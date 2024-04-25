@@ -15,8 +15,8 @@
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@aws-amplify/backend": "^0.13.0-beta.18",
-    "@aws-amplify/backend-cli": "^0.12.0-beta.20",
+    "@aws-amplify/backend": "^0.13.2",
+    "@aws-amplify/backend-cli": "^0.13.0",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
     "@typescript-eslint/eslint-plugin": "^7.2.0",
