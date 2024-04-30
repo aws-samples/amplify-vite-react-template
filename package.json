@@ -10,13 +10,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "aws-amplify": "^6.0.28",
+    "aws-amplify": "^6.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@aws-amplify/backend": "^0.13.2",
-    "@aws-amplify/backend-cli": "^0.13.0",
+    "@aws-amplify/backend": "^0.15.0",
+    "@aws-amplify/backend-cli": "^0.15.0",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
     "@typescript-eslint/eslint-plugin": "^7.2.0",
