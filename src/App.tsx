@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useAuthenticator } from '@aws-amplify/ui-react';
 import { fetchAuthSession } from '@aws-amplify/auth';
+// import { signInWithRedirect } from 'aws-amplify/auth';
 
 function App() {
   const { user, signOut } = useAuthenticator();
@@ -15,6 +16,12 @@ function App() {
     getIDToken();
 
   }, []);
+
+  // if (!user) {
+  //     signInWithRedirect({
+  //       provider: 'Google'
+  //     }); 
+  // }
 
   return (
     <main>

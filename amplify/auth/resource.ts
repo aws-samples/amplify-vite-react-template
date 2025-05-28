@@ -10,9 +10,10 @@ export const auth = defineAuth({
         attributeMapping: {
           email: 'email'
         },
+        scopes: ['profile','email']
       },
       callbackUrls: [
-        'http://localhost:3000/profile',
+        'http://localhost:5173/',
         'https://mywebsite.com/profile'
       ],
       logoutUrls: ['http://localhost:3000/', 'https://mywebsite.com'],
