@@ -14,9 +14,12 @@ export const auth = defineAuth({
       },
       callbackUrls: [
         'http://localhost:3000/profile',
-        'https://eye-of-gaia.com'
+        'https://eye-of-gaia.com/profile'
       ],
       logoutUrls: ['http://localhost:3000/', 'https://eye-of-gaia.com'],
+    },
+      hostedUI: {
+        domain: 'auth.eye-of-gaia.com'
     }
   },
 });
