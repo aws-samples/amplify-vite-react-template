@@ -1,6 +1,3 @@
-import type { Schema } from "../amplify/data/resource";
-import { generateClient } from "aws-amplify/data";
-
 import { Authenticator } from '@aws-amplify/ui-react';
 import { Amplify } from 'aws-amplify';
 import outputs from '../amplify_outputs.json';
@@ -10,11 +7,9 @@ Amplify.configure(outputs);
 
 
 type AppProps = {
-Component: any
-pageProps: any
+Component?: any
+pageProps?: any
 }
-
-const client = generateClient<Schema>();
 
 function App({ Component, pageProps }: AppProps) {
   return (
