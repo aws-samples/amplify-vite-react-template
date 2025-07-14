@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@aws-amplify/ui-react": "^6.5.5",
+    "@aws-amplify/ui-react": "^6.11.2",
     "aws-amplify": "^6.6.6",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
