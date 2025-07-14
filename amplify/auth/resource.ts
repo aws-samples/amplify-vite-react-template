@@ -17,9 +17,6 @@ export const auth = defineAuth({
         'https://eye-of-gaia.com/profile'
       ],
       logoutUrls: ['http://localhost:3000/', 'https://eye-of-gaia.com'],
-    },
-      hostedUI: {
-        domain: 'auth.eye-of-gaia.com'
     }
   },
 });
