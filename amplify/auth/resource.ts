@@ -5,7 +5,7 @@ import { defineAuth, secret } from '@aws-amplify/backend';
  * @see https://docs.amplify.aws/gen2/build-a-backend/auth
  */
 
-const env = process.env.AMPLIFY_ENV; // ← this gives 'dev', 'qa', 'main', etc.
+const env = process.env.AWS_BRANCH;
 let callbackUrls: string[] = [];
 let logoutUrls: string[] = [];
 
