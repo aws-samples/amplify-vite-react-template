@@ -10,8 +10,8 @@ let callbackUrls: string[] = [];
 let logoutUrls: string[] = [];
 
 if (env === 'dev') {
-  callbackUrls = ['http://localhost:5173/profile', 'https://dev.eye-of-gaia.com/profile'];
-  logoutUrls = ['http://localhost:5173/', 'https://dev.eye-of-gaia.com'];
+  callbackUrls = ['https://dev.eye-of-gaia.com/profile'];
+  logoutUrls = ['https://dev.eye-of-gaia.com'];
 } else if (env === 'qa') {
   callbackUrls = ['https://qa.eye-of-gaia.com/profile'];
   logoutUrls = ['https://qa.eye-of-gaia.com'];
