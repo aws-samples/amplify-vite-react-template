@@ -1,0 +1,25 @@
+name: Auto Promote
+
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  auto-promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Auto Promote dev to qa
+        run: |
+          git checkout qa
+          git merge origin/dev --no-ff -m "Auto promote from dev to qa"
+          git push origin qa

@@ -1,0 +1,49 @@
+name: Promote Code
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_branch:
+        description: 'Source branch'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qa
+      to_branch:
+        description: 'Target branch'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - qa
+          - main
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Promote Code
+        run: |
+          git checkout ${{ github.event.inputs.to_branch }}
+          git merge origin/${{ github.event.inputs.from_branch }} --no-ff -m "Promote from ${{ github.event.inputs.from_branch }} to ${{ github.event.inputs.to_branch }}"
+          git push origin ${{ github.event.inputs.to_branch }}
+
+      - name: Trigger Amplify Build
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/dispatches" \
+            -d '{"event_type":"amplify-build","client_payload":{"branch":"${{ github.event.inputs.to_branch }}"}}'
