@@ -11,9 +11,12 @@
   },
   "dependencies": {
     "@aws-amplify/ui-react": "^6.5.5",
+    "@saffron/core-components": "^3.10.0",
+    "@saffron/core-styles": "^3.6.0",
     "aws-amplify": "^6.6.6",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^7.9.1"
   },
   "devDependencies": {
     "@aws-amplify/backend": "^1.5.0",
