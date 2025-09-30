@@ -1,6 +1,56 @@
-body {
+@import './node_modules/@saffron/core-styles/dist/index.css';
+
+:root {
+  --max-width: 1100px;
+  --border-radius: 12px;
+  --font-mono: ui-monospace, Menlo, Monaco, 'Cascadia Mono', 'Segoe UI Mono',
+    'Roboto Mono', 'Oxygen Mono', 'Ubuntu Monospace', 'Source Code Pro',
+    'Fira Mono', 'Droid Sans Mono', 'Courier New', monospace;
+
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: #CBBEFF;
+  --background-end-rgb: 255, 255, 255;
+
+  --callout-rgb: 238, 240, 241;
+  --callout-border-rgb: 172, 175, 176;
+  --card-rgb: #6649AE;
+  --card-border-rgb: 131, 134, 135;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --foreground-rgb: 255, 255, 255;
+    --background-start-rgb: 0, 0, 0;
+    --background-end-rgb: 0, 0, 0;
+
+    --callout-rgb: 20, 20, 20;
+    --callout-border-rgb: 108, 108, 108;
+    --card-rgb: 100, 100, 100;
+    --card-border-rgb: 200, 200, 200;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
   margin: 0;
-  background: linear-gradient(180deg, rgb(117, 81, 194), rgb(255, 255, 255));
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+      to bottom,
+      transparent,
+      rgb(var(--background-end-rgb))
+    )
+    rgb(var(--background-start-rgb));
+  margin: 0;
   display: flex;
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   height: 100vh;
@@ -9,10 +59,15 @@ body {
   align-items: center;
 }
 
-main {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    color-scheme: dark;
+  }
 }
 
 button {
@@ -35,6 +90,12 @@ button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
+main {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
 ul {
   padding-inline-start: 0;
   margin-block-start: 0;
@@ -50,16 +111,75 @@ ul {
   overflow: auto;
 }
 
-li {
-  background-color: white;
-  padding: 8px;
+saf-side-nav {
+  height: 100vh;
+  position: fixed;
+  top: 64px;
+  left: 0;
+  border-right: 1px solid rgb(var(--callout-border-rgb));
+  background: linear-gradient(180deg, #f5f5f5 80%, #e9e6f7 100%);
+  z-index: 50;
+  padding: 32px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  box-sizing: border-box;
+  min-width: 220px;
+  box-shadow: 2px 0 8px 0 rgba(102, 73, 174, 0.04);
 }
 
-li:hover {
-  background: #dadbf9;
-}
-
-a {
-  font-weight: 800;
+saf-side-nav > saf-menu-item::part(root) {
+  margin: 0 24px;
+  border-radius: 8px;
+  transition: background 0.2s, color 0.2s;
+  font-size: 1.08rem;
+  font-weight: 500;
+  color: #3a2e5a;
+  padding: 10px 16px;
+  cursor: pointer;
+  outline: none;
+  border: none;
+  background: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   text-decoration: none;
+}
+
+saf-side-nav > saf-menu-item::part(root):hover,
+saf-side-nav > saf-menu-item::part(root):focus-visible {
+  box-shadow: 0 2px 8px 0 rgba(102, 73, 174, 0.08);
+  text-decoration: none;
+}
+
+saf-product-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  z-index: 100;
+  color: white;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+
+.sonca-logo {
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+body, #root {
+  padding-top: 64px;
+}
+
+saf-product-header, saf-product-header-item {
+  font-size: 1.08rem;
+  font-weight: 500;
+}
+
+saf-product-header-item {
+  margin: 0 32px;
+}
+
+saf-product-header a:hover, saf-product-header-item a:hover {
+  text-decoration: underline;
 }
