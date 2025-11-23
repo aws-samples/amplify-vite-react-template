@@ -9,7 +9,7 @@ function App() {
 
   useEffect(() => {
     client.models.Todo.observeQuery().subscribe({
-      next: (data) => setTodos([...data.items]),
+      next: (data: { items: Array<Schema["Todo"]["type"]> }) => setTodos([...data.items]),
     });
   }, []);
 
