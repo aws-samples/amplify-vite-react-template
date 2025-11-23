@@ -1,38 +1,140 @@
-import { useEffect, useState } from "react";
-import type { Schema } from "../amplify/data/resource";
-import { generateClient } from "aws-amplify/data";
+import { useState } from "react";
 
-const client = generateClient<Schema>();
+interface FormData {
+  firstName: string;
+  lastName: string;
+  email: string;
+  number: string;
+}
 
 function App() {
-  const [todos, setTodos] = useState<Array<Schema["Todo"]["type"]>>([]);
+  const [formData, setFormData] = useState<FormData>({
+    firstName: "",
+    lastName: "",
+    email: "",
+    number: ""
+  });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
 
-  useEffect(() => {
-    client.models.Todo.observeQuery().subscribe({
-      next: (data: { items: Array<Schema["Todo"]["type"]> }) => setTodos([...data.items]),
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    setMessage("");
+
+    try {
+      // Fake API call
+      const response = await fetch("https://jsonplaceholder.typicode.com/posts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(formData),
+      });
+
+      if (response.ok) {
+        setMessage("Form submitted successfully!");
+        setFormData({ firstName: "", lastName: "", email: "", number: "" });
+      } else {
+        setMessage("Error submitting form");
+      }
+    } catch (error) {
+      setMessage("Error submitting form");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFormData({
+      ...formData,
+      [e.target.name]: e.target.value
     });
-  }, []);
-
-  function createTodo() {
-    client.models.Todo.create({ content: window.prompt("Todo content") });
-  }
+  };
 
   return (
-    <main>
-      <h1>My todos</h1>
-      <button onClick={createTodo}>+ new</button>
-      <ul>
-        {todos.map((todo) => (
-          <li key={todo.id}>{todo.content}</li>
-        ))}
-      </ul>
-      <div>
-        🥳 App successfully hosted. Try creating a new todo.
-        <br />
-        <a href="https://docs.amplify.aws/react/start/quickstart/#make-frontend-updates">
-          Review next step of this tutorial.
-        </a>
-      </div>
+    <main style={{ padding: "20px", maxWidth: "400px", margin: "0 auto" }}>
+      <h1>Contact Form</h1>
+      <form onSubmit={handleSubmit}>
+        <div style={{ marginBottom: "15px" }}>
+          <label htmlFor="firstName">First Name:</label>
+          <input
+            type="text"
+            id="firstName"
+            name="firstName"
+            value={formData.firstName}
+            onChange={handleChange}
+            required
+            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+          />
+        </div>
+        
+        <div style={{ marginBottom: "15px" }}>
+          <label htmlFor="lastName">Last Name:</label>
+          <input
+            type="text"
+            id="lastName"
+            name="lastName"
+            value={formData.lastName}
+            onChange={handleChange}
+            required
+            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+          />
+        </div>
+        
+        <div style={{ marginBottom: "15px" }}>
+          <label htmlFor="email">Email:</label>
+          <input
+            type="email"
+            id="email"
+            name="email"
+            value={formData.email}
+            onChange={handleChange}
+            required
+            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+          />
+        </div>
+        
+        <div style={{ marginBottom: "15px" }}>
+          <label htmlFor="number">Phone Number:</label>
+          <input
+            type="tel"
+            id="number"
+            name="number"
+            value={formData.number}
+            onChange={handleChange}
+            required
+            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+          />
+        </div>
+        
+        <button 
+          type="submit" 
+          disabled={isSubmitting}
+          style={{ 
+            padding: "10px 20px", 
+            backgroundColor: "#007bff", 
+            color: "white", 
+            border: "none", 
+            borderRadius: "4px",
+            cursor: isSubmitting ? "not-allowed" : "pointer"
+          }}
+        >
+          {isSubmitting ? "Submitting..." : "Submit"}
+        </button>
+      </form>
+      
+      {message && (
+        <div style={{ 
+          marginTop: "15px", 
+          padding: "10px", 
+          backgroundColor: message.includes("Error") ? "#f8d7da" : "#d4edda",
+          color: message.includes("Error") ? "#721c24" : "#155724",
+          borderRadius: "4px"
+        }}>
+          {message}
+        </div>
+      )}
     </main>
   );
 }
