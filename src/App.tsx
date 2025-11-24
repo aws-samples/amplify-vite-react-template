@@ -23,15 +23,21 @@ function App() {
     setMessage("");
 
     try {
-      // Fake API call
-      const response = await fetch("https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/prod/SignUpForm", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(formData),
-      });
-
+      const response = await fetch(
+        "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/SignUpForm",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(formData),
+        }
+      );
+    
+      console.log("Status:", response.status);
+      const text = await response.text();
+      console.log("Response body:", text);
+    
       if (response.ok) {
         setMessage("Form submitted successfully!");
         setFormData({ firstName: "", lastName: "", email: "", phone: "" });
@@ -39,10 +45,9 @@ function App() {
         setMessage("Error submitting form");
       }
     } catch (error) {
+      console.error("Fetch error:", error);
       setMessage("Error submitting form");
-    } finally {
-      setIsSubmitting(false);
-    }
+    }    
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
