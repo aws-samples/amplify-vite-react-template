@@ -24,25 +24,6 @@ function App() {
     setMessage("");
 
     try {
-      console.log("Sending data:", formData);
-      
-      // First try OPTIONS request to test CORS
-      const optionsResponse = await fetch(
-        "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/prod/SignUpForm",
-        {
-          method: "OPTIONS",
-          headers: {
-            "Origin": window.location.origin,
-            "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "Content-Type",
-          },
-        }
-      );
-      
-      console.log("OPTIONS Status:", optionsResponse.status);
-      console.log("OPTIONS Headers:", [...optionsResponse.headers.entries()]);
-      
-      // Now try the actual POST request
       const response = await fetch(
         "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/prod/SignUpForm",
         {
@@ -54,20 +35,13 @@ function App() {
         }
       );
     
-      console.log("POST Status:", response.status);
-      console.log("POST Headers:", [...response.headers.entries()]);
-      
-      const text = await response.text();
-      console.log("Response body:", text);
-    
       if (response.ok) {
         setMessage("Form submitted successfully!");
         setFormData({ firstName: "", lastName: "", email: "", phone: "" });
       } else {
-        setMessage(`Error: ${response.status} - ${text}`);
+        setMessage(`Error: ${response.status}`);
       }
     } catch (error) {
-      console.error("Fetch error:", error);
       setMessage(`Network error: ${error}`);
     } finally {
       setIsSubmitting(false);
