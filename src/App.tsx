@@ -1,4 +1,5 @@
 import { useState } from "react";
+import "./App.css";
 
 interface FormData {
   firstName: string;
@@ -24,7 +25,7 @@ function App() {
 
     try {
       const response = await fetch(
-        "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/SignUpForm",
+        "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/prod/SignUpForm",
         {
           method: "POST",
           headers: {
@@ -58,10 +59,10 @@ function App() {
   };
 
   return (
-    <main style={{ padding: "20px", maxWidth: "400px", margin: "0 auto" }}>
+    <main className="form-container">
       <h1>Contact Form</h1>
       <form onSubmit={handleSubmit}>
-        <div style={{ marginBottom: "15px" }}>
+        <div className="form-group">
           <label htmlFor="firstName">First Name:</label>
           <input
             type="text"
@@ -70,11 +71,11 @@ function App() {
             value={formData.firstName}
             onChange={handleChange}
             required
-            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+            className="form-input"
           />
         </div>
         
-        <div style={{ marginBottom: "15px" }}>
+        <div className="form-group">
           <label htmlFor="lastName">Last Name:</label>
           <input
             type="text"
@@ -83,11 +84,11 @@ function App() {
             value={formData.lastName}
             onChange={handleChange}
             required
-            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+            className="form-input"
           />
         </div>
         
-        <div style={{ marginBottom: "15px" }}>
+        <div className="form-group">
           <label htmlFor="email">Email:</label>
           <input
             type="email"
@@ -96,11 +97,11 @@ function App() {
             value={formData.email}
             onChange={handleChange}
             required
-            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+            className="form-input"
           />
         </div>
         
-        <div style={{ marginBottom: "15px" }}>
+        <div className="form-group">
           <label htmlFor="phone">Phone Number:</label>
           <input
             type="tel"
@@ -109,34 +110,21 @@ function App() {
             value={formData.phone}
             onChange={handleChange}
             required
-            style={{ width: "100%", padding: "8px", marginTop: "5px" }}
+            className="form-input"
           />
         </div>
         
         <button 
           type="submit" 
           disabled={isSubmitting}
-          style={{ 
-            padding: "10px 20px", 
-            backgroundColor: "#007bff", 
-            color: "white", 
-            border: "none", 
-            borderRadius: "4px",
-            cursor: isSubmitting ? "not-allowed" : "pointer"
-          }}
+          className="submit-button"
         >
           {isSubmitting ? "Submitting..." : "Submit"}
         </button>
       </form>
       
       {message && (
-        <div style={{ 
-          marginTop: "15px", 
-          padding: "10px", 
-          backgroundColor: message.includes("Error") ? "#f8d7da" : "#d4edda",
-          color: message.includes("Error") ? "#721c24" : "#155724",
-          borderRadius: "4px"
-        }}>
+        <div className={`message ${message.includes("Error") ? "error" : "success"}`}>
           {message}
         </div>
       )}
