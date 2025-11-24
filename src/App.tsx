@@ -24,7 +24,7 @@ function App() {
 
     try {
       // Fake API call
-      const response = await fetch("https://jsonplaceholder.typicode.com/posts", {
+      const response = await fetch("https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/SignUpForm", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
