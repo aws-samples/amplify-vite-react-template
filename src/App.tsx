@@ -4,7 +4,7 @@ interface FormData {
   firstName: string;
   lastName: string;
   email: string;
-  number: string;
+  phone: string;
 }
 
 function App() {
@@ -12,7 +12,7 @@ function App() {
     firstName: "",
     lastName: "",
     email: "",
-    number: ""
+    phone: ""
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState("");
@@ -34,7 +34,7 @@ function App() {
 
       if (response.ok) {
         setMessage("Form submitted successfully!");
-        setFormData({ firstName: "", lastName: "", email: "", number: "" });
+        setFormData({ firstName: "", lastName: "", email: "", phone: "" });
       } else {
         setMessage("Error submitting form");
       }
@@ -96,12 +96,12 @@ function App() {
         </div>
         
         <div style={{ marginBottom: "15px" }}>
-          <label htmlFor="number">Phone Number:</label>
+          <label htmlFor="phone">Phone Number:</label>
           <input
             type="tel"
-            id="number"
-            name="number"
-            value={formData.number}
+            id="phone"
+            name="phone"
+            value={formData.phone}
             onChange={handleChange}
             required
             style={{ width: "100%", padding: "8px", marginTop: "5px" }}
