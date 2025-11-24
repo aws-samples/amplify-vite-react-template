@@ -24,6 +24,8 @@ function App() {
     setMessage("");
 
     try {
+      console.log("Sending data:", formData);
+      
       const response = await fetch(
         "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/prod/SignUpForm",
         {
@@ -36,6 +38,8 @@ function App() {
       );
     
       console.log("Status:", response.status);
+      console.log("Headers:", response.headers);
+      
       const text = await response.text();
       console.log("Response body:", text);
     
@@ -43,12 +47,14 @@ function App() {
         setMessage("Form submitted successfully!");
         setFormData({ firstName: "", lastName: "", email: "", phone: "" });
       } else {
-        setMessage("Error submitting form");
+        setMessage(`Error: ${response.status} - ${text}`);
       }
     } catch (error) {
       console.error("Fetch error:", error);
-      setMessage("Error submitting form");
-    }    
+      setMessage(`Network error: ${error}`);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
