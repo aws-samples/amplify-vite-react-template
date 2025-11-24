@@ -30,8 +30,10 @@ function App() {
         "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/prod/SignUpForm",
         {
           method: "POST",
+          mode: "cors",
           headers: {
             "Content-Type": "application/json",
+            "Accept": "application/json",
           },
           body: JSON.stringify(formData),
         }
