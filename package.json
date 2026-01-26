@@ -16,12 +16,12 @@
     "react-dom": "~18.3.1"
   },
   "engines": {
-    "node": ">= 20.0.0",
-    "npm": ">= 10.0.0"
+    "node": ">= 20.20.0",
+    "npm": ">= 10.8.0"
   },
   "devDependencies": {
-    "@aws-amplify/backend": "*",
-    "@aws-amplify/backend-cli": "*",
+    "@aws-amplify/backend": "~1.19.0",
+    "@aws-amplify/backend-cli": "~1.8.1",
     "@eslint/compat":  "~2.0.1",
     "@eslint/eslintrc": "~3.3.3",
     "@eslint/js": "~9.39.2",
