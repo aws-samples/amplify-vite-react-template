@@ -1,38 +1,130 @@
-import { useEffect, useState } from "react";
-import type { Schema } from "../amplify/data/resource";
-import { generateClient } from "aws-amplify/data";
+import { useState } from "react";
+import "./App.css";
 
-const client = generateClient<Schema>();
+interface FormData {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+}
 
 function App() {
-  const [todos, setTodos] = useState<Array<Schema["Todo"]["type"]>>([]);
+  const [formData, setFormData] = useState<FormData>({
+    firstName: "",
+    lastName: "",
+    email: "",
+    phone: ""
+  });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
 
-  useEffect(() => {
-    client.models.Todo.observeQuery().subscribe({
-      next: (data) => setTodos([...data.items]),
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    setMessage("");
+
+    try {
+      const response = await fetch(
+        "https://0ovbdtb93d.execute-api.us-east-1.amazonaws.com/prod/SignUpForm",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(formData),
+        }
+      );
+    
+      if (response.ok) {
+        setMessage("Form submitted successfully!");
+        setFormData({ firstName: "", lastName: "", email: "", phone: "" });
+      } else {
+        setMessage(`Error: ${response.status}`);
+      }
+    } catch (error) {
+      setMessage(`Network error: ${error}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFormData({
+      ...formData,
+      [e.target.name]: e.target.value
     });
-  }, []);
-
-  function createTodo() {
-    client.models.Todo.create({ content: window.prompt("Todo content") });
-  }
+  };
 
   return (
-    <main>
-      <h1>My todos</h1>
-      <button onClick={createTodo}>+ new</button>
-      <ul>
-        {todos.map((todo) => (
-          <li key={todo.id}>{todo.content}</li>
-        ))}
-      </ul>
-      <div>
-        🥳 App successfully hosted. Try creating a new todo.
-        <br />
-        <a href="https://docs.amplify.aws/react/start/quickstart/#make-frontend-updates">
-          Review next step of this tutorial.
-        </a>
-      </div>
+    <main className="form-container">
+      <h1>Contact Form</h1>
+      <form onSubmit={handleSubmit}>
+        <div className="form-group">
+          <label htmlFor="firstName">First Name:</label>
+          <input
+            type="text"
+            id="firstName"
+            name="firstName"
+            value={formData.firstName}
+            onChange={handleChange}
+            required
+            className="form-input"
+          />
+        </div>
+        
+        <div className="form-group">
+          <label htmlFor="lastName">Last Name:</label>
+          <input
+            type="text"
+            id="lastName"
+            name="lastName"
+            value={formData.lastName}
+            onChange={handleChange}
+            required
+            className="form-input"
+          />
+        </div>
+        
+        <div className="form-group">
+          <label htmlFor="email">Email:</label>
+          <input
+            type="email"
+            id="email"
+            name="email"
+            value={formData.email}
+            onChange={handleChange}
+            required
+            className="form-input"
+          />
+        </div>
+        
+        <div className="form-group">
+          <label htmlFor="phone">Phone Number:</label>
+          <input
+            type="tel"
+            id="phone"
+            name="phone"
+            value={formData.phone}
+            onChange={handleChange}
+            required
+            className="form-input"
+          />
+        </div>
+        
+        <button 
+          type="submit" 
+          disabled={isSubmitting}
+          className="submit-button"
+        >
+          {isSubmitting ? "Submitting..." : "Submit"}
+        </button>
+      </form>
+      
+      {message && (
+        <div className={`message ${message.includes("Error") ? "error" : "success"}`}>
+          {message}
+        </div>
+      )}
     </main>
   );
 }
