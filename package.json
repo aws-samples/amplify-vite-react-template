@@ -12,8 +12,8 @@
   "dependencies": {
     "@aws-amplify/ui-react": "~6.13.2",
     "aws-amplify": "~6.15.10",
-    "react": "~18.3.1",
-    "react-dom": "~18.3.1"
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   },
   "engines": {
     "node": ">= 20.20.0",
@@ -22,11 +22,11 @@
   "devDependencies": {
     "@aws-amplify/backend": "~1.19.0",
     "@aws-amplify/backend-cli": "~1.8.1",
-    "@eslint/compat":  "~2.0.1",
+    "@eslint/compat": "~2.0.1",
     "@eslint/eslintrc": "~3.3.3",
     "@eslint/js": "~9.39.2",
-    "@types/react": "~18.3.27",
-    "@types/react-dom": "~18.3.7",
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3",
     "@typescript-eslint/eslint-plugin": "~8.53.0",
     "@typescript-eslint/parser": "~8.53.0",
     "@vitejs/plugin-react": "~5.1.2",
