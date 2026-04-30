@@ -14,7 +14,9 @@ function App() {
   }, []);
 
   function createTodo() {
-    client.models.Todo.create({ content: window.prompt("Todo content") });
+    const todo = window.prompt("Todo content")
+    if (!todo) return
+    client.models.Todo.create({ content: todo });
   }
 
   return (
