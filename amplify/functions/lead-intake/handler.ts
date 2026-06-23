@@ -35,7 +35,7 @@ type APIGatewayLikeResponse = {
 };
 
 type LeadInput = {
-  propertyType?: "Association" | "Residential" | string;
+  propertyType?: "Association" | "Residential" | "Specialty" | string;
   first?: string;
   last?: string;
   email?: string;
@@ -48,6 +48,8 @@ type LeadInput = {
   units?: string;
   freq?: string;
   company?: string;
+  specialtyService?: string;
+  specialtyPropertyType?: string;
 };
 
 const REQUIRED_FIELDS: (keyof LeadInput)[] = [
@@ -115,6 +117,14 @@ function isOneTime(freq: string | undefined): boolean {
 
 // ── Dynamic pricing ──────────────────────────────────────────────────
 // Base prices (from Product Template for each service type)
+const SPECIALTY_PRICE: Record<string, number> = {
+  "Wasp Nest Removal": 299,
+  "Rodent Nest Removal": 399,
+  "Rodent Exclusion (Exterior Only)": 600,
+  "Termite Bait Stations": 0,
+  "Other Specialty Service": 0,
+};
+
 const BASE_PRICE: Record<string, number> = {
   "Association:Monthly": 110,
   "Association:Every 2 Months": 90,
@@ -382,9 +392,15 @@ function buildCustomerPayload(input: LeadInput): Record<string, string> {
   if (input.sqft) noteParts.push(`Square footage: ${input.sqft}`);
   if (input.units) noteParts.push(`Unit count: ${input.units}`);
   if (input.freq) noteParts.push(`Requested frequency: ${input.freq}`);
-  noteParts.push(
-    `Property type: ${isAssociation ? "Association / HOA" : "Residential"}`,
-  );
+  if (input.propertyType === "Specialty") {
+    noteParts.push(`Property type: Specialty Services`);
+    if (input.specialtyPropertyType) noteParts.push(`Location type: ${input.specialtyPropertyType}`);
+    if (input.specialtyService) noteParts.push(`Specialty service: ${input.specialtyService}`);
+  } else {
+    noteParts.push(
+      `Property type: ${isAssociation ? "Association / HOA" : "Residential"}`,
+    );
+  }
   if (noteParts.length > 0) {
     out.specialScheduling = noteParts.join(" | ");
   }
@@ -396,8 +412,11 @@ function buildSubscriptionPayload(
   input: LeadInput,
   customerID: number,
 ): Record<string, string | number> {
-  const isAssociation = input.propertyType === "Association";
-  const freq = input.freq ?? "Monthly";
+  const isSpecialty = input.propertyType === "Specialty";
+  const isAssociation = isSpecialty
+    ? input.specialtyPropertyType === "Association"
+    : input.propertyType === "Association";
+  const freq = isSpecialty ? "One-time treatment" : (input.freq ?? "Monthly");
   const propType = isAssociation ? "Association" : "Residential";
 
   const typeMap = SERVICE_ID_MAP[propType] ?? {};
@@ -405,11 +424,12 @@ function buildSubscriptionPayload(
   const frequencyDays = FREQUENCY_DAYS[freq] ?? 30;
   const billingFrequencyDays = BILLING_FREQUENCY[freq] ?? 30;
 
-  // Calculate monthly billing rate (base + dynamic pricing premium).
-  // The pricing tables are monthly rates and FieldRoutes is configured
-  // to bill the same monthly amount regardless of service frequency.
+  // For specialty services, use the fixed specialty price.
+  // For standard types, calculate from the dynamic pricing tables.
   const cnt = Number(digitsOnly(isAssociation ? input.units : input.sqft));
-  const monthlyRate = cnt > 0 ? calculateTotalCharge(propType, freq, cnt) : 0;
+  const monthlyRate = isSpecialty
+    ? (SPECIALTY_PRICE[input.specialtyService ?? ""] ?? 0)
+    : cnt > 0 ? calculateTotalCharge(propType, freq, cnt) : 0;
 
   const out: Record<string, string | number> = {
     customerID,

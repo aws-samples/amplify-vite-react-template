@@ -556,24 +556,16 @@ export default function ContactForm({
                 {type === "Specialty" && (
                   <>
                     <div className="bk-field bk-full">
-                      <label>Property type</label>
-                      <div
-                        className="bk-segmented bk-segmented--full"
-                        role="radiogroup"
-                        aria-label="Specialty property type"
+                      <label htmlFor="specialtyPropertyType">Location type</label>
+                      <select
+                        id="specialtyPropertyType"
+                        value={data.specialtyPropertyType}
+                        onChange={update("specialtyPropertyType")}
                       >
-                        {["Association", "Residential"].map((opt) => (
-                          <button
-                            type="button"
-                            key={opt}
-                            className={`bk-seg ${data.specialtyPropertyType === opt ? "is-active" : ""}`}
-                            aria-pressed={data.specialtyPropertyType === opt}
-                            onClick={() => setData({ ...data, specialtyPropertyType: opt })}
-                          >
-                            {opt === "Association" ? "Association / HOA" : opt}
-                          </button>
-                        ))}
-                      </div>
+                        <option value="">— Choose location type —</option>
+                        <option value="Association">Association / HOA</option>
+                        <option value="Residential">Residential</option>
+                      </select>
                     </div>
 
                     <div className="bk-field bk-full">
