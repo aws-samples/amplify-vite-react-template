@@ -5,7 +5,7 @@ import { submitLead } from "../lib/leadIntake";
 // Seconds to wait before auto-redirecting to the agreement signing page
 const AGREEMENT_REDIRECT_DELAY = 4;
 
-type PropertyType = "Association" | "Residential";
+type PropertyType = "Association" | "Residential" | "Specialty";
 
 type ContactFormProps = {
   eyebrow?: string;
@@ -22,7 +22,7 @@ const BASE: Record<string, number> = {
   "Residential:Monthly": 69,
   "Residential:Every 2 Months": 56,
   "Residential:Every 3 Months": 45,
-  "Residential:One-time treatment": 119,
+  "Residential:One-time treatment": 300,
 };
 
 const TIERS: Record<
@@ -93,6 +93,22 @@ const TIERS: Record<
     threshold: 2500,
     tiers: [{ min: 2501, max: 0, per: 1000, premium: 13 }],
   },
+};
+
+const SPECIALTY_SERVICES = [
+  "Wasp Nest Removal",
+  "Rodent Nest Removal",
+  "Rodent Exclusion (Exterior Only)",
+  "Termite Bait Stations",
+  "Other Specialty Service",
+];
+
+const SPECIALTY_PRICES: Record<string, number | null> = {
+  "Wasp Nest Removal": 299,
+  "Rodent Nest Removal": 399,
+  "Rodent Exclusion (Exterior Only)": 600,
+  "Termite Bait Stations": null,
+  "Other Specialty Service": null,
 };
 
 function calcPrice(type: string, freq: string, cnt: number): number {
@@ -178,6 +194,9 @@ export default function ContactForm({
     sqft: "",
     freq: "Monthly",
     company: "",
+    specialtyService: "",
+    specialtyPropertyType: "",
+    specialtyName: "",
   });
 
   const update =
@@ -202,7 +221,10 @@ export default function ContactForm({
 
   // Live monthly price preview from current form state
   const cntNum = parseInt(type === "Association" ? data.units : data.sqft) || 0;
-  const livePrice = cntNum > 0 ? calcPrice(type, data.freq, cntNum) : 0;
+  const livePrice = cntNum > 0 && type !== "Specialty" ? calcPrice(type, data.freq, cntNum) : 0;
+  const specialtyPrice = type === "Specialty" && data.specialtyService
+    ? SPECIALTY_PRICES[data.specialtyService]
+    : undefined;
 
   function nextStep() {
     setStep((s) => Math.min(s + 1, 3));
@@ -235,6 +257,8 @@ export default function ContactForm({
       validationErrors.push("the number of units");
     if (type === "Residential" && !data.sqft)
       validationErrors.push("square footage");
+    if (type === "Specialty" && !data.specialtyService)
+      validationErrors.push("a specialty service");
     if (validationErrors.length > 0) {
       setErrorMsg(`Please enter ${validationErrors.join(", ")}.`);
       return;
@@ -442,7 +466,7 @@ export default function ContactForm({
                     role="radiogroup"
                     aria-label="Property type"
                   >
-                    {(["Association", "Residential"] as PropertyType[]).map(
+                    {(["Association", "Residential", "Specialty"] as PropertyType[]).map(
                       (opt) => (
                         <button
                           type="button"
@@ -451,7 +475,7 @@ export default function ContactForm({
                           aria-pressed={type === opt}
                           onClick={() => setType(opt)}
                         >
-                          {opt === "Association" ? "Association / HOA" : opt}
+                          {opt === "Association" ? "Association / HOA" : opt === "Specialty" ? "Specialty Services" : opt}
                         </button>
                       ),
                     )}
@@ -495,7 +519,7 @@ export default function ContactForm({
                       />
                     </div>
                   </>
-                ) : (
+                ) : type === "Residential" ? (
                   <div className="bk-field bk-full">
                     <label htmlFor="sqft">Square footage</label>
                     <input
@@ -515,20 +539,61 @@ export default function ContactForm({
                       placeholder="2400"
                     />
                   </div>
+                ) : null}
+
+                {type !== "Specialty" && (
+                  <div className="bk-field bk-full">
+                    <label htmlFor="freq">Service frequency</label>
+                    <select id="freq" value={data.freq} onChange={update("freq")}>
+                      <option>Monthly</option>
+                      <option>Every 2 Months</option>
+                      <option>Every 3 Months</option>
+                      <option>One-time treatment</option>
+                    </select>
+                  </div>
                 )}
 
-                <div className="bk-field bk-full">
-                  <label htmlFor="freq">Service frequency</label>
-                  <select id="freq" value={data.freq} onChange={update("freq")}>
-                    <option>Monthly</option>
-                    <option>Every 2 Months</option>
-                    <option>Every 3 Months</option>
-                    <option>One-time treatment</option>
-                  </select>
-                </div>
+                {type === "Specialty" && (
+                  <>
+                    <div className="bk-field bk-full">
+                      <label>Property type</label>
+                      <div
+                        className="bk-segmented bk-segmented--full"
+                        role="radiogroup"
+                        aria-label="Specialty property type"
+                      >
+                        {["Association", "Residential"].map((opt) => (
+                          <button
+                            type="button"
+                            key={opt}
+                            className={`bk-seg ${data.specialtyPropertyType === opt ? "is-active" : ""}`}
+                            aria-pressed={data.specialtyPropertyType === opt}
+                            onClick={() => setData({ ...data, specialtyPropertyType: opt })}
+                          >
+                            {opt === "Association" ? "Association / HOA" : opt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
 
-                {/* Live quote preview */}
-                {livePrice > 0 && (
+                    <div className="bk-field bk-full">
+                      <label htmlFor="specialtyService">Select service</label>
+                      <select
+                        id="specialtyService"
+                        value={data.specialtyService}
+                        onChange={update("specialtyService")}
+                      >
+                        <option value="">— Choose a service —</option>
+                        {SPECIALTY_SERVICES.map((s) => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                )}
+
+                {/* Live quote preview — standard types */}
+                {livePrice > 0 && type !== "Specialty" && (
                   <div className="bk-quote-preview" aria-live="polite">
                     <div className="bk-quote-preview__label">Estimated price</div>
                     <div className="bk-quote-preview__price">
@@ -542,13 +607,44 @@ export default function ContactForm({
                   </div>
                 )}
 
+                {/* Specialty price preview */}
+                {type === "Specialty" && data.specialtyService && (
+                  <div className="bk-quote-preview" aria-live="polite">
+                    {data.specialtyService === "Termite Bait Stations" ? (
+                      <>
+                        <div className="bk-quote-preview__label">Next step</div>
+                        <div style={{ fontFamily: "var(--font-body)", fontWeight: 700, fontSize: 15, lineHeight: 1.5 }}>
+                          Termite bait station pricing is based on your property's square footage and site conditions. Click Continue to request a professional inspection and receive a custom quote.
+                        </div>
+                      </>
+                    ) : specialtyPrice !== null && specialtyPrice !== undefined ? (
+                      <>
+                        <div className="bk-quote-preview__label">Estimated price</div>
+                        <div className="bk-quote-preview__price">
+                          {fmt(specialtyPrice)}
+                          <span className="bk-quote-preview__per"> one-time + tax</span>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="bk-quote-preview__label">Next step</div>
+                        <div style={{ fontFamily: "var(--font-body)", fontWeight: 700, fontSize: 15, lineHeight: 1.5 }}>
+                          Pricing for this service varies based on your specific needs. Click Continue and one of our specialists will follow up with a tailored quote.
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
                 <div className="bk-form-step__actions">
                   <button
                     type="button"
                     className="bk-btn bk-btn-primary"
                     onClick={nextStep}
                     disabled={
-                      type === "Association" ? !data.units : !data.sqft
+                      type === "Association" ? !data.units :
+                      type === "Residential" ? !data.sqft :
+                      !data.specialtyPropertyType || !data.specialtyService
                     }
                   >
                     Continue &rarr;

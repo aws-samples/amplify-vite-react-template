@@ -123,7 +123,7 @@ const BASE_PRICE: Record<string, number> = {
   "Residential:Monthly": 69,
   "Residential:Every 2 Months": 56,
   "Residential:Every 3 Months": 45,
-  "Residential:One-time treatment": 119, // Residential - Single Visit Initial Quote
+  "Residential:One-time treatment": 300, // Residential - Single Visit Initial Quote
 };
 
 // Dynamic pricing tiers (from Admin → Preferences → Service Types → Product Template)
