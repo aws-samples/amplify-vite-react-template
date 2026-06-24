@@ -50,7 +50,7 @@ export async function getLeadIntakeUrl(): Promise<string | undefined> {
 }
 
 export type LeadPayload = {
-  propertyType: "Association" | "Residential";
+  propertyType: "Association" | "Residential" | "Specialty";
   first: string;
   last: string;
   email: string;
@@ -63,6 +63,8 @@ export type LeadPayload = {
   units: string;
   freq: string;
   company: string;
+  specialtyService?: string;
+  specialtyPropertyType?: string;
 };
 
 export type LeadResponse =
