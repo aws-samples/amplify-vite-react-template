@@ -368,7 +368,9 @@ async function frPost(
 // ── Field mapping ────────────────────────────────────────────────────
 
 function buildCustomerPayload(input: LeadInput): Record<string, string> {
-  const isAssociation = input.propertyType === "Association";
+  const isAssociation =
+    input.propertyType === "Association" ||
+    (input.propertyType === "Specialty" && input.specialtyPropertyType === "Association");
   const out: Record<string, string> = {
     fname: (input.first ?? "").trim(),
     lname: (input.last ?? "").trim(),
@@ -626,7 +628,9 @@ export const handler: Handler = async (event) => {
   // This requires a productID — we use serviceID as the product
   // reference since they map to the same service type.
   const isAssociation = input.propertyType === "Association";
-  const cnt = Number(digitsOnly(isAssociation ? input.units : input.sqft));
+  const cnt = input.propertyType === "Specialty"
+    ? 0
+    : Number(digitsOnly(isAssociation ? input.units : input.sqft));
   let ticketWarning: string | undefined;
 
   if (subscriptionID && cnt > 0) {
@@ -659,7 +663,11 @@ export const handler: Handler = async (event) => {
   let contractWarning: string | undefined;
   let agreementUrl: string | undefined;
 
-  if (subscriptionID) {
+  // Zero-price specialty services (Termite Bait Stations, Other Specialty Service)
+  // require a manual quote — skip auto-contract generation entirely.
+  const skipContract = isSpecialty && !hasKnownPrice;
+
+  if (subscriptionID && !skipContract) {
     try {
       const contractResult = await frPost(subdomain, key, token, "contract/create", {
         subscriptionID,
@@ -688,20 +696,26 @@ export const handler: Handler = async (event) => {
   // ── Step 5: Send notification + quote emails ─────────────────────
   const fromEmail = process.env.SES_FROM_EMAIL ?? "info@pestbuzzkill.com";
   const notifyEmail = process.env.SES_NOTIFY_EMAIL ?? "info@pestbuzzkill.com";
-  const isAssoc = input.propertyType === "Association";
-  const propLabel = isAssoc ? "Association / HOA" : "Residential";
-  const cntValue = Number(digitsOnly(isAssoc ? input.units : input.sqft));
+  const isSpecialty = input.propertyType === "Specialty";
+  const isAssoc = isSpecialty
+    ? input.specialtyPropertyType === "Association"
+    : input.propertyType === "Association";
+  const propLabel = isSpecialty ? "Specialty Services" : isAssoc ? "Association / HOA" : "Residential";
+  const cntValue = isSpecialty ? 0 : Number(digitsOnly(isAssoc ? input.units : input.sqft));
   const propType = isAssoc ? "Association" : "Residential";
-  const freqLabel = input.freq ?? "Monthly";
+  const freqLabel = isSpecialty ? "One-time treatment" : (input.freq ?? "Monthly");
 
   // For recurring plans, this is the monthly billing rate. For one-time
   // treatments, this is the total flat charge for the single visit.
   // The display copy forks on `oneTime` to render the suffix correctly
   // ("/month + tax" vs "one-time + tax").
-  const oneTime = isOneTime(freqLabel);
-  const monthlyCharge = calculateTotalCharge(propType, freqLabel, cntValue);
-  const chargeFormatted = formatCurrency(monthlyCharge);
-  const chargeSuffix = oneTime ? " one-time + tax" : " / month + tax";
+  const oneTime = isSpecialty || isOneTime(freqLabel);
+  const monthlyCharge = isSpecialty
+    ? (SPECIALTY_PRICE[input.specialtyService ?? ""] ?? 0)
+    : calculateTotalCharge(propType, freqLabel, cntValue);
+  const hasKnownPrice = monthlyCharge > 0;
+  const chargeFormatted = hasKnownPrice ? formatCurrency(monthlyCharge) : "Custom Quote";
+  const chargeSuffix = hasKnownPrice ? (oneTime ? " one-time + tax" : " / month + tax") : "";
 
   // 5a: Internal notification to BuzzKill team
   try {
@@ -715,7 +729,13 @@ export const handler: Handler = async (event) => {
           <tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Address</td><td>${(input.addr ?? "").trim()}, ${(input.city ?? "").trim()}, ${(input.state ?? "").trim().toUpperCase()} ${digitsOnly(input.zip).slice(0, 5)}</td></tr>
           <tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Type</td><td>${propLabel}</td></tr>
           ${isAssoc && input.company?.trim() ? `<tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Company</td><td>${input.company.trim()}</td></tr>` : ""}
-          ${isAssoc ? `<tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Units</td><td>${input.units || "—"}</td></tr>` : `<tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Sq Ft</td><td>${input.sqft || "—"}</td></tr>`}
+          ${isSpecialty
+            ? `<tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Location Type</td><td>${input.specialtyPropertyType || "—"}</td></tr>
+               <tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Service</td><td>${input.specialtyService || "—"}</td></tr>`
+            : isAssoc
+              ? `<tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Units</td><td>${input.units || "—"}</td></tr>`
+              : `<tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Sq Ft</td><td>${input.sqft || "—"}</td></tr>`
+          }
           <tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Frequency</td><td>${freqLabel}</td></tr>
           <tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Quoted Price</td><td style="font-weight: 700; font-size: 16px;">${chargeFormatted}${chargeSuffix}</td></tr>
           <tr><td style="font-weight: 700; color: #5FA517; padding-right: 16px;">Customer ID</td><td>${customerID}</td></tr>
@@ -725,7 +745,9 @@ export const handler: Handler = async (event) => {
     await sendEmail(
       fromEmail,
       notifyEmail,
-      `New Lead${oneTime ? " (One-Time)" : ""}: ${(input.first ?? "").trim()} ${(input.last ?? "").trim()} — ${propLabel} ${freqLabel}`,
+      isSpecialty
+        ? `New Specialty Lead: ${(input.first ?? "").trim()} ${(input.last ?? "").trim()} — ${input.specialtyService || "Specialty Service"}`
+        : `New Lead${oneTime ? " (One-Time)" : ""}: ${(input.first ?? "").trim()} ${(input.last ?? "").trim()} — ${propLabel} ${freqLabel}`,
       notifyHtml,
     );
     console.log("Notification email sent to", notifyEmail);
@@ -759,15 +781,20 @@ export const handler: Handler = async (event) => {
           <li style="margin-bottom: 8px;">Once signed, we'll <strong>schedule your first appointment</strong></li>
         </ol>`;
 
-    const priceSuffixHtml = oneTime
-      ? ` one-time <span style="font-size: 13px; color: #9A9A9A;">+ tax</span>`
-      : ` / month <span style="font-size: 13px; color: #9A9A9A;">+ tax</span>`;
-    const metaLabel = oneTime ? "One-time treatment" : `${freqLabel} service`;
+    const priceSuffixHtml = !hasKnownPrice
+      ? ""
+      : oneTime
+        ? ` one-time <span style="font-size: 13px; color: #9A9A9A;">+ tax</span>`
+        : ` / month <span style="font-size: 13px; color: #9A9A9A;">+ tax</span>`;
+    const metaLabel = isSpecialty
+      ? (input.specialtyService || "Specialty Service")
+      : oneTime ? "One-time treatment" : `${freqLabel} service`;
     const quoteCard = `
         <div style="background: #F7F7F4; border-left: 4px solid #7ED321; padding: 20px 24px; margin: 24px 0; border-radius: 0 8px 8px 0;">
           <div style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #5FA517; font-weight: 700; margin-bottom: 8px;">Your Quick Quote</div>
           <div style="font-size: 28px; font-weight: 800; color: #0A0A0A; margin-bottom: 4px;">${chargeFormatted}<span style="font-size: 15px; font-weight: 400; color: #6E6E6E;">${priceSuffixHtml}</span></div>
-          <div style="font-size: 14px; color: #4A4A4A;">${propLabel} &bull; ${metaLabel}${isAssoc && input.units ? ` &bull; ${input.units} units` : ""}${!isAssoc && input.sqft ? ` &bull; ${input.sqft} sq ft` : ""}</div>
+          <div style="font-size: 14px; color: #4A4A4A;">${propLabel} &bull; ${metaLabel}${!isSpecialty && isAssoc && input.units ? ` &bull; ${input.units} units` : ""}${!isSpecialty && !isAssoc && input.sqft ? ` &bull; ${input.sqft} sq ft` : ""}</div>
+          ${!hasKnownPrice ? `<div style="font-size: 13px; color: #6E6E6E; margin-top: 8px;">A specialist will follow up with a tailored quote for your property.</div>` : ""}
         </div>`;
 
     const customerHtml = `
@@ -776,9 +803,13 @@ export const handler: Handler = async (event) => {
 
         <p>Thank you for reaching out to <strong>BuzzKill Pest Control</strong>! We appreciate your interest in professional pest management for your ${isAssoc ? "community" : "home"}.</p>
 
-        ${quoteCard}
+        ${skipContract ? `
+        <div style="background: #F7F7F4; border-left: 4px solid #7ED321; padding: 20px 24px; margin: 24px 0; border-radius: 0 8px 8px 0;">
+          <div style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #5FA517; font-weight: 700; margin-bottom: 8px;">Next Steps</div>
+          <div style="font-size: 15px; color: #1A1A1A; line-height: 1.6;">We've received your request for <strong>${input.specialtyService}</strong>. Because pricing for this service depends on your specific property, one of our specialists will reach out within one business day with a custom quote.</div>
+        </div>` : `${quoteCard}
 
-        ${agreementBlock}
+        ${agreementBlock}`}
 
         <p>If you have any questions, don't hesitate to call us at <a href="tel:+15082589294" style="color: #5FA517; font-weight: 600;">508-258-9294</a> or reply to this email.</p>
 
@@ -790,9 +821,13 @@ export const handler: Handler = async (event) => {
     await sendEmail(
       fromEmail,
       (input.email ?? "").trim(),
-      oneTime
-        ? `Your BuzzKill One-Time Service Quote — ${chargeFormatted}`
-        : `Your BuzzKill Pest Control Quote — ${chargeFormatted}/month`,
+      isSpecialty
+        ? (hasKnownPrice
+            ? `Your BuzzKill ${input.specialtyService} Quote — ${chargeFormatted}`
+            : `Your BuzzKill ${input.specialtyService} Request — A Specialist Will Follow Up`)
+        : oneTime
+          ? `Your BuzzKill One-Time Service Quote — ${chargeFormatted}`
+          : `Your BuzzKill Pest Control Quote — ${chargeFormatted}/month`,
       customerHtml,
     );
     console.log("Customer quote email sent to", (input.email ?? "").trim());

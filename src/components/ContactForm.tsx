@@ -196,7 +196,6 @@ export default function ContactForm({
     company: "",
     specialtyService: "",
     specialtyPropertyType: "",
-    specialtyName: "",
   });
 
   const update =
@@ -257,6 +256,8 @@ export default function ContactForm({
       validationErrors.push("the number of units");
     if (type === "Residential" && !data.sqft)
       validationErrors.push("square footage");
+    if (type === "Specialty" && !data.specialtyPropertyType)
+      validationErrors.push("a location type");
     if (type === "Specialty" && !data.specialtyService)
       validationErrors.push("a specialty service");
     if (validationErrors.length > 0) {
