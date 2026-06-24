@@ -665,7 +665,11 @@ export const handler: Handler = async (event) => {
 
   // Zero-price specialty services (Termite Bait Stations, Other Specialty Service)
   // require a manual quote — skip auto-contract generation entirely.
-  const skipContract = isSpecialty && !hasKnownPrice;
+  // Computed inline here (rather than reusing the Step 5 vars) because those
+  // are declared further down; referencing them here would hit the TDZ.
+  const skipContract =
+    input.propertyType === "Specialty" &&
+    (SPECIALTY_PRICE[input.specialtyService ?? ""] ?? 0) <= 0;
 
   if (subscriptionID && !skipContract) {
     try {
