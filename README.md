@@ -6,7 +6,8 @@ Monorepo for BuzzKill Pest Control applications.
 
 | Path | What it is |
 | --- | --- |
-| `apps/web/` | Public-facing marketing site (React + Vite) and its Amplify Gen 2 backend (`apps/web/amplify/`) |
+| `apps/web/` | Public-facing marketing site (React + Vite) and its Amplify Gen 2 backend (`apps/web/amplify/`) — the single backend owner |
+| `apps/crm/` | Internal CRM (React + Vite, replaces FieldRoutes). Frontend-only: consumes the web app's backend via `npm run outputs` locally / `ampx generate outputs` in CI |
 | `docs/` | Shared reference docs (FieldRoutes API, etc.) |
 | `amplify.yml` | Amplify Hosting build spec (monorepo format; each app declares its own `appRoot`) |
 

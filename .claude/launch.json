@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "apps/web", "run", "dev", "--", "--host"],
       "port": 5173
+    },
+    {
+      "name": "crm",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "apps/crm", "run", "dev", "--", "--host"],
+      "port": 5174
     }
   ]
 }

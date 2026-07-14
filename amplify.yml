@@ -28,3 +28,27 @@ applications:
         paths:
           - .npm/**/*
           - node_modules/**/*
+  - appRoot: apps/crm
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci --cache .npm --prefer-offline
+        build:
+          commands:
+            # The CRM consumes the web app's Amplify backend (apps/web owns the
+            # single backend) instead of deploying its own — no pipeline-deploy
+            # here. Fetching another app's outputs requires an IAM service role
+            # on this hosting app; until one is attached the fallback lets the
+            # build finish without backend config (status pill shows it in-app).
+            - npx ampx generate outputs --app-id d26qpsjewk0bee --branch $AWS_BRANCH || echo "WARNING could not fetch backend outputs — building without backend config"
+            - env | grep -E '^VITE_' >> .env || true
+            - npm run build
+      artifacts:
+        baseDirectory: dist
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - .npm/**/*
+          - node_modules/**/*
