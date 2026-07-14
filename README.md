@@ -1,6 +1,29 @@
-## AWS Amplify React+Vite Starter Template
+## BuzzKill Pest Control
 
-This repository provides a starter template for creating applications using React+Vite and AWS Amplify, emphasizing easy setup for authentication, API, and database capabilities.
+Monorepo for BuzzKill Pest Control applications.
+
+## Repository layout
+
+| Path | What it is |
+| --- | --- |
+| `apps/web/` | Public-facing marketing site (React + Vite) and its Amplify Gen 2 backend (`apps/web/amplify/`) |
+| `docs/` | Shared reference docs (FieldRoutes API, etc.) |
+| `amplify.yml` | Amplify Hosting build spec (monorepo format; each app declares its own `appRoot`) |
+
+Each app is self-contained with its own `package.json` and lockfile — install and run from inside the app directory:
+
+```bash
+cd apps/web
+npm install
+npm run dev        # local dev server
+npx ampx sandbox   # personal cloud sandbox for the Amplify backend
+```
+
+The Amplify Hosting app has `AMPLIFY_MONOREPO_APP_ROOT=apps/web` set in the console so builds resolve the correct app root.
+
+---
+
+This repository was created from the AWS Amplify React+Vite starter template, emphasizing easy setup for authentication, API, and database capabilities.
 
 ## Overview
 
