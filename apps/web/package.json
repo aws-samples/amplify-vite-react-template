@@ -23,10 +23,14 @@
   "devDependencies": {
     "@aws-amplify/backend": "~1.19.0",
     "@aws-amplify/backend-cli": "~1.8.1",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1087.0",
+    "@aws-sdk/client-s3": "^3.1087.0",
     "@aws-sdk/client-ses": "^3.1038.0",
+    "@aws-sdk/s3-request-presigner": "^3.1087.0",
     "@eslint/compat": "~2.0.1",
     "@eslint/eslintrc": "~3.3.3",
     "@eslint/js": "~9.39.2",
+    "@types/aws-lambda": "^8.10.162",
     "@types/node": "^25.6.0",
     "@types/react": "~18.3.27",
     "@types/react-dom": "~18.3.7",
@@ -38,6 +42,8 @@
     "eslint-plugin-react-hooks": "~7.0.1",
     "eslint-plugin-react-refresh": "~0.4.26",
     "globals": "~17.0.0",
+    "pdf-lib": "^1.17.1",
+    "stripe": "^22.3.1",
     "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "vite": "~7.3.1"

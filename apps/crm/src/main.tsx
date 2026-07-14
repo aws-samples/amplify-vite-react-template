@@ -4,10 +4,10 @@ import App from "./App.tsx";
 import "./index.css";
 import { connectBackend } from "./lib/backend";
 
-connectBackend().then((backendConnected) => {
+connectBackend().then((backendReady) => {
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
-      <App backendConnected={backendConnected} />
+      <App backendReady={backendReady} />
     </React.StrictMode>
   );
 });

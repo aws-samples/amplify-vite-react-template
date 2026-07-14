@@ -1,0 +1,194 @@
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { signOut } from "aws-amplify/auth";
+import { api, unwrap, type Technician } from "../lib/api";
+import { useRoles } from "../lib/auth";
+import { fmtDateTime } from "../lib/format";
+import {
+  Badge,
+  Button,
+  Card,
+  ErrorNote,
+  Field,
+  ListRow,
+  Page,
+  Sheet,
+} from "../ui/kit";
+
+export default function More() {
+  const roles = useRoles();
+  const navigate = useNavigate();
+  const [staffSheet, setStaffSheet] = useState(false);
+  const [emailLogSheet, setEmailLogSheet] = useState(false);
+
+  return (
+    <Page title="More">
+      <Card>
+        <ListRow
+          title="Signed in"
+          subtitle={roles.email ?? undefined}
+          meta={
+            <span style={{ display: "inline-flex", gap: 4 }}>
+              {roles.office ? <Badge tone="ok">office</Badge> : null}
+              {roles.tech ? <Badge tone="info">tech</Badge> : null}
+              {roles.customer ? <Badge tone="muted">customer</Badge> : null}
+            </span>
+          }
+        />
+      </Card>
+
+      {roles.office ? (
+        <Card title="Office tools">
+          {roles.tech ? (
+            <ListRow title="My day (technician view)" onClick={() => navigate("/tech")} />
+          ) : null}
+          <ListRow
+            title="Invite a staff member"
+            subtitle="Office, technician, or both"
+            onClick={() => setStaffSheet(true)}
+          />
+          <ListRow
+            title="Email log"
+            subtitle="Recent emails sent to customers"
+            onClick={() => setEmailLogSheet(true)}
+          />
+        </Card>
+      ) : null}
+
+      <Button block variant="ghost" onClick={() => void signOut().then(() => window.location.assign("/"))}>
+        Sign out
+      </Button>
+
+      <Sheet open={staffSheet} onClose={() => setStaffSheet(false)} title="Invite staff">
+        <StaffInvite onDone={() => setStaffSheet(false)} />
+      </Sheet>
+      <Sheet open={emailLogSheet} onClose={() => setEmailLogSheet(false)} title="Email log">
+        <EmailLogList />
+      </Sheet>
+    </Page>
+  );
+}
+
+function StaffInvite({ onDone }: { onDone: () => void }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"OFFICE" | "TECH" | "BOTH">("OFFICE");
+  const [techs, setTechs] = useState<Technician[]>([]);
+  const [technicianId, setTechnicianId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (role === "OFFICE") return;
+    api()
+      .models.Technician.list({ limit: 200 })
+      .then((res) => setTechs(unwrap(res).filter((t) => !t.userSub)))
+      .catch(() => undefined);
+  }, [role]);
+
+  if (done) {
+    return (
+      <div className="form-grid">
+        <p>
+          Invite sent — they'll get an email with a temporary password and can
+          sign in right away.
+        </p>
+        <Button block onClick={onDone}>
+          Done
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="form-grid">
+      <Field label="Name">
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </Field>
+      <Field label="Email">
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      </Field>
+      <Field label="Role">
+        <select value={role} onChange={(e) => setRole(e.target.value as typeof role)}>
+          <option value="OFFICE">Office staff</option>
+          <option value="TECH">Technician</option>
+          <option value="BOTH">Both (office + technician)</option>
+        </select>
+      </Field>
+      {role !== "OFFICE" && techs.length > 0 ? (
+        <Field label="Link to technician record" hint="So their daily route shows up under My Day">
+          <select value={technicianId} onChange={(e) => setTechnicianId(e.target.value)}>
+            <option value="">Don't link</option>
+            {techs.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      ) : null}
+      <ErrorNote error={error} />
+      <Button
+        block
+        loading={busy}
+        onClick={() => {
+          if (!name.trim() || !email.trim()) {
+            setError("Name and email are required");
+            return;
+          }
+          setBusy(true);
+          api()
+            .mutations.adminCreateUser({
+              email: email.trim(),
+              name: name.trim(),
+              roles: role === "BOTH" ? ["OFFICE", "TECH"] : [role],
+              technicianId: technicianId || undefined,
+            })
+            .then((res) => {
+              if (res.errors?.length) throw new Error(res.errors[0].message);
+              setDone(true);
+            })
+            .catch((err) => {
+              setError(err.message ?? "Could not send invite");
+              setBusy(false);
+            });
+        }}
+      >
+        Send invite
+      </Button>
+    </div>
+  );
+}
+
+function EmailLogList() {
+  const [rows, setRows] = useState<
+    { id: string; toEmail: string; subject: string; status: string | null; sentAt: string }[] | null
+  >(null);
+
+  useEffect(() => {
+    api()
+      .models.EmailLog.list({ limit: 100 })
+      .then((res) =>
+        setRows(
+          unwrap(res).sort((a, b) => b.sentAt.localeCompare(a.sentAt))
+        )
+      )
+      .catch(() => setRows([]));
+  }, []);
+
+  if (!rows) return <p className="muted">Loading…</p>;
+  if (rows.length === 0) return <p className="muted">No emails sent yet.</p>;
+  return (
+    <div>
+      {rows.map((r) => (
+        <ListRow
+          key={r.id}
+          title={r.subject}
+          subtitle={`${r.toEmail} · ${fmtDateTime(r.sentAt)}`}
+          meta={<Badge tone={r.status === "SENT" ? "ok" : "danger"}>{r.status?.toLowerCase()}</Badge>}
+        />
+      ))}
+    </div>
+  );
+}

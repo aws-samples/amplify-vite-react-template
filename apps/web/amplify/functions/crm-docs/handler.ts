@@ -1,0 +1,291 @@
+import { randomBytes } from "node:crypto";
+import type { AppSyncResolverEvent } from "aws-lambda";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { dataClient } from "../shared/dataClient";
+import { opFieldName } from "../shared/opEvent";
+import { callerGroups, callerIsOffice } from "../shared/authz";
+import { cusGroup, grpGroup } from "../shared/dynamicGroups";
+import { emailShell, sendEmail } from "../shared/email";
+import { renderServiceReportPdf, type ReportProduct } from "../shared/pdf";
+
+const s3 = new S3Client();
+const BUCKET = () => {
+  const b = process.env.DOCS_BUCKET;
+  if (!b) throw new Error("DOCS_BUCKET is not configured");
+  return b;
+};
+const CRM_URL = () =>
+  process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com";
+
+/** productsUsed is an AWSJSON field — may arrive as a JSON string. */
+function parseProducts(raw: unknown): ReportProduct[] {
+  try {
+    const v = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(v) ? (v as ReportProduct[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+type Args = {
+  agreementId?: string;
+  reportId?: string;
+  key?: string;
+  customerId?: string;
+  kind?: string;
+  note?: string;
+};
+
+export const handler = async (event: AppSyncResolverEvent<Args>) => {
+  switch (opFieldName(event)) {
+    case "sendAgreement": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return sendAgreement(event.arguments.agreementId!);
+    }
+    case "finalizeServiceReport": {
+      const groups = callerGroups(event.identity);
+      if (!groups.includes("OFFICE") && !groups.includes("TECH")) {
+        throw new Error("Staff role required");
+      }
+      return finalizeServiceReport(event.arguments.reportId!);
+    }
+    case "getDocumentUrl": {
+      return getDocumentUrl(event.arguments.key!, callerGroups(event.identity));
+    }
+    case "sendCustomerEmail": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return sendCustomerEmail(
+        event.arguments.customerId!,
+        event.arguments.kind!,
+        event.arguments.note ?? undefined
+      );
+    }
+    default:
+      throw new Error(`Unknown field ${opFieldName(event)}`);
+  }
+};
+
+/** Office-initiated transactional emails (payment request, portal reminder). */
+async function sendCustomerEmail(
+  customerId: string,
+  kind: string,
+  note?: string
+) {
+  const client = await dataClient();
+  const { data: customer } = await client.models.Customer.get({
+    id: customerId,
+  });
+  if (!customer?.email) throw new Error("Customer has no email address on file");
+  const hi = `<p>Hi ${customer.contactName ?? customer.displayName},</p>`;
+  const noteHtml = note
+    ? `<p style="border-left:3px solid #e4e6ea;padding-left:12px;color:#444;">${note}</p>`
+    : "";
+
+  let subject: string;
+  let heading: string;
+  let body: string;
+  if (kind === "payment-request") {
+    subject = "Action needed: add a payment method";
+    heading = "Add a payment method";
+    body = `${hi}
+      <p>Before your first BuzzKill service visit, please add a payment method (card or bank account) to your account.</p>
+      ${noteHtml}
+      <p style="margin:20px 0;"><a href="${CRM_URL()}/billing" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Add payment method</a></p>
+      <p style="color:#666;font-size:13px;">Sign in with your BuzzKill account. Payment details are stored securely with Stripe — we never see your card or account number.</p>`;
+  } else if (kind === "portal-reminder") {
+    subject = "Your BuzzKill customer portal";
+    heading = "Your customer portal";
+    body = `${hi}
+      <p>Your BuzzKill portal has your upcoming visits, service reports, agreements, and billing in one place.</p>
+      ${noteHtml}
+      <p style="margin:20px 0;"><a href="${CRM_URL()}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open my portal</a></p>`;
+  } else {
+    throw new Error(`Unknown email kind: ${kind}`);
+  }
+
+  const sent = await sendEmail({
+    to: customer.email,
+    subject,
+    template: kind,
+    customerId,
+    html: emailShell(heading, body),
+  });
+  return { sent, to: customer.email };
+}
+
+async function sendAgreement(agreementId: string) {
+  const client = await dataClient();
+  const { data: agreement } = await client.models.Agreement.get({
+    id: agreementId,
+  });
+  if (!agreement) throw new Error(`Agreement ${agreementId} not found`);
+  if (agreement.status === "SIGNED") {
+    throw new Error("Agreement is already signed");
+  }
+  const { data: customer } = await client.models.Customer.get({
+    id: agreement.customerId,
+  });
+  if (!customer?.email) {
+    throw new Error("Customer has no email address on file");
+  }
+
+  const signToken = agreement.signToken ?? randomBytes(24).toString("hex");
+  await client.models.Agreement.update({
+    id: agreementId,
+    signToken,
+    status: "SENT",
+    sentAt: new Date().toISOString(),
+  });
+
+  const link = `${CRM_URL()}/sign/${signToken}`;
+  const emailed = await sendEmail({
+    to: customer.email,
+    subject: `Your BuzzKill service agreement: ${agreement.title}`,
+    template: "agreement-link",
+    customerId: customer.id,
+    relatedId: agreementId,
+    html: emailShell(
+      "Your service agreement is ready to sign",
+      `<p>Hi ${customer.contactName ?? customer.displayName},</p>
+       <p>Please review and electronically sign your service agreement, <strong>${agreement.title}</strong>.</p>
+       <p style="margin:20px 0;"><a href="${link}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Review &amp; sign</a></p>
+       <p style="color:#666;font-size:13px;">This link is unique to you — please don't forward it. Once signed, you'll receive a copy for your records.</p>`
+    ),
+  });
+
+  return { sent: emailed, to: customer.email, link };
+}
+
+async function finalizeServiceReport(reportId: string) {
+  const client = await dataClient();
+  const { data: report } = await client.models.ServiceReport.get({
+    id: reportId,
+  });
+  if (!report) throw new Error(`ServiceReport ${reportId} not found`);
+  if (report.status === "FINALIZED" && report.pdfKey) {
+    return { pdfKey: report.pdfKey, emailed: false, alreadyFinalized: true };
+  }
+
+  const [{ data: job }, { data: customer }, { data: technician }] =
+    await Promise.all([
+      client.models.Job.get({ id: report.jobId }),
+      client.models.Customer.get({ id: report.customerId }),
+      client.models.Technician.get({ id: report.technicianId }),
+    ]);
+  if (!job || !customer) throw new Error("Report is missing its job/customer");
+
+  const serviceAddress = [
+    customer.serviceStreet,
+    customer.serviceCity,
+    customer.serviceState,
+    customer.serviceZip,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const pdf = await renderServiceReportPdf({
+    reportId,
+    customerName: customer.displayName,
+    serviceAddress: serviceAddress || undefined,
+    serviceType: job.serviceType,
+    serviceDateIso: report.serviceDate,
+    technicianName: technician?.name ?? "BuzzKill Technician",
+    servicesPerformed: report.servicesPerformed,
+    productsUsed: parseProducts(report.productsUsed),
+    targetPests: report.targetPests,
+    areasTreated: report.areasTreated,
+    recommendations: report.recommendations,
+    techNotes: report.techNotes,
+    geo:
+      report.geoLat != null && report.geoLng != null
+        ? {
+            lat: report.geoLat,
+            lng: report.geoLng,
+            accuracyM: report.geoAccuracyM,
+            capturedAtIso: report.geoCapturedAt,
+          }
+        : null,
+  });
+
+  const pdfKey = `reports/${report.customerId}/${reportId}.pdf`;
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET(),
+      Key: pdfKey,
+      Body: pdf,
+      ContentType: "application/pdf",
+    })
+  );
+
+  let emailed = false;
+  if (customer.email) {
+    emailed = await sendEmail({
+      to: customer.email,
+      subject: `Service report — ${job.serviceType}`,
+      template: "service-report",
+      customerId: customer.id,
+      relatedId: reportId,
+      attachments: [
+        {
+          filename: "BuzzKill-Service-Report.pdf",
+          content: pdf,
+          contentType: "application/pdf",
+        },
+      ],
+      html: emailShell(
+        "Your service is complete",
+        `<p>Hi ${customer.contactName ?? customer.displayName},</p>
+         <p>${technician?.name ?? "Your technician"} completed your <strong>${job.serviceType}</strong> service. Your full service report is attached, and it's always available in your BuzzKill portal.</p>
+         <p style="color:#666;font-size:13px;">Questions about this visit? Just reply to this email.</p>`
+      ),
+    });
+  }
+
+  await client.models.ServiceReport.update({
+    id: reportId,
+    status: "FINALIZED",
+    pdfKey,
+    ...(emailed ? { emailedAt: new Date().toISOString() } : {}),
+  });
+  await client.models.Job.update({
+    id: report.jobId,
+    status: "COMPLETED",
+    completedAt: new Date().toISOString(),
+  });
+
+  return { pdfKey, emailed, alreadyFinalized: false };
+}
+
+/**
+ * Presign a document for viewing. Keys are always
+ * `reports/<customerId>/...` or `agreements/<customerId>/...`; entitlement
+ * is office/tech, the customer's own dynamic group, or their customer-group.
+ */
+async function getDocumentUrl(key: string, groups: string[]) {
+  const match = /^(reports|agreements)\/([^/]+)\//.exec(key);
+  if (!match) throw new Error("Invalid document key");
+  const customerId = match[2];
+
+  const staff = groups.includes("OFFICE") || groups.includes("TECH");
+  if (!staff) {
+    let allowed = groups.includes(cusGroup(customerId));
+    if (!allowed) {
+      const client = await dataClient();
+      const { data: customer } = await client.models.Customer.get({
+        id: customerId,
+      });
+      allowed = Boolean(
+        customer?.groupId && groups.includes(grpGroup(customer.groupId))
+      );
+    }
+    if (!allowed) throw new Error("Not authorized for this document");
+  }
+
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({ Bucket: BUCKET(), Key: key }),
+    { expiresIn: 900 }
+  );
+  return { url, expiresInSeconds: 900 };
+}
