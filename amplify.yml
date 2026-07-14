@@ -34,6 +34,11 @@ applications:
         preBuild:
           commands:
             - npm ci --cache .npm --prefer-offline
+            # The CRM imports the backend Schema *type* from apps/web, and
+            # TypeScript resolves that file's imports through apps/web's own
+            # node_modules — install them too (type-only, nothing from
+            # apps/web ships in the CRM bundle).
+            - cd ../web && npm ci --cache ../crm/.npm --prefer-offline && cd ../crm
         build:
           commands:
             # The CRM consumes the web app's Amplify backend (apps/web owns the
@@ -52,3 +57,4 @@ applications:
         paths:
           - .npm/**/*
           - node_modules/**/*
+          - ../web/node_modules/**/*
