@@ -5,6 +5,7 @@ import { stripeWebhook } from "../functions/stripe-webhook/resource";
 import { crmDocs } from "../functions/crm-docs/resource";
 import { agreementPublic } from "../functions/agreement-public/resource";
 import { dailyReminders } from "../functions/daily-reminders/resource";
+import { postAuth } from "../functions/post-auth/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -27,6 +28,7 @@ import { dailyReminders } from "../functions/daily-reminders/resource";
 const schema = a.schema({
   CustomerStatus: a.enum(["LEAD", "ACTIVE", "INACTIVE"]),
   ServicePlanStatus: a.enum(["ACTIVE", "PAUSED", "CANCELED"]),
+  QuoteStatus: a.enum(["DRAFT", "SENT", "CONVERTED", "VOID"]),
   ServiceFrequency: a.enum(["MONTHLY", "BIMONTHLY", "QUARTERLY"]),
   JobType: a.enum(["ONE_TIME", "RECURRING"]),
   JobStatus: a.enum([
@@ -92,12 +94,14 @@ const schema = a.schema({
       paymentMethodKind: a.ref("PaymentMethodKind"),
       portalUserSub: a.string(),
       portalInvitedAt: a.datetime(),
+      portalLastLoginAt: a.datetime(),
       accessGroups: a.string().array(),
       servicePlans: a.hasMany("ServicePlan", "customerId"),
       jobs: a.hasMany("Job", "customerId"),
       agreements: a.hasMany("Agreement", "customerId"),
       serviceReports: a.hasMany("ServiceReport", "customerId"),
       invoices: a.hasMany("Invoice", "customerId"),
+      quotes: a.hasMany("Quote", "customerId"),
     })
     .secondaryIndexes((index) => [
       index("status").sortKeys(["displayName"]),
@@ -124,6 +128,60 @@ const schema = a.schema({
       accessGroups: a.string().array(),
       jobs: a.hasMany("Job", "servicePlanId"),
       invoices: a.hasMany("Invoice", "servicePlanId"),
+    })
+    .authorization((allow) => [
+      allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["TECH"]).to(["read"]),
+      allow.groupsDefinedIn("accessGroups").to(["read"]),
+    ]),
+
+  /**
+   * Global plan catalog: office defines the plans BuzzKill sells once, then
+   * quotes/plans for a customer are created *from* a template. Each template
+   * carries the default agreement sent when a lead is quoted (placeholders
+   * {{customerName}}, {{planName}}, {{price}}, {{frequency}}, {{address}}
+   * are substituted at quote time).
+   */
+  PlanTemplate: a
+    .model({
+      name: a.string().required(),
+      description: a.string(),
+      priceCents: a.integer().required(),
+      serviceFrequency: a.ref("ServiceFrequency").required(),
+      agreementTitle: a.string().required(),
+      agreementBody: a.string().required(),
+      active: a.boolean().required(),
+      sortOrder: a.integer(),
+      quotes: a.hasMany("Quote", "planTemplateId"),
+    })
+    .authorization((allow) => [
+      allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["TECH"]).to(["read"]),
+    ]),
+
+  /**
+   * A stored quote for a lead: a plan template (with optional price
+   * override) plus the agreement sent for signature. Signing the agreement
+   * converts the quote — lead becomes an ACTIVE customer with a ServicePlan
+   * created from the quote (billing still starts explicitly once a payment
+   * method is on file).
+   */
+  Quote: a
+    .model({
+      customerId: a.id().required(),
+      customer: a.belongsTo("Customer", "customerId"),
+      planTemplateId: a.id(),
+      planTemplate: a.belongsTo("PlanTemplate", "planTemplateId"),
+      planName: a.string().required(),
+      priceCents: a.integer().required(),
+      serviceFrequency: a.ref("ServiceFrequency").required(),
+      status: a.ref("QuoteStatus").required(),
+      notes: a.string(),
+      servicePlanId: a.id(),
+      quotedAt: a.datetime(),
+      convertedAt: a.datetime(),
+      accessGroups: a.string().array(),
+      agreements: a.hasMany("Agreement", "quoteId"),
     })
     .authorization((allow) => [
       allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
@@ -205,6 +263,8 @@ const schema = a.schema({
     .model({
       customerId: a.id().required(),
       customer: a.belongsTo("Customer", "customerId"),
+      quoteId: a.id(),
+      quote: a.belongsTo("Quote", "quoteId"),
       title: a.string().required(),
       bodyText: a.string().required(),
       status: a.ref("AgreementStatus").required(),
@@ -246,6 +306,7 @@ const schema = a.schema({
       geoCapturedAt: a.datetime(),
       status: a.ref("ReportStatus").required(),
       pdfKey: a.string(),
+      photoKeys: a.string().array(),
       emailedAt: a.datetime(),
       accessGroups: a.string().array(),
     })
@@ -366,6 +427,25 @@ const schema = a.schema({
     .authorization((allow) => [allow.groups(["OFFICE"])])
     .handler(a.handler.function(crmBilling)),
 
+  /**
+   * Deactivate/reactivate a plan without ending it: pauses Stripe payment
+   * collection when a subscription is running and flips the plan status
+   * PAUSED ⇄ ACTIVE.
+   */
+  pausePlan: a
+    .mutation()
+    .arguments({ servicePlanId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  resumePlan: a
+    .mutation()
+    .arguments({ servicePlanId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE"])])
+    .handler(a.handler.function(crmBilling)),
+
   chargeOneTimeJob: a
     .mutation()
     .arguments({ jobId: a.string().required() })
@@ -389,6 +469,21 @@ const schema = a.schema({
   finalizeServiceReport: a
     .mutation()
     .arguments({ reportId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * Presigned PUT for a technician report photo. Keys land under
+   * `reports/<customerId>/photos/<reportId>/…` so the existing
+   * getDocumentUrl entitlement covers viewing them.
+   */
+  getReportPhotoUploadUrl: a
+    .mutation()
+    .arguments({
+      reportId: a.string().required(),
+      contentType: a.string().required(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OFFICE", "TECH"])])
     .handler(a.handler.function(crmDocs)),
@@ -419,6 +514,7 @@ const schema = a.schema({
   allow.resource(crmDocs),
   allow.resource(agreementPublic),
   allow.resource(dailyReminders),
+  allow.resource(postAuth),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

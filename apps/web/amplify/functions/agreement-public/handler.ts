@@ -4,6 +4,7 @@ import type {
 } from "aws-lambda";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { dataClient } from "../shared/dataClient";
+import { customerAccessGroups } from "../shared/dynamicGroups";
 import { emailShell, sendEmail } from "../shared/email";
 import { renderAgreementPdf } from "../shared/pdf";
 
@@ -62,6 +63,53 @@ export const handler = async (
   }
   return json(405, { error: "Method not allowed" });
 };
+
+/**
+ * Idempotent quote → customer conversion: creates the ServicePlan from the
+ * quoted terms, marks the quote CONVERTED, and flips a LEAD to ACTIVE.
+ */
+async function convertQuote(quoteId: string, signedAtIso: string) {
+  const client = await dataClient();
+  const { data: quote } = await client.models.Quote.get({ id: quoteId });
+  if (!quote || quote.status === "CONVERTED" || quote.status === "VOID") {
+    return;
+  }
+  const { data: customer } = await client.models.Customer.get({
+    id: quote.customerId,
+  });
+  if (!customer) throw new Error(`Quote customer ${quote.customerId} missing`);
+
+  const accessGroups = customerAccessGroups(
+    quote.customerId,
+    customer.groupId
+  );
+  const { data: plan, errors } = await client.models.ServicePlan.create({
+    customerId: quote.customerId,
+    planName: quote.planName,
+    priceCents: quote.priceCents,
+    serviceFrequency: quote.serviceFrequency,
+    status: "ACTIVE",
+    startDate: signedAtIso.slice(0, 10),
+    notes: quote.notes ?? undefined,
+    accessGroups,
+  });
+  if (!plan) {
+    throw new Error(errors?.[0]?.message ?? "ServicePlan create failed");
+  }
+  await client.models.Quote.update({
+    id: quoteId,
+    status: "CONVERTED",
+    convertedAt: signedAtIso,
+    servicePlanId: plan.id,
+  });
+  if (customer.status === "LEAD") {
+    await client.models.Customer.update({
+      id: customer.id,
+      status: "ACTIVE",
+      convertedAt: signedAtIso,
+    });
+  }
+}
 
 async function findByToken(token: string) {
   const client = await dataClient();
@@ -162,6 +210,20 @@ async function signAgreement(opts: {
     signerUserAgent: opts.userAgent.slice(0, 250),
     pdfKey,
   });
+
+  // Quote-backed agreement: signing converts the quote — the lead becomes
+  // an ACTIVE customer with a ServicePlan created from the quoted terms.
+  // (Billing still starts explicitly once a payment method is on file.)
+  if (agreement.quoteId) {
+    try {
+      await convertQuote(agreement.quoteId, signedAtIso);
+    } catch (err) {
+      // The signature itself succeeded — don't fail the signer's request.
+      // The office notification below still flags the signing; the quote
+      // stays SENT so the office can convert manually if this ever fires.
+      console.error("Quote conversion failed for", agreement.quoteId, err);
+    }
+  }
 
   const attachment = {
     filename: "BuzzKill-Signed-Agreement.pdf",

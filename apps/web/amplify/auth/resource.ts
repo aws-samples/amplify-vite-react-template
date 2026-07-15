@@ -1,5 +1,6 @@
 import { defineAuth } from "@aws-amplify/backend";
 import { crmAdmin } from "../functions/crm-admin/resource";
+import { postAuth } from "../functions/post-auth/resource";
 
 /**
  * Shared auth for the marketing site and the CRM.
@@ -19,6 +20,9 @@ export const auth = defineAuth({
     email: true,
   },
   groups: ["OFFICE", "TECH", "CUSTOMER"],
+  triggers: {
+    postAuthentication: postAuth,
+  },
   access: (allow) => [
     allow
       .resource(crmAdmin)

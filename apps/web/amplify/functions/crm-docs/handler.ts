@@ -35,6 +35,7 @@ type Args = {
   customerId?: string;
   kind?: string;
   note?: string;
+  contentType?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -52,6 +53,16 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "getDocumentUrl": {
       return getDocumentUrl(event.arguments.key!, callerGroups(event.identity));
+    }
+    case "getReportPhotoUploadUrl": {
+      const groups = callerGroups(event.identity);
+      if (!groups.includes("OFFICE") && !groups.includes("TECH")) {
+        throw new Error("Staff role required");
+      }
+      return getReportPhotoUploadUrl(
+        event.arguments.reportId!,
+        event.arguments.contentType!
+      );
     }
     case "sendCustomerEmail": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
@@ -255,6 +266,45 @@ async function finalizeServiceReport(reportId: string) {
   });
 
   return { pdfKey, emailed, alreadyFinalized: false };
+}
+
+const PHOTO_TYPES: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/heic": "heic",
+};
+
+/**
+ * Presigned PUT for a technician report photo. The key lives under
+ * `reports/<customerId>/photos/<reportId>/…` so getDocumentUrl's existing
+ * entitlement check covers viewing. The client PUTs the file, then appends
+ * the key to the report's photoKeys.
+ */
+async function getReportPhotoUploadUrl(reportId: string, contentType: string) {
+  const ext = PHOTO_TYPES[contentType.toLowerCase()];
+  if (!ext) {
+    throw new Error("Unsupported image type — use JPEG, PNG, WEBP, or HEIC");
+  }
+  const client = await dataClient();
+  const { data: report } = await client.models.ServiceReport.get({
+    id: reportId,
+  });
+  if (!report) throw new Error(`Report ${reportId} not found`);
+  if (report.status === "FINALIZED") {
+    throw new Error("Report is finalized — photos can no longer be added");
+  }
+  const key = `reports/${report.customerId}/photos/${reportId}/${Date.now()}-${randomBytes(4).toString("hex")}.${ext}`;
+  const uploadUrl = await getSignedUrl(
+    s3,
+    new PutObjectCommand({
+      Bucket: BUCKET(),
+      Key: key,
+      ContentType: contentType,
+    }),
+    { expiresIn: 900 }
+  );
+  return { key, uploadUrl, expiresInSeconds: 900 };
 }
 
 /**

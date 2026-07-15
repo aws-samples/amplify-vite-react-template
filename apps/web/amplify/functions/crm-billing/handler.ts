@@ -29,6 +29,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       assertOffice(event);
       return cancelSubscription(event.arguments.servicePlanId!);
     }
+    case "pausePlan": {
+      assertOffice(event);
+      return setPlanPaused(event.arguments.servicePlanId!, true);
+    }
+    case "resumePlan": {
+      assertOffice(event);
+      return setPlanPaused(event.arguments.servicePlanId!, false);
+    }
     case "chargeOneTimeJob": {
       assertOffice(event);
       return chargeOneTimeJob(event.arguments.jobId!);
@@ -212,6 +220,36 @@ async function cancelSubscription(servicePlanId: string) {
     canceledAt: new Date().toISOString(),
   });
   return { canceled: true };
+}
+
+/**
+ * Deactivate/reactivate a plan without canceling it. When a Stripe
+ * subscription is running, pausing voids invoices while paused
+ * (pause_collection) and resuming clears it; either way the plan status
+ * flips PAUSED ⇄ ACTIVE so scheduling can honor it.
+ */
+async function setPlanPaused(servicePlanId: string, paused: boolean) {
+  const client = await dataClient();
+  const { data: sub } = await client.models.ServicePlan.get({
+    id: servicePlanId,
+  });
+  if (!sub) throw new Error(`Service plan ${servicePlanId} not found`);
+  if (sub.status === "CANCELED") {
+    throw new Error("Plan is canceled — create a new plan instead");
+  }
+  if (sub.stripeSubscriptionId) {
+    const stripe = stripeClient();
+    await stripe.subscriptions.update(sub.stripeSubscriptionId, {
+      pause_collection: paused
+        ? { behavior: "void" }
+        : ("" as unknown as { behavior: "void" }), // '' clears the pause per Stripe API convention
+    });
+  }
+  await client.models.ServicePlan.update({
+    id: servicePlanId,
+    status: paused ? "PAUSED" : "ACTIVE",
+  });
+  return { paused };
 }
 
 /**
