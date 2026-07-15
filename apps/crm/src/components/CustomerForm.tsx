@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Customer } from "../lib/api";
+import { AddressAutocompleteInput } from "../lib/addressAutocomplete";
 import { Button, ErrorNote, Field } from "../ui/kit";
 
 export type CustomerFormValues = {
@@ -85,7 +86,22 @@ export default function CustomerForm({
         </Field>
       </div>
       <Field label="Service street address">
-        <input value={values.serviceStreet} onChange={set("serviceStreet")} />
+        <AddressAutocompleteInput
+          value={values.serviceStreet}
+          autoComplete="street-address"
+          onChangeText={(text) =>
+            setValues((v) => ({ ...v, serviceStreet: text }))
+          }
+          onResolved={(a) =>
+            setValues((v) => ({
+              ...v,
+              serviceStreet: a.street,
+              serviceCity: a.city || v.serviceCity,
+              serviceState: a.state || v.serviceState,
+              serviceZip: a.zip || v.serviceZip,
+            }))
+          }
+        />
       </Field>
       <div className="form-row-2">
         <Field label="City">

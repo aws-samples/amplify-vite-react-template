@@ -39,20 +39,30 @@ Sandbox equivalents: `npx ampx sandbox secret set STRIPE_SECRET_KEY` etc. in
 `apps/web`, and a local `.env` with `VITE_STRIPE_PUBLISHABLE_KEY` in
 `apps/crm`.
 
-## 2. SES
+## 2. Google Maps address autocomplete
+
+Create a **browser API key** in Google Cloud Console (APIs & Services →
+Credentials) with **Places API (New)** enabled (the Maps JavaScript API is not
+required — the forms call the Places REST endpoints directly). Restrict the
+key by HTTP referrer to the app domains (and `localhost` for dev), then set
+env var `VITE_GOOGLE_MAPS_API_KEY` on **both** Amplify apps and rebuild.
+Without the key the address fields are plain inputs — everything still works,
+just no suggestions.
+
+## 3. SES
 
 Already working: `info@pestbuzzkill.com` is the verified sender used for
 service reports, agreement links, reminders, and payment requests. If email
 volume grows or messages land in spam, add DKIM for the domain in SES.
 Cognito login invites use Cognito's default mailer.
 
-## 3. Custom domain (optional, later)
+## 4. Custom domain (optional, later)
 
 When the CRM gets a real domain, set the `CRM_APP_URL` env var on the WEB
 app's branches (it's baked into agreement links, portal links, and the
 Cognito invite email) and rebuild. Defaults to the Amplify staging domain.
 
-## 4. Bootstrapping the first office user
+## 5. Bootstrapping the first office user
 
 The CRM is invite-only, and invites are sent from the CRM by office staff.
 Create the *first* office login once per environment with the AWS CLI

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AddressAutocompleteInput } from "../lib/addressAutocomplete";
 import type { FormEvent } from "react";
 import { submitLead } from "../lib/leadIntake";
 
@@ -747,10 +748,19 @@ export default function ContactForm({
 
                 <div className="bk-field bk-full">
                   <label htmlFor="addr">Service address *</label>
-                  <input
+                  <AddressAutocompleteInput
                     id="addr"
                     value={data.addr}
-                    onChange={update("addr")}
+                    onChangeText={(text) => setData({ ...data, addr: text })}
+                    onResolved={(a) =>
+                      setData({
+                        ...data,
+                        addr: a.street,
+                        city: a.city || data.city,
+                        state: (a.state || data.state).toUpperCase().slice(0, 2),
+                        zip: onlyDigits(a.zip || data.zip).slice(0, 5),
+                      })
+                    }
                     autoComplete="street-address"
                     placeholder="123 Main Street"
                     required
