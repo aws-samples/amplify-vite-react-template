@@ -46,7 +46,7 @@ export default function TechToday() {
           setTechId(mine.id);
         } else if (roles.office && all.length) {
           setTechId(all[0].id);
-        } else if (!mine) {
+        } else {
           setNoTechRecord(true);
         }
       } catch (err) {
@@ -100,12 +100,16 @@ export default function TechToday() {
     void load();
   }, [load]);
 
-  if (noTechRecord && !roles.office) {
+  if (noTechRecord) {
     return (
       <Page title="My day">
         <EmptyState
-          title="No technician profile linked"
-          body="Ask the office to link your login to your technician record (More → Technicians)."
+          title={roles.office ? "No technicians yet" : "No technician profile linked"}
+          body={
+            roles.office
+              ? "Add a technician from the Schedule screen — their day view will appear here."
+              : "Ask the office to link your login to your technician record (More → Technicians)."
+          }
         />
       </Page>
     );

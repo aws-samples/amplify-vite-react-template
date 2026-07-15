@@ -43,10 +43,19 @@ applications:
           commands:
             # The CRM consumes the web app's Amplify backend (apps/web owns the
             # single backend) instead of deploying its own — no pipeline-deploy
-            # here. Fetching another app's outputs requires an IAM service role
-            # on this hosting app; until one is attached the fallback lets the
-            # build finish without backend config (status pill shows it in-app).
-            - npx ampx generate outputs --app-id d26qpsjewk0bee --branch $AWS_BRANCH || echo "WARNING could not fetch backend outputs — building without backend config"
+            # here. Both apps build in parallel on push, so the web app's
+            # backend deploy may still be running: retry until the outputs
+            # contain the newest model (else this bundle bakes stale
+            # introspection and new models are undefined at runtime).
+            - |
+              for i in $(seq 1 16); do
+                npx ampx generate outputs --app-id d26qpsjewk0bee --branch $AWS_BRANCH || true
+                if node -e "const o=require('./amplify_outputs.json');const m=(o.data&&o.data.model_introspection&&o.data.model_introspection.models)||{};process.exit(m.Product&&m.ServiceReport?0:1)" 2>/dev/null; then
+                  echo "backend outputs are current (attempt $i)"; break
+                fi
+                if [ "$i" = "16" ]; then echo "ERROR backend outputs still stale after 8 minutes" && exit 1; fi
+                echo "outputs stale or missing (attempt $i) — backend deploy likely in flight, retrying in 30s"; sleep 30
+              done
             - env | grep -E '^VITE_' >> .env || true
             - npm run build
       artifacts:

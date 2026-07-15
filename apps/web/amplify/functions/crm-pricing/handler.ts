@@ -64,6 +64,9 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
 const secretCache = new Map<string, string | null>();
 
 async function getSecret(name: string): Promise<string | null> {
+  // Baked-in env (from Amplify Console app env vars) wins — no SSM needed.
+  const fromEnv = process.env[name];
+  if (fromEnv && fromEnv !== "placeholder-set-me") return fromEnv;
   if (secretCache.has(name)) return secretCache.get(name) ?? null;
   const appId = process.env.AMPLIFY_APP_ID ?? "d26qpsjewk0bee";
   let value: string | null = null;
@@ -83,7 +86,9 @@ async function getSecret(name: string): Promise<string | null> {
       /* parameter absent — try the next path */
     }
   }
-  secretCache.set(name, value);
+  // Only cache hits: a missing key added later must not be pinned to null
+  // for the container's whole lifetime.
+  if (value !== null) secretCache.set(name, value);
   return value;
 }
 

@@ -152,6 +152,15 @@ const appId = process.env.AWS_APP_ID ?? "d26qpsjewk0bee";
 const branch = process.env.AWS_BRANCH ?? "staging";
 backend.crmPricing.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
+// The API keys live as Amplify Console app-level env vars — present in the
+// build container at synth time. Bake them into the Lambda env so runtime
+// doesn't depend on SSM entries the Console never writes.
+for (const key of ["ANTHROPIC_API_KEY", "GOOGLE_ROUTES_API_KEY"] as const) {
+  const v = process.env[key];
+  if (v && v !== "placeholder-set-me") {
+    backend.crmPricing.addEnvironment(key, v);
+  }
+}
 backend.crmPricing.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     actions: ["ssm:GetParameter"],
