@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   jsonField,
@@ -47,9 +47,11 @@ export default function PriceLeadSheet({
   const [run, setRun] = useState<LeadPricingRun | null>(null);
   const [copied, setCopied] = useState(false);
   const [quoteSent, setQuoteSent] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const attach = async (file: File) => {
+    if (busy) return;
     setBusy("upload");
     setError(null);
     try {
@@ -69,12 +71,57 @@ export default function PriceLeadSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Screenshot upload failed");
     } finally {
-      setBusy(null);
+      setBusy((b) => (b === "upload" ? null : b));
       if (fileInput.current) fileInput.current.value = "";
     }
   };
 
+  /** Shared entry for drop/paste: only image files become the screenshot. */
+  const attachIfImage = (file: File | null | undefined) => {
+    if (!file) return false;
+    if (!file.type.startsWith("image/")) {
+      setError("That file isn't an image — attach a screenshot (PNG/JPEG)");
+      return false;
+    }
+    void attach(file);
+    return true;
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    setDragOver(false);
+    if (!e.dataTransfer.files?.length) return; // text drag — let the browser handle it
+    e.preventDefault();
+    attachIfImage(e.dataTransfer.files[0]);
+  };
+
+  // Paste works sheet-wide, not only when a field has focus. The ref keeps
+  // the document listener on the latest closure (fresh busy/error state).
+  const attachIfImageRef = useRef(attachIfImage);
+  attachIfImageRef.current = attachIfImage;
+  useEffect(() => {
+    const onDocPaste = (e: ClipboardEvent) => {
+      const item = Array.from(e.clipboardData?.items ?? []).find((it) =>
+        it.type.startsWith("image/")
+      );
+      if (item && attachIfImageRef.current(item.getAsFile())) e.preventDefault();
+    };
+    // A drop that misses the sheet must not navigate the tab away from the
+    // half-typed lead — swallow stray file drops while the sheet is open.
+    const guard = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    document.addEventListener("paste", onDocPaste);
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    return () => {
+      document.removeEventListener("paste", onDocPaste);
+      window.removeEventListener("dragover", guard);
+      window.removeEventListener("drop", guard);
+    };
+  }, []);
+
   const price = async () => {
+    if (busy) return;
     if (!inputText.trim() && !screenshotKey) {
       setError("Paste the lead text or attach a screenshot");
       return;
@@ -122,6 +169,7 @@ export default function PriceLeadSheet({
 
   /** Turn a QUOTE run into a Quote + sent agreement on this lead. */
   const createQuote = async () => {
+    if (busy) return;
     if (!run || !customer || run.monthlyPriceCents == null) return;
     setBusy("quote");
     setError(null);
@@ -234,7 +282,19 @@ export default function PriceLeadSheet({
           : "danger";
 
   return (
-    <div className="form-grid">
+    <div
+      className="form-grid"
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes("Files")) {
+          e.preventDefault();
+          setDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
+      }}
+      onDrop={onDrop}
+    >
       <Field label="Lead details" hint="Paste the Thumbtack lead — message, address, sqft, lead fee, everything">
         <textarea
           rows={6}
@@ -244,7 +304,7 @@ export default function PriceLeadSheet({
         />
       </Field>
 
-      <div className="row-split">
+      <div className={dragOver ? "dropzone drag" : "dropzone"}>
         <input
           ref={fileInput}
           type="file"
@@ -260,6 +320,13 @@ export default function PriceLeadSheet({
         >
           {screenshotKey ? `📎 ${screenshotName ?? "screenshot"}` : "📎 Attach screenshot"}
         </Button>
+        <span className="muted small">
+          {dragOver
+            ? "Drop it here"
+            : screenshotKey
+              ? "Attached — drop or paste to replace"
+              : "or drag & drop / paste a screenshot"}
+        </span>
         {screenshotKey ? (
           <Button small variant="ghost" onClick={() => { setScreenshotKey(null); setScreenshotName(null); }}>
             Remove

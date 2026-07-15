@@ -21,6 +21,7 @@ import CustomerDetail from "./office/CustomerDetail";
 import GroupDetail from "./office/GroupDetail";
 import PlanTemplates from "./office/PlanTemplates";
 import PricingLog from "./office/PricingLog";
+import ProductLog from "./office/ProductLog";
 import Schedule from "./office/Schedule";
 import More from "./pages/More";
 import TechToday from "./tech/Today";
@@ -184,6 +185,7 @@ function Shell() {
         <Route path="/schedule" element={<Require when={staff}><Schedule /></Require>} />
         <Route path="/templates" element={<Require when={staff}><PlanTemplates /></Require>} />
         <Route path="/pricing" element={<Require when={staff}><PricingLog /></Require>} />
+        <Route path="/products" element={<Require when={staff}><ProductLog /></Require>} />
 
         {/* Technician */}
         <Route path="/tech" element={<Require when={roles.tech || staff}><TechToday /></Require>} />

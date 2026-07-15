@@ -26,6 +26,7 @@ export type Invoice = Schema["Invoice"]["type"];
 export type PlanTemplate = Schema["PlanTemplate"]["type"];
 export type Quote = Schema["Quote"]["type"];
 export type LeadPricingRun = Schema["LeadPricingRun"]["type"];
+export type Product = Schema["Product"]["type"];
 
 /** Parse an AWSJSON field that may arrive as a string. */
 export function jsonField<T>(raw: unknown): T | null {

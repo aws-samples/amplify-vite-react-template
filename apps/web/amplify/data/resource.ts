@@ -330,6 +330,24 @@ const schema = a.schema({
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
+  // Master product catalog: techs pick from it on service reports; the
+  // office curates it (techs can add a missing product from the field).
+  Product: a
+    .model({
+      name: a.string().required(),
+      epaNumber: a.string(),
+      activeIngredient: a.string(),
+      defaultQuantity: a.string(),
+      targetPests: a.string(),
+      notes: a.string(),
+      active: a.boolean().required(),
+      sortOrder: a.integer(),
+    })
+    .authorization((allow) => [
+      allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["TECH"]).to(["create", "read"]),
+    ]),
+
   ServiceReport: a
     .model({
       jobId: a.id().required(),
@@ -355,6 +373,7 @@ const schema = a.schema({
       emailedAt: a.datetime(),
       accessGroups: a.string().array(),
     })
+    .secondaryIndexes((index) => [index("jobId")])
     .authorization((allow) => [
       allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
       allow.groups(["TECH"]).to(["create", "read", "update"]),

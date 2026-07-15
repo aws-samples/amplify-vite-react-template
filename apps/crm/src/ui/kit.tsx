@@ -103,18 +103,29 @@ export function Field({
   label,
   hint,
   children,
+  group,
 }: {
   label: string;
   hint?: string;
   children: ReactNode;
+  /** Composite content (multiple controls): render a group, not a <label>. */
+  group?: boolean;
 }) {
-  return (
-    <label className="field">
+  const body = (
+    <>
       <span className="field-label">{label}</span>
       {children}
       {hint ? <span className="field-hint">{hint}</span> : null}
-    </label>
+    </>
   );
+  if (group) {
+    return (
+      <div className="field" role="group" aria-label={label}>
+        {body}
+      </div>
+    );
+  }
+  return <label className="field">{body}</label>;
 }
 
 export type BadgeTone = "ok" | "warn" | "danger" | "muted" | "info";

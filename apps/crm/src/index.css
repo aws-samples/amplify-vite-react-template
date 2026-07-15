@@ -859,6 +859,21 @@ textarea {
   color: #fff;
 }
 
+.dropzone {
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dropzone.drag {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
 .auth-brand-emblem {
   width: 72px;
   height: auto;

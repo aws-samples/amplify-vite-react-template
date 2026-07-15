@@ -59,6 +59,11 @@ export default function More() {
             onClick={() => navigate("/pricing")}
           />
           <ListRow
+            title="Product log"
+            subtitle="Products techs record on service reports"
+            onClick={() => navigate("/products")}
+          />
+          <ListRow
             title="Invite a staff member"
             subtitle="Office, technician, or both"
             onClick={() => setStaffSheet(true)}
