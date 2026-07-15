@@ -16,6 +16,7 @@ import { stripeWebhook } from "./functions/stripe-webhook/resource";
 import { crmDocs } from "./functions/crm-docs/resource";
 import { agreementPublic } from "./functions/agreement-public/resource";
 import { dailyReminders } from "./functions/daily-reminders/resource";
+import { createChallenge } from "./functions/auth-challenge/resource";
 
 const backend = defineBackend({
   auth,
@@ -28,23 +29,21 @@ const backend = defineBackend({
   crmDocs,
   agreementPublic,
   dailyReminders,
+  createChallenge,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
-// adminCreateUser) — block public self-signup and brand the invite email.
-// The CRM URL is overridable per-branch via hosting env vars if a custom
-// domain is added later.
-const crmUrl = process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com";
+// adminCreateUser) — block public self-signup. Invites go out as single-use
+// magic sign-in links (crm-admin + the auth-challenge triggers), not
+// temporary passwords, so enable the custom auth flow on the app client.
 backend.auth.resources.cfnResources.cfnUserPool.adminCreateUserConfig = {
   allowAdminCreateUserOnly: true,
-  inviteMessageTemplate: {
-    emailSubject: "Your BuzzKill Pest Control account",
-    emailMessage:
-      "Welcome! An account has been created for you at BuzzKill Pest Control. " +
-      `Sign in at ${crmUrl} with username {username} and temporary password {####} — ` +
-      "you'll choose your own password on first sign-in.",
-  },
 };
+backend.auth.resources.cfnResources.cfnUserPoolClient.explicitAuthFlows = [
+  "ALLOW_USER_SRP_AUTH",
+  "ALLOW_CUSTOM_AUTH",
+  "ALLOW_REFRESH_TOKEN_AUTH",
+];
 
 // Grant SES send permissions to the lead-intake function
 backend.leadIntake.resources.lambda.addToRolePolicy(
@@ -111,7 +110,13 @@ const sesPolicy = new PolicyStatement({
 });
 const crmUrlEnv = process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com";
 
-for (const fn of [backend.crmDocs, backend.agreementPublic, backend.dailyReminders]) {
+for (const fn of [
+  backend.crmDocs,
+  backend.agreementPublic,
+  backend.dailyReminders,
+  backend.crmAdmin,
+  backend.createChallenge,
+]) {
   fn.resources.lambda.addToRolePolicy(sesPolicy);
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
   fn.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com");

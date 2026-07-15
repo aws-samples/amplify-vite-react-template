@@ -755,3 +755,32 @@ textarea {
   cursor: pointer;
   line-height: 1;
 }
+
+/* ---------- Magic-link login footer ---------- */
+
+.magic-link-footer {
+  padding: 0 24px 20px;
+  text-align: center;
+}
+
+.magic-link-footer .linklike {
+  background: none;
+  border: none;
+  color: var(--brand);
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.magic-link-form {
+  display: flex;
+  gap: 8px;
+}
+
+.magic-link-form input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 15px;
+}

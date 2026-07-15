@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { signOut } from "aws-amplify/auth";
+import { confirmResetPassword, resetPassword, signOut } from "aws-amplify/auth";
 import { api, unwrap, type Technician } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
@@ -20,6 +20,7 @@ export default function More() {
   const navigate = useNavigate();
   const [staffSheet, setStaffSheet] = useState(false);
   const [emailLogSheet, setEmailLogSheet] = useState(false);
+  const [passwordSheet, setPasswordSheet] = useState(false);
 
   return (
     <Page title="More">
@@ -34,6 +35,11 @@ export default function More() {
               {roles.customer ? <Badge tone="muted">customer</Badge> : null}
             </span>
           }
+        />
+        <ListRow
+          title="Set or change password"
+          subtitle="Optional — you can always use emailed sign-in links"
+          onClick={() => setPasswordSheet(true)}
         />
       </Card>
 
@@ -70,6 +76,9 @@ export default function More() {
       <Sheet open={emailLogSheet} onClose={() => setEmailLogSheet(false)} title="Email log">
         <EmailLogList />
       </Sheet>
+      <Sheet open={passwordSheet} onClose={() => setPasswordSheet(false)} title="Set your password">
+        <SetPassword email={roles.email ?? ""} onDone={() => setPasswordSheet(false)} />
+      </Sheet>
     </Page>
   );
 }
@@ -96,8 +105,8 @@ function StaffInvite({ onDone }: { onDone: () => void }) {
     return (
       <div className="form-grid">
         <p>
-          Invite sent — they'll get an email with a temporary password and can
-          sign in right away.
+          Invite sent — they'll get an email with a sign-in link that logs
+          them straight in. No passwords to juggle.
         </p>
         <Button block onClick={onDone}>
           Done
@@ -161,6 +170,100 @@ function StaffInvite({ onDone }: { onDone: () => void }) {
         }}
       >
         Send invite
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Set (or change) a password using the standard reset flow — works even for
+ * accounts that only ever signed in with magic links, since Cognito's reset
+ * doesn't need the current password.
+ */
+function SetPassword({ email, onDone }: { email: string; onDone: () => void }) {
+  const [step, setStep] = useState<"start" | "confirm" | "done">("start");
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (step === "done") {
+    return (
+      <div className="form-grid">
+        <p>Password set — you can use it (or sign-in links) from now on.</p>
+        <Button block onClick={onDone}>
+          Done
+        </Button>
+      </div>
+    );
+  }
+
+  if (step === "start") {
+    return (
+      <div className="form-grid">
+        <p className="muted small">
+          We'll email a 6-digit code to <strong>{email}</strong> to confirm
+          it's you, then you pick your password.
+        </p>
+        <ErrorNote error={error} />
+        <Button
+          block
+          loading={busy}
+          onClick={() => {
+            setBusy(true);
+            setError(null);
+            resetPassword({ username: email })
+              .then(() => setStep("confirm"))
+              .catch((err) => setError(err.message ?? "Could not send the code"))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Email me the code
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="form-grid">
+      <Field label="6-digit code from the email">
+        <input
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+        />
+      </Field>
+      <Field label="New password" hint="At least 8 characters">
+        <input
+          type="password"
+          autoComplete="new-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </Field>
+      <ErrorNote error={error} />
+      <Button
+        block
+        loading={busy}
+        onClick={() => {
+          if (!code.trim() || password.length < 8) {
+            setError("Enter the code and a password of at least 8 characters");
+            return;
+          }
+          setBusy(true);
+          setError(null);
+          confirmResetPassword({
+            username: email,
+            confirmationCode: code.trim(),
+            newPassword: password,
+          })
+            .then(() => setStep("done"))
+            .catch((err) => setError(err.message ?? "Could not set the password"))
+            .finally(() => setBusy(false));
+        }}
+      >
+        Set password
       </Button>
     </div>
   );

@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import type { AppSyncResolverEvent } from "aws-lambda";
 import {
   AdminAddUserToGroupCommand,
@@ -5,11 +6,14 @@ import {
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
+  AdminSetUserPasswordCommand,
+  AdminUpdateUserAttributesCommand,
   CognitoIdentityProviderClient,
   CreateGroupCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
+import { emailShell, sendEmail } from "../shared/email";
 import {
   cusGroup,
   customerAccessGroups,
@@ -83,18 +87,18 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
   if (roles.includes("CUSTOMER") && !args.customerId)
     throw new Error("customerId is required when creating a CUSTOMER login");
 
-  // Create (or find) the Cognito user. Cognito emails the temporary
-  // password using the invite template configured in backend.ts.
+  // Create (or find) the Cognito user. No temporary-password email —
+  // we send a single-use magic sign-in link instead (below).
   let username = email;
   let sub: string | undefined;
   let created = false;
+  let needsPassword = false;
   try {
     const res = await cognito.send(
       new AdminCreateUserCommand({
         UserPoolId: USER_POOL_ID,
         Username: email,
-        DesiredDeliveryMediums: ["EMAIL"],
-        ...(args.resend ? { MessageAction: "RESEND" } : {}),
+        MessageAction: "SUPPRESS",
         UserAttributes: [
           { Name: "email", Value: email },
           { Name: "email_verified", Value: "true" },
@@ -105,6 +109,7 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
     username = res.User?.Username ?? email;
     sub = res.User?.Attributes?.find((a) => a.Name === "sub")?.Value;
     created = true;
+    needsPassword = true;
   } catch (err) {
     if ((err as { name?: string }).name !== "UsernameExistsException") {
       throw err;
@@ -114,8 +119,23 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
     );
     username = existing.Username ?? email;
     sub = existing.UserAttributes?.find((a) => a.Name === "sub")?.Value;
+    needsPassword = existing.UserStatus === "FORCE_CHANGE_PASSWORD";
   }
   if (!sub) throw new Error("Could not resolve Cognito sub for user");
+
+  // Users sign in via magic link (or later set their own password with the
+  // reset flow). A random permanent password moves the account out of
+  // FORCE_CHANGE_PASSWORD, which would otherwise block the custom auth flow.
+  if (needsPassword) {
+    await cognito.send(
+      new AdminSetUserPasswordCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+        Password: `Bk1!${randomBytes(24).toString("base64url")}`,
+        Permanent: true,
+      })
+    );
+  }
 
   const client = await dataClient();
   const groupsAdded: string[] = [];
@@ -155,7 +175,43 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
     });
   }
 
-  return { sub, username, created, groupsAdded };
+  // Magic sign-in link: single-use token, 7-day expiry for invites.
+  const token = randomBytes(32).toString("base64url");
+  await cognito.send(
+    new AdminUpdateUserAttributesCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: username,
+      UserAttributes: [
+        {
+          Name: "custom:loginTokenHash",
+          Value: createHash("sha256").update(token).digest("hex"),
+        },
+        {
+          Name: "custom:loginTokenExp",
+          Value: String(Date.now() + 7 * 24 * 60 * 60_000),
+        },
+      ],
+    })
+  );
+  const crmUrl = process.env.CRM_APP_URL ?? "";
+  const link = `${crmUrl}/welcome#email=${encodeURIComponent(email)}&token=${token}`;
+  const linkSent = await sendEmail({
+    to: email,
+    subject: created
+      ? "Welcome to BuzzKill — tap to sign in"
+      : "Your BuzzKill sign-in link",
+    template: "magic-link-invite",
+    customerId: args.customerId ?? undefined,
+    relatedId: sub,
+    html: emailShell(
+      created ? `Welcome, ${args.name}!` : "Your sign-in link",
+      `<p>Your BuzzKill ${roles.includes("CUSTOMER") ? "customer portal" : "CRM"} account is ready. Tap below to sign in — no password needed.</p>
+       <p style="margin:24px 0"><a href="${link}" style="background:#176b2c;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600">Sign in to BuzzKill</a></p>
+       <p style="color:#666;font-size:13px;">The link works once and expires in 7 days. Need a new one? Use “Email me a sign-in link” on the login page. You can also set a password any time from the More tab.</p>`
+    ),
+  });
+
+  return { sub, username, created, groupsAdded, linkSent };
 }
 
 /**

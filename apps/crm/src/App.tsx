@@ -7,10 +7,10 @@ import {
 } from "react-router-dom";
 import { Authenticator } from "@aws-amplify/ui-react";
 import "@aws-amplify/ui-react/styles.css";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { myGroupIds, RolesProvider, useRoles } from "./lib/auth";
 import { Button, EmptyState, Spinner } from "./ui/kit";
-import { signOut } from "aws-amplify/auth";
+import { signIn, signOut } from "aws-amplify/auth";
 
 import Dashboard from "./office/Dashboard";
 import Leads from "./office/Leads";
@@ -27,6 +27,7 @@ import PortalDocs from "./portal/Docs";
 import PortalBilling from "./portal/Billing";
 import PortalGroup from "./portal/Group";
 import SignPage from "./sign/SignPage";
+import Welcome from "./pages/Welcome";
 
 export default function App({ backendReady }: { backendReady: boolean }) {
   if (!backendReady) {
@@ -44,6 +45,8 @@ export default function App({ backendReady }: { backendReady: boolean }) {
       <Routes>
         {/* Public e-sign page — leads sign before they have a login. */}
         <Route path="/sign/:token" element={<SignPage />} />
+        {/* Magic-link landing page — completes sign-in from the email link. */}
+        <Route path="/welcome" element={<Welcome />} />
         <Route path="/*" element={<AuthedApp />} />
       </Routes>
     </BrowserRouter>
@@ -59,9 +62,67 @@ function AuthHeader() {
   );
 }
 
+/** "Email me a sign-in link" — passwordless option under the password form. */
+function MagicLinkFooter() {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+
+  const request = async () => {
+    if (!email.trim()) return;
+    setBusy(true);
+    try {
+      await signIn({
+        username: email.trim().toLowerCase(),
+        options: {
+          authFlowType: "CUSTOM_WITHOUT_SRP",
+          clientMetadata: { mode: "request" },
+        },
+      });
+    } catch {
+      /* Never reveal whether the account exists. */
+    }
+    setBusy(false);
+    setSent(true);
+  };
+
+  return (
+    <div className="magic-link-footer">
+      {sent ? (
+        <p className="small">
+          If that address has a BuzzKill account, a sign-in link is on its way.
+          You can close this tab.
+        </p>
+      ) : open ? (
+        <div className="magic-link-form">
+          <input
+            type="email"
+            inputMode="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void request()}
+          />
+          <Button small loading={busy} onClick={() => void request()}>
+            Send link
+          </Button>
+        </div>
+      ) : (
+        <button className="linklike" onClick={() => setOpen(true)}>
+          Prefer no password? Email me a sign-in link
+        </button>
+      )}
+    </div>
+  );
+}
+
 function AuthedApp() {
   return (
-    <Authenticator hideSignUp components={{ Header: AuthHeader }}>
+    <Authenticator
+      hideSignUp
+      components={{ Header: AuthHeader, SignIn: { Footer: MagicLinkFooter } }}
+    >
       <RolesProvider>
         <Shell />
       </RolesProvider>
