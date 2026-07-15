@@ -1,9 +1,9 @@
 import { dataClient } from "../shared/dataClient";
 import { emailShell, sendEmail } from "../shared/email";
 
-/** Tomorrow's date (YYYY-MM-DD) in the shop's timezone. */
-function tomorrowEastern(): string {
-  return new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleDateString(
+/** Date N days from now (YYYY-MM-DD) in the shop's timezone. */
+function easternPlusDays(n: number): string {
+  return new Date(Date.now() + n * 24 * 60 * 60 * 1000).toLocaleDateString(
     "en-CA",
     { timeZone: "America/New_York" }
   );
@@ -17,9 +17,20 @@ const prettyDate = (isoDate: string) =>
   });
 
 export const handler = async () => {
-  const client = await dataClient();
-  const date = tomorrowEastern();
+  const totals: Record<string, unknown>[] = [];
+  // T-1 and T-7 reminders — the cron runs once a day, so each fires once.
+  for (const [daysOut, phrasing] of [
+    [1, "tomorrow"],
+    [7, "in one week"],
+  ] as const) {
+    totals.push(await remind(easternPlusDays(daysOut), phrasing));
+  }
+  console.log("Reminder totals:", JSON.stringify(totals));
+  return totals;
+};
 
+async function remind(date: string, phrasing: string) {
+  const client = await dataClient();
   const jobs: {
     customerId: string;
     serviceType: string;
@@ -67,7 +78,7 @@ export const handler = async () => {
       customerId,
       relatedId: customerJobs[0].id,
       html: emailShell(
-        "Your service visit is tomorrow",
+        `Your service visit is ${phrasing}`,
         `<p>Hi ${customer.contactName ?? customer.displayName},</p>
          <p>This is a friendly reminder that BuzzKill Pest Control is scheduled to visit on <strong>${prettyDate(date)}</strong>:</p>
          <ul>${visitLines}</ul>
@@ -81,4 +92,4 @@ export const handler = async () => {
     `Reminders for ${date}: ${scheduled.length} scheduled jobs, ${byCustomer.size} customers, ${sent} emails sent`
   );
   return { date, jobs: scheduled.length, customers: byCustomer.size, sent };
-};
+}

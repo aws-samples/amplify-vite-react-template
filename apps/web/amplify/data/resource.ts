@@ -7,6 +7,7 @@ import { agreementPublic } from "../functions/agreement-public/resource";
 import { dailyReminders } from "../functions/daily-reminders/resource";
 import { postAuth } from "../functions/post-auth/resource";
 import { crmPricing } from "../functions/crm-pricing/resource";
+import { bookingPublic } from "../functions/booking-public/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -204,8 +205,77 @@ const schema = a.schema({
    * decision + reply. This is the pricing log Jake reviews weekly (date,
    * town, service, zone, lead fee, quoted price, outcome).
    */
+  // One row per website booking-funnel quote. All writes go through the
+  // public booking Lambda (Function URL) - no public model access.
+  BookingRequest: a
+    .model({
+      status: a.enum(["QUOTED", "BOOKED", "CANCELED", "EXPIRED", "CONTACT"]),
+      propertyKind: a.enum(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]),
+      service: a.enum([
+        "GENERAL_PEST",
+        "WASP_NEST",
+        "RODENT",
+        "ROACH",
+        "TERMITE",
+        "WILDLIFE",
+      ]),
+      name: a.string().required(),
+      email: a.string().required(),
+      phone: a.string(),
+      street: a.string(),
+      city: a.string(),
+      state: a.string(),
+      zip: a.string(),
+      units: a.integer(),
+      sqft: a.integer(),
+      nestCount: a.integer(),
+      comments: a.string(),
+      recurringPreference: a.string(),
+      zone: a.string(),
+      driveMinutes: a.integer(),
+      quoteJson: a.json(),
+      selectedDate: a.date(),
+      selectedWindow: a.string(),
+      recurring: a.boolean(),
+      amountCents: a.integer(),
+      monthlyCents: a.integer(),
+      stripeCustomerId: a.string(),
+      stripePaymentIntentId: a.string(),
+      cancelToken: a.string(),
+      customerId: a.id(),
+      jobId: a.id(),
+      servicePlanId: a.id(),
+      agreementId: a.id(),
+      expiresAt: a.datetime(),
+    })
+    .secondaryIndexes((index) => [index("cancelToken"), index("status")])
+    .authorization((allow) => [
+      allow.groups(["OFFICE"]).to(["read", "update"]),
+    ]),
+
+  // AI-researched market rates for services without fixed rate cards.
+  // Cached per service+area so identical inputs keep identical prices;
+  // the office can review and override.
+  MarketRate: a
+    .model({
+      rateKey: a.string().required(),
+      service: a.string().required(),
+      areaKey: a.string().required(),
+      priceCents: a.integer().required(),
+      basis: a.string(),
+      sources: a.string(),
+      researchedAt: a.datetime(),
+      expiresAt: a.datetime(),
+      active: a.boolean().required(),
+    })
+    .secondaryIndexes((index) => [index("rateKey")])
+    .authorization((allow) => [
+      allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
+    ]),
+
   LeadPricingRun: a
     .model({
+      source: a.string(),
       customerId: a.id(),
       customer: a.belongsTo("Customer", "customerId"),
       decision: a.ref("PricingDecision").required(),
@@ -622,6 +692,7 @@ const schema = a.schema({
   allow.resource(dailyReminders),
   allow.resource(postAuth),
   allow.resource(crmPricing),
+  allow.resource(bookingPublic),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

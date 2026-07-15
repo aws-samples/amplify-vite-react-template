@@ -6,6 +6,7 @@ import type Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { customerAccessGroups } from "../shared/dynamicGroups";
+import { finalizeBooking } from "../shared/bookingFinalize";
 
 export const handler = async (
   event: APIGatewayProxyEventV2
@@ -36,9 +37,19 @@ export const handler = async (
       case "setup_intent.succeeded":
         await onSetupIntentSucceeded(stripeEvent.data.object);
         break;
-      case "payment_intent.succeeded":
-        await settlePaymentIntent(stripeEvent.data.object, "PAID");
+      case "payment_intent.succeeded": {
+        const pi = stripeEvent.data.object;
+        if (pi.metadata?.bookingRequestId) {
+          // Website booking funnel: payment creates the CRM records.
+          await finalizeBooking({
+            bookingRequestId: pi.metadata.bookingRequestId,
+            paymentIntentId: pi.id,
+          });
+        } else {
+          await settlePaymentIntent(pi, "PAID");
+        }
         break;
+      }
       case "payment_intent.payment_failed":
         await settlePaymentIntent(stripeEvent.data.object, "FAILED");
         break;
