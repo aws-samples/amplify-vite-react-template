@@ -20,6 +20,13 @@ applications:
             # file so import.meta.env can see it. Safe no-op when nothing is set.
             - env | grep -E '^VITE_' >> .env || true
             - npm run build
+            # Staging must never compete with www.pestbuzzkill.com in search:
+            # non-main branches get a hard noindex (robots.txt + meta).
+            - |
+              if [ "$AWS_BRANCH" != "main" ]; then
+                printf 'User-agent: *\nDisallow: /\n' > dist/robots.txt
+                find dist -name '*.html' -exec sed -i 's/<meta name="robots" content="[^"]*"/<meta name="robots" content="noindex, nofollow"/' {} +
+              fi
       artifacts:
         baseDirectory: dist
         files:

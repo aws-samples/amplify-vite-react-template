@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { ReactNode, ButtonHTMLAttributes } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -189,6 +190,17 @@ export function ListRow({
       className={`list-row ${onClick ? "list-row-tappable" : ""}`}
       onClick={onClick}
       role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
     >
       <div className="list-row-main">
         <div className="list-row-title">{title}</div>
@@ -286,7 +298,38 @@ export function Stat({
   );
 }
 
+/** Raw exception text helps nobody — show friendly copy, log the rest. */
+const TECHNICAL_ERROR =
+  /is not a function|Cannot read propert|undefined is not|Failed to fetch|NetworkError|^\[object|Unexpected token/i;
+
 export function ErrorNote({ error }: { error: string | null }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (error) {
+      if (TECHNICAL_ERROR.test(error)) console.error("[BuzzKill]", error);
+      ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [error]);
   if (!error) return null;
-  return <p className="error-note">{error}</p>;
+  return (
+    <p className="error-note" role="alert" ref={ref}>
+      {TECHNICAL_ERROR.test(error)
+        ? "Something went wrong on our side — please try again. (Details are in the browser console.)"
+        : error}
+    </p>
+  );
+}
+
+/** Transient success confirmation for actions with no visible state change. */
+export function SuccessNote({ message }: { message: string | null }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (message) ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [message]);
+  if (!message) return null;
+  return (
+    <p className="success-note" role="status" ref={ref}>
+      ✓ {message}
+    </p>
+  );
 }

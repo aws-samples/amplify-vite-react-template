@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, unwrap, type Customer, type CustomerGroup } from "../lib/api";
+import { api, listAll, unwrap, type Customer, type CustomerGroup } from "../lib/api";
 import {
   Badge,
   Button,
@@ -29,23 +29,31 @@ export default function Customers() {
   const [adding, setAdding] = useState(false);
   const [addingGroup, setAddingGroup] = useState(false);
 
+  // Monotonic request id: rapid tab switches must not let a slower older
+  // response overwrite the newer tab's data.
+  const reqRef = useRef(0);
   const load = useCallback(async (which: Tab) => {
+    const req = ++reqRef.current;
     setError(null);
     try {
       if (which === "GROUPS") {
-        setGroups(unwrap(await api().models.CustomerGroup.list({ limit: 500 })));
+        const rows = await listAll((t) =>
+          api().models.CustomerGroup.list({ limit: 500, nextToken: t })
+        );
+        if (req === reqRef.current) setGroups(rows);
       } else {
-        setCustomers(
-          unwrap(
-            await api().models.Customer.listCustomerByStatusAndDisplayName(
-              { status: which },
-              { limit: 500 }
-            )
+        const rows = await listAll((t) =>
+          api().models.Customer.listCustomerByStatusAndDisplayName(
+            { status: which },
+            { limit: 500, nextToken: t }
           )
         );
+        if (req === reqRef.current) setCustomers(rows);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load");
+      if (req === reqRef.current) {
+        setError(err instanceof Error ? err.message : "Could not load");
+      }
     }
   }, []);
 

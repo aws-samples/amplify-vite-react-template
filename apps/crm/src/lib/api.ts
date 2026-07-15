@@ -41,6 +41,28 @@ export function jsonField<T>(raw: unknown): T | null {
   return raw as T;
 }
 
+/**
+ * Exhaustively page a .list() query. Dashboard totals and long lists must
+ * never silently truncate at one page (DynamoDB may also return fewer items
+ * than `limit` per page even when more exist).
+ */
+export async function listAll<T>(
+  fetchPage: (nextToken?: string) => Promise<{
+    data: T[];
+    nextToken?: string | null;
+    errors?: { message: string }[];
+  }>
+): Promise<T[]> {
+  const out: T[] = [];
+  let token: string | null | undefined;
+  do {
+    const page = await fetchPage(token ?? undefined);
+    out.push(...unwrap(page));
+    token = page.nextToken;
+  } while (token);
+  return out;
+}
+
 /** Unwrap an Amplify Data result, surfacing GraphQL errors as exceptions. */
 export function unwrap<T>(result: {
   data: T;

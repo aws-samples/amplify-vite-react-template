@@ -156,6 +156,7 @@ function StaffInvite({ onDone }: { onDone: () => void }) {
       <Button
         block
         loading={busy}
+        disabled={!name.trim() || !/^\S+@\S+\.\S+$/.test(email.trim())}
         onClick={() => {
           if (!name.trim() || !email.trim()) {
             setError("Name and email are required");

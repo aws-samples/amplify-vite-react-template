@@ -25,6 +25,7 @@ import {
   Button,
   Card,
   ErrorNote,
+  SuccessNote,
   Field,
   ListRow,
   Page,
@@ -56,6 +57,7 @@ export default function CustomerDetail() {
   const [rescheduling, setRescheduling] = useState<Job | null>(null);
   const [pm, setPm] = useState<{ hasPaymentMethod: boolean; label: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [sheet, setSheet] = useState<
     | null
@@ -165,12 +167,21 @@ export default function CustomerDetail() {
   const needsAttention =
     customer.status === "ACTIVE" && !activePlan && !upcomingJob;
 
-  const run = async (name: string, fn: () => Promise<unknown>) => {
+  const run = async (
+    name: string,
+    fn: () => Promise<unknown>,
+    successMsg?: string
+  ) => {
     setBusyAction(name);
     setError(null);
+    setNotice(null);
     try {
       await fn();
       await load();
+      if (successMsg) {
+        setNotice(successMsg);
+        window.setTimeout(() => setNotice((n) => (n === successMsg ? null : n)), 6000);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Action failed");
     } finally {
@@ -200,6 +211,7 @@ export default function CustomerDetail() {
       }
     >
       <ErrorNote error={error} />
+      <SuccessNote message={notice} />
 
       <Card>
         <div className="row-split" style={{ marginBottom: 8 }}>
@@ -279,13 +291,16 @@ export default function CustomerDetail() {
               loading={busyAction === "payreq"}
               disabled={!customer.email}
               onClick={() =>
-                void run("payreq", async () =>
-                  unwrap(
-                    await api().mutations.sendCustomerEmail({
-                      customerId: customer.id,
-                      kind: "payment-request",
-                    })
-                  )
+                void run(
+                  "payreq",
+                  async () =>
+                    unwrap(
+                      await api().mutations.sendCustomerEmail({
+                        customerId: customer.id,
+                        kind: "payment-request",
+                      })
+                    ),
+                  `Payment request emailed to ${customer.email}`
                 )
               }
             >
@@ -322,16 +337,19 @@ export default function CustomerDetail() {
               disabled={!customer.email}
               loading={busyAction === "invite"}
               onClick={() =>
-                void run("invite", async () =>
-                  unwrap(
-                    await api().mutations.adminCreateUser({
-                      email: customer.email!,
-                      name: customer.contactName ?? customer.displayName,
-                      roles: ["CUSTOMER"],
-                      customerId: customer.id,
-                      resend: Boolean(customer.portalUserSub),
-                    })
-                  )
+                void run(
+                  "invite",
+                  async () =>
+                    unwrap(
+                      await api().mutations.adminCreateUser({
+                        email: customer.email!,
+                        name: customer.contactName ?? customer.displayName,
+                        roles: ["CUSTOMER"],
+                        customerId: customer.id,
+                        resend: Boolean(customer.portalUserSub),
+                      })
+                    ),
+                  `Portal invite sent to ${customer.email}`
                 )
               }
             >
@@ -343,13 +361,16 @@ export default function CustomerDetail() {
                 variant="ghost"
                 loading={busyAction === "remind"}
                 onClick={() =>
-                  void run("remind", async () =>
-                    unwrap(
-                      await api().mutations.sendCustomerEmail({
-                        customerId: customer.id,
-                        kind: "portal-reminder",
-                      })
-                    )
+                  void run(
+                    "remind",
+                    async () =>
+                      unwrap(
+                        await api().mutations.sendCustomerEmail({
+                          customerId: customer.id,
+                          kind: "portal-reminder",
+                        })
+                      ),
+                    `Portal link emailed to ${customer.email}`
                   )
                 }
               >
@@ -392,7 +413,28 @@ export default function CustomerDetail() {
                 key={q.id}
                 title={q.planName}
                 subtitle={`${money(q.priceCents)}/mo · quoted ${fmtDate(q.quotedAt, true)}${q.notes ? ` · ${q.notes}` : ""}`}
-                meta={<StatusBadge status={q.status} />}
+                meta={
+                  <>
+                    <StatusBadge status={q.status} />
+                    {q.status === "DRAFT" || q.status === "SENT" ? (
+                      <Button
+                        small
+                        variant="ghost"
+                        loading={busyAction === `voidquote-${q.id}`}
+                        onClick={() => {
+                          if (!window.confirm("Void this quote? The signing link in any sent agreement stays usable unless you void the agreement too.")) return;
+                          void run(`voidquote-${q.id}`, async () =>
+                            unwrap(
+                              await api().models.Quote.update({ id: q.id, status: "VOID" })
+                            )
+                          );
+                        }}
+                      >
+                        Void
+                      </Button>
+                    ) : null}
+                  </>
+                }
               />
             ))
           )}
@@ -512,6 +554,16 @@ export default function CustomerDetail() {
           ) : undefined
         }
       >
+        {activePlan && !upcomingJob && roles.office ? (
+          <div className="row-split" style={{ marginBottom: 8 }}>
+            <p className="muted small" style={{ margin: 0 }}>
+              Plan is active but nothing is on the schedule.
+            </p>
+            <Button small variant="subtle" onClick={() => setSheet("job")}>
+              Schedule first visit
+            </Button>
+          </div>
+        ) : null}
         {jobs.length === 0 ? (
           <p className="muted small">No jobs yet.</p>
         ) : (
@@ -550,6 +602,27 @@ export default function CustomerDetail() {
                   meta={
                     <>
                       <StatusBadge status={j.status} />
+                      {roles.office &&
+                      (j.status === "SCHEDULED" || j.status === "IN_PROGRESS") ? (
+                        <Button
+                          small
+                          variant="ghost"
+                          loading={busyAction === `complete-${j.id}`}
+                          onClick={() => {
+                            if (!window.confirm("Mark this job completed without a tech report? The customer won't get a field report for it.")) return;
+                            void run(`complete-${j.id}`, async () =>
+                              unwrap(
+                                await api().models.Job.update({
+                                  id: j.id,
+                                  status: "COMPLETED",
+                                })
+                              )
+                            );
+                          }}
+                        >
+                          ✓ Complete
+                        </Button>
+                      ) : null}
                       {roles.office &&
                       j.type === "ONE_TIME" &&
                       j.status === "COMPLETED" &&
@@ -661,6 +734,40 @@ export default function CustomerDetail() {
                 meta={
                   <>
                     <StatusBadge status={a.status} />
+                    {a.signToken && a.status !== "SIGNED" && a.status !== "VOID" ? (
+                      <Button
+                        small
+                        variant="ghost"
+                        onClick={() => {
+                          navigator.clipboard
+                            .writeText(`${window.location.origin}/sign/${a.signToken}`)
+                            .then(() => {
+                              setNotice("Signing link copied — paste it anywhere");
+                              window.setTimeout(() => setNotice(null), 6000);
+                            })
+                            .catch(() => setError("Couldn't copy — long-press the Send button link instead"));
+                        }}
+                      >
+                        Copy link
+                      </Button>
+                    ) : null}
+                    {a.status !== "VOID" ? (
+                      <Button
+                        small
+                        variant="ghost"
+                        loading={busyAction === `voidagr-${a.id}`}
+                        onClick={() => {
+                          if (!window.confirm(a.status === "SIGNED" ? "Void this SIGNED agreement? The signed PDF stays on file but the agreement is marked void." : "Void this agreement? Its signing link stops working.")) return;
+                          void run(`voidagr-${a.id}`, async () =>
+                            unwrap(
+                              await api().models.Agreement.update({ id: a.id, status: "VOID" })
+                            )
+                          );
+                        }}
+                      >
+                        Void
+                      </Button>
+                    ) : null}
                     {a.pdfKey ? (
                       <DocButton docKey={a.pdfKey} />
                     ) : a.status !== "SIGNED" ? (
@@ -670,12 +777,15 @@ export default function CustomerDetail() {
                         disabled={!customer.email}
                         loading={busyAction === `send-${a.id}`}
                         onClick={() =>
-                          void run(`send-${a.id}`, async () =>
-                            unwrap(
-                              await api().mutations.sendAgreement({
-                                agreementId: a.id,
-                              })
-                            )
+                          void run(
+                            `send-${a.id}`,
+                            async () =>
+                              unwrap(
+                                await api().mutations.sendAgreement({
+                                  agreementId: a.id,
+                                })
+                              ),
+                            `Agreement emailed to ${customer.email} for signing`
                           )
                         }
                       >

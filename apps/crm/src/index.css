@@ -859,6 +859,51 @@ textarea {
   color: #fff;
 }
 
+.success-note {
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  border: 1px solid color-mix(in srgb, var(--brand) 35%, transparent);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 13.5px;
+  margin: 0 0 4px;
+}
+
+.form-row-3 {
+  display: grid;
+  grid-template-columns: 2fr 64px 1fr;
+  gap: 10px;
+}
+
+.week-strip {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-top: 10px;
+}
+.week-chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 5px 0 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  cursor: pointer;
+  color: var(--muted);
+  min-height: 44px;
+}
+.week-chip span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.week-chip strong { font-size: 15px; color: var(--ink, inherit); }
+.week-chip-active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.week-chip-active strong { color: var(--brand-dark); }
+.week-chip-today span { color: var(--brand); font-weight: 700; }
+
 .dropzone {
   border: 1.5px dashed var(--line-strong);
   border-radius: 12px;

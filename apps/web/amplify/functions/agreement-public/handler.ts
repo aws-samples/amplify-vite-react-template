@@ -304,7 +304,11 @@ async function signAgreement(opts: {
       html: emailShell(
         "Your signed agreement",
         `<p>Hi ${customer.contactName ?? customer.displayName},</p>
-         <p>Thanks for signing <strong>${agreement.title}</strong>. A copy is attached for your records, and it's always available in your BuzzKill portal.</p>`
+         <p>Thanks for signing <strong>${agreement.title}</strong>. A copy is attached for your records${
+           customer.portalUserSub
+             ? ", and it's always available in your BuzzKill portal"
+             : ""
+         }.</p>`
       ),
     });
   }

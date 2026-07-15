@@ -37,6 +37,7 @@ export default function Schedule() {
   const [error, setError] = useState<string | null>(null);
   const [assigning, setAssigning] = useState<Job | null>(null);
   const [addingTech, setAddingTech] = useState(false);
+  const [editingTech, setEditingTech] = useState<Technician | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -189,6 +190,19 @@ export default function Schedule() {
             Next ›
           </Button>
         </div>
+        <div className="week-strip">
+          {Array.from({ length: 7 }, (_, i) => addDays(date, i - 3)).map((d) => (
+            <button
+              key={d}
+              type="button"
+              className={`week-chip${d === date ? " week-chip-active" : ""}${d === todayEastern() ? " week-chip-today" : ""}`}
+              onClick={() => setDate(d)}
+            >
+              <span>{new Date(`${d}T12:00:00`).toLocaleDateString("en-US", { weekday: "short" })}</span>
+              <strong>{Number(d.slice(8, 10))}</strong>
+            </button>
+          ))}
+        </div>
       </Card>
 
       <ErrorNote error={error} />
@@ -234,7 +248,14 @@ export default function Schedule() {
                 <Card
                   key={tech.id}
                   title={`${tech.name} — ${routeJobs.length} stop${routeJobs.length === 1 ? "" : "s"}`}
-                  actions={route ? <StatusBadge status={route.status} /> : <Badge tone="muted">empty route</Badge>}
+                  actions={
+                    <>
+                      {route ? <StatusBadge status={route.status} /> : <Badge tone="muted">empty route</Badge>}
+                      <Button small variant="ghost" onClick={() => setEditingTech(tech)}>
+                        Edit
+                      </Button>
+                    </>
+                  }
                 >
                   {routeJobs.length === 0 ? (
                     <p className="muted small">No stops on this day's route.</p>
@@ -299,15 +320,37 @@ export default function Schedule() {
           }}
         />
       </Sheet>
+
+      <Sheet
+        open={editingTech !== null}
+        onClose={() => setEditingTech(null)}
+        title="Edit technician"
+      >
+        {editingTech ? (
+          <TechForm
+            existing={editingTech}
+            onDone={async () => {
+              setEditingTech(null);
+              await load();
+            }}
+          />
+        ) : null}
+      </Sheet>
     </Page>
   );
 }
 
-function TechForm({ onDone }: { onDone: () => Promise<void> }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [invite, setInvite] = useState(true);
+function TechForm({
+  existing,
+  onDone,
+}: {
+  existing?: Technician | null;
+  onDone: () => Promise<void>;
+}) {
+  const [name, setName] = useState(existing?.name ?? "");
+  const [email, setEmail] = useState(existing?.email ?? "");
+  const [phone, setPhone] = useState(existing?.phone ?? "");
+  const [invite, setInvite] = useState(!existing);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -322,15 +365,17 @@ function TechForm({ onDone }: { onDone: () => Promise<void> }) {
       <Field label="Phone">
         <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} />
       </Field>
-      <label className="row-split" style={{ fontSize: 14 }}>
-        <span>Email them a CRM login invite</span>
-        <input
-          type="checkbox"
-          style={{ width: "auto" }}
-          checked={invite}
-          onChange={(e) => setInvite(e.target.checked)}
-        />
-      </label>
+      {!existing ? (
+        <label className="row-split" style={{ fontSize: 14 }}>
+          <span>Email them a CRM login invite</span>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={invite}
+            onChange={(e) => setInvite(e.target.checked)}
+          />
+        </label>
+      ) : null}
       <ErrorNote error={error} />
       <Button
         block
@@ -346,6 +391,18 @@ function TechForm({ onDone }: { onDone: () => Promise<void> }) {
           }
           setBusy(true);
           (async () => {
+            if (existing) {
+              unwrap(
+                await api().models.Technician.update({
+                  id: existing.id,
+                  name: name.trim(),
+                  email: email.trim() || undefined,
+                  phone: phone.trim() || undefined,
+                })
+              );
+              await onDone();
+              return;
+            }
             const created = unwrap(
               await api().models.Technician.create({
                 name: name.trim(),
@@ -366,13 +423,38 @@ function TechForm({ onDone }: { onDone: () => Promise<void> }) {
             }
             await onDone();
           })().catch((err) => {
-            setError(err.message ?? "Could not add technician");
+            setError(err.message ?? "Could not save technician");
             setBusy(false);
           });
         }}
       >
-        Add technician
+        {existing ? "Save technician" : "Add technician"}
       </Button>
+      {existing ? (
+        <Button
+          block
+          variant="danger"
+          loading={busy}
+          onClick={() => {
+            if (!window.confirm(`Deactivate ${existing.name}? Their history stays, but they disappear from Schedule and My day.`)) return;
+            setBusy(true);
+            (async () => {
+              unwrap(
+                await api().models.Technician.update({
+                  id: existing.id,
+                  active: false,
+                })
+              );
+              await onDone();
+            })().catch((err) => {
+              setError(err.message ?? "Could not deactivate");
+              setBusy(false);
+            });
+          }}
+        >
+          Deactivate technician
+        </Button>
+      ) : null}
     </div>
   );
 }

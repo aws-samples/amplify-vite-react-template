@@ -118,7 +118,17 @@ function MagicLinkFooter() {
         </div>
       ) : (
         <div className="magic-link-options">
-          <button className="linklike" onClick={() => setOpen(true)}>
+          <button
+            className="linklike"
+            onClick={() => {
+              // Carry over whatever they already typed in the password form.
+              const typed = document.querySelector<HTMLInputElement>(
+                'input[name="username"]'
+              )?.value;
+              if (typed && !email) setEmail(typed);
+              setOpen(true);
+            }}
+          >
             Prefer no password? Email me a sign-in link
           </button>
           <button className="linklike linklike-muted" onClick={toForgotPassword}>

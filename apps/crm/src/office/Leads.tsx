@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, unwrap, type Customer } from "../lib/api";
+import {
+  api,
+  listAll,
+  unwrap, type Customer } from "../lib/api";
 import { fmtDate } from "../lib/format";
 import {
   Button,
@@ -24,10 +27,14 @@ export default function Leads() {
 
   const load = useCallback(async () => {
     try {
-      const data = unwrap(
-        await api().models.Customer.listCustomerByStatusAndDisplayName({ status: "LEAD" })
+      setLeads(
+        await listAll((t) =>
+          api().models.Customer.listCustomerByStatusAndDisplayName(
+            { status: "LEAD" },
+            { limit: 500, nextToken: t }
+          )
+        )
       );
-      setLeads(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load leads");
     }

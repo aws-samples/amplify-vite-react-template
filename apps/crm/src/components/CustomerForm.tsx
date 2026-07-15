@@ -103,9 +103,17 @@ export default function CustomerForm({
           }
         />
       </Field>
-      <div className="form-row-2">
+      <div className="form-row-3">
         <Field label="City">
           <input value={values.serviceCity} onChange={set("serviceCity")} />
+        </Field>
+        <Field label="State">
+          <input
+            value={values.serviceState}
+            onChange={set("serviceState")}
+            maxLength={2}
+            style={{ textTransform: "uppercase" }}
+          />
         </Field>
         <Field label="ZIP">
           <input inputMode="numeric" value={values.serviceZip} onChange={set("serviceZip")} />

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
-  unwrap,
+  listAll,
   type Customer,
   type Invoice,
   type Job,
@@ -10,6 +10,7 @@ import {
 } from "../lib/api";
 import { fmtDate, money, todayEastern } from "../lib/format";
 import {
+  Button,
   Card,
   EmptyState,
   ErrorNote,
@@ -45,15 +46,15 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     try {
       const [inv, cus, pl, jb] = await Promise.all([
-        api().models.Invoice.list({ limit: 1000 }),
-        api().models.Customer.list({ limit: 1000 }),
-        api().models.ServicePlan.list({ limit: 1000 }),
-        api().models.Job.list({ limit: 1000 }),
+        listAll((t) => api().models.Invoice.list({ limit: 1000, nextToken: t })),
+        listAll((t) => api().models.Customer.list({ limit: 1000, nextToken: t })),
+        listAll((t) => api().models.ServicePlan.list({ limit: 1000, nextToken: t })),
+        listAll((t) => api().models.Job.list({ limit: 1000, nextToken: t })),
       ]);
-      setInvoices(unwrap(inv));
-      setCustomers(unwrap(cus));
-      setPlans(unwrap(pl));
-      setJobs(unwrap(jb));
+      setInvoices(inv);
+      setCustomers(cus);
+      setPlans(pl);
+      setJobs(jb);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load dashboard");
     }
@@ -67,7 +68,19 @@ export default function Dashboard() {
     return (
       <Page title="Dashboard">
         <ErrorNote error={error} />
-        <Spinner />
+        {error ? (
+          <Button
+            variant="subtle"
+            onClick={() => {
+              setError(null);
+              void load();
+            }}
+          >
+            Retry
+          </Button>
+        ) : (
+          <Spinner />
+        )}
       </Page>
     );
   }
