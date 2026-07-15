@@ -17,6 +17,7 @@ import Leads from "./office/Leads";
 import Customers from "./office/Customers";
 import CustomerDetail from "./office/CustomerDetail";
 import GroupDetail from "./office/GroupDetail";
+import PlanTemplates from "./office/PlanTemplates";
 import Schedule from "./office/Schedule";
 import More from "./pages/More";
 import TechToday from "./tech/Today";
@@ -108,6 +109,7 @@ function Shell() {
         <Route path="/customers/:id" element={<Require when={staff || roles.tech}><CustomerDetail /></Require>} />
         <Route path="/groups/:id" element={<Require when={staff}><GroupDetail /></Require>} />
         <Route path="/schedule" element={<Require when={staff}><Schedule /></Require>} />
+        <Route path="/templates" element={<Require when={staff}><PlanTemplates /></Require>} />
 
         {/* Technician */}
         <Route path="/tech" element={<Require when={roles.tech || staff}><TechToday /></Require>} />

@@ -43,6 +43,11 @@ export default function More() {
             <ListRow title="My day (technician view)" onClick={() => navigate("/tech")} />
           ) : null}
           <ListRow
+            title="Plan templates"
+            subtitle="The plans BuzzKill sells — used for quotes and new plans"
+            onClick={() => navigate("/templates")}
+          />
+          <ListRow
             title="Invite a staff member"
             subtitle="Office, technician, or both"
             onClick={() => setStaffSheet(true)}

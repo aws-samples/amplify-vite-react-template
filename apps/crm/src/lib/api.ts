@@ -23,6 +23,8 @@ export type Technician = Schema["Technician"]["type"];
 export type Agreement = Schema["Agreement"]["type"];
 export type ServiceReport = Schema["ServiceReport"]["type"];
 export type Invoice = Schema["Invoice"]["type"];
+export type PlanTemplate = Schema["PlanTemplate"]["type"];
+export type Quote = Schema["Quote"]["type"];
 
 /** Unwrap an Amplify Data result, surfacing GraphQL errors as exceptions. */
 export function unwrap<T>(result: {

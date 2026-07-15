@@ -9,10 +9,16 @@ import {
   type CustomerGroup,
   type Invoice,
   type Job,
+  type PlanTemplate,
+  type Quote,
   type ServicePlan,
   type ServiceReport,
 } from "../lib/api";
 import { customerAccessGroups } from "../lib/accessGroups";
+import {
+  DEFAULT_AGREEMENT_BODY,
+  fillAgreementTemplate,
+} from "../lib/agreementTemplate";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import {
   Badge,
@@ -30,23 +36,9 @@ import {
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import DocButton from "../components/DocButton";
+import QuoteSheet from "../components/QuoteSheet";
+import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
-
-const AGREEMENT_TEMPLATE = (name: string) => `SERVICE AGREEMENT
-
-This agreement is between BuzzKill Pest Control ("BuzzKill") and ${name} ("Customer").
-
-1. SERVICES. BuzzKill will provide pest control services at the Customer's service address as described in the selected service plan or scheduled one-time service.
-
-2. TERM & BILLING. Recurring plans are billed monthly to the payment method on file until canceled with 30 days' notice. One-time services are billed upon completion.
-
-3. ACCESS. Customer will provide reasonable access to the service areas on scheduled service dates.
-
-4. RE-TREATMENT GUARANTEE. If covered pests return between scheduled visits, BuzzKill will re-treat at no additional charge.
-
-5. CANCELLATION. Either party may cancel with written notice. Charges for services already performed remain due.
-
-By signing below, the Customer agrees to these terms and consents to transact electronically.`;
 
 export default function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
@@ -58,7 +50,9 @@ export default function CustomerDetail() {
   const [agreements, setAgreements] = useState<Agreement[]>([]);
   const [reports, setReports] = useState<ServiceReport[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [quotes, setQuotes] = useState<Quote[]>([]);
   const [groups, setGroups] = useState<CustomerGroup[]>([]);
+  const [rescheduling, setRescheduling] = useState<Job | null>(null);
   const [pm, setPm] = useState<{ hasPaymentMethod: boolean; label: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
@@ -72,6 +66,7 @@ export default function CustomerDetail() {
     | "collect"
     | "portal"
     | "group"
+    | "quote"
   >(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
@@ -91,13 +86,14 @@ export default function CustomerDetail() {
       }
       setCustomer(c);
       const filter = { customerId: { eq: id } };
-      const [pl, jb, ag, rp, inv, gr] = await Promise.all([
+      const [pl, jb, ag, rp, inv, gr, qt] = await Promise.all([
         api().models.ServicePlan.list({ filter, limit: 200 }),
         api().models.Job.list({ filter, limit: 500 }),
         api().models.Agreement.list({ filter, limit: 200 }),
         api().models.ServiceReport.list({ filter, limit: 500 }),
         api().models.Invoice.list({ filter, limit: 500 }),
         api().models.CustomerGroup.list({ limit: 500 }),
+        api().models.Quote.list({ filter, limit: 200 }),
       ]);
       setPlans(unwrap(pl));
       setJobs(
@@ -113,6 +109,11 @@ export default function CustomerDetail() {
         )
       );
       setGroups(unwrap(gr));
+      setQuotes(
+        unwrap(qt).sort((a, b) =>
+          (b.quotedAt ?? "").localeCompare(a.quotedAt ?? "")
+        )
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load customer");
     }
@@ -296,13 +297,21 @@ export default function CustomerDetail() {
         <Card
           title="Portal access"
           actions={
-            customer.portalUserSub ? <Badge tone="ok">invited</Badge> : <Badge tone="muted">not invited</Badge>
+            customer.portalLastLoginAt ? (
+              <Badge tone="ok">active</Badge>
+            ) : customer.portalUserSub ? (
+              <Badge tone="info">invited</Badge>
+            ) : (
+              <Badge tone="muted">not invited</Badge>
+            )
           }
         >
           <p className="muted small" style={{ marginBottom: 10 }}>
-            {customer.portalUserSub
-              ? `Portal login active${customer.portalInvitedAt ? ` since ${fmtDate(customer.portalInvitedAt, true)}` : ""}.`
-              : "Invite the customer to view services, documents, and billing online."}
+            {customer.portalLastLoginAt
+              ? `Last signed in ${fmtDateTime(customer.portalLastLoginAt)}.`
+              : customer.portalUserSub
+                ? `Invited${customer.portalInvitedAt ? ` ${fmtDate(customer.portalInvitedAt, true)}` : ""} — hasn't signed in yet.`
+                : "Invite the customer to view services, documents, and billing online."}
           </p>
           <div className="row-split">
             <Button
@@ -354,6 +363,33 @@ export default function CustomerDetail() {
         </Card>
       ) : null}
 
+      {roles.office && (quotes.length > 0 || isLead) ? (
+        <Card
+          title="Quotes"
+          actions={
+            <Button small variant="ghost" onClick={() => setSheet("quote")}>
+              + Quote
+            </Button>
+          }
+        >
+          {quotes.length === 0 ? (
+            <p className="muted small">
+              No quotes yet — quote a plan and the agreement goes out for
+              signature. Signing converts the lead automatically.
+            </p>
+          ) : (
+            quotes.map((q) => (
+              <ListRow
+                key={q.id}
+                title={q.planName}
+                subtitle={`${money(q.priceCents)}/mo · quoted ${fmtDate(q.quotedAt, true)}${q.notes ? ` · ${q.notes}` : ""}`}
+                meta={<StatusBadge status={q.status} />}
+              />
+            ))
+          )}
+        </Card>
+      ) : null}
+
       <Card
         title="Service plans"
         actions={
@@ -376,42 +412,79 @@ export default function CustomerDetail() {
                 <>
                   <StatusBadge status={p.status} />
                   {roles.office && p.status === "ACTIVE" ? (
-                    p.stripeSubscriptionId ? (
+                    <>
+                      {p.stripeSubscriptionId ? (
+                        <Button
+                          small
+                          variant="danger"
+                          loading={busyAction === `cancel-${p.id}`}
+                          onClick={() => {
+                            if (!window.confirm("Cancel this plan's billing?")) return;
+                            void run(`cancel-${p.id}`, async () =>
+                              unwrap(
+                                await api().mutations.cancelSubscription({
+                                  servicePlanId: p.id,
+                                })
+                              )
+                            );
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      ) : (
+                        <Button
+                          small
+                          variant="subtle"
+                          loading={busyAction === `start-${p.id}`}
+                          onClick={() =>
+                            void run(`start-${p.id}`, async () =>
+                              unwrap(
+                                await api().mutations.startSubscription({
+                                  servicePlanId: p.id,
+                                })
+                              )
+                            )
+                          }
+                        >
+                          Start billing
+                        </Button>
+                      )}
                       <Button
                         small
-                        variant="danger"
-                        loading={busyAction === `cancel-${p.id}`}
+                        variant="ghost"
+                        loading={busyAction === `pause-${p.id}`}
                         onClick={() => {
-                          if (!window.confirm("Cancel this plan's billing?")) return;
-                          void run(`cancel-${p.id}`, async () =>
+                          if (!window.confirm("Deactivate this plan? Billing pauses and no new visits are scheduled.")) return;
+                          void run(`pause-${p.id}`, async () =>
                             unwrap(
-                              await api().mutations.cancelSubscription({
+                              await api().mutations.pausePlan({
                                 servicePlanId: p.id,
                               })
                             )
                           );
                         }}
                       >
-                        Cancel
+                        Deactivate
                       </Button>
-                    ) : (
-                      <Button
-                        small
-                        variant="subtle"
-                        loading={busyAction === `start-${p.id}`}
-                        onClick={() =>
-                          void run(`start-${p.id}`, async () =>
-                            unwrap(
-                              await api().mutations.startSubscription({
-                                servicePlanId: p.id,
-                              })
-                            )
+                    </>
+                  ) : null}
+                  {roles.office && p.status === "PAUSED" ? (
+                    <Button
+                      small
+                      variant="subtle"
+                      loading={busyAction === `resume-${p.id}`}
+                      onClick={() =>
+                        void run(`resume-${p.id}`, async () =>
+                          unwrap(
+                            await api().mutations.resumePlan({
+                              servicePlanId: p.id,
+                            })
                           )
-                        }
-                      >
-                        Start billing
-                      </Button>
-                    )
+                        )
+                      }
+                    >
+                      Reactivate
+                    </Button>
                   ) : null}
                 </>
               }
@@ -433,38 +506,123 @@ export default function CustomerDetail() {
         {jobs.length === 0 ? (
           <p className="muted small">No jobs yet.</p>
         ) : (
-          jobs.slice(0, 8).map((j) => (
-            <ListRow
-              key={j.id}
-              title={j.serviceType}
-              subtitle={`${j.scheduledDate ? fmtDate(j.scheduledDate, true) : "unscheduled"}${j.timeWindow ? ` · ${j.timeWindow}` : ""}${j.priceCents ? ` · ${money(j.priceCents)}` : ""}`}
-              meta={
-                <>
-                  <StatusBadge status={j.status} />
-                  {roles.office &&
-                  j.type === "ONE_TIME" &&
-                  j.status === "COMPLETED" &&
-                  j.priceCents &&
-                  !invoices.some((inv) => inv.jobId === j.id && inv.status !== "FAILED") ? (
-                    <Button
-                      small
-                      variant="subtle"
-                      loading={busyAction === `charge-${j.id}`}
-                      onClick={() =>
-                        void run(`charge-${j.id}`, async () =>
-                          unwrap(
-                            await api().mutations.chargeOneTimeJob({ jobId: j.id })
-                          )
-                        )
-                      }
-                    >
-                      Charge {money(j.priceCents)}
-                    </Button>
-                  ) : null}
-                </>
-              }
-            />
-          ))
+          (() => {
+            const renderJob = (j: Job) => {
+              const report = reports.find((r) => r.jobId === j.id);
+              const invoice = invoices.find(
+                (inv) => inv.jobId === j.id && inv.status !== "FAILED"
+              );
+              const reschedulable =
+                roles.office &&
+                (j.status === "SCHEDULED" || j.status === "UNSCHEDULED");
+              return (
+                <ListRow
+                  key={j.id}
+                  title={j.serviceType}
+                  subtitle={
+                    <>
+                      {`${j.scheduledDate ? fmtDate(j.scheduledDate, true) : "unscheduled"}${j.timeWindow ? ` · ${j.timeWindow}` : ""}${j.priceCents ? ` · ${money(j.priceCents)}` : ""}`}
+                      {j.status === "COMPLETED" ? (
+                        <span className="nested-line">
+                          {report?.pdfKey ? (
+                            <>
+                              report <DocButton docKey={report.pdfKey} label="view" />
+                            </>
+                          ) : (
+                            "report pending"
+                          )}
+                          {invoice
+                            ? ` · invoice ${invoice.status?.toLowerCase()}`
+                            : ""}
+                        </span>
+                      ) : null}
+                    </>
+                  }
+                  meta={
+                    <>
+                      <StatusBadge status={j.status} />
+                      {roles.office &&
+                      j.type === "ONE_TIME" &&
+                      j.status === "COMPLETED" &&
+                      j.priceCents &&
+                      !invoice ? (
+                        <Button
+                          small
+                          variant="subtle"
+                          loading={busyAction === `charge-${j.id}`}
+                          onClick={() =>
+                            void run(`charge-${j.id}`, async () =>
+                              unwrap(
+                                await api().mutations.chargeOneTimeJob({ jobId: j.id })
+                              )
+                            )
+                          }
+                        >
+                          Charge {money(j.priceCents)}
+                        </Button>
+                      ) : null}
+                      {reschedulable ? (
+                        <>
+                          <Button
+                            small
+                            variant="ghost"
+                            onClick={() => setRescheduling(j)}
+                          >
+                            {j.scheduledDate ? "Reschedule" : "Schedule"}
+                          </Button>
+                          <Button
+                            small
+                            variant="danger"
+                            loading={busyAction === `canceljob-${j.id}`}
+                            onClick={() => {
+                              if (!window.confirm("Cancel this job?")) return;
+                              void run(`canceljob-${j.id}`, async () =>
+                                unwrap(
+                                  await api().models.Job.update({
+                                    id: j.id,
+                                    status: "CANCELED",
+                                    routeId: null,
+                                    routeOrder: null,
+                                  })
+                                )
+                              );
+                            }}
+                          >
+                            ✕
+                          </Button>
+                        </>
+                      ) : null}
+                    </>
+                  }
+                />
+              );
+            };
+            const planned = plans.filter((p) =>
+              jobs.some((j) => j.servicePlanId === p.id)
+            );
+            const oneTime = jobs.filter((j) => !j.servicePlanId);
+            return (
+              <>
+                {planned.map((p) => (
+                  <div key={p.id} className="job-group">
+                    <p className="group-label">{p.planName}</p>
+                    {jobs
+                      .filter((j) => j.servicePlanId === p.id)
+                      .slice(0, 6)
+                      .map(renderJob)}
+                  </div>
+                ))}
+                {oneTime.length ? (
+                  <div className="job-group">
+                    {planned.length ? (
+                      <p className="group-label">One-time jobs</p>
+                    ) : null}
+                    {oneTime.slice(0, 8).map(renderJob)}
+                  </div>
+                ) : null}
+              </>
+            );
+          })()
         )}
       </Card>
 
@@ -543,14 +701,32 @@ export default function CustomerDetail() {
           {invoices.length === 0 ? (
             <p className="muted small">No invoices yet.</p>
           ) : (
-            invoices.slice(0, 10).map((inv) => (
-              <ListRow
-                key={inv.id}
-                title={money(inv.amountCents)}
-                subtitle={`${inv.description} · ${fmtDate(inv.issuedAt, true)}`}
-                meta={<StatusBadge status={inv.status} />}
-              />
-            ))
+            invoices.slice(0, 10).map((inv) => {
+              const job = inv.jobId ? jobs.find((j) => j.id === inv.jobId) : null;
+              const plan = inv.servicePlanId
+                ? plans.find((p) => p.id === inv.servicePlanId)
+                : null;
+              const source = job
+                ? `${job.serviceType}${job.scheduledDate ? ` (${fmtDate(job.scheduledDate, true)})` : ""}`
+                : plan
+                  ? plan.planName
+                  : null;
+              return (
+                <ListRow
+                  key={inv.id}
+                  title={money(inv.amountCents)}
+                  subtitle={
+                    <>
+                      {`${inv.description} · ${fmtDate(inv.issuedAt, true)}`}
+                      {source ? (
+                        <span className="nested-line">for {source}</span>
+                      ) : null}
+                    </>
+                  }
+                  meta={<StatusBadge status={inv.status} />}
+                />
+              );
+            })
           )}
         </Card>
       ) : null}
@@ -616,6 +792,12 @@ export default function CustomerDetail() {
       </Sheet>
 
       <Sheet open={sheet === "plan"} onClose={() => setSheet(null)} title="New service plan">
+        {isLead ? (
+          <p className="muted small" style={{ marginBottom: 10 }}>
+            This is still a lead — creating a plan will convert them to an
+            active customer.
+          </p>
+        ) : null}
         <PlanForm
           onSubmit={async (v) => {
             unwrap(
@@ -628,10 +810,46 @@ export default function CustomerDetail() {
                 accessGroups,
               })
             );
+            if (isLead) {
+              unwrap(
+                await api().models.Customer.update({
+                  id: customer.id,
+                  status: "ACTIVE",
+                  convertedAt: new Date().toISOString(),
+                })
+              );
+            }
             setSheet(null);
             await load();
           }}
         />
+      </Sheet>
+
+      <Sheet open={sheet === "quote"} onClose={() => setSheet(null)} title="Quote a plan">
+        <QuoteSheet
+          customer={customer}
+          accessGroups={accessGroups}
+          onDone={async () => {
+            setSheet(null);
+            await load();
+          }}
+        />
+      </Sheet>
+
+      <Sheet
+        open={rescheduling !== null}
+        onClose={() => setRescheduling(null)}
+        title={rescheduling?.scheduledDate ? "Reschedule job" : "Schedule job"}
+      >
+        {rescheduling ? (
+          <RescheduleForm
+            job={rescheduling}
+            onDone={async () => {
+              setRescheduling(null);
+              await load();
+            }}
+          />
+        ) : null}
       </Sheet>
 
       <Sheet open={sheet === "job"} onClose={() => setSheet(null)} title="New job">
@@ -724,30 +942,68 @@ function PlanForm({
     serviceFrequency: "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
   }) => Promise<void>;
 }) {
-  const [planName, setPlanName] = useState("Residential Protection Plan");
-  const [price, setPrice] = useState("99");
-  const [freq, setFreq] = useState<"MONTHLY" | "BIMONTHLY" | "QUARTERLY">("MONTHLY");
+  const [templates, setTemplates] = useState<PlanTemplate[] | null>(null);
+  const [templateId, setTemplateId] = useState("");
+  const [price, setPrice] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    api()
+      .models.PlanTemplate.list({ limit: 200 })
+      .then((res) => {
+        const active = unwrap(res)
+          .filter((t) => t.active)
+          .sort(
+            (a, b) =>
+              (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
+              a.name.localeCompare(b.name)
+          );
+        setTemplates(active);
+        if (active[0]) {
+          setTemplateId(active[0].id);
+          setPrice((active[0].priceCents / 100).toString());
+        }
+      })
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : "Could not load templates")
+      );
+  }, []);
+
+  if (templates === null) return <p className="muted">Loading plan templates…</p>;
+  if (templates.length === 0) {
+    return (
+      <p className="muted">
+        No active plan templates — create one under More → Plan templates
+        first. Plans are always created from a template.
+      </p>
+    );
+  }
+  const template = templates.find((t) => t.id === templateId) ?? null;
+
   return (
     <div className="form-grid">
-      <Field label="Plan name">
-        <input value={planName} onChange={(e) => setPlanName(e.target.value)} />
+      <Field label="Plan">
+        <select
+          value={templateId}
+          onChange={(e) => {
+            setTemplateId(e.target.value);
+            const t = templates.find((x) => x.id === e.target.value);
+            if (t) setPrice((t.priceCents / 100).toString());
+          }}
+        >
+          {templates.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name} — {money(t.priceCents)}/mo · {t.serviceFrequency?.toLowerCase()}
+            </option>
+          ))}
+        </select>
       </Field>
-      <Field label="Monthly price ($)">
+      {template?.description ? (
+        <p className="muted small">{template.description}</p>
+      ) : null}
+      <Field label="Monthly price ($)" hint="Prefilled from the template — adjust if needed">
         <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
-      </Field>
-      <Field label="Service visit frequency">
-        <SegControl
-          options={[
-            { value: "MONTHLY" as const, label: "Monthly" },
-            { value: "BIMONTHLY" as const, label: "Bi-monthly" },
-            { value: "QUARTERLY" as const, label: "Quarterly" },
-          ]}
-          value={freq}
-          onChange={setFreq}
-        />
       </Field>
       <ErrorNote error={error} />
       <Button
@@ -755,17 +1011,20 @@ function PlanForm({
         loading={busy}
         onClick={() => {
           const cents = Math.round(parseFloat(price) * 100);
-          if (!planName.trim() || !Number.isFinite(cents) || cents <= 0) {
-            setError("Enter a plan name and a valid price");
+          if (!template || !Number.isFinite(cents) || cents <= 0) {
+            setError("Pick a plan and enter a valid price");
             return;
           }
           setBusy(true);
-          onSubmit({ planName: planName.trim(), priceCents: cents, serviceFrequency: freq }).catch(
-            (err) => {
-              setError(err.message ?? "Could not create plan");
-              setBusy(false);
-            }
-          );
+          onSubmit({
+            planName: template.name,
+            priceCents: cents,
+            serviceFrequency: (template.serviceFrequency ??
+              "MONTHLY") as "MONTHLY" | "BIMONTHLY" | "QUARTERLY",
+          }).catch((err) => {
+            setError(err.message ?? "Could not create plan");
+            setBusy(false);
+          });
         }}
       >
         Create plan
@@ -774,6 +1033,64 @@ function PlanForm({
         Billing starts only when you tap “Start billing” (requires a payment
         method on file).
       </p>
+    </div>
+  );
+}
+
+function RescheduleForm({
+  job,
+  onDone,
+}: {
+  job: Job;
+  onDone: () => Promise<void>;
+}) {
+  const [date, setDate] = useState(job.scheduledDate ?? "");
+  const [timeWindow, setTimeWindow] = useState(job.timeWindow ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dateChanged = date !== (job.scheduledDate ?? "");
+
+  return (
+    <div className="form-grid">
+      <Field label="Date">
+        <DateField value={date} onChange={setDate} allowClear />
+      </Field>
+      <Field label="Time window">
+        <TimeWindowField value={timeWindow} onChange={setTimeWindow} />
+      </Field>
+      {dateChanged && job.routeId ? (
+        <p className="muted small">
+          Moving the date takes this job off its current route — it'll be
+          re-routed for the new day.
+        </p>
+      ) : null}
+      <ErrorNote error={error} />
+      <Button
+        block
+        loading={busy}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          api()
+            .models.Job.update({
+              id: job.id,
+              scheduledDate: date || null,
+              timeWindow: timeWindow.trim() || null,
+              status: date ? "SCHEDULED" : "UNSCHEDULED",
+              ...(dateChanged ? { routeId: null, routeOrder: null } : {}),
+            })
+            .then((res) => {
+              unwrap(res);
+              return onDone();
+            })
+            .catch((err) => {
+              setError(err.message ?? "Could not reschedule");
+              setBusy(false);
+            });
+        }}
+      >
+        {date ? "Save schedule" : "Mark unscheduled"}
+      </Button>
     </div>
   );
 }
@@ -822,14 +1139,12 @@ function JobForm({
           <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
         </Field>
       ) : null}
-      <div className="form-row-2">
-        <Field label="Date" hint="Leave empty to schedule later">
-          <input type="date" value={scheduledDate} onChange={(e) => setScheduledDate(e.target.value)} />
-        </Field>
-        <Field label="Time window">
-          <input placeholder="8–10 AM" value={timeWindow} onChange={(e) => setTimeWindow(e.target.value)} />
-        </Field>
-      </div>
+      <Field label="Date" hint="Leave empty to schedule later">
+        <DateField value={scheduledDate} onChange={setScheduledDate} allowClear />
+      </Field>
+      <Field label="Time window">
+        <TimeWindowField value={timeWindow} onChange={setTimeWindow} />
+      </Field>
       <ErrorNote error={error} />
       <Button
         block
@@ -871,7 +1186,22 @@ function AgreementForm({
   onSubmit: (title: string, bodyText: string, sendNow: boolean) => Promise<void>;
 }) {
   const [title, setTitle] = useState("Pest Control Service Agreement");
-  const [bodyText, setBodyText] = useState(AGREEMENT_TEMPLATE(customer.displayName));
+  const [bodyText, setBodyText] = useState(
+    fillAgreementTemplate(DEFAULT_AGREEMENT_BODY, {
+      customerName: customer.displayName,
+      planName: "pest control",
+      price: "the quoted price",
+      frequency: "as scheduled",
+      address: [
+        customer.serviceStreet,
+        customer.serviceCity,
+        customer.serviceState,
+        customer.serviceZip,
+      ]
+        .filter(Boolean)
+        .join(", ") || "the Customer's service address",
+    })
+  );
   const [busy, setBusy] = useState<null | "draft" | "send">(null);
   const [error, setError] = useState<string | null>(null);
 

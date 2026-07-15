@@ -22,6 +22,7 @@ import {
   StatusBadge,
 } from "../ui/kit";
 import DocButton from "../components/DocButton";
+import ReportPhotos from "../components/ReportPhotos";
 
 type Product = { name: string; epaNumber: string; quantity: string; targetPest: string };
 type Geo = { lat: number; lng: number; accuracyM: number; capturedAt: string };
@@ -160,6 +161,7 @@ export default function TechJob() {
             <Badge tone="ok">completed &amp; sent</Badge>
             {report.pdfKey ? <DocButton docKey={report.pdfKey} /> : null}
           </div>
+          <ReportPhotos report={report} readOnly onChanged={load} />
         </Card>
       ) : job.status === "IN_PROGRESS" || job.status === "COMPLETED" || report ? (
         <ReportForm
@@ -338,6 +340,16 @@ function ReportForm({
         </Field>
         <Field label="Internal notes (not shown to customer)">
           <textarea value={techNotes} onChange={(e) => setTechNotes(e.target.value)} />
+        </Field>
+
+        <Field label="Job-site photos">
+          {existing ? (
+            <ReportPhotos report={existing} onChanged={onChanged} />
+          ) : (
+            <p className="muted small">
+              Save the draft once, then you can attach photos.
+            </p>
+          )}
         </Field>
 
         <Card className="geo-card" title="On-site verification">
