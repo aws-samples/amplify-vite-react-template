@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   api,
+  opResult,
   unwrap,
   type Agreement,
   type Customer,
@@ -128,7 +129,9 @@ export default function CustomerDetail() {
       .queries.getPaymentMethodSummary({ customerId: customer.id })
       .then((res) => {
         if (!res.errors?.length) {
-          setPm(res.data as { hasPaymentMethod: boolean; label: string | null });
+          setPm(
+            opResult<{ hasPaymentMethod: boolean; label: string | null }>(res)
+          );
         }
       })
       .catch(() => undefined);

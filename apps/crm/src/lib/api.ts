@@ -34,3 +34,25 @@ export function unwrap<T>(result: {
   }
   return result.data;
 }
+
+/**
+ * Result of a custom operation declared with `.returns(a.json())`: AppSync
+ * serializes AWSJSON as a JSON string, so the client receives a string, not
+ * the object the Lambda returned. Parse it (tolerating an already-parsed
+ * object, in case a future Amplify client version starts parsing for us).
+ */
+export function opResult<T>(result: {
+  data: unknown;
+  errors?: { message: string }[];
+}): T | null {
+  const data = unwrap(result);
+  if (data == null) return null;
+  if (typeof data === "string") {
+    try {
+      return JSON.parse(data) as T;
+    } catch {
+      return null;
+    }
+  }
+  return data as T;
+}

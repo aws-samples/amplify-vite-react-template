@@ -6,7 +6,7 @@ import {
   useElements,
   useStripe,
 } from "@stripe/react-stripe-js";
-import { api } from "../lib/api";
+import { api, opResult } from "../lib/api";
 import { Button, ErrorNote, Sheet, Spinner } from "../ui/kit";
 
 const publishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as
@@ -44,8 +44,7 @@ export default function CollectPaymentSheet({
     api()
       .mutations.createSetupIntent({ customerId })
       .then((res) => {
-        if (res.errors?.length) throw new Error(res.errors[0].message);
-        const data = res.data as { clientSecret?: string } | null;
+        const data = opResult<{ clientSecret?: string }>(res);
         if (!data?.clientSecret) throw new Error("No client secret returned");
         setClientSecret(data.clientSecret);
       })

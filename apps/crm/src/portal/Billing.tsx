@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, unwrap, type Customer, type Invoice } from "../lib/api";
+import { api, opResult, unwrap, type Customer, type Invoice } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDate, money } from "../lib/format";
 import { Badge, Button, Card, ErrorNote, ListRow, Page, Spinner, StatusBadge } from "../ui/kit";
@@ -36,7 +36,12 @@ export default function PortalBilling() {
           const res = await api().queries.getPaymentMethodSummary({
             customerId: c.id,
           });
-          return [c.id, res.data as { hasPaymentMethod: boolean; label: string | null }] as const;
+          return [
+            c.id,
+            opResult<{ hasPaymentMethod: boolean; label: string | null }>(
+              res
+            ) ?? { hasPaymentMethod: false, label: null },
+          ] as const;
         })
       );
       setPm(Object.fromEntries(summaries));

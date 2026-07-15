@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../lib/api";
+import { api, opResult } from "../lib/api";
 import { Button } from "../ui/kit";
 
 /** Opens a stored PDF via an entitlement-checked presigned URL. */
@@ -15,8 +15,7 @@ export default function DocButton({
     setBusy(true);
     try {
       const res = await api().queries.getDocumentUrl({ key: docKey });
-      if (res.errors?.length) throw new Error(res.errors[0].message);
-      const { url } = (res.data as { url?: string } | null) ?? {};
+      const { url } = opResult<{ url?: string }>(res) ?? {};
       if (url) window.open(url, "_blank", "noopener");
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not open document");
