@@ -1,0 +1,772 @@
+import { randomBytes } from "node:crypto";
+import type { AppSyncResolverEvent } from "aws-lambda";
+import {
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import Anthropic from "@anthropic-ai/sdk";
+import { dataClient } from "../shared/dataClient";
+import { opFieldName } from "../shared/opEvent";
+import { callerIsOffice } from "../shared/authz";
+import { emailShell, sendEmail } from "../shared/email";
+import {
+  clearsLeadFee,
+  freqLabel,
+  money,
+  oneTimeGrossProfitCents,
+  priceAssociation,
+  priceCommercial,
+  priceMosquito,
+  priceResidential,
+  priceSpecialty,
+  zoneFromMinutes,
+  type Frequency,
+  type PricedPlan,
+  type Zone,
+} from "./rateCards";
+
+const s3 = new S3Client();
+const ssm = new SSMClient();
+
+const BUCKET = () => {
+  const b = process.env.DOCS_BUCKET;
+  if (!b) throw new Error("DOCS_BUCKET is not configured");
+  return b;
+};
+
+const HOME_BASE = "81 Greenwich Rd, Ware, MA 01082";
+
+type Args = {
+  inputText?: string | null;
+  screenshotKey?: string | null;
+  customerId?: string | null;
+  leadFeeCents?: number | null;
+  contentType?: string;
+};
+
+export const handler = async (event: AppSyncResolverEvent<Args>) => {
+  if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+  switch (opFieldName(event)) {
+    case "priceLead":
+      return priceLead(event.arguments);
+    case "getPricingUploadUrl":
+      return getPricingUploadUrl(event.arguments.contentType!);
+    default:
+      throw new Error(`Unknown field ${opFieldName(event)}`);
+  }
+};
+
+// ---------- secrets (runtime SSM; cached per container) ----------
+
+const secretCache = new Map<string, string | null>();
+
+async function getSecret(name: string): Promise<string | null> {
+  if (secretCache.has(name)) return secretCache.get(name) ?? null;
+  const appId = process.env.AMPLIFY_APP_ID ?? "d26qpsjewk0bee";
+  let value: string | null = null;
+  for (const path of [
+    `/amplify/${appId}/${process.env.AMPLIFY_BRANCH ?? "staging"}/${name}`,
+    `/amplify/shared/${appId}/${name}`,
+  ]) {
+    try {
+      const res = await ssm.send(
+        new GetParameterCommand({ Name: path, WithDecryption: true })
+      );
+      if (res.Parameter?.Value && res.Parameter.Value !== "placeholder-set-me") {
+        value = res.Parameter.Value;
+        break;
+      }
+    } catch {
+      /* parameter absent — try the next path */
+    }
+  }
+  secretCache.set(name, value);
+  return value;
+}
+
+// ---------- screenshot upload ----------
+
+const IMAGE_TYPES: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
+
+async function getPricingUploadUrl(contentType: string) {
+  const ext = IMAGE_TYPES[contentType.toLowerCase()];
+  if (!ext) throw new Error("Unsupported image type — use PNG, JPEG, WEBP, or GIF");
+  const key = `pricing/${Date.now()}-${randomBytes(4).toString("hex")}.${ext}`;
+  const uploadUrl = await getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: BUCKET(), Key: key, ContentType: contentType }),
+    { expiresIn: 900 }
+  );
+  return { key, uploadUrl, expiresInSeconds: 900 };
+}
+
+// ---------- extraction (Claude) ----------
+
+type Extraction = {
+  eligibility:
+    | "ok"
+    | "wildlife"
+    | "bed_bugs"
+    | "food_service"
+    | "fumigation"
+    | "out_of_area";
+  propertyType:
+    | "residential"
+    | "association"
+    | "commercial"
+    | "mosquito"
+    | "specialty"
+    | "unknown";
+  specialtyKind: "wasp_nest" | "rodent_nest" | "rodent_exclusion" | "termite" | "none";
+  pest: string;
+  customerName: string | null;
+  town: string | null;
+  state: string | null;
+  fullAddress: string | null;
+  sqft: number | null;
+  units: number | null;
+  halfAcres: number | null;
+  tick: boolean;
+  frequencyInterest: "monthly" | "bimonthly" | "quarterly" | "one_time" | "unspecified";
+  leadFeeCents: number | null;
+  rodentInterest: boolean;
+  multiProperty: boolean;
+  competitorMatchBelowFloor: boolean;
+  complianceDocsRequested: boolean;
+  assumptions: string[];
+};
+
+const EXTRACTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "eligibility", "propertyType", "specialtyKind", "pest", "customerName",
+    "town", "state", "fullAddress", "sqft", "units", "halfAcres", "tick",
+    "frequencyInterest", "leadFeeCents", "rodentInterest", "multiProperty",
+    "competitorMatchBelowFloor", "complianceDocsRequested", "assumptions",
+  ],
+  properties: {
+    eligibility: { type: "string", enum: ["ok", "wildlife", "bed_bugs", "food_service", "fumigation", "out_of_area"] },
+    propertyType: { type: "string", enum: ["residential", "association", "commercial", "mosquito", "specialty", "unknown"] },
+    specialtyKind: { type: "string", enum: ["wasp_nest", "rodent_nest", "rodent_exclusion", "termite", "none"] },
+    pest: { type: "string" },
+    customerName: { type: ["string", "null"] },
+    town: { type: ["string", "null"] },
+    state: { type: ["string", "null"] },
+    fullAddress: { type: ["string", "null"] },
+    sqft: { type: ["number", "null"] },
+    units: { type: ["number", "null"] },
+    halfAcres: { type: ["number", "null"] },
+    tick: { type: "boolean" },
+    frequencyInterest: { type: "string", enum: ["monthly", "bimonthly", "quarterly", "one_time", "unspecified"] },
+    leadFeeCents: { type: ["number", "null"] },
+    rodentInterest: { type: "boolean" },
+    multiProperty: { type: "boolean" },
+    competitorMatchBelowFloor: { type: "boolean" },
+    complianceDocsRequested: { type: "boolean" },
+    assumptions: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+const EXTRACTION_SYSTEM = `You are the intake extractor for BuzzKill Pest Control's lead-pricing engine (office: Marlborough MA; technician dispatched from Ware MA; licensed in MA and RI only). You read a pasted Thumbtack lead (text and/or screenshot) and extract structured facts. You NEVER compute prices — a deterministic rate-card engine does that.
+
+Eligibility (hard passes):
+- "wildlife": LIVE animal trapping/removal/relocation — squirrels, raccoons, bats, birds, snakes, skunks, opossums. NOTE: dead rodents, mice, and rats INSIDE a structure are pest control (eligibility "ok"), not wildlife. Live animal trapping is out of scope.
+- "bed_bugs": any bed bug work.
+- "food_service": restaurants, cafés, bars, commercial kitchens, food processing/handling, grocery.
+- "fumigation": fumigation or tenting requests.
+- "out_of_area": service address clearly outside MA and RI (CT, NH, VT, NY — even if close).
+Otherwise "ok".
+
+Property type: "association" for HOA/condo-association COMMON AREAS (unit counts); an individual condo unit is "residential". "mosquito" when the request is mosquito and/or tick yard treatment. "specialty" for wasp/hornet nest removal, rodent nest removal, rodent exclusion, or termite work (set specialtyKind). Otherwise "residential"/"commercial"/"unknown".
+
+Extraction rules:
+- sqft: null when not stated (the engine assumes 2,000 sqft and states the assumption). Do not guess.
+- halfAcres: yard size in half-acre increments for mosquito/tick leads; null when unknown (engine assumes up to ½ acre).
+- leadFeeCents: the Thumbtack lead fee, in CENTS, when visible in the text/screenshot; null otherwise.
+- frequencyInterest: only when the lead stated one.
+- rodentInterest: true when mice/rats are mentioned at all.
+- multiProperty: investor/property-manager portfolios across multiple properties.
+- competitorMatchBelowFloor: they ask to match a lower competitor price.
+- complianceDocsRequested: commercial compliance documentation / audit support.
+- assumptions: every assumption you made, phrased for the customer reply (e.g. "assumed a typical ~2,000 sqft home — we'll confirm on the first visit").
+- Do not infer facts that aren't there; null is always better than a guess.`;
+
+async function extractLead(
+  anthropic: Anthropic,
+  inputText: string | null,
+  screenshot: { data: string; mediaType: string } | null
+): Promise<Extraction> {
+  const content: Anthropic.ContentBlockParam[] = [];
+  if (screenshot) {
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: screenshot.mediaType as "image/png",
+        data: screenshot.data,
+      },
+    });
+  }
+  content.push({
+    type: "text",
+    text: `Extract the lead facts from this Thumbtack lead:\n\n${inputText ?? "(screenshot only)"}`,
+  });
+
+  const response = await anthropic.messages.create({
+    model: "claude-opus-4-8",
+    max_tokens: 4096,
+    system: EXTRACTION_SYSTEM,
+    messages: [{ role: "user", content }],
+    output_config: {
+      format: { type: "json_schema", schema: EXTRACTION_SCHEMA },
+    },
+  });
+  if (response.stop_reason === "refusal") {
+    throw new Error("The model declined to process this lead text");
+  }
+  const text = response.content.find((b) => b.type === "text");
+  if (!text || text.type !== "text") throw new Error("No extraction returned");
+  return JSON.parse(text.text) as Extraction;
+}
+
+// ---------- zone (Google Routes API) ----------
+
+async function driveMinutes(address: string): Promise<number | null> {
+  const key = await getSecret("GOOGLE_ROUTES_API_KEY");
+  if (!key) return null;
+  try {
+    const res = await fetch(
+      "https://routes.googleapis.com/directions/v2:computeRoutes",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": key,
+          "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
+        },
+        body: JSON.stringify({
+          origin: { address: HOME_BASE },
+          destination: { address },
+          travelMode: "DRIVE",
+        }),
+      }
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      routes?: Array<{ duration?: string }>;
+    };
+    const dur = data.routes?.[0]?.duration;
+    if (!dur) return null;
+    return Math.round(parseInt(dur, 10) / 60);
+  } catch {
+    return null;
+  }
+}
+
+// ---------- pass scripts (deterministic, straight from the spec) ----------
+
+const PASS_SCRIPTS: Record<string, string> = {
+  wildlife:
+    "Thanks for reaching out! We're a licensed structural pest control company, and live wildlife removal requires a separate MA wildlife control license that we don't hold — so rather than waste your time, I'd point you to a licensed wildlife control operator for this one. If you ever need insect or rodent control, we'd love to help.",
+  bed_bugs:
+    "Thanks for reaching out! Bed bug treatment is outside the services we offer, so I don't want to hold you up — you'll want a company that specializes there. If you ever need general pest, rodent, or mosquito control, we'd be glad to help.",
+  food_service:
+    "Thanks for reaching out! Food-service facilities are outside the services we offer, so I don't want to hold you up — you'll want a company that specializes there. If you ever need general pest, rodent, or mosquito control, we'd be glad to help.",
+  fumigation:
+    "Thanks for reaching out! Fumigation is outside the services we offer, so I don't want to hold you up — you'll want a company that specializes there. If you ever need general pest, rodent, or mosquito control, we'd be glad to help.",
+  out_of_area:
+    "Thanks for reaching out! Your address falls outside our current licensed service area (Massachusetts & Rhode Island, within our route zone), so we're not able to take this one on. Wishing you a quick fix!",
+};
+
+// ---------- reply composition ----------
+
+async function composeReply(
+  anthropic: Anthropic,
+  facts: {
+    pest: string;
+    town: string | null;
+    service: string;
+    monthly: string | null;
+    initial: string | null;
+    oneTime: string | null;
+    fallbackPlan: string | null;
+    assumptions: string[];
+    oneTimeAsked: boolean;
+    rodentAddon: boolean;
+    pivotedFromOneTime: string | null;
+  }
+): Promise<string | null> {
+  const allowedAmounts = [facts.monthly, facts.initial, facts.oneTime, facts.fallbackPlan, facts.pivotedFromOneTime]
+    .filter(Boolean)
+    .flatMap((s) => (s as string).match(/\$\d+(?:\.\d{2})?/g) ?? []);
+
+  const prompt = `Write the paste-ready Thumbtack reply (2–4 sentences) for this quoted lead. Use ONLY these exact prices — never invent, change, or round any dollar amount:
+- Service: ${facts.service}
+- Pest: ${facts.pest}${facts.town ? `\n- Town: ${facts.town}` : ""}
+${facts.monthly ? `- Plan price: ${facts.monthly}/mo` : ""}
+${facts.initial ? `- Initial service visit: ${facts.initial} (75-minute first service: inspection, interior flush-out, exterior barrier)` : ""}
+${facts.oneTime ? `- One-time price: ${facts.oneTime} flat (30-day guarantee)` : ""}
+${facts.fallbackPlan ? `- Value fallback: ${facts.fallbackPlan}` : ""}
+${facts.rodentAddon ? "- The plan price INCLUDES the rodent program (exterior bait stations, monitored and refilled every visit) — say so." : ""}
+${facts.pivotedFromOneTime ? `- The lead asked for a one-time (${facts.pivotedFromOneTime}); position the plan as the better value: the $99 first visit costs less than the one-time, and they're covered year-round. You MAY mention the one-time price ${facts.pivotedFromOneTime} for comparison.` : facts.oneTimeAsked ? "- The lead asked for a one-time; pitch the plan as the smarter option per the conversion script, then give the one-time price." : "- Plan-first framing: covered year-round, free re-treatments between visits, licensed & insured in MA & RI."}
+- End with a concrete scheduling day (use a weekday like "Thursday", not a date).
+${facts.assumptions.length ? `- Work these assumptions in naturally: ${facts.assumptions.join("; ")}` : ""}
+
+Tone: warm, direct, no fluff. Output ONLY the reply text.`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-opus-4-8",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const text = response.content.find((b) => b.type === "text");
+    if (!text || text.type !== "text") return null;
+    const reply = text.text.trim();
+    // Consistency guard: every dollar amount in the reply must be one we
+    // computed. Normalize thousands separators on both sides first.
+    const normalize = (v: string) => v.replace(/,(?=\d{3})/g, "");
+    const used = (reply.match(/\$[\d,]+(?:\.\d{2})?/g) ?? []).map(normalize);
+    const allowed = new Set(
+      [...allowedAmounts.map(normalize), "$15", "$99"]
+    );
+    if (used.some((m) => !allowed.has(m))) return null;
+    return reply;
+  } catch {
+    return null;
+  }
+}
+
+function templateReply(facts: {
+  pest: string;
+  town: string | null;
+  monthly: string | null;
+  initial: string | null;
+  oneTime: string | null;
+  frequency: Frequency;
+  assumptions: string[];
+}): string {
+  const where = facts.town ? ` in ${facts.town}` : "";
+  const assumed = facts.assumptions.length ? ` (${facts.assumptions[0]})` : "";
+  if (facts.monthly) {
+    return `For ${facts.pest}${where}, our ${freqLabel(facts.frequency)} plan is ${facts.monthly}/mo with a ${facts.initial ?? "$99"} initial service — that first visit is the deep one: full inspection, interior treatment, and an exterior barrier${assumed}. After that you're covered year-round, and any re-treatment between visits is free. We're licensed and insured in MA & RI, and we can have our technician out as early as Thursday.`;
+  }
+  return `For ${facts.pest}${where}, the price is ${facts.oneTime} flat with a 30-day guarantee${assumed}. We're licensed and insured in MA & RI, and we can have our technician out as early as Thursday. Ask about our quarterly plan if you'd like year-round coverage with free re-treatments.`;
+}
+
+// ---------- the main flow ----------
+
+async function priceLead(args: Args) {
+  if (!args.inputText?.trim() && !args.screenshotKey) {
+    throw new Error("Paste the lead text or attach a screenshot");
+  }
+
+  const apiKey = await getSecret("ANTHROPIC_API_KEY");
+  if (!apiKey) {
+    return {
+      decision: "NEEDS_INFO",
+      reason:
+        "AI pricing isn't configured yet — add the ANTHROPIC_API_KEY secret on the web app in the Amplify Console (App settings → Secrets), then try again.",
+    };
+  }
+  // AppSync caps custom-op resolvers at 30s — keep model calls fast and
+  // fall back to the deterministic reply template when time runs short.
+  const anthropic = new Anthropic({ apiKey, timeout: 20_000, maxRetries: 0 });
+  const startedAt = Date.now();
+
+  // Screenshot from S3 → base64 for the vision call.
+  let screenshot: { data: string; mediaType: string } | null = null;
+  if (args.screenshotKey) {
+    if (!args.screenshotKey.startsWith("pricing/")) {
+      throw new Error("Invalid screenshot key");
+    }
+    const obj = await s3.send(
+      new GetObjectCommand({ Bucket: BUCKET(), Key: args.screenshotKey })
+    );
+    const mediaType = (obj.ContentType ?? "image/png").toLowerCase();
+    if (!IMAGE_TYPES[mediaType]) {
+      throw new Error("Unsupported screenshot type — re-attach as PNG or JPEG");
+    }
+    const bytes = await obj.Body!.transformToByteArray();
+    screenshot = {
+      data: Buffer.from(bytes).toString("base64"),
+      mediaType,
+    };
+  }
+
+  const extracted = await extractLead(anthropic, args.inputText ?? null, screenshot);
+  const assumptions = [...(extracted.assumptions ?? [])];
+
+  const client = await dataClient();
+  const persist = async (fields: Record<string, unknown>) => {
+    const { data: run, errors } = await client.models.LeadPricingRun.create({
+      customerId: args.customerId ?? undefined,
+      inputText: args.inputText?.slice(0, 4000) ?? undefined,
+      screenshotKey: args.screenshotKey ?? undefined,
+      town: extracted.town ?? undefined,
+      state: extracted.state ?? undefined,
+      outcome: "PENDING",
+      // Serialize the LIVE assumptions on every branch, not the raw extraction.
+      extracted: JSON.stringify({ ...extracted, assumptions }),
+      ...fields,
+    } as Parameters<typeof client.models.LeadPricingRun.create>[0]);
+    if (!run) {
+      throw new Error(
+        errors?.[0]?.message ?? "Could not save the pricing run"
+      );
+    }
+    return run;
+  };
+
+  // Lead fee: explicit arg wins; 0 means "direct lead / no fee".
+  const leadFeeCents = args.leadFeeCents ?? extracted.leadFeeCents;
+
+  // 1. Hard eligibility passes.
+  if (extracted.eligibility !== "ok") {
+    const run = await persist({
+      decision: "PASS",
+      reason: `Eligibility: ${extracted.eligibility.replace(/_/g, " ")}`,
+      replyText: PASS_SCRIPTS[extracted.eligibility],
+      service: extracted.pest,
+    });
+    return run;
+  }
+  if (extracted.state && !["MA", "RI"].includes(extracted.state.toUpperCase())) {
+    const run = await persist({
+      decision: "PASS",
+      reason: `Address outside MA/RI (${extracted.state})`,
+      replyText: PASS_SCRIPTS.out_of_area,
+      service: extracted.pest,
+    });
+    return run;
+  }
+
+  // 2. Lead fee required before quoting (spec step 0). 0 = direct lead.
+  if (leadFeeCents == null) {
+    const run = await persist({
+      decision: "NEEDS_INFO",
+      reason:
+        "Lead fee is required before quoting — enter the exact Thumbtack lead fee (or 0 for a direct lead) and run again.",
+    });
+    return run;
+  }
+
+  // 3. Zone from real drive time.
+  let zone: Zone = "UNKNOWN";
+  let minutes: number | null = null;
+  if (extracted.fullAddress || extracted.town) {
+    const dest = extracted.fullAddress ?? `${extracted.town}, ${extracted.state ?? "MA"}`;
+    minutes = await driveMinutes(dest);
+    if (minutes !== null) zone = zoneFromMinutes(minutes);
+    if (!extracted.fullAddress) {
+      assumptions.push("zone computed from the town center — confirm the street address");
+    }
+  }
+  if (zone === "OUT") {
+    const run = await persist({
+      decision: "PASS",
+      reason: `Drive time ${minutes} min from Ware exceeds 90 minutes`,
+      replyText: PASS_SCRIPTS.out_of_area,
+      zone,
+      driveMinutes: minutes ?? undefined,
+      leadFeeCents,
+      service: extracted.pest,
+    });
+    return run;
+  }
+  if (zone === "UNKNOWN") {
+    const key = await getSecret("GOOGLE_ROUTES_API_KEY");
+    const run = await persist({
+      decision: "NEEDS_INFO",
+      reason: key
+        ? "Couldn't compute the drive time for this address — check the service address and run again."
+        : "Zone lookup isn't configured — add the GOOGLE_ROUTES_API_KEY secret (a server key with Routes API enabled) in the Amplify Console.",
+      leadFeeCents,
+    });
+    return run;
+  }
+
+  // 4. Rule-driven escalations that price first, then flag.
+  const escalateReasons: string[] = [];
+  const internalNotes: string[] = [];
+  let pivotedFromOneTimeCents: number | null = null;
+  if (extracted.multiProperty) escalateReasons.push("Multi-property portfolio lead");
+  if (extracted.competitorMatchBelowFloor)
+    escalateReasons.push("Request to match a competitor price below floor");
+  if (extracted.complianceDocsRequested)
+    escalateReasons.push("Compliance documentation / audit support requested");
+
+  // 5. Map to a rate card and price deterministically.
+  const statedFreq: Frequency | null =
+    extracted.frequencyInterest === "monthly"
+      ? "MONTHLY"
+      : extracted.frequencyInterest === "bimonthly"
+        ? "BIMONTHLY"
+        : extracted.frequencyInterest === "quarterly"
+          ? "QUARTERLY"
+          : extracted.frequencyInterest === "one_time"
+            ? "ONE_TIME"
+            : null;
+
+  let priced: PricedPlan | null = null;
+  let gpKind = "one_time_gpc";
+
+  if (extracted.propertyType === "specialty" && extracted.specialtyKind !== "none") {
+    priced = priceSpecialty(extracted.specialtyKind, zone);
+    gpKind =
+      extracted.specialtyKind === "wasp_nest"
+        ? "wasp_nest"
+        : extracted.specialtyKind === "rodent_nest"
+          ? "rodent_nest"
+          : extracted.specialtyKind === "rodent_exclusion"
+            ? "rodent_exclusion"
+            : "one_time_gpc";
+  } else if (extracted.propertyType === "association") {
+    if (extracted.units == null) {
+      const run = await persist({
+        decision: "NEEDS_INFO",
+        reason: "Association lead without a unit count — get the number of units and run again.",
+        zone,
+        driveMinutes: minutes ?? undefined,
+        leadFeeCents,
+      });
+      return run;
+    }
+    priced = priceAssociation({
+      frequency: statedFreq ?? "MONTHLY",
+      units: extracted.units,
+      zone,
+    });
+  } else if (extracted.propertyType === "commercial") {
+    const sqft = extracted.sqft ?? 2000;
+    if (extracted.sqft == null) assumptions.push("assumed ~2,000 sqft — confirm on booking");
+    priced = priceCommercial({ frequency: statedFreq ?? "MONTHLY", sqft, zone });
+  } else if (extracted.propertyType === "mosquito") {
+    if (extracted.halfAcres == null)
+      assumptions.push("assumed up to ½ acre yard — we'll confirm on the first visit");
+    const mosquitoOneTime = statedFreq === "ONE_TIME";
+    if (mosquitoOneTime && extracted.tick) {
+      assumptions.push(
+        "the one-time event spray covers mosquitoes only — tick coverage is on the seasonal plan"
+      );
+    }
+    priced = priceMosquito({
+      tick: extracted.tick && !mosquitoOneTime,
+      halfAcres: extracted.halfAcres ?? 1,
+      zone,
+      oneTime: mosquitoOneTime,
+    });
+    gpKind = "mosquito_one_time";
+  } else {
+    // Residential (default). Unknown sqft → assume 2,000 and say so.
+    const sqft = extracted.sqft ?? 2000;
+    if (extracted.sqft == null)
+      assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+    const freq = statedFreq ?? "QUARTERLY";
+    priced = priceResidential({
+      frequency: freq,
+      sqft,
+      zone,
+      rodentAddon: extracted.rodentInterest && freq !== "ONE_TIME",
+    });
+    gpKind = "one_time_gpc";
+
+    // One-time economics: if it fails the 3× lead-fee test, quote the plan
+    // instead. The WHY stays internal (run.reason) — never customer-facing.
+    if (freq === "ONE_TIME" && priced.oneTimeCents != null) {
+      const gp = oneTimeGrossProfitCents(gpKind, priced.oneTimeCents, zone);
+      if (clearsLeadFee(gp, leadFeeCents) === false) {
+        pivotedFromOneTimeCents = priced.oneTimeCents;
+        internalNotes.push(
+          `One-time GP ${gp != null ? money(gp) : "?"} failed the 3× lead-fee test — pivoted to the quarterly plan`
+        );
+        priced = priceResidential({ frequency: "QUARTERLY", sqft, zone });
+      }
+    }
+  }
+
+  if (!priced) {
+    const run = await persist({
+      decision: "ESCALATE",
+      reason: "Couldn't map this lead to a rate card — Jake quotes custom.",
+      zone,
+      driveMinutes: minutes ?? undefined,
+      leadFeeCents,
+    });
+    await notifyEscalation(run?.id, extracted, "Unmapped service", null);
+    return run;
+  }
+  // Escalate-only cards (termite, oversized commercial): no price exists, so
+  // never run reply composition — use the deterministic holding script.
+  if (priced.escalate && priced.monthlyCents == null && priced.oneTimeCents == null) {
+    const run = await persist({
+      decision: "ESCALATE",
+      reason: [priced.escalate, ...escalateReasons].join("; "),
+      zone,
+      driveMinutes: minutes ?? undefined,
+      leadFeeCents,
+      service: priced.service,
+      frequency: priced.frequency,
+      replyText:
+        "Thanks for reaching out! This one needs a custom quote from our owner — he'll call you today to walk through the details and get you an exact price.",
+    });
+    await notifyEscalation(run?.id, extracted, [priced.escalate, ...escalateReasons].join("; "), priced);
+    return run;
+  }
+
+  if (priced.escalate) {
+    escalateReasons.push(priced.escalate);
+    if (priced.oneTimeCents != null && priced.monthlyCents == null && leadFeeCents > 0) {
+      const gp = oneTimeGrossProfitCents(gpKind, priced.oneTimeCents, zone);
+      if (clearsLeadFee(gp, leadFeeCents) === false) {
+        escalateReasons.push(
+          `One-time gross profit ${gp != null ? money(gp) : "?"} fails the 3× lead-fee test`
+        );
+      }
+    }
+  }
+
+  // 6. Specialty/one-time lead-fee test (recurring always clears).
+  // Escalate-flagged cards (HOA etc.) never short-circuit to PASS — Jake
+  // decides; the failed economics just become part of the escalation.
+  if (
+    priced.oneTimeCents != null &&
+    priced.monthlyCents == null &&
+    leadFeeCents > 0 &&
+    !priced.escalate
+  ) {
+    const gp = oneTimeGrossProfitCents(gpKind, priced.oneTimeCents, zone);
+    if (clearsLeadFee(gp, leadFeeCents) === false) {
+      const run = await persist({
+        decision: "PASS",
+        reason: `One-time gross profit ${gp != null ? money(gp) : "?"} fails the 3× lead-fee test (${money(3 * leadFeeCents)})`,
+        zone,
+        driveMinutes: minutes ?? undefined,
+        leadFeeCents,
+        service: priced.service,
+        frequency: priced.frequency,
+        oneTimePriceCents: priced.oneTimeCents,
+        priceBreakdown: JSON.stringify(priced.lines),
+      });
+      return run;
+    }
+  }
+
+  // 7. Compose the reply (AI-polished, price-validated; deterministic fallback).
+  const factTown = extracted.town;
+  const monthlyStr = priced.monthlyCents != null ? money(priced.monthlyCents) : null;
+  const initialStr = priced.initialFeeCents != null ? money(priced.initialFeeCents) : null;
+  const oneTimeStr = priced.oneTimeCents != null ? money(priced.oneTimeCents) : null;
+
+  let fallbackPlanStr: string | null = null;
+  if (extracted.propertyType === "residential" && priced.frequency === "QUARTERLY") {
+    const bi = priceResidential({
+      frequency: "BIMONTHLY",
+      sqft: extracted.sqft ?? 2000,
+      zone,
+    });
+    fallbackPlanStr = `bi-monthly at ${money(bi.monthlyCents!)}/mo`;
+  } else if (extracted.propertyType === "residential" && priced.frequency === "MONTHLY") {
+    const q = priceResidential({
+      frequency: "QUARTERLY",
+      sqft: extracted.sqft ?? 2000,
+      zone,
+    });
+    fallbackPlanStr = `quarterly at ${money(q.monthlyCents!)}/mo as the value option`;
+  } else if (priced.service.startsWith("Mosquito + tick")) {
+    const m = priceMosquito({ tick: false, halfAcres: extracted.halfAcres ?? 1, zone });
+    fallbackPlanStr = `mosquito-only at ${money(m.monthlyCents!)}/mo`;
+  }
+
+  // Keep the second model call inside the AppSync window; the deterministic
+  // template is always a valid reply.
+  const timeLeft = Date.now() - startedAt < 15_000;
+  const composed =
+    (timeLeft
+      ? await composeReply(anthropic, {
+          pest: extracted.pest || "pests",
+          town: factTown,
+          service: priced.service,
+          monthly: monthlyStr,
+          initial: initialStr,
+          oneTime: oneTimeStr,
+          fallbackPlan: fallbackPlanStr,
+          assumptions,
+          oneTimeAsked: statedFreq === "ONE_TIME" && priced.monthlyCents != null,
+          rodentAddon:
+            extracted.rodentInterest && extracted.propertyType === "residential",
+          pivotedFromOneTime:
+            pivotedFromOneTimeCents != null ? money(pivotedFromOneTimeCents) : null,
+        })
+      : null) ??
+    templateReply({
+      pest: extracted.pest || "pests",
+      town: factTown,
+      monthly: monthlyStr,
+      initial: initialStr,
+      oneTime: oneTimeStr,
+      frequency: priced.frequency,
+      assumptions,
+    });
+
+  const decision = escalateReasons.length ? "ESCALATE" : "QUOTE";
+  const run = await persist({
+    decision,
+    reason:
+      [...escalateReasons, ...internalNotes].join("; ") || undefined,
+    zone,
+    driveMinutes: minutes ?? undefined,
+    leadFeeCents,
+    service: priced.service,
+    frequency: priced.frequency,
+    monthlyPriceCents: priced.monthlyCents ?? undefined,
+    initialFeeCents: priced.initialFeeCents ?? undefined,
+    oneTimePriceCents: priced.oneTimeCents ?? undefined,
+    priceBreakdown: JSON.stringify(priced.lines),
+    replyText: composed,
+  });
+
+  if (decision === "ESCALATE") {
+    await notifyEscalation(run?.id, extracted, escalateReasons.join("; "), priced);
+  }
+  return run;
+}
+
+async function notifyEscalation(
+  runId: string | undefined,
+  extracted: Extraction,
+  reason: string,
+  priced: PricedPlan | null
+) {
+  const office = process.env.SES_NOTIFY_EMAIL;
+  if (!office) return;
+  const priceLine = priced
+    ? priced.monthlyCents != null
+      ? `${money(priced.monthlyCents)}/mo${priced.initialFeeCents != null ? ` + ${money(priced.initialFeeCents)} initial` : ""}`
+      : priced.oneTimeCents != null
+        ? `${money(priced.oneTimeCents)} flat`
+        : "no card price"
+    : "no card price";
+  await sendEmail({
+    to: office,
+    subject: `Pricing escalation: ${extracted.town ?? "unknown town"} — ${extracted.pest || "lead"}`,
+    template: "pricing-escalation",
+    relatedId: runId,
+    html: emailShell(
+      "Lead needs your call",
+      `<p><strong>Reason:</strong> ${reason}</p>
+       <p><strong>Lead:</strong> ${extracted.customerName ?? "unknown"} — ${extracted.pest || "?"} — ${extracted.town ?? "?"}, ${extracted.state ?? "?"}</p>
+       <p><strong>Computed quote:</strong> ${priceLine}</p>
+       <p>The receptionist has told the prospect a manager will follow up same day. Full details are in the CRM pricing log.</p>`
+    ),
+  });
+}

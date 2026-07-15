@@ -149,6 +149,8 @@ const fmtDateTime = (iso: string) =>
     timeZone: "America/New_York",
   });
 
+export type AgreementImage = { bytes: Uint8Array; contentType: string };
+
 export async function renderAgreementPdf(opts: {
   agreementId: string;
   title: string;
@@ -161,6 +163,7 @@ export async function renderAgreementPdf(opts: {
   signedAtIso: string;
   signerIp?: string;
   signerUserAgent?: string;
+  images?: AgreementImage[];
 }): Promise<Uint8Array> {
   const w = await PdfWriter.create();
   w.header("Service Agreement");
@@ -171,6 +174,34 @@ export async function renderAgreementPdf(opts: {
   w.rule();
 
   w.text(opts.bodyText, { gapAfter: 10 });
+
+  // Pest / treatment photos from the plan template.
+  if (opts.images?.length) {
+    w.heading("Covered pests");
+    const maxW = PAGE.width - MARGIN * 2;
+    for (const img of opts.images.slice(0, 8)) {
+      try {
+        const ct = img.contentType.toLowerCase();
+        if (!ct.includes("png") && !ct.includes("jpeg") && !ct.includes("jpg")) {
+          continue; // pdf-lib can only embed PNG/JPEG
+        }
+        const embedded = ct.includes("png")
+          ? await w.doc.embedPng(img.bytes)
+          : await w.doc.embedJpg(img.bytes);
+        const dims = embedded.scaleToFit(Math.min(maxW, 300), 220);
+        w.ensure(dims.height + 12);
+        w.page.drawImage(embedded, {
+          x: MARGIN,
+          y: w.y - dims.height,
+          width: dims.width,
+          height: dims.height,
+        });
+        w.y -= dims.height + 10;
+      } catch {
+        // Unsupported/corrupt image — the agreement still renders.
+      }
+    }
+  }
 
   w.rule();
   w.heading("Electronic signature");

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, unwrap, type Customer, type PlanTemplate } from "../lib/api";
+import { api, opResult, unwrap, type Customer, type PlanTemplate } from "../lib/api";
 import {
   FREQUENCY_LABEL,
   fillAgreementTemplate,
@@ -43,7 +43,11 @@ export default function QuoteSheet({
         setTemplates(active);
         if (active[0]) {
           setTemplateId(active[0].id);
-          setPrice((active[0].priceCents / 100).toString());
+          setPrice(
+            active[0].priceCents != null
+              ? (active[0].priceCents / 100).toString()
+              : ""
+          );
         }
       })
       .catch((err) =>
@@ -77,7 +81,7 @@ export default function QuoteSheet({
           planName: template.name,
           priceCents: cents,
           serviceFrequency: template.serviceFrequency,
-          status: sendNow ? "SENT" : "DRAFT",
+          status: "DRAFT",
           notes: notes.trim() || undefined,
           quotedAt: new Date().toISOString(),
           accessGroups,
@@ -109,14 +113,25 @@ export default function QuoteSheet({
           title: template.agreementTitle,
           bodyText,
           status: "DRAFT",
+          imageKeys: (template.imageKeys ?? []).filter(
+            (k): k is string => typeof k === "string"
+          ),
           accessGroups,
         })
       );
       if (!agreement) throw new Error("Could not create the agreement");
       if (sendNow) {
-        unwrap(
+        const sendResult = opResult<{ sent: boolean; link?: string }>(
           await api().mutations.sendAgreement({ agreementId: agreement.id })
         );
+        if (!sendResult?.sent) {
+          throw new Error(
+            sendResult?.link
+              ? `The signing email failed to send — share this link manually: ${sendResult.link}`
+              : "The signing email failed to send — check the email address and resend from the Agreements card."
+          );
+        }
+        unwrap(await api().models.Quote.update({ id: quote.id, status: "SENT" }));
       }
       await onDone();
     } catch (err) {
@@ -143,12 +158,12 @@ export default function QuoteSheet({
           onChange={(e) => {
             setTemplateId(e.target.value);
             const t = templates.find((x) => x.id === e.target.value);
-            if (t) setPrice((t.priceCents / 100).toString());
+            if (t) setPrice(t.priceCents != null ? (t.priceCents / 100).toString() : "");
           }}
         >
           {templates.map((t) => (
             <option key={t.id} value={t.id}>
-              {t.name} — {money(t.priceCents)}/mo
+              {t.name}{t.priceCents != null ? ` — ${money(t.priceCents)}/mo` : " — AI-priced"}
             </option>
           ))}
         </select>
@@ -156,7 +171,7 @@ export default function QuoteSheet({
       {template?.description ? (
         <p className="muted small">{template.description}</p>
       ) : null}
-      <Field label="Quoted monthly price ($)" hint="Prefilled from the template — adjust if needed">
+      <Field label="Quoted monthly price ($)" hint="Prefilled from the template list price — or use ⚡ AI price for the exact rate-card number">
         <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
       </Field>
       <Field label="Notes (internal)">

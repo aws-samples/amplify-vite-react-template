@@ -37,6 +37,7 @@ import CustomerForm, { customerToForm } from "../components/CustomerForm";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import DocButton from "../components/DocButton";
 import QuoteSheet from "../components/QuoteSheet";
+import PriceLeadSheet from "../components/PriceLeadSheet";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
 
@@ -67,6 +68,7 @@ export default function CustomerDetail() {
     | "portal"
     | "group"
     | "quote"
+    | "price"
   >(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
@@ -367,9 +369,16 @@ export default function CustomerDetail() {
         <Card
           title="Quotes"
           actions={
-            <Button small variant="ghost" onClick={() => setSheet("quote")}>
-              + Quote
-            </Button>
+            <>
+              {isLead ? (
+                <Button small variant="subtle" onClick={() => setSheet("price")}>
+                  ⚡ AI price
+                </Button>
+              ) : null}
+              <Button small variant="ghost" onClick={() => setSheet("quote")}>
+                + Quote
+              </Button>
+            </>
           }
         >
           {quotes.length === 0 ? (
@@ -836,6 +845,10 @@ export default function CustomerDetail() {
         />
       </Sheet>
 
+      <Sheet open={sheet === "price"} onClose={() => setSheet(null)} title="AI price this lead">
+        <PriceLeadSheet customer={customer} onQuoteCreated={load} />
+      </Sheet>
+
       <Sheet
         open={rescheduling !== null}
         onClose={() => setRescheduling(null)}
@@ -962,7 +975,11 @@ function PlanForm({
         setTemplates(active);
         if (active[0]) {
           setTemplateId(active[0].id);
-          setPrice((active[0].priceCents / 100).toString());
+          setPrice(
+            active[0].priceCents != null
+              ? (active[0].priceCents / 100).toString()
+              : ""
+          );
         }
       })
       .catch((err) =>
@@ -989,12 +1006,12 @@ function PlanForm({
           onChange={(e) => {
             setTemplateId(e.target.value);
             const t = templates.find((x) => x.id === e.target.value);
-            if (t) setPrice((t.priceCents / 100).toString());
+            if (t) setPrice(t.priceCents != null ? (t.priceCents / 100).toString() : "");
           }}
         >
           {templates.map((t) => (
             <option key={t.id} value={t.id}>
-              {t.name} — {money(t.priceCents)}/mo · {t.serviceFrequency?.toLowerCase()}
+              {t.name}{t.priceCents != null ? ` — ${money(t.priceCents)}/mo` : ""} · {t.serviceFrequency?.toLowerCase()}
             </option>
           ))}
         </select>

@@ -2,7 +2,12 @@ import type {
   APIGatewayProxyEventV2,
   APIGatewayProxyResultV2,
 } from "aws-lambda";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 import { emailShell, sendEmail } from "../shared/email";
@@ -102,6 +107,21 @@ async function convertQuote(quoteId: string, signedAtIso: string) {
     convertedAt: signedAtIso,
     servicePlanId: plan.id,
   });
+  // The quoted initial service visit becomes a chargeable one-time job so
+  // the office schedules it and bills it through the normal flow.
+  if (quote.initialFeeCents != null && quote.initialFeeCents > 0) {
+    await client.models.Job.create({
+      customerId: quote.customerId,
+      servicePlanId: plan.id,
+      type: "ONE_TIME",
+      serviceType: "Initial service visit",
+      description:
+        "75-minute first service: inspection, interior flush-out, exterior barrier, web/nest removal.",
+      priceCents: quote.initialFeeCents,
+      status: "UNSCHEDULED",
+      accessGroups,
+    });
+  }
   if (customer.status === "LEAD") {
     await client.models.Customer.update({
       id: customer.id,
@@ -137,12 +157,36 @@ async function getAgreement(token: string) {
     });
   }
 
+  // Pest/treatment photos: short-lived presigned URLs for the sign page.
+  // Access is already gated by the unguessable agreement token.
+  const bucket = process.env.DOCS_BUCKET;
+  const imageKeys = (agreement.imageKeys ?? []).filter(
+    (k): k is string => typeof k === "string" && k.length > 0
+  );
+  const imageUrls: string[] = [];
+  if (bucket) {
+    for (const key of imageKeys.slice(0, 8)) {
+      try {
+        imageUrls.push(
+          await getSignedUrl(
+            s3,
+            new GetObjectCommand({ Bucket: bucket, Key: key }),
+            { expiresIn: 900 }
+          )
+        );
+      } catch {
+        /* skip broken image */
+      }
+    }
+  }
+
   return json(200, {
     title: agreement.title,
     bodyText: agreement.bodyText,
     customerName: customer?.displayName ?? "",
     status: agreement.status === "SENT" ? "VIEWED" : agreement.status,
     signedAt: agreement.signedAt ?? null,
+    imageUrls,
   });
 }
 
@@ -174,6 +218,27 @@ async function signAgreement(opts: {
     .filter(Boolean)
     .join(", ");
 
+  const bucket = process.env.DOCS_BUCKET;
+  if (!bucket) throw new Error("DOCS_BUCKET is not configured");
+
+  // Fetch pest/treatment photos so they're embedded in the signed PDF.
+  const images: { bytes: Uint8Array; contentType: string }[] = [];
+  for (const key of (agreement.imageKeys ?? []).filter(
+    (k): k is string => typeof k === "string" && k.length > 0
+  ).slice(0, 8)) {
+    try {
+      const obj = await s3.send(
+        new GetObjectCommand({ Bucket: bucket, Key: key })
+      );
+      images.push({
+        bytes: await obj.Body!.transformToByteArray(),
+        contentType: obj.ContentType ?? "image/jpeg",
+      });
+    } catch {
+      /* missing image never blocks a signature */
+    }
+  }
+
   const pdf = await renderAgreementPdf({
     agreementId: agreement.id,
     title: agreement.title,
@@ -186,10 +251,8 @@ async function signAgreement(opts: {
     signedAtIso,
     signerIp: opts.ip,
     signerUserAgent: opts.userAgent,
+    images,
   });
-
-  const bucket = process.env.DOCS_BUCKET;
-  if (!bucket) throw new Error("DOCS_BUCKET is not configured");
   const pdfKey = `agreements/${agreement.customerId}/${agreement.id}.pdf`;
   await s3.send(
     new PutObjectCommand({

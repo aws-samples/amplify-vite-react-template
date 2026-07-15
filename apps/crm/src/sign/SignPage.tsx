@@ -9,6 +9,7 @@ type AgreementView = {
   customerName: string;
   status: string;
   signedAt: string | null;
+  imageUrls?: string[];
 };
 
 /**
@@ -132,6 +133,18 @@ export default function SignPage() {
               >
                 {agreement.bodyText}
               </div>
+              {agreement.imageUrls?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <p className="group-label">Covered pests</p>
+                  <div className="photo-grid">
+                    {agreement.imageUrls.map((url, i) => (
+                      <div key={i} className="photo-thumb">
+                        <img src={url} alt="Covered pest" loading="lazy" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </Card>
 
             <Card title="Sign here">

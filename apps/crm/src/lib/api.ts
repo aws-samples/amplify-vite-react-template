@@ -25,6 +25,20 @@ export type ServiceReport = Schema["ServiceReport"]["type"];
 export type Invoice = Schema["Invoice"]["type"];
 export type PlanTemplate = Schema["PlanTemplate"]["type"];
 export type Quote = Schema["Quote"]["type"];
+export type LeadPricingRun = Schema["LeadPricingRun"]["type"];
+
+/** Parse an AWSJSON field that may arrive as a string. */
+export function jsonField<T>(raw: unknown): T | null {
+  if (raw == null) return null;
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+  return raw as T;
+}
 
 /** Unwrap an Amplify Data result, surfacing GraphQL errors as exceptions. */
 export function unwrap<T>(result: {

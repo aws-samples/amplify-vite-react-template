@@ -36,6 +36,7 @@ type Args = {
   kind?: string;
   note?: string;
   contentType?: string;
+  templateId?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -53,6 +54,13 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "getDocumentUrl": {
       return getDocumentUrl(event.arguments.key!, callerGroups(event.identity));
+    }
+    case "getTemplateImageUploadUrl": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return getTemplateImageUploadUrl(
+        event.arguments.templateId!,
+        event.arguments.contentType!
+      );
     }
     case "getReportPhotoUploadUrl": {
       const groups = callerGroups(event.identity);
@@ -307,12 +315,57 @@ async function getReportPhotoUploadUrl(reportId: string, contentType: string) {
   return { key, uploadUrl, expiresInSeconds: 900 };
 }
 
+// Template photos are embedded in PDFs (pdf-lib) — JPEG/PNG only.
+const TEMPLATE_IMAGE_TYPES: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+};
+
+/** Presigned PUT for a plan-template pest photo (templates/<id>/…). */
+async function getTemplateImageUploadUrl(templateId: string, contentType: string) {
+  const ext = TEMPLATE_IMAGE_TYPES[contentType.toLowerCase()];
+  if (!ext) {
+    throw new Error("Unsupported image type — pest photos must be JPEG or PNG");
+  }
+  const client = await dataClient();
+  const { data: template } = await client.models.PlanTemplate.get({
+    id: templateId,
+  });
+  if (!template) throw new Error(`Template ${templateId} not found`);
+  const key = `templates/${templateId}/${Date.now()}-${randomBytes(4).toString("hex")}.${ext}`;
+  const uploadUrl = await getSignedUrl(
+    s3,
+    new PutObjectCommand({
+      Bucket: BUCKET(),
+      Key: key,
+      ContentType: contentType,
+    }),
+    { expiresIn: 900 }
+  );
+  return { key, uploadUrl, expiresInSeconds: 900 };
+}
+
 /**
  * Presign a document for viewing. Keys are always
- * `reports/<customerId>/...` or `agreements/<customerId>/...`; entitlement
- * is office/tech, the customer's own dynamic group, or their customer-group.
+ * `reports/<customerId>/...`, `agreements/<customerId>/...`, or
+ * `templates/<templateId>/...` (staff-only); entitlement is office/tech,
+ * the customer's own dynamic group, or their customer-group.
  */
 async function getDocumentUrl(key: string, groups: string[]) {
+  // Plan-template pest photos: staff only (signers get them via the
+  // token-gated agreement-public endpoint; customers get the signed PDF).
+  if (/^templates\/[^/]+\//.test(key)) {
+    if (!groups.includes("OFFICE") && !groups.includes("TECH")) {
+      throw new Error("Not authorized for this document");
+    }
+    const url = await getSignedUrl(
+      s3,
+      new GetObjectCommand({ Bucket: BUCKET(), Key: key }),
+      { expiresIn: 900 }
+    );
+    return { url, expiresInSeconds: 900 };
+  }
+
   const match = /^(reports|agreements)\/([^/]+)\//.exec(key);
   if (!match) throw new Error("Invalid document key");
   const customerId = match[2];

@@ -13,12 +13,14 @@ import {
   Spinner,
 } from "../ui/kit";
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
+import PriceLeadSheet from "../components/PriceLeadSheet";
 
 export default function Leads() {
   const navigate = useNavigate();
   const [leads, setLeads] = useState<Customer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [pricing, setPricing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -39,9 +41,14 @@ export default function Leads() {
     <Page
       title="Leads"
       actions={
-        <Button small onClick={() => setAdding(true)}>
-          + Lead
-        </Button>
+        <>
+          <Button small variant="subtle" onClick={() => setPricing(true)}>
+            ⚡ Price a lead
+          </Button>
+          <Button small onClick={() => setAdding(true)}>
+            + Lead
+          </Button>
+        </>
       }
     >
       <ErrorNote error={error} />
@@ -68,6 +75,10 @@ export default function Leads() {
           ))}
         </Card>
       )}
+
+      <Sheet open={pricing} onClose={() => setPricing(false)} title="Price a lead">
+        <PriceLeadSheet />
+      </Sheet>
 
       <Sheet open={adding} onClose={() => setAdding(false)} title="New lead">
         <CustomerForm

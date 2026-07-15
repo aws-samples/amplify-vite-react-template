@@ -6,6 +6,7 @@ import { crmDocs } from "../functions/crm-docs/resource";
 import { agreementPublic } from "../functions/agreement-public/resource";
 import { dailyReminders } from "../functions/daily-reminders/resource";
 import { postAuth } from "../functions/post-auth/resource";
+import { crmPricing } from "../functions/crm-pricing/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -29,6 +30,8 @@ const schema = a.schema({
   CustomerStatus: a.enum(["LEAD", "ACTIVE", "INACTIVE"]),
   ServicePlanStatus: a.enum(["ACTIVE", "PAUSED", "CANCELED"]),
   QuoteStatus: a.enum(["DRAFT", "SENT", "CONVERTED", "VOID"]),
+  PricingDecision: a.enum(["QUOTE", "PASS", "ESCALATE", "NEEDS_INFO"]),
+  PricingOutcome: a.enum(["PENDING", "SENT", "WON", "LOST", "PASSED"]),
   ServiceFrequency: a.enum(["MONTHLY", "BIMONTHLY", "QUARTERLY"]),
   JobType: a.enum(["ONE_TIME", "RECURRING"]),
   JobStatus: a.enum([
@@ -102,6 +105,7 @@ const schema = a.schema({
       serviceReports: a.hasMany("ServiceReport", "customerId"),
       invoices: a.hasMany("Invoice", "customerId"),
       quotes: a.hasMany("Quote", "customerId"),
+      pricingRuns: a.hasMany("LeadPricingRun", "customerId"),
     })
     .secondaryIndexes((index) => [
       index("status").sortKeys(["displayName"]),
@@ -146,10 +150,14 @@ const schema = a.schema({
     .model({
       name: a.string().required(),
       description: a.string(),
-      priceCents: a.integer().required(),
+      // Optional list price. Real quotes are priced by the AI pricing
+      // engine (crm-pricing) from the rate cards; this is a display anchor.
+      priceCents: a.integer(),
       serviceFrequency: a.ref("ServiceFrequency").required(),
       agreementTitle: a.string().required(),
       agreementBody: a.string().required(),
+      // Pest photos shown on the e-sign page and embedded in the signed PDF.
+      imageKeys: a.string().array(),
       active: a.boolean().required(),
       sortOrder: a.integer(),
       quotes: a.hasMany("Quote", "planTemplateId"),
@@ -174,6 +182,7 @@ const schema = a.schema({
       planTemplate: a.belongsTo("PlanTemplate", "planTemplateId"),
       planName: a.string().required(),
       priceCents: a.integer().required(),
+      initialFeeCents: a.integer(),
       serviceFrequency: a.ref("ServiceFrequency").required(),
       status: a.ref("QuoteStatus").required(),
       notes: a.string(),
@@ -187,6 +196,41 @@ const schema = a.schema({
       allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
       allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
+    ]),
+
+  /**
+   * One run of the AI lead-pricing engine: the pasted/screenshotted lead,
+   * what the model extracted, the deterministic rate-card price, and the
+   * decision + reply. This is the pricing log Jake reviews weekly (date,
+   * town, service, zone, lead fee, quoted price, outcome).
+   */
+  LeadPricingRun: a
+    .model({
+      customerId: a.id(),
+      customer: a.belongsTo("Customer", "customerId"),
+      decision: a.ref("PricingDecision").required(),
+      outcome: a.ref("PricingOutcome"),
+      inputText: a.string(),
+      screenshotKey: a.string(),
+      leadFeeCents: a.integer(),
+      zone: a.string(), // A | B | OUT | UNKNOWN
+      driveMinutes: a.integer(),
+      town: a.string(),
+      state: a.string(),
+      service: a.string(), // human label, e.g. "Residential GPC — quarterly"
+      frequency: a.string(), // MONTHLY | BIMONTHLY | QUARTERLY | ONE_TIME
+      extracted: a.json(), // pest, propertyType, sqft/units, assumptions, flags
+      monthlyPriceCents: a.integer(),
+      initialFeeCents: a.integer(),
+      oneTimePriceCents: a.integer(),
+      priceBreakdown: a.json(), // [{label, cents}]
+      replyText: a.string(),
+      reason: a.string(), // pass/escalate/needs-info reason
+      modelPriceMismatch: a.boolean(),
+      quoteId: a.id(),
+    })
+    .authorization((allow) => [
+      allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
     ]),
 
   Technician: a
@@ -277,6 +321,7 @@ const schema = a.schema({
       signerIp: a.string(),
       signerUserAgent: a.string(),
       pdfKey: a.string(),
+      imageKeys: a.string().array(),
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [index("signToken")])
@@ -474,6 +519,48 @@ const schema = a.schema({
     .handler(a.handler.function(crmDocs)),
 
   /**
+   * AI lead pricing: paste a Thumbtack lead (or attach a screenshot) and the
+   * engine extracts the facts with Claude, determines the zone from real
+   * drive time, prices deterministically from the rate cards, and returns
+   * QUOTE / PASS / ESCALATE with a paste-ready reply. Persists a
+   * LeadPricingRun and emails Jake on ESCALATE.
+   */
+  priceLead: a
+    .mutation()
+    .arguments({
+      inputText: a.string(),
+      screenshotKey: a.string(),
+      customerId: a.string(),
+      leadFeeCents: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE"])])
+    .handler(a.handler.function(crmPricing)),
+
+  /** Presigned PUT for a lead screenshot to price (pricing/<uuid>.png). */
+  getPricingUploadUrl: a
+    .mutation()
+    .arguments({ contentType: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE"])])
+    .handler(a.handler.function(crmPricing)),
+
+  /**
+   * Presigned PUT for a plan-template pest photo. Keys land under
+   * `templates/<templateId>/…`; shown on the e-sign page and embedded in
+   * the signed agreement PDF.
+   */
+  getTemplateImageUploadUrl: a
+    .mutation()
+    .arguments({
+      templateId: a.string().required(),
+      contentType: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
    * Presigned PUT for a technician report photo. Keys land under
    * `reports/<customerId>/photos/<reportId>/…` so the existing
    * getDocumentUrl entitlement covers viewing them.
@@ -515,6 +602,7 @@ const schema = a.schema({
   allow.resource(agreementPublic),
   allow.resource(dailyReminders),
   allow.resource(postAuth),
+  allow.resource(crmPricing),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

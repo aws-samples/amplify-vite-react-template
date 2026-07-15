@@ -17,6 +17,7 @@ import { crmDocs } from "./functions/crm-docs/resource";
 import { agreementPublic } from "./functions/agreement-public/resource";
 import { dailyReminders } from "./functions/daily-reminders/resource";
 import { createChallenge } from "./functions/auth-challenge/resource";
+import { crmPricing } from "./functions/crm-pricing/resource";
 
 const backend = defineBackend({
   auth,
@@ -30,6 +31,7 @@ const backend = defineBackend({
   agreementPublic,
   dailyReminders,
   createChallenge,
+  crmPricing,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
@@ -129,6 +131,7 @@ for (const fn of [
   backend.dailyReminders,
   backend.crmAdmin,
   backend.createChallenge,
+  backend.crmPricing,
 ]) {
   fn.resources.lambda.addToRolePolicy(sesPolicy);
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
@@ -137,8 +140,29 @@ for (const fn of [
 }
 docsBucket.grantReadWrite(backend.crmDocs.resources.lambda);
 docsBucket.grantWrite(backend.agreementPublic.resources.lambda);
+docsBucket.grantRead(backend.agreementPublic.resources.lambda);
+docsBucket.grantReadWrite(backend.crmPricing.resources.lambda);
 backend.crmDocs.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 backend.agreementPublic.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
+backend.crmPricing.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
+
+// The pricing engine reads its API keys from SSM at runtime so the deploy
+// never depends on the secrets existing (they're added via the console).
+const appId = process.env.AWS_APP_ID ?? "d26qpsjewk0bee";
+const branch = process.env.AWS_BRANCH ?? "staging";
+backend.crmPricing.addEnvironment("AMPLIFY_APP_ID", appId);
+backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
+backend.crmPricing.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/ANTHROPIC_API_KEY`,
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/GOOGLE_ROUTES_API_KEY`,
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/ANTHROPIC_API_KEY`,
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/GOOGLE_ROUTES_API_KEY`,
+    ],
+  })
+);
 
 // Surface the Function URLs into amplify_outputs.json so the frontends
 // (and the Stripe dashboard setup) can read them without separate env vars.

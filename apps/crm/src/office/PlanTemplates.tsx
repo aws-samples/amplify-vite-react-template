@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, unwrap, type PlanTemplate } from "../lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, opResult, unwrap, type PlanTemplate } from "../lib/api";
 import { DEFAULT_AGREEMENT_BODY } from "../lib/agreementTemplate";
 import { money } from "../lib/format";
 import {
@@ -72,7 +72,7 @@ export default function PlanTemplates() {
             <ListRow
               key={t.id}
               title={t.name}
-              subtitle={`${money(t.priceCents)}/mo · service ${t.serviceFrequency?.toLowerCase()}`}
+              subtitle={`${t.priceCents != null ? `${money(t.priceCents)}/mo list` : "AI-priced"} · service ${t.serviceFrequency?.toLowerCase()}`}
               meta={
                 t.active ? (
                   <Badge tone="ok">active</Badge>
@@ -115,7 +115,7 @@ function TemplateForm({
   const [name, setName] = useState(existing?.name ?? "");
   const [description, setDescription] = useState(existing?.description ?? "");
   const [price, setPrice] = useState(
-    existing ? (existing.priceCents / 100).toString() : ""
+    existing?.priceCents != null ? (existing.priceCents / 100).toString() : ""
   );
   const [freq, setFreq] = useState<Freq>(
     (existing?.serviceFrequency as Freq) ?? "MONTHLY"
@@ -131,9 +131,9 @@ function TemplateForm({
   const [error, setError] = useState<string | null>(null);
 
   const save = async () => {
-    const cents = Math.round(parseFloat(price) * 100);
-    if (!name.trim() || !Number.isFinite(cents) || cents <= 0) {
-      setError("Enter a name and a valid monthly price");
+    const cents = price.trim() ? Math.round(parseFloat(price) * 100) : null;
+    if (!name.trim() || (cents !== null && (!Number.isFinite(cents) || cents <= 0))) {
+      setError("Enter a name (and a valid list price, or leave it blank for AI pricing)");
       return;
     }
     if (!agreementTitle.trim() || !agreementBody.trim()) {
@@ -179,8 +179,8 @@ function TemplateForm({
         <input value={description} onChange={(e) => setDescription(e.target.value)} />
       </Field>
       <div className="form-row-2">
-        <Field label="Monthly price ($)">
-          <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
+        <Field label="List price ($/mo)" hint="Optional — quotes are AI-priced">
+          <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="AI-priced" />
         </Field>
         <Field label="Active">
           <SegControl
@@ -217,10 +217,125 @@ function TemplateForm({
           onChange={(e) => setAgreementBody(e.target.value)}
         />
       </Field>
+      {existing ? (
+        <Field
+          label="Pest photos"
+          hint="Shown on the e-sign page and embedded in the signed PDF"
+        >
+          <TemplateImages template={existing} />
+        </Field>
+      ) : (
+        <p className="muted small">Save the template first to add pest photos.</p>
+      )}
       <ErrorNote error={error} />
       <Button block loading={busy} onClick={() => void save()}>
         {existing ? "Save template" : "Create template"}
       </Button>
+    </div>
+  );
+}
+
+/** Pest photo grid for a template — presigned PUT, thumbnails, remove. */
+function TemplateImages({ template }: { template: PlanTemplate }) {
+  const [keys, setKeys] = useState<string[]>(
+    (template.imageKeys ?? []).filter((k): k is string => typeof k === "string")
+  );
+  const [urls, setUrls] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      for (const key of keys) {
+        if (urls[key]) continue;
+        try {
+          const res = await api().queries.getDocumentUrl({ key });
+          const { url } = opResult<{ url?: string }>(res) ?? {};
+          if (url && !cancel) setUrls((u) => ({ ...u, [key]: url }));
+        } catch {
+          /* thumbnail just won't render */
+        }
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys.join("|")]);
+
+  const saveKeys = async (next: string[]) => {
+    unwrap(
+      await api().models.PlanTemplate.update({ id: template.id, imageKeys: next })
+    );
+    setKeys(next);
+  };
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api().mutations.getTemplateImageUploadUrl({
+        templateId: template.id,
+        contentType: file.type || "image/jpeg",
+      });
+      const target = opResult<{ key: string; uploadUrl: string }>(res);
+      if (!target?.uploadUrl) throw new Error("Could not get an upload URL");
+      const put = await fetch(target.uploadUrl, {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type || "image/jpeg" },
+      });
+      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+      await saveKeys([...keys, target.key]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Photo upload failed");
+    } finally {
+      setBusy(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
+
+  return (
+    <div className="photo-block">
+      {keys.length ? (
+        <div className="photo-grid">
+          {keys.map((key) => (
+            <div key={key} className="photo-thumb">
+              {urls[key] ? (
+                <img src={urls[key]} alt="Pest" loading="lazy" />
+              ) : (
+                <div className="photo-loading" />
+              )}
+              <button
+                type="button"
+                className="photo-remove"
+                aria-label="Remove photo"
+                onClick={() => {
+                  if (!window.confirm("Remove this photo from the template?")) return;
+                  void saveKeys(keys.filter((k) => k !== key)).catch((err) =>
+                    setError(err instanceof Error ? err.message : "Remove failed")
+                  );
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <input
+        ref={fileInput}
+        type="file"
+        accept="image/jpeg,image/png"
+        hidden
+        onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])}
+      />
+      <Button small variant="subtle" loading={busy} onClick={() => fileInput.current?.click()}>
+        📷 Add pest photo
+      </Button>
+      <ErrorNote error={error} />
     </div>
   );
 }
