@@ -44,6 +44,13 @@ backend.auth.resources.cfnResources.cfnUserPoolClient.explicitAuthFlows = [
   "ALLOW_CUSTOM_AUTH",
   "ALLOW_REFRESH_TOKEN_AUTH",
 ];
+// The magic-link token attributes are written only by backend admin calls —
+// without this, Cognito's default lets any signed-in user updateUserAttributes
+// their own custom:loginTokenHash and mint themselves sign-in links.
+backend.auth.resources.cfnResources.cfnUserPoolClient.writeAttributes = [
+  "email",
+  "name",
+];
 
 // Grant SES send permissions to the lead-intake function
 backend.leadIntake.resources.lambda.addToRolePolicy(
@@ -108,7 +115,13 @@ const sesPolicy = new PolicyStatement({
   actions: ["ses:SendEmail", "ses:SendRawEmail"],
   resources: ["*"],
 });
-const crmUrlEnv = process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com";
+// Resolved at build time. CRM_APP_URL (hosting env var) wins; otherwise
+// derive from the branch being built so main never emails staging links.
+const crmUrlEnv =
+  process.env.CRM_APP_URL ??
+  (process.env.AWS_BRANCH === "main"
+    ? "https://main.d5ln2hbbp9s2j.amplifyapp.com"
+    : "https://staging.d5ln2hbbp9s2j.amplifyapp.com");
 
 for (const fn of [
   backend.crmDocs,

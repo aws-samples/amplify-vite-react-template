@@ -5,11 +5,13 @@ import {
   Route,
   Routes,
 } from "react-router-dom";
-import { Authenticator } from "@aws-amplify/ui-react";
+import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react";
 import "@aws-amplify/ui-react/styles.css";
 import { useState, type ReactNode } from "react";
 import { myGroupIds, RolesProvider, useRoles } from "./lib/auth";
 import { Button, EmptyState, Spinner } from "./ui/kit";
+import { Icon, type IconName } from "./ui/icons";
+import InstallBanner from "./components/InstallBanner";
 import { signIn, signOut } from "aws-amplify/auth";
 
 import Dashboard from "./office/Dashboard";
@@ -56,14 +58,18 @@ export default function App({ backendReady }: { backendReady: boolean }) {
 function AuthHeader() {
   return (
     <div className="auth-brand">
-      <h1>BuzzKill CRM</h1>
-      <p>Sign in with your BuzzKill account</p>
+      <img src="/icons/emblem.png" alt="" className="auth-brand-emblem" />
+      <h1>
+        BuzzKill <span>CRM</span>
+      </h1>
+      <p>Safe for families. Tough on pests.</p>
     </div>
   );
 }
 
 /** "Email me a sign-in link" — passwordless option under the password form. */
 function MagicLinkFooter() {
+  const { toForgotPassword } = useAuthenticator();
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
@@ -109,9 +115,14 @@ function MagicLinkFooter() {
           </Button>
         </div>
       ) : (
-        <button className="linklike" onClick={() => setOpen(true)}>
-          Prefer no password? Email me a sign-in link
-        </button>
+        <div className="magic-link-options">
+          <button className="linklike" onClick={() => setOpen(true)}>
+            Prefer no password? Email me a sign-in link
+          </button>
+          <button className="linklike linklike-muted" onClick={toForgotPassword}>
+            Forgot password?
+          </button>
+        </div>
       )}
     </div>
   );
@@ -186,30 +197,32 @@ function Shell() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
 
+      {roles.office || roles.tech ? <InstallBanner /> : null}
+
       <nav className="tabbar">
         <div className="tabbar-inner">
           {staff ? (
             <>
-              <Tab to="/dashboard" icon="📊" label="Dashboard" />
-              <Tab to="/leads" icon="✨" label="Leads" />
-              <Tab to="/customers" icon="👥" label="Customers" />
-              <Tab to="/schedule" icon="📅" label="Schedule" />
-              <Tab to="/more" icon="⋯" label="More" />
+              <Tab to="/dashboard" icon="dashboard" label="Dashboard" />
+              <Tab to="/leads" icon="leads" label="Leads" />
+              <Tab to="/customers" icon="customers" label="Customers" />
+              <Tab to="/schedule" icon="schedule" label="Schedule" />
+              <Tab to="/more" icon="more" label="More" />
             </>
           ) : techOnly ? (
             <>
-              <Tab to="/tech" icon="🚐" label="Today" />
-              <Tab to="/more" icon="⋯" label="More" />
+              <Tab to="/tech" icon="route" label="Today" />
+              <Tab to="/more" icon="more" label="More" />
             </>
           ) : customerOnly ? (
             <>
-              <Tab to="/portal" icon="🏠" label="Home" />
-              <Tab to="/portal/docs" icon="📄" label="Documents" />
-              <Tab to="/portal/billing" icon="💳" label="Billing" />
+              <Tab to="/portal" icon="home" label="Home" />
+              <Tab to="/portal/docs" icon="documents" label="Documents" />
+              <Tab to="/portal/billing" icon="billing" label="Billing" />
               {myGroupIds(roles).length > 0 ? (
-                <Tab to="/portal/group" icon="🏢" label="Group" />
+                <Tab to="/portal/group" icon="group" label="Group" />
               ) : null}
-              <Tab to="/more" icon="⋯" label="More" />
+              <Tab to="/more" icon="more" label="More" />
             </>
           ) : null}
         </div>
@@ -218,11 +231,11 @@ function Shell() {
   );
 }
 
-function Tab({ to, icon, label }: { to: string; icon: string; label: string }) {
+function Tab({ to, icon, label }: { to: string; icon: IconName; label: string }) {
   return (
     <NavLink to={to} className={({ isActive }) => (isActive ? "active" : "")}>
       <span className="tab-icon" aria-hidden>
-        {icon}
+        <Icon name={icon} />
       </span>
       {label}
     </NavLink>

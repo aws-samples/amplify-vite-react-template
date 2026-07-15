@@ -87,6 +87,7 @@ export default function ReportPhotos({
   };
 
   const remove = async (key: string) => {
+    if (!window.confirm("Remove this photo from the report?")) return;
     try {
       unwrap(
         await api().models.ServiceReport.update({
