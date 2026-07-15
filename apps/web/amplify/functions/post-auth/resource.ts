@@ -8,4 +8,7 @@ import { defineFunction } from "@aws-amplify/backend";
 export const postAuth = defineFunction({
   name: "post-auth",
   entry: "./handler.ts",
+  // Auth triggers must live in the auth stack to avoid a circular
+  // dependency between the auth/data/function nested stacks.
+  resourceGroupName: "auth",
 });
