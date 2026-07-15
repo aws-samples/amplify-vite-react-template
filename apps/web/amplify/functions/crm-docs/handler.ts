@@ -321,6 +321,9 @@ async function completeJob(jobId: string) {
   if (job.status === "COMPLETED") {
     return { jobId, alreadyCompleted: true };
   }
+  if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") {
+    throw new Error(`Can't complete a ${job.status.toLowerCase()} job`);
+  }
   const completedAt = new Date().toISOString();
   await client.models.Job.update({ id: jobId, status: "COMPLETED", completedAt });
   await scheduleNextRecurringVisit({ ...job, completedAt });

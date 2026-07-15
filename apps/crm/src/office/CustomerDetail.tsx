@@ -1096,6 +1096,9 @@ function ManualChargeSheet({
   const [recordStatus, setRecordStatus] = useState<"PAID" | "OPEN">("PAID");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // One idempotency token per sheet open: accidental retries/double-taps
+  // collapse to a single charge; a fresh sheet open charges again.
+  const [idemToken] = useState(() => crypto.randomUUID());
 
   const submit = async () => {
     const cents = Math.round(parseFloat(amount) * 100);
@@ -1116,6 +1119,7 @@ function ManualChargeSheet({
             customerId: customer.id,
             amountCents: cents,
             description: description.trim(),
+            idempotencyKey: idemToken,
           })
         );
         await onDone(

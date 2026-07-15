@@ -60,19 +60,25 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     if (!interval) return;
 
     // Idempotency: don't double-queue if a future visit already exists.
-    const { data: siblings } = await client.models.Job.list({
-      filter: { servicePlanId: { eq: job.servicePlanId } },
-      limit: 200,
-    });
+    // Query the servicePlanId index and page fully — a filtered scan would
+    // miss the sibling once the Job table grows past one page.
     const today = new Date().toISOString().slice(0, 10);
-    const hasFuture = siblings.some(
-      (j) =>
-        j.id !== job.id &&
-        j.status !== "CANCELED" &&
-        j.status !== "COMPLETED" &&
-        (j.scheduledDate ?? "") >= today
-    );
-    if (hasFuture) return;
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Job.listJobByServicePlanId(
+        { servicePlanId: job.servicePlanId },
+        { nextToken: token, limit: 200 }
+      );
+      const hasFuture = page.data.some(
+        (j) =>
+          j.id !== job.id &&
+          j.status !== "CANCELED" &&
+          j.status !== "COMPLETED" &&
+          (j.scheduledDate ?? "") >= today
+      );
+      if (hasFuture) return;
+      token = page.nextToken;
+    } while (token);
 
     const base = (job.completedAt ?? new Date().toISOString()).slice(0, 10);
     const dueDate = toWeekday(addDays(base, interval));
@@ -86,7 +92,9 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       servicePlanId: job.servicePlanId,
       type: "RECURRING",
       serviceType: plan.planName,
-      priceCents: plan.priceCents,
+      // Plan-covered visits carry no per-visit price (the plan bills
+      // separately); plan.priceCents is a monthly figure, not a visit price.
+      priceCents: null,
       status: "UNSCHEDULED",
       scheduledDate: dueDate, // target date — office confirms the slot
       notes: `Auto-queued ${plan.serviceFrequency.toLowerCase()} visit after job ${job.id}.`,

@@ -11,6 +11,7 @@ type Args = {
   jobId?: string;
   amountCents?: number;
   description?: string;
+  idempotencyKey?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -48,7 +49,8 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return chargeManualAmount(
         event.arguments.customerId!,
         event.arguments.amountCents!,
-        event.arguments.description ?? "Manual charge"
+        event.arguments.description ?? "Manual charge",
+        event.arguments.idempotencyKey
       );
     }
     default:
@@ -341,7 +343,8 @@ async function chargeOneTimeJob(jobId: string) {
 async function chargeManualAmount(
   customerId: string,
   amountCents: number,
-  description: string
+  description: string,
+  idempotencyKey?: string
 ) {
   if (!Number.isInteger(amountCents) || amountCents <= 0) {
     throw new Error("Enter a valid amount to charge");
@@ -360,16 +363,25 @@ async function chargeManualAmount(
 
   const clean = description.trim().slice(0, 300) || "Manual charge";
   const stripe = stripeClient();
-  const intent = await stripe.paymentIntents.create({
-    customer: stripeCustomerId,
-    amount: amountCents,
-    currency: "usd",
-    payment_method: pm.id,
-    off_session: true,
-    confirm: true,
-    description: clean,
-    metadata: { crmCustomerId: customerId, manual: "true" },
-  });
+  // A per-submit idempotency token from the client collapses accidental
+  // retries/double-taps into a single charge; a deliberate second identical
+  // charge uses a fresh token. Fall back to a content-derived key.
+  const key =
+    idempotencyKey?.slice(0, 200) ||
+    `crm-manual-${customerId}-${amountCents}-${Buffer.from(clean).toString("base64url").slice(0, 40)}`;
+  const intent = await stripe.paymentIntents.create(
+    {
+      customer: stripeCustomerId,
+      amount: amountCents,
+      currency: "usd",
+      payment_method: pm.id,
+      off_session: true,
+      confirm: true,
+      description: clean,
+      metadata: { crmCustomerId: customerId, manual: "true" },
+    },
+    { idempotencyKey: `crm-manual-${key}` }
+  );
 
   const { data: invoice } = await client.models.Invoice.create({
     customerId,

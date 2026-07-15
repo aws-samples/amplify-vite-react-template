@@ -386,6 +386,7 @@ const schema = a.schema({
     .secondaryIndexes((index) => [
       index("scheduledDate"),
       index("status").sortKeys(["scheduledDate"]),
+      index("servicePlanId"),
     ])
     .authorization((allow) => [
       allow.groups(["OFFICE"]).to(["create", "read", "update", "delete"]),
@@ -615,6 +616,7 @@ const schema = a.schema({
       customerId: a.string().required(),
       amountCents: a.integer().required(),
       description: a.string(),
+      idempotencyKey: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OFFICE"])])
