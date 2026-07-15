@@ -44,6 +44,11 @@ export const handler = async (
           await finalizeBooking({
             bookingRequestId: pi.metadata.bookingRequestId,
             paymentIntentId: pi.id,
+            amountReceived: pi.amount_received,
+            paymentMethodId:
+              typeof pi.payment_method === "string"
+                ? pi.payment_method
+                : (pi.payment_method?.id ?? null),
           });
         } else {
           await settlePaymentIntent(pi, "PAID");

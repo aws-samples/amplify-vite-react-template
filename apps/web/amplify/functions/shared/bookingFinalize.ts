@@ -4,6 +4,7 @@ import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
 import { emailShell, sendEmail } from "./email";
 import { renderAgreementPdf } from "./pdf";
+import { stripeClient } from "./stripeClient";
 
 const s3 = new S3Client();
 
@@ -24,12 +25,99 @@ const WINDOW_LABEL: Record<string, string> = {
 export async function finalizeBooking(opts: {
   bookingRequestId: string;
   paymentIntentId: string;
+  amountReceived: number;
+  paymentMethodId?: string | null;
 }): Promise<void> {
   const client = await dataClient();
   const { data: booking } = await client.models.BookingRequest.get({
     id: opts.bookingRequestId,
   });
   if (!booking || booking.status !== "QUOTED") return; // already finalized/canceled
+
+  // The record is mutable and /book can be retried, so trust the money, not
+  // the record: only the PaymentIntent this booking currently points at, for
+  // exactly the amount it says, may create records. Otherwise a stale
+  // client_secret for a cheap day could buy the premium slot the record was
+  // later repointed at.
+  if (
+    booking.stripePaymentIntentId &&
+    opts.paymentIntentId !== booking.stripePaymentIntentId
+  ) {
+    console.warn(
+      `finalizeBooking: ignoring superseded PaymentIntent ${opts.paymentIntentId} for booking ${booking.id}`
+    );
+    return;
+  }
+  if (opts.amountReceived !== booking.amountCents) {
+    console.error(
+      `finalizeBooking: amount mismatch for booking ${booking.id} — paid ${opts.amountReceived}, quoted ${booking.amountCents}`
+    );
+    return;
+  }
+
+  // Atomic claim — `create` is conditional on the id not existing, so only
+  // one concurrent webhook delivery proceeds. Released on failure so a
+  // Stripe retry can pick the work back up.
+  const { data: claim } = await client.models.BookingFinalization.create({
+    id: opts.bookingRequestId,
+    note: `pi ${opts.paymentIntentId}`,
+  });
+  if (!claim) return; // another delivery already owns this booking
+
+  try {
+    await finalizeClaimed(
+      booking,
+      opts.paymentIntentId,
+      opts.paymentMethodId ?? null
+    );
+  } catch (err) {
+    await client.models.BookingFinalization.delete({
+      id: opts.bookingRequestId,
+    });
+    throw err;
+  }
+}
+
+/** Only the fields finalization reads — the generated model type is too
+ *  deep for the compiler to compare across this boundary. */
+type BookingRecord = {
+  id: string;
+  name: string;
+  email: string;
+  phone?: string | null;
+  street?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  quoteJson?: unknown;
+  selectedDate?: string | null;
+  selectedWindow?: string | null;
+  recurring?: boolean | null;
+  amountCents?: number | null;
+  cancelToken?: string | null;
+  stripeCustomerId?: string | null;
+  stripePaymentIntentId?: string | null;
+};
+
+async function finalizeClaimed(
+  booking: BookingRecord,
+  paymentIntentId: string,
+  paymentMethodId: string | null
+): Promise<void> {
+  const client = await dataClient();
+
+  // The card that paid for the booking must become the customer's invoice
+  // default, or "Start billing" would later report no payment method for
+  // exactly the customers who already paid us.
+  if (paymentMethodId && booking.stripeCustomerId) {
+    try {
+      await stripeClient().customers.update(booking.stripeCustomerId, {
+        invoice_settings: { default_payment_method: paymentMethodId },
+      });
+    } catch (err) {
+      console.error("finalizeBooking: could not set default payment method", err);
+    }
+  }
 
   const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
     serviceLabel?: string;
@@ -45,8 +133,10 @@ export async function finalizeBooking(opts: {
     booking.selectedWindow?.toLowerCase() ??
     "";
 
-  // 1. Customer (ACTIVE — they've paid).
-  const { data: customer } = await client.models.Customer.create({
+  // 1. Customer (ACTIVE — they've paid). Contact details are validated at
+  // /quote, but a paid booking must never be bricked by a format rejection:
+  // retry without the optional phone rather than fail.
+  let { data: customer } = await client.models.Customer.create({
     displayName: booking.name,
     contactName: booking.name,
     email: booking.email,
@@ -60,6 +150,21 @@ export async function finalizeBooking(opts: {
     stripeCustomerId: booking.stripeCustomerId ?? undefined,
     convertedAt: new Date().toISOString(),
   });
+  if (!customer && booking.phone) {
+    ({ data: customer } = await client.models.Customer.create({
+      displayName: booking.name,
+      contactName: booking.name,
+      email: booking.email,
+      serviceStreet: booking.street ?? undefined,
+      serviceCity: booking.city ?? undefined,
+      serviceState: booking.state ?? undefined,
+      serviceZip: booking.zip ?? undefined,
+      status: "ACTIVE",
+      leadSource: "Website booking",
+      stripeCustomerId: booking.stripeCustomerId ?? undefined,
+      convertedAt: new Date().toISOString(),
+    }));
+  }
   if (!customer) throw new Error("finalizeBooking: customer create failed");
   const accessGroups = customerAccessGroups(customer.id, customer.groupId);
   await client.models.Customer.update({ id: customer.id, accessGroups });
@@ -93,7 +198,7 @@ export async function finalizeBooking(opts: {
     timeWindow: windowLabel,
     priceCents: booking.amountCents ?? undefined,
     status: "SCHEDULED",
-    notes: `Website booking ${booking.id}. Paid up front (${opts.paymentIntentId}).`,
+    notes: `Website booking ${booking.id}. Paid up front (${paymentIntentId}).`,
     accessGroups,
   });
 

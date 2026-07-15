@@ -165,6 +165,14 @@ backend.crmPricing.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
 backend.bookingPublic.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.bookingPublic.addEnvironment("AMPLIFY_BRANCH", branch);
+// finalizeBooking() runs inside the webhook Lambda — it builds the
+// customer's cancel link, so it needs the same marketing URL.
+backend.stripeWebhook.addEnvironment(
+  "MARKETING_URL",
+  branch === "main"
+    ? "https://www.pestbuzzkill.com"
+    : "https://staging.d26qpsjewk0bee.amplifyapp.com"
+);
 backend.bookingPublic.addEnvironment(
   "MARKETING_URL",
   branch === "main"

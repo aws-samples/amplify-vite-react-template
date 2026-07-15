@@ -68,13 +68,16 @@ const ALLOWED_ORIGINS = (process.env.BOOKING_CORS_ORIGINS ?? "")
   .map((o) => o.trim())
   .filter(Boolean);
 
+const originAllowed = (origin: string | undefined): boolean =>
+  !origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin);
+
 function corsHeaders(origin: string | undefined): Record<string, string> {
-  const allowed =
-    origin && (ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.length === 0)
-      ? origin
-      : (ALLOWED_ORIGINS[0] ?? "*");
   return {
-    "Access-Control-Allow-Origin": allowed,
+    // Only ever echo an origin we actually trust.
+    "Access-Control-Allow-Origin":
+      origin && ALLOWED_ORIGINS.includes(origin)
+        ? origin
+        : (ALLOWED_ORIGINS[0] ?? "*"),
     "Access-Control-Allow-Methods": "POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Content-Type": "application/json",
@@ -93,7 +96,24 @@ type QuoteInput = {
   nestCount?: number;
   comments?: string;
   recurringPreference?: string | null;
+  botToken?: string;
 };
+
+// AppSync AWSEmail/AWSPhone reject loosely-formatted values, and a paid
+// booking must never fail to finalize on a format error — so validate hard
+// at the quote step, where the customer can still fix it.
+const EMAIL_RE =
+  /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$/;
+
+/** E.164-ish normalization; null when the input can't be salvaged. */
+function normalizePhone(raw: string | undefined): string | null {
+  const digits = (raw ?? "").replace(/[^\d+]/g, "");
+  if (!digits) return null;
+  if (/^\d{10}$/.test(digits)) return `+1${digits}`;
+  if (/^1\d{10}$/.test(digits)) return `+${digits}`;
+  if (/^\+\d{10,15}$/.test(digits)) return digits;
+  return null;
+}
 
 const SERVICES = new Set([
   "GENERAL_PEST",
@@ -111,6 +131,16 @@ export const handler = async (
   const headers = corsHeaders(origin);
   const method = event.requestContext.http.method;
   if (method === "OPTIONS") return { statusCode: 204, headers, body: "" };
+  // A browser always sends Origin on a cross-origin POST; refuse the ones we
+  // don't publish from. (Not a security boundary on its own — the bot check
+  // and throttle carry that — but it stops casual embedding.)
+  if (!originAllowed(origin)) {
+    return {
+      statusCode: 403,
+      headers,
+      body: JSON.stringify({ error: "Forbidden origin" }),
+    };
+  }
   if (method !== "POST") {
     return { statusCode: 405, headers, body: JSON.stringify({ error: "POST only" }) };
   }
@@ -129,7 +159,10 @@ export const handler = async (
   const path = event.requestContext.http.path.replace(/\/+$/, "");
   try {
     if (path.endsWith("/quote")) {
-      return json(headers, await quote(body as QuoteInput));
+      return json(
+        headers,
+        await quote(body as QuoteInput, event.requestContext.http.sourceIp)
+      );
     }
     if (path.endsWith("/book")) {
       return json(headers, await book(body));
@@ -171,7 +204,70 @@ const json = (
 
 // ---------------------------------------------------------------- /quote
 
-async function quote(input: QuoteInput) {
+/**
+ * Layered abuse control for the unauthenticated endpoint: an optional bot
+ * token (enforced as soon as TURNSTILE_SECRET is configured), a best-effort
+ * per-IP hourly cap, and a hard global ceiling on how many *new* AI market
+ * researches can run per day. The endpoint spends real money per call
+ * (Claude + web search + Google Routes), so nothing billed runs until these
+ * pass.
+ */
+const QUOTES_PER_IP_PER_HOUR = 12;
+const NEW_RESEARCH_PER_DAY = 25;
+
+async function verifyBotToken(token: string | undefined): Promise<boolean> {
+  const secret = process.env.TURNSTILE_SECRET;
+  if (!secret) return true; // not configured yet — don't break the form
+  if (!token) return false;
+  try {
+    const res = await fetch(
+      "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret, response: token }),
+      }
+    );
+    const json = (await res.json()) as { success?: boolean };
+    return json.success === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Best-effort: read-then-write can lose a race, but it still stops a
+ *  single source from looping the endpoint thousands of times. */
+async function throttleOk(ip: string): Promise<boolean> {
+  if (!ip) return true;
+  const hour = new Date().toISOString().slice(0, 13);
+  const id = `${ip}#${hour}`;
+  const client = await dataClient();
+  const { data: existing } = await client.models.QuoteThrottle.get({ id });
+  if (!existing) {
+    await client.models.QuoteThrottle.create({
+      id,
+      count: 1,
+      windowStart: new Date().toISOString(),
+    });
+    return true;
+  }
+  if (existing.count >= QUOTES_PER_IP_PER_HOUR) return false;
+  await client.models.QuoteThrottle.update({ id, count: existing.count + 1 });
+  return true;
+}
+
+/** Global ceiling on brand-new (uncached) AI research runs per day. */
+async function researchBudgetLeft(): Promise<boolean> {
+  const client = await dataClient();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data } = await client.models.MarketRate.list({
+    filter: { researchedAt: { gt: since } },
+    limit: NEW_RESEARCH_PER_DAY + 1,
+  });
+  return data.length < NEW_RESEARCH_PER_DAY;
+}
+
+async function quote(input: QuoteInput, sourceIp: string) {
   const errors: Record<string, string> = {};
   const name = (input.name ?? "").trim();
   const email = (input.email ?? "").trim().toLowerCase();
@@ -179,7 +275,11 @@ async function quote(input: QuoteInput) {
   const propertyKind = (input.propertyKind ?? "RESIDENTIAL").toUpperCase();
   const addr = input.address ?? {};
   if (!name) errors.name = "Name is required";
-  if (!/^\S+@\S+\.\S+$/.test(email)) errors.email = "A valid email is required";
+  if (!EMAIL_RE.test(email)) errors.email = "A valid email is required";
+  const phone = input.phone?.trim() ? normalizePhone(input.phone) : null;
+  if (input.phone?.trim() && !phone) {
+    errors.phone = "Enter a valid phone number, e.g. (413) 555-0123";
+  }
   if (!SERVICES.has(service)) errors.service = "Unknown service";
   if (!addr.street?.trim()) errors["address.street"] = "Street address is required";
   if (!addr.city?.trim()) errors["address.city"] = "City is required";
@@ -194,6 +294,17 @@ async function quote(input: QuoteInput) {
   }
   if (Object.keys(errors).length) throw new HttpError(400, { errors });
 
+  if (!(await verifyBotToken(input.botToken))) {
+    throw new HttpError(400, {
+      error: "We couldn't verify that request came from a browser — please reload and try again.",
+    });
+  }
+  if (!(await throttleOk(sourceIp))) {
+    throw new HttpError(429, {
+      error: "That's a lot of quotes from one place — give it an hour, or call us at the office and we'll sort it out directly.",
+    });
+  }
+
   const client = await dataClient();
   const address = `${addr.street}, ${addr.city}, ${addr.state}${addr.zip ? ` ${addr.zip}` : ""}`;
 
@@ -202,7 +313,7 @@ async function quote(input: QuoteInput) {
       await client.models.BookingRequest.create({
         name,
         email,
-        phone: input.phone?.trim() || undefined,
+        phone: phone ?? undefined,
         street: addr.street!.trim(),
         city: addr.city!.trim(),
         state: addr.state!.trim().toUpperCase(),
@@ -303,7 +414,9 @@ async function quote(input: QuoteInput) {
     baseCents = first.oneTimeCents!;
     const extraNests = (input.nestCount ?? 1) - 1;
     if (extraNests > 0) {
-      const anthropicKey = await getSecret("ANTHROPIC_API_KEY");
+      const anthropicKey = (await researchBudgetLeft())
+        ? await getSecret("ANTHROPIC_API_KEY")
+        : null;
       const extra = anthropicKey
         ? await marketRate({
             anthropicKey,
@@ -322,7 +435,9 @@ async function quote(input: QuoteInput) {
     serviceLabel = `Wasp / hornet nest removal${(input.nestCount ?? 1) > 1 ? ` — ${input.nestCount} nests` : ""}`;
   } else {
     // RODENT / ROACH — AI-researched market rate for this area + size.
-    const anthropicKey = await getSecret("ANTHROPIC_API_KEY");
+    const anthropicKey = (await researchBudgetLeft())
+      ? await getSecret("ANTHROPIC_API_KEY")
+      : null;
     const rate = anthropicKey
       ? await marketRate({
           anthropicKey,
@@ -441,16 +556,51 @@ async function book(body: Record<string, unknown>) {
     : day.priceCents;
 
   const s = await stripeClient();
-  const customer = await s.customers.create({
-    email: booking.email,
-    name: booking.name,
-    phone: booking.phone ?? undefined,
-    metadata: { bookingRequestId: booking.id },
-  });
+
+  // Repeat /book calls must never leave a second chargeable intent behind:
+  // a paid one is terminal, an open one is reused or replaced.
+  if (booking.stripePaymentIntentId) {
+    const existing = await s.paymentIntents.retrieve(
+      booking.stripePaymentIntentId
+    );
+    if (existing.status === "succeeded" || existing.status === "processing") {
+      throw new HttpError(409, {
+        error: "This booking is already paid — check your email for the confirmation.",
+      });
+    }
+    if (
+      existing.amount === amountCents &&
+      booking.selectedDate === date &&
+      booking.selectedWindow === window &&
+      existing.client_secret
+    ) {
+      return {
+        clientSecret: existing.client_secret,
+        amountCents,
+        summary: summaryFor(stored, date, window, recurring),
+      };
+    }
+    try {
+      await s.paymentIntents.cancel(booking.stripePaymentIntentId);
+    } catch {
+      /* already canceled/expired — fine */
+    }
+  }
+
+  const customerId =
+    booking.stripeCustomerId ??
+    (
+      await s.customers.create({
+        email: booking.email,
+        name: booking.name,
+        phone: booking.phone ?? undefined,
+        metadata: { bookingRequestId: booking.id },
+      })
+    ).id;
   const intent = await s.paymentIntents.create({
     amount: amountCents,
     currency: "usd",
-    customer: customer.id,
+    customer: customerId,
     setup_future_usage: "off_session",
     automatic_payment_methods: { enabled: true },
     description: `${stored.serviceLabel ?? "BuzzKill service"} — ${date} (${window.toLowerCase()})`,
@@ -463,19 +613,31 @@ async function book(body: Record<string, unknown>) {
     selectedWindow: window,
     recurring,
     amountCents,
-    stripeCustomerId: customer.id,
+    stripeCustomerId: customerId,
     stripePaymentIntentId: intent.id,
   });
 
   return {
     clientSecret: intent.client_secret,
     amountCents,
-    summary: `${stored.serviceLabel ?? "Service visit"} — ${date}, ${window.toLowerCase()}${
-      recurring
-        ? ` · then ${money(stored.recurringOffer!.monthlyCents)}/mo ${stored.recurringOffer!.frequency.toLowerCase()} plan`
-        : ""
-    }`,
+    summary: summaryFor(stored, date, window, recurring),
   };
+}
+
+function summaryFor(
+  stored: {
+    serviceLabel?: string;
+    recurringOffer?: { frequency: string; monthlyCents: number } | null;
+  },
+  date: string,
+  window: string,
+  recurring: boolean
+): string {
+  return `${stored.serviceLabel ?? "Service visit"} — ${date}, ${window.toLowerCase()}${
+    recurring && stored.recurringOffer
+      ? ` · then ${money(stored.recurringOffer.monthlyCents)}/mo ${stored.recurringOffer.frequency.toLowerCase()} plan`
+      : ""
+  }`;
 }
 
 // --------------------------------------------------------------- /cancel
@@ -495,8 +657,16 @@ async function cancel(body: Record<string, unknown>) {
     throw new HttpError(404, { error: "Booking not found or already canceled." });
   }
 
-  const visitMs = new Date(`${booking.selectedDate}T12:00:00`).getTime();
-  const daysOut = Math.floor((visitMs - Date.now()) / 86_400_000);
+  // Whole calendar days in the shop's timezone — "more than 3 days before"
+  // must hold all day, not from an arbitrary clock instant.
+  const todayEt = new Date().toLocaleDateString("en-CA", {
+    timeZone: "America/New_York",
+  });
+  const daysOut = Math.round(
+    (Date.parse(`${booking.selectedDate}T00:00:00Z`) -
+      Date.parse(`${todayEt}T00:00:00Z`)) /
+      86_400_000
+  );
   const refundable = daysOut > CANCEL_FULL_REFUND_DAYS;
 
   if (body.confirm !== true) {

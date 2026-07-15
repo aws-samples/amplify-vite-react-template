@@ -253,6 +253,26 @@ const schema = a.schema({
       allow.groups(["OFFICE"]).to(["read", "update"]),
     ]),
 
+  // Atomic finalization claim: create is conditional on the id not
+  // existing, which is the only lock primitive AppSync gives us. Keyed by
+  // BookingRequest id so concurrent Stripe webhook deliveries can't both
+  // finalize the same booking.
+  BookingFinalization: a
+    .model({
+      note: a.string(),
+    })
+    .authorization((allow) => [allow.groups(["OFFICE"]).to(["read", "delete"])]),
+
+  // Best-effort per-IP throttle for the public quote endpoint (id =
+  // "<ip>#<hour>"). Not a hard lock — it exists so a single abusive source
+  // can't spin billed AI research and Routes calls unbounded.
+  QuoteThrottle: a
+    .model({
+      count: a.integer().required(),
+      windowStart: a.datetime(),
+    })
+    .authorization((allow) => [allow.groups(["OFFICE"]).to(["read", "delete"])]),
+
   // AI-researched market rates for services without fixed rate cards.
   // Cached per service+area so identical inputs keep identical prices;
   // the office can review and override.
