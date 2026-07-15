@@ -4,10 +4,10 @@ import {
   AdminUpdateUserAttributesCommand,
   CognitoIdentityProviderClient,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
+import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 
 const cognito = new CognitoIdentityProviderClient();
-const ses = new SESv2Client();
+const ses = new SESClient();
 
 const LINK_TTL_MINUTES = 60;
 
@@ -43,20 +43,18 @@ export const handler: CreateAuthChallengeTriggerHandler = async (event) => {
     const link = `${crmUrl}/welcome#email=${encodeURIComponent(email)}&token=${token}`;
     await ses.send(
       new SendEmailCommand({
-        FromEmailAddress: process.env.SES_FROM_EMAIL,
+        Source: process.env.SES_FROM_EMAIL,
         Destination: { ToAddresses: [email] },
-        Content: {
-          Simple: {
-            Subject: { Data: "Your BuzzKill sign-in link" },
-            Body: {
-              Html: {
-                Data: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+        Message: {
+          Subject: { Data: "Your BuzzKill sign-in link" },
+          Body: {
+            Html: {
+              Data: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
   <h2 style="color:#176b2c">Sign in to BuzzKill</h2>
   <p>Tap the button below to sign in — no password needed. The link works once and expires in ${LINK_TTL_MINUTES} minutes.</p>
   <p style="margin:24px 0"><a href="${link}" style="background:#176b2c;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600">Sign in</a></p>
   <p style="color:#666;font-size:13px">If you didn't request this, you can ignore this email.</p>
 </div>`,
-              },
             },
           },
         },
