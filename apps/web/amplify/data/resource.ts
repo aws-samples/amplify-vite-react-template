@@ -607,6 +607,19 @@ const schema = a.schema({
     .authorization((allow) => [allow.groups(["OFFICE"])])
     .handler(a.handler.function(crmBilling)),
 
+  /** Charge an arbitrary amount to a customer's card on file (office escape
+   *  hatch for one-off charges that don't map to a job). */
+  chargeManualAmount: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      amountCents: a.integer().required(),
+      description: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE"])])
+    .handler(a.handler.function(crmBilling)),
+
   /** Email a lead/customer their secure e-sign link for an agreement. */
   sendAgreement: a
     .mutation()
@@ -625,6 +638,15 @@ const schema = a.schema({
     .arguments({ reportId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** Office-side job completion without a field report — marks COMPLETED and
+   *  queues the next recurring visit. */
+  completeJob: a
+    .mutation()
+    .arguments({ jobId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OFFICE"])])
     .handler(a.handler.function(crmDocs)),
 
   /**

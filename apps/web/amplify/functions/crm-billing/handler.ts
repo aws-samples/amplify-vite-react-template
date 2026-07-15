@@ -9,6 +9,8 @@ type Args = {
   customerId?: string;
   servicePlanId?: string;
   jobId?: string;
+  amountCents?: number;
+  description?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -40,6 +42,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "chargeOneTimeJob": {
       assertOffice(event);
       return chargeOneTimeJob(event.arguments.jobId!);
+    }
+    case "chargeManualAmount": {
+      assertOffice(event);
+      return chargeManualAmount(
+        event.arguments.customerId!,
+        event.arguments.amountCents!,
+        event.arguments.description ?? "Manual charge"
+      );
     }
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);
@@ -313,6 +323,66 @@ async function chargeOneTimeJob(jobId: string) {
       ? { paidAt: new Date().toISOString() }
       : {}),
     accessGroups: customerAccessGroups(job.customerId, customer.groupId),
+  });
+
+  return {
+    invoiceId: invoice?.id,
+    paymentIntentId: intent.id,
+    status: intent.status,
+  };
+}
+
+/**
+ * Charge an arbitrary amount to a customer's saved payment method and record
+ * the invoice — the office escape hatch for one-off or unusual charges that
+ * don't map to a job. Card-on-file only; for offline payments the office
+ * records an invoice directly (no charge).
+ */
+async function chargeManualAmount(
+  customerId: string,
+  amountCents: number,
+  description: string
+) {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    throw new Error("Enter a valid amount to charge");
+  }
+  if (amountCents > 2_000_000) {
+    throw new Error("That amount looks too large — confirm and split if intended");
+  }
+  const client = await dataClient();
+  const { customer, stripeCustomerId } = await ensureStripeCustomer(customerId);
+  const pm = await getDefaultPaymentMethod(stripeCustomerId);
+  if (!pm) {
+    throw new Error(
+      "Customer has no saved payment method — collect one first, or record an offline invoice instead"
+    );
+  }
+
+  const clean = description.trim().slice(0, 300) || "Manual charge";
+  const stripe = stripeClient();
+  const intent = await stripe.paymentIntents.create({
+    customer: stripeCustomerId,
+    amount: amountCents,
+    currency: "usd",
+    payment_method: pm.id,
+    off_session: true,
+    confirm: true,
+    description: clean,
+    metadata: { crmCustomerId: customerId, manual: "true" },
+  });
+
+  const { data: invoice } = await client.models.Invoice.create({
+    customerId,
+    description: clean,
+    amountCents,
+    status: intent.status === "succeeded" ? "PAID" : "OPEN",
+    method: pm.type === "us_bank_account" ? "BANK" : "CARD",
+    stripePaymentIntentId: intent.id,
+    issuedAt: new Date().toISOString(),
+    ...(intent.status === "succeeded"
+      ? { paidAt: new Date().toISOString() }
+      : {}),
+    accessGroups: customerAccessGroups(customerId, customer.groupId),
   });
 
   return {

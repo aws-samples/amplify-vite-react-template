@@ -7,6 +7,11 @@ import { opFieldName } from "../shared/opEvent";
 import { callerGroups, callerIsOffice } from "../shared/authz";
 import { cusGroup, grpGroup } from "../shared/dynamicGroups";
 import { emailShell, sendEmail } from "../shared/email";
+import {
+  nextVisitDate,
+  prettyDate,
+  scheduleNextRecurringVisit,
+} from "../shared/recurring";
 import { renderServiceReportPdf, type ReportProduct } from "../shared/pdf";
 
 const s3 = new S3Client();
@@ -31,6 +36,9 @@ function parseProducts(raw: unknown): ReportProduct[] {
 type Args = {
   agreementId?: string;
   reportId?: string;
+  jobId?: string;
+  amountCents?: number;
+  description?: string;
   key?: string;
   customerId?: string;
   kind?: string;
@@ -44,6 +52,9 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "sendAgreement": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return sendAgreement(event.arguments.agreementId!);
+    }
+    case "completeJob": {
+      return completeJob(event.arguments.jobId!);
     }
     case "finalizeServiceReport": {
       const groups = callerGroups(event.identity);
@@ -237,6 +248,16 @@ async function finalizeServiceReport(reportId: string) {
     })
   );
 
+  // If this visit was part of a plan, tell them when the next one lands.
+  const { data: plan } = job.servicePlanId
+    ? await client.models.ServicePlan.get({ id: job.servicePlanId })
+    : { data: null };
+  const nextIso =
+    plan && plan.status === "ACTIVE"
+      ? nextVisitDate(plan.serviceFrequency, new Date().toISOString())
+      : null;
+  const reviewUrl = process.env.GOOGLE_REVIEW_URL;
+
   let emailed = false;
   if (customer.email) {
     emailed = await sendEmail({
@@ -256,6 +277,16 @@ async function finalizeServiceReport(reportId: string) {
         "Your service is complete",
         `<p>Hi ${customer.contactName ?? customer.displayName},</p>
          <p>${technician?.name ?? "Your technician"} completed your <strong>${job.serviceType}</strong> service. Your full service report is attached, and it's always available in your BuzzKill portal.</p>
+         ${
+           nextIso
+             ? `<p><strong>Your next visit is planned for around ${prettyDate(nextIso)}</strong> — we'll confirm the exact time and send reminders as it gets closer.</p>`
+             : ""
+         }
+         ${
+           reviewUrl
+             ? `<p style="margin:22px 0;"><a href="${reviewUrl}" style="background:#176b2c;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">How did we do? Leave a quick review</a></p>`
+             : ""
+         }
          <p style="color:#666;font-size:13px;">Questions about this visit? Just reply to this email.</p>`
       ),
     });
@@ -267,13 +298,33 @@ async function finalizeServiceReport(reportId: string) {
     pdfKey,
     ...(emailed ? { emailedAt: new Date().toISOString() } : {}),
   });
+  const completedAt = new Date().toISOString();
   await client.models.Job.update({
     id: report.jobId,
     status: "COMPLETED",
-    completedAt: new Date().toISOString(),
+    completedAt,
   });
+  await scheduleNextRecurringVisit({ ...job, completedAt });
 
   return { pdfKey, emailed, alreadyFinalized: false };
+}
+
+/**
+ * Office-side job completion without a field report (the exception path).
+ * Marks the job COMPLETED and queues the next recurring visit, mirroring
+ * what finalizeServiceReport does after a report.
+ */
+async function completeJob(jobId: string) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+  if (job.status === "COMPLETED") {
+    return { jobId, alreadyCompleted: true };
+  }
+  const completedAt = new Date().toISOString();
+  await client.models.Job.update({ id: jobId, status: "COMPLETED", completedAt });
+  await scheduleNextRecurringVisit({ ...job, completedAt });
+  return { jobId, alreadyCompleted: false };
 }
 
 const PHOTO_TYPES: Record<string, string> = {

@@ -140,6 +140,10 @@ for (const fn of [
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
   fn.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com");
   fn.addEnvironment("CRM_APP_URL", crmUrlEnv);
+  fn.addEnvironment(
+    "GOOGLE_REVIEW_URL",
+    "https://g.page/r/CYyHi3DH59WEEAI/review"
+  );
 }
 docsBucket.grantReadWrite(backend.crmDocs.resources.lambda);
 docsBucket.grantWrite(backend.agreementPublic.resources.lambda);

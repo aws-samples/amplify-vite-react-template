@@ -67,6 +67,7 @@ export default function CustomerDetail() {
     | "job"
     | "agreement"
     | "collect"
+    | "charge"
     | "portal"
     | "group"
     | "quote"
@@ -305,6 +306,11 @@ export default function CustomerDetail() {
               }
             >
               Email request
+            </Button>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <Button small variant="ghost" onClick={() => setSheet("charge")}>
+              Charge / record a payment
             </Button>
           </div>
         </Card>
@@ -612,10 +618,7 @@ export default function CustomerDetail() {
                             if (!window.confirm("Mark this job completed without a tech report? The customer won't get a field report for it.")) return;
                             void run(`complete-${j.id}`, async () =>
                               unwrap(
-                                await api().models.Job.update({
-                                  id: j.id,
-                                  status: "COMPLETED",
-                                })
+                                await api().mutations.completeJob({ jobId: j.id })
                               )
                             );
                           }}
@@ -1050,7 +1053,156 @@ export default function CustomerDetail() {
           setTimeout(() => void load(), 1500);
         }}
       />
+
+      <Sheet
+        open={sheet === "charge"}
+        onClose={() => setSheet(null)}
+        title="Charge or record a payment"
+      >
+        <ManualChargeSheet
+          customer={customer}
+          hasPaymentMethod={pm?.hasPaymentMethod ?? false}
+          onDone={async (msg) => {
+            setSheet(null);
+            setNotice(msg);
+            window.setTimeout(() => setNotice(null), 6000);
+            await load();
+          }}
+        />
+      </Sheet>
     </Page>
+  );
+}
+
+/**
+ * Office escape hatch for one-off billing: either charge the card on file
+ * for an arbitrary amount, or record an offline payment / invoice (cash,
+ * check, adjustment) with no card movement.
+ */
+function ManualChargeSheet({
+  customer,
+  hasPaymentMethod,
+  onDone,
+}: {
+  customer: Customer;
+  hasPaymentMethod: boolean;
+  onDone: (message: string) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"CHARGE" | "RECORD">(
+    hasPaymentMethod ? "CHARGE" : "RECORD"
+  );
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [recordStatus, setRecordStatus] = useState<"PAID" | "OPEN">("PAID");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    const cents = Math.round(parseFloat(amount) * 100);
+    if (!Number.isFinite(cents) || cents <= 0) {
+      setError("Enter a valid amount");
+      return;
+    }
+    if (!description.trim()) {
+      setError("Add a short description (what is this charge for?)");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      if (mode === "CHARGE") {
+        const res = opResult<{ status?: string }>(
+          await api().mutations.chargeManualAmount({
+            customerId: customer.id,
+            amountCents: cents,
+            description: description.trim(),
+          })
+        );
+        await onDone(
+          res?.status === "succeeded"
+            ? `Charged ${money(cents)} to the card on file`
+            : `Charge submitted for ${money(cents)} — status will update when it settles`
+        );
+      } else {
+        // Offline payment / invoice — no card movement.
+        unwrap(
+          await api().models.Invoice.create({
+            customerId: customer.id,
+            description: description.trim(),
+            amountCents: cents,
+            status: recordStatus,
+            issuedAt: new Date().toISOString(),
+            ...(recordStatus === "PAID"
+              ? { paidAt: new Date().toISOString() }
+              : {}),
+            accessGroups: customerAccessGroups(customer.id, customer.groupId),
+          })
+        );
+        await onDone(
+          recordStatus === "PAID"
+            ? `Recorded a ${money(cents)} offline payment`
+            : `Recorded a ${money(cents)} open invoice`
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not process");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="form-grid">
+      <SegControl
+        options={[
+          { value: "CHARGE" as const, label: "Charge card on file" },
+          { value: "RECORD" as const, label: "Record offline" },
+        ]}
+        value={mode}
+        onChange={setMode}
+      />
+      {mode === "CHARGE" && !hasPaymentMethod ? (
+        <p className="muted small">
+          No card on file — collect one first, or switch to "Record offline"
+          for a cash/check payment.
+        </p>
+      ) : null}
+      <Field label="Amount ($)">
+        <input
+          inputMode="decimal"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="149.00"
+        />
+      </Field>
+      <Field label="Description" hint="Shows on the invoice and the customer's history">
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Extra visit — wasp nest follow-up"
+        />
+      </Field>
+      {mode === "RECORD" ? (
+        <Field label="Status" hint="Paid = already collected offline; Open = owed">
+          <SegControl
+            options={[
+              { value: "PAID" as const, label: "Paid (offline)" },
+              { value: "OPEN" as const, label: "Open (owed)" },
+            ]}
+            value={recordStatus}
+            onChange={setRecordStatus}
+          />
+        </Field>
+      ) : null}
+      <ErrorNote error={error} />
+      <Button
+        block
+        loading={busy}
+        disabled={mode === "CHARGE" && !hasPaymentMethod}
+        onClick={() => void submit()}
+      >
+        {mode === "CHARGE" ? "Charge card" : "Record payment"}
+      </Button>
+    </div>
   );
 }
 
