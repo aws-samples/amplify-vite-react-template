@@ -1,6 +1,6 @@
 # BuzzKill — business review of the CRM & booking funnel
 
-**Revision 3** — updated against commit `372f30b` ("Close the three money holes") · 15 July 2026
+**Revision 3.1** — updated against commit `372f30b` ("Close the three money holes") · 15 July 2026
 
 Revision 1 reviewed the app from ten perspectives: 149 features, 116 findings confirmed against code, 35 gaps verified absent. Revisions 2 and 3 re-check every item against the tree after each commit, so the list burns down.
 
@@ -29,7 +29,7 @@ Where the burn-down and the retained Revision 1 analysis disagree, the burn-down
 | 1 | Recurring plans never start billing | Open | **CLOSED** | Both completion paths call it: `crm-docs/handler.ts:306` (finalizeServiceReport) and `:368` (completeJob). Idempotent on `stripeSubscriptionId`, guards `CANCELED`, never throws. |
 | 2 | "Internal notes" on customer PDF | Closed | **CLOSED** | `49f2c23` |
 | 3 | Paid bookings look unpaid; CRM re-charges | Open | **CLOSED** | `Job.paidAt`/`paidPaymentIntentId` written in the same create as the job. `chargeOneTimeJob` refuses on it *before* the ledger scan (`crm-billing/handler.ts:183`). Button hidden, "paid $299 online" badge shown. PAID Invoice written with id `booking-<id>`, so a retry is a no-op. |
-| 4 | Three cancellation policies; refunds unreachable | Open | **OPEN** | ToS 24h, agreement 30d, code 3d. `REFUNDED` still written by no code path; still no refund action in the CRM. |
+| 4 | Three cancellation policies; refunds unreachable | Open | **OPEN** *(split)* | ToS 24h, agreement 30d, code 3d. `REFUNDED` written by no code path. **No refund action in the CRM — bleeding today.** The policy conflict and dead cancel link are launch gates; see "Rank by reachability" below. |
 | 5 | Cancelling never stops Stripe | Open | **CLOSED** | `cancelPlanBilling` cancels at Stripe *first* and throws on any real error; `resource_missing` counts as success. Both the office mutation and the public funnel call the one implementation. The webhook now clears a dead subscription id. |
 | 6 | ~~Quarterly plans billed 12×/yr~~ | Open | **RETRACTED** | Not a defect. See above. |
 | 7 | Service report is not a valid MA pesticide record | Partial | **PARTIAL** | Unchanged. TECH/OFFICE can still update a FINALIZED report; licence number, application time, rate, re-entry interval still absent. |
@@ -87,15 +87,40 @@ The refund window makes this expensive: a cancellation attempted on day four tha
 
 ---
 
+## Rank by reachability, not by severity
+
+One fact reorders everything below, and it did not come from this review — the engineering team found it while verifying the reviews, and I have confirmed it independently.
+
+**The public booking funnel cannot be reached.** `bookingApiUrl` is published from `backend.ts:232` and has **zero consumers** in either app's `src/`. `tcAccepted`, hard-required at `booking-public/handler.ts:523` before any booking is accepted, is **produced by nothing in the repository**. `finalizeBooking` has therefore never run in production, and cannot until the front end in `docs/public-ui-handoff.md` is built.
+
+That does not make the funnel's defects imaginary — they are launch gates, and shipping the front end without them would be reckless. It makes them **defects with no live victims**, which is a different thing from an emergency. Several items this review marked "fix before launch" and ranked by dollars can only bite through a door nobody can open yet.
+
+Split the remaining work accordingly:
+
+**Bleeding today** — reachable through the office CRM and the tech app, which are in daily use:
+the missing refund action (an office charge made through `chargeOneTimeJob` can be taken but never given back), the pesticide record (item 7), the unguarded money screens (11, 12), the technician with no honest option at a locked door (14), the cost model behind every Thumbtack quote (13), the escalation bottleneck (15), and dunning and disputes (9) — the office charges cards today, so a decline or a chargeback today has nowhere to go.
+
+**Launch gates, no live victims** — reachable only once the funnel front end exists:
+the dead cancel link, the checkout disclosure, the three-way policy conflict as it applies to funnel bookings, and capacity oversell. Fix them before the door opens, not before Tuesday.
+
+Item 4 straddles the line and should be split: *"the CRM has no refund action"* is bleeding today; *"the cancel link 404s and the published terms disagree"* is a launch gate.
+
+This is the ordering principle the plan below now follows. Where it conflicts with the dollar rankings in Revision 1, reachability wins.
+
+---
+
 ## How to whittle this down
 
-Nine open items. A, B and C are done. What follows is re-ordered for what remains.
+Nine open items. A, B and C are done. What follows is ordered by reachability first, then dollars.
 
 **Commit D — "Nothing fails quietly"** · closes the residuals of A/B/C · *do this next, it is small*
 Notify the office when the ledger row is missing and when billing fails to start (`notifyOffice` is already in scope). Add "serviced but not billing" to the daily digest. Give the failed public cancellation a real message and record the attempt so the refund date is honoured. Stand up a test runner and commit the fourteen assertions. *Verified when:* the probe runs in CI, and a forced Invoice-write failure produces an email rather than a log line.
 
-**Commit E — "Cancel means cancel, and refunds exist"** · closes 4
-A refund is a first-class CRM action that writes `REFUNDED`. One cancellation policy lives in one place, and the published terms, the agreement template, the checkout disclosure, and the enforcement code all read it from there. *Verified when:* a CSR can refund without opening Stripe, and the three documents agree.
+**Commit E — "Refunds exist"** · closes the live half of 4 · *bleeding today*
+A refund is a first-class CRM action that writes `REFUNDED`. Today an office charge can be taken and never given back without opening the Stripe dashboard, and a refund issued there leaves the Invoice `PAID` forever, so the Dashboard counts refunded money as revenue in perpetuity. This is reachable now, through a button office staff already use. *Verified when:* a CSR can refund without opening Stripe.
+
+**Commit E2 — "One cancellation policy"** · closes the launch-gate half of 4 · *before the funnel ships*
+The published terms say 24 hours, the agreement says 30 days, the code enforces 3. One policy lives in one place and the terms, the agreement template, the checkout disclosure, and the enforcement code all read it from there. Pair with Commit L; neither matters until a customer can reach the funnel, and both must be true before one can.
 
 **Commit F — "Seasons, dunning, disputes"** · closes 9, 10
 Decide whether a seasonal plan bills six months or twelve, then encode it: `ServicePlan` gets an end condition and stops on its own. A failed payment sends an email, retries, and creates a task; the portal grows a Pay Now button. The webhook handles `charge.dispute.created`.
