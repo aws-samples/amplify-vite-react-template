@@ -43,17 +43,13 @@ export default function Welcome() {
       try {
         const { nextStep } = await signIn({
           username: email,
-          options: {
-            authFlowType: "CUSTOM_WITHOUT_SRP",
-            clientMetadata: { mode: "redeem" },
-          },
+          options: { authFlowType: "CUSTOM_WITHOUT_SRP" },
         });
         if (nextStep.signInStep !== "CONFIRM_SIGN_IN_WITH_CUSTOM_CHALLENGE") {
           throw new Error("Unexpected sign-in step");
         }
         const { isSignedIn } = await confirmSignIn({
           challengeResponse: token,
-          options: { clientMetadata: { mode: "redeem" } },
         });
         if (!isSignedIn) throw new Error("Sign-in was not completed");
         window.location.replace("/");

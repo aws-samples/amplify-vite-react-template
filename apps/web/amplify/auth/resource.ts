@@ -58,7 +58,9 @@ export const auth = defineAuth({
     allow
       .resource(crmAdmin)
       .to(["manageUsers", "manageGroups", "manageGroupMembership"]),
-    allow.resource(createChallenge).to(["manageUsers"]),
+    // Only verify writes user attributes now: it mints the link token on the
+    // REQUEST_LINK answer and burns it on redemption. create issues the
+    // challenge and touches nothing.
     allow.resource(verifyChallenge).to(["manageUsers"]),
   ],
 });

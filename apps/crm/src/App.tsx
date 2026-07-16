@@ -12,7 +12,7 @@ import { myGroupIds, RolesProvider, useRoles } from "./lib/auth";
 import { Button, EmptyState, Spinner } from "./ui/kit";
 import { Icon, type IconName } from "./ui/icons";
 import InstallBanner from "./components/InstallBanner";
-import { signIn, signOut } from "aws-amplify/auth";
+import { confirmSignIn, signIn, signOut } from "aws-amplify/auth";
 
 import Dashboard from "./office/Dashboard";
 import Leads from "./office/Leads";
@@ -82,13 +82,17 @@ function MagicLinkFooter() {
     if (!email.trim()) return;
     setBusy(true);
     try {
-      await signIn({
+      const { nextStep } = await signIn({
         username: email.trim().toLowerCase(),
-        options: {
-          authFlowType: "CUSTOM_WITHOUT_SRP",
-          clientMetadata: { mode: "request" },
-        },
+        options: { authFlowType: "CUSTOM_WITHOUT_SRP" },
       });
+      if (nextStep.signInStep === "CONFIRM_SIGN_IN_WITH_CUSTOM_CHALLENGE") {
+        // The sentinel answer tells the verify trigger to email a sign-in
+        // link; the sign-in itself then fails on purpose and this throwaway
+        // session ends. (Keying the request off clientMetadata never worked:
+        // Cognito doesn't deliver InitiateAuth metadata to the triggers.)
+        await confirmSignIn({ challengeResponse: "REQUEST_LINK" });
+      }
     } catch {
       /* Never reveal whether the account exists. */
     }

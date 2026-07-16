@@ -16,7 +16,10 @@ import { stripeWebhook } from "./functions/stripe-webhook/resource";
 import { crmDocs } from "./functions/crm-docs/resource";
 import { agreementPublic } from "./functions/agreement-public/resource";
 import { dailyReminders } from "./functions/daily-reminders/resource";
-import { createChallenge } from "./functions/auth-challenge/resource";
+import {
+  createChallenge,
+  verifyChallenge,
+} from "./functions/auth-challenge/resource";
 import { crmPricing } from "./functions/crm-pricing/resource";
 import { bookingPublic } from "./functions/booking-public/resource";
 
@@ -32,6 +35,7 @@ const backend = defineBackend({
   agreementPublic,
   dailyReminders,
   createChallenge,
+  verifyChallenge,
   crmPricing,
   bookingPublic,
 });
@@ -124,7 +128,9 @@ for (const fn of [
   backend.agreementPublic,
   backend.dailyReminders,
   backend.crmAdmin,
-  backend.createChallenge,
+  // The verify trigger emails the magic sign-in link (the request leg is
+  // keyed off the challenge answer, which only verify reliably receives).
+  backend.verifyChallenge,
   backend.crmPricing,
   backend.bookingPublic,
   backend.leadIntake,
