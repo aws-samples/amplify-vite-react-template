@@ -185,7 +185,7 @@ export default function PriceLeadSheet({
       const planName = run.service ?? "General pest protection";
 
       // DRAFT first; flips to SENT only after the signing email goes out.
-      // A direct model create, NOT createQuote: that mutation's deviation
+      // A direct model create, NOT quotePlan: that mutation's deviation
       // guard vouches for raw sheet monthlies, and this price is the
       // engine's own output (sheet + deterministic zone overlay) — already
       // checked, logged on the LeadPricingRun, and never typed by a human.

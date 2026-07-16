@@ -234,9 +234,9 @@ describe("voidAgreement", () => {
   });
 });
 
-describe("createQuote — priced against the live AI sheet", () => {
+describe("quotePlan — priced against the live AI sheet", () => {
   const quote = (args: Record<string, unknown>) =>
-    call("createQuote", {
+    call("quotePlan", {
       customerId: "c1",
       planName: "General Pest Control — monthly",
       serviceFrequency: "MONTHLY",
@@ -410,7 +410,7 @@ describe("createQuote — priced against the live AI sheet", () => {
   it("refuses a technician", async () => {
     await expect(
       call(
-        "createQuote",
+        "quotePlan",
         {
           customerId: "c1",
           planName: "P",

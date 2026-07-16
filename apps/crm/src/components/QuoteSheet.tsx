@@ -22,7 +22,7 @@ import { PlanPricingFields, usePlanPricing } from "./PlanPricing";
  * website funnel quotes from, so the CRM and the site can never disagree.
  * The AI rate rides along as listPriceCents; charging anything else needs a
  * reason, recorded on the quote with your name (the deviation guard is
- * server-side in createQuote, which re-reads the live sheets — there is no
+ * server-side in quotePlan, which re-reads the live sheets — there is no
  * quoting without a cached rate, only "Price a lead" to research one). The
  * agreement comes from the code template. Signing converts the lead via the
  * agreement-public backend.

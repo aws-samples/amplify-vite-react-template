@@ -54,12 +54,14 @@ export function updateMarketRate(fields: {
 
 /**
  * How the office quotes a price it can see on screen. Same contract
- * boundary: the backend wave replaces quoteFromTemplate with createQuote —
+ * boundary: the backend wave replaces quoteFromTemplate with quotePlan —
  * planName + serviceFrequency + listPriceCents ride in directly (plan
  * templates are gone). The deviation guard lives server-side: it re-reads
  * the live AI sheets for the customer's area, refuses a listPriceCents no
  * live sheet carries, and a priceCents that differs from it needs
  * priceOverrideReason, recorded on the quote with the caller's name.
+ * (quotePlan, not createQuote — the Quote model's generated createQuote
+ * already owns that mutation name.)
  */
 export function createQuoteMutation(args: {
   customerId: string;
@@ -74,12 +76,12 @@ export function createQuoteMutation(args: {
   notes?: string | null;
 }) {
   const mutations = api().mutations as unknown as {
-    createQuote: (a: typeof args) => Promise<{
+    quotePlan: (a: typeof args) => Promise<{
       data: unknown;
       errors?: { message: string }[];
     }>;
   };
-  return mutations.createQuote(args);
+  return mutations.quotePlan(args);
 }
 
 /** Parse an AWSJSON field that may arrive as a string. */
