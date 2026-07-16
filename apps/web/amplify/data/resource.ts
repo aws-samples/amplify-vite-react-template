@@ -28,7 +28,9 @@ import { leadIntake } from "../functions/lead-intake/resource";
  * plus the conversion requirements (active subscription or scheduled
  * one-time job), which keeps the full history on one record.
  */
-const schema = a.schema({
+// Exported for resource.test.ts, which checks that no custom operation
+// redeclares a mutation/query the model transformer generates.
+export const schema = a.schema({
   CustomerStatus: a.enum(["LEAD", "ACTIVE", "INACTIVE"]),
   ServicePlanStatus: a.enum(["ACTIVE", "PAUSED", "CANCELED"]),
   QuoteStatus: a.enum(["DRAFT", "SENT", "CONVERTED", "VOID"]),
@@ -938,8 +940,12 @@ const schema = a.schema({
    * counts) and refuses a rate no live sheet carries. A priceCents that
    * differs from the verified list price needs a reason, recorded on the
    * quote with the person who set it.
+   *
+   * Not named createQuote: the Quote model already generates a
+   * createQuote mutation, and a custom operation may not redeclare it —
+   * the schema fails to synthesize (deploy 41).
    */
-  createQuote: a
+  quotePlan: a
     .mutation()
     .arguments({
       customerId: a.string().required(),

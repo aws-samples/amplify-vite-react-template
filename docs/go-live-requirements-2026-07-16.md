@@ -118,6 +118,25 @@ everything priced with AI — no other way is acceptable"; suites 364 web / 134 
   the funnel applies (product decision needed); template pest photos on e-sign pages died with
   templates.
 
+**Deploy 41 post-mortem, `7c00031`** (the AI-pricing wave is still not on staging; suites
+366 web / 134 CRM):
+
+- Deploy 41 failed at backend synth — after all 364 tests and both type checks passed — with
+  "Object type extension 'Mutation' cannot redeclare field createQuote": the wave's custom
+  `createQuote` mutation shared its name with the create mutation the Quote model's
+  transformer generates. Deploy 40's guard (`tsc -p amplify` inside `npm test`) cannot see
+  this class — the schema is a plain object whose keys never meet until synth. The DEPLOY log
+  is empty; the pipeline never reached the deploy phase, so staging still runs the
+  pre-rearchitecture backend until the next deploy goes green.
+- The custom mutation is now `quotePlan` end-to-end (schema, crm-docs dispatch, CRM client,
+  tests); the deviation guard is behaviorally unchanged. The generated `createQuote` keeps its
+  name because PriceLeadSheet's direct `Quote.create` is deliberate (the engine's own output,
+  never typed by a human).
+- Same discipline as deploy 40: `npm test` now derives every generated model operation name
+  from the transformed schema and fails on any custom-operation collision
+  (`amplify/data/resource.test.ts`) — proven by reintroducing the collision and watching the
+  test name it.
+
 **Lead-form retirement, `cdc8c18`** (Jake's directive; suites 314 web / 114 CRM):
 
 - The website lead form is gone everywhere (ContactForm + all three LP inline forms); the
@@ -191,7 +210,7 @@ CRM billing. Grouped by what they protect.
   deviation guard; "+ Plan" and "Convert lead" still take a free-typed monthly price straight
   into an ACTIVE plan (`CustomerDetail.tsx:1719`) — and billing now auto-starts on completion,
   so the $4-instead-of-$45 typo goes to the card with no human re-reading it. Same guard, same
-  reason field, same actor stamp as `createQuote`. *(small)*
+  reason field, same actor stamp as `quotePlan` (né `createQuote`). *(small)*
 
 - **R26 — The office "✓ Complete" button discloses that it starts billing.** Its confirm says
   "the customer won't get a field report"; the server behind it may create a Stripe

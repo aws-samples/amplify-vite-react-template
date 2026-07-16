@@ -97,7 +97,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return sendAgreement(event.arguments.agreementId!);
     }
-    case "createQuote": {
+    case "quotePlan": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return createQuote(actorOf(event), {
         customerId: event.arguments.customerId!,
