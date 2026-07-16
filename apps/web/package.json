@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@aws-amplify/ui-react": "~6.13.2",
@@ -48,6 +50,7 @@
     "stripe": "^22.3.1",
     "tsx": "^4.21.0",
     "typescript": "~5.9.3",
-    "vite": "~7.3.1"
+    "vite": "~7.3.1",
+    "vitest": "^3.2.7"
   }
 }

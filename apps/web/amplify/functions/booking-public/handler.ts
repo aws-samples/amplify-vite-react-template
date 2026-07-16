@@ -644,6 +644,7 @@ function summaryFor(
 // --------------------------------------------------------------- /cancel
 
 const CANCEL_FULL_REFUND_DAYS = 3;
+const SUPPORT_PHONE = "(401) 526-0323";
 
 async function cancel(body: Record<string, unknown>) {
   const token = String(body.token ?? "");
@@ -663,9 +664,13 @@ async function cancel(body: Record<string, unknown>) {
   const todayEt = new Date().toLocaleDateString("en-CA", {
     timeZone: "America/New_York",
   });
+  // Judged from the customer's FIRST cancellation attempt. If an earlier
+  // attempt failed on our side, they keep the refund they were entitled to
+  // then — our outage is not their forfeit.
+  const judgedOn = booking.cancelRequestedOn ?? todayEt;
   const daysOut = Math.round(
     (Date.parse(`${booking.selectedDate}T00:00:00Z`) -
-      Date.parse(`${todayEt}T00:00:00Z`)) /
+      Date.parse(`${judgedOn}T00:00:00Z`)) /
       86_400_000
   );
   const refundable = daysOut > CANCEL_FULL_REFUND_DAYS;
@@ -685,17 +690,50 @@ async function cancel(body: Record<string, unknown>) {
     };
   }
 
-  // Stop the recurring billing BEFORE anything else and before we tell the
-  // customer they are cancelled. Marking the plan CANCELED while its Stripe
-  // subscription keeps charging is an unauthorized recurring charge, and the
-  // customer has no way to see it — their visits simply stopped.
-  if (booking.servicePlanId) {
-    await cancelPlanBilling(await stripeClient(), booking.servicePlanId);
+  // Stamp the attempt before anything that can fail. This is what makes a
+  // retry safe for the customer: if Stripe is down today and they succeed
+  // tomorrow, `judgedOn` above still reads today and they keep their refund.
+  if (!booking.cancelRequestedOn) {
+    await client.models.BookingRequest.update({
+      id: booking.id,
+      cancelRequestedOn: todayEt,
+    });
   }
-  if (refundable && booking.stripePaymentIntentId) {
-    const s = await stripeClient();
-    await s.refunds.create({ payment_intent: booking.stripePaymentIntentId });
+
+  try {
+    // Stop the recurring billing BEFORE anything else and before we tell the
+    // customer they are cancelled. Marking the plan CANCELED while its Stripe
+    // subscription keeps charging is an unauthorized recurring charge, and the
+    // customer has no way to see it — their visits simply stopped.
+    if (booking.servicePlanId) {
+      await cancelPlanBilling(await stripeClient(), booking.servicePlanId);
+    }
+    if (refundable && booking.stripePaymentIntentId) {
+      const s = await stripeClient();
+      // Keyed on the booking so a retry after a partial failure refunds once.
+      await s.refunds.create(
+        { payment_intent: booking.stripePaymentIntentId },
+        { idempotencyKey: `booking-refund-${booking.id}` }
+      );
+    }
+  } catch (err) {
+    // The billing is still live and the appointment still stands. Say so —
+    // "please try again" is false when the outage is ours, and retrying into a
+    // Stripe outage just burns the customer's refund window.
+    console.error(`cancel failed for booking ${booking.id}`, err);
+    await notifyOffice(
+      `ACTION REQUIRED — customer could not cancel: ${booking.name}`,
+      `<p><strong>${escapeHtml(booking.name)}</strong> tried to cancel their ${escapeHtml(String(booking.selectedDate))} visit and it failed. Their plan may still be billing and the appointment is still on the schedule.</p>
+       <p><strong>Cancel it by hand and honour the cancellation as of ${escapeHtml(booking.cancelRequestedOn ?? todayEt)}</strong> — that is the date they first asked${refundable ? ", and it entitles them to a full refund of " + money(booking.amountCents ?? 0) : ""}.</p>
+       <p style="color:#666;font-size:13px;">Booking: ${escapeHtml(booking.id)}<br/>Error: ${escapeHtml(err instanceof Error ? err.message : String(err))}</p>`
+    );
+    throw new HttpError(503, {
+      error: `We couldn't cancel your appointment just now — that's a fault on our side, not a problem with your booking. Please call us at ${SUPPORT_PHONE} and we'll sort it out.`,
+      cancellationRecordedOn: booking.cancelRequestedOn ?? todayEt,
+      reassurance: `We've recorded that you asked to cancel today${refundable ? ", so your full refund still applies even though this didn't go through" : ""}.`,
+    });
   }
+
   if (booking.jobId) {
     await client.models.Job.update({
       id: booking.jobId,
@@ -732,7 +770,13 @@ async function cancel(body: Record<string, unknown>) {
 
 async function notifyOffice(subject: string, html: string) {
   const office = process.env.SES_NOTIFY_EMAIL;
-  if (!office) return;
+  if (!office) {
+    console.error(
+      "notifyOffice: SES_NOTIFY_EMAIL is not configured — nobody was told:",
+      subject
+    );
+    return;
+  }
   await sendEmail({
     to: office,
     subject,

@@ -6,7 +6,7 @@ import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { callerGroups, callerIsOffice, isStaff } from "../shared/authz";
 import { cusGroup, grpGroup } from "../shared/dynamicGroups";
-import { emailShell, sendEmail } from "../shared/email";
+import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
   nextVisitDate,
   prettyDate,
@@ -325,27 +325,55 @@ async function finalizeServiceReport(reportId: string) {
  */
 async function startBillingForPlan(job: {
   id: string;
+  customerId: string;
   type: string;
   servicePlanId?: string | null;
 }) {
   if (job.type !== "RECURRING" || !job.servicePlanId) return;
+
+  let reason: string;
   try {
     const outcome = await startPlanBilling(stripeClient(), job.servicePlanId);
-    if (!outcome.started) {
-      console.error("startPlanBilling did not start after job completion", {
-        jobId: job.id,
-        servicePlanId: job.servicePlanId,
-        reason: outcome.reason,
-        message: outcome.message,
-      });
-    }
+    // A plan that was already running, or one deliberately canceled, is not a
+    // problem anybody needs to hear about.
+    if (outcome.started) return;
+    if (outcome.reason === "PLAN_NOT_ACTIVE") return;
+    reason = outcome.message;
+    console.error("startPlanBilling did not start after job completion", {
+      jobId: job.id,
+      servicePlanId: job.servicePlanId,
+      reason: outcome.reason,
+      message: outcome.message,
+    });
   } catch (err) {
+    reason = err instanceof Error ? err.message : String(err);
     console.error("startPlanBilling threw after job completion", {
       jobId: job.id,
       servicePlanId: job.servicePlanId,
       err,
     });
   }
+
+  // The visit happened and the completion stands — but this plan is now being
+  // serviced for free. The Dashboard lists it; this makes sure someone is told
+  // today rather than whenever they next open the Dashboard.
+  const client = await dataClient();
+  const [{ data: customer }, { data: plan }] = await Promise.all([
+    client.models.Customer.get({ id: job.customerId }),
+    client.models.ServicePlan.get({ id: job.servicePlanId }),
+  ]);
+  const price = plan?.priceCents ? `$${(plan.priceCents / 100).toFixed(2)}/mo` : "";
+  await notifyOffice({
+    subject: `ACTION REQUIRED — plan serviced but not billing: ${customer?.displayName ?? job.customerId}`,
+    heading: "A plan was serviced but billing did not start",
+    template: "ops-billing-start-failed",
+    customerId: job.customerId,
+    relatedId: job.servicePlanId,
+    bodyHtml: `<p><strong>${customer?.displayName ?? "This customer"}</strong> has had their first visit on <strong>${plan?.planName ?? "their plan"}</strong>${price ? ` (${price})` : ""}, but the subscription did not start — so they are being serviced for free.</p>
+       <p>Most often this means there is no payment method on file. Collect one on their customer record, then use <strong>Start billing</strong> on the plan.</p>
+       <p>They also appear under <strong>Serviced but not billing</strong> on the Dashboard until this is resolved.</p>
+       <p style="color:#666;font-size:13px;">Reason: ${reason}</p>`,
+  });
 }
 
 /**

@@ -6,6 +6,10 @@ applications:
         build:
           commands:
             - npm ci --cache .npm --prefer-offline
+            # Backend business rules (billing cadence, lead capture) are tested
+            # before anything deploys — a broken money rule must fail the build,
+            # not reach production and wait to be noticed.
+            - npm test
             # Deploys the backend (auth, data, lead-intake function) and writes
             # amplify_outputs.json — including the lead-intake Function URL —
             # to the app root before the frontend phase runs.

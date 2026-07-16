@@ -1,5 +1,5 @@
 import { dataClient } from "../shared/dataClient";
-import { emailShell, sendEmail } from "../shared/email";
+import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 
 /** Date N days from now (YYYY-MM-DD) in the shop's timezone. */
 function easternPlusDays(n: number): string {
@@ -25,9 +25,90 @@ export const handler = async () => {
   ] as const) {
     totals.push(await remind(easternPlusDays(daysOut), phrasing));
   }
+  const notBilling = await reportPlansNotBilling();
   console.log("Reminder totals:", JSON.stringify(totals));
-  return totals;
+  return [...totals, notBilling];
 };
+
+/**
+ * Serviced-but-not-billing digest.
+ *
+ * Job completion already emails the office the moment a plan fails to start
+ * billing, and the Dashboard lists them. Both can be missed: the email gets
+ * triaged away, and the Dashboard only exists for whoever opens it. This is the
+ * backstop that keeps announcing a plan being serviced for free until somebody
+ * actually fixes it — each row is roughly $1,188/yr.
+ */
+async function reportPlansNotBilling() {
+  const client = await dataClient();
+
+  const plans: {
+    id: string;
+    customerId: string;
+    planName: string;
+    priceCents: number;
+    status: string | null;
+    stripeSubscriptionId?: string | null;
+  }[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.ServicePlan.list({
+      filter: { status: { eq: "ACTIVE" } },
+      nextToken,
+      limit: 200,
+    });
+    plans.push(...page.data);
+    nextToken = page.nextToken;
+  } while (nextToken);
+
+  const unbilled = plans.filter((p) => !p.stripeSubscriptionId);
+  if (unbilled.length === 0) {
+    console.log("Not-billing digest: none");
+    return { notBilling: 0, notified: false };
+  }
+
+  // Only plans whose first visit has actually happened are owed money. One that
+  // hasn't been serviced yet is *supposed* to be unbilled; listing it would
+  // train the office to ignore this email.
+  const serviced: typeof unbilled = [];
+  for (const plan of unbilled) {
+    const { data: jobs } = await client.models.Job.listJobByServicePlanId(
+      { servicePlanId: plan.id },
+      { limit: 50 }
+    );
+    if (jobs.some((j) => j.status === "COMPLETED")) serviced.push(plan);
+  }
+  if (serviced.length === 0) {
+    console.log(
+      `Not-billing digest: ${unbilled.length} unbilled plans, none serviced yet`
+    );
+    return { notBilling: 0, notified: false };
+  }
+
+  const rows = await Promise.all(
+    serviced.map(async (p) => {
+      const { data: customer } = await client.models.Customer.get({
+        id: p.customerId,
+      });
+      return `<li><strong>${customer?.displayName ?? p.customerId}</strong> — ${p.planName}, $${(p.priceCents / 100).toFixed(2)}/mo</li>`;
+    })
+  );
+  const annual = serviced.reduce((s, p) => s + p.priceCents * 12, 0);
+
+  const notified = await notifyOffice({
+    subject: `${serviced.length} plan${serviced.length === 1 ? " is" : "s are"} being serviced without billing`,
+    heading: "Serviced but not billing",
+    template: "ops-not-billing-digest",
+    bodyHtml: `<p>These plans have had their first visit but no subscription is running, so they are being serviced for free. Together that is about <strong>$${(annual / 100).toFixed(2)}/yr</strong>.</p>
+       <ul>${rows.join("")}</ul>
+       <p>Usually this means no payment method on file. Collect one on the customer record, then use <strong>Start billing</strong> on the plan.</p>`,
+  });
+
+  console.log(
+    `Not-billing digest: ${serviced.length} serviced plans not billing, notified=${notified}`
+  );
+  return { notBilling: serviced.length, notified };
+}
 
 async function remind(date: string, phrasing: string) {
   const client = await dataClient();

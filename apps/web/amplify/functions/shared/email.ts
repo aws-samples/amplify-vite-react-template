@@ -115,3 +115,46 @@ export async function sendEmail(opts: {
 
   return !error;
 }
+
+/**
+ * Page the office about something that needs a human, and never throw doing it.
+ *
+ * This is for the cases where an operation cannot safely fail — a technician's
+ * completed visit, a card that has already been charged — but something
+ * downstream did not happen. Not throwing is right; telling nobody is not. The
+ * send is recorded in EmailLog like any other, so a failed alert is at least
+ * visible in More → Email log rather than being lost entirely.
+ *
+ * Deliberately not used for *email* failures: routing an alarm through the
+ * subsystem it is reporting on is how alarms go unheard.
+ */
+export async function notifyOffice(opts: {
+  subject: string;
+  heading: string;
+  bodyHtml: string;
+  template: string;
+  customerId?: string | null;
+  relatedId?: string;
+}): Promise<boolean> {
+  const office = process.env.SES_NOTIFY_EMAIL;
+  if (!office) {
+    console.error(
+      "notifyOffice: SES_NOTIFY_EMAIL is not configured — nobody was told",
+      opts.subject
+    );
+    return false;
+  }
+  try {
+    return await sendEmail({
+      to: office,
+      subject: opts.subject,
+      template: opts.template,
+      customerId: opts.customerId,
+      relatedId: opts.relatedId,
+      html: emailShell(opts.heading, opts.bodyHtml),
+    });
+  } catch (err) {
+    console.error("notifyOffice failed", opts.subject, err);
+    return false;
+  }
+}

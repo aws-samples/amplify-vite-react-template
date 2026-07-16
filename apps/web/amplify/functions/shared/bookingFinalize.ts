@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
-import { emailShell, sendEmail } from "./email";
+import { emailShell, notifyOffice, sendEmail } from "./email";
 import { renderAgreementPdf } from "./pdf";
 import { stripeClient } from "./stripeClient";
 
@@ -238,10 +238,26 @@ async function finalizeClaimed(
         accessGroups,
       });
     if (!paidInvoice) {
+      const detail =
+        invoiceErrors?.map((e) => e.message).join("; ") ?? "unknown error";
       console.error(
         `finalizeBooking: PAID invoice not recorded for booking ${booking.id} (${paymentIntentId}) — money collected, ledger row missing`,
         invoiceErrors
       );
+      // Not throwing is deliberate (see above). Not telling anyone is not: this
+      // customer's money exists only in Stripe, and no screen in the CRM will
+      // ever show it. Somebody has to key it in by hand.
+      await notifyOffice({
+        subject: `ACTION REQUIRED — payment taken but not recorded: ${booking.name}`,
+        heading: "A paid booking is missing from the ledger",
+        template: "ops-invoice-write-failed",
+        customerId: customer.id,
+        relatedId: booking.id,
+        bodyHtml: `<p><strong>${booking.name}</strong> paid <strong>$${(booking.amountCents / 100).toFixed(2)}</strong> for ${serviceLabel} and the charge succeeded, but the invoice could not be written to the CRM.</p>
+           <p>The booking, customer and job all exist — only the invoice is missing, so this customer's payment will not appear in the Dashboard or reconcile against Stripe until someone records it.</p>
+           <p><strong>Record an invoice against this customer by hand for $${(booking.amountCents / 100).toFixed(2)}, marked paid.</strong> Do not charge the card again — it has already been charged.</p>
+           <p style="color:#666;font-size:13px;">Stripe payment: ${paymentIntentId}<br/>Booking: ${booking.id}<br/>Error: ${detail}</p>`,
+      });
     }
   }
 

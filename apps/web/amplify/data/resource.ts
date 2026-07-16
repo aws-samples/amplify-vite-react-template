@@ -252,6 +252,11 @@ const schema = a.schema({
       servicePlanId: a.id(),
       agreementId: a.id(),
       expiresAt: a.datetime(),
+      // The calendar date (shop timezone) the customer FIRST asked to cancel.
+      // Refundability is judged from this, not from when the cancellation
+      // finally succeeded: an attempt that fails on day 4 because Stripe is
+      // down must not cost the customer their refund when it retries on day 3.
+      cancelRequestedOn: a.date(),
     })
     .secondaryIndexes((index) => [index("cancelToken"), index("status")])
     .authorization((allow) => [
