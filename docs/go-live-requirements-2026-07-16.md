@@ -92,6 +92,21 @@ deploy so the stale built Clarity tag can't ship.
   app's hosting env; Turnstile (`TURNSTILE_SECRET` + widget) before ad spend if bot volume
   appears; production Stripe webhook registration (R82) before the funnel opens on main.
 
+**Lead-form retirement, `cdc8c18`** (Jake's directive; suites 314 web / 114 CRM):
+
+- The website lead form is gone everywhere (ContactForm + all three LP inline forms); the
+  instant-quote funnel is the site's only intake, with the office phone as the second path. The
+  funnel's CONTACT decision already covered every prospect type the form handled.
+- First-touch ad attribution now rides the funnel: sanitized onto the BookingRequest and
+  surfaced as the customer's `leadSource`/`leadNotes` at finalization — R73's raw material
+  survives the form's removal.
+- The lead-intake Lambda now has **zero site callers** — decommission it (and its Function URL)
+  in a later deliberate pass; R80's "three lead notifications" reduces to the funnel's
+  new-booking + needs-a-call alerts. The lead-form contract section of
+  [public-ui-handoff.md](public-ui-handoff.md) is obsolete.
+- Standing residual now more visible: two office phone numbers in the tree (401 vs 508) — R38's
+  decision.
+
 **Second pass, `00e26a8`** (same verification discipline; suites 262 web / 114 CRM):
 
 - **R04, R06** — completed-but-never-charged one-time jobs and ACTIVE-plans-with-no-next-visit
