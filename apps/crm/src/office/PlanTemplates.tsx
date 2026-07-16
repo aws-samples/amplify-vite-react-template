@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, opResult, unwrap, type PlanTemplate } from "../lib/api";
 import { DEFAULT_AGREEMENT_BODY } from "../lib/agreementTemplate";
-import { money } from "../lib/format";
+import { planCadence } from "../lib/planCadence";
 import {
   Badge,
   Button,
@@ -72,7 +72,7 @@ export default function PlanTemplates() {
             <ListRow
               key={t.id}
               title={t.name}
-              subtitle={`${t.priceCents != null ? `${money(t.priceCents)}/mo list` : "AI-priced"} · service ${t.serviceFrequency?.toLowerCase()}`}
+              subtitle={planCadence(t.priceCents, t.serviceFrequency)}
               meta={
                 t.active ? (
                   <Badge tone="ok">active</Badge>

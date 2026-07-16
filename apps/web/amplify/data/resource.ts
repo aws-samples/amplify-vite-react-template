@@ -516,17 +516,28 @@ const schema = a.schema({
       refundedAt: a.datetime(),
       refundReason: a.string(),
       stripeRefundId: a.string(),
+      // Who moved the money. Stamped server-side from the caller's Cognito
+      // identity — never accepted from the client, or it would be a field an
+      // actor could fill in with someone else's name.
+      createdBy: a.string(),
+      createdByEmail: a.string(),
+      refundedBy: a.string(),
+      refundedByEmail: a.string(),
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [
       index("status").sortKeys(["issuedAt"]),
       index("stripePaymentIntentId"),
     ])
-    // Invoices are the financial record. OFFICE reads but cannot rewrite or
-    // destroy them; voiding is a FINANCE status change, never a delete.
+    // Invoices are the financial record. Nobody creates one from a browser:
+    // every invoice comes from a Lambda (chargeOneTimeJob, chargeManualAmount,
+    // recordOfflinePayment, the booking funnel, the subscription webhook), which
+    // is what makes createdBy trustworthy — a client-side create could name
+    // anyone as its author. OFFICE reads but cannot rewrite or destroy them;
+    // voiding is a FINANCE status change, never a delete.
     .authorization((allow) => [
-      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["FINANCE"]).to(["create", "read", "update"]),
+      allow.groups(["OWNER"]).to(["read", "update", "delete"]),
+      allow.groups(["FINANCE"]).to(["read", "update"]),
       allow.groups(["OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
@@ -650,19 +661,48 @@ const schema = a.schema({
 
   /**
    * Charge an arbitrary amount to a customer's card on file (finance escape
-   * hatch for one-off charges that don't map to a job). Above
-   * CHARGE_APPROVAL_THRESHOLD_CENTS the handler requires approvedBy — an
-   * OWNER who is not the caller.
+   * hatch for one-off charges that don't map to a job).
+   *
+   * `description` is required — it is the charge's reason, and it is what the
+   * customer sees on their statement. A charge nobody can explain afterwards is
+   * the same problem as a refund nobody can explain.
+   *
+   * FINANCE is capped at MANUAL_CHARGE_CEILING_CENTS; an OWNER can go above it.
+   * That ceiling is a backstop, not the control — the control is the
+   * confirmation the CRM shows before calling this.
    */
   chargeManualAmount: a
     .mutation()
     .arguments({
       customerId: a.string().required(),
       amountCents: a.integer().required(),
-      description: a.string(),
+      description: a.string().required(),
       idempotencyKey: a.string(),
-      /** Cognito sub of the approving OWNER. Required above the threshold. */
-      approvedBy: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Record a payment taken outside Stripe — cash, cheque, bank transfer — or
+   * an invoice to be settled later. Moves no money.
+   *
+   * A mutation rather than a client-side Invoice.create so the actor is stamped
+   * from the Cognito identity rather than supplied by the browser. Recording
+   * $500 as collected without collecting it is the cheapest way to fabricate
+   * revenue in this product; the least it can do is name who did it.
+   */
+  recordOfflinePayment: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      amountCents: a.integer().required(),
+      description: a.string().required(),
+      /** PAID for money already in hand, OPEN to invoice for it. */
+      status: a.string().required(),
+      /** How it arrived: CASH | CHEQUE | BANK | OTHER. Recorded in the notes. */
+      method: a.string(),
+      jobId: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, unwrap, type Customer, type Job, type ServicePlan } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { fmtDate, money, todayEastern } from "../lib/format";
+import { fmtDate, todayEastern } from "../lib/format";
+import { planCadence } from "../lib/planCadence";
 import { Card, EmptyState, ErrorNote, ListRow, Page, Spinner, StatusBadge } from "../ui/kit";
 import { loadMyCustomers } from "./portalData";
 
@@ -80,7 +81,7 @@ export default function PortalHome() {
                 <ListRow
                   key={p.id}
                   title={p.planName}
-                  subtitle={`${money(p.priceCents)}/month · ${p.serviceFrequency?.toLowerCase()} visits`}
+                  subtitle={planCadence(p.priceCents, p.serviceFrequency)}
                   meta={<StatusBadge status={p.status} />}
                 />
               ))}

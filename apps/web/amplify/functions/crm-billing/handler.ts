@@ -1,7 +1,12 @@
 import type { AppSyncResolverEvent } from "aws-lambda";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
-import { assertCanActForCustomer, assertFinance } from "../shared/authz";
+import {
+  assertCanActForCustomer,
+  assertFinance,
+  callerIsOwner,
+  callerSub,
+} from "../shared/authz";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { refundInvoice } from "../shared/refund";
 import {
@@ -19,9 +24,10 @@ type Args = {
   amountCents?: number;
   description?: string;
   idempotencyKey?: string;
-  approvedBy?: string;
   invoiceId?: string;
   reason?: string;
+  status?: string;
+  method?: string;
 };
 
 // The shared helpers take an injected Stripe client because booking-public
@@ -30,6 +36,57 @@ const ensureStripeCustomer = (customerId: string) =>
   sharedEnsureStripeCustomer(stripeClient(), customerId);
 const getDefaultPaymentMethod = (stripeCustomerId: string) =>
   sharedGetDefaultPaymentMethod(stripeClient(), stripeCustomerId);
+
+/**
+ * Who is doing this, taken from the verified Cognito identity rather than from
+ * anything the browser sent. Every money record carries it.
+ */
+type Actor = { sub: string | null; email: string | null; isOwner: boolean };
+
+function actorOf(event: AppSyncResolverEvent<Args>): Actor {
+  const identity = event.identity as { claims?: Record<string, unknown> } | null;
+  const email = identity?.claims?.email;
+  return {
+    sub: callerSub(event.identity),
+    email: typeof email === "string" ? email : null,
+    isOwner: callerIsOwner(event.identity),
+  };
+}
+
+const actorStamp = (a: Actor) => ({
+  createdBy: a.sub ?? undefined,
+  createdByEmail: a.email ?? undefined,
+});
+
+/**
+ * What a BuzzKill job can plausibly cost, with room above the rate card's own
+ * ceiling: AI-priced rodent work clamps at $2,500 and a large HOA one-time can
+ * exceed that, so a lower bar would send real work to the owner for approval —
+ * which is the bottleneck this product is supposed to remove.
+ *
+ * This is a backstop, not the control. It catches the classic hundred-fold slip
+ * ($149.00 typed as 14900) on anything over $50; the confirmation the CRM shows
+ * before calling this is what catches the rest.
+ */
+const MANUAL_CHARGE_CEILING_CENTS = 500_000; // $5,000
+/** Nothing this business does is a single $20,000 card charge. */
+const ABSOLUTE_CHARGE_CEILING_CENTS = 2_000_000;
+
+function assertChargeableAmount(actor: Actor, amountCents: number) {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    throw new Error("Enter a valid amount to charge");
+  }
+  if (amountCents > ABSOLUTE_CHARGE_CEILING_CENTS) {
+    throw new Error(
+      `$${(amountCents / 100).toLocaleString("en-US")} is beyond anything this business charges to a card. If it is genuinely owed, take it another way — do not split it into smaller charges.`
+    );
+  }
+  if (amountCents > MANUAL_CHARGE_CEILING_CENTS && !actor.isOwner) {
+    throw new Error(
+      `$${(amountCents / 100).toLocaleString("en-US")} is over the $${(MANUAL_CHARGE_CEILING_CENTS / 100).toLocaleString("en-US")} limit for a single charge. An owner can take it — do not split it into smaller charges.`
+    );
+  }
+}
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
   switch (opFieldName(event)) {
@@ -59,7 +116,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "chargeOneTimeJob": {
       assertFinance(event.identity);
-      return chargeOneTimeJob(event.arguments.jobId!);
+      return chargeOneTimeJob(actorOf(event), event.arguments.jobId!);
     }
     case "refundInvoice": {
       assertFinance(event.identity);
@@ -67,16 +124,29 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         invoiceId: event.arguments.invoiceId!,
         amountCents: event.arguments.amountCents ?? null,
         reason: event.arguments.reason ?? "",
+        actor: actorOf(event),
       });
     }
     case "chargeManualAmount": {
       assertFinance(event.identity);
       return chargeManualAmount(
+        actorOf(event),
         event.arguments.customerId!,
         event.arguments.amountCents!,
-        event.arguments.description ?? "Manual charge",
+        event.arguments.description ?? "",
         event.arguments.idempotencyKey
       );
+    }
+    case "recordOfflinePayment": {
+      assertFinance(event.identity);
+      return recordOfflinePayment(actorOf(event), {
+        customerId: event.arguments.customerId!,
+        amountCents: event.arguments.amountCents!,
+        description: event.arguments.description ?? "",
+        status: event.arguments.status ?? "PAID",
+        method: event.arguments.method,
+        jobId: event.arguments.jobId,
+      });
     }
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);
@@ -181,7 +251,7 @@ async function setPlanPaused(servicePlanId: string, paused: boolean) {
  * Creates an OPEN Invoice immediately; payment_intent.succeeded/failed in
  * the webhook settles it to PAID/FAILED.
  */
-async function chargeOneTimeJob(jobId: string) {
+async function chargeOneTimeJob(actor: Actor, jobId: string) {
   const client = await dataClient();
   const { data: job } = await client.models.Job.get({ id: jobId });
   if (!job) throw new Error(`Job ${jobId} not found`);
@@ -256,38 +326,34 @@ async function chargeOneTimeJob(jobId: string) {
 
 /**
  * Charge an arbitrary amount to a customer's saved payment method and record
- * the invoice — the office escape hatch for one-off or unusual charges that
- * don't map to a job. Card-on-file only; for offline payments the office
- * records an invoice directly (no charge).
+ * the invoice — the finance escape hatch for one-off or unusual charges that
+ * don't map to a job. Card-on-file only; money taken outside Stripe goes
+ * through recordOfflinePayment.
  */
 async function chargeManualAmount(
+  actor: Actor,
   customerId: string,
   amountCents: number,
   description: string,
   idempotencyKey?: string
 ) {
-  if (!Number.isInteger(amountCents) || amountCents <= 0) {
-    throw new Error("Enter a valid amount to charge");
-  }
-  // TODO(WS2): above CHARGE_APPROVAL_THRESHOLD_CENTS ($500) this must require
-  // an approval record created by an OWNER who is not the caller. Blocked on
-  // the approval UI — without it, requiring approvedBy would leave FINANCE
-  // unable to raise a large charge at all.
-  if (amountCents > 2_000_000) {
+  assertChargeableAmount(actor, amountCents);
+  const clean = description.trim().slice(0, 300);
+  if (!clean) {
     throw new Error(
-      "That amount is over the $20,000 limit for a single manual charge. Ask an owner — do not split it into smaller charges."
+      "Say what this charge is for — it goes on the customer's statement, and an unexplained charge is one nobody can answer a question about later"
     );
   }
+
   const client = await dataClient();
   const { customer, stripeCustomerId } = await ensureStripeCustomer(customerId);
   const pm = await getDefaultPaymentMethod(stripeCustomerId);
   if (!pm) {
     throw new Error(
-      "Customer has no saved payment method — collect one first, or record an offline invoice instead"
+      "Customer has no saved payment method — collect one first, or record an offline payment instead"
     );
   }
 
-  const clean = description.trim().slice(0, 300) || "Manual charge";
   const stripe = stripeClient();
   // A per-submit idempotency token from the client collapses accidental
   // retries/double-taps into a single charge; a deliberate second identical
@@ -320,6 +386,7 @@ async function chargeManualAmount(
     ...(intent.status === "succeeded"
       ? { paidAt: new Date().toISOString() }
       : {}),
+    ...actorStamp(actor),
     accessGroups: customerAccessGroups(customerId, customer.groupId),
   });
 
@@ -328,4 +395,61 @@ async function chargeManualAmount(
     paymentIntentId: intent.id,
     status: intent.status,
   };
+}
+
+/**
+ * Record money taken outside Stripe (cash, cheque, transfer), or raise an
+ * invoice to be settled later. Moves no money — this is bookkeeping.
+ *
+ * It lives here rather than as a client-side Invoice.create for one reason:
+ * the actor. Marking $500 collected without collecting it is the cheapest way
+ * to fabricate revenue in this product, and a browser-written record could name
+ * anyone as its author.
+ */
+async function recordOfflinePayment(
+  actor: Actor,
+  args: {
+    customerId: string;
+    amountCents: number;
+    description: string;
+    status: string;
+    method?: string | null;
+    jobId?: string | null;
+  }
+) {
+  if (!Number.isInteger(args.amountCents) || args.amountCents <= 0) {
+    throw new Error("Enter a valid amount");
+  }
+  if (args.status !== "PAID" && args.status !== "OPEN") {
+    throw new Error(`Unsupported invoice status: ${args.status}`);
+  }
+  const clean = args.description.trim().slice(0, 300);
+  if (!clean) throw new Error("Say what this payment is for");
+
+  const client = await dataClient();
+  const { data: customer } = await client.models.Customer.get({
+    id: args.customerId,
+  });
+  if (!customer) throw new Error(`Customer ${args.customerId} not found`);
+
+  const method = (args.method ?? "").trim().toUpperCase();
+  const nowIso = new Date().toISOString();
+  const { data: invoice, errors } = await client.models.Invoice.create({
+    customerId: args.customerId,
+    jobId: args.jobId ?? undefined,
+    description: method ? `${clean} (${method.toLowerCase()})` : clean,
+    amountCents: args.amountCents,
+    status: args.status,
+    method: method === "BANK" ? "BANK" : undefined,
+    issuedAt: nowIso,
+    ...(args.status === "PAID" ? { paidAt: nowIso } : {}),
+    ...actorStamp(actor),
+    accessGroups: customerAccessGroups(args.customerId, customer.groupId),
+  });
+  if (!invoice) {
+    throw new Error(
+      `Could not record the payment: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { invoiceId: invoice.id, status: invoice.status };
 }

@@ -20,6 +20,8 @@ import {
   fillAgreementTemplate,
 } from "../lib/agreementTemplate";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
+import { amountInWords } from "../lib/amountWords";
+import { planCadence } from "../lib/planCadence";
 import {
   Badge,
   Button,
@@ -69,6 +71,7 @@ export default function CustomerDetail() {
     | "agreement"
     | "collect"
     | "charge"
+    | "record"
     | "portal"
     | "group"
     | "quote"
@@ -309,12 +312,18 @@ export default function CustomerDetail() {
               Email request
             </Button>
           </div>
-          {/* Both modes are finance work: one moves money, the other writes an
-              Invoice. Office staff collect the card but never take payment. */}
+          {/* Two buttons, not one screen with a toggle. Taking money and
+              writing down that money arrived are different acts, and the only
+              thing that used to separate them was which half of a segmented
+              control was lit. Both are finance work: office staff collect the
+              card but never take payment. */}
           {roles.finance ? (
-            <div style={{ marginTop: 10 }}>
+            <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
               <Button small variant="ghost" onClick={() => setSheet("charge")}>
-                Charge / record a payment
+                Charge the card
+              </Button>
+              <Button small variant="ghost" onClick={() => setSheet("record")}>
+                Record a payment
               </Button>
             </div>
           ) : null}
@@ -469,7 +478,7 @@ export default function CustomerDetail() {
             <ListRow
               key={p.id}
               title={p.planName}
-              subtitle={`${money(p.priceCents)}/mo · service ${p.serviceFrequency?.toLowerCase()}`}
+              subtitle={planCadence(p.priceCents, p.serviceFrequency)}
               meta={
                 <>
                   <StatusBadge status={p.status} />
@@ -1114,11 +1123,28 @@ export default function CustomerDetail() {
       <Sheet
         open={sheet === "charge"}
         onClose={() => setSheet(null)}
-        title="Charge or record a payment"
+        title="Charge the card on file"
       >
-        <ManualChargeSheet
+        <ChargeCardSheet
           customer={customer}
           hasPaymentMethod={pm?.hasPaymentMethod ?? false}
+          cardLabel={pm?.label ?? customer.paymentMethodLabel ?? null}
+          onDone={async (msg) => {
+            setSheet(null);
+            setNotice(msg);
+            window.setTimeout(() => setNotice(null), 6000);
+            await load();
+          }}
+        />
+      </Sheet>
+
+      <Sheet
+        open={sheet === "record"}
+        onClose={() => setSheet(null)}
+        title="Record a payment"
+      >
+        <RecordPaymentSheet
+          customer={customer}
           onDone={async (msg) => {
             setSheet(null);
             setNotice(msg);
@@ -1257,132 +1283,273 @@ function RefundSheet({
   );
 }
 
-function ManualChargeSheet({
+/**
+ * Charge a card. Two steps, because this is the control the review found on
+ * backwards: giving money back had a confirmation and taking it did not, so a
+ * CSR who meant $149.00 and typed 14900 charged $14,900 instantly with no
+ * dialog and no undo.
+ *
+ * The confirmation states the amount in words as well as figures. $14,900.00
+ * and $149.00 look alike at a glance; "fourteen thousand nine hundred dollars"
+ * does not. Above RETYPE_ABOVE_CENTS it also has to be typed again, because at
+ * that size reading past a confirmation is exactly the mistake being made.
+ */
+const RETYPE_ABOVE_CENTS = 50_000; // $500
+
+function ChargeCardSheet({
   customer,
   hasPaymentMethod,
+  cardLabel,
   onDone,
 }: {
   customer: Customer;
   hasPaymentMethod: boolean;
+  cardLabel: string | null;
   onDone: (message: string) => Promise<void>;
 }) {
-  const [mode, setMode] = useState<"CHARGE" | "RECORD">(
-    hasPaymentMethod ? "CHARGE" : "RECORD"
-  );
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
-  const [recordStatus, setRecordStatus] = useState<"PAID" | "OPEN">("PAID");
+  const [confirming, setConfirming] = useState(false);
+  const [retyped, setRetyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // One idempotency token per sheet open: accidental retries/double-taps
   // collapse to a single charge; a fresh sheet open charges again.
   const [idemToken] = useState(() => crypto.randomUUID());
 
+  const cents = Math.round(parseFloat(amount) * 100);
+  const validAmount = Number.isFinite(cents) && cents > 0;
+  const needsRetype = validAmount && cents > RETYPE_ABOVE_CENTS;
+  const retypeOk =
+    !needsRetype || Math.round(parseFloat(retyped) * 100) === cents;
+
   const submit = async () => {
-    const cents = Math.round(parseFloat(amount) * 100);
-    if (!Number.isFinite(cents) || cents <= 0) {
-      setError("Enter a valid amount");
-      return;
-    }
-    if (!description.trim()) {
-      setError("Add a short description (what is this charge for?)");
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
-      if (mode === "CHARGE") {
-        const res = opResult<{ status?: string }>(
-          await api().mutations.chargeManualAmount({
-            customerId: customer.id,
-            amountCents: cents,
-            description: description.trim(),
-            idempotencyKey: idemToken,
-          })
-        );
-        await onDone(
-          res?.status === "succeeded"
-            ? `Charged ${money(cents)} to the card on file`
-            : `Charge submitted for ${money(cents)} — status will update when it settles`
-        );
-      } else {
-        // Offline payment / invoice — no card movement.
-        unwrap(
-          await api().models.Invoice.create({
-            customerId: customer.id,
-            description: description.trim(),
-            amountCents: cents,
-            status: recordStatus,
-            issuedAt: new Date().toISOString(),
-            ...(recordStatus === "PAID"
-              ? { paidAt: new Date().toISOString() }
-              : {}),
-            accessGroups: customerAccessGroups(customer.id, customer.groupId),
-          })
-        );
-        await onDone(
-          recordStatus === "PAID"
-            ? `Recorded a ${money(cents)} offline payment`
-            : `Recorded a ${money(cents)} open invoice`
-        );
-      }
+      const res = opResult<{ status?: string }>(
+        await api().mutations.chargeManualAmount({
+          customerId: customer.id,
+          amountCents: cents,
+          description: description.trim(),
+          idempotencyKey: idemToken,
+        })
+      );
+      await onDone(
+        res?.status === "succeeded"
+          ? `Charged ${money(cents)} to ${cardLabel ?? "the card on file"}`
+          : `Charge submitted for ${money(cents)} — the status updates when it settles`
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not process");
+      setError(err instanceof Error ? err.message : "Could not charge the card");
+      setConfirming(false);
       setBusy(false);
     }
   };
 
+  if (!hasPaymentMethod) {
+    return (
+      <div className="form-grid">
+        <p>
+          <strong>{customer.displayName}</strong> has no payment method on file,
+          so there is nothing to charge.
+        </p>
+        <p className="muted small" style={{ margin: 0 }}>
+          Collect a card first. If they have already paid you by cash or cheque,
+          record that instead — it is a separate action on the customer record.
+        </p>
+      </div>
+    );
+  }
+
+  if (confirming) {
+    return (
+      <div className="form-grid">
+        <p style={{ margin: 0 }}>
+          Charge <strong>{money(cents)}</strong> to{" "}
+          <strong>{customer.displayName}</strong>
+          {cardLabel ? ` on ${cardLabel}` : ""}?
+        </p>
+        <p style={{ margin: 0, fontSize: 17, fontWeight: 600 }}>
+          {amountInWords(cents)}
+        </p>
+        <p className="muted small" style={{ margin: 0 }}>
+          {description.trim()}
+        </p>
+        <p className="muted small" style={{ margin: 0 }}>
+          This takes the money now. It can be refunded afterwards, but it cannot
+          be undone.
+        </p>
+        {needsRetype ? (
+          <Field
+            label="Type the amount again to confirm"
+            hint="Anything over $500 is worth checking twice"
+          >
+            <input
+              inputMode="decimal"
+              value={retyped}
+              onChange={(e) => setRetyped(e.target.value.replace(/[^\d.]/g, ""))}
+              placeholder={(cents / 100).toFixed(2)}
+            />
+          </Field>
+        ) : null}
+        <ErrorNote error={error} />
+        <Button
+          block
+          variant="danger"
+          loading={busy}
+          disabled={!retypeOk}
+          onClick={() => void submit()}
+        >
+          Yes, charge {money(cents)}
+        </Button>
+        <Button block variant="subtle" onClick={() => setConfirming(false)}>
+          Back
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="form-grid">
-      <SegControl
-        options={[
-          { value: "CHARGE" as const, label: "Charge card on file" },
-          { value: "RECORD" as const, label: "Record offline" },
-        ]}
-        value={mode}
-        onChange={setMode}
-      />
-      {mode === "CHARGE" && !hasPaymentMethod ? (
-        <p className="muted small">
-          No card on file — collect one first, or switch to "Record offline"
-          for a cash/check payment.
-        </p>
-      ) : null}
+      <p className="muted small" style={{ margin: 0 }}>
+        Charges {cardLabel ?? "the card on file"} straight away.
+      </p>
       <Field label="Amount ($)">
         <input
           inputMode="decimal"
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
+          onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))}
           placeholder="149.00"
         />
       </Field>
-      <Field label="Description" hint="Shows on the invoice and the customer's history">
+      <Field
+        label="What is this for?"
+        hint="Goes on the invoice and on the customer's card statement"
+      >
         <input
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="Extra visit — wasp nest follow-up"
         />
       </Field>
-      {mode === "RECORD" ? (
-        <Field label="Status" hint="Paid = already collected offline; Open = owed">
-          <SegControl
-            options={[
-              { value: "PAID" as const, label: "Paid (offline)" },
-              { value: "OPEN" as const, label: "Open (owed)" },
-            ]}
-            value={recordStatus}
-            onChange={setRecordStatus}
-          />
+      <ErrorNote error={error} />
+      <Button
+        block
+        disabled={!validAmount || !description.trim()}
+        onClick={() => {
+          setRetyped("");
+          setConfirming(true);
+        }}
+      >
+        Review charge
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Record money taken outside Stripe, or raise an invoice to be settled later.
+ * Moves no money.
+ *
+ * Deliberately a different screen from the charge, not a toggle beside it. As
+ * one control the only thing separating "collected $500" from "took $500" was
+ * which half of a segmented control was lit, and it defaulted to the recording
+ * half whenever the payment-method lookup came back empty — including when it
+ * failed. Goes through a mutation so the actor is stamped server-side.
+ */
+function RecordPaymentSheet({
+  customer,
+  onDone,
+}: {
+  customer: Customer;
+  onDone: (message: string) => Promise<void>;
+}) {
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [method, setMethod] = useState<"CASH" | "CHEQUE" | "BANK" | "OTHER">(
+    "CHEQUE"
+  );
+  const [status, setStatus] = useState<"PAID" | "OPEN">("PAID");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const cents = Math.round(parseFloat(amount) * 100);
+  const validAmount = Number.isFinite(cents) && cents > 0;
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      unwrap(
+        await api().mutations.recordOfflinePayment({
+          customerId: customer.id,
+          amountCents: cents,
+          description: description.trim(),
+          status,
+          method: status === "PAID" ? method : undefined,
+        })
+      );
+      await onDone(
+        status === "PAID"
+          ? `Recorded ${money(cents)} received by ${method.toLowerCase()}`
+          : `Raised a ${money(cents)} invoice`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not record the payment");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="form-grid">
+      <p className="muted small" style={{ margin: 0 }}>
+        Bookkeeping only — no card is charged. Your name is recorded against it.
+      </p>
+      <SegControl
+        options={[
+          { value: "PAID" as const, label: "Money received" },
+          { value: "OPEN" as const, label: "Invoice to be paid" },
+        ]}
+        value={status}
+        onChange={setStatus}
+      />
+      <Field label="Amount ($)">
+        <input
+          inputMode="decimal"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))}
+          placeholder="149.00"
+        />
+      </Field>
+      {status === "PAID" ? (
+        <Field label="How did it arrive?">
+          <select
+            value={method}
+            onChange={(e) => setMethod(e.target.value as typeof method)}
+          >
+            <option value="CHEQUE">Cheque</option>
+            <option value="CASH">Cash</option>
+            <option value="BANK">Bank transfer</option>
+            <option value="OTHER">Other</option>
+          </select>
         </Field>
       ) : null}
+      <Field label="What is this for?" hint="Shows on the invoice and their history">
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Extra visit — wasp nest follow-up"
+        />
+      </Field>
       <ErrorNote error={error} />
       <Button
         block
         loading={busy}
-        disabled={mode === "CHARGE" && !hasPaymentMethod}
+        disabled={!validAmount || !description.trim()}
         onClick={() => void submit()}
       >
-        {mode === "CHARGE" ? "Charge card" : "Record payment"}
+        {status === "PAID" ? `Record ${validAmount ? money(cents) : "payment"} received` : "Raise invoice"}
       </Button>
     </div>
   );

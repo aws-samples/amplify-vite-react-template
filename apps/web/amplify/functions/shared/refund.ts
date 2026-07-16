@@ -62,7 +62,13 @@ export type RefundOutcome = {
  */
 export async function refundInvoice(
   stripe: Stripe,
-  opts: { invoiceId: string; amountCents?: number | null; reason: string }
+  opts: {
+    invoiceId: string;
+    amountCents?: number | null;
+    reason: string;
+    /** Verified Cognito identity of whoever pressed the button. */
+    actor?: { sub: string | null; email: string | null };
+  }
 ): Promise<RefundOutcome> {
   const client = await dataClient();
   const { data: invoice } = await client.models.Invoice.get({
@@ -126,6 +132,10 @@ export async function refundInvoice(
     refundReason: reason,
     status,
     ...(stripeRefundId ? { stripeRefundId } : {}),
+    // Why was already required; who was not. Compelling an explanation for an
+    // action whose actor is unrecorded is a strange place to stop.
+    ...(opts.actor?.sub ? { refundedBy: opts.actor.sub } : {}),
+    ...(opts.actor?.email ? { refundedByEmail: opts.actor.email } : {}),
   });
   if (!updated) {
     // The money is already back with the customer. This must be loud: the
