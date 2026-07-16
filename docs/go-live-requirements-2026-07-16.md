@@ -92,6 +92,32 @@ deploy so the stale built Clarity tag can't ship.
   app's hosting env; Turnstile (`TURNSTILE_SECRET` + widget) before ad spend if bot volume
   appears; production Stripe webhook registration (R82) before the funnel opens on main.
 
+**AI pricing rearchitecture, `e734ee5` + `fe85d00`** (Jake's directive, 16 July: "absolutely
+everything priced with AI — no other way is acceptable"; suites 364 web / 134 CRM):
+
+- **R63 resolved by reversal**: the LLM market-rate engine is not cut — it is now the ONLY
+  pricing engine. One cached research per service+area+size band returns a full rate sheet
+  (one-time, extra nests, all plan cadences with initial fees, HOA per-unit by unit band);
+  the funnel and the office/Thumbtack engine both price from it. Deterministic survivors, by
+  Jake's explicit choice: the drive-time day-pricing overlay + zone adders (locked decision)
+  and the variable-cost floor. **Clamps and review gates were explicitly declined — there is
+  no upper price bound**; the compensating control is the new-rate office email plus the
+  Market Rates console (full-sheet edit, pin/un-pin — a pinned override never re-researches).
+- **HOA auto-quotes** — the every-HOA-lead-escalates-to-Jake policy is retired (this also
+  resolves section C's "HOA auto-quote threshold": there is none; escalation remains only the
+  research-failure fallback). The two-weeks-off test now passes by construction.
+- **Plan templates retired** (Jake: "simpler is better; production never used") — model,
+  screen, and mutation gone; quotes verify their baseline against the live AI sheet
+  server-side with the deviation guard intact; agreement bodies come from the code template,
+  closing R65's direction for the quote flow. R57's monotonicity suite retired with the
+  hand-priced HOA card it kept honest. Rodent/roach's guard work from R63 is moot (the office
+  override is now the pinned sheet, not a free-text bypass).
+- Residuals now tracked: commercial + mosquito still price from their deterministic cards (no
+  engine service kind yet); plan cadences and HOA rates carry no cost floor (no per-visit cost
+  constants exist — noted on each rate row); CRM quotes don't apply the Zone-B travel adder
+  the funnel applies (product decision needed); template pest photos on e-sign pages died with
+  templates.
+
 **Lead-form retirement, `cdc8c18`** (Jake's directive; suites 314 web / 114 CRM):
 
 - The website lead form is gone everywhere (ContactForm + all three LP inline forms); the
