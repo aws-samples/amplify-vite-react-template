@@ -31,6 +31,7 @@ vi.mock("../shared/stripeClient", () => ({
 }));
 
 let booking: Record<string, unknown>;
+const customers: Record<string, unknown>[] = [];
 
 const fakeDataClient = {
   models: {
@@ -43,9 +44,10 @@ const fakeDataClient = {
       delete: async () => ({ data: null }),
     },
     Customer: {
-      create: async (input: Record<string, unknown>) => ({
-        data: { id: "cust1", groupId: null, ...input },
-      }),
+      create: async (input: Record<string, unknown>) => {
+        customers.push(input);
+        return { data: { id: "cust1", groupId: null, ...input } };
+      },
       update: async (patch: Record<string, unknown>) => ({ data: patch }),
     },
     ServicePlan: {
@@ -77,6 +79,7 @@ const { finalizeBooking } = await import("../shared/bookingFinalize");
 beforeEach(() => {
   emails.length = 0;
   pdfBodies.length = 0;
+  customers.length = 0;
   delete process.env.DOCS_BUCKET; // skip the S3 write
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   booking = {
@@ -129,5 +132,63 @@ describe("the finalize email renders the cancellation constant (R17)", () => {
     expect(pdfBodies[0]).toContain(
       `Cancel more than ${CANCEL_FULL_REFUND_DAYS} days before your appointment for a full refund. Cancellations ${CANCEL_FULL_REFUND_DAYS} days or less before the appointment are not refundable.`
     );
+  });
+});
+
+describe("the customer's lead source carries the booking's attribution", () => {
+  const finalize = () =>
+    finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_1",
+      amountReceived: 31300,
+    });
+
+  it("derives leadSource and the notes lines from a stored utm click", async () => {
+    booking.attribution = JSON.stringify({
+      source: "google",
+      medium: "cpc",
+      campaign: "spring-rodents",
+      gclid: "abc123",
+      referrer: "https://www.google.com/",
+      landingPage: "/quote?utm_source=google",
+    });
+
+    await finalize();
+
+    expect(customers[0].leadSource).toBe("Website booking · utm:google");
+    const notes = String(customers[0].leadNotes);
+    expect(notes).toContain("Campaign: spring-rodents");
+    expect(notes).toContain("Medium: cpc");
+    expect(notes).toContain("Google click id: abc123");
+    expect(notes).toContain("Referrer: https://www.google.com/");
+    expect(notes).toContain("Landing page: /quote?utm_source=google");
+    expect(notes).not.toContain("Term:"); // absent fields write no line
+  });
+
+  it("labels attribution without a utm source as a plain website booking, keeping the rest", async () => {
+    booking.attribution = JSON.stringify({ referrer: "https://bing.com/" });
+
+    await finalize();
+
+    expect(customers[0].leadSource).toBe("Website booking");
+    expect(String(customers[0].leadNotes)).toContain(
+      "Referrer: https://bing.com/"
+    );
+  });
+
+  it("stays exactly as before when the booking has no attribution", async () => {
+    await finalize();
+
+    expect(customers[0].leadSource).toBe("Website booking");
+    expect(customers[0].leadNotes).toBeUndefined();
+  });
+
+  it("shrugs off junk in the stored field rather than failing a paid booking", async () => {
+    booking.attribution = "{not json";
+
+    await finalize();
+
+    expect(customers[0].leadSource).toBe("Website booking");
+    expect(customers[0].leadNotes).toBeUndefined();
   });
 });

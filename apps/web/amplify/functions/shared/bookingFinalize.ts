@@ -92,6 +92,7 @@ type BookingRecord = {
   state?: string | null;
   zip?: string | null;
   quoteJson?: unknown;
+  attribution?: unknown;
   selectedDate?: string | null;
   selectedWindow?: string | null;
   recurring?: boolean | null;
@@ -100,6 +101,77 @@ type BookingRecord = {
   stripeCustomerId?: string | null;
   stripePaymentIntentId?: string | null;
 };
+
+/** First-touch ad attribution as sanitized and stored at /quote. */
+type Attribution = {
+  source?: string;
+  medium?: string;
+  campaign?: string;
+  term?: string;
+  content?: string;
+  gclid?: string;
+  referrer?: string;
+  landingPage?: string;
+};
+
+/** The stored field is a.json() written as a string at /quote; be tolerant of
+ *  either shape and of junk — attribution must never break a finalization. */
+function parseAttribution(raw: unknown): Attribution | null {
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const out: Attribution = {};
+  for (const key of [
+    "source",
+    "medium",
+    "campaign",
+    "term",
+    "content",
+    "gclid",
+    "referrer",
+    "landingPage",
+  ] as const) {
+    const v = (value as Record<string, unknown>)[key];
+    if (typeof v === "string" && v.trim()) out[key] = v.trim();
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * The lead source the office sees on the customer — mirrors lead-intake's
+ * sourceLabel: the channel, plus the utm source when the click carried one.
+ */
+function bookingSourceLabel(attribution: Attribution | null): string {
+  const utm = attribution?.source?.trim();
+  return utm ? `Website booking · utm:${utm}` : "Website booking";
+}
+
+/** Attribution lines for the customer's lead notes, in lead-intake's
+ *  buildLeadNotes label style — only the fields actually present. */
+function attributionNotes(attribution: Attribution | null): string | undefined {
+  if (!attribution) return undefined;
+  const lines: string[] = [];
+  const add = (label: string, v: string | undefined) => {
+    const t = (v ?? "").trim();
+    if (t) lines.push(`${label}: ${t}`);
+  };
+  add("Campaign", attribution.campaign);
+  add("Medium", attribution.medium);
+  add("Term", attribution.term);
+  add("Content", attribution.content);
+  add("Google click id", attribution.gclid);
+  add("Landing page", attribution.landingPage);
+  add("Referrer", attribution.referrer);
+  return lines.length ? lines.join("\n") : undefined;
+}
 
 async function finalizeClaimed(
   booking: BookingRecord,
@@ -138,6 +210,13 @@ async function finalizeClaimed(
   // 1. Customer (ACTIVE — they've paid). Contact details are validated at
   // /quote, but a paid booking must never be bricked by a format rejection:
   // retry without the optional phone rather than fail.
+  //
+  // The lead source and notes carry the first-touch ad attribution captured
+  // at /quote, so a website booking is trackable to its campaign just like a
+  // lead-form lead was.
+  const attribution = parseAttribution(booking.attribution);
+  const leadSource = bookingSourceLabel(attribution);
+  const leadNotes = attributionNotes(attribution);
   let { data: customer } = await client.models.Customer.create({
     displayName: booking.name,
     contactName: booking.name,
@@ -148,7 +227,8 @@ async function finalizeClaimed(
     serviceState: booking.state ?? undefined,
     serviceZip: booking.zip ?? undefined,
     status: "ACTIVE",
-    leadSource: "Website booking",
+    leadSource,
+    leadNotes,
     stripeCustomerId: booking.stripeCustomerId ?? undefined,
     convertedAt: new Date().toISOString(),
   });
@@ -162,7 +242,8 @@ async function finalizeClaimed(
       serviceState: booking.state ?? undefined,
       serviceZip: booking.zip ?? undefined,
       status: "ACTIVE",
-      leadSource: "Website booking",
+      leadSource,
+      leadNotes,
       stripeCustomerId: booking.stripeCustomerId ?? undefined,
       convertedAt: new Date().toISOString(),
     }));

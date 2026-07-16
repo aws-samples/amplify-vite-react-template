@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import FAQ from "../components/FAQ";
-import ContactForm from "../components/ContactForm";
+import QuoteCTA from "../components/QuoteCTA";
 import SEO, { buildServiceSchema, buildBreadcrumbSchema, buildFAQSchema } from "../components/SEO";
 
 const CONDO_FAQS = [
@@ -176,7 +176,11 @@ export default function CondoServices() {
         ]}
       />
 
-      <ContactForm />
+      <QuoteCTA
+        eyebrow="For HOA Boards & Property Managers"
+        title="Start Your HOA Proposal"
+        intro="Tell us about your community in our instant quote form — a BuzzKill specialist will call you within the hour to build a custom common-area program."
+      />
     </>
   );
 }

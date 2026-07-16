@@ -1,7 +1,7 @@
 import { useParams, Navigate, useNavigate } from "react-router-dom";
 import { CITY_BY_SLUG } from "../data/cities";
 import FAQ from "../components/FAQ";
-import ContactForm from "../components/ContactForm";
+import QuoteCTA from "../components/QuoteCTA";
 import SEO, { buildCitySchema, buildBreadcrumbSchema, buildFAQSchema } from "../components/SEO";
 
 export default function CityPage() {
@@ -22,7 +22,7 @@ export default function CityPage() {
   const cityFaqs = [
     { q: `Do you service condos and HOAs in ${name}?`, a: `Yes! BuzzKill provides professional pest control for condominiums, HOAs, and multi-unit communities throughout ${name}, ${stateAbbr} and surrounding areas.` },
     { q: "Is in-unit service required?", a: `No. In-unit service is optional and scheduled directly by ${name} unit owners. The HOA contract covers common areas only.` },
-    { q: `How do I get a quote for my ${name} property?`, a: "Fill out the form below with your property details and we'll provide a quote within one business day. Or call us at 508-258-9294." },
+    { q: `How do I get a quote for my ${name} property?`, a: "Use the instant quote below — enter your property details, see your price in seconds, and book online. For condo/HOA and anything we can't price on the spot, a specialist calls you within the hour. Or call us at 508-258-9294." },
   ];
 
   return (
@@ -197,16 +197,16 @@ export default function CityPage() {
           },
           {
             q: `How do I get a quote for my ${name} property?`,
-            a: "Fill out the form below with your property details and we'll provide a quote within one business day. Or call us at 508-258-9294.",
+            a: "Use the instant quote below — enter your property details, see your price in seconds, and book online. For condo/HOA and anything we can't price on the spot, a specialist calls you within the hour. Or call us at 508-258-9294.",
           },
         ]}
       />
 
-      {/* Contact form */}
-      <ContactForm
+      {/* Instant quote CTA */}
+      <QuoteCTA
         eyebrow={`Pest Control in ${fullLocation}`}
-        title={`Get a Free Quote for ${name}`}
-        intro={`Tell us about your ${name} property and we'll provide a custom pest control quote within one business day.`}
+        title={`Get an Instant Quote for ${name}`}
+        intro={`Tell us about your ${name} property and see your price in seconds — then book online.`}
       />
     </>
   );

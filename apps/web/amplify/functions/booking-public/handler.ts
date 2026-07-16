@@ -123,7 +123,51 @@ type QuoteInput = {
   comments?: string;
   recurringPreference?: string | null;
   botToken?: string;
+  /** First-touch ad attribution from the site — untrusted, sanitized below. */
+  attribution?: unknown;
 };
+
+/** The only attribution keys the funnel stores (mirrors lead-intake). */
+const ATTRIBUTION_KEYS = [
+  "source",
+  "medium",
+  "campaign",
+  "term",
+  "content",
+  "gclid",
+  "referrer",
+  "landingPage",
+] as const;
+type AttributionKey = (typeof ATTRIBUTION_KEYS)[number];
+type Attribution = Partial<Record<AttributionKey, string>>;
+
+const ATTRIBUTION_VALUE_MAX = 300;
+
+/**
+ * Attribution is nice-to-have telemetry from the browser — it must never fail
+ * a quote. Keep only the known keys, coerce primitive values to strings
+ * truncated at 300 chars, and drop everything else (arrays, objects, junk)
+ * silently. Returns null when nothing usable survives.
+ */
+export function sanitizeAttribution(raw: unknown): Attribution | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const out: Attribution = {};
+  for (const key of ATTRIBUTION_KEYS) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (
+      typeof value !== "string" &&
+      typeof value !== "number" &&
+      typeof value !== "boolean"
+    ) {
+      continue;
+    }
+    const str = String(value).trim().slice(0, ATTRIBUTION_VALUE_MAX);
+    if (str) out[key] = str;
+  }
+  return Object.keys(out).length ? out : null;
+}
 
 // AppSync AWSEmail/AWSPhone reject loosely-formatted values, and a paid
 // booking must never fail to finalize on a format error — so validate hard
@@ -341,6 +385,10 @@ async function quote(input: QuoteInput, sourceIp: string) {
 
   const client = await dataClient();
   const address = `${addr.street}, ${addr.city}, ${addr.state}${addr.zip ? ` ${addr.zip}` : ""}`;
+  // First-touch ad attribution rides along on every booking this quote
+  // creates, so finalization can derive the customer's lead source. Malformed
+  // input sanitizes to null and the quote proceeds without it.
+  const attribution = sanitizeAttribution(input.attribution);
 
   const makeBooking = async (fields: Record<string, unknown>) => {
     const { data: booking, errors: gqlErrors } =
@@ -365,6 +413,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
         nestCount: input.nestCount ?? undefined,
         comments: input.comments?.slice(0, 2000) || undefined,
         recurringPreference: input.recurringPreference ?? undefined,
+        attribution: attribution ? JSON.stringify(attribution) : undefined,
         cancelToken: randomUUID(),
         ...fields,
       });
@@ -387,6 +436,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
       relatedId: booking.id,
       bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}.</p>
        ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
+       ${attribution?.source ? `<p>Lead source: utm:${escapeHtml(attribution.source)}${attribution.campaign ? ` · campaign:${escapeHtml(attribution.campaign)}` : ""}</p>` : ""}
        <p>Booking request ${booking.id} — call within the hour per the website promise.</p>
        ${opsNote}`,
     });

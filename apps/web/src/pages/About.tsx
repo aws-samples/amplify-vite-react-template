@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import ContactForm from "../components/ContactForm";
+import QuoteCTA from "../components/QuoteCTA";
 import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 
 export default function About() {
@@ -126,7 +126,7 @@ export default function About() {
         </div>
       </section>
 
-      <ContactForm />
+      <QuoteCTA />
     </>
   );
 }

@@ -261,6 +261,10 @@ const schema = a.schema({
       nestCount: a.integer(),
       comments: a.string(),
       recurringPreference: a.string(),
+      // First-touch ad attribution carried from the site (utm fields, gclid,
+      // referrer, landing page); feeds the customer's leadSource at
+      // finalization so website bookings keep their lead source.
+      attribution: a.json(),
       zone: a.string(),
       driveMinutes: a.integer(),
       quoteJson: a.json(),

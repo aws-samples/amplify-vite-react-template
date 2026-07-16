@@ -3,7 +3,7 @@ import Hero from "../components/Hero";
 import NumberedSteps from "../components/NumberedSteps";
 import WhyUs from "../components/WhyUs";
 import FAQ from "../components/FAQ";
-import ContactForm from "../components/ContactForm";
+import QuoteCTA from "../components/QuoteCTA";
 import SEO, {
   ORG_SCHEMA,
   LOCAL_BUSINESS_SCHEMA,
@@ -236,7 +236,7 @@ export default function Home() {
         </div>
       </section>
 
-      <ContactForm />
+      <QuoteCTA />
     </>
   );
 }

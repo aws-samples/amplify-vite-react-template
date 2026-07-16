@@ -191,3 +191,78 @@ describe("PRICED quotes carry the checkout terms (R17)", () => {
     expect(res.body.terms).toBeUndefined();
   });
 });
+
+describe("first-touch attribution rides on the booking", () => {
+  const storedAttribution = () =>
+    bookings[0].attribution
+      ? JSON.parse(String(bookings[0].attribution))
+      : undefined;
+
+  it("stores sanitized attribution on a PRICED booking", async () => {
+    const res = await postQuote({
+      ...rodentInput,
+      attribution: {
+        source: "google",
+        medium: "cpc",
+        campaign: "x".repeat(400), // oversize — truncated to 300
+        gclid: "abc123",
+        referrer: "https://www.google.com/",
+        landingPage: "/quote",
+        unknownKey: "dropped", // not in the contract
+        junk: { nested: true },
+      },
+    });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(storedAttribution()).toEqual({
+      source: "google",
+      medium: "cpc",
+      campaign: "x".repeat(300),
+      gclid: "abc123",
+      referrer: "https://www.google.com/",
+      landingPage: "/quote",
+    });
+  });
+
+  it("stores it on the CONTACT path too, and tells the office the source", async () => {
+    hqMinutes = null; // zone UNKNOWN → callback
+
+    const res = await postQuote({
+      ...rodentInput,
+      attribution: { source: "facebook", campaign: "spring-ants" },
+    });
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(storedAttribution()).toEqual({
+      source: "facebook",
+      campaign: "spring-ants",
+    });
+    expect(officeEmails[0].bodyHtml).toContain("utm:facebook");
+    expect(officeEmails[0].bodyHtml).toContain("campaign:spring-ants");
+  });
+
+  it("survives junk attribution as a no-op — the quote never fails over it", async () => {
+    for (const junk of [
+      "not-an-object",
+      42,
+      ["an", "array"],
+      { source: { nested: true }, campaign: ["arr"], gclid: null },
+    ]) {
+      bookings.length = 0;
+      const res = await postQuote({ ...rodentInput, attribution: junk });
+
+      expect(res.status).toBe(200);
+      expect(res.body.decision).toBe("PRICED");
+      expect(bookings[0].attribution).toBeUndefined();
+    }
+  });
+
+  it("coerces primitive non-string values instead of dropping the click", async () => {
+    await postQuote({
+      ...rodentInput,
+      attribution: { source: "google", term: 12345 },
+    });
+
+    expect(storedAttribution()).toEqual({ source: "google", term: "12345" });
+  });
+});

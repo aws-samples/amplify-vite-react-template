@@ -1,5 +1,5 @@
 import FAQ from "../components/FAQ";
-import ContactForm from "../components/ContactForm";
+import QuoteCTA from "../components/QuoteCTA";
 import SEO, { buildServiceSchema, buildBreadcrumbSchema, buildFAQSchema } from "../components/SEO";
 
 const INUNIT_FAQS = [
@@ -156,7 +156,7 @@ export default function InUnitServices() {
         ]}
       />
 
-      <ContactForm />
+      <QuoteCTA />
     </>
   );
 }

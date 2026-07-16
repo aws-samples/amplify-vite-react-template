@@ -6,14 +6,11 @@
  * - Shows consequences of inaction (complaints, health, property value)
  * - Social proof: number of communities served, trust signals
  * - Urgency: seasonal messaging, limited capacity
- * - Single CTA: Request a free assessment
+ * - Single CTA: the instant-quote funnel — community/HOA requests are
+ *   captured there and a specialist calls back within the hour
  */
-import { useEffect, useState } from "react";
-import type { FormEvent } from "react";
-import { submitLead } from "../../lib/leadIntake";
+import { Link } from "react-router-dom";
 import SEO from "../../components/SEO";
-
-const AGREEMENT_REDIRECT_DELAY = 4;
 
 const STATS = [
   {
@@ -56,71 +53,6 @@ function CheckIcon() {
 }
 
 export default function LPProtect() {
-  const [submitted, setSubmitted] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [agreementUrl, setAgreementUrl] = useState<string | null>(null);
-  const [redirectCountdown, setRedirectCountdown] = useState<number>(
-    AGREEMENT_REDIRECT_DELAY,
-  );
-  const [data, setData] = useState({
-    first: "",
-    last: "",
-    email: "",
-    phone: "",
-    addr: "",
-    city: "",
-    state: "MA",
-    zip: "",
-    company: "",
-    units: "",
-  });
-
-  const update =
-    (k: keyof typeof data) => (e: React.ChangeEvent<HTMLInputElement>) =>
-      setData({ ...data, [k]: e.target.value });
-
-  // Auto-redirect to agreement signing page after submission
-  useEffect(() => {
-    if (!submitted || !agreementUrl) return;
-    if (redirectCountdown <= 0) {
-      window.location.href = agreementUrl;
-      return;
-    }
-    const timer = setTimeout(() => {
-      setRedirectCountdown((n) => n - 1);
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [submitted, agreementUrl, redirectCountdown]);
-
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    try {
-      const result = await submitLead({
-        propertyType: "Association",
-        ...data,
-        sqft: "",
-        freq: "Monthly",
-      });
-      if (result.ok) {
-        const body = result.body as { agreementUrl?: string };
-        if (body.agreementUrl) setAgreementUrl(body.agreementUrl);
-        setSubmitted(true);
-      } else
-        setError(
-          "error" in result.body
-            ? String(result.body.error)
-            : "Something went wrong. Please call 508-258-9294.",
-        );
-    } catch {
-      setError("Network error. Please call 508-258-9294.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   return (
     <div className="bk-lp bk-lp--dark">
       <SEO
@@ -207,82 +139,47 @@ export default function LPProtect() {
         spring/summer coverage.
       </div>
 
-      {/* Form or success */}
-      <section
-        style={{ padding: "56px 24px 80px", flex: 1 }}
-      >
+      {/* CTA — straight into the instant-quote funnel */}
+      <section style={{ padding: "56px 24px 80px", flex: 1 }}>
         <div
           className="bk-lp-container bk-lp-container--narrow"
-          style={{ padding: 0 }}
+          style={{ padding: 0, textAlign: "center" }}
         >
-          {submitted ? (
-            <div style={{ textAlign: "center", padding: "20px 0" }}>
-              <div className="bk-lp-success-icon" aria-hidden="true">
-                <svg
-                  width="32"
-                  height="32"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M20 6L9 17l-5-5" />
-                </svg>
-              </div>
-              <h2 className="bk-lp-h2">
-                {agreementUrl ? "You're All Set!" : "We'll Be in Touch"}
-              </h2>
-              {agreementUrl ? (
-                <>
-                  <p
-                    className="bk-lp-lead"
-                    style={{ maxWidth: 460, margin: "0 auto 18px" }}
-                  >
-                    Your service agreement is ready to sign.
-                    {redirectCountdown > 0 && (
-                      <>
-                        {" "}
-                        Redirecting you in{" "}
-                        <strong>{redirectCountdown}</strong> second
-                        {redirectCountdown === 1 ? "" : "s"}…
-                      </>
-                    )}
-                  </p>
-                  <a
-                    href={agreementUrl}
-                    className="bk-btn bk-btn-primary bk-lp-cta"
-                    style={{ maxWidth: 360, margin: "0 auto" }}
-                  >
-                    Review &amp; Sign Agreement Now &rarr;
-                  </a>
-                  <p
-                    style={{
-                      fontSize: 13,
-                      color: "rgba(255,255,255,0.5)",
-                      marginTop: 18,
-                      maxWidth: 420,
-                      marginLeft: "auto",
-                      marginRight: "auto",
-                    }}
-                  >
-                    A copy was also sent to <strong>{data.email}</strong>.
-                    (Check your spam folder if you don&rsquo;t see it.)
-                  </p>
-                </>
-              ) : (
-                <p
-                  className="bk-lp-lead"
-                  style={{ maxWidth: 420, margin: "0 auto" }}
-                >
-                  A BuzzKill specialist will contact you within one business
-                  day to discuss your community&rsquo;s needs and schedule a
-                  free assessment.
-                </p>
-              )}
-              <div className="bk-lp-trust">
-                <div className="bk-lp-trust__item">
+          <h2 className="bk-lp-h2">Get Your Community a Plan</h2>
+          <p className="bk-lp-lead" style={{ maxWidth: 440, margin: "0 auto" }}>
+            Start with our instant quote — tell us about your property and a
+            BuzzKill specialist will call you within the hour to build a
+            custom plan. No obligation.
+          </p>
+
+          <Link
+            to="/quote"
+            className="bk-btn bk-btn-primary bk-lp-cta bk-lp-cta--lg"
+            style={{ maxWidth: 380, margin: "28px auto 0", display: "block" }}
+          >
+            Get My Instant Quote &rarr;
+          </Link>
+
+          <p
+            style={{
+              fontSize: 14,
+              color: "rgba(255,255,255,0.55)",
+              marginTop: 18,
+            }}
+          >
+            Prefer to talk now? Call{" "}
+            <a
+              href="tel:508-258-9294"
+              style={{ color: "var(--bk-green)", fontWeight: 600 }}
+            >
+              508-258-9294
+            </a>
+          </p>
+
+          <div className="bk-lp-trust">
+            {["Specialist call within the hour", "No obligation"].map(
+              (t, i) => (
+                <div key={i} className="bk-lp-trust__item">
                   <svg
                     width="14"
                     height="14"
@@ -291,207 +188,15 @@ export default function LPProtect() {
                     stroke="currentColor"
                     strokeWidth="3"
                     strokeLinecap="round"
+                    aria-hidden="true"
                   >
                     <path d="M20 6L9 17l-5-5" />
                   </svg>
-                  Reply within 1 business day
+                  {t}
                 </div>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div style={{ textAlign: "center", marginBottom: 24 }}>
-                <h2 className="bk-lp-h2">Request a Free Assessment</h2>
-                <p className="bk-lp-lead">
-                  We&rsquo;ll evaluate your property and build a custom plan.
-                  No obligation.
-                </p>
-              </div>
-
-              <form
-                onSubmit={handleSubmit}
-                className="bk-lp-card bk-lp-card--dark"
-              >
-                <div className="bk-lp-field">
-                  <label className="bk-lp-field-label" htmlFor="lp-company">
-                    Association / Property name *
-                  </label>
-                  <input
-                    id="lp-company"
-                    className="bk-lp-input bk-lp-input--dark"
-                    required
-                    autoComplete="organization"
-                    value={data.company}
-                    onChange={update("company")}
-                  />
-                </div>
-
-                <div className="bk-lp-row bk-lp-row--2">
-                  <div className="bk-lp-field" style={{ marginBottom: 0 }}>
-                    <label className="bk-lp-field-label" htmlFor="lp-first">
-                      First name *
-                    </label>
-                    <input
-                      id="lp-first"
-                      className="bk-lp-input bk-lp-input--dark"
-                      required
-                      autoComplete="given-name"
-                      value={data.first}
-                      onChange={update("first")}
-                    />
-                  </div>
-                  <div className="bk-lp-field" style={{ marginBottom: 0 }}>
-                    <label className="bk-lp-field-label" htmlFor="lp-last">
-                      Last name *
-                    </label>
-                    <input
-                      id="lp-last"
-                      className="bk-lp-input bk-lp-input--dark"
-                      required
-                      autoComplete="family-name"
-                      value={data.last}
-                      onChange={update("last")}
-                    />
-                  </div>
-                </div>
-
-                <div className="bk-lp-row bk-lp-row--2">
-                  <div className="bk-lp-field" style={{ marginBottom: 0 }}>
-                    <label className="bk-lp-field-label" htmlFor="lp-email">
-                      Email *
-                    </label>
-                    <input
-                      id="lp-email"
-                      className="bk-lp-input bk-lp-input--dark"
-                      required
-                      type="email"
-                      autoComplete="email"
-                      value={data.email}
-                      onChange={update("email")}
-                    />
-                  </div>
-                  <div className="bk-lp-field" style={{ marginBottom: 0 }}>
-                    <label className="bk-lp-field-label" htmlFor="lp-phone">
-                      Phone *
-                    </label>
-                    <input
-                      id="lp-phone"
-                      className="bk-lp-input bk-lp-input--dark"
-                      required
-                      type="tel"
-                      autoComplete="tel"
-                      value={data.phone}
-                      onChange={update("phone")}
-                    />
-                  </div>
-                </div>
-
-                <div className="bk-lp-field">
-                  <label className="bk-lp-field-label" htmlFor="lp-addr">
-                    Property address *
-                  </label>
-                  <input
-                    id="lp-addr"
-                    className="bk-lp-input bk-lp-input--dark"
-                    required
-                    autoComplete="street-address"
-                    value={data.addr}
-                    onChange={update("addr")}
-                  />
-                </div>
-
-                <div className="bk-lp-row bk-lp-row--3">
-                  <div className="bk-lp-field" style={{ marginBottom: 0 }}>
-                    <label className="bk-lp-field-label" htmlFor="lp-city">
-                      City *
-                    </label>
-                    <input
-                      id="lp-city"
-                      className="bk-lp-input bk-lp-input--dark"
-                      required
-                      autoComplete="address-level2"
-                      value={data.city}
-                      onChange={update("city")}
-                    />
-                  </div>
-                  <div className="bk-lp-field" style={{ marginBottom: 0 }}>
-                    <label className="bk-lp-field-label" htmlFor="lp-state">
-                      State *
-                    </label>
-                    <input
-                      id="lp-state"
-                      className="bk-lp-input bk-lp-input--dark"
-                      required
-                      maxLength={2}
-                      autoComplete="address-level1"
-                      value={data.state}
-                      onChange={(e) =>
-                        setData({
-                          ...data,
-                          state: e.target.value.toUpperCase().slice(0, 2),
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="bk-lp-field" style={{ marginBottom: 0 }}>
-                    <label className="bk-lp-field-label" htmlFor="lp-zip">
-                      Zip *
-                    </label>
-                    <input
-                      id="lp-zip"
-                      className="bk-lp-input bk-lp-input--dark"
-                      required
-                      inputMode="numeric"
-                      autoComplete="postal-code"
-                      value={data.zip}
-                      onChange={update("zip")}
-                    />
-                  </div>
-                </div>
-
-                <div className="bk-lp-field">
-                  <label className="bk-lp-field-label" htmlFor="lp-units">
-                    Approx. unit count
-                  </label>
-                  <input
-                    id="lp-units"
-                    className="bk-lp-input bk-lp-input--dark"
-                    inputMode="numeric"
-                    placeholder="e.g. 48"
-                    value={data.units}
-                    onChange={update("units")}
-                  />
-                </div>
-
-                {error && (
-                  <div className="bk-lp-error" role="alert">
-                    {error}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  aria-busy={submitting}
-                  className="bk-btn bk-btn-primary bk-lp-cta"
-                >
-                  {submitting ? "Submitting…" : "Get My Free Assessment"}
-                </button>
-
-                <p
-                  style={{
-                    textAlign: "center",
-                    fontSize: 12,
-                    color: "rgba(255,255,255,0.4)",
-                    marginTop: 14,
-                    marginBottom: 0,
-                  }}
-                >
-                  No obligation. No pressure. Just a plan that works.
-                </p>
-              </form>
-            </>
-          )}
+              ),
+            )}
+          </div>
         </div>
       </section>
     </div>

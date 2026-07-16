@@ -11,6 +11,8 @@
  * and must be surfaced verbatim, so they ride along on the `ok: false` arm.
  */
 
+import { readAttribution, type Attribution } from "./leadIntake";
+
 let cached: string | null | undefined;
 
 export async function getBookingApiUrl(): Promise<string | undefined> {
@@ -73,6 +75,12 @@ export type QuoteRequest = {
   comments?: string;
   recurringPreference?: RecurringFrequency;
   botToken?: string;
+  /**
+   * First-touch ad attribution (see `lib/leadIntake.ts`). Optional — the
+   * server never fails a quote over it; it just rides along so the
+   * customer created at booking keeps their lead source.
+   */
+  attribution?: Attribution;
 };
 
 export type QuoteDay = {
@@ -203,7 +211,14 @@ async function post<T>(path: string, payload: unknown): Promise<ApiResult<T>> {
 // ── Callers ──────────────────────────────────────────────────────────
 
 export function requestQuote(input: QuoteRequest): Promise<ApiResult<QuoteResponse>> {
-  return post<QuoteResponse>("/quote", input);
+  // First-touch attribution rides along when we have it, so the customer
+  // created at booking keeps their lead source. Omitted entirely when the
+  // session has none (direct visits, storage-disabled browsers).
+  const attribution = readAttribution();
+  return post<QuoteResponse>(
+    "/quote",
+    attribution ? { ...input, attribution } : input,
+  );
 }
 
 export function bookVisit(input: BookRequest): Promise<ApiResult<BookResponse>> {

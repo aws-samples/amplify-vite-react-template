@@ -704,14 +704,8 @@ h6 {
 }
 
 /* =========================================================================
-   FORM (lead capture)
+   FORM (shared field styles — booking funnel + quote CTA)
    ========================================================================= */
-.bk-form {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 18px;
-  margin-top: 32px;
-}
 .bk-field {
   display: flex;
   flex-direction: column;
@@ -719,9 +713,6 @@ h6 {
 }
 .bk-field.bk-full {
   grid-column: 1 / -1;
-}
-.bk-field.bk-third {
-  grid-column: span 1;
 }
 .bk-field label {
   font-size: 13px;
@@ -746,10 +737,6 @@ h6 {
   border-color: var(--bk-green);
   box-shadow: 0 0 0 3px rgba(126, 211, 33, 0.18);
 }
-.bk-help {
-  font-size: 11px;
-  color: var(--fg2);
-}
 .bk-segmented {
   display: inline-flex;
   border: 1px solid var(--border-strong);
@@ -773,22 +760,13 @@ h6 {
   background: var(--bk-black);
   color: var(--bk-green);
 }
-.bk-submit-row {
-  padding-top: 8px;
-}
 .bk-confirm {
   text-align: center;
   padding: 64px 32px;
 }
 
-@media (max-width: 880px) {
-  .bk-form {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* =========================================================================
-   WIZARD FORM (multi-step ContactForm)
+   FORM CARD (booking funnel pages)
    ========================================================================= */
 .bk-form-card {
   background: #fff;
@@ -797,77 +775,6 @@ h6 {
   padding: 32px;
   margin-top: 32px;
   box-shadow: var(--shadow-md);
-}
-
-/* Stepper / progress indicator */
-.bk-stepper {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 36px;
-  position: relative;
-  padding: 0 8px;
-}
-.bk-stepper__step {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  position: relative;
-  z-index: 1;
-}
-.bk-stepper__num {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid var(--border-strong);
-  color: var(--fg2);
-  font-weight: 700;
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all var(--dur-base) var(--ease-out);
-}
-.bk-stepper__label {
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--fg2);
-  transition: color var(--dur-base);
-}
-.bk-stepper__line {
-  position: absolute;
-  top: 17px;
-  left: calc(50% + 22px);
-  right: calc(-50% + 22px);
-  height: 2px;
-  background: var(--border-strong);
-  z-index: -1;
-  transition: background var(--dur-base);
-}
-.bk-stepper__step.is-active .bk-stepper__num {
-  background: var(--bk-black);
-  border-color: var(--bk-black);
-  color: var(--bk-green);
-  box-shadow: 0 0 0 4px rgba(126, 211, 33, 0.18);
-}
-.bk-stepper__step.is-active .bk-stepper__label {
-  color: var(--fg1);
-}
-.bk-stepper__step.is-done .bk-stepper__num {
-  background: var(--bk-green);
-  border-color: var(--bk-green);
-  color: var(--bk-black);
-}
-.bk-stepper__step.is-done .bk-stepper__line {
-  background: var(--bk-green);
-}
-.bk-stepper__step.is-done .bk-stepper__label {
-  color: var(--fg1);
 }
 
 /* Wizard form steps */
@@ -926,47 +833,6 @@ h6 {
 .bk-segmented--full .bk-seg {
   flex: 1;
   text-align: center;
-}
-
-/* Live quote preview card */
-.bk-quote-preview {
-  grid-column: 1 / -1;
-  background: linear-gradient(
-    180deg,
-    rgba(126, 211, 33, 0.08) 0%,
-    rgba(126, 211, 33, 0.02) 100%
-  );
-  border: 1px solid rgba(126, 211, 33, 0.3);
-  border-left: 4px solid var(--bk-green);
-  border-radius: 0 8px 8px 0;
-  padding: 18px 22px;
-  animation: bkFadeIn var(--dur-base) var(--ease-out);
-}
-.bk-quote-preview__label {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--bk-green-deep);
-  margin-bottom: 6px;
-}
-.bk-quote-preview__price {
-  font-family: var(--font-heading);
-  font-size: 36px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--fg1);
-}
-.bk-quote-preview__per {
-  font-family: var(--font-body);
-  font-size: 14px;
-  font-weight: 400;
-  color: var(--fg2);
-}
-.bk-quote-preview__meta {
-  font-size: 13px;
-  color: var(--fg2);
-  margin-top: 4px;
 }
 
 /* Inline error */
@@ -1075,9 +941,6 @@ h6 {
   }
   .bk-form-row--3 {
     grid-template-columns: 1fr 1fr 1fr;
-  }
-  .bk-stepper__label {
-    font-size: 11px;
   }
 }
 
@@ -1440,186 +1303,6 @@ a:focus-visible {
   color: var(--fg2);
 }
 
-/* Card containers (form wrappers) */
-.bk-lp-card {
-  border-radius: var(--radius-xl);
-  padding: 28px;
-}
-.bk-lp-card--light {
-  background: #fff;
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
-}
-.bk-lp-card--dark {
-  background: var(--bk-neutral-800);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-@media (max-width: 480px) {
-  .bk-lp-card {
-    padding: 22px 18px;
-  }
-}
-
-/* Field group (label + input) */
-.bk-lp-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 14px;
-}
-.bk-lp-field-label {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-.bk-lp--light .bk-lp-field-label {
-  color: var(--fg1);
-}
-.bk-lp--dark .bk-lp-field-label {
-  color: rgba(255, 255, 255, 0.85);
-}
-.bk-lp-field-help {
-  font-size: 11px;
-}
-.bk-lp--light .bk-lp-field-help {
-  color: var(--fg2);
-}
-.bk-lp--dark .bk-lp-field-help {
-  color: rgba(255, 255, 255, 0.5);
-}
-
-/* Input + select */
-.bk-lp-input {
-  width: 100%;
-  font-family: var(--font-body);
-  font-size: 15px;
-  padding: 12px 14px;
-  border-radius: 8px;
-  outline: none;
-  transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
-}
-.bk-lp-input--light {
-  background: #fff;
-  border: 1px solid var(--border-strong);
-  color: var(--fg1);
-}
-.bk-lp-input--light::placeholder {
-  color: var(--fg3);
-}
-.bk-lp-input--light:focus,
-.bk-lp-input--light:focus-visible {
-  border-color: var(--bk-green);
-  box-shadow: 0 0 0 3px rgba(126, 211, 33, 0.22);
-}
-.bk-lp-input--dark {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  color: #fff;
-}
-.bk-lp-input--dark::placeholder {
-  color: rgba(255, 255, 255, 0.42);
-}
-.bk-lp-input--dark:hover {
-  border-color: rgba(255, 255, 255, 0.32);
-}
-.bk-lp-input--dark:focus,
-.bk-lp-input--dark:focus-visible {
-  border-color: var(--bk-green);
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 3px rgba(126, 211, 33, 0.28);
-}
-
-/* Field row layouts */
-.bk-lp-row {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-.bk-lp-row--2 {
-  grid-template-columns: 1fr 1fr;
-}
-.bk-lp-row--3 {
-  grid-template-columns: 2fr 1fr 1fr;
-}
-@media (max-width: 480px) {
-  .bk-lp-row--3 {
-    grid-template-columns: 2fr 1fr 1fr;
-  }
-}
-
-/* Quote display card (live preview / done state) */
-.bk-lp-quote {
-  text-align: center;
-  padding: 20px 24px;
-  border-top: 1px solid var(--border);
-  margin-top: 8px;
-}
-.bk-lp-quote--card {
-  background: linear-gradient(
-    180deg,
-    rgba(126, 211, 33, 0.1) 0%,
-    rgba(126, 211, 33, 0.02) 100%
-  );
-  border: 1px solid rgba(126, 211, 33, 0.3);
-  border-left: 4px solid var(--bk-green);
-  border-top: none;
-  border-radius: 0 8px 8px 0;
-  padding: 18px 22px;
-  text-align: left;
-  margin: 0;
-}
-.bk-lp-quote-label {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--bk-green-deep);
-  margin-bottom: 6px;
-}
-.bk-lp-quote-price {
-  font-family: var(--font-heading);
-  font-size: 40px;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--fg1);
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.bk-lp-quote-card--center .bk-lp-quote-price {
-  justify-content: center;
-}
-.bk-lp-quote-per {
-  font-family: var(--font-body);
-  font-size: 14px;
-  font-weight: 400;
-  color: var(--fg2);
-  white-space: nowrap;
-}
-.bk-lp-quote-per .bk-lp-quote-tax {
-  color: var(--fg3);
-  font-size: 12px;
-}
-.bk-lp-quote-meta {
-  font-size: 13px;
-  color: var(--fg2);
-  margin-top: 6px;
-}
-
-/* Success icon */
-.bk-lp-success-icon {
-  width: 64px;
-  height: 64px;
-  border-radius: 50%;
-  background: var(--bk-green);
-  color: var(--bk-black);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 20px;
-}
-
 /* Trust bar — used at bottom of every LP */
 .bk-lp-trust {
   display: flex;
@@ -1669,51 +1352,6 @@ a:focus-visible {
   align-items: center;
   justify-content: center;
   gap: 12px;
-}
-
-/* Inline error banner */
-.bk-lp-error {
-  border-radius: 8px;
-  padding: 12px 14px;
-  font-size: 14px;
-  line-height: 1.5;
-  margin-bottom: 14px;
-}
-.bk-lp--light .bk-lp-error {
-  background: #FFF4F2;
-  border: 1px solid #E53935;
-  color: #7A1A0F;
-}
-.bk-lp--dark .bk-lp-error {
-  background: rgba(229, 57, 53, 0.16);
-  border: 1px solid #E53935;
-  color: #ff9d96;
-}
-
-/* Recalculate / back link */
-.bk-lp-textlink {
-  display: block;
-  margin: 18px auto 0;
-  background: none;
-  border: 0;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--bk-green-deep);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.bk-lp--dark .bk-lp-textlink {
-  color: var(--bk-green);
-}
-.bk-lp-textlink:hover {
-  color: var(--bk-green-deep);
-}
-.bk-lp-textlink:focus-visible {
-  outline: 2px solid var(--bk-green);
-  outline-offset: 4px;
-  border-radius: 4px;
 }
 
 /* Stat tiles for LPProtect */
@@ -1819,29 +1457,6 @@ a:focus-visible {
    BOOKING FUNNEL — public /quote, /book, /cancel pages
    Reuses the bk- form language; only funnel-specific pieces live here.
    ========================================================================= */
-
-/* Compact entry banner rendered inside the classic contact form section */
-.bk-instant-quote-banner {
-  display: block;
-  background: #f4fbea;
-  border: 1px solid var(--bk-green-deep);
-  border-radius: 8px;
-  padding: 14px 18px;
-  margin: 0 0 22px;
-  font-family: var(--font-body);
-  font-size: 15px;
-  line-height: 1.5;
-  color: var(--fg1);
-  text-decoration: none;
-  transition: all var(--dur-fast) var(--ease-out);
-}
-.bk-instant-quote-banner:hover {
-  background: #ecf8dc;
-  box-shadow: var(--shadow-green);
-}
-.bk-instant-quote-banner strong {
-  font-weight: 800;
-}
 
 /* Informational (non-error) notice */
 .bk-notice {
