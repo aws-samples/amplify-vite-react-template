@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type Invoice = Record<string, unknown> & { id: string };
 
 const created: Invoice[] = [];
+let invoices: Invoice[] = [];
 let createResult: { data: unknown; errors?: { message: string }[] } = {
   data: { id: "inv_1", status: "PAID" },
 };
@@ -30,6 +31,15 @@ const fakeDataClient = {
         return createResult;
       },
       list: async () => ({ data: [] }),
+      get: async ({ id }: { id: string }) => ({
+        data: invoices.find((i) => i.id === id) ?? null,
+      }),
+      update: async (patch: Invoice) => {
+        const i = invoices.findIndex((x) => x.id === patch.id);
+        if (i < 0) return { data: null, errors: [{ message: "not found" }] };
+        invoices[i] = { ...invoices[i], ...patch };
+        return { data: invoices[i], errors: undefined };
+      },
     },
     Job: {
       get: async ({ id }: { id: string }) => ({
@@ -84,6 +94,7 @@ const call = (...a: Parameters<typeof event>) =>
 
 beforeEach(() => {
   created.length = 0;
+  invoices = [];
   paymentIntentsCreate.mockClear();
   createResult = { data: { id: "inv_1", status: "PAID" } };
 });
@@ -299,5 +310,63 @@ describe("recordOfflinePayment", () => {
         status: "PAID",
       })
     ).rejects.toThrow(/could not record the payment/i);
+  });
+});
+
+describe("voidInvoice", () => {
+  it("withdraws an unpaid invoice and records who and why", async () => {
+    invoices.push({ id: "inv_1", status: "OPEN", amountCents: 29900 });
+
+    await call("voidInvoice", { invoiceId: "inv_1", reason: "Raised against the wrong customer" });
+
+    expect(invoices[0]).toMatchObject({
+      status: "VOID",
+      voidReason: "Raised against the wrong customer",
+      voidedBy: "sub-finance",
+      voidedByEmail: "csr@pestbuzzkill.com",
+    });
+  });
+
+  it("refuses to void a paid invoice — money that moved is refunded, not forgotten", async () => {
+    invoices.push({ id: "inv_1", status: "PAID", amountCents: 29900 });
+
+    await expect(
+      call("voidInvoice", { invoiceId: "inv_1", reason: "oops" })
+    ).rejects.toThrow(/refund it instead/i);
+    expect(invoices[0].status).toBe("PAID");
+  });
+
+  it("refuses to void a refunded invoice", async () => {
+    invoices.push({ id: "inv_1", status: "REFUNDED", amountCents: 29900 });
+
+    await expect(
+      call("voidInvoice", { invoiceId: "inv_1", reason: "x" })
+    ).rejects.toThrow(/refund it instead/i);
+  });
+
+  it("requires a reason", async () => {
+    invoices.push({ id: "inv_1", status: "OPEN", amountCents: 100 });
+
+    await expect(
+      call("voidInvoice", { invoiceId: "inv_1", reason: "   " })
+    ).rejects.toThrow(/say why/i);
+    expect(invoices[0].status).toBe("OPEN");
+  });
+
+  it("is idempotent", async () => {
+    invoices.push({ id: "inv_1", status: "VOID", amountCents: 100 });
+
+    const res = (await call("voidInvoice", { invoiceId: "inv_1", reason: "x" })) as {
+      alreadyVoid: boolean;
+    };
+
+    expect(res.alreadyVoid).toBe(true);
+  });
+
+  it("refuses an office user", async () => {
+    invoices.push({ id: "inv_1", status: "OPEN", amountCents: 100 });
+    await expect(
+      call("voidInvoice", { invoiceId: "inv_1", reason: "x" }, { groups: ["OFFICE"], sub: "s" })
+    ).rejects.toThrow(/finance role required/i);
   });
 });

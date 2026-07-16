@@ -432,8 +432,18 @@ const schema = a.schema({
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [index("signToken")])
+    // Read-only for every human role, for the same reason as Invoice and one
+    // more: signedAt, signerName, signerEmail, signerIp and signerUserAgent are
+    // the evidence that a customer agreed to a contract. While OFFICE held
+    // create/update on this model, an office user could write those fields
+    // directly and produce a signed agreement indistinguishable from a real
+    // one — a forged contract, from a browser, with no record of who did it.
+    //
+    // Only agreement-public (the token-gated e-sign endpoint) writes a
+    // signature now. Staff author and void agreements through createAgreement /
+    // voidAgreement, which have no signature arguments to pass.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -516,6 +526,11 @@ const schema = a.schema({
       refundedAt: a.datetime(),
       refundReason: a.string(),
       stripeRefundId: a.string(),
+      // VOID is how an invoice is withdrawn. There is no delete: a ledger that
+      // can lose a row cannot be reconciled against Stripe, and "it was never
+      // there" is not something a financial record should be able to say.
+      voidedAt: a.datetime(),
+      voidReason: a.string(),
       // Who moved the money. Stamped server-side from the caller's Cognito
       // identity — never accepted from the client, or it would be a field an
       // actor could fill in with someone else's name.
@@ -523,22 +538,31 @@ const schema = a.schema({
       createdByEmail: a.string(),
       refundedBy: a.string(),
       refundedByEmail: a.string(),
+      voidedBy: a.string(),
+      voidedByEmail: a.string(),
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [
       index("status").sortKeys(["issuedAt"]),
       index("stripePaymentIntentId"),
     ])
-    // Invoices are the financial record. Nobody creates one from a browser:
-    // every invoice comes from a Lambda (chargeOneTimeJob, chargeManualAmount,
-    // recordOfflinePayment, the booking funnel, the subscription webhook), which
-    // is what makes createdBy trustworthy — a client-side create could name
-    // anyone as its author. OFFICE reads but cannot rewrite or destroy them;
-    // voiding is a FINANCE status change, never a delete.
+    // Invoices are the financial record and no browser writes one. Every field
+    // — the amount, the status, what was refunded, who did it — is set by a
+    // Lambda: chargeOneTimeJob, chargeManualAmount, recordOfflinePayment,
+    // refundInvoice, voidInvoice, the booking funnel, the subscription webhook.
+    //
+    // Read-only for every human role, deliberately. Closing `create` alone was
+    // not enough: FINANCE — the role this audit trail exists to hold to account
+    // — could still call Invoice.update({ id, createdBy: "someone else" })
+    // against the GraphQL endpoint and rewrite its own name off a charge, or
+    // move amountCents, status and refundedAmountCents, which are every number
+    // the Dashboard reports. That the CRM's UI never offered it is not the bar.
+    // The bar for an audit trail is that the audited party cannot rewrite it.
+    //
+    // Delete is gone too. An invoice is withdrawn with VOID, which leaves the
+    // row, the reason and the actor behind.
     .authorization((allow) => [
-      allow.groups(["OWNER"]).to(["read", "update", "delete"]),
-      allow.groups(["FINANCE"]).to(["read", "update"]),
-      allow.groups(["OFFICE"]).to(["read"]),
+      allow.groups(["OWNER", "FINANCE", "OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -727,6 +751,50 @@ const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
     .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Withdraw an invoice that should not have been raised. Status → VOID, with a
+   * reason and an actor. This is the only way an invoice leaves the books:
+   * there is no delete, because a ledger that can lose a row cannot be
+   * reconciled and "it was never there" is not a thing a financial record
+   * should be able to say.
+   */
+  voidInvoice: a
+    .mutation()
+    .arguments({
+      invoiceId: a.string().required(),
+      reason: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Author an agreement for a customer. A mutation rather than a client-side
+   * create for one reason: this cannot be handed a signature. Status is always
+   * DRAFT and the signature fields are never arguments, so no browser can
+   * produce a signed contract.
+   */
+  createAgreement: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      title: a.string().required(),
+      bodyText: a.string().required(),
+      quoteId: a.string(),
+      imageKeys: a.string().array(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** Withdraw an unsigned agreement. A signed one is evidence and stays. */
+  voidAgreement: a
+    .mutation()
+    .arguments({ agreementId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
 
   /** Email a lead/customer their secure e-sign link for an agreement. */
   sendAgreement: a

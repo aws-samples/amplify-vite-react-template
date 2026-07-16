@@ -137,6 +137,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         event.arguments.idempotencyKey
       );
     }
+    case "voidInvoice": {
+      assertFinance(event.identity);
+      return voidInvoice(
+        actorOf(event),
+        event.arguments.invoiceId!,
+        event.arguments.reason ?? ""
+      );
+    }
     case "recordOfflinePayment": {
       assertFinance(event.identity);
       return recordOfflinePayment(actorOf(event), {
@@ -395,6 +403,52 @@ async function chargeManualAmount(
     paymentIntentId: intent.id,
     status: intent.status,
   };
+}
+
+/**
+ * Withdraw an invoice that should not have been raised.
+ *
+ * Replaces the hard delete an OWNER used to have. A deleted invoice takes its
+ * amount, its actor and the fact of its existence with it; a VOID one stays on
+ * the books saying who withdrew it and why, and the Dashboard already excludes
+ * VOID from every figure.
+ *
+ * Refuses a paid invoice: money that moved is refunded, not un-remembered.
+ */
+async function voidInvoice(
+  actor: Actor,
+  invoiceId: string,
+  reason: string
+) {
+  const clean = reason.trim().slice(0, 300);
+  if (!clean) throw new Error("Say why this invoice is being voided");
+
+  const client = await dataClient();
+  const { data: invoice } = await client.models.Invoice.get({ id: invoiceId });
+  if (!invoice) throw new Error(`Invoice ${invoiceId} not found`);
+  if (invoice.status === "VOID") {
+    return { invoiceId, status: "VOID", alreadyVoid: true };
+  }
+  if (invoice.status === "PAID" || invoice.status === "REFUNDED") {
+    throw new Error(
+      "This invoice has been paid — refund it instead. Voiding it would drop money that actually moved out of the books."
+    );
+  }
+
+  const { data: updated, errors } = await client.models.Invoice.update({
+    id: invoiceId,
+    status: "VOID",
+    voidedAt: new Date().toISOString(),
+    voidReason: clean,
+    voidedBy: actor.sub ?? undefined,
+    voidedByEmail: actor.email ?? undefined,
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not void the invoice: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { invoiceId, status: "VOID", alreadyVoid: false };
 }
 
 /**

@@ -106,23 +106,23 @@ export default function QuoteSheet({
           String(template.serviceFrequency ?? "").toLowerCase(),
         address: address || "the Customer's service address",
       });
-      const agreement = unwrap(
-        await api().models.Agreement.create({
+      const agreement = opResult<{ agreementId?: string }>(
+        await api().mutations.createAgreement({
           customerId: customer.id,
           quoteId: quote.id,
           title: template.agreementTitle,
           bodyText,
-          status: "DRAFT",
           imageKeys: (template.imageKeys ?? []).filter(
             (k): k is string => typeof k === "string"
           ),
-          accessGroups,
         })
       );
-      if (!agreement) throw new Error("Could not create the agreement");
+      if (!agreement?.agreementId) {
+        throw new Error("Could not create the agreement");
+      }
       if (sendNow) {
         const sendResult = opResult<{ sent: boolean; link?: string }>(
-          await api().mutations.sendAgreement({ agreementId: agreement.id })
+          await api().mutations.sendAgreement({ agreementId: agreement.agreementId })
         );
         if (!sendResult?.sent) {
           throw new Error(

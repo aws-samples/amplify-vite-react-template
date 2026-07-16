@@ -5,7 +5,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { callerGroups, callerIsOffice, isStaff } from "../shared/authz";
-import { cusGroup, grpGroup } from "../shared/dynamicGroups";
+import { cusGroup, customerAccessGroups, grpGroup } from "../shared/dynamicGroups";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
   nextVisitDate,
@@ -47,6 +47,10 @@ type Args = {
   note?: string;
   contentType?: string;
   templateId?: string;
+  title?: string;
+  bodyText?: string;
+  quoteId?: string;
+  imageKeys?: (string | null)[];
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -54,6 +58,20 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "sendAgreement": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return sendAgreement(event.arguments.agreementId!);
+    }
+    case "createAgreement": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return createAgreement({
+        customerId: event.arguments.customerId!,
+        title: event.arguments.title ?? "",
+        bodyText: event.arguments.bodyText ?? "",
+        quoteId: event.arguments.quoteId,
+        imageKeys: event.arguments.imageKeys,
+      });
+    }
+    case "voidAgreement": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return voidAgreement(event.arguments.agreementId!);
     }
     case "completeJob": {
       return completeJob(event.arguments.jobId!);
@@ -142,6 +160,80 @@ async function sendCustomerEmail(
     html: emailShell(heading, body),
   });
   return { sent, to: customer.email };
+}
+
+/**
+ * Author an agreement. Always DRAFT, never signed.
+ *
+ * This exists so that no browser can write a signature. While OFFICE held
+ * create/update on the Agreement model, an office user could set signedAt,
+ * signerName, signerEmail and signerIp directly and produce a contract
+ * indistinguishable from one the customer actually signed. There is no argument
+ * here to pass one: the only signature this system will accept comes from
+ * agreement-public, behind the customer's token.
+ */
+async function createAgreement(args: {
+  customerId: string;
+  title: string;
+  bodyText: string;
+  quoteId?: string | null;
+  imageKeys?: (string | null)[] | null;
+}) {
+  const title = args.title.trim();
+  const bodyText = args.bodyText.trim();
+  if (!title) throw new Error("An agreement needs a title");
+  if (!bodyText) throw new Error("An agreement needs a body");
+
+  const client = await dataClient();
+  const { data: customer } = await client.models.Customer.get({
+    id: args.customerId,
+  });
+  if (!customer) throw new Error(`Customer ${args.customerId} not found`);
+
+  const { data: agreement, errors } = await client.models.Agreement.create({
+    customerId: args.customerId,
+    quoteId: args.quoteId ?? undefined,
+    title,
+    bodyText,
+    status: "DRAFT",
+    imageKeys: (args.imageKeys ?? []).filter(
+      (k): k is string => typeof k === "string"
+    ),
+    accessGroups: customerAccessGroups(args.customerId, customer.groupId),
+  });
+  if (!agreement) {
+    throw new Error(
+      `Could not create the agreement: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { agreementId: agreement.id, status: agreement.status };
+}
+
+/** Withdraw an unsigned agreement. A signed one is evidence and stays. */
+async function voidAgreement(agreementId: string) {
+  const client = await dataClient();
+  const { data: agreement } = await client.models.Agreement.get({
+    id: agreementId,
+  });
+  if (!agreement) throw new Error(`Agreement ${agreementId} not found`);
+  if (agreement.status === "SIGNED") {
+    throw new Error(
+      "This agreement has been signed — it is the record of what the customer agreed to and cannot be voided. Cancel the plan instead."
+    );
+  }
+  if (agreement.status === "VOID") {
+    return { agreementId, status: "VOID", alreadyVoid: true };
+  }
+  const { data: updated, errors } = await client.models.Agreement.update({
+    id: agreementId,
+    status: "VOID",
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not void the agreement: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { agreementId, status: "VOID", alreadyVoid: false };
 }
 
 async function sendAgreement(agreementId: string) {

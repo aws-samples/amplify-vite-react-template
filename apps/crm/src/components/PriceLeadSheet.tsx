@@ -227,22 +227,22 @@ export default function PriceLeadSheet({
       if (run.initialFeeCents != null) {
         bodyText += `\n\nINITIAL SERVICE VISIT. The first service visit is billed once at ${money(run.initialFeeCents)} and includes the full inspection, interior flush-out, exterior barrier treatment, and web/nest removal.`;
       }
-      const agreement = unwrap(
-        await api().models.Agreement.create({
+      const agreement = opResult<{ agreementId?: string }>(
+        await api().mutations.createAgreement({
           customerId: customer.id,
           quoteId: quote.id,
           title: template.agreementTitle,
           bodyText,
-          status: "DRAFT",
           imageKeys: (template.imageKeys ?? []).filter(
             (k): k is string => typeof k === "string"
           ),
-          accessGroups,
         })
       );
-      if (!agreement) throw new Error("Could not create the agreement");
+      if (!agreement?.agreementId) {
+        throw new Error("Could not create the agreement");
+      }
       const sendResult = opResult<{ sent: boolean; link?: string }>(
-        await api().mutations.sendAgreement({ agreementId: agreement.id })
+        await api().mutations.sendAgreement({ agreementId: agreement.agreementId })
       );
       if (!sendResult?.sent) {
         throw new Error(

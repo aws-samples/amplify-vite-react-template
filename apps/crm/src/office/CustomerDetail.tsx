@@ -785,7 +785,7 @@ export default function CustomerDetail() {
                           if (!window.confirm(a.status === "SIGNED" ? "Void this SIGNED agreement? The signed PDF stays on file but the agreement is marked void." : "Void this agreement? Its signing link stops working.")) return;
                           void run(`voidagr-${a.id}`, async () =>
                             unwrap(
-                              await api().models.Agreement.update({ id: a.id, status: "VOID" })
+                              await api().mutations.voidAgreement({ agreementId: a.id })
                             )
                           );
                         }}
@@ -861,6 +861,10 @@ export default function CustomerDetail() {
                 roles.finance &&
                 (inv.status === "PAID" || inv.status === "REFUNDED") &&
                 refundable > 0;
+              // Money that moved gets refunded; an invoice that should never
+              // have existed gets voided. There is no third option and no delete.
+              const canVoid =
+                roles.finance && (inv.status === "OPEN" || inv.status === "FAILED");
               return (
                 <ListRow
                   key={inv.id}
@@ -877,6 +881,11 @@ export default function CustomerDetail() {
                           {inv.refundReason ? ` — ${inv.refundReason}` : ""}
                         </span>
                       ) : null}
+                      {inv.status === "VOID" && inv.voidReason ? (
+                        <span className="nested-line">
+                          voided — {inv.voidReason}
+                        </span>
+                      ) : null}
                     </>
                   }
                   meta={
@@ -889,6 +898,32 @@ export default function CustomerDetail() {
                           onClick={() => setRefunding(inv)}
                         >
                           Refund
+                        </Button>
+                      ) : null}
+                      {canVoid ? (
+                        <Button
+                          small
+                          variant="ghost"
+                          loading={busyAction === `void-${inv.id}`}
+                          onClick={() => {
+                            const reason = window.prompt(
+                              `Void this ${money(inv.amountCents)} invoice? It stays on the record as voided, with your name and this reason.\n\nWhy is it being voided?`
+                            );
+                            if (!reason?.trim()) return;
+                            void run(
+                              `void-${inv.id}`,
+                              async () =>
+                                unwrap(
+                                  await api().mutations.voidInvoice({
+                                    invoiceId: inv.id,
+                                    reason: reason.trim(),
+                                  })
+                                ),
+                              `Voided the ${money(inv.amountCents)} invoice`
+                            );
+                          }}
+                        >
+                          Void
                         </Button>
                       ) : null}
                     </>
@@ -1052,18 +1087,18 @@ export default function CustomerDetail() {
         <AgreementForm
           customer={customer}
           onSubmit={async (title, bodyText, sendNow) => {
-            const created = unwrap(
-              await api().models.Agreement.create({
+            const created = opResult<{ agreementId?: string }>(
+              await api().mutations.createAgreement({
                 customerId: customer.id,
                 title,
                 bodyText,
-                status: "DRAFT",
-                accessGroups,
               })
             );
-            if (sendNow && created) {
+            if (sendNow && created?.agreementId) {
               unwrap(
-                await api().mutations.sendAgreement({ agreementId: created.id })
+                await api().mutations.sendAgreement({
+                  agreementId: created.agreementId,
+                })
               );
             }
             setSheet(null);
