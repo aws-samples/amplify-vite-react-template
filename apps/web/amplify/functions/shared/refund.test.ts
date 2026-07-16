@@ -74,8 +74,8 @@ const fakeDataClient: {
 };
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const sendEmail = vi.fn(async () => true);
-const notifyOffice = vi.fn(async () => true);
+const sendEmail = vi.fn(async (_opts?: unknown) => true);
+const notifyOffice = vi.fn(async (_opts?: unknown) => true);
 vi.mock("./email", () => ({
   sendEmail: (opts: unknown) => sendEmail(opts as never),
   notifyOffice: (opts: unknown) => notifyOffice(opts as never),

@@ -113,8 +113,8 @@ vi.mock("../shared/stripeClient", () => ({
   paymentMethodLabel: () => ({ label: "Visa ••4242", kind: "CARD" }),
 }));
 
-const sendEmail = vi.fn(async () => true);
-const notifyOffice = vi.fn(async () => true);
+const sendEmail = vi.fn(async (_opts?: unknown) => true);
+const notifyOffice = vi.fn(async (_opts?: unknown) => true);
 vi.mock("../shared/email", () => ({
   sendEmail: (opts: unknown) => sendEmail(opts as never),
   notifyOffice: (opts: unknown) => notifyOffice(opts as never),
