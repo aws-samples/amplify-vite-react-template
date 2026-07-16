@@ -55,9 +55,17 @@ export const auth = defineAuth({
     verifyAuthChallengeResponse: verifyChallenge,
   },
   access: (allow) => [
+    // setUserPassword is granted separately — the manageUsers bundle does not
+    // include AdminSetUserPassword, and invites need it to move a new account
+    // out of FORCE_CHANGE_PASSWORD (which blocks the magic-link custom flow).
     allow
       .resource(crmAdmin)
-      .to(["manageUsers", "manageGroups", "manageGroupMembership"]),
+      .to([
+        "manageUsers",
+        "manageGroups",
+        "manageGroupMembership",
+        "setUserPassword",
+      ]),
     // Only verify writes user attributes now: it mints the link token on the
     // REQUEST_LINK answer and burns it on redemption. create issues the
     // challenge and touches nothing.
