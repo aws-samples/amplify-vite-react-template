@@ -92,7 +92,7 @@ const PREVENTION_TIPS = [
 
 const COMMUNITY_SERVICES = [
   { label: "Communities Overview",         to: "/communities",                     desc: "Full community pest protection programs for HOAs, condos, and more." },
-  { label: "Property Management Programs", to: "/communities/property-management", desc: "Reliable pest coverage built for multi-unit residential properties." },
+  { label: "Property Management Programs", to: "/property-managers",               desc: "Reliable pest coverage built for multi-unit residential properties." },
   { label: "HOA Resources",                to: "/communities/hoa-resources",       desc: "Tools and information to help boards make informed pest decisions." },
   { label: "Residential Services",         to: "/residential",                     desc: "Protecting the homes inside the communities we serve." },
 ];

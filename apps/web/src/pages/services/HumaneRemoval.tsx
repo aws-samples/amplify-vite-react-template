@@ -148,7 +148,7 @@ const RELATED_SERVICES = [
   },
   {
     label: "Wildlife Attic Restoration",
-    to: "/services/wildlife/attic-restoration",
+    to: "/services/rodent-control/attic-restoration",
     desc: "After humane removal, we restore the attic to a clean and safe condition.",
   },
   {
