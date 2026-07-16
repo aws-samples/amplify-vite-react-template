@@ -29,7 +29,7 @@ const $ = (dollars: number) => Math.round(dollars * 100);
 
 // ---------- Zone B adders ----------
 
-const ZONE_B = {
+export const ZONE_B = {
   MONTHLY: $(25),
   BIMONTHLY: $(13),
   QUARTERLY: $(8),
@@ -157,7 +157,13 @@ const HOA_BRACKETS: Array<{
   { lo: 10, hi: 25, per: 15, label: "11–25 units (per 15)", premiums: { MONTHLY: $(55), BIMONTHLY: $(40), QUARTERLY: $(35), ONE_TIME: $(156) } },
   { lo: 25, hi: 50, per: 25, label: "26–50 units (per 25)", premiums: { MONTHLY: $(100), BIMONTHLY: $(80), QUARTERLY: $(65), ONE_TIME: $(288) } },
   { lo: 50, hi: 100, per: 50, label: "51–100 units (per 50)", premiums: { MONTHLY: $(140), BIMONTHLY: $(115), QUARTERLY: $(90), ONE_TIME: $(396) } },
-  { lo: 100, hi: Number.MAX_SAFE_INTEGER, per: 100, label: "101+ units (per 100)", premiums: { MONTHLY: $(275), BIMONTHLY: $(150), QUARTERLY: $(180), ONE_TIME: $(792) } },
+  // R57: the 101+ bimonthly premium was $150 — below quarterly ($180), so a
+  // bigger association paid MORE for LESS service. No spec document exists in
+  // the tree to check against, so the value is derived from the surrounding
+  // per-unit series: bimonthly/monthly runs 0.73→0.80→0.82 across the three
+  // lower brackets, and 0.82–0.84 × $275 ≈ $230. The monotonicity test in
+  // rateCards.test.ts keeps the ordering honest.
+  { lo: 100, hi: Number.MAX_SAFE_INTEGER, per: 100, label: "101+ units (per 100)", premiums: { MONTHLY: $(275), BIMONTHLY: $(230), QUARTERLY: $(180), ONE_TIME: $(792) } },
 ];
 
 export function priceAssociation(opts: {

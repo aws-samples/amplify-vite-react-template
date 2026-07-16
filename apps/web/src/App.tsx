@@ -14,7 +14,6 @@ import LicensedInsured from "./pages/LicensedInsured";
 import LPQuote from "./pages/lp/LPQuote";
 import LPProtect from "./pages/lp/LPProtect";
 import LPCall from "./pages/lp/LPCall";
-import Schedule from "./pages/Schedule";
 import ScrollToTop from "./components/ScrollToTop";
 
 /** Standard site layout — header + main + footer */
@@ -48,7 +47,6 @@ function App() {
         <Route path="/lp/quote" element={<LPQuote />} />
         <Route path="/lp/protect" element={<LPProtect />} />
         <Route path="/lp/call" element={<LPCall />} />
-        <Route path="/schedule/:slug" element={<Schedule />} />
 
         {/* Main site — full layout */}
         <Route element={<SiteLayout />}>

@@ -13,7 +13,7 @@ export default function PrivacyPolicy() {
         <h1>Privacy Policy</h1>
         <p className="bk-legal-meta">
           <strong>Effective Date:</strong> January 1, 2026 &nbsp;|&nbsp;{" "}
-          <strong>Last Updated:</strong> January 1, 2026
+          <strong>Last Updated:</strong> July 16, 2026
         </p>
 
         <p>
@@ -38,8 +38,8 @@ export default function PrivacyPolicy() {
           </li>
           <li>Account information: login credentials for customer portal</li>
           <li>
-            Communications: messages through forms, email, chat, phone, SMS;
-            scheduling notes; support requests
+            Communications: messages through our website forms, email, phone,
+            and text message; scheduling notes; support requests
           </li>
           <li>
             Photos and property information: pest issue photos; access
@@ -50,19 +50,25 @@ export default function PrivacyPolicy() {
         <h3>B. Information Collected Automatically</h3>
         <ul>
           <li>
-            Device and usage data: IP address, browser type, device identifiers,
-            operating system, pages viewed, time spent, referring URLs, clicks
+            Device and usage data: IP address, browser type, operating system,
+            pages requested, and referring URLs, collected through standard web
+            server logs
           </li>
           <li>
-            Approximate location: inferred from IP address (not precise GPS
-            unless explicitly allowed)
+            How you reached us: if you arrive from an ad or link, we note the
+            referring page, landing page, and ad-campaign parameters for the
+            duration of your visit and include them if you submit a form
+          </li>
+          <li>
+            Approximate location: inferred from IP address (not precise GPS)
           </li>
         </ul>
 
         <h3>C. Information from Third Parties</h3>
         <p>
           Sources include payment processors, scheduling/CRM platforms,
-          advertising and analytics providers, and review platforms.
+          advertising platforms that report on our ad campaigns, and review
+          platforms.
         </p>
 
         <h2>2. How We Use Information</h2>
@@ -89,8 +95,8 @@ export default function PrivacyPolicy() {
         <h3>A. Service Providers</h3>
         <p>
           Sharing occurs with website hosting, IT, scheduling/CRM, payment
-          processors, communications, analytics, and advertising partners who
-          use information only as needed.
+          processing, and communications providers who use information only as
+          needed to support our Services.
         </p>
         <h3>B. Business Transfers</h3>
         <p>
@@ -110,59 +116,49 @@ export default function PrivacyPolicy() {
 
         <h2>4. Cookies and Similar Technologies</h2>
         <p>
-          We may use cookies, pixels, and similar technologies to keep the
-          website functioning, remember preferences, understand website traffic
-          and performance, and measure ad performance.
+          Our website uses browser storage and similar technologies to keep the
+          site functioning and to remember, for the duration of your visit, how
+          you reached us (for example, the ad campaign or referring page that
+          brought you here). That information is included with your inquiry if
+          you submit a form.
         </p>
         <p>
-          You can control cookies through browser settings and cookie
-          banner/preferences tools. Blocking some cookies may impact
+          You can clear or block cookies and site data through your browser
+          settings. Blocking some of these technologies may impact site
           functionality.
         </p>
 
         <h2>5. Marketing Communications</h2>
         <p>
-          You can opt out of marketing emails at any time by using the
-          "unsubscribe" link in our messages or by contacting us. Non-marketing
-          messages like appointment confirmations and invoices continue
-          regardless.
+          You can opt out of marketing communications at any time by contacting
+          us at{" "}
+          <a href="mailto:info@pestbuzzkill.com">info@pestbuzzkill.com</a> or{" "}
+          <a href="tel:508-258-9294">508-258-9294</a>. Non-marketing messages
+          like appointment confirmations and invoices continue regardless.
         </p>
 
-        <h2>6. SMS/Text Messaging</h2>
-        <p>Text messages may be sent for:</p>
-        <ul>
-          <li>Appointment confirmations and reminders</li>
-          <li>Technician arrival updates</li>
-          <li>Service follow-ups</li>
-          <li>Promotions/marketing (if opted in)</li>
-        </ul>
-        <p>
-          Reply STOP to unsubscribe from marketing texts; HELP for assistance.
-          Message and data rates may apply.
-        </p>
-
-        <h2>7. Data Retention</h2>
+        <h2>6. Data Retention</h2>
         <p>
           Information is retained as reasonably necessary to provide Services,
           maintain business records, comply with legal/tax/insurance
           requirements, resolve disputes, and enforce agreements.
         </p>
 
-        <h2>8. Data Security</h2>
+        <h2>7. Data Security</h2>
         <p>
           We use reasonable administrative, technical, and physical safeguards
           designed to protect information. However, no method of transmission or
           storage is 100% secure, and we cannot guarantee absolute security.
         </p>
 
-        <h2>9. Children's Privacy</h2>
+        <h2>8. Children's Privacy</h2>
         <p>
           Our Services are not directed to children under 13. We do not
           knowingly collect personal information from children under 13. Contact
           us if you believe we have received such information.
         </p>
 
-        <h2>10. Your Privacy Rights and Choices</h2>
+        <h2>9. Your Privacy Rights and Choices</h2>
         <p>Depending on your location, you may request to:</p>
         <ul>
           <li>Access information we hold about you</li>
@@ -177,13 +173,13 @@ export default function PrivacyPolicy() {
           required.
         </p>
 
-        <h2>11. Third-Party Links</h2>
+        <h2>10. Third-Party Links</h2>
         <p>
           Our website may link to third-party sites (e.g., review platforms).
           Their privacy practices are governed by their own policies, not ours.
         </p>
 
-        <h2>12. Changes to This Privacy Policy</h2>
+        <h2>11. Changes to This Privacy Policy</h2>
         <p>
           We may update this Privacy Policy from time to time. The "Last
           Updated" date shows when it was most recently revised.

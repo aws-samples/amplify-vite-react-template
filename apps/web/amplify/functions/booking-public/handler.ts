@@ -13,6 +13,7 @@ import {
   priceSpecialty,
   zoneFromMinutes,
   money,
+  ZONE_B,
   type Zone,
 } from "../crm-pricing/rateCards";
 import { cancelPlanBilling } from "../shared/subscription";
@@ -341,7 +342,11 @@ async function quote(input: QuoteInput, sourceIp: string) {
     return booking;
   };
 
-  const contact = async (message: string, extra: Record<string, unknown> = {}) => {
+  const contact = async (
+    message: string,
+    extra: Record<string, unknown> = {},
+    opsNote = ""
+  ) => {
     const booking = await makeBooking({ status: "CONTACT", ...extra });
     await notifyOffice({
       subject: "Website lead needs a call",
@@ -350,7 +355,8 @@ async function quote(input: QuoteInput, sourceIp: string) {
       relatedId: booking.id,
       bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}.</p>
        ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
-       <p>Booking request ${booking.id} — call within the hour per the website promise.</p>`,
+       <p>Booking request ${booking.id} — call within the hour per the website promise.</p>
+       ${opsNote}`,
     });
     return { bookingId: booking.id, decision: "CONTACT", message };
   };
@@ -379,7 +385,21 @@ async function quote(input: QuoteInput, sourceIp: string) {
       { zone, driveMinutes: minutes ?? undefined }
     );
   }
-  const priceZone: Zone = zone === "UNKNOWN" ? "B" : zone; // price safe, never block
+  if (zone === "UNKNOWN") {
+    // R59: no zone, no price. A Routes outage or an expired key used to
+    // silently reprice the whole funnel as Zone B; route the lead to the
+    // callback path instead and tell the office why.
+    return contact(
+      "We just need to double-check your address against our service area — a specialist will call you within the hour with your exact price.",
+      { zone },
+      `<p style="color:#b91c1c;"><strong>Drive-time zone lookup failed for this address</strong>${
+        routesKey
+          ? " (the Routes API returned no route — possible outage or a bad address)"
+          : " (GOOGLE_ROUTES_API_KEY is not configured)"
+      }. Zone pricing is unavailable, so this quote fell back to a callback. If this keeps happening, check the Google Routes API key.</p>`
+    );
+  }
+  const priceZone: Zone = zone;
 
   // Deterministic base price.
   let baseCents: number | null = null;
@@ -457,6 +477,12 @@ async function quote(input: QuoteInput, sourceIp: string) {
       );
     }
     baseCents = rate.priceCents;
+    if (priceZone === "B") {
+      // R60: market-rate services carry the same one-time Zone B travel
+      // adder as the carded services — an 89-minute drive must not price
+      // like a 10-minute one.
+      baseCents += ZONE_B.ONE_TIME_FLAT;
+    }
     serviceLabel =
       service === "RODENT"
         ? `Rodent treatment — up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`
@@ -469,6 +495,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
     candidateAddress: address,
     service,
     baseCents: baseCents!,
+    zone: priceZone,
   });
   if (days.length === 0) {
     return contact(
@@ -563,15 +590,45 @@ async function book(body: Record<string, unknown>) {
 
   // Repeat /book calls must never leave a second chargeable intent behind:
   // a paid one is terminal, an open one is reused or replaced.
+  let existing: Stripe.PaymentIntent | null = null;
   if (booking.stripePaymentIntentId) {
-    const existing = await s.paymentIntents.retrieve(
-      booking.stripePaymentIntentId
-    );
+    existing = await s.paymentIntents.retrieve(booking.stripePaymentIntentId);
     if (existing.status === "succeeded" || existing.status === "processing") {
       throw new HttpError(409, {
         error: "This booking is already paid — check your email for the confirmation.",
       });
     }
+  }
+
+  // R29: the stored quote is a snapshot up to 24 hours old — every holder of
+  // a live quote could otherwise book the same last slot. Re-read the day and
+  // re-run capacity/feasibility against the live schedule before taking
+  // money. The PRICE is not re-run: the customer pays what they were quoted.
+  const address = `${booking.street}, ${booking.city}, ${booking.state}${booking.zip ? ` ${booking.zip}` : ""}`;
+  const liveDay = await buildDayMatrix({
+    routesKey: await getSecret("GOOGLE_ROUTES_API_KEY"),
+    candidateAddress: address,
+    service: String(booking.service),
+    baseCents: day.priceCents, // availability only — the quoted price stands
+    zone:
+      booking.zone === "A" || booking.zone === "B" ? booking.zone : undefined,
+    onlyDate: date,
+  });
+  if (!liveDay.some((d) => d.date === date && d.windows.includes(window))) {
+    // A stale open intent must not stay chargeable for a day we just said no to.
+    if (existing) {
+      try {
+        await s.paymentIntents.cancel(existing.id);
+      } catch {
+        /* already canceled/expired — fine */
+      }
+    }
+    throw new HttpError(409, {
+      error: "That day is no longer available — request a fresh quote.",
+    });
+  }
+
+  if (existing) {
     if (
       existing.amount === amountCents &&
       booking.selectedDate === date &&
@@ -585,7 +642,7 @@ async function book(body: Record<string, unknown>) {
       };
     }
     try {
-      await s.paymentIntents.cancel(booking.stripePaymentIntentId);
+      await s.paymentIntents.cancel(existing.id);
     } catch {
       /* already canceled/expired — fine */
     }

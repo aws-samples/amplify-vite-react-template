@@ -1,5 +1,6 @@
 import { dataClient } from "../shared/dataClient";
 import { driveMatrixFrom } from "../shared/driveTime";
+import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
 
 /**
  * Schedule-aware availability + day pricing for the booking funnel.
@@ -13,7 +14,7 @@ import { driveMatrixFrom } from "../shared/driveTime";
  *   nearly full     +10%  day at ≥85% capacity
  *   rush            +15%  inside 48 hours
  *   planner         −5%   three or more weeks out
- *   floor           never below 85% of base
+ *   floor           never below 85% of base, and never below variable cost
  *
  * Identical inputs (same schedule state) → identical prices, always.
  */
@@ -54,22 +55,57 @@ function isWeekday(iso: string): boolean {
 
 const tidyDollars = (cents: number) => Math.round(cents / 100) * 100;
 
+/**
+ * R62: funnel service → variable-cost kind for the discount floor
+ * (`oneTimeGrossProfitCents` in crm-pricing/rateCards). Without this mapping
+ * the market-rate services had no cost model, so a discounted day could
+ * price below what the visit costs to run.
+ */
+const COST_KIND: Record<string, string> = {
+  GENERAL_PEST: "one_time_gpc",
+  WASP_NEST: "wasp_nest",
+  RODENT: "rodent_nest",
+  // Same 90-minute onsite as rodent; gel bait + IGR + included follow-up
+  // materials track the $55 rodent kit, not the $15 GPC kit.
+  ROACH: "rodent_nest",
+};
+
 export async function buildDayMatrix(opts: {
   routesKey: string | null;
   candidateAddress: string;
   service: string;
   baseCents: number;
+  /** Drive-time zone; enables the variable-cost discount floor (R62). */
+  zone?: Zone;
   onsiteMinutes?: number;
+  /** Restrict to a single day — the /book live re-check (R29). */
+  onlyDate?: string;
 }): Promise<DayQuote[]> {
-  const { routesKey, candidateAddress, service, baseCents } = opts;
+  const { routesKey, candidateAddress, service, baseCents, zone } = opts;
   const onsite =
     opts.onsiteMinutes ?? ONSITE_MINUTES[service] ?? 90;
+
+  // R62: a discount must never take a day below its variable cost. A Zone B
+  // rodent quote at the $199 clamp floor used to discount to $169 against
+  // ~$177 of drive + labor + materials — a loss on every such booking.
+  const gp =
+    zone != null
+      ? oneTimeGrossProfitCents(
+          COST_KIND[service] ?? "one_time_gpc",
+          baseCents,
+          zone
+        )
+      : null;
+  const costCents = gp != null ? baseCents - gp : null;
 
   const client = await dataClient();
   const today = easternToday();
   const days = Array.from({ length: 32 }, (_, i) => addDays(today, i + 1))
     .filter(isWeekday)
-    .slice(0, 22); // ~a month of business days
+    .slice(0, 22) // ~a month of business days
+    // onlyDate applies after the window slice: a date the quote could never
+    // have offered must not become bookable through the re-check.
+    .filter((d) => !opts.onlyDate || d === opts.onlyDate);
 
   const [techsRes, ...jobPages] = await Promise.all([
     client.models.Technician.list({ limit: 200 }),
@@ -181,9 +217,12 @@ export async function buildDayMatrix(opts: {
       factors.push("planner −5%");
     }
 
-    const priceCents = tidyDollars(
-      Math.max(baseCents * 0.85, baseCents * factor)
-    );
+    let floored = Math.max(baseCents * 0.85, baseCents * factor);
+    if (costCents != null && costCents > floored) {
+      floored = costCents;
+      factors.push("floored at variable cost");
+    }
+    const priceCents = tidyDollars(floored);
     out.push({
       date,
       windows: ["MORNING", "AFTERNOON"],

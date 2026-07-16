@@ -322,7 +322,7 @@ ${facts.initial ? `- Initial service visit: ${facts.initial} (75-minute first se
 ${facts.oneTime ? `- One-time price: ${facts.oneTime} flat (30-day guarantee)` : ""}
 ${facts.fallbackPlan ? `- Value fallback: ${facts.fallbackPlan}` : ""}
 ${facts.rodentAddon ? "- The plan price INCLUDES the rodent program (exterior bait stations, monitored and refilled every visit) — say so." : ""}
-${facts.pivotedFromOneTime ? `- The lead asked for a one-time (${facts.pivotedFromOneTime}); position the plan as the better value: the $99 first visit costs less than the one-time, and they're covered year-round. You MAY mention the one-time price ${facts.pivotedFromOneTime} for comparison.` : facts.oneTimeAsked ? "- The lead asked for a one-time; pitch the plan as the smarter option per the conversion script, then give the one-time price." : "- Plan-first framing: covered year-round, free re-treatments between visits, licensed & insured in MA & RI."}
+${facts.pivotedFromOneTime ? `- The lead asked for a one-time (${facts.pivotedFromOneTime}); position the plan as the better value: the ${facts.initial ?? "initial-visit"} first visit costs less than the one-time, and they're covered year-round. You MAY mention the one-time price ${facts.pivotedFromOneTime} for comparison.` : facts.oneTimeAsked ? "- The lead asked for a one-time; pitch the plan as the smarter option per the conversion script, then give the one-time price." : "- Plan-first framing: covered year-round, free re-treatments between visits, licensed & insured in MA & RI."}
 - End with a concrete scheduling day (use a weekday like "Thursday", not a date).
 ${facts.assumptions.length ? `- Work these assumptions in naturally: ${facts.assumptions.join("; ")}` : ""}
 
@@ -337,21 +337,30 @@ Tone: warm, direct, no fluff. Output ONLY the reply text.`;
     const text = response.content.find((b) => b.type === "text");
     if (!text || text.type !== "text") return null;
     const reply = text.text.trim();
-    // Consistency guard: every dollar amount in the reply must be one we
-    // computed. Normalize thousands separators on both sides first.
-    const normalize = (v: string) => v.replace(/,(?=\d{3})/g, "");
-    const used = (reply.match(/\$[\d,]+(?:\.\d{2})?/g) ?? []).map(normalize);
-    const allowed = new Set(
-      [...allowedAmounts.map(normalize), "$15", "$99"]
-    );
-    if (used.some((m) => !allowed.has(m))) return null;
+    if (!replyUsesOnlyAllowedAmounts(reply, allowedAmounts)) return null;
     return reply;
   } catch {
     return null;
   }
 }
 
-function templateReply(facts: {
+/**
+ * Consistency guard: every dollar amount in a composed reply must be one the
+ * rate card computed. Nothing is whitelisted by literal — a hardcoded "$15"
+ * or "$99" is exactly the class of amount this guard exists to catch (R58).
+ * Thousands separators are normalized on both sides first.
+ */
+export function replyUsesOnlyAllowedAmounts(
+  reply: string,
+  allowedAmounts: string[]
+): boolean {
+  const normalize = (v: string) => v.replace(/,(?=\d{3})/g, "");
+  const used = (reply.match(/\$[\d,]+(?:\.\d{2})?/g) ?? []).map(normalize);
+  const allowed = new Set(allowedAmounts.map(normalize));
+  return used.every((m) => allowed.has(m));
+}
+
+export function templateReply(facts: {
   pest: string;
   town: string | null;
   monthly: string | null;
@@ -362,8 +371,13 @@ function templateReply(facts: {
 }): string {
   const where = facts.town ? ` in ${facts.town}` : "";
   const assumed = facts.assumptions.length ? ` (${facts.assumptions[0]})` : "";
+  if (facts.monthly && facts.initial) {
+    return `For ${facts.pest}${where}, our ${freqLabel(facts.frequency)} plan is ${facts.monthly}/mo with a ${facts.initial} initial service — that first visit is the deep one: full inspection, interior treatment, and an exterior barrier${assumed}. After that you're covered year-round, and any re-treatment between visits is free. We're licensed and insured in MA & RI, and we can have our technician out as early as Thursday.`;
+  }
   if (facts.monthly) {
-    return `For ${facts.pest}${where}, our ${freqLabel(facts.frequency)} plan is ${facts.monthly}/mo with a ${facts.initial ?? "$99"} initial service — that first visit is the deep one: full inspection, interior treatment, and an exterior barrier${assumed}. After that you're covered year-round, and any re-treatment between visits is free. We're licensed and insured in MA & RI, and we can have our technician out as early as Thursday.`;
+    // R58: mosquito/tick plans carry no initial fee — this branch used to
+    // hardcode "$99", quoting a fee that does not exist, in writing.
+    return `For ${facts.pest}${where}, our ${freqLabel(facts.frequency)} plan is ${facts.monthly}/mo with no initial fee${assumed}. Any re-treatment between visits is free, we're licensed and insured in MA & RI, and we can have our technician out as early as Thursday.`;
   }
   return `For ${facts.pest}${where}, the price is ${facts.oneTime} flat with a 30-day guarantee${assumed}. We're licensed and insured in MA & RI, and we can have our technician out as early as Thursday. Ask about our quarterly plan if you'd like year-round coverage with free re-treatments.`;
 }
@@ -454,6 +468,20 @@ async function priceLead(args: Args) {
     });
     return run;
   }
+  // R75: the licensing gate fails closed. A lead with no extractable state
+  // used to skip the MA/RI check entirely and then geocode as "<town>, MA" —
+  // Hartford, Nashua, and Brattleboro all sit inside the 90-minute zone
+  // check. No state, no quote.
+  if (!extracted.state) {
+    const run = await persist({
+      decision: "NEEDS_INFO",
+      reason:
+        "Couldn't read the service state from this lead — we're licensed in MA and RI only. Confirm the state (and the town or full address) and run again.",
+      leadFeeCents: leadFeeCents ?? undefined,
+      service: extracted.pest,
+    });
+    return run;
+  }
 
   // 2. Lead fee required before quoting (spec step 0). 0 = direct lead.
   if (leadFeeCents == null) {
@@ -469,7 +497,8 @@ async function priceLead(args: Args) {
   let zone: Zone = "UNKNOWN";
   let minutes: number | null = null;
   if (extracted.fullAddress || extracted.town) {
-    const dest = extracted.fullAddress ?? `${extracted.town}, ${extracted.state ?? "MA"}`;
+    // extracted.state is guaranteed by the R75 gate above — never default it.
+    const dest = extracted.fullAddress ?? `${extracted.town}, ${extracted.state}`;
     minutes = await driveMinutes(dest);
     if (minutes !== null) zone = zoneFromMinutes(minutes);
     if (!extracted.fullAddress) {

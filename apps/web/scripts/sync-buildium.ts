@@ -18,11 +18,14 @@
 // ── Config ───────────────────────────────────────────────────────────
 const BUILDIUM_BASE_URL =
   process.env.BUILDIUM_BASE_URL || "https://api.buildium.com";
-const BUILDIUM_CLIENT_ID =
-  process.env.BUILDIUM_CLIENT_ID || "a32ffd58-8115-429e-a623-9a938b94a058";
-const BUILDIUM_CLIENT_SECRET =
-  process.env.BUILDIUM_CLIENT_SECRET ||
-  "Ssh1fB+e1EYz8gLP/kIKKjHRedMkuf+KuCen6kZz2ZU=";
+const BUILDIUM_CLIENT_ID = process.env.BUILDIUM_CLIENT_ID || "";
+const BUILDIUM_CLIENT_SECRET = process.env.BUILDIUM_CLIENT_SECRET || "";
+if (!BUILDIUM_CLIENT_ID || !BUILDIUM_CLIENT_SECRET) {
+  console.error(
+    "BUILDIUM_CLIENT_ID and BUILDIUM_CLIENT_SECRET must be set in the environment.",
+  );
+  process.exit(1);
+}
 
 const FR_SUBDOMAIN = process.env.FIELDROUTES_SUBDOMAIN || "buzzkill";
 const FR_KEY = process.env.FIELDROUTES_KEY || "";
