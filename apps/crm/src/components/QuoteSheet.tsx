@@ -81,7 +81,7 @@ export default function QuoteSheet({
     setError(null);
     try {
       const quote = opResult<{ quoteId?: string }>(
-        await api().mutations.createQuote({
+        await api().mutations.quoteFromTemplate({
           customerId: customer.id,
           planTemplateId: template.id,
           priceCents: cents,
@@ -109,7 +109,7 @@ export default function QuoteSheet({
         address: address || "the Customer's service address",
       });
       const agreement = opResult<{ agreementId?: string }>(
-        await api().mutations.createAgreement({
+        await api().mutations.authorAgreement({
           customerId: customer.id,
           quoteId: quote.quoteId,
           title: template.agreementTitle,

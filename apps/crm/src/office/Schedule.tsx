@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   api,
+  listAll,
   unwrap,
   type Customer,
   type Job,
@@ -45,31 +46,48 @@ export default function Schedule() {
   const load = useCallback(async () => {
     setError(null);
     try {
+      // Every list is paged to exhaustion: a filtered scan counts the limit
+      // against rows scanned, not rows matched, so a single page can silently
+      // drop stops from the board and the pool past a few hundred jobs.
       const [techList, routeList, jobsOnDate, unscheduled, customerList] =
         await Promise.all([
-          api().models.Technician.list({ limit: 200 }),
-          api().models.Route.listRouteByDate({ date }, { limit: 200 }),
-          api().models.Job.listJobByScheduledDate(
-            { scheduledDate: date },
-            { limit: 500 }
+          listAll((t) =>
+            api().models.Technician.list({ limit: 200, nextToken: t })
           ),
-          api().models.Job.list({
-            filter: { status: { eq: "UNSCHEDULED" } },
-            limit: 500,
-          }),
-          api().models.Customer.list({ limit: 1000 }),
+          listAll((t) =>
+            api().models.Route.listRouteByDate(
+              { date },
+              { limit: 200, nextToken: t }
+            )
+          ),
+          listAll((t) =>
+            api().models.Job.listJobByScheduledDate(
+              { scheduledDate: date },
+              { limit: 500, nextToken: t }
+            )
+          ),
+          listAll((t) =>
+            api().models.Job.list({
+              filter: { status: { eq: "UNSCHEDULED" } },
+              limit: 500,
+              nextToken: t,
+            })
+          ),
+          listAll((t) =>
+            api().models.Customer.list({ limit: 1000, nextToken: t })
+          ),
         ]);
-      setTechs(unwrap(techList).filter((t) => t.active));
-      setRoutes(unwrap(routeList));
-      const onDate = unwrap(jobsOnDate).filter((j) => j.status !== "CANCELED");
+      setTechs(techList.filter((t) => t.active));
+      setRoutes(routeList);
+      const onDate = jobsOnDate.filter((j) => j.status !== "CANCELED");
       setDayJobs(onDate);
       setPoolJobs([
         // COMPLETED / IN_PROGRESS never belong in the pool: "needs scheduling"
         // must not offer an Assign that rewrites a status billing acted on.
         ...onDate.filter((j) => !j.routeId && !assignBlockedNote(j.status)),
-        ...unwrap(unscheduled).filter((j) => j.scheduledDate !== date),
+        ...unscheduled.filter((j) => j.scheduledDate !== date),
       ]);
-      setCustomers(new Map(unwrap(customerList).map((c) => [c.id, c])));
+      setCustomers(new Map(customerList.map((c) => [c.id, c])));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load schedule");
     }

@@ -303,14 +303,56 @@ async function chargeOneTimeJob(actor: Actor, jobId: string) {
       `This job was already paid online on ${job.paidAt.slice(0, 10)} — charging again would double-charge the customer`
     );
   }
-  const { data: existingInvoices } = await client.models.Invoice.list({
-    filter: {
-      jobId: { eq: jobId },
-      status: { ne: "FAILED" },
-    },
-  });
-  if (existingInvoices.length > 0) {
-    throw new Error("This job already has a non-failed invoice");
+  if (job.type !== "ONE_TIME") {
+    throw new Error(
+      "This is a plan visit — the plan's subscription bills it, not this button"
+    );
+  }
+  // The button charges for work performed, so the server checks the work was
+  // performed. The CRM's UI already hides Charge on anything not COMPLETED,
+  // but the mutation is reachable without the CRM, and a NO_ACCESS or
+  // SCHEDULED job charged in full is money taken for nothing.
+  if (job.status !== "COMPLETED") {
+    if (job.status === "NO_ACCESS") {
+      throw new Error(
+        "This visit ended no-access — the technician could not do the work, so there is nothing to charge"
+      );
+    }
+    if (job.status === "CANCELED") {
+      throw new Error(
+        "This job was canceled — there is no completed work to charge for"
+      );
+    }
+    throw new Error(
+      `This job is ${job.status.toLowerCase().replace(/_/g, " ")} — charge it after the work is completed`
+    );
+  }
+  // Paged to exhaustion: a filtered scan counts its limit against rows
+  // scanned, not rows matched, so a single page could miss the covering
+  // invoice and wave a second charge through.
+  const existingInvoices: { status: string | null }[] = [];
+  let invoiceToken: string | null | undefined;
+  do {
+    const { data: page, nextToken } = await client.models.Invoice.list({
+      filter: { jobId: { eq: jobId } },
+      nextToken: invoiceToken,
+    });
+    existingInvoices.push(...page);
+    invoiceToken = nextToken;
+  } while (invoiceToken);
+  // FAILED may be retried, and VOID was withdrawn as wrong — neither speaks
+  // for the job any more. Anything else (OPEN, PAID, REFUNDED) means the money
+  // question was already answered; answering it twice is a double charge, and
+  // re-charging a deliberate refund is a decision for the manual charge path.
+  const covering = existingInvoices.filter(
+    (i) => i.status !== "FAILED" && i.status !== "VOID"
+  );
+  if (covering.length > 0) {
+    throw new Error(
+      covering.some((i) => i.status === "REFUNDED")
+        ? "This job was charged and then deliberately refunded — if that refund was a mistake, use the manual card charge and say why"
+        : "This job already has a non-failed invoice"
+    );
   }
 
   const { customer, stripeCustomerId } = await ensureStripeCustomer(
@@ -339,7 +381,12 @@ async function chargeOneTimeJob(actor: Actor, jobId: string) {
       receipt_email: customer.email ?? undefined,
       metadata: { crmJobId: jobId, crmCustomerId: job.customerId },
     },
-    { idempotencyKey: `crm-job-${jobId}` }
+    // The attempt counter is the number of invoice rows this job already has:
+    // a bare per-job key would make Stripe replay the first attempt's response
+    // for 24 hours — a FAILED retry with a fresh card would get the old
+    // decline back. Two racing calls for the same attempt still share a key,
+    // so a double-tap replays one intent instead of charging twice.
+    { idempotencyKey: `crm-job-${jobId}-a${existingInvoices.length}` }
   );
 
   const { data: invoice } = await client.models.Invoice.create({
@@ -491,6 +538,29 @@ async function voidInvoice(
     throw new Error(
       "This invoice has been paid — refund it instead. Voiding it would drop money that actually moved out of the books."
     );
+  }
+
+  // An OPEN invoice with a PaymentIntent is a charge still in motion (a bank
+  // debit takes days). Voiding the row without touching the intent leaves the
+  // charge to land anyway — and frees the job for a second one. The void must
+  // also stop the money, or honestly refuse.
+  if (invoice.status === "OPEN" && invoice.stripePaymentIntentId) {
+    const intent = await stripeClient().paymentIntents.retrieve(
+      invoice.stripePaymentIntentId
+    );
+    if (intent.status === "succeeded") {
+      throw new Error(
+        "This invoice's payment already went through — it will settle to PAID shortly. Refund it instead of voiding."
+      );
+    }
+    if (intent.status === "processing") {
+      throw new Error(
+        "This invoice's bank debit is still processing — the money may still arrive. Wait for it to settle or fail, then void or refund."
+      );
+    }
+    if (intent.status !== "canceled") {
+      await stripeClient().paymentIntents.cancel(intent.id);
+    }
   }
 
   const { data: updated, errors } = await client.models.Invoice.update({

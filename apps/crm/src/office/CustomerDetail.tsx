@@ -622,8 +622,14 @@ export default function CustomerDetail() {
           (() => {
             const renderJob = (j: Job) => {
               const report = reports.find((r) => r.jobId === j.id);
+              // FAILED may be retried and VOID was withdrawn — neither speaks
+              // for the job, so neither hides the Charge button. Mirrors the
+              // server's covering rule in chargeOneTimeJob.
               const invoice = invoices.find(
-                (inv) => inv.jobId === j.id && inv.status !== "FAILED"
+                (inv) =>
+                  inv.jobId === j.id &&
+                  inv.status !== "FAILED" &&
+                  inv.status !== "VOID"
               );
               const reschedulable =
                 roles.office &&
@@ -1160,7 +1166,7 @@ export default function CustomerDetail() {
           customer={customer}
           onSubmit={async (title, bodyText, sendNow) => {
             const created = opResult<{ agreementId?: string }>(
-              await api().mutations.createAgreement({
+              await api().mutations.authorAgreement({
                 customerId: customer.id,
                 title,
                 bodyText,

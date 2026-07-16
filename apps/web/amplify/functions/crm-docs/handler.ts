@@ -93,7 +93,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return sendAgreement(event.arguments.agreementId!);
     }
-    case "createQuote": {
+    case "quoteFromTemplate": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return createQuote(actorOf(event), {
         customerId: event.arguments.customerId!,
@@ -104,7 +104,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         notes: event.arguments.note,
       });
     }
-    case "createAgreement": {
+    case "authorAgreement": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return createAgreement({
         customerId: event.arguments.customerId!,

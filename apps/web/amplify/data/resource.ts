@@ -943,7 +943,7 @@ const schema = a.schema({
    * differs from the template's list price needs a reason, recorded on the
    * quote with the person who set it.
    */
-  createQuote: a
+  quoteFromTemplate: a
     .mutation()
     .arguments({
       customerId: a.string().required(),
@@ -964,7 +964,7 @@ const schema = a.schema({
    * DRAFT and the signature fields are never arguments, so no browser can
    * produce a signed contract.
    */
-  createAgreement: a
+  authorAgreement: a
     .mutation()
     .arguments({
       customerId: a.string().required(),

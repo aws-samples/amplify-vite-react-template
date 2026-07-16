@@ -10,6 +10,7 @@ import {
 } from "../lib/api";
 import { fmtDate, money, todayEastern } from "../lib/format";
 import { revenueTotals } from "../lib/revenue";
+import { plansWithoutNextVisit, unchargedOneTimeJobs } from "../lib/workQueues";
 import {
   Badge,
   Button,
@@ -141,6 +142,15 @@ export default function Dashboard() {
       servicedPlanIds.has(p.id)
   );
 
+  // Completed one-time jobs nobody has charged. Completion only auto-starts
+  // billing for recurring plans; a one-time job's money moves when somebody
+  // presses Charge, and until this list existed no worklist fed that button.
+  const uncharged = unchargedOneTimeJobs(jobs, invoices);
+
+  // The service direction of "not billing": plans still charging the customer
+  // with no visit on the calendar. NO_ACCESS deliberately parks a plan here.
+  const noNextVisit = plansWithoutNextVisit(plans, jobs, today);
+
   const openLeads = customers.filter((c) => c.status === "LEAD");
   const customerById = new Map(customers.map((c) => [c.id, c]));
 
@@ -199,6 +209,30 @@ export default function Dashboard() {
         </Card>
       ) : null}
 
+      {uncharged.length > 0 ? (
+        <Card title={`Completed but never charged (${uncharged.length})`}>
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            One-time jobs where the work is done and no charge or invoice
+            exists. Nobody pays for these unless someone acts — open the
+            customer and use <strong>Charge</strong> on the job.
+          </p>
+          {uncharged.slice(0, 10).map((j) => (
+            <ListRow
+              key={j.id}
+              title={customerById.get(j.customerId)?.displayName ?? "Unknown"}
+              subtitle={`${j.serviceType} · completed ${fmtDate(j.completedAt ?? j.scheduledDate, true)}`}
+              meta={
+                <>
+                  <strong>{money(j.priceCents)}</strong>
+                  <Badge tone="danger">never charged</Badge>
+                </>
+              }
+              onClick={() => navigate(`/customers/${j.customerId}`)}
+            />
+          ))}
+        </Card>
+      ) : null}
+
       {notBilling.length > 0 ? (
         <Card title={`Serviced but not billing (${notBilling.length})`}>
           <p className="muted small" style={{ marginBottom: 6 }}>
@@ -212,6 +246,26 @@ export default function Dashboard() {
               title={customerById.get(p.customerId)?.displayName ?? "Unknown"}
               subtitle={`${p.planName} · ${money(p.priceCents)}/mo`}
               meta={<Badge tone="danger">not billing</Badge>}
+              onClick={() => navigate(`/customers/${p.customerId}`)}
+            />
+          ))}
+        </Card>
+      ) : null}
+
+      {noNextVisit.length > 0 ? (
+        <Card title={`Active plans with no next visit (${noNextVisit.length})`}>
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            These plans are live — any with a subscription are still charging
+            the customer — and no visit is scheduled or queued. A no-access
+            exit or a canceled visit leaves a plan like this. Book the next
+            visit from the customer page.
+          </p>
+          {noNextVisit.slice(0, 10).map((p) => (
+            <ListRow
+              key={p.id}
+              title={customerById.get(p.customerId)?.displayName ?? "Unknown"}
+              subtitle={`${p.planName} · ${money(p.priceCents)}/mo`}
+              meta={<Badge tone="danger">no next visit</Badge>}
               onClick={() => navigate(`/customers/${p.customerId}`)}
             />
           ))}
@@ -236,10 +290,12 @@ export default function Dashboard() {
 
       {outstanding.length === 0 &&
       needsAttention.length === 0 &&
-      notBilling.length === 0 ? (
+      notBilling.length === 0 &&
+      uncharged.length === 0 &&
+      noNextVisit.length === 0 ? (
         <EmptyState
           title="All caught up"
-          body="No outstanding invoices, every active customer has a plan or upcoming job, and every serviced plan is billing."
+          body="No outstanding invoices, every completed job is charged, every serviced plan is billing, every active plan has a next visit, and every active customer has a plan or upcoming job."
         />
       ) : null}
     </Page>

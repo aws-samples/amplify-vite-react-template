@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
-  unwrap,
+  listAll,
   type Customer,
   type Job,
   type Route,
@@ -39,7 +39,11 @@ export default function TechToday() {
   useEffect(() => {
     (async () => {
       try {
-        const all = unwrap(await api().models.Technician.list({ limit: 200 }));
+        // Paged to exhaustion: a one-page read past 200 technicians would
+        // miss `mine` and tell a real tech their login isn't linked.
+        const all = await listAll((t) =>
+          api().models.Technician.list({ limit: 200, nextToken: t })
+        );
         setTechs(all.filter((t) => t.active));
         const mine = all.find((t) => t.userSub === roles.sub);
         if (mine) {
@@ -60,11 +64,11 @@ export default function TechToday() {
     setJobs(null);
     setError(null);
     try {
-      const routes = unwrap(
-        await api().models.Route.listRouteByTechnicianIdAndDate({
-          technicianId: techId,
-          date: { eq: date },
-        })
+      const routes = await listAll((t) =>
+        api().models.Route.listRouteByTechnicianIdAndDate(
+          { technicianId: techId, date: { eq: date } },
+          { nextToken: t }
+        )
       );
       const r = routes[0] ?? null;
       setRoute(r);
@@ -72,11 +76,17 @@ export default function TechToday() {
         setJobs([]);
         return;
       }
-      const jobList = unwrap(
-        await api().models.Job.list({
-          filter: { routeId: { eq: r.id } },
-          limit: 200,
-        })
+      // The routeId filter runs post-scan (no routeId index), so the 200-row
+      // limit counts scanned jobs, not the truck's stops — page to exhaustion
+      // or stops silently fall off the day list.
+      const jobList = (
+        await listAll((t) =>
+          api().models.Job.list({
+            filter: { routeId: { eq: r.id } },
+            limit: 200,
+            nextToken: t,
+          })
+        )
       ).sort((a, b) => (a.routeOrder ?? 0) - (b.routeOrder ?? 0));
       setJobs(jobList);
       const ids = [...new Set(jobList.map((j) => j.customerId))];

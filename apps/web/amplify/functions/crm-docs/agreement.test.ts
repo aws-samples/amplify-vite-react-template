@@ -90,7 +90,7 @@ beforeEach(() => {
 
 describe("createAgreement", () => {
   it("creates a draft", async () => {
-    const res = (await call("createAgreement", {
+    const res = (await call("authorAgreement", {
       customerId: "c1",
       title: "Residential plan",
       bodyText: "Terms…",
@@ -104,7 +104,7 @@ describe("createAgreement", () => {
     // The forgery this replaces: an office user writing the signature fields
     // directly against the model. The mutation has no such arguments, so they
     // are dropped rather than validated away.
-    await call("createAgreement", {
+    await call("authorAgreement", {
       customerId: "c1",
       title: "Residential plan",
       bodyText: "Terms…",
@@ -121,7 +121,7 @@ describe("createAgreement", () => {
   });
 
   it("stamps access groups server-side rather than taking the caller's word", async () => {
-    await call("createAgreement", {
+    await call("authorAgreement", {
       customerId: "c1",
       title: "T",
       bodyText: "B",
@@ -133,17 +133,17 @@ describe("createAgreement", () => {
 
   it("refuses an empty title or body", async () => {
     await expect(
-      call("createAgreement", { customerId: "c1", title: "  ", bodyText: "B" })
+      call("authorAgreement", { customerId: "c1", title: "  ", bodyText: "B" })
     ).rejects.toThrow(/needs a title/i);
     await expect(
-      call("createAgreement", { customerId: "c1", title: "T", bodyText: "  " })
+      call("authorAgreement", { customerId: "c1", title: "T", bodyText: "  " })
     ).rejects.toThrow(/needs a body/i);
   });
 
   it("refuses an unknown customer", async () => {
     fakeDataClient.models.Customer.get = async () => ({ data: null }) as never;
     await expect(
-      call("createAgreement", { customerId: "nope", title: "T", bodyText: "B" })
+      call("authorAgreement", { customerId: "nope", title: "T", bodyText: "B" })
     ).rejects.toThrow(/not found/i);
     fakeDataClient.models.Customer.get = async ({ id }: { id: string }) => ({
       data: { id, displayName: "Dana", groupId: null },
@@ -152,7 +152,7 @@ describe("createAgreement", () => {
 
   it("refuses a technician", async () => {
     await expect(
-      call("createAgreement", { customerId: "c1", title: "T", bodyText: "B" }, ["TECH"])
+      call("authorAgreement", { customerId: "c1", title: "T", bodyText: "B" }, ["TECH"])
     ).rejects.toThrow(/office role required/i);
   });
 
@@ -160,7 +160,7 @@ describe("createAgreement", () => {
     createResult = { data: null, errors: [{ message: "throttled" }] };
 
     await expect(
-      call("createAgreement", { customerId: "c1", title: "T", bodyText: "B" })
+      call("authorAgreement", { customerId: "c1", title: "T", bodyText: "B" })
     ).rejects.toThrow(/could not create the agreement/i);
   });
 });
@@ -203,7 +203,7 @@ describe("voidAgreement", () => {
 
 describe("createQuote price guard", () => {
   const quote = (args: Record<string, unknown>) =>
-    call("createQuote", { customerId: "c1", planTemplateId: "t_list", ...args });
+    call("quoteFromTemplate", { customerId: "c1", planTemplateId: "t_list", ...args });
 
   it("quotes at the template's list price without ceremony", async () => {
     await quote({ priceCents: 9900 });
@@ -256,7 +256,7 @@ describe("createQuote price guard", () => {
     // The flagship product. Its box used to prefill empty, so the standard path
     // was to type a number from memory.
     await expect(
-      call("createQuote", {
+      call("quoteFromTemplate", {
         customerId: "c1",
         planTemplateId: "t_ai",
         priceCents: 12000,
@@ -272,13 +272,13 @@ describe("createQuote price guard", () => {
 
   it("refuses a technician", async () => {
     await expect(
-      call("createQuote", { customerId: "c1", planTemplateId: "t_list", priceCents: 9900 }, ["TECH"])
+      call("quoteFromTemplate", { customerId: "c1", planTemplateId: "t_list", priceCents: 9900 }, ["TECH"])
     ).rejects.toThrow(/office role required/i);
   });
 
   it("refuses an unknown template", async () => {
     await expect(
-      call("createQuote", { customerId: "c1", planTemplateId: "nope", priceCents: 9900 })
+      call("quoteFromTemplate", { customerId: "c1", planTemplateId: "nope", priceCents: 9900 })
     ).rejects.toThrow(/not found/i);
   });
 });

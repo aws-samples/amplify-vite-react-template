@@ -13,6 +13,13 @@ import {
 import { useRoles } from "../lib/auth";
 import { fmtDate } from "../lib/format";
 import {
+  clearDraft,
+  isConnectivityError,
+  loadDraft,
+  saveDraft,
+  syncBadge,
+} from "../lib/reportDraft";
+import {
   Badge,
   Button,
   Card,
@@ -37,6 +44,40 @@ type ProductRow = {
   pestTouched?: boolean;
 };
 type Geo = { lat: number; lng: number; accuracyM: number; capturedAt: string };
+
+/**
+ * What this phone keeps if the battery dies mid-report (R12) — the exact UI
+ * state of the form, so a restore puts the tech back where they were.
+ */
+type DraftFields = {
+  servicesPerformed: string;
+  targetPests: string;
+  areasTreated: string;
+  recommendations: string;
+  techNotes: string;
+  inspectionOnly: boolean;
+  reEntry: string;
+  products: ProductRow[];
+  geo: Geo | null;
+};
+
+/** Live navigator.onLine, for the offline banner and the sync words. */
+function useOnline(): boolean {
+  const [online, setOnline] = useState(
+    () => typeof navigator === "undefined" || navigator.onLine
+  );
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => {
+      window.removeEventListener("online", up);
+      window.removeEventListener("offline", down);
+    };
+  }, []);
+  return online;
+}
 
 /** productsUsed is an AWSJSON field — arrives as a JSON string or value. */
 function parseProducts(raw: unknown): ProductRow[] {
@@ -103,8 +144,15 @@ export default function TechJob() {
       // assigned technician: that attributes the report, GPS and sign-off to
       // someone who was not on site.
       setTechRecord(allTechs.find((t) => t.userSub === roles.sub) ?? null);
+      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load job");
+      setError(
+        isConnectivityError(err)
+          ? "No connection — couldn't load this job. It will load when signal returns."
+          : err instanceof Error
+            ? err.message
+            : "Could not load job"
+      );
     }
   }, [jobId, roles.sub]);
 
@@ -112,9 +160,29 @@ export default function TechJob() {
     void load();
   }, [load]);
 
+  // Regained signal reloads the job — the offline error clears itself instead
+  // of asking the tech to know that pull-to-refresh exists.
+  useEffect(() => {
+    const onOnline = () => void load();
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [load]);
+
+  const online = useOnline();
+  const offlineBanner = !online ? (
+    <Card>
+      <Badge tone="warn">offline</Badge>
+      <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+        No connection. Anything you type in the report is saved to this phone
+        and can be sent when signal returns.
+      </p>
+    </Card>
+  ) : null;
+
   if (!job || !customer) {
     return (
       <Page title="Job" back="/tech">
+        {offlineBanner}
         <ErrorNote error={error} />
         {!error ? <Spinner /> : null}
       </Page>
@@ -132,6 +200,7 @@ export default function TechJob() {
 
   return (
     <Page title={customer.displayName} back="/tech">
+      {offlineBanner}
       <ErrorNote error={error} />
       <Card>
         <div className="row-split" style={{ marginBottom: 8 }}>
@@ -197,8 +266,15 @@ export default function TechJob() {
                 return load();
               })
               .catch((err) =>
+                // Honest failure words (R12): a dropped connection is not the
+                // same as the server saying no, and the tech needs to know
+                // the start time was NOT stamped.
                 setError(
-                  err instanceof Error ? err.message : "Could not start the job"
+                  isConnectivityError(err)
+                    ? "No connection — the job didn't start. The start time is stamped by the office clock, so try again when you have signal."
+                    : err instanceof Error
+                      ? err.message
+                      : "Could not start the job"
                 )
               )
           }
@@ -302,9 +378,18 @@ function NoAccessCard({ job, onDone }: { job: Job; onDone: () => Promise<void> }
           photoKey: photoKey ?? undefined,
         })
       );
+      // The visit is over and no report will be filed for it — a lingering
+      // draft would only restore stale words into a future rebooked visit.
+      clearDraft(job.id);
       await onDone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not report it");
+      setError(
+        isConnectivityError(err)
+          ? "No connection — this didn't go through. Tap Send it again when you have signal."
+          : err instanceof Error
+            ? err.message
+            : "Could not report it"
+      );
       setBusy(false);
     }
   };
@@ -387,41 +472,155 @@ function ReportForm({
   catalog: CatalogProduct[];
   onChanged: () => Promise<void>;
 }) {
-  const [servicesPerformed, setServicesPerformed] = useState(existing?.servicesPerformed ?? "");
-  const [targetPests, setTargetPests] = useState(existing?.targetPests ?? "");
-  const [areasTreated, setAreasTreated] = useState(existing?.areasTreated ?? "");
-  const [recommendations, setRecommendations] = useState(existing?.recommendations ?? "");
-  const [techNotes, setTechNotes] = useState(existing?.techNotes ?? "");
+  // R12: if this phone holds typing the office never got — battery died,
+  // signal dropped, tab evicted — put the tech back exactly where they were.
+  // Content is the arbiter, not clocks: a save that lands after the tech kept
+  // typing gives the server the newer timestamp while the phone holds the
+  // newer words. A draft is discarded only when it says nothing the office
+  // copy doesn't already say.
+  const serverCopyFields = (): DraftFields => ({
+    servicesPerformed: existing?.servicesPerformed ?? "",
+    targetPests: existing?.targetPests ?? "",
+    areasTreated: existing?.areasTreated ?? "",
+    recommendations: existing?.recommendations ?? "",
+    techNotes: existing?.techNotes ?? "",
+    inspectionOnly: existing?.inspectionOnly ?? false,
+    reEntry:
+      existing?.reEntryIntervalHours != null
+        ? String(existing.reEntryIntervalHours)
+        : "",
+    products: parseProducts(existing?.productsUsed).map((p) => ({
+      ...p,
+      custom: !!p.name && !catalog.some((c) => c.name === p.name),
+    })),
+    geo:
+      existing?.geoLat != null && existing?.geoLng != null
+        ? {
+            lat: existing.geoLat,
+            lng: existing.geoLng,
+            accuracyM: existing.geoAccuracyM ?? 0,
+            capturedAt: existing.geoCapturedAt ?? "",
+          }
+        : null,
+  });
+  const [restored] = useState(() => {
+    const d = loadDraft<DraftFields>(job.id);
+    if (!d) return null;
+    if (JSON.stringify(d.fields) === JSON.stringify(serverCopyFields())) {
+      clearDraft(job.id);
+      return null;
+    }
+    return d;
+  });
+  const [servicesPerformed, setServicesPerformed] = useState(
+    restored?.fields.servicesPerformed ?? existing?.servicesPerformed ?? ""
+  );
+  const [targetPests, setTargetPests] = useState(
+    restored?.fields.targetPests ?? existing?.targetPests ?? ""
+  );
+  const [areasTreated, setAreasTreated] = useState(
+    restored?.fields.areasTreated ?? existing?.areasTreated ?? ""
+  );
+  const [recommendations, setRecommendations] = useState(
+    restored?.fields.recommendations ?? existing?.recommendations ?? ""
+  );
+  const [techNotes, setTechNotes] = useState(
+    restored?.fields.techNotes ?? existing?.techNotes ?? ""
+  );
   const [inspectionOnly, setInspectionOnly] = useState(
-    existing?.inspectionOnly ?? false
+    restored?.fields.inspectionOnly ?? existing?.inspectionOnly ?? false
   );
   const [reEntry, setReEntry] = useState(
-    existing?.reEntryIntervalHours != null
-      ? String(existing.reEntryIntervalHours)
-      : ""
+    restored?.fields.reEntry ??
+      (existing?.reEntryIntervalHours != null
+        ? String(existing.reEntryIntervalHours)
+        : "")
   );
   // Reloaded rows lost their UI-only flags — a named row that isn't in the
   // catalog must come back in manual mode or its inputs vanish mid-edit.
-  const [products, setProducts] = useState<ProductRow[]>(() =>
-    parseProducts(existing?.productsUsed).map((p) => ({
-      ...p,
-      custom: !!p.name && !catalog.some((c) => c.name === p.name),
-    }))
+  // (A restored draft kept its flags: it is the exact UI state as typed.)
+  const [products, setProducts] = useState<ProductRow[]>(
+    () =>
+      restored?.fields.products ??
+      parseProducts(existing?.productsUsed).map((p) => ({
+        ...p,
+        custom: !!p.name && !catalog.some((c) => c.name === p.name),
+      }))
   );
   const [geo, setGeo] = useState<Geo | null>(
-    existing?.geoLat != null && existing?.geoLng != null
-      ? {
-          lat: existing.geoLat,
-          lng: existing.geoLng,
-          accuracyM: existing.geoAccuracyM ?? 0,
-          capturedAt: existing.geoCapturedAt ?? new Date().toISOString(),
-        }
-      : null
+    () =>
+      restored?.fields.geo ??
+      (existing?.geoLat != null && existing?.geoLng != null
+        ? {
+            lat: existing.geoLat,
+            lng: existing.geoLng,
+            accuracyM: existing.geoAccuracyM ?? 0,
+            capturedAt: existing.geoCapturedAt ?? new Date().toISOString(),
+          }
+        : null)
   );
   const [geoBusy, setGeoBusy] = useState(false);
   const [busy, setBusy] = useState<null | "save" | "finalize">(null);
   const [error, setError] = useState<string | null>(null);
   const [reportId, setReportId] = useState(existing?.id ?? null);
+
+  // The sync truth (R12): dirty = the office doesn't have the latest words;
+  // persisted = this phone does. The badge below the form says exactly which.
+  const online = useOnline();
+  const [dirty, setDirty] = useState(!!restored);
+  const [persisted, setPersisted] = useState(true);
+  const [sendFailed, setSendFailed] = useState(false);
+  const [restoredNote, setRestoredNote] = useState(restored?.savedAt ?? null);
+  const editGen = useRef(0);
+  const lastMirrored = useRef<string | null>(null);
+  const retryRef = useRef<(() => void) | null>(null);
+
+  // Every edit is mirrored to this phone before it goes anywhere else. The
+  // snapshot comparison makes mounting (and StrictMode's double-mount) a
+  // display, not an edit — only real typing marks the form dirty.
+  useEffect(() => {
+    const fields: DraftFields = {
+      servicesPerformed,
+      targetPests,
+      areasTreated,
+      recommendations,
+      techNotes,
+      inspectionOnly,
+      reEntry,
+      products,
+      geo,
+    };
+    const snapshot = JSON.stringify(fields);
+    if (lastMirrored.current === null) {
+      lastMirrored.current = snapshot;
+      return;
+    }
+    if (snapshot === lastMirrored.current) return;
+    lastMirrored.current = snapshot;
+    editGen.current += 1;
+    setDirty(true);
+    setPersisted(saveDraft(job.id, fields));
+  }, [
+    job.id,
+    servicesPerformed,
+    targetPests,
+    areasTreated,
+    recommendations,
+    techNotes,
+    inspectionOnly,
+    reEntry,
+    products,
+    geo,
+  ]);
+
+  // Regained signal auto-retries the failed *draft* send — no retyping, no
+  // extra tap. Finalize is never auto-retried: it emails the customer, so it
+  // stays a deliberate button press.
+  useEffect(() => {
+    const onOnline = () => retryRef.current?.();
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
 
   const captureGeo = () => {
     if (!navigator.geolocation) {
@@ -504,6 +703,97 @@ function ReportForm({
     return saved.reportId;
   };
 
+  /**
+   * The office confirmed it holds everything typed up to `gen` — only then
+   * may the phone's copy clear. Edits made while the save was in flight keep
+   * the draft and the "saved to this phone" words (rule 2: no false "saved").
+   */
+  const markDelivered = (gen: number) => {
+    setSendFailed(false);
+    setRestoredNote(null);
+    if (editGen.current === gen) {
+      clearDraft(job.id);
+      setDirty(false);
+    }
+  };
+
+  const runSave = () => {
+    setBusy("save");
+    setError(null);
+    const gen = editGen.current;
+    save()
+      .then(() => {
+        markDelivered(gen);
+        return onChanged();
+      })
+      .catch((err) => {
+        if (isConnectivityError(err)) {
+          // The draft is already on this phone (mirrored on every edit) —
+          // nothing is lost, and it re-sends by itself when signal returns.
+          setSendFailed(true);
+          setError(
+            "Couldn't reach the office — your report is saved on this phone and will send when you're back online."
+          );
+        } else {
+          setError(err.message);
+        }
+      })
+      .finally(() => setBusy(null));
+  };
+
+  const runFinalize = () => {
+    if (!geo) {
+      setError("Capture your on-site location before completing the job");
+      return;
+    }
+    if (!servicesPerformed.trim()) {
+      setError("Describe the services performed");
+      return;
+    }
+    setBusy("finalize");
+    setError(null);
+    const gen = editGen.current;
+    save()
+      .then(async (id) => {
+        // Stop the application clock first, server-stamped. The
+        // first stamp wins, so if finalize fails here and is
+        // retried tomorrow morning, the record's end time is still
+        // now — while the tech is on site — not whenever the retry
+        // lands.
+        const ended = await api().mutations.endApplication({
+          jobId: job.id,
+        });
+        if (ended.errors?.length) {
+          throw new Error(ended.errors[0].message);
+        }
+        return api().mutations.finalizeServiceReport({ reportId: id });
+      })
+      .then((res) => {
+        if (res.errors?.length) throw new Error(res.errors[0].message);
+        markDelivered(gen);
+        return onChanged();
+      })
+      .catch((err) => {
+        if (isConnectivityError(err)) {
+          setSendFailed(true);
+          setError(
+            "Couldn't reach the office — the report is saved on this phone. Tap Complete & send again when you have signal."
+          );
+        } else {
+          setError(err.message);
+        }
+      })
+      .finally(() => setBusy(null));
+  };
+
+  // The auto-retry reads through a ref so the 'online' listener always sees
+  // this render's state, not the state from when the listener was attached.
+  // Any unsent words qualify, not just a failed send — the offline badge
+  // promises "will send when signal returns", so signal returning must send.
+  useEffect(() => {
+    retryRef.current = dirty && busy === null ? runSave : null;
+  });
+
   const setProduct = (i: number, k: "name" | "epaNumber" | "quantity" | "targetPest", v: string) =>
     setProducts((list) =>
       list.map((p, idx) =>
@@ -518,9 +808,25 @@ function ReportForm({
       )
     );
 
+  const syncState = syncBadge({
+    online,
+    sending: busy !== null,
+    dirty,
+    persisted,
+    sendFailed,
+    hasServerCopy: !!(reportId ?? existing),
+  });
+
   return (
     <Card title="Service report">
       <div className="form-grid">
+        {restoredNote ? (
+          <p className="muted small" style={{ margin: 0 }}>
+            Restored the report you typed at{" "}
+            {new Date(restoredNote).toLocaleString()} — it was saved on this
+            phone.
+          </p>
+        ) : null}
         <Field label="Services performed">
           <textarea
             value={servicesPerformed}
@@ -661,58 +967,20 @@ function ReportForm({
           </Button>
         </Card>
 
+        {/* The one honest sentence about where the report lives right now:
+            this phone, the office, or in flight. It never says "saved" for
+            words that only exist in React state. */}
+        {syncState ? (
+          <p className="small" style={{ margin: 0 }}>
+            <Badge tone={syncState.tone}>{syncState.label}</Badge>
+          </p>
+        ) : null}
         <ErrorNote error={error} />
         <div className="form-row-2">
-          <Button
-            variant="ghost"
-            loading={busy === "save"}
-            onClick={() => {
-              setBusy("save");
-              setError(null);
-              save()
-                .then(() => onChanged())
-                .catch((err) => setError(err.message))
-                .finally(() => setBusy(null));
-            }}
-          >
+          <Button variant="ghost" loading={busy === "save"} onClick={runSave}>
             Save draft
           </Button>
-          <Button
-            loading={busy === "finalize"}
-            onClick={() => {
-              if (!geo) {
-                setError("Capture your on-site location before completing the job");
-                return;
-              }
-              if (!servicesPerformed.trim()) {
-                setError("Describe the services performed");
-                return;
-              }
-              setBusy("finalize");
-              setError(null);
-              save()
-                .then(async (id) => {
-                  // Stop the application clock first, server-stamped. The
-                  // first stamp wins, so if finalize fails here and is
-                  // retried tomorrow morning, the record's end time is still
-                  // now — while the tech is on site — not whenever the retry
-                  // lands.
-                  const ended = await api().mutations.endApplication({
-                    jobId: job.id,
-                  });
-                  if (ended.errors?.length) {
-                    throw new Error(ended.errors[0].message);
-                  }
-                  return api().mutations.finalizeServiceReport({ reportId: id });
-                })
-                .then((res) => {
-                  if (res.errors?.length) throw new Error(res.errors[0].message);
-                  return onChanged();
-                })
-                .catch((err) => setError(err.message))
-                .finally(() => setBusy(null));
-            }}
-          >
+          <Button loading={busy === "finalize"} onClick={runFinalize}>
             Complete &amp; send
           </Button>
         </div>

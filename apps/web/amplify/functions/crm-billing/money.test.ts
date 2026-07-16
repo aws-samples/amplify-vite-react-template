@@ -13,10 +13,21 @@ type Invoice = Record<string, unknown> & { id: string };
 
 const created: Invoice[] = [];
 let invoices: Invoice[] = [];
+/** What Invoice.list returns — the job's existing ledger rows. */
+let jobInvoices: { id: string; jobId: string; status: string }[] = [];
 let createResult: { data: unknown; errors?: { message: string }[] } = {
   data: { id: "inv_1", status: "PAID" },
 };
 let customerEmail: string | null = "dana@example.com";
+const baseJob = () => ({
+  customerId: "c1",
+  type: "ONE_TIME",
+  serviceType: "Wasp nest removal",
+  priceCents: 29900,
+  status: "COMPLETED",
+  paidAt: null as string | null,
+});
+let job = baseJob();
 
 const fakeDataClient = {
   models: {
@@ -37,7 +48,7 @@ const fakeDataClient = {
         created.push(input);
         return createResult;
       },
-      list: async () => ({ data: [] }),
+      list: async () => ({ data: jobInvoices }),
       get: async ({ id }: { id: string }) => ({
         data: invoices.find((i) => i.id === id) ?? null,
       }),
@@ -50,13 +61,7 @@ const fakeDataClient = {
     },
     Job: {
       get: async ({ id }: { id: string }) => ({
-        data: {
-          id,
-          customerId: "c1",
-          serviceType: "Wasp nest removal",
-          priceCents: 29900,
-          paidAt: null,
-        },
+        data: { id, ...job },
       }),
     },
   },
@@ -67,9 +72,21 @@ const paymentIntentsCreate = vi.fn(async () => ({
   id: "pi_1",
   status: "succeeded",
 }));
+const paymentIntentsRetrieve = vi.fn(async (id: string) => ({
+  id,
+  status: "requires_payment_method",
+}));
+const paymentIntentsCancel = vi.fn(async () => ({
+  id: "pi_1",
+  status: "canceled",
+}));
 vi.mock("../shared/stripeClient", () => ({
   stripeClient: () => ({
-    paymentIntents: { create: paymentIntentsCreate },
+    paymentIntents: {
+      create: paymentIntentsCreate,
+      retrieve: paymentIntentsRetrieve,
+      cancel: paymentIntentsCancel,
+    },
     customers: {
       retrieve: async () => ({
         deleted: false,
@@ -116,11 +133,19 @@ const call = (...a: Parameters<typeof event>) =>
 beforeEach(() => {
   created.length = 0;
   invoices = [];
+  jobInvoices = [];
+  job = baseJob();
   paymentIntentsCreate.mockClear();
   paymentIntentsCreate.mockImplementation(async () => ({
     id: "pi_1",
     status: "succeeded",
   }));
+  paymentIntentsRetrieve.mockClear();
+  paymentIntentsRetrieve.mockImplementation(async (id: string) => ({
+    id,
+    status: "requires_payment_method",
+  }));
+  paymentIntentsCancel.mockClear();
   sendEmail.mockClear();
   notifyOffice.mockClear();
   customerEmail = "dana@example.com";
@@ -220,6 +245,126 @@ describe("chargeManualAmount ceiling", () => {
         { groups: ["OFFICE"], sub: "sub-office" }
       )
     ).rejects.toThrow(/finance role required/i);
+  });
+});
+
+describe("chargeOneTimeJob status guard", () => {
+  // R08: the CRM hides the Charge button on anything not COMPLETED, but the
+  // mutation is reachable without the CRM. The server enforces what the
+  // button's label promises: this charges for work that was performed.
+
+  it("charges a completed, unpaid one-time job in full", async () => {
+    const res = (await call("chargeOneTimeJob", { jobId: "job1" })) as {
+      status: string;
+    };
+
+    expect(res.status).toBe("succeeded");
+    const [params] = paymentIntentsCreate.mock.calls[0] as unknown as [
+      { amount: number },
+    ];
+    expect(params.amount).toBe(29900);
+  });
+
+  it("refuses a NO_ACCESS visit — the technician could not do the work", async () => {
+    job.status = "NO_ACCESS";
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /nothing to charge/i
+    );
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a job that is merely scheduled", async () => {
+    job.status = "SCHEDULED";
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /scheduled — charge it after the work is completed/i
+    );
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses an in-progress job with honest words", async () => {
+    job.status = "IN_PROGRESS";
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /in progress — charge it after the work is completed/i
+    );
+  });
+
+  it("refuses a canceled job", async () => {
+    job.status = "CANCELED";
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /canceled/i
+    );
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a plan visit — the subscription bills those", async () => {
+    job.type = "RECURRING";
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /plan visit/i
+    );
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a job paid online at booking — charging again is a double charge", async () => {
+    job.paidAt = "2026-07-12T14:00:00.000Z";
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /already paid online on 2026-07-12/i
+    );
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses when an OPEN or PAID invoice already covers the job", async () => {
+    jobInvoices = [{ id: "inv_open", jobId: "job1", status: "OPEN" }];
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /already has a non-failed invoice/i
+    );
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a job whose charge was deliberately refunded", async () => {
+    jobInvoices = [{ id: "inv_ref", jobId: "job1", status: "REFUNDED" }];
+
+    await expect(call("chargeOneTimeJob", { jobId: "job1" })).rejects.toThrow(
+      /deliberately refunded/i
+    );
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("charges again after a FAILED attempt — the work is still unpaid", async () => {
+    jobInvoices = [{ id: "inv_fail", jobId: "job1", status: "FAILED" }];
+
+    await call("chargeOneTimeJob", { jobId: "job1" });
+
+    expect(paymentIntentsCreate).toHaveBeenCalledOnce();
+  });
+
+  it("charges after a voided invoice — withdrawn means never charged", async () => {
+    jobInvoices = [{ id: "inv_void", jobId: "job1", status: "VOID" }];
+
+    await call("chargeOneTimeJob", { jobId: "job1" });
+
+    expect(paymentIntentsCreate).toHaveBeenCalledOnce();
+  });
+
+  it("a retry is a new idempotency key — Stripe must not replay the first attempt's decline", async () => {
+    await call("chargeOneTimeJob", { jobId: "job1" });
+    const firstKey = (
+      paymentIntentsCreate.mock.calls[0] as unknown[]
+    )[1] as { idempotencyKey: string };
+
+    jobInvoices = [{ id: "inv_fail", jobId: "job1", status: "FAILED" }];
+    await call("chargeOneTimeJob", { jobId: "job1" });
+    const retryKey = (
+      paymentIntentsCreate.mock.calls[1] as unknown[]
+    )[1] as { idempotencyKey: string };
+
+    expect(firstKey.idempotencyKey).not.toBe(retryKey.idempotencyKey);
   });
 });
 
@@ -379,6 +524,75 @@ describe("voidInvoice", () => {
       call("voidInvoice", { invoiceId: "inv_1", reason: "   " })
     ).rejects.toThrow(/say why/i);
     expect(invoices[0].status).toBe("OPEN");
+  });
+
+  it("voiding an open invoice cancels its still-cancellable payment intent", async () => {
+    invoices.push({
+      id: "inv_1",
+      status: "OPEN",
+      amountCents: 29900,
+      stripePaymentIntentId: "pi_open",
+    });
+
+    await call("voidInvoice", { invoiceId: "inv_1", reason: "wrong customer" });
+
+    expect(paymentIntentsCancel).toHaveBeenCalledWith("pi_open");
+    expect(invoices[0].status).toBe("VOID");
+  });
+
+  it("refuses to void while a bank debit is still processing — the money may still land", async () => {
+    invoices.push({
+      id: "inv_1",
+      status: "OPEN",
+      amountCents: 29900,
+      stripePaymentIntentId: "pi_processing",
+    });
+    paymentIntentsRetrieve.mockImplementation(async () => ({
+      id: "pi_processing",
+      status: "processing",
+    }));
+
+    await expect(
+      call("voidInvoice", { invoiceId: "inv_1", reason: "x" })
+    ).rejects.toThrow(/still processing/i);
+    expect(paymentIntentsCancel).not.toHaveBeenCalled();
+    expect(invoices[0].status).toBe("OPEN");
+  });
+
+  it("refuses to void an open invoice whose payment already succeeded — refund instead", async () => {
+    invoices.push({
+      id: "inv_1",
+      status: "OPEN",
+      amountCents: 29900,
+      stripePaymentIntentId: "pi_done",
+    });
+    paymentIntentsRetrieve.mockImplementation(async () => ({
+      id: "pi_done",
+      status: "succeeded",
+    }));
+
+    await expect(
+      call("voidInvoice", { invoiceId: "inv_1", reason: "x" })
+    ).rejects.toThrow(/refund it instead/i);
+    expect(invoices[0].status).toBe("OPEN");
+  });
+
+  it("voids an already-canceled intent without a second cancel call", async () => {
+    invoices.push({
+      id: "inv_1",
+      status: "OPEN",
+      amountCents: 29900,
+      stripePaymentIntentId: "pi_canceled",
+    });
+    paymentIntentsRetrieve.mockImplementation(async () => ({
+      id: "pi_canceled",
+      status: "canceled",
+    }));
+
+    await call("voidInvoice", { invoiceId: "inv_1", reason: "x" });
+
+    expect(paymentIntentsCancel).not.toHaveBeenCalled();
+    expect(invoices[0].status).toBe("VOID");
   });
 
   it("is idempotent", async () => {
