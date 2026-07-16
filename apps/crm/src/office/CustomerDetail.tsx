@@ -308,11 +308,15 @@ export default function CustomerDetail() {
               Email request
             </Button>
           </div>
-          <div style={{ marginTop: 10 }}>
-            <Button small variant="ghost" onClick={() => setSheet("charge")}>
-              Charge / record a payment
-            </Button>
-          </div>
+          {/* Both modes are finance work: one moves money, the other writes an
+              Invoice. Office staff collect the card but never take payment. */}
+          {roles.finance ? (
+            <div style={{ marginTop: 10 }}>
+              <Button small variant="ghost" onClick={() => setSheet("charge")}>
+                Charge / record a payment
+              </Button>
+            </div>
+          ) : null}
         </Card>
       ) : null}
 
@@ -468,7 +472,7 @@ export default function CustomerDetail() {
               meta={
                 <>
                   <StatusBadge status={p.status} />
-                  {roles.office && p.status === "ACTIVE" ? (
+                  {roles.finance && p.status === "ACTIVE" ? (
                     <>
                       {p.stripeSubscriptionId ? (
                         <Button
@@ -525,7 +529,7 @@ export default function CustomerDetail() {
                       </Button>
                     </>
                   ) : null}
-                  {roles.office && p.status === "PAUSED" ? (
+                  {roles.finance && p.status === "PAUSED" ? (
                     <Button
                       small
                       variant="subtle"
@@ -626,7 +630,7 @@ export default function CustomerDetail() {
                           ✓ Complete
                         </Button>
                       ) : null}
-                      {roles.office &&
+                      {roles.finance &&
                       j.type === "ONE_TIME" &&
                       j.status === "COMPLETED" &&
                       j.priceCents &&

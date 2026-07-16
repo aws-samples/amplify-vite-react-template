@@ -11,10 +11,25 @@ import {
  * Shared auth for the marketing site and the CRM.
  *
  * Static groups map to BuzzKill roles:
- *   OFFICE   — office staff (full CRM access)
+ *   OWNER    — everything, including approvals and staff invites
+ *   OFFICE   — day-to-day: leads, quotes, scheduling, plans. May NOT move
+ *              money or invite staff.
+ *   FINANCE  — money movement: charges, refunds, invoice voids
  *   TECH     — technicians (routes, jobs, service reports)
  *   CUSTOMER — portal users (their own records + their customer-group's)
- * "Both" office+tech users are simply members of OFFICE and TECH.
+ *
+ * Roles are additive: a user who does office work and handles billing is a
+ * member of both OFFICE and FINANCE. OWNER is a superset — every rule that
+ * admits OFFICE or FINANCE also admits OWNER, so an owner never needs a
+ * second login. "Both" office+tech users are simply members of both.
+ *
+ * Separation of duties: a manual charge above CHARGE_APPROVAL_THRESHOLD_CENTS
+ * (crm-billing) requires an OWNER approver who is not the initiator. Approval
+ * and role changes are recorded as AuditEvents.
+ *
+ * DEPLOY STEP: after this ships, add the owner's Cognito user to the OWNER
+ * group by hand. Nothing else can invite staff, so skipping this locks
+ * everyone out of provisioning new logins.
  *
  * Row-level customer visibility uses *dynamic* Cognito groups created at
  * runtime by the crm-admin function (`cus-<customerId>`, `grp-<groupId>`)
@@ -32,7 +47,7 @@ export const auth = defineAuth({
     "custom:loginTokenHash": { dataType: "String", mutable: true },
     "custom:loginTokenExp": { dataType: "String", mutable: true },
   },
-  groups: ["OFFICE", "TECH", "CUSTOMER"],
+  groups: ["OWNER", "OFFICE", "FINANCE", "TECH", "CUSTOMER"],
   triggers: {
     postAuthentication: postAuth,
     defineAuthChallenge: defineChallenge,

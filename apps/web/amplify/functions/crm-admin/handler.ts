@@ -23,7 +23,8 @@ import {
 const cognito = new CognitoIdentityProviderClient();
 
 const USER_POOL_ID = process.env.AMPLIFY_AUTH_USERPOOL_ID!;
-const STAFF_ROLES = ["OFFICE", "TECH"] as const;
+const STAFF_ROLES = ["OWNER", "OFFICE", "FINANCE", "TECH"] as const;
+type StaffRole = (typeof STAFF_ROLES)[number];
 
 type AdminCreateUserArgs = {
   email: string;
@@ -81,7 +82,7 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
   const roles = [...new Set(args.roles)];
 
   const invalid = roles.filter(
-    (r) => r !== "CUSTOMER" && !STAFF_ROLES.includes(r as "OFFICE" | "TECH")
+    (r) => r !== "CUSTOMER" && !STAFF_ROLES.includes(r as StaffRole)
   );
   if (invalid.length) throw new Error(`Invalid roles: ${invalid.join(", ")}`);
   if (roles.includes("CUSTOMER") && !args.customerId)

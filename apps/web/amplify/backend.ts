@@ -56,14 +56,6 @@ backend.auth.resources.cfnResources.cfnUserPoolClient.writeAttributes = [
   "name",
 ];
 
-// Grant SES send permissions to the lead-intake function
-backend.leadIntake.resources.lambda.addToRolePolicy(
-  new PolicyStatement({
-    actions: ["ses:SendEmail", "ses:SendRawEmail"],
-    resources: ["*"],
-  }),
-);
-
 // Public Function URL for the contact-form proxy. CORS is locked to the
 // production + staging origins (and localhost for dev). Auth is NONE
 // because the form is unauthenticated — protection comes from CORS +
@@ -135,6 +127,7 @@ for (const fn of [
   backend.createChallenge,
   backend.crmPricing,
   backend.bookingPublic,
+  backend.leadIntake,
 ]) {
   fn.resources.lambda.addToRolePolicy(sesPolicy);
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");

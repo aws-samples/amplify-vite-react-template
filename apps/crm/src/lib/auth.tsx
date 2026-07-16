@@ -9,7 +9,12 @@ import {
 import { fetchAuthSession } from "aws-amplify/auth";
 
 export type Roles = {
+  /** Everything, including approvals and staff invites. Superset of the rest. */
+  owner: boolean;
+  /** Day-to-day: leads, quotes, scheduling, plans. True for owners too. */
   office: boolean;
+  /** May move money: charges, subscriptions, invoice voids. True for owners. */
+  finance: boolean;
   tech: boolean;
   customer: boolean;
   /** All Cognito groups, including dynamic cus-/grp- groups. */
@@ -24,7 +29,9 @@ const RolesContext = createContext<Roles | null>(null);
 
 export function RolesProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<Omit<Roles, "refresh">>({
+    owner: false,
     office: false,
+    finance: false,
     tech: false,
     customer: false,
     groups: [],
@@ -39,8 +46,14 @@ export function RolesProvider({ children }: { children: ReactNode }) {
       const payload = session.tokens?.accessToken.payload;
       const groups = (payload?.["cognito:groups"] as string[] | undefined) ?? [];
       const idPayload = session.tokens?.idToken?.payload;
+      // OWNER is a superset: an owner should never be told they lack a role
+      // they implicitly hold, so office/finance are true for owners too. This
+      // mirrors callerIsOffice/callerIsFinance in amplify/functions/shared/authz.
+      const owner = groups.includes("OWNER");
       setState({
-        office: groups.includes("OFFICE"),
+        owner,
+        office: owner || groups.includes("OFFICE"),
+        finance: owner || groups.includes("FINANCE"),
         tech: groups.includes("TECH"),
         customer: groups.includes("CUSTOMER"),
         groups,

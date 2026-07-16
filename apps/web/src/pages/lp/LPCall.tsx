@@ -49,9 +49,13 @@ function CheckIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+const CONSENT_TEXT =
+  "By requesting a call, you agree that BuzzKill may contact you by phone or text about your pest control enquiry. Message and data rates may apply.";
+
 export default function LPCall() {
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
@@ -59,9 +63,10 @@ export default function LPCall() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setSubmitting(true);
+    setError(null);
     const [first, ...rest] = name.trim().split(" ");
     try {
-      await submitLead({
+      const result = await submitLead({
         propertyType: "Association",
         first: first || name,
         last: rest.join(" ") || "",
@@ -75,11 +80,24 @@ export default function LPCall() {
         units: "",
         freq: "Monthly",
         company: "",
+        formId: "lp-call",
+        // The form's own copy is the ask; submitting it is the opt-in.
+        consentToContact: true,
+        consentText: CONSENT_TEXT,
       });
-      setSubmitted(true);
+      if (result.ok) {
+        setSubmitted(true);
+      } else {
+        setError(
+          "error" in result.body
+            ? result.body.error
+            : "We couldn't submit your request. Please call us at (401) 526-0323."
+        );
+      }
     } catch {
-      // Even on error, show success — we'll get the lead from CloudWatch
-      setSubmitted(true);
+      setError(
+        "We couldn't reach our servers. Please call us at (401) 526-0323 and we'll help right away."
+      );
     } finally {
       setSubmitting(false);
     }
@@ -208,6 +226,12 @@ export default function LPCall() {
                   />
                 </div>
 
+                {error ? (
+                  <p role="alert" style={{ color: "#b91c1c", margin: "8px 0 0" }}>
+                    {error}
+                  </p>
+                ) : null}
+
                 <button
                   type="submit"
                   disabled={submitting}
@@ -217,6 +241,10 @@ export default function LPCall() {
                 >
                   {submitting ? "Sending…" : "Have Us Call You"}
                 </button>
+
+                <p style={{ fontSize: 12, opacity: 0.7, margin: "8px 0 0" }}>
+                  {CONSENT_TEXT}
+                </p>
               </form>
             </div>
 

@@ -4,7 +4,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
-import { callerGroups, callerIsOffice } from "../shared/authz";
+import { callerGroups, callerIsOffice, isStaff } from "../shared/authz";
 import { cusGroup, grpGroup } from "../shared/dynamicGroups";
 import { emailShell, sendEmail } from "../shared/email";
 import {
@@ -57,8 +57,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return completeJob(event.arguments.jobId!);
     }
     case "finalizeServiceReport": {
-      const groups = callerGroups(event.identity);
-      if (!groups.includes("OFFICE") && !groups.includes("TECH")) {
+      if (!isStaff(callerGroups(event.identity))) {
         throw new Error("Staff role required");
       }
       return finalizeServiceReport(event.arguments.reportId!);
@@ -74,8 +73,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "getReportPhotoUploadUrl": {
-      const groups = callerGroups(event.identity);
-      if (!groups.includes("OFFICE") && !groups.includes("TECH")) {
+      if (!isStaff(callerGroups(event.identity))) {
         throw new Error("Staff role required");
       }
       return getReportPhotoUploadUrl(
@@ -226,7 +224,6 @@ async function finalizeServiceReport(reportId: string) {
     targetPests: report.targetPests,
     areasTreated: report.areasTreated,
     recommendations: report.recommendations,
-    techNotes: report.techNotes,
     geo:
       report.geoLat != null && report.geoLng != null
         ? {
@@ -409,7 +406,7 @@ async function getDocumentUrl(key: string, groups: string[]) {
   // Plan-template pest photos: staff only (signers get them via the
   // token-gated agreement-public endpoint; customers get the signed PDF).
   if (/^templates\/[^/]+\//.test(key)) {
-    if (!groups.includes("OFFICE") && !groups.includes("TECH")) {
+    if (!isStaff(groups)) {
       throw new Error("Not authorized for this document");
     }
     const url = await getSignedUrl(
@@ -424,7 +421,7 @@ async function getDocumentUrl(key: string, groups: string[]) {
   if (!match) throw new Error("Invalid document key");
   const customerId = match[2];
 
-  const staff = groups.includes("OFFICE") || groups.includes("TECH");
+  const staff = isStaff(groups);
   if (!staff) {
     let allowed = groups.includes(cusGroup(customerId));
     if (!allowed) {

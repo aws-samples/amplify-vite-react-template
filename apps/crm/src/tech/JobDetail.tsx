@@ -99,11 +99,10 @@ export default function TechJob() {
           )
       );
       const allTechs = unwrap(techs);
-      setTechRecord(
-        allTechs.find((t) => t.userSub === roles.sub) ??
-          allTechs.find((t) => t.id === j.technicianId) ??
-          null
-      );
+      // Identity comes from the signed-in user only. Never fall back to the job's
+      // assigned technician: that attributes the report, GPS and sign-off to
+      // someone who was not on site.
+      setTechRecord(allTechs.find((t) => t.userSub === roles.sub) ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load job");
     }

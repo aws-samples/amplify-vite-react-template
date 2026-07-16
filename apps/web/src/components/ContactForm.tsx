@@ -129,12 +129,19 @@ function calcPrice(type: string, freq: string, cnt: number): number {
 
 // Pricing tables are monthly billing rates for both Association and
 // Residential. The calc result is displayed as-is with a "/month" label.
-// FieldRoutes per-service charge is computed in the Lambda by
-// multiplying the monthly rate by months-per-service.
+//
+// These are an INDICATIVE on-page estimate only — they are a hand-copied third
+// copy of the numbers in crm-pricing/rateCards.ts and have drifted from them
+// before. The binding price comes from the CRM rate card, applied by a human.
+// Do not reintroduce a pricing path that quotes or contracts from this table.
 
 function fmt(n: number): string {
   return "$" + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
+
+/** Stored verbatim on the lead as evidence of what the customer agreed to. */
+export const CONTACT_CONSENT_TEXT =
+  "By submitting this form, you agree that BuzzKill may contact you by phone, text or email about your pest control enquiry. Message and data rates may apply.";
 
 // ── Input sanitizers ───────────────────────────────────────────────
 // These run on every onChange so the input value can never contain
@@ -269,7 +276,13 @@ export default function ContactForm({
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      const result = await submitLead({ propertyType: type, ...data });
+      const result = await submitLead({
+        propertyType: type,
+        ...data,
+        formId: "contact",
+        consentToContact: true,
+        consentText: CONTACT_CONSENT_TEXT,
+      });
       if (result.ok) {
         const body = result.body as {
           monthlyCharge?: number;
@@ -874,6 +887,9 @@ export default function ContactForm({
                     {submitting ? "Submitting…" : "Get My Quote"}
                   </button>
                 </div>
+                <p style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
+                  {CONTACT_CONSENT_TEXT}
+                </p>
               </div>
             )}
           </form>

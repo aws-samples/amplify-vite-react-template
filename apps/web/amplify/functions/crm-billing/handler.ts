@@ -1,7 +1,7 @@
 import type { AppSyncResolverEvent } from "aws-lambda";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
-import { assertCanActForCustomer, callerIsOffice } from "../shared/authz";
+import { assertCanActForCustomer, assertFinance } from "../shared/authz";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 
@@ -25,27 +25,27 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return getPaymentMethodSummary(event.arguments.customerId!);
     }
     case "startSubscription": {
-      assertOffice(event);
+      assertFinance(event.identity);
       return startSubscription(event.arguments.servicePlanId!);
     }
     case "cancelSubscription": {
-      assertOffice(event);
+      assertFinance(event.identity);
       return cancelSubscription(event.arguments.servicePlanId!);
     }
     case "pausePlan": {
-      assertOffice(event);
+      assertFinance(event.identity);
       return setPlanPaused(event.arguments.servicePlanId!, true);
     }
     case "resumePlan": {
-      assertOffice(event);
+      assertFinance(event.identity);
       return setPlanPaused(event.arguments.servicePlanId!, false);
     }
     case "chargeOneTimeJob": {
-      assertOffice(event);
+      assertFinance(event.identity);
       return chargeOneTimeJob(event.arguments.jobId!);
     }
     case "chargeManualAmount": {
-      assertOffice(event);
+      assertFinance(event.identity);
       return chargeManualAmount(
         event.arguments.customerId!,
         event.arguments.amountCents!,
@@ -58,11 +58,6 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
   }
 };
 
-function assertOffice(event: AppSyncResolverEvent<Args>) {
-  if (!callerIsOffice(event.identity)) {
-    throw new Error("Office role required");
-  }
-}
 
 /** Get or create the Stripe customer mirroring a CRM customer. */
 async function ensureStripeCustomer(customerId: string) {
@@ -349,8 +344,14 @@ async function chargeManualAmount(
   if (!Number.isInteger(amountCents) || amountCents <= 0) {
     throw new Error("Enter a valid amount to charge");
   }
+  // TODO(WS2): above CHARGE_APPROVAL_THRESHOLD_CENTS ($500) this must require
+  // an approval record created by an OWNER who is not the caller. Blocked on
+  // the approval UI — without it, requiring approvedBy would leave FINANCE
+  // unable to raise a large charge at all.
   if (amountCents > 2_000_000) {
-    throw new Error("That amount looks too large — confirm and split if intended");
+    throw new Error(
+      "That amount is over the $20,000 limit for a single manual charge. Ask an owner — do not split it into smaller charges."
+    );
   }
   const client = await dataClient();
   const { customer, stripeCustomerId } = await ensureStripeCustomer(customerId);

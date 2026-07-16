@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { BrowserRouter, Routes, Route, Outlet } from "react-router-dom";
+import { captureAttribution } from "./lib/leadIntake";
 import Header from "./components/Header";
 import Footer from "./components/Footer";
 import Home from "./pages/Home";
@@ -32,6 +34,12 @@ function SiteLayout() {
 }
 
 function App() {
+  // First touch wins, so this has to run on the landing page rather than at
+  // submit time — by then the ad's utm/gclid params are long gone.
+  useEffect(() => {
+    captureAttribution();
+  }, []);
+
   return (
     <BrowserRouter>
       <ScrollToTop />

@@ -30,7 +30,9 @@ export default function More() {
           subtitle={roles.email ?? undefined}
           meta={
             <span style={{ display: "inline-flex", gap: 4 }}>
-              {roles.office ? <Badge tone="ok">office</Badge> : null}
+              {roles.owner ? <Badge tone="ok">owner</Badge> : null}
+              {roles.office && !roles.owner ? <Badge tone="ok">office</Badge> : null}
+              {roles.finance && !roles.owner ? <Badge tone="ok">finance</Badge> : null}
               {roles.tech ? <Badge tone="info">tech</Badge> : null}
               {roles.customer ? <Badge tone="muted">customer</Badge> : null}
             </span>
@@ -68,11 +70,13 @@ export default function More() {
             subtitle="AI-researched prices for services without a rate card"
             onClick={() => navigate("/market-rates")}
           />
-          <ListRow
-            title="Invite a staff member"
-            subtitle="Office, technician, or both"
-            onClick={() => setStaffSheet(true)}
-          />
+          {roles.owner ? (
+            <ListRow
+              title="Invite a staff member"
+              subtitle="Owner, office, finance, technician, or a combination"
+              onClick={() => setStaffSheet(true)}
+            />
+          ) : null}
           <ListRow
             title="Email log"
             subtitle="Recent emails sent to customers"
@@ -98,23 +102,43 @@ export default function More() {
   );
 }
 
+/**
+ * Roles are additive in Cognito, so each option maps to the group list it
+ * grants. OWNER is a superset and never needs pairing with OFFICE/FINANCE.
+ */
+const ROLE_CHOICES = {
+  OFFICE: { label: "Office staff — leads, quotes, scheduling", groups: ["OFFICE"] },
+  FINANCE: { label: "Finance — charges, refunds, invoices", groups: ["FINANCE"] },
+  OFFICE_FINANCE: { label: "Office + finance", groups: ["OFFICE", "FINANCE"] },
+  TECH: { label: "Technician", groups: ["TECH"] },
+  BOTH: { label: "Office + technician", groups: ["OFFICE", "TECH"] },
+  OWNER: {
+    label: "Owner — everything, incl. approvals and invites",
+    groups: ["OWNER"],
+  },
+} satisfies Record<string, { label: string; groups: string[] }>;
+
+type RoleChoice = keyof typeof ROLE_CHOICES;
+
 function StaffInvite({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"OFFICE" | "TECH" | "BOTH">("OFFICE");
+  const [role, setRole] = useState<RoleChoice>("OFFICE");
   const [techs, setTechs] = useState<Technician[]>([]);
   const [technicianId, setTechnicianId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
+  const linksTechnician = ROLE_CHOICES[role].groups.includes("TECH");
+
   useEffect(() => {
-    if (role === "OFFICE") return;
+    if (!linksTechnician) return;
     api()
       .models.Technician.list({ limit: 200 })
       .then((res) => setTechs(unwrap(res).filter((t) => !t.userSub)))
       .catch(() => undefined);
-  }, [role]);
+  }, [linksTechnician]);
 
   if (done) {
     return (
@@ -139,13 +163,15 @@ function StaffInvite({ onDone }: { onDone: () => void }) {
         <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
       </Field>
       <Field label="Role">
-        <select value={role} onChange={(e) => setRole(e.target.value as typeof role)}>
-          <option value="OFFICE">Office staff</option>
-          <option value="TECH">Technician</option>
-          <option value="BOTH">Both (office + technician)</option>
+        <select value={role} onChange={(e) => setRole(e.target.value as RoleChoice)}>
+          {Object.entries(ROLE_CHOICES).map(([k, v]) => (
+            <option key={k} value={k}>
+              {v.label}
+            </option>
+          ))}
         </select>
       </Field>
-      {role !== "OFFICE" && techs.length > 0 ? (
+      {linksTechnician && techs.length > 0 ? (
         <Field label="Link to technician record" hint="So their daily route shows up under My Day">
           <select value={technicianId} onChange={(e) => setTechnicianId(e.target.value)}>
             <option value="">Don't link</option>
@@ -172,7 +198,7 @@ function StaffInvite({ onDone }: { onDone: () => void }) {
             .mutations.adminCreateUser({
               email: email.trim(),
               name: name.trim(),
-              roles: role === "BOTH" ? ["OFFICE", "TECH"] : [role],
+              roles: [...ROLE_CHOICES[role].groups],
               technicianId: technicianId || undefined,
             })
             .then((res) => {

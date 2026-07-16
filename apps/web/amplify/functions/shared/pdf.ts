@@ -265,7 +265,6 @@ export async function renderServiceReportPdf(opts: {
   targetPests?: string | null;
   areasTreated?: string | null;
   recommendations?: string | null;
-  techNotes?: string | null;
   geo?: {
     lat: number;
     lng: number;
@@ -308,7 +307,8 @@ export async function renderServiceReportPdf(opts: {
   section("Target pests", opts.targetPests);
   section("Areas treated", opts.areasTreated);
   section("Recommendations", opts.recommendations);
-  section("Technician notes", opts.techNotes);
+  // ServiceReport.techNotes is internal-only ("not shown to customer" in the tech
+  // app) and must never be passed into this customer-facing document.
 
   if (opts.geo) {
     w.rule();
