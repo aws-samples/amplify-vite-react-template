@@ -320,15 +320,19 @@ const schema = a.schema({
     })
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
 
-  // AI-researched market rates for services without fixed rate cards.
-  // Cached per service+area so identical inputs keep identical prices;
-  // the office can review and override.
+  // AI-researched market rates — the base price for every quoted service.
+  // One research per service+area(+sqft band) returns a full rate sheet
+  // (one-time, plan cadences with monthly + initial fees, wasp extra-nest)
+  // stored in ratesJson; priceCents mirrors the sheet's one-time price and
+  // is the office-editable override. Cached so identical inputs keep
+  // identical prices; the office can review, override, or retire any row.
   MarketRate: a
     .model({
       rateKey: a.string().required(),
       service: a.string().required(),
       areaKey: a.string().required(),
       priceCents: a.integer().required(),
+      ratesJson: a.json(),
       basis: a.string(),
       sources: a.string(),
       researchedAt: a.datetime(),

@@ -9,8 +9,6 @@ import { dataClient } from "../shared/dataClient";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
-  priceResidential,
-  priceSpecialty,
   zoneFromMinutes,
   money,
   ZONE_B,
@@ -23,7 +21,7 @@ import {
   CANCEL_FULL_REFUND_DAYS,
 } from "../shared/bookingTerms";
 import { buildDayMatrix, type DayQuote } from "./availability";
-import { marketRate, sqftBucket } from "./marketRate";
+import { marketRate, sqftBucket, type PlanCadence } from "../shared/marketRate";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -284,14 +282,15 @@ const json = (
 
 /**
  * Layered abuse control for the unauthenticated endpoint: an optional bot
- * token (enforced as soon as TURNSTILE_SECRET is configured), a best-effort
- * per-IP hourly cap, and a hard global ceiling on how many *new* AI market
- * researches can run per day. The endpoint spends real money per call
- * (Claude + web search + Google Routes), so nothing billed runs until these
- * pass.
+ * token (enforced as soon as TURNSTILE_SECRET is configured) and a
+ * best-effort per-IP hourly cap. The hard global ceiling on how many *new*
+ * AI market researches can run per day lives inside the engine
+ * (shared/marketRate — NEW_RESEARCH_PER_DAY), so cached rates keep serving
+ * even after the day's research budget is spent. The endpoint spends real
+ * money per call (Claude + web search + Google Routes), so nothing billed
+ * runs until these pass.
  */
 const QUOTES_PER_IP_PER_HOUR = 12;
-const NEW_RESEARCH_PER_DAY = 25;
 
 async function verifyBotToken(token: string | undefined): Promise<boolean> {
   const secret = process.env.TURNSTILE_SECRET;
@@ -332,17 +331,6 @@ async function throttleOk(ip: string): Promise<boolean> {
   if (existing.count >= QUOTES_PER_IP_PER_HOUR) return false;
   await client.models.QuoteThrottle.update({ id, count: existing.count + 1 });
   return true;
-}
-
-/** Global ceiling on brand-new (uncached) AI research runs per day. */
-async function researchBudgetLeft(): Promise<boolean> {
-  const client = await dataClient();
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { data } = await client.models.MarketRate.list({
-    filter: { researchedAt: { gt: since } },
-    limit: NEW_RESEARCH_PER_DAY + 1,
-  });
-  return data.length < NEW_RESEARCH_PER_DAY;
 }
 
 async function quote(input: QuoteInput, sourceIp: string) {
@@ -483,7 +471,18 @@ async function quote(input: QuoteInput, sourceIp: string) {
   }
   const priceZone: Zone = zone;
 
-  // Deterministic base price.
+  // AI base price. Every service prices from the cached market-rate sheet
+  // (one research per service + area + size band; an office-edited row
+  // wins). No sheet — budget spent, key missing, junk research, expired
+  // cache — is never a made-up number: the lead falls to the callback path.
+  // The deterministic overlay stays on top of the AI base: the Zone B
+  // adders here, then day pricing / capacity / the R62 cost floor below.
+  const anthropicKey = await getSecret("ANTHROPIC_API_KEY");
+  const contactForPrice = () =>
+    contact(
+      "This one takes a quick look at local specifics — a specialist will call you within the hour with an exact price."
+    );
+
   let baseCents: number | null = null;
   let serviceLabel = "";
   let recurringOffer: {
@@ -493,78 +492,61 @@ async function quote(input: QuoteInput, sourceIp: string) {
   } | null = null;
 
   if (service === "GENERAL_PEST") {
-    const oneTime = priceResidential({
-      frequency: "ONE_TIME",
+    const rate = await marketRate({
+      anthropicKey,
+      service: "GENERAL_PEST",
+      city: addr.city!,
+      state: addr.state!,
       sqft: input.sqft!,
-      zone: priceZone,
     });
-    baseCents = oneTime.oneTimeCents!;
-    serviceLabel = "General pest control — one-time treatment";
     const freq = (["MONTHLY", "BIMONTHLY", "QUARTERLY"].includes(
       input.recurringPreference ?? ""
     )
       ? input.recurringPreference
-      : "QUARTERLY") as "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
-    const plan = priceResidential({
-      frequency: freq,
-      sqft: input.sqft!,
-      zone: priceZone,
-    });
+      : "QUARTERLY") as PlanCadence;
+    const plan = rate?.sheet.plans?.[freq];
+    if (!rate || !plan) return contactForPrice();
+    baseCents = rate.priceCents;
+    serviceLabel = "General pest control — one-time treatment";
+    // R60: the same deterministic Zone B travel adders the rate cards
+    // carried — an 89-minute drive must not price like a 10-minute one.
+    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
     recurringOffer = {
       frequency: freq,
-      monthlyCents: plan.monthlyCents!,
-      initialFeeCents: plan.initialFeeCents!,
+      monthlyCents:
+        plan.monthlyCents + (priceZone === "B" ? ZONE_B[freq] : 0),
+      initialFeeCents:
+        plan.initialFeeCents + (priceZone === "B" ? ZONE_B.ONE_TIME_FLAT : 0),
     };
   } else if (service === "WASP_NEST") {
-    const first = priceSpecialty("wasp_nest", priceZone)!;
-    baseCents = first.oneTimeCents!;
+    const rate = await marketRate({
+      anthropicKey,
+      service: "WASP_NEST",
+      city: addr.city!,
+      state: addr.state!,
+    });
     const extraNests = (input.nestCount ?? 1) - 1;
-    if (extraNests > 0) {
-      const anthropicKey = (await researchBudgetLeft())
-        ? await getSecret("ANTHROPIC_API_KEY")
-        : null;
-      const extra = anthropicKey
-        ? await marketRate({
-            anthropicKey,
-            service: "WASP_EXTRA_NEST",
-            city: addr.city!,
-            state: addr.state!,
-          })
-        : null;
-      if (!extra) {
-        return contact(
-          "Multiple nests get a custom quote — a specialist will call you within the hour."
-        );
-      }
-      baseCents += extra.priceCents * extraNests;
+    // The sheet must actually price what was asked: a multi-nest job with
+    // no extra-nest component on the sheet is an unpriceable request.
+    if (!rate || (extraNests > 0 && rate.sheet.extraNestCents == null)) {
+      return contactForPrice();
     }
+    baseCents =
+      rate.priceCents + extraNests * (rate.sheet.extraNestCents ?? 0);
+    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
     serviceLabel = `Wasp / hornet nest removal${(input.nestCount ?? 1) > 1 ? ` — ${input.nestCount} nests` : ""}`;
   } else {
-    // RODENT / ROACH — AI-researched market rate for this area + size.
-    const anthropicKey = (await researchBudgetLeft())
-      ? await getSecret("ANTHROPIC_API_KEY")
-      : null;
-    const rate = anthropicKey
-      ? await marketRate({
-          anthropicKey,
-          service: service as "RODENT" | "ROACH",
-          city: addr.city!,
-          state: addr.state!,
-          sqft: input.sqft!,
-        })
-      : null;
-    if (!rate) {
-      return contact(
-        "This one takes a quick look at local specifics — a specialist will call you within the hour with an exact price."
-      );
-    }
+    // RODENT / ROACH — market rate for this area + size, as before.
+    const rate = await marketRate({
+      anthropicKey,
+      service: service as "RODENT" | "ROACH",
+      city: addr.city!,
+      state: addr.state!,
+      sqft: input.sqft!,
+    });
+    if (!rate) return contactForPrice();
     baseCents = rate.priceCents;
-    if (priceZone === "B") {
-      // R60: market-rate services carry the same one-time Zone B travel
-      // adder as the carded services — an 89-minute drive must not price
-      // like a 10-minute one.
-      baseCents += ZONE_B.ONE_TIME_FLAT;
-    }
+    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
     serviceLabel =
       service === "RODENT"
         ? `Rodent treatment — up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`

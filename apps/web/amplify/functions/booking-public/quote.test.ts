@@ -17,6 +17,12 @@ import {
  *
  * R17 — a PRICED quote carries the checkout terms (version + text), so the
  * UI renders exactly what /book will hold the customer to.
+ *
+ * AI-first pricing — every base price (GENERAL_PEST one-time + plans,
+ * WASP_NEST first + extra nests, rodent/roach) comes from the cached AI
+ * rate sheet (shared/marketRate). No sheet → CONTACT, never a made-up
+ * price. The deterministic overlay (Zone B adders, day pricing) stays on
+ * top of the AI base.
  */
 
 const bookings: Record<string, unknown>[] = [];
@@ -70,9 +76,23 @@ vi.mock("../shared/driveTime", () => ({
     dests.map(() => null),
 }));
 
-let marketRateResult: { priceCents: number; basis: string; cached: boolean } | null;
-vi.mock("./marketRate", () => ({
-  marketRate: async () => marketRateResult,
+type FakeSheet = {
+  oneTimeCents: number;
+  extraNestCents?: number;
+  plans?: Record<string, { monthlyCents: number; initialFeeCents: number }>;
+};
+let marketRateResult: {
+  priceCents: number;
+  sheet: FakeSheet;
+  basis: string;
+  cached: boolean;
+} | null;
+const marketRateCalls: Record<string, unknown>[] = [];
+vi.mock("../shared/marketRate", () => ({
+  marketRate: async (opts: Record<string, unknown>) => {
+    marketRateCalls.push(opts);
+    return marketRateResult;
+  },
   sqftBucket: (sqft: number) => Math.max(500, Math.ceil(sqft / 500) * 500),
 }));
 
@@ -111,8 +131,14 @@ beforeEach(() => {
   bookings.length = 0;
   pricingRuns.length = 0;
   officeEmails.length = 0;
+  marketRateCalls.length = 0;
   hqMinutes = 20;
-  marketRateResult = { priceCents: 19900, basis: "test", cached: true };
+  marketRateResult = {
+    priceCents: 19900,
+    sheet: { oneTimeCents: 19900 },
+    basis: "test",
+    cached: true,
+  };
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   process.env.GOOGLE_ROUTES_API_KEY = "test-routes-key";
   process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
@@ -168,6 +194,160 @@ describe("market-rate services carry the Zone B adder (R60)", () => {
 
     expect(res.body.decision).toBe("PRICED");
     expect(pricingRuns[0]).toMatchObject({ zone: "A", oneTimePriceCents: 19900 });
+  });
+});
+
+describe("GENERAL_PEST prices from the cached AI sheet", () => {
+  const gpSheet: FakeSheet = {
+    oneTimeCents: 30000,
+    plans: {
+      MONTHLY: { monthlyCents: 9900, initialFeeCents: 11900 },
+      BIMONTHLY: { monthlyCents: 5900, initialFeeCents: 11900 },
+      QUARTERLY: { monthlyCents: 4900, initialFeeCents: 10900 },
+    },
+  };
+  const gpInput = { ...rodentInput, service: "GENERAL_PEST" };
+
+  beforeEach(() => {
+    marketRateResult = {
+      priceCents: 30000,
+      sheet: gpSheet,
+      basis: "test sheet",
+      cached: true,
+    };
+  });
+
+  it("prices the one-time base and the chosen plan from the sheet (Zone A)", async () => {
+    const res = await postQuote({ ...gpInput, recurringPreference: "QUARTERLY" });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(marketRateCalls[0]).toMatchObject({
+      service: "GENERAL_PEST",
+      city: "Ware",
+      state: "MA",
+      sqft: 2000,
+    });
+    expect(res.body.recurringOffer).toEqual({
+      frequency: "QUARTERLY",
+      monthlyCents: 4900,
+      initialFeeCents: 10900,
+    });
+    expect(pricingRuns[0]).toMatchObject({
+      oneTimePriceCents: 30000,
+      monthlyPriceCents: 4900,
+      initialFeeCents: 10900,
+    });
+  });
+
+  it("keeps the deterministic Zone B adders on top of the AI base", async () => {
+    hqMinutes = 80; // Zone B
+
+    const res = await postQuote({ ...gpInput, recurringPreference: "MONTHLY" });
+
+    expect(res.body.decision).toBe("PRICED");
+    // one-time +$25 flat, monthly +$25/mo, initial +$25 flat.
+    expect(pricingRuns[0]).toMatchObject({ zone: "B", oneTimePriceCents: 32500 });
+    expect(res.body.recurringOffer).toEqual({
+      frequency: "MONTHLY",
+      monthlyCents: 12400,
+      initialFeeCents: 14400,
+    });
+  });
+
+  it("applies the day-pricing overlay to the AI base", async () => {
+    const res = await postQuote(gpInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    const prices = (res.body.days as { priceCents: number }[]).map(
+      (d) => d.priceCents
+    );
+    expect(prices.length).toBeGreaterThan(0);
+    // Every day is the AI base times the overlay's bounded modifiers…
+    for (const p of prices) {
+      expect(p).toBeGreaterThanOrEqual(30000 * 0.85);
+      expect(p).toBeLessThanOrEqual(30000 * 1.15);
+      expect(p % 100).toBe(0); // tidied to whole dollars
+    }
+    // …and an empty schedule means the quiet-day discount actually moved it.
+    expect(Math.min(...prices)).toBeLessThan(30000);
+  });
+
+  it("falls to CONTACT when no rate sheet is available (never a made-up price)", async () => {
+    marketRateResult = null;
+
+    const res = await postQuote(gpInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.days).toBeUndefined();
+    expect(bookings[0]).toMatchObject({ status: "CONTACT" });
+  });
+
+  it("falls to CONTACT when the sheet is missing the chosen plan cadence", async () => {
+    marketRateResult = {
+      priceCents: 30000,
+      sheet: { oneTimeCents: 30000 }, // no plans on the sheet
+      basis: "partial",
+      cached: true,
+    };
+
+    const res = await postQuote({ ...gpInput, recurringPreference: "MONTHLY" });
+
+    expect(res.body.decision).toBe("CONTACT");
+  });
+});
+
+describe("WASP_NEST prices from the cached AI sheet", () => {
+  const waspInput = {
+    name: "Dana Whitlock",
+    email: "dana@example.com",
+    service: "WASP_NEST",
+    nestCount: 1,
+    address: { street: "12 Beacon St", city: "Ware", state: "MA", zip: "01082" },
+  };
+
+  beforeEach(() => {
+    marketRateResult = {
+      priceCents: 29900,
+      sheet: { oneTimeCents: 29900, extraNestCents: 9900 },
+      basis: "test sheet",
+      cached: true,
+    };
+  });
+
+  it("prices the first nest from the sheet", async () => {
+    const res = await postQuote(waspInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(marketRateCalls[0]).toMatchObject({ service: "WASP_NEST" });
+    expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 29900 });
+  });
+
+  it("adds the sheet's extra-nest increment per additional nest", async () => {
+    const res = await postQuote({ ...waspInput, nestCount: 3 });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 49700 });
+  });
+
+  it("falls to CONTACT when research is unavailable", async () => {
+    marketRateResult = null;
+
+    const res = await postQuote(waspInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+  });
+
+  it("falls to CONTACT when a multi-nest job has no extra-nest component", async () => {
+    marketRateResult = {
+      priceCents: 29900,
+      sheet: { oneTimeCents: 29900 }, // no extra-nest price on the sheet
+      basis: "partial",
+      cached: true,
+    };
+
+    const res = await postQuote({ ...waspInput, nestCount: 2 });
+
+    expect(res.body.decision).toBe("CONTACT");
   });
 });
 
