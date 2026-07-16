@@ -74,6 +74,20 @@ Residuals from this pass, tracked under existing IDs: the dashboard-refund leg o
 `charge.refunded` webhook registration (R82, console); one dist rebuild must accompany the R18
 deploy so the stale built Clarity tag can't ship.
 
+**Second pass, `00e26a8`** (same verification discipline; suites 262 web / 114 CRM):
+
+- **R04, R06** — completed-but-never-charged one-time jobs and ACTIVE-plans-with-no-next-visit
+  each get a Dashboard queue card and a daily digest that repeats until cleared; "All caught up"
+  requires both empty.
+- **R08 closed in full** — charge path checks work was performed server-side; covering-invoice
+  scan paginates; idempotency key cycles per attempt (a retry can't replay a decline); voiding
+  an OPEN invoice cancels its cancellable Stripe intent or honestly refuses mid-debit.
+- **R21** — unstaffed visits (no route, route gone, deactivated tech) suppress the customer
+  reminder and alert the office by the morning before.
+- **R22** — Schedule board and tech day queries page to exhaustion.
+- **R12** — report drafts persist locally on every edit, restore by content (not clocks), the
+  sync badge never over-claims, and regained signal auto-sends unsent words.
+
 ---
 
 ## What "go-live" means
