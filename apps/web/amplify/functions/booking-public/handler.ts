@@ -17,6 +17,11 @@ import {
   type Zone,
 } from "../crm-pricing/rateCards";
 import { cancelPlanBilling } from "../shared/subscription";
+import {
+  BOOKING_TERMS_TEXT,
+  BOOKING_TERMS_VERSION,
+  CANCEL_FULL_REFUND_DAYS,
+} from "../shared/bookingTerms";
 import { buildDayMatrix, type DayQuote } from "./availability";
 import { marketRate, sqftBucket } from "./marketRate";
 
@@ -167,7 +172,15 @@ export const handler = async (
       );
     }
     if (path.endsWith("/book")) {
-      return json(headers, await book(body));
+      return json(
+        headers,
+        await book(body, {
+          sourceIp: event.requestContext.http.sourceIp,
+          userAgent:
+            event.headers?.["user-agent"] ??
+            event.requestContext.http.userAgent,
+        })
+      );
     }
     if (path.endsWith("/cancel")) {
       return json(headers, await cancel(body));
@@ -540,12 +553,17 @@ async function quote(input: QuoteInput, sourceIp: string) {
     recurringOffer,
     days: days.map(({ factors: _f, ...d }) => d),
     expiresAt,
+    // R17: the checkout must render exactly what /book will hold them to.
+    terms: { version: BOOKING_TERMS_VERSION, text: BOOKING_TERMS_TEXT },
   };
 }
 
 // ----------------------------------------------------------------- /book
 
-async function book(body: Record<string, unknown>) {
+async function book(
+  body: Record<string, unknown>,
+  req: { sourceIp?: string; userAgent?: string }
+) {
   const bookingId = String(body.bookingId ?? "");
   const date = String(body.date ?? "");
   const window = String(body.window ?? "");
@@ -553,6 +571,16 @@ async function book(body: Record<string, unknown>) {
   if (!body.tcAccepted) {
     throw new HttpError(400, {
       error: "Please accept the terms & cancellation policy to book.",
+    });
+  }
+  // R17: an acceptance is only worth recording if it names the terms it
+  // accepted. Missing or stale version → the UI re-renders the fresh terms
+  // and re-asks; no money moves against an unseen policy.
+  const tcVersion = typeof body.tcVersion === "string" ? body.tcVersion : "";
+  if (tcVersion !== BOOKING_TERMS_VERSION) {
+    throw new HttpError(409, {
+      error: "The booking terms were updated — please review them again.",
+      terms: { version: BOOKING_TERMS_VERSION, text: BOOKING_TERMS_TEXT },
     });
   }
   const client = await dataClient();
@@ -676,6 +704,12 @@ async function book(body: Record<string, unknown>) {
     amountCents,
     stripeCustomerId: customerId,
     stripePaymentIntentId: intent.id,
+    // R17: the acceptance record. tcAcceptedAt is server time — a client
+    // clock (or a client lie) never decides when the terms were accepted.
+    tcVersion,
+    tcAcceptedAt: new Date().toISOString(),
+    tcIp: req.sourceIp || undefined,
+    tcUserAgent: req.userAgent?.slice(0, 512) || undefined,
   });
 
   return {
@@ -703,7 +737,8 @@ function summaryFor(
 
 // --------------------------------------------------------------- /cancel
 
-const CANCEL_FULL_REFUND_DAYS = 3;
+// CANCEL_FULL_REFUND_DAYS lives in ../shared/bookingTerms — the single
+// source shared with the checkout terms and the finalize email (R17).
 const SUPPORT_PHONE = "(401) 526-0323";
 
 async function cancel(body: Record<string, unknown>) {
@@ -851,7 +886,7 @@ async function cancel(body: Record<string, unknown>) {
       "Appointment canceled",
       `<p>Hi ${booking.name},</p>
        <p>Your ${String(booking.service).toLowerCase().replace("_", " ")} visit on <strong>${booking.selectedDate}</strong> is canceled.</p>
-       <p>${refundable ? `A full refund of ${money(booking.amountCents ?? 0)} is on its way to your original payment method (3–5 business days).` : "Per the cancellation policy (3 days or less before the visit), this booking isn't refundable."}</p>`
+       <p>${refundable ? `A full refund of ${money(booking.amountCents ?? 0)} is on its way to your original payment method (3–5 business days).` : `Per the cancellation policy (${CANCEL_FULL_REFUND_DAYS} days or less before the visit), this booking isn't refundable.`}</p>`
     ),
   });
   await notifyOffice({

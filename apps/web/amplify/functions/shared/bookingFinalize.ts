@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
 import { emailShell, notifyOffice, sendEmail } from "./email";
@@ -8,8 +9,9 @@ import { stripeClient } from "./stripeClient";
 
 const s3 = new S3Client();
 
-const CANCEL_POLICY_TEXT =
-  "CANCELLATION POLICY. Cancel more than 3 days before your appointment for a full refund. Cancellations 3 days or less before the appointment are not refundable.";
+// Derived from the single shared constant (R17) — the policy in the signed
+// agreement must be the rule /cancel enforces, not a copy that can drift.
+const CANCEL_POLICY_TEXT = `CANCELLATION POLICY. Cancel more than ${CANCEL_FULL_REFUND_DAYS} days before your appointment for a full refund. Cancellations ${CANCEL_FULL_REFUND_DAYS} days or less before the appointment are not refundable.`;
 
 const WINDOW_LABEL: Record<string, string> = {
   MORNING: "morning (8am–12pm)",
@@ -353,7 +355,7 @@ async function finalizeClaimed(
            : ""
        }. Your service agreement is attached.</p>
        <p>We'll remind you 7 days and 1 day before the visit.</p>
-       <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than 3 days out is a full refund; 3 days or less is non-refundable.</p>`
+       <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than ${CANCEL_FULL_REFUND_DAYS} days out is a full refund; ${CANCEL_FULL_REFUND_DAYS} days or less is non-refundable.</p>`
     ),
   });
 

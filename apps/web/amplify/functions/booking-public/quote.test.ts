@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  BOOKING_TERMS_TEXT,
+  BOOKING_TERMS_VERSION,
+} from "../shared/bookingTerms";
 
 /**
  * Quote pricing integrity:
@@ -10,6 +14,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * R60 — rodent/roach market-rate quotes carry the same Zone B travel adder
  * as the carded services; an 89-minute drive must not price like a
  * 10-minute one.
+ *
+ * R17 — a PRICED quote carries the checkout terms (version + text), so the
+ * UI renders exactly what /book will hold the customer to.
  */
 
 const bookings: Record<string, unknown>[] = [];
@@ -161,5 +168,26 @@ describe("market-rate services carry the Zone B adder (R60)", () => {
 
     expect(res.body.decision).toBe("PRICED");
     expect(pricingRuns[0]).toMatchObject({ zone: "A", oneTimePriceCents: 19900 });
+  });
+});
+
+describe("PRICED quotes carry the checkout terms (R17)", () => {
+  it("returns the current terms version and text with the price", async () => {
+    const res = await postQuote(rodentInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(res.body.terms).toEqual({
+      version: BOOKING_TERMS_VERSION,
+      text: BOOKING_TERMS_TEXT,
+    });
+  });
+
+  it("sends no terms on the CONTACT path — there is nothing to accept yet", async () => {
+    hqMinutes = null; // zone UNKNOWN → callback
+
+    const res = await postQuote(rodentInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.terms).toBeUndefined();
   });
 });

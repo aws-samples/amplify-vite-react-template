@@ -277,6 +277,14 @@ const schema = a.schema({
       servicePlanId: a.id(),
       agreementId: a.id(),
       expiresAt: a.datetime(),
+      // R17: the acceptance record for the checkout terms. tcVersion names
+      // the exact BOOKING_TERMS_VERSION the customer saw; tcAcceptedAt is
+      // server-stamped (never client-supplied); tcIp/tcUserAgent come from
+      // the /book request itself.
+      tcVersion: a.string(),
+      tcAcceptedAt: a.datetime(),
+      tcIp: a.string(),
+      tcUserAgent: a.string(),
       // The calendar date (shop timezone) the customer FIRST asked to cancel.
       // Refundability is judged from this, not from when the cancellation
       // finally succeeded: an attempt that fails on day 4 because Stripe is

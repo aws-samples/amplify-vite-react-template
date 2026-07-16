@@ -14,6 +14,9 @@ import LicensedInsured from "./pages/LicensedInsured";
 import LPQuote from "./pages/lp/LPQuote";
 import LPProtect from "./pages/lp/LPProtect";
 import LPCall from "./pages/lp/LPCall";
+import QuotePage from "./pages/booking/QuotePage";
+import BookPage from "./pages/booking/BookPage";
+import CancelPage from "./pages/booking/CancelPage";
 import ScrollToTop from "./components/ScrollToTop";
 
 /** Standard site layout — header + main + footer */
@@ -58,6 +61,12 @@ function App() {
           <Route path="/privacy-policy" element={<PrivacyPolicy />} />
           <Route path="/terms-of-service" element={<TermsOfService />} />
           <Route path="/pest-control/:slug" element={<CityPage />} />
+
+          {/* Booking funnel — /cancel is linked from confirmation emails,
+              so this route must exist for every emailed URL to resolve. */}
+          <Route path="/quote" element={<QuotePage />} />
+          <Route path="/book" element={<BookPage />} />
+          <Route path="/cancel" element={<CancelPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

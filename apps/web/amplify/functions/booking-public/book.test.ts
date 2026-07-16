@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  BOOKING_TERMS_TEXT,
+  BOOKING_TERMS_VERSION,
+} from "../shared/bookingTerms";
 
 /**
  * R29 — /book re-checks live availability before taking money.
@@ -7,6 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * every holder of a live quote could book the same last slot. Booking must
  * re-read the day and re-run capacity/feasibility — while still honoring the
  * QUOTED price, never repricing.
+ *
+ * R17 — /book requires the tcVersion the customer actually saw; a missing or
+ * stale version gets a 409 carrying the fresh terms (and creates no
+ * PaymentIntent), and a successful booking records version, server-stamped
+ * timestamp, IP and user-agent.
  */
 
 type Stop = { customerId: string; serviceType: string; status: string };
@@ -92,7 +101,7 @@ const { handler } = await import("./handler");
 
 const postBook = async (body: unknown) => {
   const res = (await handler({
-    headers: {},
+    headers: { "user-agent": "vitest-agent/1.0" },
     requestContext: {
       http: { method: "POST", path: "/book", sourceIp: "1.2.3.4" },
     },
@@ -160,12 +169,14 @@ beforeEach(() => {
 
 afterEach(() => vi.useRealTimers());
 
-const bookIt = () =>
+const bookIt = (overrides: Record<string, unknown> = {}) =>
   postBook({
     bookingId: "b1",
     date: "2026-07-22",
     window: "MORNING",
     tcAccepted: true,
+    tcVersion: BOOKING_TERMS_VERSION,
+    ...overrides,
   });
 
 describe("booking re-checks live availability (R29)", () => {
@@ -231,5 +242,45 @@ describe("booking re-checks live availability (R29)", () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/already paid/i);
     expect(intentCancel).not.toHaveBeenCalled();
+  });
+});
+
+describe("terms acceptance is versioned and recorded (R17)", () => {
+  const freshTerms = {
+    version: BOOKING_TERMS_VERSION,
+    text: BOOKING_TERMS_TEXT,
+  };
+
+  it("refuses a /book with no tcVersion — 409 carrying the fresh terms, no charge", async () => {
+    const res = await bookIt({ tcVersion: undefined });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/terms were updated/i);
+    expect(res.body.terms).toEqual(freshTerms);
+    expect(intentCreate).not.toHaveBeenCalled();
+    expect(bookingUpdates).toHaveLength(0);
+  });
+
+  it("refuses a stale tcVersion the same way", async () => {
+    const res = await bookIt({ tcVersion: "2020-01-01" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.terms).toEqual(freshTerms);
+    expect(intentCreate).not.toHaveBeenCalled();
+    expect(bookingUpdates).toHaveLength(0);
+  });
+
+  it("records version, IP, user-agent and a SERVER-stamped tcAcceptedAt", async () => {
+    // A client-supplied timestamp must never win — send a lie and make sure
+    // the record carries the frozen server clock instead.
+    const res = await bookIt({ tcAcceptedAt: "1999-01-01T00:00:00Z" });
+
+    expect(res.status).toBe(200);
+    expect(bookingUpdates[0]).toMatchObject({
+      tcVersion: BOOKING_TERMS_VERSION,
+      tcAcceptedAt: new Date().toISOString(), // frozen 2026-07-16T16:00:00.000Z
+      tcIp: "1.2.3.4",
+      tcUserAgent: "vitest-agent/1.0",
+    });
   });
 });

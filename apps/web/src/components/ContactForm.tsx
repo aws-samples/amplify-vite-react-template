@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { AddressAutocompleteInput } from "../lib/addressAutocomplete";
 import type { FormEvent } from "react";
 import { submitLead } from "../lib/leadIntake";
@@ -430,6 +431,11 @@ export default function ContactForm({
         <div className="bk-eyebrow">{eyebrow}</div>
         <h2 className="bk-h2">{title}</h2>
         <p className="bk-body-lead">{intro}</p>
+
+        <Link to="/quote" className="bk-instant-quote-banner">
+          <strong>Want a price right now?</strong> Get an instant quote and
+          book online &rarr;
+        </Link>
 
         <div className="bk-form-card">
           {/* Step indicator */}

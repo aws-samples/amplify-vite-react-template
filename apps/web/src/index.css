@@ -1814,3 +1814,180 @@ a:focus-visible {
   color: rgba(255, 255, 255, 0.4);
   font-weight: 600;
 }
+
+/* =========================================================================
+   BOOKING FUNNEL — public /quote, /book, /cancel pages
+   Reuses the bk- form language; only funnel-specific pieces live here.
+   ========================================================================= */
+
+/* Compact entry banner rendered inside the classic contact form section */
+.bk-instant-quote-banner {
+  display: block;
+  background: #f4fbea;
+  border: 1px solid var(--bk-green-deep);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin: 0 0 22px;
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--fg1);
+  text-decoration: none;
+  transition: all var(--dur-fast) var(--ease-out);
+}
+.bk-instant-quote-banner:hover {
+  background: #ecf8dc;
+  box-shadow: var(--shadow-green);
+}
+.bk-instant-quote-banner strong {
+  font-weight: 800;
+}
+
+/* Informational (non-error) notice */
+.bk-notice {
+  background: var(--bk-neutral-50);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--fg1);
+  margin: 14px 0;
+}
+
+/* Field-level validation message */
+.bk-field-error {
+  color: var(--danger);
+  font-size: 13px;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+/* Day picker */
+.bk-day-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+.bk-day-card {
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--bk-white);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-body);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.bk-day-card:hover {
+  border-color: var(--border-strong);
+}
+.bk-day-card.is-active {
+  border-color: var(--bk-green-deep);
+  background: #f4fbea;
+}
+.bk-day-card__date {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+.bk-day-card__price {
+  font-size: 18px;
+  font-weight: 800;
+}
+
+/* Window / plan choice chips + cards */
+.bk-choice-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0 4px;
+}
+.bk-choice-card {
+  flex: 1 1 240px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--bk-white);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.bk-choice-card:hover {
+  border-color: var(--border-strong);
+}
+.bk-choice-card.is-active {
+  border-color: var(--bk-green-deep);
+  background: #f4fbea;
+}
+.bk-choice-card__title {
+  font-weight: 800;
+  margin-bottom: 2px;
+}
+.bk-choice-card__meta {
+  color: var(--fg2);
+  font-size: 13px;
+}
+
+/* Checkout: order summary + terms */
+.bk-summary-list {
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.bk-summary-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 16px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  background: var(--bk-white);
+}
+.bk-summary-list li + li {
+  border-top: 1px solid var(--divider);
+}
+.bk-summary-list .bk-summary-key {
+  color: var(--fg2);
+}
+.bk-summary-list .bk-summary-val {
+  font-weight: 700;
+  text-align: right;
+}
+.bk-terms-box {
+  border: 1px solid var(--border);
+  background: var(--bk-neutral-50);
+  border-radius: 8px;
+  padding: 14px 16px;
+  max-height: 280px;
+  overflow-y: auto;
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  margin: 14px 0 0;
+}
+.bk-check-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 14px 0 18px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.bk-check-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  accent-color: var(--bk-green-deep);
+  flex-shrink: 0;
+}

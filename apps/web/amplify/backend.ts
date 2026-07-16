@@ -190,7 +190,7 @@ backend.bookingPublic.addEnvironment(
   "BOOKING_CORS_ORIGINS",
   branch === "main"
     ? "https://www.pestbuzzkill.com,https://pestbuzzkill.com"
-    : "https://staging.d26qpsjewk0bee.amplifyapp.com,http://localhost:5173,http://localhost:5174"
+    : "https://staging.d26qpsjewk0bee.amplifyapp.com,https://staging.pestbuzzkill.com,http://localhost:5173,http://localhost:5174"
 );
 // The API keys live as Amplify Console app-level env vars — present in the
 // build container at synth time. Bake them into the Lambda env so runtime
