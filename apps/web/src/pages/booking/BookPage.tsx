@@ -444,37 +444,66 @@ function PaymentForm({
   const stripe = useStripe();
   const elements = useElements();
   const [busy, setBusy] = useState(false);
+  // useElements() returns an object even when the inner PaymentElement
+  // failed to load (e.g. the key can't read the intent) — the button must
+  // arm on the element's own ready signal, or "Pay" fires confirmPayment at
+  // a form that isn't there.
+  const [payReady, setPayReady] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
-    if (!stripe || !elements) return;
+    if (!stripe || !elements || !payReady) return;
     setBusy(true);
     setError(null);
-    // return_url brings redirect payment methods back to /book, where the
-    // payment_intent_client_secret query param resolves the outcome.
-    const result = await stripe.confirmPayment({
-      elements,
-      confirmParams: { return_url: `${window.location.origin}/book` },
-      redirect: "if_required",
-    });
-    setBusy(false);
-    if (result.error) {
-      // Stripe's message is customer-facing (declines, expired cards…).
-      setError(result.error.message ?? "Your payment could not be completed.");
-      return;
-    }
-    if (result.paymentIntent?.status === "succeeded") {
-      onSucceeded();
-    } else if (result.paymentIntent?.status === "processing") {
-      onProcessing();
-    } else {
-      setError("Your payment wasn't completed — no charge was made. Please try again.");
+    try {
+      // return_url brings redirect payment methods back to /book, where the
+      // payment_intent_client_secret query param resolves the outcome.
+      const result = await stripe.confirmPayment({
+        elements,
+        confirmParams: { return_url: `${window.location.origin}/book` },
+        redirect: "if_required",
+      });
+      if (result.error) {
+        // Stripe's message is customer-facing (declines, expired cards…).
+        setError(result.error.message ?? "Your payment could not be completed.");
+        return;
+      }
+      if (result.paymentIntent?.status === "succeeded") {
+        onSucceeded();
+      } else if (result.paymentIntent?.status === "processing") {
+        onProcessing();
+      } else {
+        setError("Your payment wasn't completed — no charge was made. Please try again.");
+      }
+    } catch (err) {
+      // confirmPayment throws (rather than returning an error) on
+      // integration faults; those are ours, not the customer's card.
+      console.error("confirmPayment threw", err);
+      setError(
+        "Your payment could not be started — that's a fault on our side, and your card was not charged. Please try again shortly, or call (401) 526-0323 to book by phone."
+      );
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <div>
-      <PaymentElement />
+      <PaymentElement
+        onReady={() => setPayReady(true)}
+        onLoadError={(ev) => {
+          console.error("PaymentElement failed to load", ev.error);
+          setLoadError(
+            "The payment form couldn't load — that's a fault on our side, not your card, and nothing was charged. Please try again shortly, or call (401) 526-0323 to book by phone."
+          );
+        }}
+      />
+      {loadError && (
+        <div className="bk-form-error" role="alert" style={{ marginTop: 12 }}>
+          {loadError}
+        </div>
+      )}
       {error && (
         <div className="bk-form-error" role="alert" style={{ marginTop: 12 }}>
           {error}
@@ -484,7 +513,7 @@ function PaymentForm({
         <button
           type="button"
           className="bk-btn bk-btn-primary"
-          disabled={!stripe || !elements || busy}
+          disabled={!stripe || !elements || !payReady || busy}
           aria-busy={busy}
           onClick={() => void submit()}
         >

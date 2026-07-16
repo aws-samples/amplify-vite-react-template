@@ -61,11 +61,30 @@ async function getSecret(name: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * A non-production branch must never move real money. The shared SSM
+ * fallback holds the live key, so a missing branch secret used to silently
+ * run this funnel in live mode — a staging checkout creating real
+ * PaymentIntents. Refuse loudly instead: a 500 somebody sees beats a live
+ * charge nobody meant.
+ */
+export function assertStripeKeyAllowed(
+  key: string,
+  branch: string | undefined
+): void {
+  if (branch !== "main" && /^[sr]k_live_/.test(key)) {
+    throw new Error(
+      `Refusing a live Stripe key on branch "${branch ?? "unknown"}" — set the branch's STRIPE_SECRET_KEY secret to a test key.`
+    );
+  }
+}
+
 let stripe: Stripe | null = null;
 async function stripeClient(): Promise<Stripe> {
   if (stripe) return stripe;
   const key = await getSecret("STRIPE_SECRET_KEY");
   if (!key) throw new Error("Stripe is not configured");
+  assertStripeKeyAllowed(key, process.env.AMPLIFY_BRANCH);
   stripe = new Stripe(key);
   return stripe;
 }

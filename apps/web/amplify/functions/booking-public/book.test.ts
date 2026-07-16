@@ -284,3 +284,28 @@ describe("terms acceptance is versioned and recorded (R17)", () => {
     });
   });
 });
+
+describe("live-key branch guard", () => {
+  // The shared SSM fallback holds the live key, so a missing branch secret
+  // once ran this funnel in live mode from a staging checkout. A wrong key
+  // must be a loud refusal, never a real charge.
+  it("refuses a live key on any non-production branch", async () => {
+    const { assertStripeKeyAllowed } = await import("./handler");
+    expect(() => assertStripeKeyAllowed("sk_live_abc", "staging")).toThrow(
+      /live Stripe key/i
+    );
+    expect(() => assertStripeKeyAllowed("rk_live_abc", "staging")).toThrow(
+      /live Stripe key/i
+    );
+    expect(() => assertStripeKeyAllowed("sk_live_abc", undefined)).toThrow(
+      /live Stripe key/i
+    );
+  });
+
+  it("allows the live key on main and test keys everywhere", async () => {
+    const { assertStripeKeyAllowed } = await import("./handler");
+    expect(() => assertStripeKeyAllowed("sk_live_abc", "main")).not.toThrow();
+    expect(() => assertStripeKeyAllowed("sk_test_abc", "staging")).not.toThrow();
+    expect(() => assertStripeKeyAllowed("sk_test_abc", "main")).not.toThrow();
+  });
+});
