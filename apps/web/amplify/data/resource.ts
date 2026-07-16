@@ -163,46 +163,18 @@ const schema = a.schema({
     ]),
 
   /**
-   * Global plan catalog: office defines the plans BuzzKill sells once, then
-   * quotes/plans for a customer are created *from* a template. Each template
-   * carries the default agreement sent when a lead is quoted (placeholders
-   * {{customerName}}, {{planName}}, {{price}}, {{frequency}}, {{address}}
-   * are substituted at quote time).
-   */
-  PlanTemplate: a
-    .model({
-      name: a.string().required(),
-      description: a.string(),
-      // Optional list price. Real quotes are priced by the AI pricing
-      // engine (crm-pricing) from the rate cards; this is a display anchor.
-      priceCents: a.integer(),
-      serviceFrequency: a.ref("ServiceFrequency").required(),
-      agreementTitle: a.string().required(),
-      agreementBody: a.string().required(),
-      // Pest photos shown on the e-sign page and embedded in the signed PDF.
-      imageKeys: a.string().array(),
-      active: a.boolean().required(),
-      sortOrder: a.integer(),
-      quotes: a.hasMany("Quote", "planTemplateId"),
-    })
-    .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["TECH"]).to(["read"]),
-    ]),
-
-  /**
-   * A stored quote for a lead: a plan template (with optional price
-   * override) plus the agreement sent for signature. Signing the agreement
-   * converts the quote — lead becomes an ACTIVE customer with a ServicePlan
-   * created from the quote (billing still starts explicitly once a payment
-   * method is on file).
+   * A stored quote for a lead: an AI-sheet-priced plan (with optional,
+   * reasoned price override) plus the agreement sent for signature. Signing
+   * the agreement converts the quote — lead becomes an ACTIVE customer with
+   * a ServicePlan created from the quote (billing still starts explicitly
+   * once a payment method is on file). Plan templates are retired: the plan
+   * catalog IS the AI market-rate sheet, and agreement bodies come from the
+   * CRM's code template.
    */
   Quote: a
     .model({
       customerId: a.id().required(),
       customer: a.belongsTo("Customer", "customerId"),
-      planTemplateId: a.id(),
-      planTemplate: a.belongsTo("PlanTemplate", "planTemplateId"),
       planName: a.string().required(),
       priceCents: a.integer().required(),
       initialFeeCents: a.integer(),
@@ -212,10 +184,10 @@ const schema = a.schema({
       servicePlanId: a.id(),
       quotedAt: a.datetime(),
       convertedAt: a.datetime(),
-      // What the plan template said this costs, captured at quote time. A quote
-      // whose priceCents differs from it was priced by a human, and
-      // priceOverrideReason says why. Kept so the deviation is answerable later
-      // even if the template's list price moves.
+      // What the live AI market-rate sheet said this costs, verified against
+      // the cached sheet at quote time. A quote whose priceCents differs from
+      // it was priced by a human, and priceOverrideReason says why. Kept so
+      // the deviation is answerable later even if the sheet re-researches.
       listPriceCents: a.integer(),
       priceOverrideReason: a.string(),
       quotedBy: a.string(),
@@ -322,10 +294,13 @@ const schema = a.schema({
 
   // AI-researched market rates — the base price for every quoted service.
   // One research per service+area(+sqft band) returns a full rate sheet
-  // (one-time, plan cadences with monthly + initial fees, wasp extra-nest)
-  // stored in ratesJson; priceCents mirrors the sheet's one-time price and
-  // is the office-editable override. Cached so identical inputs keep
-  // identical prices; the office can review, override, or retire any row.
+  // (one-time, plan cadences with monthly + initial fees, wasp extra-nest,
+  // HOA per-unit monthly rates by unit band) stored in ratesJson; priceCents
+  // mirrors the sheet's one-time price. The office override surface is the
+  // FULL sheet: the Market Rates screen edits ratesJson components, keeps
+  // priceCents mirrored, and sets pinned — a pinned row never expires or
+  // re-researches until the office un-pins or retires it. Cached so
+  // identical inputs keep identical prices.
   MarketRate: a
     .model({
       rateKey: a.string().required(),
@@ -338,6 +313,8 @@ const schema = a.schema({
       researchedAt: a.datetime(),
       expiresAt: a.datetime(),
       active: a.boolean().required(),
+      // Office-edited. Pinned rows are the office's word and never expire.
+      pinned: a.boolean(),
     })
     .secondaryIndexes((index) => [index("rateKey")])
     .authorization((allow) => [
@@ -950,24 +927,34 @@ const schema = a.schema({
     .handler(a.handler.function(crmDocs)),
 
   /**
-   * Quote a customer from a plan template.
+   * Quote a customer a recurring plan at the AI market-rate sheet's price.
    *
    * A mutation because the price has to be checked against something, and a
-   * check in the browser is not a check. The deterministic pricing engine
-   * exists so nobody prices from memory; a free-text box beside it that nothing
-   * compares to the rate card is a hole straight through that. A price that
-   * differs from the template's list price needs a reason, recorded on the
+   * check in the browser is not a check. The AI pricing engine exists so
+   * nobody prices from memory; a free-text box beside it that nothing
+   * compares to the sheet is a hole straight through that. listPriceCents is
+   * the sheet rate the office screen displayed — the server re-reads the
+   * live sheets for the customer's area (an office-edited, pinned row
+   * counts) and refuses a rate no live sheet carries. A priceCents that
+   * differs from the verified list price needs a reason, recorded on the
    * quote with the person who set it.
    */
-  quoteFromTemplate: a
+  createQuote: a
     .mutation()
     .arguments({
       customerId: a.string().required(),
-      planTemplateId: a.string().required(),
+      planName: a.string().required(),
+      /** MONTHLY | BIMONTHLY | QUARTERLY. */
+      serviceFrequency: a.string().required(),
       priceCents: a.integer().required(),
+      /** The live AI sheet rate the office screen displayed. */
+      listPriceCents: a.integer().required(),
       initialFeeCents: a.integer(),
-      /** Required when priceCents differs from the template's list price. */
+      /** Required when priceCents differs from the sheet's list price. */
       priceOverrideReason: a.string(),
+      /** HOA quotes: unit count — the sheet rate is per-unit, so the guard
+       *  needs it to verify listPriceCents = per-unit × units. */
+      units: a.integer(),
       notes: a.string(),
     })
     .returns(a.json())
@@ -1061,9 +1048,11 @@ const schema = a.schema({
   /**
    * AI lead pricing: paste a Thumbtack lead (or attach a screenshot) and the
    * engine extracts the facts with Claude, determines the zone from real
-   * drive time, prices deterministically from the rate cards, and returns
-   * QUOTE / PASS / ESCALATE with a paste-ready reply. Persists a
-   * LeadPricingRun and emails Jake on ESCALATE.
+   * drive time, prices from the cached AI market-rate sheets (deterministic
+   * Zone B adders on top), and returns QUOTE / PASS / ESCALATE with a
+   * paste-ready reply. Research failure escalates — the human is the
+   * fallback, never an invented price. Persists a LeadPricingRun and emails
+   * Jake on ESCALATE.
    */
   priceLead: a
     .mutation()
@@ -1084,21 +1073,6 @@ const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmPricing)),
-
-  /**
-   * Presigned PUT for a plan-template pest photo. Keys land under
-   * `templates/<templateId>/…`; shown on the e-sign page and embedded in
-   * the signed agreement PDF.
-   */
-  getTemplateImageUploadUrl: a
-    .mutation()
-    .arguments({
-      templateId: a.string().required(),
-      contentType: a.string().required(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
-    .handler(a.handler.function(crmDocs)),
 
   /**
    * Presigned PUT for a technician report photo. Keys land under

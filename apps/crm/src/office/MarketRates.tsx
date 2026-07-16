@@ -1,5 +1,27 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, listAll, unwrap, type MarketRate } from "../lib/api";
+import {
+  api,
+  listAll,
+  unwrap,
+  updateMarketRate,
+  type MarketRate,
+} from "../lib/api";
+import {
+  CADENCE_LABEL,
+  HOA_BANDS,
+  HOA_BAND_LABEL,
+  PLAN_CADENCES,
+  SERVICE_LABEL,
+  bandOfKey,
+  mergeSheetEdits,
+  rateStatus,
+  sheetOf,
+  type HoaBand,
+  type HoaPerUnitRates,
+  type PlanCadence,
+  type PlanRate,
+  type RateStatus,
+} from "../lib/marketRates";
 import { fmtDate, money } from "../lib/format";
 import {
   Badge,
@@ -13,19 +35,43 @@ import {
   SegControl,
   Sheet,
   Spinner,
+  type BadgeTone,
 } from "../ui/kit";
 
-const SERVICE_LABEL: Record<string, string> = {
-  RODENT: "Rodent treatment",
-  ROACH: "Specialized roach",
-  WASP_EXTRA_NEST: "Extra wasp nest",
+/**
+ * The pricing console. Every base price in the system is an AI-researched
+ * market-rate sheet cached on one of these rows — this screen is the ONLY
+ * human pricing control: the office edits any component of a sheet (one-time,
+ * extra nest, each cadence's monthly + initial fee), and saving pins the row
+ * so it never expires or re-researches until the office un-pins it.
+ */
+
+const STATUS_TONE: Record<RateStatus, BadgeTone> = {
+  active: "ok",
+  pinned: "info",
+  expired: "warn",
+  retired: "muted",
 };
 
-/**
- * AI-researched market rates for services without a fixed rate card. Each
- * row was researched once for a service + area (+ size) and cached so quotes
- * stay consistent. The office reviews, overrides, or retires any rate here.
- */
+const STATUS_LABEL: Record<RateStatus, string> = {
+  active: "active",
+  pinned: "pinned — never re-researches",
+  expired: "expired",
+  retired: "retired",
+};
+
+function bandLabel(rate: MarketRate): string | null {
+  const band = bandOfKey(rate.rateKey);
+  // Only sqft services carry a key band; HOA keeps all unit bands inside
+  // the one sheet.
+  return band == null ? null : `up to ${band.toLocaleString()} sqft`;
+}
+
+function scopeOf(rate: MarketRate): string {
+  const band = bandLabel(rate);
+  return `${SERVICE_LABEL[rate.service] ?? rate.service} · ${rate.areaKey}${band ? ` · ${band}` : ""}`;
+}
+
 export default function MarketRates() {
   const [rates, setRates] = useState<MarketRate[] | null>(null);
   const [editing, setEditing] = useState<MarketRate | null>(null);
@@ -50,9 +96,6 @@ export default function MarketRates() {
     void load();
   }, [load]);
 
-  const expired = (r: MarketRate) =>
-    r.expiresAt != null && new Date(r.expiresAt).getTime() < Date.now();
-
   return (
     <Page title="Market rates" back="/more">
       <ErrorNote error={error} />
@@ -61,29 +104,34 @@ export default function MarketRates() {
       ) : rates.length === 0 ? (
         <EmptyState
           title="No market rates yet"
-          body="When a website lead needs pricing for a service without a rate card (rodent, roach, extra wasp nests), the AI researches the local market once and the result lands here for review."
+          body="Every base price is AI-researched: the first quote for a service + area (+ size band) researches the local market once and caches the full rate sheet here. Review, edit (which pins the rate), or retire any row."
         />
       ) : (
         <Card>
-          {rates.map((r) => (
-            <ListRow
-              key={r.id}
-              title={`${SERVICE_LABEL[r.service] ?? r.service} · ${r.areaKey}`}
-              subtitle={`${money(r.priceCents)}${r.researchedAt ? ` · researched ${fmtDate(r.researchedAt, true)}` : ""}${r.basis ? ` · ${r.basis.slice(0, 70)}` : ""}`}
-              meta={
-                <>
-                  {!r.active ? (
-                    <Badge tone="muted">retired</Badge>
-                  ) : expired(r) ? (
-                    <Badge tone="warn">expired</Badge>
-                  ) : (
-                    <Badge tone="ok">active</Badge>
-                  )}
-                </>
-              }
-              onClick={() => setEditing(r)}
-            />
-          ))}
+          {rates.map((r) => {
+            const status = rateStatus(r);
+            const sheet = sheetOf(r);
+            const planMin = Math.min(
+              ...PLAN_CADENCES.map(
+                (c) => sheet.plans?.[c]?.monthlyCents ?? Infinity
+              )
+            );
+            const plans = Number.isFinite(planMin)
+              ? ` · plans from ${money(planMin)}/mo`
+              : "";
+            const headline = sheet.hoaPerUnitMonthly
+              ? `from ${money(r.priceCents)}/unit/mo`
+              : `${money(r.priceCents)} one-time${plans}`;
+            return (
+              <ListRow
+                key={r.id}
+                title={scopeOf(r)}
+                subtitle={`${headline}${r.researchedAt ? ` · researched ${fmtDate(r.researchedAt, true)}` : ""}`}
+                meta={<Badge tone={STATUS_TONE[status]}>{status}</Badge>}
+                onClick={() => setEditing(r)}
+              />
+            );
+          })}
         </Card>
       )}
 
@@ -106,6 +154,18 @@ export default function MarketRates() {
   );
 }
 
+/** Dollar-string state for one plan cadence. */
+type PlanDraft = { monthly: string; initialFee: string };
+
+const toDollars = (cents: number | null | undefined) =>
+  cents != null ? (cents / 100).toString() : "";
+
+const toCents = (dollars: string): number | null => {
+  if (!dollars.trim()) return null;
+  const cents = Math.round(parseFloat(dollars) * 100);
+  return Number.isFinite(cents) && cents >= 0 ? cents : NaN;
+};
+
 function RateForm({
   rate,
   onDone,
@@ -113,63 +173,256 @@ function RateForm({
   rate: MarketRate;
   onDone: () => Promise<void>;
 }) {
-  const [price, setPrice] = useState((rate.priceCents / 100).toString());
+  const sheet = sheetOf(rate);
+  const status = rateStatus(rate);
+
+  const [oneTime, setOneTime] = useState(toDollars(sheet.oneTimeCents));
+  const [extraNest, setExtraNest] = useState(toDollars(sheet.extraNestCents));
+  const [plans, setPlans] = useState<Record<PlanCadence, PlanDraft>>(() => {
+    const out = {} as Record<PlanCadence, PlanDraft>;
+    for (const cadence of PLAN_CADENCES) {
+      out[cadence] = {
+        monthly: toDollars(sheet.plans?.[cadence]?.monthlyCents),
+        initialFee: toDollars(sheet.plans?.[cadence]?.initialFeeCents),
+      };
+    }
+    return out;
+  });
+  const [hoa, setHoa] = useState<Record<HoaBand, Record<PlanCadence, string>>>(
+    () => {
+      const out = {} as Record<HoaBand, Record<PlanCadence, string>>;
+      for (const band of HOA_BANDS) {
+        out[band] = {} as Record<PlanCadence, string>;
+        for (const cadence of PLAN_CADENCES) {
+          out[band][cadence] = toDollars(
+            sheet.hoaPerUnitMonthly?.[band]?.[cadence]
+          );
+        }
+      }
+      return out;
+    }
+  );
   const [active, setActive] = useState(rate.active);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<null | "save" | "unpin">(null);
   const [error, setError] = useState<string | null>(null);
 
+  // HOA sheets have no one-time card; everything else always has one.
+  const isHoa = sheet.hoaPerUnitMonthly != null || rate.service === "HOA";
+  const hasExtraNest = sheet.extraNestCents != null || rate.service === "WASP_NEST";
+  const hasPlans = sheet.plans != null;
+
   const save = async () => {
-    const cents = Math.round(parseFloat(price) * 100);
-    if (!Number.isFinite(cents) || cents <= 0) {
-      setError("Enter a valid price");
+    let oneTimeCents: number | null = null;
+    if (!isHoa) {
+      oneTimeCents = toCents(oneTime);
+      if (oneTimeCents == null || Number.isNaN(oneTimeCents) || oneTimeCents <= 0) {
+        setError("Enter a valid one-time price");
+        return;
+      }
+    }
+    const extraNestCents = toCents(extraNest);
+    if (extraNestCents != null && Number.isNaN(extraNestCents)) {
+      setError("The extra-nest price doesn't look valid");
       return;
     }
-    setBusy(true);
+    const planEdits: Partial<Record<PlanCadence, PlanRate>> = {};
+    if (hasPlans) {
+      for (const cadence of PLAN_CADENCES) {
+        const monthly = toCents(plans[cadence].monthly);
+        const initialFee = toCents(plans[cadence].initialFee);
+        if (
+          monthly == null ||
+          Number.isNaN(monthly) ||
+          monthly <= 0 ||
+          (initialFee != null && Number.isNaN(initialFee))
+        ) {
+          setError(`The ${CADENCE_LABEL[cadence]} plan prices don't look valid`);
+          return;
+        }
+        planEdits[cadence] = {
+          monthlyCents: monthly,
+          initialFeeCents: initialFee ?? 0,
+        };
+      }
+    }
+    let hoaEdits: HoaPerUnitRates | undefined;
+    if (isHoa) {
+      const out = {} as HoaPerUnitRates;
+      for (const band of HOA_BANDS) {
+        out[band] = {} as HoaPerUnitRates[HoaBand];
+        for (const cadence of PLAN_CADENCES) {
+          const cents = toCents(hoa[band][cadence]);
+          if (cents == null || Number.isNaN(cents) || cents <= 0) {
+            setError(
+              `The ${HOA_BAND_LABEL[band]} ${CADENCE_LABEL[cadence]} per-unit rate doesn't look valid`
+            );
+            return;
+          }
+          out[band][cadence] = cents;
+        }
+      }
+      hoaEdits = out;
+    }
+    setBusy("save");
     setError(null);
     try {
+      const merged = mergeSheetEdits(rate, {
+        oneTimeCents: oneTimeCents ?? undefined,
+        extraNestCents: hasExtraNest ? extraNestCents : undefined,
+        plans: hasPlans ? planEdits : undefined,
+        hoaPerUnitMonthly: hoaEdits,
+      });
       unwrap(
-        await api().models.MarketRate.update({
+        await updateMarketRate({
           id: rate.id,
-          priceCents: cents,
+          priceCents: merged.priceCents,
+          ratesJson: merged.ratesJson,
           active,
+          // An office-edited rate is pinned: served forever, never
+          // re-researched, until explicitly un-pinned. A retired row isn't
+          // pinned to anything — it forces fresh research on the next quote.
+          pinned: active,
         })
       );
       await onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save");
-      setBusy(false);
+      setBusy(null);
+    }
+  };
+
+  const unpin = async () => {
+    setBusy("unpin");
+    setError(null);
+    try {
+      unwrap(await updateMarketRate({ id: rate.id, pinned: false }));
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not un-pin");
+      setBusy(null);
     }
   };
 
   return (
     <div className="form-grid">
+      <div className="row-split">
+        <strong>{scopeOf(rate)}</strong>
+        <Badge tone={STATUS_TONE[status]}>{STATUS_LABEL[status]}</Badge>
+      </div>
       <dl className="kv">
-        <dt>Service</dt>
-        <dd>{SERVICE_LABEL[rate.service] ?? rate.service}</dd>
-        <dt>Area</dt>
-        <dd>{rate.areaKey}</dd>
         {rate.researchedAt ? (
           <>
             <dt>Researched</dt>
             <dd>{fmtDate(rate.researchedAt, true)}</dd>
           </>
         ) : null}
-        {rate.expiresAt ? (
-          <>
-            <dt>Re-researches</dt>
-            <dd>{fmtDate(rate.expiresAt, true)}</dd>
-          </>
-        ) : null}
+        <dt>Re-researches</dt>
+        <dd>
+          {rate.pinned
+            ? "never — pinned until you un-pin it"
+            : rate.expiresAt
+              ? fmtDate(rate.expiresAt, true)
+              : "—"}
+        </dd>
       </dl>
       {rate.basis ? (
-        <p className="small" style={{ background: "var(--surface-2)", borderRadius: 10, padding: 10 }}>
+        <p
+          className="small"
+          style={{ background: "var(--surface-2)", borderRadius: 10, padding: 10 }}
+        >
           {rate.basis}
         </p>
       ) : null}
-      <Field label="Price ($)" hint="Your override becomes the quoted price for this service + area">
-        <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
-      </Field>
-      <Field label="Active" hint="Retire to force fresh research on the next quote">
+
+      {!isHoa ? (
+        <Field
+          label="One-time price ($)"
+          hint="What one visit costs; quoted to the website funnel and the CRM alike"
+        >
+          <input
+            inputMode="decimal"
+            value={oneTime}
+            onChange={(e) => setOneTime(e.target.value)}
+          />
+        </Field>
+      ) : null}
+      {hasExtraNest ? (
+        <Field label="Each extra nest ($)" hint="Per additional nest on the same visit">
+          <input
+            inputMode="decimal"
+            value={extraNest}
+            onChange={(e) => setExtraNest(e.target.value)}
+          />
+        </Field>
+      ) : null}
+      {hasPlans
+        ? PLAN_CADENCES.map((cadence) => (
+            <div className="form-row-2" key={cadence}>
+              <Field
+                label={`${CADENCE_LABEL[cadence].replace(/^./, (c) => c.toUpperCase())} plan ($/mo)`}
+              >
+                <input
+                  inputMode="decimal"
+                  value={plans[cadence].monthly}
+                  onChange={(e) =>
+                    setPlans((p) => ({
+                      ...p,
+                      [cadence]: { ...p[cadence], monthly: e.target.value },
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="Initial fee ($)">
+                <input
+                  inputMode="decimal"
+                  value={plans[cadence].initialFee}
+                  onChange={(e) =>
+                    setPlans((p) => ({
+                      ...p,
+                      [cadence]: { ...p[cadence], initialFee: e.target.value },
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+          ))
+        : null}
+      {isHoa ? (
+        <>
+          <p className="group-label">Per-unit monthly rate ($/unit/mo)</p>
+          {HOA_BANDS.map((band) => (
+            <div key={band}>
+              <p className="muted small" style={{ margin: "0 0 4px" }}>
+                {HOA_BAND_LABEL[band]}
+              </p>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, 1fr)",
+                  gap: 8,
+                }}
+              >
+                {PLAN_CADENCES.map((cadence) => (
+                  <Field key={cadence} label={CADENCE_LABEL[cadence]}>
+                    <input
+                      inputMode="decimal"
+                      value={hoa[band][cadence]}
+                      onChange={(e) =>
+                        setHoa((h) => ({
+                          ...h,
+                          [band]: { ...h[band], [cadence]: e.target.value },
+                        }))
+                      }
+                    />
+                  </Field>
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
+      ) : null}
+
+      <Field label="Active" hint="Retire to force fresh AI research on the next quote">
         <SegControl
           options={[
             { value: "yes" as const, label: "Active" },
@@ -180,9 +433,24 @@ function RateForm({
         />
       </Field>
       <ErrorNote error={error} />
-      <Button block loading={busy} onClick={() => void save()}>
-        Save rate
+      <Button block loading={busy === "save"} onClick={() => void save()}>
+        {active ? "Save & pin this rate" : "Save & retire this rate"}
       </Button>
+      <p className="muted small">
+        {active
+          ? "Saving pins the sheet: it becomes the quoted price for this service + area and never expires or re-researches until you un-pin it."
+          : "A retired rate is never served — the next quote for this service + area researches the market fresh."}
+      </p>
+      {rate.pinned ? (
+        <Button
+          block
+          variant="ghost"
+          loading={busy === "unpin"}
+          onClick={() => void unpin()}
+        >
+          Resume AI research for this rate
+        </Button>
+      ) : null}
     </div>
   );
 }

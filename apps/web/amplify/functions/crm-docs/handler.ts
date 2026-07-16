@@ -3,6 +3,7 @@ import type { AppSyncResolverEvent } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
+import { hoaBandFor } from "../shared/marketRate";
 import { opFieldName } from "../shared/opEvent";
 import {
   callerGroups,
@@ -51,13 +52,14 @@ type Args = {
   kind?: string;
   note?: string;
   contentType?: string;
-  templateId?: string;
   title?: string;
   bodyText?: string;
   quoteId?: string;
   imageKeys?: (string | null)[];
-  planTemplateId?: string;
+  planName?: string;
+  serviceFrequency?: string;
   priceCents?: number;
+  listPriceCents?: number;
   initialFeeCents?: number;
   priceOverrideReason?: string;
   reason?: string;
@@ -93,15 +95,18 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return sendAgreement(event.arguments.agreementId!);
     }
-    case "quoteFromTemplate": {
+    case "createQuote": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return createQuote(actorOf(event), {
         customerId: event.arguments.customerId!,
-        planTemplateId: event.arguments.planTemplateId!,
+        planName: event.arguments.planName!,
+        serviceFrequency: event.arguments.serviceFrequency!,
         priceCents: event.arguments.priceCents!,
+        listPriceCents: event.arguments.listPriceCents!,
         initialFeeCents: event.arguments.initialFeeCents,
         priceOverrideReason: event.arguments.priceOverrideReason,
-        notes: event.arguments.note,
+        units: event.arguments.units,
+        notes: event.arguments.notes,
       });
     }
     case "authorAgreement": {
@@ -194,13 +199,6 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "getDocumentUrl": {
       return getDocumentUrl(event.arguments.key!, callerGroups(event.identity));
     }
-    case "getTemplateImageUploadUrl": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
-      return getTemplateImageUploadUrl(
-        event.arguments.templateId!,
-        event.arguments.contentType!
-      );
-    }
     case "getReportPhotoUploadUrl": {
       if (!isStaff(callerGroups(event.identity))) {
         throw new Error("Staff role required");
@@ -271,68 +269,147 @@ async function sendCustomerEmail(
   return { sent, to: customer.email };
 }
 
+const QUOTE_FREQUENCIES = ["MONTHLY", "BIMONTHLY", "QUARTERLY"] as const;
+type QuoteFrequency = (typeof QUOTE_FREQUENCIES)[number];
+
+/** A MarketRate row that is still serving: active and either pinned (an
+ *  office edit never expires) or within its research shelf life. */
+function rateRowIsLive(row: {
+  active: boolean;
+  pinned?: boolean | null;
+  expiresAt?: string | null;
+}): boolean {
+  return (
+    row.active &&
+    (Boolean(row.pinned) ||
+      !row.expiresAt ||
+      new Date(row.expiresAt).getTime() > Date.now())
+  );
+}
+
 /**
- * Quote a customer from a plan template, with the typed price checked against
- * the template's list price.
+ * Quote a customer a recurring plan, with the typed price checked against the
+ * live AI market-rate sheet.
  *
- * The pricing architecture is the best thing in this codebase — the AI extracts
- * facts, rateCards computes every dollar, and the model cannot invent a price.
- * None of that survives a text box beside it that nothing compares to anything.
- * A typo of 4 for 45 created a $4/mo plan that billed forever and no screen ever
- * mentioned it.
+ * The pricing architecture is the best thing in this codebase — the AI
+ * researches the rates, one cached sheet per service + area, and nobody
+ * prices from memory. None of that survives a text box beside it that nothing
+ * compares to anything. A typo of 4 for 45 created a $4/mo plan that billed
+ * forever and no screen ever mentioned it.
  *
- * Templates with no list price are priced by the engine, not from memory: the
- * only honest answer is to refuse and send the caller to Price a lead.
+ * `listPriceCents` is the sheet rate the office screen displayed. The server
+ * re-reads the live sheets for the customer's area (including an office-
+ * edited, pinned row — the office's numbers ARE the sheet) and refuses a
+ * listPriceCents that no live sheet carries: a stale screen must not become
+ * the deviation-guard baseline. A priceCents that differs from the verified
+ * list price needs a reason, recorded with the person who set it.
  */
 async function createQuote(
   actor: { sub: string | null; email: string | null },
   args: {
     customerId: string;
-    planTemplateId: string;
+    planName: string;
+    serviceFrequency: string;
     priceCents: number;
+    listPriceCents: number;
     initialFeeCents?: number | null;
     priceOverrideReason?: string | null;
+    units?: number | null;
     notes?: string | null;
   }
 ) {
+  const planName = args.planName.trim();
+  if (!planName) throw new Error("A quote needs a plan name");
+  const frequency = args.serviceFrequency as QuoteFrequency;
+  if (!QUOTE_FREQUENCIES.includes(frequency)) {
+    throw new Error(
+      `Unknown service frequency ${args.serviceFrequency} — expected MONTHLY, BIMONTHLY, or QUARTERLY`
+    );
+  }
   if (!Number.isInteger(args.priceCents) || args.priceCents <= 0) {
     throw new Error("Enter a valid monthly price");
   }
+  if (!Number.isInteger(args.listPriceCents) || args.listPriceCents <= 0) {
+    throw new Error(
+      "The quote is missing its AI sheet rate — reload the customer so the screen shows the live rate, then quote again"
+    );
+  }
 
   const client = await dataClient();
-  const [{ data: customer }, { data: template }] = await Promise.all([
-    client.models.Customer.get({ id: args.customerId }),
-    client.models.PlanTemplate.get({ id: args.planTemplateId }),
-  ]);
+  const { data: customer } = await client.models.Customer.get({
+    id: args.customerId,
+  });
   if (!customer) throw new Error(`Customer ${args.customerId} not found`);
-  if (!template) throw new Error(`Plan template ${args.planTemplateId} not found`);
-
-  if (template.priceCents == null) {
+  if (!customer.serviceCity?.trim() || !customer.serviceState?.trim()) {
     throw new Error(
-      `${template.name} is priced by the pricing engine, not by hand. Use "Price a lead" so the rate card sets the number.`
+      "This customer has no service city/state on file — the AI rate is cached per area, so add the service address before quoting"
+    );
+  }
+
+  // Re-read the live sheets for the customer's area and verify the screen's
+  // rate against them. Never trust the browser's number: the sheet may have
+  // re-researched or been office-edited since the screen loaded.
+  const areaKey = `${customer.serviceCity.trim().toLowerCase().replace(/\s+/g, "-")}-${customer.serviceState.trim().toLowerCase()}`;
+  const { data: rateRows } = await client.models.MarketRate.list({
+    filter: { areaKey: { eq: areaKey } },
+    limit: 500,
+  });
+  const liveMonthlies = new Set<number>();
+  for (const row of rateRows) {
+    if (!rateRowIsLive(row)) continue;
+    try {
+      const sheet = JSON.parse(String(row.ratesJson ?? "null")) as {
+        plans?: Record<string, { monthlyCents?: number }>;
+        hoaPerUnitMonthly?: Record<string, Record<string, number>>;
+      } | null;
+      const monthly = sheet?.plans?.[frequency]?.monthlyCents;
+      if (typeof monthly === "number") liveMonthlies.add(monthly);
+      // HOA sheets are per-unit: with a unit count, the quoted monthly is
+      // per-unit × units for the unit-count band.
+      if (
+        sheet?.hoaPerUnitMonthly &&
+        typeof args.units === "number" &&
+        args.units > 0
+      ) {
+        const perUnit = sheet.hoaPerUnitMonthly[hoaBandFor(args.units)]?.[frequency];
+        if (typeof perUnit === "number") {
+          liveMonthlies.add(perUnit * args.units);
+        }
+      }
+    } catch {
+      /* corrupt ratesJson — that row can't vouch for any price */
+    }
+  }
+  if (liveMonthlies.size === 0) {
+    throw new Error(
+      `No live AI rate sheet covers ${customer.serviceCity.trim()}, ${customer.serviceState.trim().toUpperCase()} — use "Price a lead" so the engine researches and caches the rate first`
+    );
+  }
+  if (!liveMonthlies.has(args.listPriceCents)) {
+    throw new Error(
+      `The AI sheet rate has moved since this screen loaded — no live sheet for ${customer.serviceCity.trim()} lists $${(args.listPriceCents / 100).toFixed(2)}/mo for the ${frequency.toLowerCase()} plan. Reload the customer and quote from the current rate.`
     );
   }
 
   const override = (args.priceOverrideReason ?? "").trim();
-  if (args.priceCents !== template.priceCents && !override) {
-    const listed = (template.priceCents / 100).toFixed(2);
+  if (args.priceCents !== args.listPriceCents && !override) {
+    const listed = (args.listPriceCents / 100).toFixed(2);
     const typed = (args.priceCents / 100).toFixed(2);
     throw new Error(
-      `${template.name} lists at $${listed}/mo and this quote is $${typed}/mo. Say why before it goes out — the price is recorded with your name on it.`
+      `${planName} lists at $${listed}/mo and this quote is $${typed}/mo. Say why before it goes out — the price is recorded with your name on it.`
     );
   }
 
   const { data: quote, errors } = await client.models.Quote.create({
     customerId: args.customerId,
-    planTemplateId: template.id,
-    planName: template.name,
+    planName,
     priceCents: args.priceCents,
     initialFeeCents: args.initialFeeCents ?? undefined,
-    serviceFrequency: template.serviceFrequency,
+    serviceFrequency: frequency,
     status: "DRAFT",
     notes: args.notes ?? undefined,
     quotedAt: new Date().toISOString(),
-    listPriceCents: template.priceCents,
+    listPriceCents: args.listPriceCents,
     priceOverrideReason: override || undefined,
     quotedBy: actor.sub ?? undefined,
     quotedByEmail: actor.email ?? undefined,
@@ -346,8 +423,8 @@ async function createQuote(
   return {
     quoteId: quote.id,
     priceCents: quote.priceCents,
-    listPriceCents: template.priceCents,
-    overridden: args.priceCents !== template.priceCents,
+    listPriceCents: args.listPriceCents,
+    overridden: args.priceCents !== args.listPriceCents,
   };
 }
 
@@ -1124,57 +1201,13 @@ async function getReportPhotoUploadUrl(reportId: string, contentType: string) {
   return { key, uploadUrl, expiresInSeconds: 900 };
 }
 
-// Template photos are embedded in PDFs (pdf-lib) — JPEG/PNG only.
-const TEMPLATE_IMAGE_TYPES: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-};
-
-/** Presigned PUT for a plan-template pest photo (templates/<id>/…). */
-async function getTemplateImageUploadUrl(templateId: string, contentType: string) {
-  const ext = TEMPLATE_IMAGE_TYPES[contentType.toLowerCase()];
-  if (!ext) {
-    throw new Error("Unsupported image type — pest photos must be JPEG or PNG");
-  }
-  const client = await dataClient();
-  const { data: template } = await client.models.PlanTemplate.get({
-    id: templateId,
-  });
-  if (!template) throw new Error(`Template ${templateId} not found`);
-  const key = `templates/${templateId}/${Date.now()}-${randomBytes(4).toString("hex")}.${ext}`;
-  const uploadUrl = await getSignedUrl(
-    s3,
-    new PutObjectCommand({
-      Bucket: BUCKET(),
-      Key: key,
-      ContentType: contentType,
-    }),
-    { expiresIn: 900 }
-  );
-  return { key, uploadUrl, expiresInSeconds: 900 };
-}
-
 /**
  * Presign a document for viewing. Keys are always
- * `reports/<customerId>/...`, `agreements/<customerId>/...`, or
- * `templates/<templateId>/...` (staff-only); entitlement is office/tech,
- * the customer's own dynamic group, or their customer-group.
+ * `reports/<customerId>/...` or `agreements/<customerId>/...`; entitlement
+ * is office/tech, the customer's own dynamic group, or their
+ * customer-group.
  */
 async function getDocumentUrl(key: string, groups: string[]) {
-  // Plan-template pest photos: staff only (signers get them via the
-  // token-gated agreement-public endpoint; customers get the signed PDF).
-  if (/^templates\/[^/]+\//.test(key)) {
-    if (!isStaff(groups)) {
-      throw new Error("Not authorized for this document");
-    }
-    const url = await getSignedUrl(
-      s3,
-      new GetObjectCommand({ Bucket: BUCKET(), Key: key }),
-      { expiresIn: 900 }
-    );
-    return { url, expiresInSeconds: 900 };
-  }
-
   const match = /^(reports|agreements)\/([^/]+)\//.exec(key);
   if (!match) throw new Error("Invalid document key");
   const customerId = match[2];

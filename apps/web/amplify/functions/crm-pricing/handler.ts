@@ -17,16 +17,21 @@ import {
   freqLabel,
   money,
   oneTimeGrossProfitCents,
-  priceAssociation,
   priceCommercial,
   priceMosquito,
-  priceResidential,
-  priceSpecialty,
   zoneFromMinutes,
+  ZONE_B,
   type Frequency,
   type PricedPlan,
+  type PriceLine,
   type Zone,
 } from "./rateCards";
+import {
+  hoaBandFor,
+  marketRate,
+  type MarketRateResult,
+  type PlanCadence,
+} from "../shared/marketRate";
 
 const s3 = new S3Client();
 const ssm = new SSMClient();
@@ -130,7 +135,13 @@ type Extraction = {
     | "mosquito"
     | "specialty"
     | "unknown";
-  specialtyKind: "wasp_nest" | "rodent_nest" | "rodent_exclusion" | "termite" | "none";
+  specialtyKind:
+    | "wasp_nest"
+    | "rodent_nest"
+    | "rodent_exclusion"
+    | "roach"
+    | "termite"
+    | "none";
   pest: string;
   customerName: string | null;
   town: string | null;
@@ -138,6 +149,7 @@ type Extraction = {
   fullAddress: string | null;
   sqft: number | null;
   units: number | null;
+  nestCount: number | null;
   halfAcres: number | null;
   tick: boolean;
   frequencyInterest: "monthly" | "bimonthly" | "quarterly" | "one_time" | "unspecified";
@@ -154,14 +166,15 @@ const EXTRACTION_SCHEMA = {
   additionalProperties: false,
   required: [
     "eligibility", "propertyType", "specialtyKind", "pest", "customerName",
-    "town", "state", "fullAddress", "sqft", "units", "halfAcres", "tick",
-    "frequencyInterest", "leadFeeCents", "rodentInterest", "multiProperty",
-    "competitorMatchBelowFloor", "complianceDocsRequested", "assumptions",
+    "town", "state", "fullAddress", "sqft", "units", "nestCount", "halfAcres",
+    "tick", "frequencyInterest", "leadFeeCents", "rodentInterest",
+    "multiProperty", "competitorMatchBelowFloor", "complianceDocsRequested",
+    "assumptions",
   ],
   properties: {
     eligibility: { type: "string", enum: ["ok", "wildlife", "bed_bugs", "food_service", "fumigation", "out_of_area"] },
     propertyType: { type: "string", enum: ["residential", "association", "commercial", "mosquito", "specialty", "unknown"] },
-    specialtyKind: { type: "string", enum: ["wasp_nest", "rodent_nest", "rodent_exclusion", "termite", "none"] },
+    specialtyKind: { type: "string", enum: ["wasp_nest", "rodent_nest", "rodent_exclusion", "roach", "termite", "none"] },
     pest: { type: "string" },
     customerName: { type: ["string", "null"] },
     town: { type: ["string", "null"] },
@@ -169,6 +182,7 @@ const EXTRACTION_SCHEMA = {
     fullAddress: { type: ["string", "null"] },
     sqft: { type: ["number", "null"] },
     units: { type: ["number", "null"] },
+    nestCount: { type: ["number", "null"] },
     halfAcres: { type: ["number", "null"] },
     tick: { type: "boolean" },
     frequencyInterest: { type: "string", enum: ["monthly", "bimonthly", "quarterly", "one_time", "unspecified"] },
@@ -191,10 +205,11 @@ Eligibility (hard passes):
 - "out_of_area": service address clearly outside MA and RI (CT, NH, VT, NY — even if close).
 Otherwise "ok".
 
-Property type: "association" for HOA/condo-association COMMON AREAS (unit counts); an individual condo unit is "residential". "mosquito" when the request is mosquito and/or tick yard treatment. "specialty" for wasp/hornet nest removal, rodent nest removal, rodent exclusion, or termite work (set specialtyKind). Otherwise "residential"/"commercial"/"unknown".
+Property type: "association" for HOA/condo-association COMMON AREAS (unit counts); an individual condo unit is "residential". "mosquito" when the request is mosquito and/or tick yard treatment. "specialty" for wasp/hornet nest removal, rodent nest removal, rodent exclusion, a specialized roach/German-cockroach cleanout, or termite work (set specialtyKind). Otherwise "residential"/"commercial"/"unknown".
 
 Extraction rules:
 - sqft: null when not stated (the engine assumes 2,000 sqft and states the assumption). Do not guess.
+- nestCount: how many wasp/hornet nests the lead mentions; null when not stated (the engine assumes one and states the assumption).
 - halfAcres: yard size in half-acre increments for mosquito/tick leads; null when unknown (engine assumes up to ½ acre).
 - leadFeeCents: the Thumbtack lead fee, in CENTS, when visible in the text/screenshot; null otherwise.
 - frequencyInterest: only when the lead stated one.
@@ -291,6 +306,94 @@ const PASS_SCRIPTS: Record<string, string> = {
   out_of_area:
     "Thanks for reaching out! Your address falls outside our current licensed service area (Massachusetts & Rhode Island, within our route zone), so we're not able to take this one on. Wishing you a quick fix!",
 };
+
+// ---------- AI base price → priced plan (deterministic zone overlay) ----------
+
+/**
+ * Escalation reason when the engine cannot produce a sheet — research
+ * budget spent, key missing, junk research. The human IS the fallback:
+ * never a silent skip, never an invented price.
+ */
+export const AI_UNAVAILABLE_REASON = "AI pricing unavailable — price by hand";
+
+const CUSTOM_QUOTE_SCRIPT =
+  "Thanks for reaching out! This one needs a custom quote from our owner — he'll call you today to walk through the details and get you an exact price.";
+
+/**
+ * A recurring GP plan from the researched sheet, with the deterministic
+ * Zone B travel adders on top — exactly as the website funnel prices it
+ * (R60: an 89-minute drive must not price like a 10-minute one).
+ */
+function planFromSheet(
+  rate: MarketRateResult,
+  cadence: PlanCadence,
+  zone: Zone
+): PricedPlan | null {
+  const plan = rate.sheet.plans?.[cadence];
+  if (!plan) return null;
+  const lines: PriceLine[] = [
+    {
+      label: `AI market rate — ${freqLabel(cadence)} plan`,
+      cents: plan.monthlyCents,
+    },
+    { label: "AI market rate — initial visit", cents: plan.initialFeeCents },
+  ];
+  let monthly = plan.monthlyCents;
+  let initial = plan.initialFeeCents;
+  if (zone === "B") {
+    lines.push({ label: "Zone B travel adder (monthly)", cents: ZONE_B[cadence] });
+    lines.push({
+      label: "Zone B travel adder (initial)",
+      cents: ZONE_B.ONE_TIME_FLAT,
+    });
+    monthly += ZONE_B[cadence];
+    initial += ZONE_B.ONE_TIME_FLAT;
+  }
+  return {
+    service: `Residential GPC — ${freqLabel(cadence)}`,
+    frequency: cadence,
+    monthlyCents: monthly,
+    oneTimeCents: null,
+    initialFeeCents: initial,
+    lines,
+  };
+}
+
+/** A one-time price from the sheet with the Zone B flat adder on top. */
+function oneTimeFromSheet(opts: {
+  service: string;
+  lines: PriceLine[];
+  baseCents: number;
+  zone: Zone;
+}): PricedPlan {
+  const lines = [...opts.lines];
+  let total = opts.baseCents;
+  if (opts.zone === "B") {
+    lines.push({ label: "Zone B travel adder", cents: ZONE_B.ONE_TIME_FLAT });
+    total += ZONE_B.ONE_TIME_FLAT;
+  }
+  return {
+    service: opts.service,
+    frequency: "ONE_TIME",
+    monthlyCents: null,
+    oneTimeCents: total,
+    initialFeeCents: null,
+    lines,
+  };
+}
+
+/** An escalate-only card: no price exists, Jake quotes custom. */
+function escalateOnly(service: string, escalate: string): PricedPlan {
+  return {
+    service,
+    frequency: "ONE_TIME",
+    monthlyCents: null,
+    oneTimeCents: null,
+    initialFeeCents: null,
+    lines: [],
+    escalate,
+  };
+}
 
 // ---------- reply composition ----------
 
@@ -539,7 +642,10 @@ async function priceLead(args: Args) {
   if (extracted.complianceDocsRequested)
     escalateReasons.push("Compliance documentation / audit support requested");
 
-  // 5. Map to a rate card and price deterministically.
+  // 5. Map to the AI market-rate engine and price from the cached sheet
+  // (deterministic Zone B adders on top, exactly as the website funnel does
+  // it). Commercial and mosquito/tick keep their deterministic cards — the
+  // engine has no service kind for them yet.
   const statedFreq: Frequency | null =
     extracted.frequencyInterest === "monthly"
       ? "MONTHLY"
@@ -553,17 +659,109 @@ async function priceLead(args: Args) {
 
   let priced: PricedPlan | null = null;
   let gpKind = "one_time_gpc";
+  // Kept for the value-fallback plan strings in the reply.
+  let gpRate: MarketRateResult | null = null;
+
+  // Research failure → the human prices it. Never a silent skip, never an
+  // invented number: the office gets the escalation with the holding script.
+  const escalateAiUnavailable = async (serviceLabel: string) => {
+    const run = await persist({
+      decision: "ESCALATE",
+      reason: AI_UNAVAILABLE_REASON,
+      zone,
+      driveMinutes: minutes ?? undefined,
+      leadFeeCents,
+      service: serviceLabel,
+      replyText: CUSTOM_QUOTE_SCRIPT,
+    });
+    await notifyEscalation(run?.id, extracted, AI_UNAVAILABLE_REASON, null);
+    return run;
+  };
+  // The engine caches per service + area; the area key needs the town.
+  const needsTown = async () =>
+    persist({
+      decision: "NEEDS_INFO",
+      reason:
+        "Couldn't read the service town from this lead — the pricing engine caches rates per area. Confirm the town and run again.",
+      zone,
+      driveMinutes: minutes ?? undefined,
+      leadFeeCents,
+      service: extracted.pest,
+    });
+  const town = extracted.town;
 
   if (extracted.propertyType === "specialty" && extracted.specialtyKind !== "none") {
-    priced = priceSpecialty(extracted.specialtyKind, zone);
-    gpKind =
-      extracted.specialtyKind === "wasp_nest"
-        ? "wasp_nest"
-        : extracted.specialtyKind === "rodent_nest"
-          ? "rodent_nest"
-          : extracted.specialtyKind === "rodent_exclusion"
-            ? "rodent_exclusion"
-            : "one_time_gpc";
+    if (extracted.specialtyKind === "termite") {
+      priced = escalateOnly("Termite (any)", "Termite work — Jake quotes custom");
+    } else if (extracted.specialtyKind === "rodent_exclusion") {
+      // No engine service kind for exclusion work — custom, not researched.
+      priced = escalateOnly(
+        "Rodent exclusion (exterior only)",
+        "Rodent exclusion — Jake quotes custom"
+      );
+    } else if (extracted.specialtyKind === "wasp_nest") {
+      if (!town) return needsTown();
+      const rate = await marketRate({
+        anthropicKey: apiKey,
+        service: "WASP_NEST",
+        city: town,
+        state: extracted.state,
+      });
+      if (!rate) return escalateAiUnavailable("Wasp / hornet nest removal");
+      const nests = Math.max(1, extracted.nestCount ?? 1);
+      if (extracted.nestCount == null) {
+        assumptions.push("assumed a single nest — we'll confirm when scheduling");
+      }
+      // The sheet must actually price what was asked: a multi-nest job with
+      // no extra-nest component is an unpriceable request.
+      if (nests > 1 && rate.sheet.extraNestCents == null) {
+        return escalateAiUnavailable("Wasp / hornet nest removal — multiple nests");
+      }
+      const lines: PriceLine[] = [
+        { label: "AI market rate — first nest", cents: rate.priceCents },
+      ];
+      let base = rate.priceCents;
+      if (nests > 1) {
+        const extra = (nests - 1) * (rate.sheet.extraNestCents ?? 0);
+        lines.push({
+          label: `${nests - 1} × ${money(rate.sheet.extraNestCents ?? 0)} (each additional nest)`,
+          cents: extra,
+        });
+        base += extra;
+      }
+      priced = oneTimeFromSheet({
+        service: `Wasp / hornet nest removal${nests > 1 ? ` — ${nests} nests` : ""}`,
+        lines,
+        baseCents: base,
+        zone,
+      });
+      gpKind = "wasp_nest";
+    } else {
+      // rodent_nest / roach: one-time treatments priced from their sheets.
+      if (!town) return needsTown();
+      const roach = extracted.specialtyKind === "roach";
+      const sqft = extracted.sqft ?? 2000;
+      if (extracted.sqft == null)
+        assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+      const rate = await marketRate({
+        anthropicKey: apiKey,
+        service: roach ? "ROACH" : "RODENT",
+        city: town,
+        state: extracted.state,
+        sqft,
+      });
+      const label = roach
+        ? "Specialized roach treatment"
+        : "Rodent treatment (trapping + exclusion check)";
+      if (!rate) return escalateAiUnavailable(label);
+      priced = oneTimeFromSheet({
+        service: label,
+        lines: [{ label: "AI market rate — one-time treatment", cents: rate.priceCents }],
+        baseCents: rate.priceCents,
+        zone,
+      });
+      gpKind = "rodent_nest";
+    }
   } else if (extracted.propertyType === "association") {
     if (extracted.units == null) {
       const run = await persist({
@@ -575,11 +773,46 @@ async function priceLead(args: Args) {
       });
       return run;
     }
-    priced = priceAssociation({
-      frequency: statedFreq ?? "MONTHLY",
-      units: extracted.units,
-      zone,
+    if (!town) return needsTown();
+    // HOA auto-quotes like everything else now — the every-HOA-escalates-to-
+    // Jake policy is retired by Jake's decision. Escalation remains only the
+    // fallback when research fails.
+    const rate = await marketRate({
+      anthropicKey: apiKey,
+      service: "HOA",
+      city: town,
+      state: extracted.state,
     });
+    const hoa = rate?.sheet.hoaPerUnitMonthly;
+    if (!hoa) return escalateAiUnavailable("Association/HOA common areas");
+    const freq: PlanCadence =
+      statedFreq && statedFreq !== "ONE_TIME" ? statedFreq : "MONTHLY";
+    if (statedFreq === "ONE_TIME") {
+      assumptions.push(
+        "quoted the monthly common-area plan — one-off association work is confirmed on a walkthrough"
+      );
+    }
+    const units = Math.max(1, extracted.units);
+    const perUnit = hoa[hoaBandFor(units)][freq];
+    const lines: PriceLine[] = [
+      {
+        label: `${units} units × ${money(perUnit)}/unit (AI market rate, ${freqLabel(freq)})`,
+        cents: perUnit * units,
+      },
+    ];
+    let monthly = perUnit * units;
+    if (zone === "B") {
+      lines.push({ label: "Zone B travel adder (monthly)", cents: ZONE_B[freq] });
+      monthly += ZONE_B[freq];
+    }
+    priced = {
+      service: `Association/HOA common areas — ${freqLabel(freq)}`,
+      frequency: freq,
+      monthlyCents: monthly,
+      oneTimeCents: null,
+      initialFeeCents: null,
+      lines,
+    };
   } else if (extracted.propertyType === "commercial") {
     const sqft = extracted.sqft ?? 2000;
     if (extracted.sqft == null) assumptions.push("assumed ~2,000 sqft — confirm on booking");
@@ -605,26 +838,47 @@ async function priceLead(args: Args) {
     const sqft = extracted.sqft ?? 2000;
     if (extracted.sqft == null)
       assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
-    const freq = statedFreq ?? "QUARTERLY";
-    priced = priceResidential({
-      frequency: freq,
+    if (!town) return needsTown();
+    const rate = await marketRate({
+      anthropicKey: apiKey,
+      service: "GENERAL_PEST",
+      city: town,
+      state: extracted.state,
       sqft,
-      zone,
-      rodentAddon: extracted.rodentInterest && freq !== "ONE_TIME",
     });
+    if (!rate) return escalateAiUnavailable("Residential general pest control");
+    gpRate = rate;
     gpKind = "one_time_gpc";
+    const freq = statedFreq ?? "QUARTERLY";
 
-    // One-time economics: if it fails the 3× lead-fee test, quote the plan
-    // instead. The WHY stays internal (run.reason) — never customer-facing.
-    if (freq === "ONE_TIME" && priced.oneTimeCents != null) {
-      const gp = oneTimeGrossProfitCents(gpKind, priced.oneTimeCents, zone);
+    if (freq === "ONE_TIME") {
+      priced = oneTimeFromSheet({
+        service: "Residential one-time treatment",
+        lines: [
+          { label: "AI market rate — one-time treatment", cents: rate.priceCents },
+        ],
+        baseCents: rate.priceCents,
+        zone,
+      });
+      // One-time economics: if it fails the 3× lead-fee test, quote the plan
+      // instead. The WHY stays internal (run.reason) — never customer-facing.
+      const gp = oneTimeGrossProfitCents(gpKind, priced.oneTimeCents!, zone);
       if (clearsLeadFee(gp, leadFeeCents) === false) {
-        pivotedFromOneTimeCents = priced.oneTimeCents;
-        internalNotes.push(
-          `One-time GP ${gp != null ? money(gp) : "?"} failed the 3× lead-fee test — pivoted to the quarterly plan`
-        );
-        priced = priceResidential({ frequency: "QUARTERLY", sqft, zone });
+        const plan = planFromSheet(rate, "QUARTERLY", zone);
+        if (plan) {
+          pivotedFromOneTimeCents = priced.oneTimeCents;
+          internalNotes.push(
+            `One-time GP ${gp != null ? money(gp) : "?"} failed the 3× lead-fee test — pivoted to the quarterly plan`
+          );
+          priced = plan;
+        }
+        // No plans on the sheet: keep the one-time — the lead-fee PASS gate
+        // below makes the call rather than inventing a plan price.
       }
+    } else {
+      priced = planFromSheet(rate, freq, zone);
+      // A GENERAL_PEST sheet without plan cadences can't price a plan lead.
+      if (!priced) return escalateAiUnavailable(`Residential GPC — ${freqLabel(freq)}`);
     }
   }
 
@@ -650,8 +904,7 @@ async function priceLead(args: Args) {
       leadFeeCents,
       service: priced.service,
       frequency: priced.frequency,
-      replyText:
-        "Thanks for reaching out! This one needs a custom quote from our owner — he'll call you today to walk through the details and get you an exact price.",
+      replyText: CUSTOM_QUOTE_SCRIPT,
     });
     await notifyEscalation(run?.id, extracted, [priced.escalate, ...escalateReasons].join("; "), priced);
     return run;
@@ -670,8 +923,9 @@ async function priceLead(args: Args) {
   }
 
   // 6. Specialty/one-time lead-fee test (recurring always clears).
-  // Escalate-flagged cards (HOA etc.) never short-circuit to PASS — Jake
-  // decides; the failed economics just become part of the escalation.
+  // Escalate-flagged leads (multi-property, competitor-match, …) never
+  // short-circuit to PASS — Jake decides; the failed economics just become
+  // part of the escalation.
   if (
     priced.oneTimeCents != null &&
     priced.monthlyCents == null &&
@@ -702,20 +956,12 @@ async function priceLead(args: Args) {
   const oneTimeStr = priced.oneTimeCents != null ? money(priced.oneTimeCents) : null;
 
   let fallbackPlanStr: string | null = null;
-  if (extracted.propertyType === "residential" && priced.frequency === "QUARTERLY") {
-    const bi = priceResidential({
-      frequency: "BIMONTHLY",
-      sqft: extracted.sqft ?? 2000,
-      zone,
-    });
-    fallbackPlanStr = `bi-monthly at ${money(bi.monthlyCents!)}/mo`;
-  } else if (extracted.propertyType === "residential" && priced.frequency === "MONTHLY") {
-    const q = priceResidential({
-      frequency: "QUARTERLY",
-      sqft: extracted.sqft ?? 2000,
-      zone,
-    });
-    fallbackPlanStr = `quarterly at ${money(q.monthlyCents!)}/mo as the value option`;
+  if (extracted.propertyType === "residential" && priced.frequency === "QUARTERLY" && gpRate) {
+    const bi = planFromSheet(gpRate, "BIMONTHLY", zone);
+    if (bi) fallbackPlanStr = `bi-monthly at ${money(bi.monthlyCents!)}/mo`;
+  } else if (extracted.propertyType === "residential" && priced.frequency === "MONTHLY" && gpRate) {
+    const q = planFromSheet(gpRate, "QUARTERLY", zone);
+    if (q) fallbackPlanStr = `quarterly at ${money(q.monthlyCents!)}/mo as the value option`;
   } else if (priced.service.startsWith("Mosquito + tick")) {
     const m = priceMosquito({ tick: false, halfAcres: extracted.halfAcres ?? 1, zone });
     fallbackPlanStr = `mosquito-only at ${money(m.monthlyCents!)}/mo`;

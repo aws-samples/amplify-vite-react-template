@@ -23,11 +23,64 @@ export type Technician = Schema["Technician"]["type"];
 export type Agreement = Schema["Agreement"]["type"];
 export type ServiceReport = Schema["ServiceReport"]["type"];
 export type Invoice = Schema["Invoice"]["type"];
-export type PlanTemplate = Schema["PlanTemplate"]["type"];
 export type Quote = Schema["Quote"]["type"];
 export type LeadPricingRun = Schema["LeadPricingRun"]["type"];
 export type Product = Schema["Product"]["type"];
-export type MarketRate = Schema["MarketRate"]["type"];
+
+/**
+ * Contract boundary with the backend wave landing alongside this one:
+ * MarketRate gains `pinned` (an office-edited row never expires or
+ * re-researches until the office un-pins it). Intersected here so the CRM
+ * compiles against the contract before the generated schema catches up; once
+ * the schema lands the extra member is redundant and harmless.
+ */
+export type MarketRate = Schema["MarketRate"]["type"] & {
+  pinned?: boolean | null;
+};
+
+/** MarketRate.update, accepting the contract's `pinned` field (see above). */
+export function updateMarketRate(fields: {
+  id: string;
+  priceCents?: number;
+  ratesJson?: string;
+  active?: boolean;
+  pinned?: boolean;
+}) {
+  type UpdateInput = Parameters<
+    ReturnType<typeof api>["models"]["MarketRate"]["update"]
+  >[0];
+  return api().models.MarketRate.update(fields as UpdateInput);
+}
+
+/**
+ * How the office quotes a price it can see on screen. Same contract
+ * boundary: the backend wave replaces quoteFromTemplate with createQuote —
+ * planName + serviceFrequency + listPriceCents ride in directly (plan
+ * templates are gone). The deviation guard lives server-side: it re-reads
+ * the live AI sheets for the customer's area, refuses a listPriceCents no
+ * live sheet carries, and a priceCents that differs from it needs
+ * priceOverrideReason, recorded on the quote with the caller's name.
+ */
+export function createQuoteMutation(args: {
+  customerId: string;
+  planName: string;
+  serviceFrequency: "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
+  priceCents: number;
+  listPriceCents: number;
+  initialFeeCents?: number | null;
+  priceOverrideReason?: string | null;
+  /** HOA quotes: unit count, so the server can verify per-unit × units. */
+  units?: number | null;
+  notes?: string | null;
+}) {
+  const mutations = api().mutations as unknown as {
+    createQuote: (a: typeof args) => Promise<{
+      data: unknown;
+      errors?: { message: string }[];
+    }>;
+  };
+  return mutations.createQuote(args);
+}
 
 /** Parse an AWSJSON field that may arrive as a string. */
 export function jsonField<T>(raw: unknown): T | null {

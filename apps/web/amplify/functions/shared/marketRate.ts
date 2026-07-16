@@ -8,12 +8,15 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  *
  * One research call per (service, area, size band) returns a full rate
  * sheet — one-time price, recurring-plan cadences with monthly + initial
- * fees, the wasp extra-nest increment — cached on ONE MarketRate row with a
- * shelf life. Consistency rule: identical inputs → identical prices, so
- * research runs at most once per rate key and the office can edit or retire
- * any cached rate from the CRM (an office-edited row wins until it expires
- * or is retired; `priceCents` is the office-editable field, so it always
- * overrides the sheet's stored one-time price).
+ * fees, the wasp extra-nest increment, HOA per-unit monthly rates by
+ * unit-count band — cached on ONE MarketRate row with a shelf life.
+ * Consistency rule: identical inputs → identical prices, so research runs
+ * at most once per rate key and the office can edit or retire any cached
+ * rate from the CRM. The office override surface is the FULL sheet: the
+ * Market Rates screen edits ratesJson components and mirrors `priceCents`
+ * to the sheet's one-time price on save. An office edit sets `pinned`,
+ * and a pinned row NEVER expires or re-researches — the office's number
+ * stands until the office un-pins or retires it.
  *
  * Exactly two guardrails — deliberately no min/max clamps and no review
  * queue, and deliberately no upper bound:
@@ -24,9 +27,9 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  *      bound; the day-pricing overlay re-floors at the caller's actual zone
  *      per R62). Components with no deterministic cost model — the plan
  *      cadences (rateCards' Step-5 cost constants cover one-time/specialty
- *      visits only) and the wasp extra-nest increment — carry NO floor;
- *      that fact is recorded on the rate row's basis rather than inventing
- *      economics.
+ *      visits only), the wasp extra-nest increment, and the HOA per-unit
+ *      rates — carry NO floor; that fact is recorded on the rate row's
+ *      basis rather than inventing economics.
  *
  *   2. Callback fallback. No research result — daily budget spent, key
  *      missing, junk or partial response, expired cache whose re-research
@@ -48,7 +51,8 @@ export type MarketRateService =
   | "GENERAL_PEST"
   | "WASP_NEST"
   | "RODENT"
-  | "ROACH";
+  | "ROACH"
+  | "HOA";
 
 export type PlanCadence = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
 export const PLAN_CADENCES: PlanCadence[] = [
@@ -59,23 +63,63 @@ export const PLAN_CADENCES: PlanCadence[] = [
 
 export type PlanRate = { monthlyCents: number; initialFeeCents: number };
 
+/**
+ * HOA unit-count bands, mirroring the brackets the retired deterministic
+ * association card used (≤10 base, 11–25, 26–50, 51–100, 101+).
+ */
+export type HoaBand =
+  | "UNITS_1_10"
+  | "UNITS_11_25"
+  | "UNITS_26_50"
+  | "UNITS_51_100"
+  | "UNITS_101_PLUS";
+export const HOA_BANDS: HoaBand[] = [
+  "UNITS_1_10",
+  "UNITS_11_25",
+  "UNITS_26_50",
+  "UNITS_51_100",
+  "UNITS_101_PLUS",
+];
+
+export function hoaBandFor(units: number): HoaBand {
+  if (units <= 10) return "UNITS_1_10";
+  if (units <= 25) return "UNITS_11_25";
+  if (units <= 50) return "UNITS_26_50";
+  if (units <= 100) return "UNITS_51_100";
+  return "UNITS_101_PLUS";
+}
+
+/** HOA: per-unit MONTHLY price in cents, by unit-count band and cadence. */
+export type HoaPerUnitRates = Record<HoaBand, Record<PlanCadence, number>>;
+
 /** The full researched sheet stored on one MarketRate row (ratesJson). */
 export type RateSheet = {
-  /** One-time treatment (WASP_NEST: the visit including the first nest). */
-  oneTimeCents: number;
+  /** One-time treatment (WASP_NEST: the visit including the first nest).
+   *  Absent on HOA sheets — common-area work has no one-time card. */
+  oneTimeCents?: number;
   /** WASP_NEST: incremental price per additional nest on the same visit. */
   extraNestCents?: number;
   /** GENERAL_PEST: recurring plans, each billed as a flat monthly price. */
   plans?: Record<PlanCadence, PlanRate>;
+  /** HOA: per-unit monthly rate by unit-count band and visit cadence. */
+  hoaPerUnitMonthly?: HoaPerUnitRates;
 };
 
 export type MarketRateResult = {
-  /** The one-time price — mirrors sheet.oneTimeCents (continuity field). */
+  /** Mirrors sheet.oneTimeCents (continuity field). HOA sheets have no
+   *  one-time, so the mirror is the smallest band's monthly per-unit rate. */
   priceCents: number;
   sheet: RateSheet;
   basis: string;
   cached: boolean;
 };
+
+/** What the row's required priceCents column mirrors for a given sheet. */
+function mirrorCents(sheet: RateSheet): number {
+  return (
+    sheet.oneTimeCents ?? sheet.hoaPerUnitMonthly?.UNITS_1_10.MONTHLY ?? 0
+  );
+}
 
 /** Round to a tidy $X9 ending like the rest of the rate card. */
 function tidy(cents: number): number {
@@ -95,9 +139,11 @@ export function areaKeyFor(city: string, state: string): string {
 
 /**
  * Funnel service → one-time cost kind in crm-pricing/rateCards (the same
- * mapping the day-pricing overlay uses for R62).
+ * mapping the day-pricing overlay uses for R62). HOA has no entry: no
+ * deterministic cost model exists for common-area work, so its rates carry
+ * no floor — recorded on the row's basis, not invented.
  */
-const COST_KIND: Record<MarketRateService, string> = {
+const COST_KIND: Partial<Record<MarketRateService, string>> = {
   GENERAL_PEST: "one_time_gpc",
   WASP_NEST: "wasp_nest",
   RODENT: "rodent_nest",
@@ -117,11 +163,14 @@ function applyFloor(
   sheet: RateSheet
 ): { sheet: RateSheet; floorNotes: string[] } {
   const notes: string[] = [];
-  const floor = variableCostCents(COST_KIND[service]);
+  const costKind = COST_KIND[service];
   let oneTimeCents = sheet.oneTimeCents;
-  if (oneTimeCents < floor) {
-    oneTimeCents = floor;
-    notes.push(`one-time floored at Zone-A variable cost ${money(floor)}`);
+  if (costKind != null && oneTimeCents != null) {
+    const floor = variableCostCents(costKind);
+    if (oneTimeCents < floor) {
+      oneTimeCents = floor;
+      notes.push(`one-time floored at Zone-A variable cost ${money(floor)}`);
+    }
   }
   if (sheet.plans) {
     notes.push(
@@ -131,6 +180,11 @@ function applyFloor(
   if (sheet.extraNestCents != null) {
     notes.push(
       "extra-nest price carries no variable-cost floor (no incremental cost model)"
+    );
+  }
+  if (sheet.hoaPerUnitMonthly) {
+    notes.push(
+      "HOA per-unit rates carry no variable-cost floor (no cost model exists for common-area work)"
     );
   }
   return { sheet: { ...sheet, oneTimeCents }, floorNotes: notes };
@@ -156,7 +210,8 @@ function parseSheet(raw: unknown): RateSheet | null {
     if (
       typeof value === "object" &&
       value !== null &&
-      typeof (value as RateSheet).oneTimeCents === "number"
+      (typeof (value as RateSheet).oneTimeCents === "number" ||
+        typeof (value as RateSheet).hoaPerUnitMonthly === "object")
     ) {
       return value as RateSheet;
     }
@@ -181,15 +236,31 @@ export async function marketRate(opts: {
   const client = await dataClient();
   const { data: existing } =
     await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  // A pinned row is an office edit and never expires — it serves until the
+  // office un-pins or retires it. Unpinned rows expire on schedule.
   const live = existing.find(
     (r) =>
       r.active &&
-      (!r.expiresAt || new Date(r.expiresAt).getTime() > Date.now())
+      (r.pinned ||
+        !r.expiresAt ||
+        new Date(r.expiresAt).getTime() > Date.now())
   );
   if (live) {
-    // priceCents is what the office edits, so it wins over the sheet's
-    // stored one-time price — that is the override contract.
     const stored = parseSheet(live.ratesJson);
+    if (stored?.hoaPerUnitMonthly) {
+      // HOA sheets have no one-time component; the office edits the
+      // per-unit rates in ratesJson directly and priceCents is only the
+      // model's required mirror column.
+      return {
+        priceCents: live.priceCents,
+        sheet: stored,
+        basis: live.basis ?? "",
+        cached: true,
+      };
+    }
+    // priceCents is mirrored to the sheet's one-time on office save, and it
+    // wins over the stored one-time — that keeps rows edited before the
+    // full-sheet override surface existed honest too.
     const sheet: RateSheet = {
       ...(stored ?? {}),
       oneTimeCents: live.priceCents,
@@ -212,25 +283,28 @@ export async function marketRate(opts: {
 
   const { sheet, floorNotes } = applyFloor(service, researched.sheet);
   const basis = [researched.basis, ...floorNotes].join(" · ").slice(0, 800);
+  const priceCents = mirrorCents(sheet);
 
   await client.models.MarketRate.create({
     rateKey,
     service,
     areaKey,
-    priceCents: sheet.oneTimeCents,
+    priceCents,
     ratesJson: JSON.stringify(sheet),
     basis,
     sources: researched.sources.slice(0, 1000),
     researchedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + NINETY_DAYS_MS).toISOString(),
     active: true,
+    // Fresh research is never pinned — only an office edit pins a row.
+    pinned: false,
   });
 
   // Visibility, not a gate: the office hears about every new sheet and can
   // override it, but the quote proceeds immediately.
   await notifyNewRate({ service, areaKey, bucket, sheet, floorNotes });
 
-  return { priceCents: sheet.oneTimeCents, sheet, basis, cached: false };
+  return { priceCents, sheet, basis, cached: false };
 }
 
 // ---------------------------------------------------------------- research
@@ -240,6 +314,9 @@ type ResearchSpec = {
   /** Every label must parse from the response, or the whole result is junk. */
   lines: string[];
   assemble: (cents: Record<string, number>) => RateSheet;
+  /** HOA per-unit rates are small dollar amounts — $X9 tidying would
+   *  distort them (tidy($4) is $9), so per-unit specs keep exact cents. */
+  tidyLines?: boolean;
 };
 
 const LINE_INSTRUCTION =
@@ -308,6 +385,30 @@ ONE_TIME_USD: <number>`,
     lines: ["ONE_TIME_USD"],
     assemble: (c) => ({ oneTimeCents: c.ONE_TIME_USD }),
   },
+  HOA: {
+    ask: (city, state) =>
+      `What do pest-control companies near ${city}, ${state} charge HOAs and condo associations for recurring COMMON-AREA pest control (building exteriors, clubhouses, mail areas, dumpster pads — not inside individual units)? These contracts bill a flat monthly subscription price regardless of visit cadence; express each answer as the PER-UNIT monthly rate (the flat monthly contract price divided by the community's unit count). Larger communities pay less per unit. Price every combination of community size band and visit cadence (monthly, every-two-months, quarterly visits). ${LINE_INSTRUCTION}
+${HOA_BANDS.flatMap((band) =>
+  PLAN_CADENCES.map((cadence) => `${band}_${cadence}_PER_UNIT_USD: <number>`)
+).join("\n")}`,
+    lines: HOA_BANDS.flatMap((band) =>
+      PLAN_CADENCES.map((cadence) => `${band}_${cadence}_PER_UNIT_USD`)
+    ),
+    assemble: (c) => ({
+      hoaPerUnitMonthly: Object.fromEntries(
+        HOA_BANDS.map((band) => [
+          band,
+          Object.fromEntries(
+            PLAN_CADENCES.map((cadence) => [
+              cadence,
+              c[`${band}_${cadence}_PER_UNIT_USD`],
+            ])
+          ),
+        ])
+      ) as HoaPerUnitRates,
+    }),
+    tidyLines: false,
+  },
 };
 
 function parseUsdLine(text: string, label: string): number | null {
@@ -348,7 +449,7 @@ async function research(
     for (const label of spec.lines) {
       const parsed = parseUsdLine(text, label);
       if (parsed == null) return null;
-      cents[label] = tidy(parsed);
+      cents[label] = spec.tidyLines === false ? parsed : tidy(parsed);
     }
     const basisLine =
       text
@@ -385,7 +486,10 @@ async function notifyNewRate(opts: {
   floorNotes: string[];
 }): Promise<void> {
   const { service, areaKey, bucket, sheet, floorNotes } = opts;
-  const rows: string[] = [`One-time: <strong>${money(sheet.oneTimeCents)}</strong>`];
+  const rows: string[] = [];
+  if (sheet.oneTimeCents != null) {
+    rows.push(`One-time: <strong>${money(sheet.oneTimeCents)}</strong>`);
+  }
   if (sheet.extraNestCents != null) {
     rows.push(`Each extra nest: <strong>${money(sheet.extraNestCents)}</strong>`);
   }
@@ -394,6 +498,14 @@ async function notifyNewRate(opts: {
       const plan = sheet.plans[cadence];
       rows.push(
         `${cadence.toLowerCase()} plan: <strong>${money(plan.monthlyCents)}/mo</strong> + ${money(plan.initialFeeCents)} initial`
+      );
+    }
+  }
+  if (sheet.hoaPerUnitMonthly) {
+    for (const band of HOA_BANDS) {
+      const rates = sheet.hoaPerUnitMonthly[band];
+      rows.push(
+        `${band.replace("UNITS_", "").replace("_PLUS", "+").replace("_", "–")} units: <strong>${money(rates.MONTHLY)}/unit/mo</strong> monthly · ${money(rates.BIMONTHLY)} bi-monthly · ${money(rates.QUARTERLY)} quarterly`
       );
     }
   }

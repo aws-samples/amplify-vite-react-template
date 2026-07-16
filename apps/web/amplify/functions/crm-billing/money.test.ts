@@ -163,9 +163,12 @@ describe("chargeManualAmount ceiling", () => {
     expect(paymentIntentsCreate).toHaveBeenCalledOnce();
   });
 
-  it("allows the rate card's most expensive job", async () => {
-    // marketRate clamps rodent/roach at $2,500 — a ceiling below this would
-    // send real work to the owner, which is the bottleneck to remove.
+  it("allows an expensive but real job", async () => {
+    // The AI engine deliberately has no upper price clamp, so big legitimate
+    // jobs exist ($2,500 exclusions do happen). This ceiling is NOT a pricing
+    // control — it is only the manual-entry typo guard on hand-keyed charges,
+    // so it must sit above real work or it sends that work to the owner,
+    // which is the bottleneck to remove.
     await call("chargeManualAmount", {
       customerId: "c1",
       amountCents: 250000,

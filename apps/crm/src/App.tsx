@@ -19,7 +19,6 @@ import Leads from "./office/Leads";
 import Customers from "./office/Customers";
 import CustomerDetail from "./office/CustomerDetail";
 import GroupDetail from "./office/GroupDetail";
-import PlanTemplates from "./office/PlanTemplates";
 import PricingLog from "./office/PricingLog";
 import ProductLog from "./office/ProductLog";
 import MarketRates from "./office/MarketRates";
@@ -198,7 +197,6 @@ function Shell() {
         <Route path="/customers/:id" element={<Require when={staff || roles.tech}><CustomerDetail /></Require>} />
         <Route path="/groups/:id" element={<Require when={staff}><GroupDetail /></Require>} />
         <Route path="/schedule" element={<Require when={staff}><Schedule /></Require>} />
-        <Route path="/templates" element={<Require when={staff}><PlanTemplates /></Require>} />
         <Route path="/pricing" element={<Require when={staff}><PricingLog /></Require>} />
         <Route path="/products" element={<Require when={staff}><ProductLog /></Require>} />
         <Route path="/market-rates" element={<Require when={staff}><MarketRates /></Require>} />

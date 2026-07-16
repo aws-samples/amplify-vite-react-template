@@ -51,11 +51,6 @@ export default function More() {
             <ListRow title="My day (technician view)" onClick={() => navigate("/tech")} />
           ) : null}
           <ListRow
-            title="Plan templates"
-            subtitle="The plans BuzzKill sells — used for quotes and new plans"
-            onClick={() => navigate("/templates")}
-          />
-          <ListRow
             title="Pricing log"
             subtitle="Every AI-priced lead — the weekly review sheet"
             onClick={() => navigate("/pricing")}
@@ -67,7 +62,7 @@ export default function More() {
           />
           <ListRow
             title="Market rates"
-            subtitle="AI-researched prices for services without a rate card"
+            subtitle="Every AI-researched base price — review, override, pin"
             onClick={() => navigate("/market-rates")}
           />
           {/* adminCreateUser is OWNER-only server-side — invites are what keep

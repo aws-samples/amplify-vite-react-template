@@ -17,6 +17,7 @@ type Row = Record<string, unknown> & {
   rateKey: string;
   priceCents: number;
   active: boolean;
+  pinned?: boolean;
   ratesJson?: string;
   basis?: string;
   researchedAt?: string;
@@ -77,7 +78,7 @@ vi.mock("@anthropic-ai/sdk", () => ({
   },
 }));
 
-const { marketRate } = await import("./marketRate");
+const { marketRate, hoaBandFor } = await import("./marketRate");
 
 const GP_TEXT = `Local operators in the Ware MA area quote these numbers for a 2,000 sqft home.
 ONE_TIME_USD: 320
@@ -197,6 +198,53 @@ describe("cache semantics", () => {
     await gpCall();
 
     expect(messagesCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pinned rows — an office edit never expires or re-researches", () => {
+  it("a pinned row past its expiry still serves, without a research call", async () => {
+    await gpCall();
+    rows[0].pinned = true; // the office edited this sheet
+    rows[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    messagesCreate.mockClear();
+
+    const res = await gpCall();
+
+    expect(messagesCreate).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ priceCents: 31900, cached: true });
+    expect(rows).toHaveLength(1);
+  });
+
+  it("un-pinning an expired row hands it back to the research cycle", async () => {
+    await gpCall();
+    rows[0].pinned = true;
+    rows[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    await gpCall(); // pinned: served from cache
+    rows[0].pinned = false;
+    messagesCreate.mockClear();
+
+    const res = await gpCall();
+
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+    expect(rows).toHaveLength(2);
+    expect(res).toMatchObject({ cached: false });
+  });
+
+  it("a pinned row that is retired (inactive) no longer serves — retire still wins", async () => {
+    await gpCall();
+    rows[0].pinned = true;
+    rows[0].active = false;
+    messagesCreate.mockClear();
+
+    await gpCall();
+
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("fresh research is cached unpinned — only the office pins", async () => {
+    await gpCall();
+
+    expect(created[0].pinned).toBe(false);
   });
 });
 
@@ -363,6 +411,100 @@ describe("variable-cost floor — the only downside guardrail", () => {
     expect(String(created[0].basis)).toContain(
       "extra-nest price carries no variable-cost floor"
     );
+  });
+});
+
+describe("HOA — per-unit monthly rates by unit-count band", () => {
+  const HOA_TEXT = `Association common-area contracts in central MA, per unit per month.
+UNITS_1_10_MONTHLY_PER_UNIT_USD: 22
+UNITS_1_10_BIMONTHLY_PER_UNIT_USD: 18
+UNITS_1_10_QUARTERLY_PER_UNIT_USD: 15
+UNITS_11_25_MONTHLY_PER_UNIT_USD: 12
+UNITS_11_25_BIMONTHLY_PER_UNIT_USD: 10
+UNITS_11_25_QUARTERLY_PER_UNIT_USD: 8.50
+UNITS_26_50_MONTHLY_PER_UNIT_USD: 9
+UNITS_26_50_BIMONTHLY_PER_UNIT_USD: 7.50
+UNITS_26_50_QUARTERLY_PER_UNIT_USD: 6
+UNITS_51_100_MONTHLY_PER_UNIT_USD: 6.75
+UNITS_51_100_BIMONTHLY_PER_UNIT_USD: 5.50
+UNITS_51_100_QUARTERLY_PER_UNIT_USD: 4.50
+UNITS_101_PLUS_MONTHLY_PER_UNIT_USD: 4.25
+UNITS_101_PLUS_BIMONTHLY_PER_UNIT_USD: 3.50
+UNITS_101_PLUS_QUARTERLY_PER_UNIT_USD: 2.75`;
+
+  const hoaCall = () =>
+    marketRate({
+      anthropicKey: "test-key",
+      service: "HOA",
+      city: "Ware",
+      state: "MA",
+    });
+
+  it("stores every band × cadence on one sheet, with exact per-unit cents (no $X9 tidying)", async () => {
+    researchText = HOA_TEXT;
+
+    const res = await hoaCall();
+
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+    expect(created[0].rateKey).toBe("HOA#ware-ma");
+    const sheet = JSON.parse(String(created[0].ratesJson));
+    // Small per-unit dollars survive exactly — tidy($6.75) would be $9.
+    expect(sheet.hoaPerUnitMonthly.UNITS_51_100).toEqual({
+      MONTHLY: 675,
+      BIMONTHLY: 550,
+      QUARTERLY: 450,
+    });
+    expect(sheet.hoaPerUnitMonthly.UNITS_101_PLUS.QUARTERLY).toBe(275);
+    expect(sheet.oneTimeCents).toBeUndefined();
+    // The row's required priceCents column mirrors the smallest band's
+    // monthly per-unit rate (an HOA sheet has no one-time to mirror).
+    expect(created[0].priceCents).toBe(2200);
+    expect(res!.sheet.hoaPerUnitMonthly!.UNITS_1_10.MONTHLY).toBe(2200);
+  });
+
+  it("records that HOA rates carry no cost floor — no cost model exists", async () => {
+    researchText = HOA_TEXT;
+
+    await hoaCall();
+
+    expect(String(created[0].basis)).toContain(
+      "HOA per-unit rates carry no variable-cost floor"
+    );
+  });
+
+  it("a partial band grid is a junk sheet — every combination or nothing", async () => {
+    researchText = HOA_TEXT.split("\n").slice(0, -1).join("\n"); // drop 101+/quarterly
+
+    const res = await hoaCall();
+
+    expect(res).toBeNull();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("a cache hit serves the stored per-unit sheet without inventing a one-time", async () => {
+    researchText = HOA_TEXT;
+    await hoaCall();
+    messagesCreate.mockClear();
+
+    const res = await hoaCall();
+
+    expect(messagesCreate).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ cached: true });
+    expect(res!.sheet.oneTimeCents).toBeUndefined();
+    expect(res!.sheet.hoaPerUnitMonthly!.UNITS_26_50.BIMONTHLY).toBe(750);
+  });
+
+  it("bands mirror the retired association card's brackets", () => {
+    expect(hoaBandFor(1)).toBe("UNITS_1_10");
+    expect(hoaBandFor(10)).toBe("UNITS_1_10");
+    expect(hoaBandFor(11)).toBe("UNITS_11_25");
+    expect(hoaBandFor(25)).toBe("UNITS_11_25");
+    expect(hoaBandFor(26)).toBe("UNITS_26_50");
+    expect(hoaBandFor(50)).toBe("UNITS_26_50");
+    expect(hoaBandFor(60)).toBe("UNITS_51_100");
+    expect(hoaBandFor(100)).toBe("UNITS_51_100");
+    expect(hoaBandFor(101)).toBe("UNITS_101_PLUS");
+    expect(hoaBandFor(500)).toBe("UNITS_101_PLUS");
   });
 });
 

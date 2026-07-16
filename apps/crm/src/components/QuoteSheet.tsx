@@ -1,16 +1,30 @@
 import { useEffect, useState } from "react";
-import { api, opResult, unwrap, type Customer, type PlanTemplate } from "../lib/api";
 import {
+  createQuoteMutation,
+  opResult,
+  api,
+  unwrap,
+  type Customer,
+} from "../lib/api";
+import {
+  DEFAULT_AGREEMENT_BODY,
+  DEFAULT_AGREEMENT_TITLE,
   FREQUENCY_LABEL,
   fillAgreementTemplate,
 } from "../lib/agreementTemplate";
 import { money } from "../lib/format";
 import { Button, ErrorNote, Field } from "../ui/kit";
+import { PlanPricingFields, usePlanPricing } from "./PlanPricing";
 
 /**
- * Quote a lead: pick a plan template, optionally adjust the price, and send
- * the template's agreement for signature. The quote is stored on the lead;
- * signing converts it (lead → ACTIVE customer with a ServicePlan) via the
+ * Quote a lead: pick service + frequency, and the price prefills from the
+ * cached AI market-rate sheet for the customer's area — the same sheet the
+ * website funnel quotes from, so the CRM and the site can never disagree.
+ * The AI rate rides along as listPriceCents; charging anything else needs a
+ * reason, recorded on the quote with your name (the deviation guard is
+ * server-side in createQuote, which re-reads the live sheets — there is no
+ * quoting without a cached rate, only "Price a lead" to research one). The
+ * agreement comes from the code template. Signing converts the lead via the
  * agreement-public backend.
  */
 export default function QuoteSheet({
@@ -20,8 +34,7 @@ export default function QuoteSheet({
   customer: Customer;
   onDone: () => Promise<void>;
 }) {
-  const [templates, setTemplates] = useState<PlanTemplate[] | null>(null);
-  const [templateId, setTemplateId] = useState("");
+  const pricing = usePlanPricing(customer);
   const [price, setPrice] = useState("");
   const [notes, setNotes] = useState("");
   const [overriding, setOverriding] = useState(false);
@@ -29,44 +42,27 @@ export default function QuoteSheet({
   const [busy, setBusy] = useState<null | "draft" | "send">(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    api()
-      .models.PlanTemplate.list({ limit: 200 })
-      .then((res) => {
-        const active = unwrap(res)
-          .filter((t) => t.active)
-          .sort(
-            (a, b) =>
-              (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
-              a.name.localeCompare(b.name)
-          );
-        setTemplates(active);
-        if (active[0]) {
-          setTemplateId(active[0].id);
-          setPrice(
-            active[0].priceCents != null
-              ? (active[0].priceCents / 100).toString()
-              : ""
-          );
-        }
-      })
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Could not load templates")
-      );
-  }, []);
+  const listCents = pricing.prefill?.monthlyCents ?? null;
 
-  const template = templates?.find((t) => t.id === templateId) ?? null;
-  // A template with no list price is priced by the engine from the rate card.
-  // Typing a number from memory beside it is the bypass this screen used to be.
-  const enginePriced = template != null && template.priceCents == null;
-  const listCents = template?.priceCents ?? null;
+  // The prefill is the price. Editing it is the exception path (overriding),
+  // so the field tracks the AI rate until the office explicitly steps off it.
+  useEffect(() => {
+    if (!overriding) {
+      setPrice(listCents != null ? (listCents / 100).toString() : "");
+    }
+  }, [listCents, overriding]);
+
   const cents = Math.round(parseFloat(price) * 100);
-  const deviates =
-    listCents != null && Number.isFinite(cents) && cents !== listCents;
+  const deviates = Number.isFinite(cents) && cents !== listCents;
+  const needsReason = deviates && overrideReason.trim() === "";
+  // The server's guard verifies listPriceCents against the live sheets: no
+  // cached rate means no quote from this screen, full stop. Price a lead
+  // researches one; Market rates lets the office write one.
+  const noSheet = listCents == null;
 
   const go = async (sendNow: boolean) => {
-    if (!template) {
-      setError("Pick a plan template");
+    if (listCents == null) {
+      setError("No cached AI rate to quote from");
       return;
     }
     if (!Number.isFinite(cents) || cents <= 0) {
@@ -81,11 +77,19 @@ export default function QuoteSheet({
     setError(null);
     try {
       const quote = opResult<{ quoteId?: string }>(
-        await api().mutations.quoteFromTemplate({
+        await createQuoteMutation({
           customerId: customer.id,
-          planTemplateId: template.id,
+          planName: pricing.planName,
+          serviceFrequency: pricing.frequency,
           priceCents: cents,
+          listPriceCents: listCents,
+          initialFeeCents: pricing.prefill?.initialFeeCents ?? undefined,
           priceOverrideReason: deviates ? overrideReason.trim() : undefined,
+          // HOA sheet rates are per-unit — the server verifies per-unit × units.
+          units:
+            pricing.service === "HOA" && pricing.sizeCount != null
+              ? pricing.sizeCount
+              : undefined,
           notes: notes.trim() || undefined,
         })
       );
@@ -99,24 +103,22 @@ export default function QuoteSheet({
       ]
         .filter(Boolean)
         .join(", ");
-      const bodyText = fillAgreementTemplate(template.agreementBody, {
+      let bodyText = fillAgreementTemplate(DEFAULT_AGREEMENT_BODY, {
         customerName: customer.displayName,
-        planName: template.name,
+        planName: pricing.planName,
         price: money(cents),
-        frequency:
-          FREQUENCY_LABEL[template.serviceFrequency ?? ""] ??
-          String(template.serviceFrequency ?? "").toLowerCase(),
+        frequency: FREQUENCY_LABEL[pricing.frequency] ?? "as scheduled",
         address: address || "the Customer's service address",
       });
+      if (pricing.prefill?.initialFeeCents != null) {
+        bodyText += `\n\nINITIAL SERVICE VISIT. The first service visit is billed once at ${money(pricing.prefill.initialFeeCents)} and includes the full inspection, interior flush-out, exterior barrier treatment, and web/nest removal.`;
+      }
       const agreement = opResult<{ agreementId?: string }>(
         await api().mutations.authorAgreement({
           customerId: customer.id,
           quoteId: quote.quoteId,
-          title: template.agreementTitle,
+          title: DEFAULT_AGREEMENT_TITLE,
           bodyText,
-          imageKeys: (template.imageKeys ?? []).filter(
-            (k): k is string => typeof k === "string"
-          ),
         })
       );
       if (!agreement?.agreementId) {
@@ -142,45 +144,14 @@ export default function QuoteSheet({
     }
   };
 
-  if (templates === null) return <p className="muted">Loading templates…</p>;
-  if (templates.length === 0) {
-    return (
-      <p className="muted">
-        No active plan templates yet — create one under More → Plan templates
-        first.
-      </p>
-    );
-  }
-
   return (
     <div className="form-grid">
-      <Field label="Plan">
-        <select
-          value={templateId}
-          onChange={(e) => {
-            setTemplateId(e.target.value);
-            const t = templates.find((x) => x.id === e.target.value);
-            if (t) setPrice(t.priceCents != null ? (t.priceCents / 100).toString() : "");
-          }}
-        >
-          {templates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}{t.priceCents != null ? ` — ${money(t.priceCents)}/mo` : " — AI-priced"}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {template?.description ? (
-        <p className="muted small">{template.description}</p>
-      ) : null}
-      {enginePriced ? (
-        // Never render an empty price box. This template's price comes from the
-        // rate card; an empty field beside it invites a number from memory,
-        // which is the whole thing the pricing engine exists to prevent.
-        <p className="muted small" style={{ margin: 0 }}>
-          <strong>{template?.name}</strong> is priced by the rate card, not by
-          hand. Close this and use <strong>⚡ Price a lead</strong> so the engine
-          sets the number.
+      <PlanPricingFields p={pricing} />
+      {noSheet ? (
+        <p className="muted small">
+          There is nothing to quote from until a rate is cached: use{" "}
+          <strong>⚡ Price a lead</strong> so the engine researches this
+          market, or write the sheet yourself under More → Market rates.
         </p>
       ) : (
         <>
@@ -190,14 +161,15 @@ export default function QuoteSheet({
                 inputMode="decimal"
                 value={price}
                 onChange={(e) => setPrice(e.target.value.replace(/[^\d.]/g, ""))}
+                placeholder="149.00"
               />
             ) : (
-              <input value={listCents != null ? money(listCents) : ""} readOnly />
+              <input value={money(listCents)} readOnly />
             )}
           </Field>
           {overriding ? (
             <Field
-              label="Why is this not the list price?"
+              label="Why is this not the AI rate?"
               hint="Recorded on the quote with your name against it"
             >
               <input
@@ -207,12 +179,8 @@ export default function QuoteSheet({
               />
             </Field>
           ) : (
-            <Button
-              small
-              variant="ghost"
-              onClick={() => setOverriding(true)}
-            >
-              Charge something other than {listCents != null ? money(listCents) : "the list price"}
+            <Button small variant="ghost" onClick={() => setOverriding(true)}>
+              Charge something other than {money(listCents)}
             </Button>
           )}
         </>
@@ -225,14 +193,14 @@ export default function QuoteSheet({
         <Button
           variant="ghost"
           loading={busy === "draft"}
-          disabled={enginePriced || (deviates && !overrideReason.trim())}
+          disabled={noSheet || needsReason}
           onClick={() => void go(false)}
         >
           Save draft
         </Button>
         <Button
           loading={busy === "send"}
-          disabled={enginePriced || (deviates && !overrideReason.trim())}
+          disabled={noSheet || needsReason}
           onClick={() => void go(true)}
         >
           Quote &amp; send agreement

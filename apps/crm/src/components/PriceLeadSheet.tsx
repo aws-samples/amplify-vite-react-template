@@ -8,6 +8,8 @@ import {
   type LeadPricingRun,
 } from "../lib/api";
 import {
+  DEFAULT_AGREEMENT_BODY,
+  DEFAULT_AGREEMENT_TITLE,
   FREQUENCY_LABEL,
   fillAgreementTemplate,
 } from "../lib/agreementTemplate";
@@ -180,25 +182,20 @@ export default function PriceLeadSheet({
         | "MONTHLY"
         | "BIMONTHLY"
         | "QUARTERLY";
-      // A matching active template supplies agreement text + pest photos.
-      // Its frequency NEVER overrides the priced frequency.
-      const templates = unwrap(
-        await api().models.PlanTemplate.list({ limit: 200 })
-      ).filter((t) => t.active);
-      const template = templates.find((t) => t.serviceFrequency === freq) ?? null;
-      if (!template) {
-        throw new Error(
-          `No active ${freq.toLowerCase()} plan template — create one under More → Plan templates first, so the agreement has real terms.`
-        );
-      }
+      const planName = run.service ?? "General pest protection";
 
       // DRAFT first; flips to SENT only after the signing email goes out.
+      // A direct model create, NOT createQuote: that mutation's deviation
+      // guard vouches for raw sheet monthlies, and this price is the
+      // engine's own output (sheet + deterministic zone overlay) — already
+      // checked, logged on the LeadPricingRun, and never typed by a human.
+      // listPriceCents = priceCents records that nothing deviated.
       const quote = unwrap(
         await api().models.Quote.create({
           customerId: customer.id,
-          planTemplateId: template.id,
-          planName: template.name,
+          planName,
           priceCents: run.monthlyPriceCents,
+          listPriceCents: run.monthlyPriceCents,
           initialFeeCents: run.initialFeeCents ?? undefined,
           serviceFrequency: freq,
           status: "DRAFT",
@@ -217,9 +214,9 @@ export default function PriceLeadSheet({
       ]
         .filter(Boolean)
         .join(", ");
-      let bodyText = fillAgreementTemplate(template.agreementBody, {
+      let bodyText = fillAgreementTemplate(DEFAULT_AGREEMENT_BODY, {
         customerName: customer.displayName,
-        planName: template.name,
+        planName,
         price: money(run.monthlyPriceCents),
         frequency: FREQUENCY_LABEL[freq] ?? "as scheduled",
         address: address || "the Customer's service address",
@@ -231,11 +228,8 @@ export default function PriceLeadSheet({
         await api().mutations.authorAgreement({
           customerId: customer.id,
           quoteId: quote.id,
-          title: template.agreementTitle,
+          title: DEFAULT_AGREEMENT_TITLE,
           bodyText,
-          imageKeys: (template.imageKeys ?? []).filter(
-            (k): k is string => typeof k === "string"
-          ),
         })
       );
       if (!agreement?.agreementId) {

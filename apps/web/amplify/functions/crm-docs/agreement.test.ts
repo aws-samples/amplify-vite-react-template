@@ -12,9 +12,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 type Agreement = Record<string, unknown> & { id: string; status: string };
+type RateRow = {
+  id: string;
+  areaKey: string;
+  active: boolean;
+  pinned?: boolean;
+  expiresAt?: string;
+  ratesJson?: string;
+};
 
 let agreements: Agreement[] = [];
-let templates: { id: string; name: string; priceCents: number | null; serviceFrequency: string }[] = [];
+let marketRates: RateRow[] = [];
 const quotesCreated: Record<string, unknown>[] = [];
 const created: Record<string, unknown>[] = [];
 let createResult: { data: unknown; errors?: { message: string }[] } = {
@@ -40,12 +48,24 @@ const fakeDataClient = {
     },
     Customer: {
       get: async ({ id }: { id: string }) => ({
-        data: { id, displayName: "Dana", groupId: null },
+        data: {
+          id,
+          displayName: "Dana",
+          groupId: null,
+          serviceCity: "Ware",
+          serviceState: "MA",
+        },
       }),
     },
-    PlanTemplate: {
-      get: async ({ id }: { id: string }) => ({
-        data: templates.find((t) => t.id === id) ?? null,
+    MarketRate: {
+      list: async ({
+        filter,
+      }: {
+        filter?: { areaKey?: { eq?: string } };
+      }) => ({
+        data: marketRates.filter(
+          (r) => !filter?.areaKey?.eq || r.areaKey === filter.areaKey.eq
+        ),
       }),
     },
     Quote: {
@@ -77,13 +97,27 @@ const call = (
     identity: { sub: "sub-office", groups, claims: { email: "csr@x.com" } },
   } as never);
 
+const GP_SHEET = JSON.stringify({
+  oneTimeCents: 31900,
+  plans: {
+    MONTHLY: { monthlyCents: 9900, initialFeeCents: 10900 },
+    BIMONTHLY: { monthlyCents: 5900, initialFeeCents: 10900 },
+    QUARTERLY: { monthlyCents: 7500, initialFeeCents: 9900 },
+  },
+});
+
 beforeEach(() => {
   agreements = [];
   created.length = 0;
   quotesCreated.length = 0;
-  templates = [
-    { id: "t_list", name: "Residential monthly", priceCents: 9900, serviceFrequency: "MONTHLY" },
-    { id: "t_ai", name: "General Pest Control", priceCents: null, serviceFrequency: "QUARTERLY" },
+  marketRates = [
+    {
+      id: "mr1",
+      areaKey: "ware-ma",
+      active: true,
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      ratesJson: GP_SHEET,
+    },
   ];
   createResult = { data: { id: "ag_1", status: "DRAFT" } };
 });
@@ -141,13 +175,12 @@ describe("createAgreement", () => {
   });
 
   it("refuses an unknown customer", async () => {
+    const realGet = fakeDataClient.models.Customer.get;
     fakeDataClient.models.Customer.get = async () => ({ data: null }) as never;
     await expect(
       call("authorAgreement", { customerId: "nope", title: "T", bodyText: "B" })
     ).rejects.toThrow(/not found/i);
-    fakeDataClient.models.Customer.get = async ({ id }: { id: string }) => ({
-      data: { id, displayName: "Dana", groupId: null },
-    });
+    fakeDataClient.models.Customer.get = realGet;
   });
 
   it("refuses a technician", async () => {
@@ -201,18 +234,124 @@ describe("voidAgreement", () => {
   });
 });
 
-describe("createQuote price guard", () => {
+describe("createQuote — priced against the live AI sheet", () => {
   const quote = (args: Record<string, unknown>) =>
-    call("quoteFromTemplate", { customerId: "c1", planTemplateId: "t_list", ...args });
+    call("createQuote", {
+      customerId: "c1",
+      planName: "General Pest Control — monthly",
+      serviceFrequency: "MONTHLY",
+      priceCents: 9900,
+      listPriceCents: 9900,
+      ...args,
+    });
 
-  it("quotes at the template's list price without ceremony", async () => {
-    await quote({ priceCents: 9900 });
+  it("quotes at the sheet's live rate without ceremony — no template anywhere", async () => {
+    await quote({});
 
     expect(quotesCreated[0]).toMatchObject({
+      planName: "General Pest Control — monthly",
+      serviceFrequency: "MONTHLY",
       priceCents: 9900,
       listPriceCents: 9900,
       status: "DRAFT",
     });
+    expect(quotesCreated[0].planTemplateId).toBeUndefined();
+  });
+
+  it("an HOA sheet vouches for per-unit × units when the unit count rides along", async () => {
+    marketRates.push({
+      id: "mr-hoa",
+      areaKey: "ware-ma",
+      active: true,
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      ratesJson: JSON.stringify({
+        hoaPerUnitMonthly: {
+          UNITS_51_100: { MONTHLY: 675, BIMONTHLY: 550, QUARTERLY: 450 },
+        },
+      }),
+    });
+
+    // 60 units × $6.75/unit = $405/mo.
+    await quote({
+      planName: "HOA common-area plan",
+      priceCents: 40500,
+      listPriceCents: 40500,
+      units: 60,
+    });
+
+    expect(quotesCreated[0]).toMatchObject({
+      planName: "HOA common-area plan",
+      priceCents: 40500,
+      listPriceCents: 40500,
+    });
+  });
+
+  it("an HOA total no live sheet's per-unit math produces is refused", async () => {
+    marketRates.push({
+      id: "mr-hoa",
+      areaKey: "ware-ma",
+      active: true,
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      ratesJson: JSON.stringify({
+        hoaPerUnitMonthly: {
+          UNITS_51_100: { MONTHLY: 675, BIMONTHLY: 550, QUARTERLY: 450 },
+        },
+      }),
+    });
+
+    await expect(
+      quote({
+        planName: "HOA common-area plan",
+        priceCents: 41500,
+        listPriceCents: 41500, // not 60 × any live per-unit rate
+        units: 60,
+      })
+    ).rejects.toThrow(/rate has moved/i);
+    expect(quotesCreated).toHaveLength(0);
+  });
+
+  it("refuses a stale listPriceCents the live sheet no longer carries", async () => {
+    // The screen showed $99/mo; the sheet re-researched to $89 since.
+    marketRates[0].ratesJson = GP_SHEET.replace('"monthlyCents":9900', '"monthlyCents":8900');
+
+    await expect(quote({})).rejects.toThrow(/rate has moved.*reload/is);
+    expect(quotesCreated).toHaveLength(0);
+  });
+
+  it("refuses to quote an area with no live sheet at all", async () => {
+    marketRates = [];
+
+    await expect(quote({})).rejects.toThrow(/no live ai rate sheet/i);
+  });
+
+  it("an expired unpinned sheet cannot vouch for a price", async () => {
+    marketRates[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+
+    await expect(quote({})).rejects.toThrow(/no live ai rate sheet/i);
+  });
+
+  it("tolerates the office-override row: a pinned sheet never expires", async () => {
+    // The office edited the monthly rate to $95 and pinned the row.
+    marketRates[0] = {
+      ...marketRates[0],
+      pinned: true,
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+      ratesJson: GP_SHEET.replace('"monthlyCents":9900', '"monthlyCents":9500'),
+    };
+
+    await quote({ priceCents: 9500, listPriceCents: 9500 });
+
+    expect(quotesCreated[0]).toMatchObject({
+      priceCents: 9500,
+      listPriceCents: 9500,
+    });
+  });
+
+  it("checks the cadence the quote is for, not just any number on the sheet", async () => {
+    // $75 is the QUARTERLY rate — it can't vouch for a MONTHLY quote.
+    await expect(quote({ listPriceCents: 7500, priceCents: 7500 })).rejects.toThrow(
+      /rate has moved/i
+    );
   });
 
   it("refuses a price that differs from the list price with no reason", async () => {
@@ -227,20 +366,13 @@ describe("createQuote price guard", () => {
     );
   });
 
-  it("allows a deviation with a reason, and records it", async () => {
+  it("allows a deviation with a reason, and records it with the actor", async () => {
     await quote({ priceCents: 8900, priceOverrideReason: "Matched a competitor" });
 
     expect(quotesCreated[0]).toMatchObject({
       priceCents: 8900,
       listPriceCents: 9900,
       priceOverrideReason: "Matched a competitor",
-    });
-  });
-
-  it("records who set an overridden price", async () => {
-    await quote({ priceCents: 8900, priceOverrideReason: "Matched a competitor" });
-
-    expect(quotesCreated[0]).toMatchObject({
       quotedBy: "sub-office",
       quotedByEmail: "csr@x.com",
     });
@@ -252,33 +384,42 @@ describe("createQuote price guard", () => {
     ).rejects.toThrow(/say why/i);
   });
 
-  it("refuses to price an engine-priced plan by hand", async () => {
-    // The flagship product. Its box used to prefill empty, so the standard path
-    // was to type a number from memory.
-    await expect(
-      call("quoteFromTemplate", {
-        customerId: "c1",
-        planTemplateId: "t_ai",
-        priceCents: 12000,
-      })
-    ).rejects.toThrow(/priced by the pricing engine/i);
-    expect(quotesCreated).toHaveLength(0);
-  });
-
-  it("refuses a nonsense price", async () => {
+  it("refuses a nonsense price or a missing sheet rate", async () => {
     await expect(quote({ priceCents: 0 })).rejects.toThrow(/valid monthly price/i);
     await expect(quote({ priceCents: -5000 })).rejects.toThrow(/valid monthly price/i);
+    await expect(quote({ listPriceCents: 0 })).rejects.toThrow(/missing its ai sheet rate/i);
+  });
+
+  it("refuses an unknown frequency", async () => {
+    await expect(quote({ serviceFrequency: "WEEKLY" })).rejects.toThrow(
+      /unknown service frequency/i
+    );
+  });
+
+  it("refuses a customer with no service area on file", async () => {
+    const realGet = fakeDataClient.models.Customer.get;
+    fakeDataClient.models.Customer.get = (async ({ id }: { id: string }) => ({
+      data: { id, displayName: "Dana", groupId: null, serviceCity: null, serviceState: null },
+    })) as never;
+
+    await expect(quote({})).rejects.toThrow(/service city/i);
+
+    fakeDataClient.models.Customer.get = realGet;
   });
 
   it("refuses a technician", async () => {
     await expect(
-      call("quoteFromTemplate", { customerId: "c1", planTemplateId: "t_list", priceCents: 9900 }, ["TECH"])
+      call(
+        "createQuote",
+        {
+          customerId: "c1",
+          planName: "P",
+          serviceFrequency: "MONTHLY",
+          priceCents: 9900,
+          listPriceCents: 9900,
+        },
+        ["TECH"]
+      )
     ).rejects.toThrow(/office role required/i);
-  });
-
-  it("refuses an unknown template", async () => {
-    await expect(
-      call("quoteFromTemplate", { customerId: "c1", planTemplateId: "nope", priceCents: 9900 })
-    ).rejects.toThrow(/not found/i);
   });
 });

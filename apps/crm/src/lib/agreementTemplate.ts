@@ -1,8 +1,11 @@
 /**
- * Default agreement text for new plan templates, and the placeholder
- * substitution used when a quote turns a template's agreement into the
- * customer-specific document that gets sent for signature.
+ * THE agreement template. Every quote's agreement body is built from this
+ * code template plus placeholder substitution — plan templates (and their
+ * free-textarea agreement bodies) are gone, so what a customer signs is
+ * always this text with the quote's facts filled in.
  */
+
+export const DEFAULT_AGREEMENT_TITLE = "Pest Control Service Agreement";
 
 export const DEFAULT_AGREEMENT_BODY = `SERVICE AGREEMENT
 

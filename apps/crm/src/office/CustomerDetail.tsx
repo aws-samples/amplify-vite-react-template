@@ -9,7 +9,6 @@ import {
   type CustomerGroup,
   type Invoice,
   type Job,
-  type PlanTemplate,
   type Quote,
   type ServicePlan,
   type ServiceReport,
@@ -45,6 +44,7 @@ import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import DocButton from "../components/DocButton";
 import QuoteSheet from "../components/QuoteSheet";
 import PriceLeadSheet from "../components/PriceLeadSheet";
+import { PlanPricingFields, usePlanPricing } from "../components/PlanPricing";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
 
@@ -1082,6 +1082,7 @@ export default function CustomerDetail() {
           </p>
         ) : null}
         <PlanForm
+          customer={customer}
           onSubmit={async (v) => {
             unwrap(
               await api().models.ServicePlan.create({
@@ -1671,80 +1672,48 @@ function RecordPaymentSheet({
 /* ---------- Sub-forms ---------- */
 
 function PlanForm({
+  customer,
   onSubmit,
 }: {
+  customer: Customer;
   onSubmit: (v: {
     planName: string;
     priceCents: number;
     serviceFrequency: "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
   }) => Promise<void>;
 }) {
-  const [templates, setTemplates] = useState<PlanTemplate[] | null>(null);
-  const [templateId, setTemplateId] = useState("");
+  const pricing = usePlanPricing(customer);
   const [price, setPrice] = useState("");
+  const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The cached AI rate is the anchor; the field stays free-editable (this
+  // creates a plan directly, no quote — the office is the override here).
+  const listCents = pricing.prefill?.monthlyCents ?? null;
   useEffect(() => {
-    api()
-      .models.PlanTemplate.list({ limit: 200 })
-      .then((res) => {
-        const active = unwrap(res)
-          .filter((t) => t.active)
-          .sort(
-            (a, b) =>
-              (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
-              a.name.localeCompare(b.name)
-          );
-        setTemplates(active);
-        if (active[0]) {
-          setTemplateId(active[0].id);
-          setPrice(
-            active[0].priceCents != null
-              ? (active[0].priceCents / 100).toString()
-              : ""
-          );
-        }
-      })
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Could not load templates")
-      );
-  }, []);
-
-  if (templates === null) return <p className="muted">Loading plan templates…</p>;
-  if (templates.length === 0) {
-    return (
-      <p className="muted">
-        No active plan templates — create one under More → Plan templates
-        first. Plans are always created from a template.
-      </p>
-    );
-  }
-  const template = templates.find((t) => t.id === templateId) ?? null;
+    if (!touched) setPrice(listCents != null ? (listCents / 100).toString() : "");
+  }, [listCents, touched]);
 
   return (
     <div className="form-grid">
-      <Field label="Plan">
-        <select
-          value={templateId}
+      <PlanPricingFields p={pricing} />
+      <Field
+        label="Monthly price ($)"
+        hint={
+          listCents != null
+            ? "Prefilled from the cached AI market rate — adjust if needed"
+            : "No cached AI rate to prefill — this is a hand price"
+        }
+      >
+        <input
+          inputMode="decimal"
+          value={price}
           onChange={(e) => {
-            setTemplateId(e.target.value);
-            const t = templates.find((x) => x.id === e.target.value);
-            if (t) setPrice(t.priceCents != null ? (t.priceCents / 100).toString() : "");
+            setTouched(true);
+            setPrice(e.target.value.replace(/[^\d.]/g, ""));
           }}
-        >
-          {templates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}{t.priceCents != null ? ` — ${money(t.priceCents)}/mo` : ""} · {t.serviceFrequency?.toLowerCase()}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {template?.description ? (
-        <p className="muted small">{template.description}</p>
-      ) : null}
-      <Field label="Monthly price ($)" hint="Prefilled from the template — adjust if needed">
-        <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
+        />
       </Field>
       <ErrorNote error={error} />
       <Button
@@ -1752,16 +1721,15 @@ function PlanForm({
         loading={busy}
         onClick={() => {
           const cents = Math.round(parseFloat(price) * 100);
-          if (!template || !Number.isFinite(cents) || cents <= 0) {
-            setError("Pick a plan and enter a valid price");
+          if (!Number.isFinite(cents) || cents <= 0) {
+            setError("Enter a valid monthly price");
             return;
           }
           setBusy(true);
           onSubmit({
-            planName: template.name,
+            planName: pricing.planName,
             priceCents: cents,
-            serviceFrequency: (template.serviceFrequency ??
-              "MONTHLY") as "MONTHLY" | "BIMONTHLY" | "QUARTERLY",
+            serviceFrequency: pricing.frequency,
           }).catch((err) => {
             setError(err.message ?? "Could not create plan");
             setBusy(false);
@@ -2017,6 +1985,7 @@ function ConvertLead({
       />
       {mode === "PLAN" ? (
         <PlanForm
+          customer={customer}
           onSubmit={async (v) => {
             unwrap(
               await api().models.ServicePlan.create({
