@@ -29,7 +29,19 @@ type Booking = {
 let booking: Booking;
 const updates: Partial<Booking>[] = [];
 
-const fakeDataClient = {
+/** What Amplify's update actually resolves: data OR errors, and it can throw. */
+type UpdateResult = { data: Booking | null; errors?: { message: string }[] };
+type UpdateFn = (patch: Partial<Booking> & { id: string }) => Promise<UpdateResult>;
+
+const fakeDataClient: {
+  models: {
+    BookingRequest: {
+      listBookingRequestByCancelToken: () => Promise<{ data: Booking[] }>;
+      update: UpdateFn;
+    };
+    Job: { update: () => Promise<{ data: null }> };
+  };
+} = {
   models: {
     BookingRequest: {
       listBookingRequestByCancelToken: async () => ({ data: [booking] }),
@@ -44,11 +56,16 @@ const fakeDataClient = {
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const officeEmails: string[] = [];
+const customerEmails: string[] = [];
+const officeEmails: { subject: string; bodyHtml: string }[] = [];
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
   sendEmail: async (o: { subject: string }) => {
-    officeEmails.push(o.subject);
+    customerEmails.push(o.subject);
+    return true;
+  },
+  notifyOffice: async (o: { subject: string; bodyHtml: string }) => {
+    officeEmails.push(o);
     return true;
   },
 }));
@@ -92,13 +109,21 @@ const call = async (body: unknown) => {
 const freezeEastern = (isoDate: string) =>
   vi.setSystemTime(new Date(`${isoDate}T12:00:00-04:00`));
 
+const workingUpdate: UpdateFn = async (patch) => {
+  updates.push(patch);
+  booking = { ...booking, ...patch };
+  return { data: booking };
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
+  fakeDataClient.models.BookingRequest.update = workingUpdate;
   // backend.ts injects this into every Lambda that emails; without it the
   // office alert has nowhere to go.
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   updates.length = 0;
   officeEmails.length = 0;
+  customerEmails.length = 0;
   cancelPlanBilling.mockClear();
   refundsCreate.mockClear();
   cancelPlanBilling.mockImplementation(async () => ({
@@ -186,6 +211,93 @@ describe("cancellation refund window", () => {
   });
 });
 
+describe("when the cancellation date cannot be recorded", () => {
+  // The write that protects the refund is itself a write that can fail. Left
+  // unguarded it fell through to the generic 500 "please try again" — no date,
+  // no alert, and the day-three retry loses the refund.
+  // Fail ONLY the date write — a conditional-check or throttle on that call —
+  // and let the rest of the flow work. A total DynamoDB outage is a different
+  // scenario: then the cancellation genuinely cannot complete and a 500 is honest.
+  const breakDateWrite = () => {
+    fakeDataClient.models.BookingRequest.update = async (patch) =>
+      patch.cancelRequestedOn
+        ? { data: null, errors: [{ message: "conditional check failed" }] }
+        : workingUpdate(patch);
+  };
+
+  // Amplify resolves most errors, but a network fault throws. Both shapes have
+  // to be handled: an unguarded throw here reaches the outer catch and returns
+  // the generic "please try again", losing the date and the alert with it.
+  const throwOnDateWrite = () => {
+    fakeDataClient.models.BookingRequest.update = async (patch) => {
+      if (patch.cancelRequestedOn) throw new Error("DynamoDB unreachable");
+      return workingUpdate(patch);
+    };
+  };
+
+  it("still cancels — today's refund decision does not depend on the write", async () => {
+    freezeEastern("2026-07-16");
+    breakDateWrite();
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ canceled: true, refunded: true });
+  });
+
+  it("still cancels when the write throws rather than resolving an error", async () => {
+    freezeEastern("2026-07-16");
+    throwOnDateWrite();
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ canceled: true, refunded: true });
+    expect(refundsCreate).toHaveBeenCalledOnce();
+  });
+
+  it("a throwing write never becomes the generic 'please try again'", async () => {
+    freezeEastern("2026-07-16");
+    throwOnDateWrite();
+    cancelPlanBilling.mockImplementation(async () => {
+      throw new Error("stripe unreachable");
+    });
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).not.toMatch(/try again/i);
+    expect(officeEmails.some((e) => e.subject.includes("ACTION REQUIRED"))).toBe(true);
+  });
+
+  it("does not fall through to the generic 'please try again'", async () => {
+    freezeEastern("2026-07-16");
+    breakDateWrite();
+    cancelPlanBilling.mockImplementation(async () => {
+      throw new Error("stripe unreachable");
+    });
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).not.toMatch(/try again/i);
+  });
+
+  it("tells the office the date was not saved, since the email is then the only record", async () => {
+    freezeEastern("2026-07-16");
+    breakDateWrite();
+    cancelPlanBilling.mockImplementation(async () => {
+      throw new Error("stripe unreachable");
+    });
+
+    await call({ token: "tok", confirm: true });
+
+    expect(officeEmails).toHaveLength(1);
+    expect(officeEmails[0].bodyHtml).toContain("not saved on the booking");
+    expect(officeEmails[0].bodyHtml).toContain("2026-07-16");
+  });
+});
+
 describe("cancellation failure", () => {
   beforeEach(() => {
     cancelPlanBilling.mockImplementation(async () => {
@@ -217,7 +329,7 @@ describe("cancellation failure", () => {
 
     await call({ token: "tok", confirm: true });
 
-    expect(officeEmails.some((s) => s.includes("ACTION REQUIRED"))).toBe(true);
+    expect(officeEmails.some((e) => e.subject.includes("ACTION REQUIRED"))).toBe(true);
   });
 
   it("does not mark the booking canceled or tell the customer it worked", async () => {
@@ -226,7 +338,7 @@ describe("cancellation failure", () => {
     await call({ token: "tok", confirm: true });
 
     expect(booking.status).toBe("BOOKED");
-    expect(officeEmails).not.toContain("Your BuzzKill appointment is canceled");
+    expect(customerEmails).not.toContain("Your BuzzKill appointment is canceled");
   });
 
   it("never refunds a customer whose plan is still billing", async () => {

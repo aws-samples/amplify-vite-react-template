@@ -32,16 +32,13 @@ vi.mock("../shared/dataClient", () => ({
   dataClient: async () => fakeDataClient,
 }));
 
-const sesSends: unknown[] = [];
-vi.mock("@aws-sdk/client-ses", () => ({
-  SESClient: class {
-    async send(cmd: unknown) {
-      sesSends.push(cmd);
-      return {};
-    }
-  },
-  SendEmailCommand: class {
-    constructor(public input: unknown) {}
+const officeEmails: { subject: string; bodyHtml: string }[] = [];
+vi.mock("../shared/email", () => ({
+  emailShell: (h: string, b: string) => `${h}${b}`,
+  sendEmail: async () => true,
+  notifyOffice: async (opts: { subject: string; bodyHtml: string }) => {
+    officeEmails.push(opts);
+    return true;
   },
 }));
 
@@ -77,7 +74,7 @@ const lpCallPayload = {
 
 beforeEach(() => {
   created.length = 0;
-  sesSends.length = 0;
+  officeEmails.length = 0;
   createResult = { data: { id: "cust_1" } };
 });
 
@@ -160,10 +157,9 @@ describe("lead-intake", () => {
 
     await post(lpCallPayload);
 
-    expect(sesSends).toHaveLength(1);
-    const sent = JSON.stringify(sesSends[0]);
-    expect(sent).toContain("ACTION REQUIRED");
-    expect(sent).toContain("Dana");
+    expect(officeEmails).toHaveLength(1);
+    expect(officeEmails[0].subject).toContain("ACTION REQUIRED");
+    expect(officeEmails[0].bodyHtml).toContain("Dana");
   });
 
   it("captures first-touch attribution against the lead", async () => {

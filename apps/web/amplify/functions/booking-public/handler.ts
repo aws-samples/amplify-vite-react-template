@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
-import { emailShell, sendEmail } from "../shared/email";
+import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
   priceResidential,
@@ -343,12 +343,15 @@ async function quote(input: QuoteInput, sourceIp: string) {
 
   const contact = async (message: string, extra: Record<string, unknown> = {}) => {
     const booking = await makeBooking({ status: "CONTACT", ...extra });
-    await notifyOffice(
-      "Website lead needs a call",
-      `<p><strong>${name}</strong> (${email}${input.phone ? `, ${input.phone}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${address}.</p>
+    await notifyOffice({
+      subject: "Website lead needs a call",
+      heading: "Website lead needs a call",
+      template: "ops-booking-contact",
+      relatedId: booking.id,
+      bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}.</p>
        ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
-       <p>Booking request ${booking.id} — call within the hour per the website promise.</p>`
-    );
+       <p>Booking request ${booking.id} — call within the hour per the website promise.</p>`,
+    });
     return { bookingId: booking.id, decision: "CONTACT", message };
   };
 
@@ -693,12 +696,38 @@ async function cancel(body: Record<string, unknown>) {
   // Stamp the attempt before anything that can fail. This is what makes a
   // retry safe for the customer: if Stripe is down today and they succeed
   // tomorrow, `judgedOn` above still reads today and they keep their refund.
-  if (!booking.cancelRequestedOn) {
-    await client.models.BookingRequest.update({
-      id: booking.id,
-      cancelRequestedOn: todayEt,
-    });
+  //
+  // The write is guarded because it is the thing that protects the refund, and
+  // an unguarded failure here would fall through to the generic "please try
+  // again" — no date recorded, nobody told, and the day-three retry silently
+  // loses the refund this whole mechanism exists to preserve. Amplify resolves
+  // errors rather than throwing them, so both shapes have to be handled.
+  const requestedOn = booking.cancelRequestedOn ?? todayEt;
+  let datePersisted = Boolean(booking.cancelRequestedOn);
+  if (!datePersisted) {
+    try {
+      const { data, errors } = await client.models.BookingRequest.update({
+        id: booking.id,
+        cancelRequestedOn: todayEt,
+      });
+      datePersisted = Boolean(data) && !errors?.length;
+      if (!datePersisted) {
+        console.error(
+          `cancel: could not record cancelRequestedOn for booking ${booking.id}`,
+          errors
+        );
+      }
+    } catch (err) {
+      console.error(
+        `cancel: could not record cancelRequestedOn for booking ${booking.id}`,
+        err
+      );
+    }
   }
+  // Deliberately not fatal. Today's refund decision was already made from
+  // `judgedOn` above, so a customer whose cancellation succeeds is unaffected —
+  // the date only matters to a later retry. If the cancellation below also
+  // fails, its alert carries the date and says it was not saved.
 
   try {
     // Stop the recurring billing BEFORE anything else and before we tell the
@@ -721,16 +750,25 @@ async function cancel(body: Record<string, unknown>) {
     // "please try again" is false when the outage is ours, and retrying into a
     // Stripe outage just burns the customer's refund window.
     console.error(`cancel failed for booking ${booking.id}`, err);
-    await notifyOffice(
-      `ACTION REQUIRED — customer could not cancel: ${booking.name}`,
-      `<p><strong>${escapeHtml(booking.name)}</strong> tried to cancel their ${escapeHtml(String(booking.selectedDate))} visit and it failed. Their plan may still be billing and the appointment is still on the schedule.</p>
-       <p><strong>Cancel it by hand and honour the cancellation as of ${escapeHtml(booking.cancelRequestedOn ?? todayEt)}</strong> — that is the date they first asked${refundable ? ", and it entitles them to a full refund of " + money(booking.amountCents ?? 0) : ""}.</p>
-       <p style="color:#666;font-size:13px;">Booking: ${escapeHtml(booking.id)}<br/>Error: ${escapeHtml(err instanceof Error ? err.message : String(err))}</p>`
-    );
+    await notifyOffice({
+      subject: `ACTION REQUIRED — customer could not cancel: ${booking.name}`,
+      heading: "A customer tried to cancel and it failed",
+      template: "ops-cancel-failed",
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      bodyHtml: `<p><strong>${escapeHtml(booking.name)}</strong> tried to cancel their ${escapeHtml(String(booking.selectedDate))} visit and it failed. Their plan may still be billing and the appointment is still on the schedule.</p>
+       <p><strong>Cancel it by hand and honour the cancellation as of ${escapeHtml(requestedOn)}</strong> — that is the date they first asked${refundable ? `, and it entitles them to a full refund of ${money(booking.amountCents ?? 0)}` : ""}.</p>
+       ${
+         datePersisted
+           ? ""
+           : `<p style="color:#b91c1c;"><strong>That date is not saved on the booking</strong> — this email is the only record of it. If they retry after ${escapeHtml(requestedOn)} the system will judge their refund by the later date, so handle it from here.</p>`
+       }
+       <p style="color:#666;font-size:13px;">Booking: ${escapeHtml(booking.id)}<br/>Error: ${escapeHtml(err instanceof Error ? err.message : String(err))}</p>`,
+    });
     throw new HttpError(503, {
       error: `We couldn't cancel your appointment just now — that's a fault on our side, not a problem with your booking. Please call us at ${SUPPORT_PHONE} and we'll sort it out.`,
-      cancellationRecordedOn: booking.cancelRequestedOn ?? todayEt,
-      reassurance: `We've recorded that you asked to cancel today${refundable ? ", so your full refund still applies even though this didn't go through" : ""}.`,
+      cancellationRecordedOn: requestedOn,
+      reassurance: `We've recorded that you asked to cancel on ${requestedOn}${refundable ? ", so your full refund still applies even though this didn't go through" : ""}.`,
     });
   }
 
@@ -759,32 +797,18 @@ async function cancel(body: Record<string, unknown>) {
        <p>${refundable ? `A full refund of ${money(booking.amountCents ?? 0)} is on its way to your original payment method (3–5 business days).` : "Per the cancellation policy (3 days or less before the visit), this booking isn't refundable."}</p>`
     ),
   });
-  await notifyOffice(
-    "Website booking canceled",
-    `<p><strong>${booking.name}</strong> canceled their ${booking.selectedDate} ${String(booking.service).toLowerCase()} visit. ${refundable ? "Full refund issued." : "No refund per policy."}</p>`
-  );
+  await notifyOffice({
+    subject: "Website booking canceled",
+    heading: "Website booking canceled",
+    template: "ops-booking-canceled",
+    customerId: booking.customerId ?? undefined,
+    relatedId: booking.id,
+    bodyHtml: `<p><strong>${escapeHtml(booking.name)}</strong> canceled their ${escapeHtml(String(booking.selectedDate))} ${String(booking.service).toLowerCase()} visit. ${refundable ? `Full refund of ${money(booking.amountCents ?? 0)} issued.` : "No refund per policy."}</p>`,
+  });
   return { canceled: true, refunded: refundable };
 }
 
 // ---------------------------------------------------------------- utils
-
-async function notifyOffice(subject: string, html: string) {
-  const office = process.env.SES_NOTIFY_EMAIL;
-  if (!office) {
-    console.error(
-      "notifyOffice: SES_NOTIFY_EMAIL is not configured — nobody was told:",
-      subject
-    );
-    return;
-  }
-  await sendEmail({
-    to: office,
-    subject,
-    template: "office-booking-alert",
-    relatedId: "booking-funnel",
-    html: emailShell(subject, html),
-  });
-}
 
 function escapeHtml(s: string): string {
   return s

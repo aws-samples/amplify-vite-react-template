@@ -1,6 +1,6 @@
 import type { Handler } from "aws-lambda";
-import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import { dataClient } from "../shared/dataClient";
+import { notifyOffice } from "../shared/email";
 
 /**
  * Lead intake for every public form on the marketing site.
@@ -47,11 +47,7 @@ type LeadInput = {
   attribution?: Attribution;
 };
 
-const SES_FROM = () => process.env.SES_FROM_EMAIL ?? "info@pestbuzzkill.com";
-const SES_NOTIFY = () =>
-  process.env.SES_NOTIFY_EMAIL ?? "info@pestbuzzkill.com";
-
-const ses = new SESClient({});
+const SUPPORT_PHONE = "(401) 526-0323";
 
 function jsonResponse(statusCode: number, body: unknown) {
   return {
@@ -149,21 +145,29 @@ function buildLeadNotes(input: LeadInput, dropped: string[]): string {
   return lines.join("\n");
 }
 
-async function notifyOffice(subject: string, body: string): Promise<void> {
-  try {
-    await ses.send(
-      new SendEmailCommand({
-        Source: SES_FROM(),
-        Destination: { ToAddresses: [SES_NOTIFY()] },
-        Message: {
-          Subject: { Data: subject },
-          Body: { Text: { Data: body } },
-        },
-      })
-    );
-  } catch (err) {
-    console.error("lead-intake: office notification failed", err);
-  }
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** The four things the office needs to act on a lead, in a fixed order. */
+function contactRows(c: {
+  name: string;
+  email?: string | null;
+  phone?: string | null;
+  source?: string | null;
+}): string {
+  const row = (label: string, value: string | null | undefined) =>
+    `<tr><td style="padding:2px 12px 2px 0;color:#666;">${label}</td><td style="padding:2px 0;"><strong>${escapeHtml(value || "—")}</strong></td></tr>`;
+  return `<table style="border-collapse:collapse;margin:12px 0;">
+      ${row("Name", c.name)}
+      ${row("Email", c.email)}
+      ${row("Phone", c.phone)}
+      ${row("Source", c.source)}
+    </table>`;
 }
 
 export const handler: Handler = async (event) => {
@@ -243,41 +247,40 @@ export const handler: Handler = async (event) => {
     // The CRM write is the only durable store. If it failed, the lead exists
     // nowhere — page a human with the raw payload and tell the caller the truth.
     console.error("lead-intake: CRM write failed", { writeError, record });
-    await notifyOffice(
-      "ACTION REQUIRED — website lead could not be saved",
-      [
-        "A lead was submitted on the website but could NOT be written to the CRM.",
-        "Contact this person manually and add them by hand.",
-        "",
-        `Name:  ${record.displayName}`,
-        `Email: ${record.email ?? input.email ?? "—"}`,
-        `Phone: ${record.phone ?? input.phone ?? "—"}`,
-        `Source: ${record.leadSource}`,
-        "",
-        record.leadNotes,
-        "",
-        `Error: ${writeError ?? "unknown"}`,
-      ].join("\n")
-    );
+    await notifyOffice({
+      subject: `ACTION REQUIRED — website lead could not be saved: ${record.displayName}`,
+      heading: "A website lead was not saved",
+      template: "ops-lead-write-failed",
+      bodyHtml: `<p>Someone submitted the website form and we could <strong>not</strong> write them to the CRM. This lead exists nowhere else — this email is the only copy.</p>
+         <p><strong>Contact them and add them by hand.</strong></p>
+         ${contactRows({
+           name: record.displayName,
+           email: record.email ?? input.email,
+           phone: record.phone ?? input.phone,
+           source: record.leadSource,
+         })}
+         <p style="white-space:pre-wrap;">${escapeHtml(record.leadNotes)}</p>
+         <p style="color:#666;font-size:13px;">Error: ${escapeHtml(writeError ?? "unknown")}</p>`,
+    });
     return jsonResponse(502, {
-      error:
-        "We couldn't submit your request. Please call us at (401) 526-0323 and we'll take care of it.",
+      error: `We couldn't submit your request. Please call us at ${SUPPORT_PHONE} and we'll take care of it.`,
     });
   }
 
-  await notifyOffice(
-    `New website lead — ${record.displayName}`,
-    [
-      `Name:  ${record.displayName}`,
-      `Email: ${record.email ?? "—"}`,
-      `Phone: ${record.phone ?? "—"}`,
-      `Source: ${record.leadSource}`,
-      "",
-      record.leadNotes,
-      "",
-      `Open in CRM: ${process.env.CRM_APP_URL ?? ""}/customers/${leadId}`,
-    ].join("\n")
-  );
+  await notifyOffice({
+    subject: `New website lead — ${record.displayName}`,
+    heading: "New website lead",
+    template: "ops-new-lead",
+    customerId: leadId,
+    bodyHtml: `${contactRows({
+      name: record.displayName,
+      email: record.email,
+      phone: record.phone,
+      source: record.leadSource,
+    })}
+       <p style="white-space:pre-wrap;">${escapeHtml(record.leadNotes)}</p>
+       <p style="margin:20px 0;"><a href="${process.env.CRM_APP_URL ?? ""}/customers/${leadId}" style="background:#176b2c;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open in the CRM</a></p>`,
+  });
 
   return jsonResponse(200, { ok: true, leadId });
 };
