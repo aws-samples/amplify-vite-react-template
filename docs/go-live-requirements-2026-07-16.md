@@ -118,16 +118,16 @@ everything priced with AI — no other way is acceptable"; suites 364 web / 134 
   the funnel applies (product decision needed); template pest photos on e-sign pages died with
   templates.
 
-**Deploy 41 post-mortem, `7c00031`** (the AI-pricing wave is still not on staging; suites
-366 web / 134 CRM):
+**Deploy 41 post-mortem, `7c00031`** (suites 366 web / 134 CRM; deploy 42 carried the fix
+and went green, so the AI-pricing wave is now live on staging):
 
 - Deploy 41 failed at backend synth — after all 364 tests and both type checks passed — with
   "Object type extension 'Mutation' cannot redeclare field createQuote": the wave's custom
   `createQuote` mutation shared its name with the create mutation the Quote model's
   transformer generates. Deploy 40's guard (`tsc -p amplify` inside `npm test`) cannot see
   this class — the schema is a plain object whose keys never meet until synth. The DEPLOY log
-  is empty; the pipeline never reached the deploy phase, so staging still runs the
-  pre-rearchitecture backend until the next deploy goes green.
+  is empty; the pipeline never reached the deploy phase, so staging ran the
+  pre-rearchitecture backend until deploy 42 (16 July, 17:47 ET) shipped the wave.
 - The custom mutation is now `quotePlan` end-to-end (schema, crm-docs dispatch, CRM client,
   tests); the deviation guard is behaviorally unchanged. The generated `createQuote` keeps its
   name because PriceLeadSheet's direct `Quote.create` is deliberate (the engine's own output,
