@@ -149,6 +149,12 @@ const fmtDateTime = (iso: string) =>
     timeZone: "America/New_York",
   });
 
+const fmtTime = (iso: string) =>
+  new Date(iso).toLocaleTimeString("en-US", {
+    timeStyle: "short",
+    timeZone: "America/New_York",
+  });
+
 export type AgreementImage = { bytes: Uint8Array; contentType: string };
 
 export async function renderAgreementPdf(opts: {
@@ -250,6 +256,8 @@ export type ReportProduct = {
   name?: string;
   epaNumber?: string;
   quantity?: string;
+  /** Label rate or dilution as applied, e.g. "0.05% dilution". */
+  rate?: string;
   targetPest?: string;
 };
 
@@ -260,6 +268,12 @@ export async function renderServiceReportPdf(opts: {
   serviceType: string;
   serviceDateIso: string;
   technicianName: string;
+  /** The applicator's certification number. A pesticide record needs one. */
+  technicianLicenseNumber?: string | null;
+  applicationStartIso?: string | null;
+  applicationEndIso?: string | null;
+  reEntryIntervalHours?: number | null;
+  inspectionOnly?: boolean | null;
   servicesPerformed?: string | null;
   productsUsed?: ReportProduct[];
   targetPests?: string | null;
@@ -279,7 +293,20 @@ export async function renderServiceReportPdf(opts: {
   if (opts.serviceAddress) w.labelValue("Service address", opts.serviceAddress);
   w.labelValue("Service", opts.serviceType);
   w.labelValue("Service date", fmtDateTime(opts.serviceDateIso));
-  w.labelValue("Technician", opts.technicianName);
+  if (opts.applicationStartIso) {
+    w.labelValue(
+      "Application time",
+      opts.applicationEndIso
+        ? `${fmtTime(opts.applicationStartIso)} – ${fmtTime(opts.applicationEndIso)}`
+        : fmtTime(opts.applicationStartIso)
+    );
+  }
+  w.labelValue(
+    "Technician",
+    opts.technicianLicenseNumber
+      ? `${opts.technicianName}  ·  Licence ${opts.technicianLicenseNumber}`
+      : opts.technicianName
+  );
   w.rule();
 
   const section = (title: string, body?: string | null) => {
@@ -290,18 +317,36 @@ export async function renderServiceReportPdf(opts: {
 
   section("Services performed", opts.servicesPerformed);
 
-  if (opts.productsUsed?.length) {
+  if (opts.inspectionOnly) {
+    w.heading("Products applied");
+    w.text("Inspection only — no pesticide was applied on this visit.", {
+      gapAfter: 10,
+    });
+  } else if (opts.productsUsed?.length) {
     w.heading("Products applied");
     for (const p of opts.productsUsed) {
       const parts = [
         p.name ?? "Product",
         p.epaNumber ? `EPA #${p.epaNumber}` : null,
+        p.rate ? `Rate: ${p.rate}` : null,
         p.quantity ? `Qty: ${p.quantity}` : null,
         p.targetPest ? `Target: ${p.targetPest}` : null,
       ].filter(Boolean);
       w.text(`•  ${parts.join("   —   ")}`, { size: 10 });
     }
     w.y -= 10;
+  }
+
+  // The applicator's duty to warn. An occupant who is not told when it is safe
+  // to go back in has not been told the one thing this document is for.
+  if (!opts.inspectionOnly && opts.reEntryIntervalHours != null) {
+    w.heading("When it is safe to re-enter");
+    w.text(
+      opts.reEntryIntervalHours <= 0
+        ? "Treated areas may be re-entered immediately once any applied product is dry or contained."
+        : `Keep people and pets out of the treated areas for ${opts.reEntryIntervalHours} ${opts.reEntryIntervalHours === 1 ? "hour" : "hours"} from the application time above.`,
+      { gapAfter: 10 }
+    );
   }
 
   section("Target pests", opts.targetPests);
@@ -325,8 +370,14 @@ export async function renderServiceReportPdf(opts: {
       "Map",
       `https://maps.google.com/?q=${opts.geo.lat.toFixed(5)},${opts.geo.lng.toFixed(5)}`
     );
+    // This used to read "…confirming on-site presence." Nothing compares these
+    // coordinates to the service address — there is no geofence and no accuracy
+    // floor — so the sentence asserted a proof the system does not have, on a
+    // document that would be handed to a lawyer in a misapplication claim. It
+    // now says only what is true. Restore a claim here when the distance is
+    // measured and printed, not before.
     w.text(
-      "Location captured from the technician's device at the time the report was filed, confirming on-site presence.",
+      "Location reported by the technician's device when the report was filed. Accuracy depends on the device and is not independently verified.",
       { size: 8.5, color: MUTED }
     );
   }

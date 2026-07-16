@@ -60,6 +60,21 @@ type Args = {
   priceCents?: number;
   initialFeeCents?: number;
   priceOverrideReason?: string;
+  reason?: string;
+  photoKey?: string;
+  servicesPerformed?: string;
+  productsUsed?: unknown;
+  targetPests?: string;
+  areasTreated?: string;
+  recommendations?: string;
+  techNotes?: string;
+  reEntryIntervalHours?: number;
+  inspectionOnly?: boolean;
+  geoLat?: number;
+  geoLng?: number;
+  geoAccuracyM?: number;
+  geoCapturedAt?: string;
+  photoKeys?: (string | null)[];
 };
 
 /** Verified Cognito identity — never anything the browser supplied. */
@@ -102,6 +117,58 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "voidAgreement": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return voidAgreement(event.arguments.agreementId!);
+    }
+    case "saveServiceReportDraft": {
+      if (!isStaff(callerGroups(event.identity))) {
+        throw new Error("Staff role required");
+      }
+      return saveServiceReportDraft(callerSub(event.identity), {
+        jobId: event.arguments.jobId!,
+        reportId: event.arguments.reportId,
+        servicesPerformed: event.arguments.servicesPerformed,
+        productsUsed: event.arguments.productsUsed,
+        targetPests: event.arguments.targetPests,
+        areasTreated: event.arguments.areasTreated,
+        recommendations: event.arguments.recommendations,
+        techNotes: event.arguments.techNotes,
+        reEntryIntervalHours: event.arguments.reEntryIntervalHours,
+        inspectionOnly: event.arguments.inspectionOnly,
+        geoLat: event.arguments.geoLat,
+        geoLng: event.arguments.geoLng,
+        geoAccuracyM: event.arguments.geoAccuracyM,
+        geoCapturedAt: event.arguments.geoCapturedAt,
+      });
+    }
+    case "setReportPhotos": {
+      if (!isStaff(callerGroups(event.identity))) {
+        throw new Error("Staff role required");
+      }
+      return setReportPhotos(
+        event.arguments.reportId!,
+        (event.arguments.photoKeys ?? []).filter(
+          (k): k is string => typeof k === "string"
+        )
+      );
+    }
+    case "reportNoAccess": {
+      if (!isStaff(callerGroups(event.identity))) {
+        throw new Error("Staff role required");
+      }
+      return reportNoAccess({
+        jobId: event.arguments.jobId!,
+        reason: event.arguments.reason ?? "",
+        note: event.arguments.note,
+        photoKey: event.arguments.photoKey,
+      });
+    }
+    case "getNoAccessPhotoUploadUrl": {
+      if (!isStaff(callerGroups(event.identity))) {
+        throw new Error("Staff role required");
+      }
+      return getNoAccessPhotoUploadUrl(
+        event.arguments.jobId!,
+        event.arguments.contentType!
+      );
     }
     case "completeJob": {
       return completeJob(event.arguments.jobId!);
@@ -389,6 +456,86 @@ async function sendAgreement(agreementId: string) {
   return { sent: emailed, to: customer.email, link };
 }
 
+/** A format-valid EPA registration number, e.g. 432-1234 or 432-1234-4321. */
+const EPA_RE = /^\d{2,7}-\d{1,5}(-\d{1,7})?$/;
+
+/**
+ * What has to be true before a service report becomes a pesticide record.
+ *
+ * Every one of these was a client-side check or nothing at all, which meant the
+ * document BuzzKill hands an inspector could be finalized empty. Throwing here
+ * is the whole point: the technician's app must ask for these before it lets
+ * them send, and the server must not take its word for it.
+ */
+function assertReportIsARecord(
+  report: {
+    inspectionOnly?: boolean | null;
+    productsUsed?: unknown;
+    servicesPerformed?: string | null;
+    reEntryIntervalHours?: number | null;
+    geoLat?: number | null;
+    geoLng?: number | null;
+  },
+  job: { status: string | null }
+) {
+  if (job.status === "CANCELED") {
+    throw new Error(
+      "This job was canceled — finalizing a report against it would resurrect it as completed"
+    );
+  }
+  if (job.status === "NO_ACCESS") {
+    throw new Error(
+      "This job is marked as no access — a report would be a record of an application that did not happen"
+    );
+  }
+  if (!report.servicesPerformed?.trim()) {
+    throw new Error("Say what was done before sending the report");
+  }
+  if (report.geoLat == null || report.geoLng == null) {
+    throw new Error("Capture the location on site before sending the report");
+  }
+
+  const products = parseProducts(report.productsUsed);
+
+  if (report.inspectionOnly) {
+    if (products.length) {
+      throw new Error(
+        "This is marked inspection-only but lists products applied — untick one or the other"
+      );
+    }
+    return;
+  }
+
+  // Zero products used to finalize and email happily. A pesticide record with
+  // no pesticide on it is either a false record or an inspection, and the
+  // system should know which.
+  if (!products.length) {
+    throw new Error(
+      "Add the products you applied, or tick “inspection only — no product applied”"
+    );
+  }
+  for (const p of products) {
+    const name = p.name?.trim();
+    if (!name) throw new Error("A product row is missing its name");
+    if (!p.epaNumber?.trim()) {
+      throw new Error(`${name} needs its EPA registration number`);
+    }
+    if (!EPA_RE.test(p.epaNumber.trim())) {
+      throw new Error(
+        `“${p.epaNumber}” isn't a valid EPA registration number for ${name} — it looks like 432-1234`
+      );
+    }
+    if (!p.quantity?.trim()) {
+      throw new Error(`How much ${name} was applied?`);
+    }
+  }
+  if (report.reEntryIntervalHours == null) {
+    throw new Error(
+      "Set the re-entry interval — the occupant has to be told when it is safe to go back in"
+    );
+  }
+}
+
 async function finalizeServiceReport(reportId: string) {
   const client = await dataClient();
   const { data: report } = await client.models.ServiceReport.get({
@@ -407,6 +554,12 @@ async function finalizeServiceReport(reportId: string) {
     ]);
   if (!job || !customer) throw new Error("Report is missing its job/customer");
 
+  // The gate was in React only. finalizeServiceReport checked nothing — not
+  // products, not an EPA number, not a quantity, not the job's state — so any
+  // caller could finalize an empty report on any job and email it. The fryer's
+  // timer belongs in the fryer.
+  assertReportIsARecord(report, job);
+
   const serviceAddress = [
     customer.serviceStreet,
     customer.serviceCity,
@@ -416,6 +569,12 @@ async function finalizeServiceReport(reportId: string) {
     .filter(Boolean)
     .join(", ");
 
+  // The application's real start is when the technician pressed Start, not when
+  // the draft was first saved — a report written up the next morning used to
+  // carry the wrong date on a legal record, uncorrectably.
+  const applicationStartIso = job.startedAt ?? report.serviceDate;
+  const applicationEndIso = new Date().toISOString();
+
   const pdf = await renderServiceReportPdf({
     reportId,
     customerName: customer.displayName,
@@ -423,6 +582,11 @@ async function finalizeServiceReport(reportId: string) {
     serviceType: job.serviceType,
     serviceDateIso: report.serviceDate,
     technicianName: technician?.name ?? "BuzzKill Technician",
+    technicianLicenseNumber: technician?.licenseNumber,
+    applicationStartIso,
+    applicationEndIso,
+    reEntryIntervalHours: report.reEntryIntervalHours,
+    inspectionOnly: report.inspectionOnly,
     servicesPerformed: report.servicesPerformed,
     productsUsed: parseProducts(report.productsUsed),
     targetPests: report.targetPests,
@@ -497,6 +661,8 @@ async function finalizeServiceReport(reportId: string) {
     id: reportId,
     status: "FINALIZED",
     pdfKey,
+    applicationStartAt: applicationStartIso,
+    applicationEndAt: applicationEndIso,
     ...(emailed ? { emailedAt: new Date().toISOString() } : {}),
   });
   const completedAt = new Date().toISOString();
@@ -613,6 +779,235 @@ const PHOTO_TYPES: Record<string, string> = {
  * entitlement check covers viewing. The client PUTs the file, then appends
  * the key to the report's photoKeys.
  */
+/**
+ * Create or update a draft report, and refuse once it is finalized.
+ *
+ * The model is read-only from a browser, so this is the only way a report gets
+ * written. The FINALIZED check is the point: the customer has a copy of that
+ * PDF and an inspector may have another, and a record that can be edited after
+ * issuance is worse evidence than no record at all.
+ */
+async function saveServiceReportDraft(
+  actorSub: string | null,
+  args: {
+    jobId: string;
+    reportId?: string | null;
+    servicesPerformed?: string | null;
+    productsUsed?: unknown;
+    targetPests?: string | null;
+    areasTreated?: string | null;
+    recommendations?: string | null;
+    techNotes?: string | null;
+    reEntryIntervalHours?: number | null;
+    inspectionOnly?: boolean | null;
+    geoLat?: number | null;
+    geoLng?: number | null;
+    geoAccuracyM?: number | null;
+    geoCapturedAt?: string | null;
+  }
+) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: args.jobId });
+  if (!job) throw new Error(`Job ${args.jobId} not found`);
+
+  const fields = {
+    servicesPerformed: args.servicesPerformed ?? undefined,
+    productsUsed: args.productsUsed ?? undefined,
+    targetPests: args.targetPests ?? undefined,
+    areasTreated: args.areasTreated ?? undefined,
+    recommendations: args.recommendations ?? undefined,
+    techNotes: args.techNotes ?? undefined,
+    reEntryIntervalHours: args.reEntryIntervalHours ?? undefined,
+    inspectionOnly: args.inspectionOnly ?? undefined,
+    geoLat: args.geoLat ?? undefined,
+    geoLng: args.geoLng ?? undefined,
+    geoAccuracyM: args.geoAccuracyM ?? undefined,
+    geoCapturedAt: args.geoCapturedAt ?? undefined,
+  };
+
+  if (args.reportId) {
+    const { data: existing } = await client.models.ServiceReport.get({
+      id: args.reportId,
+    });
+    if (!existing) throw new Error(`Report ${args.reportId} not found`);
+    if (existing.status === "FINALIZED") {
+      throw new Error(
+        "This report has been finalized and sent to the customer — it is the record of the application and cannot be changed. Ask the office to issue an amendment."
+      );
+    }
+    const { data: updated, errors } = await client.models.ServiceReport.update({
+      id: args.reportId,
+      ...fields,
+    });
+    if (!updated) {
+      throw new Error(
+        `Could not save the report: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+      );
+    }
+    return { reportId: updated.id, status: updated.status };
+  }
+
+  // Identity comes from the token, not the request: the technician on the
+  // record is whoever is signed in.
+  const { data: techs } = await client.models.Technician.list({ limit: 200 });
+  const technician = techs.find((t) => t.userSub === actorSub);
+  if (!technician) {
+    throw new Error(
+      "Your login isn't linked to a technician record — ask the office to link it before filing a report"
+    );
+  }
+  const { data: customer } = await client.models.Customer.get({
+    id: job.customerId,
+  });
+
+  const { data: created, errors } = await client.models.ServiceReport.create({
+    jobId: job.id,
+    customerId: job.customerId,
+    technicianId: technician.id,
+    serviceDate: new Date().toISOString(),
+    status: "DRAFT",
+    ...fields,
+    accessGroups: customerAccessGroups(job.customerId, customer?.groupId),
+  });
+  if (!created) {
+    throw new Error(
+      `Could not start the report: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { reportId: created.id, status: created.status };
+}
+
+/** Attach or remove report photos. Refuses once the report is FINALIZED. */
+async function setReportPhotos(reportId: string, photoKeys: string[]) {
+  const client = await dataClient();
+  const { data: report } = await client.models.ServiceReport.get({ id: reportId });
+  if (!report) throw new Error(`Report ${reportId} not found`);
+  if (report.status === "FINALIZED") {
+    throw new Error(
+      "This report has been finalized — its photos are part of the record and cannot be changed"
+    );
+  }
+  const { data: updated, errors } = await client.models.ServiceReport.update({
+    id: reportId,
+    photoKeys,
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not update the photos: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { reportId, photoKeys: updated.photoKeys };
+}
+
+const NO_ACCESS_LABEL: Record<string, string> = {
+  NOBODY_HOME: "Nobody home",
+  LOCKED_OUT: "Couldn't get in — locked gate or door",
+  DOG_LOOSE: "Dog loose in the treatment area",
+  REFUSED_ENTRY: "Customer refused entry",
+  UNSAFE_CONDITIONS: "Unsafe conditions on site",
+  WRONG_ADDRESS: "Address is wrong",
+};
+
+/**
+ * The technician attended and could not do the work.
+ *
+ * Read the list of what this deliberately does not do: no ServiceReport (a
+ * pesticide record for an application that never happened is a false legal
+ * document), no COMPLETED status (which would arm the charge), and no call to
+ * scheduleNextRecurringVisit (the cadence should not advance on a visit that
+ * did not occur). It ends the job for today and tells the office.
+ */
+async function reportNoAccess(args: {
+  jobId: string;
+  reason: string;
+  note?: string | null;
+  photoKey?: string | null;
+}) {
+  const label = NO_ACCESS_LABEL[args.reason];
+  if (!label) throw new Error(`Unknown no-access reason: ${args.reason}`);
+
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: args.jobId });
+  if (!job) throw new Error(`Job ${args.jobId} not found`);
+  if (job.status === "NO_ACCESS") {
+    return { jobId: args.jobId, status: "NO_ACCESS", alreadyReported: true };
+  }
+  if (job.status === "COMPLETED") {
+    throw new Error(
+      "This job is already completed — if that was a mistake, tell the office rather than overwriting it"
+    );
+  }
+  if (job.status === "CANCELED") {
+    throw new Error("This job was canceled — nothing to report against it");
+  }
+
+  const nowIso = new Date().toISOString();
+  const { data: updated, errors } = await client.models.Job.update({
+    id: args.jobId,
+    status: "NO_ACCESS",
+    noAccessReason: args.reason as
+      | "NOBODY_HOME"
+      | "LOCKED_OUT"
+      | "DOG_LOOSE"
+      | "REFUSED_ENTRY"
+      | "UNSAFE_CONDITIONS"
+      | "WRONG_ADDRESS",
+    noAccessAt: nowIso,
+    noAccessNote: args.note?.trim() || undefined,
+    noAccessPhotoKey: args.photoKey ?? undefined,
+    // Off the route: the stop is done for today and the day's capacity is free.
+    routeId: null,
+    routeOrder: null,
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not report no access: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+
+  const [{ data: customer }, { data: technician }] = await Promise.all([
+    client.models.Customer.get({ id: job.customerId }),
+    job.technicianId
+      ? client.models.Technician.get({ id: job.technicianId })
+      : Promise.resolve({ data: null }),
+  ]);
+
+  // The office owns what happens next: rebook, charge a no-access fee, or let
+  // it go. None of those are the technician's call from a driveway.
+  await notifyOffice({
+    subject: `Couldn't access: ${customer?.displayName ?? job.customerId} — ${label}`,
+    heading: "A technician couldn't do the job",
+    template: "ops-no-access",
+    customerId: job.customerId,
+    relatedId: job.id,
+    bodyHtml: `<p><strong>${technician?.name ?? "A technician"}</strong> attended <strong>${customer?.displayName ?? "this customer"}</strong> for ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} and couldn't do the work.</p>
+       <p><strong>${label}</strong>${args.note?.trim() ? ` — ${args.note.trim()}` : ""}</p>
+       <p>No service report was filed and nothing has been charged. The job is off the route and is waiting on a decision: rebook it, charge a no-access fee, or let it go.</p>
+       <p style="margin:20px 0;"><a href="${CRM_URL()}/customers/${job.customerId}" style="background:#176b2c;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open the customer</a></p>`,
+  });
+
+  return { jobId: args.jobId, status: "NO_ACCESS", alreadyReported: false };
+}
+
+/** Presigned PUT for the door photo. The job has no report to hang it off. */
+async function getNoAccessPhotoUploadUrl(jobId: string, contentType: string) {
+  const ext = PHOTO_TYPES[contentType.toLowerCase()];
+  if (!ext) {
+    throw new Error("Unsupported image type — use JPEG, PNG, WEBP, or HEIC");
+  }
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+
+  const key = `jobs/${job.customerId}/no-access/${jobId}/${Date.now()}-${randomBytes(4).toString("hex")}.${ext}`;
+  const uploadUrl = await getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: BUCKET(), Key: key, ContentType: contentType }),
+    { expiresIn: 900 }
+  );
+  return { uploadUrl, key };
+}
+
 async function getReportPhotoUploadUrl(reportId: string, contentType: string) {
   const ext = PHOTO_TYPES[contentType.toLowerCase()];
   if (!ext) {

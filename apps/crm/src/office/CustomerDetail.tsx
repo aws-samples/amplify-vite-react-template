@@ -810,17 +810,35 @@ export default function CustomerDetail() {
                         Copy link
                       </Button>
                     ) : null}
-                    {a.status !== "VOID" ? (
+                    {/* A signed agreement is the record of what the customer
+                        agreed to, and the server refuses to void one. Offering
+                        the button anyway meant a dialog that promised an
+                        outcome and an error on OK — which teaches operators
+                        that errors are normal. Say what to do instead. */}
+                    {a.status === "SIGNED" ? (
+                      <span className="muted small">signed — cancel the plan to end it</span>
+                    ) : a.status !== "VOID" ? (
                       <Button
                         small
                         variant="ghost"
                         loading={busyAction === `voidagr-${a.id}`}
                         onClick={() => {
-                          if (!window.confirm(a.status === "SIGNED" ? "Void this SIGNED agreement? The signed PDF stays on file but the agreement is marked void." : "Void this agreement? Its signing link stops working.")) return;
-                          void run(`voidagr-${a.id}`, async () =>
-                            unwrap(
-                              await api().mutations.voidAgreement({ agreementId: a.id })
+                          if (
+                            !window.confirm(
+                              "Void this agreement? Its signing link stops working."
                             )
+                          ) {
+                            return;
+                          }
+                          void run(
+                            `voidagr-${a.id}`,
+                            async () =>
+                              unwrap(
+                                await api().mutations.voidAgreement({
+                                  agreementId: a.id,
+                                })
+                              ),
+                            "Agreement voided"
                           );
                         }}
                       >

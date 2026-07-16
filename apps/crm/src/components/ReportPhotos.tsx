@@ -71,8 +71,8 @@ export default function ReportPhotos({
       }
       if (added.length) {
         unwrap(
-          await api().models.ServiceReport.update({
-            id: report.id,
+          await api().mutations.setReportPhotos({
+            reportId: report.id,
             photoKeys: [...keys, ...added],
           })
         );
@@ -90,8 +90,8 @@ export default function ReportPhotos({
     if (!window.confirm("Remove this photo from the report?")) return;
     try {
       unwrap(
-        await api().models.ServiceReport.update({
-          id: report.id,
+        await api().mutations.setReportPhotos({
+          reportId: report.id,
           photoKeys: keys.filter((k) => k !== key),
         })
       );

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   api,
+  opResult,
   unwrap,
   type Customer,
   type Job,
@@ -9,7 +10,6 @@ import {
   type ServiceReport,
   type Technician,
 } from "../lib/api";
-import { customerAccessGroups } from "../lib/accessGroups";
 import { useRoles } from "../lib/auth";
 import { fmtDate } from "../lib/format";
 import {
@@ -169,17 +169,44 @@ export default function TechJob() {
         </dl>
       </Card>
 
+      {job.status === "NO_ACCESS" ? (
+        <Card>
+          <Badge tone="warn">couldn't access</Badge>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+            {NO_ACCESS_LABEL[job.noAccessReason ?? ""] ?? "Couldn't do the job"}
+            {job.noAccessNote ? ` — ${job.noAccessNote}` : ""}
+          </p>
+          <p className="muted small" style={{ margin: "8px 0 0" }}>
+            The office has been told. Nothing was charged and no report was
+            filed.
+          </p>
+        </Card>
+      ) : null}
+
       {job.status === "SCHEDULED" ? (
         <Button
           block
           onClick={() =>
             api()
-              .models.Job.update({ id: job.id, status: "IN_PROGRESS" })
+              .models.Job.update({
+                id: job.id,
+                status: "IN_PROGRESS",
+                // The application's start time on the pesticide record.
+                startedAt: new Date().toISOString(),
+              })
               .then(() => load())
           }
         >
           Start job
         </Button>
+      ) : null}
+
+      {/* The honest exit. Without it, the only way to clear this screen was to
+          file a report for a visit that never happened — which emails the
+          customer a pesticide record, arms the charge, and advances the plan.
+          The tech was never being dishonest; the app routed them there. */}
+      {job.status === "SCHEDULED" || job.status === "IN_PROGRESS" ? (
+        <NoAccessCard job={job} onDone={load} />
       ) : null}
 
       {report?.status === "FINALIZED" ? (
@@ -193,19 +220,9 @@ export default function TechJob() {
       ) : job.status === "IN_PROGRESS" || job.status === "COMPLETED" || report ? (
         <ReportForm
           job={job}
-          customer={customer}
           technician={techRecord}
           existing={report}
           catalog={catalog}
-          onCatalogAdd={(pr) =>
-            setCatalog((list) =>
-              [...list, pr].sort(
-                (a, b) =>
-                  (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
-                  a.name.localeCompare(b.name)
-              )
-            )
-          }
           onChanged={load}
         />
       ) : null}
@@ -213,21 +230,155 @@ export default function TechJob() {
   );
 }
 
+const NO_ACCESS_LABEL: Record<string, string> = {
+  NOBODY_HOME: "Nobody home",
+  LOCKED_OUT: "Couldn't get in",
+  DOG_LOOSE: "Dog loose",
+  REFUSED_ENTRY: "Customer refused entry",
+  UNSAFE_CONDITIONS: "Unsafe on site",
+  WRONG_ADDRESS: "Address is wrong",
+};
+
+/**
+ * "I went and couldn't do it."
+ *
+ * Reason chips rather than a text box: this gets tapped in a driveway, one
+ * handed, in the rain. The photo is optional — requiring it would be one more
+ * way to trap someone who is already stuck — but it is what an office
+ * no-access billing decision turns on, and what protects the technician from
+ * being told they never went.
+ */
+function NoAccessCard({ job, onDone }: { job: Job; onDone: () => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+  const [photoKey, setPhotoKey] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const photoInput = useRef<HTMLInputElement>(null);
+
+  const uploadPhoto = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = opResult<{ uploadUrl: string; key: string }>(
+        await api().mutations.getNoAccessPhotoUploadUrl({
+          jobId: job.id,
+          contentType: file.type,
+        })
+      );
+      if (!res?.uploadUrl) throw new Error("Could not start the upload");
+      const put = await fetch(res.uploadUrl, {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type },
+      });
+      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+      setPhotoKey(res.key);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Photo upload failed");
+    } finally {
+      setBusy(false);
+      if (photoInput.current) photoInput.current.value = "";
+    }
+  };
+
+  const submit = async () => {
+    if (!reason) return;
+    setBusy(true);
+    setError(null);
+    try {
+      unwrap(
+        await api().mutations.reportNoAccess({
+          jobId: job.id,
+          reason,
+          note: note.trim() || undefined,
+          photoKey: photoKey ?? undefined,
+        })
+      );
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not report it");
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <Button block variant="subtle" onClick={() => setOpen(true)}>
+        Couldn't do this job
+      </Button>
+    );
+  }
+
+  return (
+    <Card title="What happened?">
+      <div className="form-grid">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {Object.entries(NO_ACCESS_LABEL).map(([value, label]) => (
+            <Button
+              key={value}
+              small
+              variant={reason === value ? undefined : "ghost"}
+              onClick={() => setReason(value)}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+        <Field label="Anything to add? (optional)">
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Gate padlocked, no answer on the phone"
+          />
+        </Field>
+        <input
+          ref={photoInput}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void uploadPhoto(f);
+          }}
+        />
+        <Button
+          small
+          variant="ghost"
+          loading={busy}
+          onClick={() => photoInput.current?.click()}
+        >
+          {photoKey ? "✓ Photo attached — retake" : "Take a photo (optional)"}
+        </Button>
+        <ErrorNote error={error} />
+        <p className="muted small" style={{ margin: 0 }}>
+          This ends the job for today and tells the office. Nothing is charged
+          and no service report is filed.
+        </p>
+        <Button block disabled={!reason} loading={busy} onClick={() => void submit()}>
+          Send it
+        </Button>
+        <Button block variant="ghost" onClick={() => setOpen(false)}>
+          Cancel
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 function ReportForm({
   job,
-  customer,
   technician,
   existing,
   catalog,
-  onCatalogAdd,
   onChanged,
 }: {
   job: Job;
-  customer: Customer;
   technician: Technician | null;
   existing: ServiceReport | null;
   catalog: CatalogProduct[];
-  onCatalogAdd: (p: CatalogProduct) => void;
   onChanged: () => Promise<void>;
 }) {
   const [servicesPerformed, setServicesPerformed] = useState(existing?.servicesPerformed ?? "");
@@ -235,6 +386,14 @@ function ReportForm({
   const [areasTreated, setAreasTreated] = useState(existing?.areasTreated ?? "");
   const [recommendations, setRecommendations] = useState(existing?.recommendations ?? "");
   const [techNotes, setTechNotes] = useState(existing?.techNotes ?? "");
+  const [inspectionOnly, setInspectionOnly] = useState(
+    existing?.inspectionOnly ?? false
+  );
+  const [reEntry, setReEntry] = useState(
+    existing?.reEntryIntervalHours != null
+      ? String(existing.reEntryIntervalHours)
+      : ""
+  );
   // Reloaded rows lost their UI-only flags — a named row that isn't in the
   // catalog must come back in manual mode or its inputs vanish mid-edit.
   const [products, setProducts] = useState<ProductRow[]>(() =>
@@ -308,6 +467,12 @@ function ReportForm({
       areasTreated: areasTreated.trim() || undefined,
       recommendations: recommendations.trim() || undefined,
       techNotes: techNotes.trim() || undefined,
+      reEntryIntervalHours: inspectionOnly
+        ? undefined
+        : reEntry.trim() === ""
+          ? undefined
+          : Number(reEntry),
+      inspectionOnly,
       ...(geo
         ? {
             geoLat: geo.lat,
@@ -317,24 +482,20 @@ function ReportForm({
           }
         : {}),
     };
-    if (reportId) {
-      unwrap(await api().models.ServiceReport.update({ id: reportId, ...fields }));
-      return reportId;
-    }
-    const created = unwrap(
-      await api().models.ServiceReport.create({
+    // The ServiceReport model is read-only from a browser: a finalized report is
+    // a pesticide record the customer holds a copy of, and it used to be
+    // rewritable after issuance. The mutation creates or updates the draft and
+    // refuses once it is FINALIZED.
+    const saved = opResult<{ reportId?: string }>(
+      await api().mutations.saveServiceReportDraft({
         jobId: job.id,
-        customerId: customer.id,
-        technicianId: technician.id,
-        serviceDate: new Date().toISOString(),
-        status: "DRAFT",
-        accessGroups: customerAccessGroups(customer.id, customer.groupId),
+        reportId: reportId ?? undefined,
         ...fields,
       })
     );
-    if (!created) throw new Error("Could not save report");
-    setReportId(created.id);
-    return created.id;
+    if (!saved?.reportId) throw new Error("Could not save the report");
+    setReportId(saved.reportId);
+    return saved.reportId;
   };
 
   const setProduct = (i: number, k: "name" | "epaNumber" | "quantity" | "targetPest", v: string) =>
@@ -362,6 +523,22 @@ function ReportForm({
           />
         </Field>
 
+        {/* Zero products used to finalize and email happily. A pesticide record
+            with no pesticide on it is either an inspection or a false record,
+            and the system should know which. */}
+        <Field label="">
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={inspectionOnly}
+              onChange={(e) => setInspectionOnly(e.target.checked)}
+              style={{ width: "auto" }}
+            />
+            <span>Inspection only — I didn't apply any product</span>
+          </label>
+        </Field>
+
+        {inspectionOnly ? null : (
         <Field group label="Products applied" hint="Pick from the product log — ask the office to add anything missing">
           <div className="form-grid">
             {products.map((p, i) => (
@@ -399,12 +576,6 @@ function ReportForm({
                     )
                   )
                 }
-                onSavedToLog={(created) => {
-                  onCatalogAdd(created);
-                  setProducts((list) =>
-                    list.map((row, idx) => (idx === i ? { ...row, custom: false } : row))
-                  );
-                }}
                 onRemove={() => setProducts((l) => l.filter((_, idx) => idx !== i))}
               />
             ))}
@@ -419,6 +590,7 @@ function ReportForm({
             </Button>
           </div>
         </Field>
+        )}
 
         <div className="form-row-2">
           <Field label="Target pests">
@@ -431,6 +603,26 @@ function ReportForm({
         <Field label="Recommendations for customer">
           <textarea value={recommendations} onChange={(e) => setRecommendations(e.target.value)} />
         </Field>
+
+        {/* The duty to warn. The occupant cannot be told when it is safe to go
+            back in if nobody recorded it — and 0 is a real answer, distinct
+            from nobody having said. */}
+        {!inspectionOnly ? (
+          <Field
+            label="Safe to re-enter after (hours)"
+            hint="Off the product label. 0 for baits or exterior-only work."
+          >
+            <select value={reEntry} onChange={(e) => setReEntry(e.target.value)}>
+              <option value="">Choose…</option>
+              <option value="0">0 — no wait needed</option>
+              <option value="2">2 hours</option>
+              <option value="4">4 hours (until dry)</option>
+              <option value="12">12 hours</option>
+              <option value="24">24 hours</option>
+              <option value="48">48 hours</option>
+            </select>
+          </Field>
+        ) : null}
         <Field label="Internal notes (not shown to customer)">
           <textarea value={techNotes} onChange={(e) => setTechNotes(e.target.value)} />
         </Field>
@@ -526,7 +718,6 @@ function ProductRowEditor({
   onChange,
   onPick,
   onCustom,
-  onSavedToLog,
   onRemove,
 }: {
   row: ProductRow;
@@ -534,12 +725,8 @@ function ProductRowEditor({
   onChange: (k: "name" | "epaNumber" | "quantity" | "targetPest", v: string) => void;
   onPick: (p: CatalogProduct) => void;
   onCustom: () => void;
-  onSavedToLog: (created: CatalogProduct) => void;
   onRemove: () => void;
 }) {
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   const matched = !row.custom
     ? catalog.find((c) => c.name === row.name) ?? null
     : null;
@@ -551,32 +738,6 @@ function ProductRowEditor({
         ? "__custom__"
         : "";
   const manualMode = selectValue === "__custom__";
-
-  const saveToLog = async () => {
-    if (!row.name.trim()) {
-      setError("Enter the product name first");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      const created = unwrap(
-        await api().models.Product.create({
-          name: row.name.trim(),
-          epaNumber: row.epaNumber.trim() || null,
-          defaultQuantity: row.quantity.trim() || null,
-          targetPests: row.targetPest.trim() || null,
-          active: true,
-        })
-      );
-      if (!created) throw new Error("Could not save to the product log");
-      onSavedToLog(created);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save product");
-    } finally {
-      setSaving(false);
-    }
-  };
 
   return (
     <div className="card" style={{ padding: 10 }}>
@@ -609,16 +770,15 @@ function ProductRowEditor({
               value={row.name}
               onChange={(e) => onChange("name", e.target.value)}
             />
-            <div className="form-row-2">
-              <input
-                placeholder="EPA #"
-                value={row.epaNumber}
-                onChange={(e) => onChange("epaNumber", e.target.value)}
-              />
-              <Button small variant="subtle" loading={saving} onClick={() => void saveToLog()}>
-                Save to log
-              </Button>
-            </div>
+            <input
+              placeholder="EPA # — e.g. 432-1234"
+              value={row.epaNumber}
+              onChange={(e) => onChange("epaNumber", e.target.value)}
+            />
+            <p className="muted small" style={{ margin: 0 }}>
+              This product is recorded on this report only. To add it to the
+              product log for everyone, ask the office.
+            </p>
           </>
         ) : matched?.epaNumber ? (
           <p className="muted small" style={{ margin: 0 }}>
@@ -638,7 +798,6 @@ function ProductRowEditor({
             onChange={(e) => onChange("targetPest", e.target.value)}
           />
         </div>
-        <ErrorNote error={error} />
         <Button small variant="ghost" onClick={onRemove}>
           ✕ Remove product
         </Button>

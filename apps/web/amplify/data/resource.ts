@@ -41,7 +41,20 @@ const schema = a.schema({
     "SCHEDULED",
     "IN_PROGRESS",
     "COMPLETED",
+    // The technician went and could not do the work: nobody home, locked gate,
+    // dog out, entry refused. Terminal for the day and honest about it — no
+    // report, no charge, no next visit queued. Without this the only way to
+    // clear the screen was to file a report for a visit that never happened.
+    "NO_ACCESS",
     "CANCELED",
+  ]),
+  NoAccessReason: a.enum([
+    "NOBODY_HOME",
+    "LOCKED_OUT",
+    "DOG_LOOSE",
+    "REFUSED_ENTRY",
+    "UNSAFE_CONDITIONS",
+    "WRONG_ADDRESS",
   ]),
   RouteStatus: a.enum(["PLANNED", "IN_PROGRESS", "COMPLETE"]),
   AgreementStatus: a.enum(["DRAFT", "SENT", "VIEWED", "SIGNED", "VOID"]),
@@ -349,6 +362,10 @@ const schema = a.schema({
       active: a.boolean().required(),
       userSub: a.string(),
       color: a.string(),
+      // The applicator's certification. It belongs on every pesticide record
+      // this business produces; a service report without it is not one.
+      licenseNumber: a.string(),
+      licenseExpiresOn: a.date(),
       routes: a.hasMany("Route", "technicianId"),
       jobs: a.hasMany("Job", "technicianId"),
       serviceReports: a.hasMany("ServiceReport", "technicianId"),
@@ -395,6 +412,10 @@ const schema = a.schema({
       routeOrder: a.integer(),
       technicianId: a.id(),
       technician: a.belongsTo("Technician", "technicianId"),
+      /** When the technician pressed Start. The application's start time on the
+       *  pesticide record — serviceDate is when the draft was first saved,
+       *  which is a different thing and was wrong on reports written up later. */
+      startedAt: a.datetime(),
       completedAt: a.datetime(),
       // Set when the customer paid up front (website booking). Written in the
       // same create as the job, so it is the authoritative "already paid"
@@ -402,6 +423,13 @@ const schema = a.schema({
       // refuse on this rather than on the absence of an Invoice row.
       paidAt: a.datetime(),
       paidPaymentIntentId: a.string(),
+      // Set with status NO_ACCESS. The photo is the technician's evidence that
+      // they attended, which is what an office no-access billing decision turns
+      // on — and what protects them from being told they never went.
+      noAccessReason: a.ref("NoAccessReason"),
+      noAccessAt: a.datetime(),
+      noAccessNote: a.string(),
+      noAccessPhotoKey: a.string(),
       notes: a.string(),
       accessGroups: a.string().array(),
       serviceReports: a.hasMany("ServiceReport", "jobId"),
@@ -463,14 +491,24 @@ const schema = a.schema({
       epaNumber: a.string(),
       activeIngredient: a.string(),
       defaultQuantity: a.string(),
+      /** Label rate or dilution, e.g. "0.05% dilution" or "1 oz / gal". */
+      defaultRate: a.string(),
+      /** Label re-entry interval in hours. 0 for baits and exterior-only work. */
+      reEntryHours: a.float(),
       targetPests: a.string(),
       notes: a.string(),
       active: a.boolean().required(),
       sortOrder: a.integer(),
     })
+    // The catalog is the control that makes pesticide records correct by
+    // construction. TECH create is gone: a technician in manual-product mode
+    // could publish a permanent, active row into the master catalog from a
+    // crawlspace, with a blank or invented EPA number, that every other
+    // technician then picked from. A manual product now lives on that one
+    // report; adding it to the catalog is an office decision.
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["TECH"]).to(["create", "read"]),
+      allow.groups(["TECH"]).to(["read"]),
     ]),
 
   ServiceReport: a
@@ -482,6 +520,22 @@ const schema = a.schema({
       technicianId: a.id().required(),
       technician: a.belongsTo("Technician", "technicianId"),
       serviceDate: a.datetime().required(),
+      // When the application actually happened. serviceDate is stamped when the
+      // draft is first saved, which is not the same thing — a report written up
+      // the next morning carried the wrong date on a legal record and there was
+      // no way to correct it.
+      applicationStartAt: a.datetime(),
+      applicationEndAt: a.datetime(),
+      /**
+       * Hours before the treated area is safe to re-enter. The applicator's
+       * duty to warn: the occupant cannot be told when to come back if nobody
+       * recorded it. 0 is a real answer (bait stations, exterior only) and is
+       * distinct from "nobody said".
+       */
+      reEntryIntervalHours: a.float(),
+      /** No product was applied — an inspection. Makes "zero products" a
+       *  deliberate statement rather than an empty required field. */
+      inspectionOnly: a.boolean(),
       servicesPerformed: a.string(),
       productsUsed: a.json(),
       targetPests: a.string(),
@@ -500,12 +554,17 @@ const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("jobId")])
     // A finalized report is the pesticide-application record behind BuzzKill's
-    // applicator licence. Nobody deletes one: corrections are amendments, and
-    // only OWNER can remove a record at all.
+    // applicator licence, and it is the document a customer already has a copy
+    // of. It was rewritable after issuance by both TECH and OFFICE — which is
+    // worse than keeping no record at all, because in an enforcement action an
+    // editable regulatory document is affirmative evidence of an uncontrolled
+    // system.
+    //
+    // Read-only from a browser. Drafts are written through
+    // saveServiceReportDraft and setReportPhotos, which refuse once the report
+    // is FINALIZED; nothing edits it after that.
     .authorization((allow) => [
-      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["OFFICE"]).to(["create", "read", "update"]),
-      allow.groups(["TECH"]).to(["create", "read", "update"]),
+      allow.groups(["OWNER", "OFFICE", "TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -776,6 +835,83 @@ const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
     .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Create or update a technician's draft report.
+   *
+   * A mutation because the model is read-only from a browser now: a FINALIZED
+   * report is a pesticide record the customer already holds a copy of, and it
+   * was rewritable after issuance by anyone with the app. This refuses once the
+   * report is finalized, which is what "immutable" means here.
+   */
+  saveServiceReportDraft: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      reportId: a.string(),
+      servicesPerformed: a.string(),
+      productsUsed: a.json(),
+      targetPests: a.string(),
+      areasTreated: a.string(),
+      recommendations: a.string(),
+      techNotes: a.string(),
+      reEntryIntervalHours: a.float(),
+      inspectionOnly: a.boolean(),
+      geoLat: a.float(),
+      geoLng: a.float(),
+      geoAccuracyM: a.float(),
+      geoCapturedAt: a.datetime(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** Attach or remove report photos. Refuses once the report is FINALIZED. */
+  setReportPhotos: a
+    .mutation()
+    .arguments({
+      reportId: a.string().required(),
+      photoKeys: a.string().required().array().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * The technician attended and could not do the work.
+   *
+   * The whole point is what it does not do: no service report, so no pesticide
+   * record for an application that never happened; no completion, so no charge
+   * is armed; no next recurring visit queued, because the plan's cadence should
+   * not advance on a visit that did not occur. The office is told and the day's
+   * capacity is freed.
+   *
+   * Before this existed, a technician at a locked door had two options: leave
+   * the job hanging and keep being nagged, or file a report for a visit that
+   * never happened. The second one is the one that clears the screen.
+   */
+  reportNoAccess: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      reason: a.string().required(),
+      note: a.string(),
+      photoKey: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** Presigned PUT for the no-access door photo, before the job has a report. */
+  getNoAccessPhotoUploadUrl: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      contentType: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
 
   /**
    * Quote a customer from a plan template.

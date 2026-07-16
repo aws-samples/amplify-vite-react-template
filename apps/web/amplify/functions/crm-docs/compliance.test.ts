@@ -1,0 +1,424 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * The pesticide record, and the technician's honest exit.
+ *
+ * These are one problem. A technician at a locked door had two options: leave
+ * the job hanging and keep being nagged, or file a report for a visit that never
+ * happened — which emails the customer a pesticide record, arms the charge and
+ * advances the plan. The second is the one that clears the screen, so the
+ * system's easiest path was a fabricated legal document.
+ *
+ * And the record it produced was not one: products optional, no EPA check, no
+ * licence number, no application time, no re-entry interval, and rewritable
+ * after it had been issued to the customer.
+ */
+
+type Job = Record<string, unknown> & { id: string; status: string };
+type Report = Record<string, unknown> & { id: string; status: string };
+
+let jobs: Job[] = [];
+let reports: Report[] = [];
+const officeEmails: { subject: string; bodyHtml: string }[] = [];
+
+const fakeDataClient = {
+  models: {
+    Job: {
+      get: async ({ id }: { id: string }) => ({
+        data: jobs.find((j) => j.id === id) ?? null,
+      }),
+      update: async (patch: Job) => {
+        const i = jobs.findIndex((j) => j.id === patch.id);
+        if (i < 0) return { data: null, errors: [{ message: "not found" }] };
+        jobs[i] = { ...jobs[i], ...patch };
+        return { data: jobs[i], errors: undefined };
+      },
+    },
+    ServiceReport: {
+      get: async ({ id }: { id: string }) => ({
+        data: reports.find((r) => r.id === id) ?? null,
+      }),
+      create: async (input: Record<string, unknown>) => {
+        const r = { id: `rep_${reports.length + 1}`, ...input } as Report;
+        reports.push(r);
+        return { data: r, errors: undefined };
+      },
+      update: async (patch: Report) => {
+        const i = reports.findIndex((r) => r.id === patch.id);
+        if (i < 0) return { data: null, errors: [{ message: "not found" }] };
+        reports[i] = { ...reports[i], ...patch };
+        return { data: reports[i], errors: undefined };
+      },
+    },
+    Customer: {
+      get: async ({ id }: { id: string }) => ({
+        data: { id, displayName: "Dana Whitlock", groupId: null },
+      }),
+    },
+    Technician: {
+      get: async ({ id }: { id: string }) => ({
+        data: { id, name: "Marco Reyes", licenseNumber: "MA-12345" },
+      }),
+      list: async () => ({
+        data: [{ id: "t1", name: "Marco Reyes", userSub: "sub-tech" }],
+      }),
+    },
+  },
+};
+vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
+vi.mock("../shared/email", () => ({
+  emailShell: (h: string, b: string) => `${h}${b}`,
+  sendEmail: async () => true,
+  notifyOffice: async (o: { subject: string; bodyHtml: string }) => {
+    officeEmails.push(o);
+    return true;
+  },
+}));
+vi.mock("../shared/stripeClient", () => ({ stripeClient: () => ({}) }));
+vi.mock("../shared/subscription", () => ({ startPlanBilling: async () => ({ started: true }) }));
+vi.mock("../shared/recurring", () => ({
+  nextVisitDate: () => "2026-08-15",
+  prettyDate: (d: string) => d,
+  scheduleNextRecurringVisit: vi.fn(async () => undefined),
+}));
+vi.mock("../shared/pdf", () => ({ renderServiceReportPdf: async () => new Uint8Array([1]) }));
+vi.mock("@aws-sdk/client-s3", () => ({
+  S3Client: class { async send() { return {}; } },
+  PutObjectCommand: class {},
+  GetObjectCommand: class {},
+}));
+vi.mock("@aws-sdk/s3-request-presigner", () => ({
+  getSignedUrl: async () => "https://s3.example/put",
+}));
+
+const { handler } = await import("./handler");
+
+const call = (
+  field: string,
+  args: Record<string, unknown>,
+  groups: string[] = ["TECH"]
+) =>
+  (handler as unknown as (e: never) => Promise<unknown>)({
+    info: { fieldName: field },
+    arguments: args,
+    identity: { sub: "sub-tech", groups, claims: { email: "marco@x.com" } },
+  } as never);
+
+/** A report that satisfies every rule, so each test can break exactly one. */
+const validReport = (over: Partial<Report> = {}): Report => ({
+  id: "rep_1",
+  jobId: "j1",
+  customerId: "c1",
+  technicianId: "t1",
+  status: "DRAFT",
+  serviceDate: "2026-07-16T09:00:00Z",
+  servicesPerformed: "Exterior barrier treatment and web removal",
+  productsUsed: JSON.stringify([
+    { name: "Suspend PolyZone", epaNumber: "432-1514", quantity: "1.5 oz", rate: "0.06%" },
+  ]),
+  reEntryIntervalHours: 4,
+  geoLat: 41.82,
+  geoLng: -71.41,
+  ...over,
+});
+
+beforeEach(() => {
+  process.env.DOCS_BUCKET = "docs";
+  jobs = [{ id: "j1", customerId: "c1", status: "IN_PROGRESS", serviceType: "General pest", type: "ONE_TIME" }];
+  reports = [];
+  officeEmails.length = 0;
+});
+
+describe("no access — the honest exit", () => {
+  it("ends the job without filing a report", async () => {
+    await call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" });
+
+    expect(jobs[0].status).toBe("NO_ACCESS");
+    expect(reports).toHaveLength(0);
+  });
+
+  it("does not complete the job, so no charge is armed", async () => {
+    await call("reportNoAccess", { jobId: "j1", reason: "LOCKED_OUT" });
+
+    expect(jobs[0].status).not.toBe("COMPLETED");
+    expect(jobs[0].completedAt).toBeUndefined();
+  });
+
+  it("does not queue the next recurring visit — the cadence did not advance", async () => {
+    const { scheduleNextRecurringVisit } = await import("../shared/recurring");
+
+    await call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" });
+
+    expect(scheduleNextRecurringVisit).not.toHaveBeenCalled();
+  });
+
+  it("frees the day's capacity by taking the stop off the route", async () => {
+    jobs[0].routeId = "r1";
+    jobs[0].routeOrder = 3;
+
+    await call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" });
+
+    expect(jobs[0].routeId).toBeNull();
+    expect(jobs[0].routeOrder).toBeNull();
+  });
+
+  it("records the reason and the time", async () => {
+    await call("reportNoAccess", { jobId: "j1", reason: "DOG_LOOSE", note: "Gate padlocked" });
+
+    expect(jobs[0]).toMatchObject({
+      noAccessReason: "DOG_LOOSE",
+      noAccessNote: "Gate padlocked",
+    });
+    expect(jobs[0].noAccessAt).toBeTruthy();
+  });
+
+  it("tells the office, because the billing decision is not the technician's", async () => {
+    await call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" });
+
+    expect(officeEmails).toHaveLength(1);
+    expect(officeEmails[0].subject).toContain("Couldn't access");
+    expect(officeEmails[0].bodyHtml).toContain("nothing has been charged");
+  });
+
+  it("refuses a reason it does not know rather than recording a blank one", async () => {
+    await expect(
+      call("reportNoAccess", { jobId: "j1", reason: "COULDNT_BE_BOTHERED" })
+    ).rejects.toThrow(/unknown no-access reason/i);
+    expect(jobs[0].status).toBe("IN_PROGRESS");
+  });
+
+  it("is idempotent", async () => {
+    await call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" });
+    const res = (await call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" })) as {
+      alreadyReported: boolean;
+    };
+
+    expect(res.alreadyReported).toBe(true);
+    expect(officeEmails).toHaveLength(1);
+  });
+
+  it("refuses to overwrite a completed job", async () => {
+    jobs[0].status = "COMPLETED";
+
+    await expect(
+      call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" })
+    ).rejects.toThrow(/already completed/i);
+  });
+});
+
+describe("the finalize gate", () => {
+  it("finalizes a report that is actually a record", async () => {
+    reports.push(validReport());
+
+    const res = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
+      alreadyFinalized: boolean;
+    };
+
+    expect(res.alreadyFinalized).toBe(false);
+    expect(reports[0].status).toBe("FINALIZED");
+  });
+
+  it("refuses a report with no products — a pesticide record needs pesticide", async () => {
+    // This used to finalize and email happily.
+    reports.push(validReport({ productsUsed: JSON.stringify([]) }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/add the products you applied/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("accepts zero products when the technician says it was an inspection", async () => {
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([]),
+        inspectionOnly: true,
+        reEntryIntervalHours: null,
+      })
+    );
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
+  });
+
+  it("refuses a report that claims inspection-only and lists products", async () => {
+    reports.push(validReport({ inspectionOnly: true }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/untick one or the other/i);
+  });
+
+  it("refuses a product with no EPA number", async () => {
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([{ name: "Suspend", quantity: "1 oz" }]),
+      })
+    );
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/needs its EPA registration number/i);
+  });
+
+  it("refuses an EPA number that is not one", async () => {
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([
+          { name: "Suspend", epaNumber: "dunno", quantity: "1 oz" },
+        ]),
+      })
+    );
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/isn't a valid EPA registration number/i);
+  });
+
+  it.each(["432-1514", "432-1514-4321", "1234567-12345"])(
+    "accepts the real EPA format %s",
+    async (epaNumber) => {
+      reports.push(
+        validReport({
+          productsUsed: JSON.stringify([{ name: "P", epaNumber, quantity: "1 oz" }]),
+        })
+      );
+
+      await call("finalizeServiceReport", { reportId: "rep_1" });
+
+      expect(reports[0].status).toBe("FINALIZED");
+    }
+  );
+
+  it("refuses a product with no quantity — 'some' is not a record", async () => {
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([{ name: "Suspend", epaNumber: "432-1514" }]),
+      })
+    );
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/how much Suspend was applied/i);
+  });
+
+  it("refuses without a re-entry interval — the occupant has to be told", async () => {
+    reports.push(validReport({ reEntryIntervalHours: null }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/re-entry interval/i);
+  });
+
+  it("accepts a re-entry interval of zero, which is a real answer", async () => {
+    reports.push(validReport({ reEntryIntervalHours: 0 }));
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
+  });
+
+  it("refuses without a location", async () => {
+    reports.push(validReport({ geoLat: null, geoLng: null }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/capture the location/i);
+  });
+
+  it("refuses without saying what was done", async () => {
+    reports.push(validReport({ servicesPerformed: "   " }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/say what was done/i);
+  });
+
+  it("refuses to resurrect a canceled job as completed", async () => {
+    jobs[0].status = "CANCELED";
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/was canceled/i);
+  });
+
+  it("refuses a report on a job the technician couldn't access", async () => {
+    jobs[0].status = "NO_ACCESS";
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/did not happen/i);
+  });
+
+  it("stamps the application window on the record", async () => {
+    jobs[0].startedAt = "2026-07-16T13:05:00Z";
+    reports.push(validReport());
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].applicationStartAt).toBe("2026-07-16T13:05:00Z");
+    expect(reports[0].applicationEndAt).toBeTruthy();
+  });
+});
+
+describe("a finalized report is immutable", () => {
+  it("refuses to edit a report that has been issued to the customer", async () => {
+    // The heart of item 7: a regulatory record that can be edited after
+    // issuance is worse evidence than none.
+    reports.push(validReport({ status: "FINALIZED" }));
+
+    await expect(
+      call("saveServiceReportDraft", {
+        jobId: "j1",
+        reportId: "rep_1",
+        servicesPerformed: "actually I didn't do that",
+      })
+    ).rejects.toThrow(/cannot be changed/i);
+    expect(reports[0].servicesPerformed).toBe(
+      "Exterior barrier treatment and web removal"
+    );
+  });
+
+  it("refuses to change a finalized report's photos", async () => {
+    reports.push(validReport({ status: "FINALIZED" }));
+
+    await expect(
+      call("setReportPhotos", { reportId: "rep_1", photoKeys: [] })
+    ).rejects.toThrow(/cannot be changed/i);
+  });
+
+  it("still lets a draft be edited", async () => {
+    reports.push(validReport());
+
+    await call("saveServiceReportDraft", {
+      jobId: "j1",
+      reportId: "rep_1",
+      servicesPerformed: "Exterior barrier treatment, web removal, bait refresh",
+    });
+
+    expect(reports[0].servicesPerformed).toContain("bait refresh");
+  });
+
+  it("takes the technician from the token, not the request", async () => {
+    await call("saveServiceReportDraft", {
+      jobId: "j1",
+      servicesPerformed: "Treatment",
+      technicianId: "somebody-else",
+    });
+
+    expect(reports[0].technicianId).toBe("t1");
+  });
+
+  it("refuses to start a report from a login with no technician record", async () => {
+    await expect(
+      (handler as unknown as (e: never) => Promise<unknown>)({
+        info: { fieldName: "saveServiceReportDraft" },
+        arguments: { jobId: "j1", servicesPerformed: "x" },
+        identity: { sub: "sub-unlinked", groups: ["TECH"], claims: {} },
+      } as never)
+    ).rejects.toThrow(/isn't linked to a technician record/i);
+  });
+});
