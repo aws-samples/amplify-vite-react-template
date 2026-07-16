@@ -74,6 +74,24 @@ Residuals from this pass, tracked under existing IDs: the dashboard-refund leg o
 `charge.refunded` webhook registration (R82, console); one dist rebuild must accompany the R18
 deploy so the stale built Clarity tag can't ship.
 
+**Funnel pass, `9d0add9`** (same verification discipline; suites 301 web / 114 CRM):
+
+- **R01 closed** — public `/quote`, `/book`, `/cancel` pages exist, routed, and styled native to
+  the site; every emailed URL now resolves. Verified live in-browser against the deployed
+  staging API: real-time quote, live day pricing, checkout summary. Full pay→finalize→cancel
+  loop to be re-verified after the next staging deploy (the terms contract ships with it).
+- **R17 funnel half closed** — checkout renders the booking & cancellation terms above the pay
+  button (unchecked-by-default acceptance); `/book` requires the acknowledged terms version and
+  records version + server-stamped time + IP + user-agent on the booking; the 3-day constant is
+  single-sourced into every rendered copy. The cross-document half (ToS says 24-hour, agreement
+  says 30-day — Jake picks one policy per product line) remains open.
+- **Launch-gate status for section B**: R29, R59, R60, R62 closed earlier today; R63 (LLM
+  market-rate engine cut-vs-guard) remains Jake's decision — the funnel runs with it guarded by
+  the daily research budget in the meantime.
+- **Go-live console needs for the funnel**: `VITE_STRIPE_PUBLISHABLE_KEY` on the marketing
+  app's hosting env; Turnstile (`TURNSTILE_SECRET` + widget) before ad spend if bot volume
+  appears; production Stripe webhook registration (R82) before the funnel opens on main.
+
 **Second pass, `00e26a8`** (same verification discipline; suites 262 web / 114 CRM):
 
 - **R04, R06** — completed-but-never-charged one-time jobs and ACTIVE-plans-with-no-next-visit
