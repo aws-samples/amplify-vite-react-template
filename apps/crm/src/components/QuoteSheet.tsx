@@ -15,17 +15,17 @@ import { Button, ErrorNote, Field } from "../ui/kit";
  */
 export default function QuoteSheet({
   customer,
-  accessGroups,
   onDone,
 }: {
   customer: Customer;
-  accessGroups: string[];
   onDone: () => Promise<void>;
 }) {
   const [templates, setTemplates] = useState<PlanTemplate[] | null>(null);
   const [templateId, setTemplateId] = useState("");
   const [price, setPrice] = useState("");
   const [notes, setNotes] = useState("");
+  const [overriding, setOverriding] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
   const [busy, setBusy] = useState<null | "draft" | "send">(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,13 +56,19 @@ export default function QuoteSheet({
   }, []);
 
   const template = templates?.find((t) => t.id === templateId) ?? null;
+  // A template with no list price is priced by the engine from the rate card.
+  // Typing a number from memory beside it is the bypass this screen used to be.
+  const enginePriced = template != null && template.priceCents == null;
+  const listCents = template?.priceCents ?? null;
+  const cents = Math.round(parseFloat(price) * 100);
+  const deviates =
+    listCents != null && Number.isFinite(cents) && cents !== listCents;
 
   const go = async (sendNow: boolean) => {
     if (!template) {
       setError("Pick a plan template");
       return;
     }
-    const cents = Math.round(parseFloat(price) * 100);
     if (!Number.isFinite(cents) || cents <= 0) {
       setError("Enter a valid monthly price");
       return;
@@ -74,20 +80,16 @@ export default function QuoteSheet({
     setBusy(sendNow ? "send" : "draft");
     setError(null);
     try {
-      const quote = unwrap(
-        await api().models.Quote.create({
+      const quote = opResult<{ quoteId?: string }>(
+        await api().mutations.createQuote({
           customerId: customer.id,
           planTemplateId: template.id,
-          planName: template.name,
           priceCents: cents,
-          serviceFrequency: template.serviceFrequency,
-          status: "DRAFT",
+          priceOverrideReason: deviates ? overrideReason.trim() : undefined,
           notes: notes.trim() || undefined,
-          quotedAt: new Date().toISOString(),
-          accessGroups,
         })
       );
-      if (!quote) throw new Error("Could not create the quote");
+      if (!quote?.quoteId) throw new Error("Could not create the quote");
 
       const address = [
         customer.serviceStreet,
@@ -109,7 +111,7 @@ export default function QuoteSheet({
       const agreement = opResult<{ agreementId?: string }>(
         await api().mutations.createAgreement({
           customerId: customer.id,
-          quoteId: quote.id,
+          quoteId: quote.quoteId,
           title: template.agreementTitle,
           bodyText,
           imageKeys: (template.imageKeys ?? []).filter(
@@ -131,7 +133,7 @@ export default function QuoteSheet({
               : "The signing email failed to send — check the email address and resend from the Agreements card."
           );
         }
-        unwrap(await api().models.Quote.update({ id: quote.id, status: "SENT" }));
+        unwrap(await api().models.Quote.update({ id: quote.quoteId, status: "SENT" }));
       }
       await onDone();
     } catch (err) {
@@ -171,18 +173,68 @@ export default function QuoteSheet({
       {template?.description ? (
         <p className="muted small">{template.description}</p>
       ) : null}
-      <Field label="Quoted monthly price ($)" hint="Prefilled from the template list price — or use ⚡ AI price for the exact rate-card number">
-        <input inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
-      </Field>
+      {enginePriced ? (
+        // Never render an empty price box. This template's price comes from the
+        // rate card; an empty field beside it invites a number from memory,
+        // which is the whole thing the pricing engine exists to prevent.
+        <p className="muted small" style={{ margin: 0 }}>
+          <strong>{template?.name}</strong> is priced by the rate card, not by
+          hand. Close this and use <strong>⚡ Price a lead</strong> so the engine
+          sets the number.
+        </p>
+      ) : (
+        <>
+          <Field label="Monthly price">
+            {overriding ? (
+              <input
+                inputMode="decimal"
+                value={price}
+                onChange={(e) => setPrice(e.target.value.replace(/[^\d.]/g, ""))}
+              />
+            ) : (
+              <input value={listCents != null ? money(listCents) : ""} readOnly />
+            )}
+          </Field>
+          {overriding ? (
+            <Field
+              label="Why is this not the list price?"
+              hint="Recorded on the quote with your name against it"
+            >
+              <input
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                placeholder="Matched a competitor quote — agreed with Jake"
+              />
+            </Field>
+          ) : (
+            <Button
+              small
+              variant="ghost"
+              onClick={() => setOverriding(true)}
+            >
+              Charge something other than {listCents != null ? money(listCents) : "the list price"}
+            </Button>
+          )}
+        </>
+      )}
       <Field label="Notes (internal)">
         <input value={notes} onChange={(e) => setNotes(e.target.value)} />
       </Field>
       <ErrorNote error={error} />
       <div className="form-row-2">
-        <Button variant="ghost" loading={busy === "draft"} onClick={() => void go(false)}>
+        <Button
+          variant="ghost"
+          loading={busy === "draft"}
+          disabled={enginePriced || (deviates && !overrideReason.trim())}
+          onClick={() => void go(false)}
+        >
           Save draft
         </Button>
-        <Button loading={busy === "send"} onClick={() => void go(true)}>
+        <Button
+          loading={busy === "send"}
+          disabled={enginePriced || (deviates && !overrideReason.trim())}
+          onClick={() => void go(true)}
+        >
           Quote &amp; send agreement
         </Button>
       </div>

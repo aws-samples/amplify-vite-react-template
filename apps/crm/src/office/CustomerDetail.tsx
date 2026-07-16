@@ -22,6 +22,13 @@ import {
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { amountInWords } from "../lib/amountWords";
 import { planCadence } from "../lib/planCadence";
+
+/** Said out loud in the start-billing confirm, so "quarterly" is never read as the billing cadence. */
+const VISIT_NOTE: Record<string, string> = {
+  MONTHLY: "A technician visits every month.",
+  BIMONTHLY: "A technician visits every 2 months — the charge is still monthly.",
+  QUARTERLY: "A technician visits every 3 months — the charge is still monthly.",
+};
 import {
   Badge,
   Button,
@@ -507,15 +514,29 @@ export default function CustomerDetail() {
                           small
                           variant="subtle"
                           loading={busyAction === `start-${p.id}`}
-                          onClick={() =>
-                            void run(`start-${p.id}`, async () =>
-                              unwrap(
-                                await api().mutations.startSubscription({
-                                  servicePlanId: p.id,
-                                })
+                          onClick={() => {
+                            // Begins charging a card every month, indefinitely.
+                            // Completion starts billing on its own now, so
+                            // reaching for this by hand means something went
+                            // wrong — worth a sentence before it starts.
+                            if (
+                              !window.confirm(
+                                `Start billing ${customer.displayName} ${money(p.priceCents)} every month for ${p.planName}?\n\nThe first charge goes to their card on file today, then monthly. ${VISIT_NOTE[p.serviceFrequency ?? ""] ?? ""}`
                               )
-                            )
-                          }
+                            ) {
+                              return;
+                            }
+                            void run(
+                              `start-${p.id}`,
+                              async () =>
+                                unwrap(
+                                  await api().mutations.startSubscription({
+                                    servicePlanId: p.id,
+                                  })
+                                ),
+                              `Billing started — ${money(p.priceCents)} every month`
+                            );
+                          }}
                         >
                           Start billing
                         </Button>
@@ -657,13 +678,26 @@ export default function CustomerDetail() {
                           small
                           variant="subtle"
                           loading={busyAction === `charge-${j.id}`}
-                          onClick={() =>
-                            void run(`charge-${j.id}`, async () =>
-                              unwrap(
-                                await api().mutations.chargeOneTimeJob({ jobId: j.id })
+                          onClick={() => {
+                            // The amount is the job's own price, so there is no
+                            // typo to catch here — but it is still a live card
+                            // charge from a list someone is scanning.
+                            if (
+                              !window.confirm(
+                                `Charge ${customer.displayName} ${money(j.priceCents ?? 0)} for ${j.serviceType}?\n\n${amountInWords(j.priceCents ?? 0)}${pm?.label ? ` — on ${pm.label}` : ""}.\n\nThis takes the money now. It can be refunded, but not undone.`
                               )
-                            )
-                          }
+                            ) {
+                              return;
+                            }
+                            void run(
+                              `charge-${j.id}`,
+                              async () =>
+                                unwrap(
+                                  await api().mutations.chargeOneTimeJob({ jobId: j.id })
+                                ),
+                              `Charged ${money(j.priceCents ?? 0)} for ${j.serviceType}`
+                            );
+                          }}
                         >
                           Charge {money(j.priceCents)}
                         </Button>
@@ -1032,7 +1066,6 @@ export default function CustomerDetail() {
       <Sheet open={sheet === "quote"} onClose={() => setSheet(null)} title="Quote a plan">
         <QuoteSheet
           customer={customer}
-          accessGroups={accessGroups}
           onDone={async () => {
             setSheet(null);
             await load();

@@ -4,7 +4,12 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
-import { callerGroups, callerIsOffice, isStaff } from "../shared/authz";
+import {
+  callerGroups,
+  callerIsOffice,
+  callerSub,
+  isStaff,
+} from "../shared/authz";
 import { cusGroup, customerAccessGroups, grpGroup } from "../shared/dynamicGroups";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
@@ -51,13 +56,38 @@ type Args = {
   bodyText?: string;
   quoteId?: string;
   imageKeys?: (string | null)[];
+  planTemplateId?: string;
+  priceCents?: number;
+  initialFeeCents?: number;
+  priceOverrideReason?: string;
 };
+
+/** Verified Cognito identity — never anything the browser supplied. */
+function actorOf(event: AppSyncResolverEvent<Args>) {
+  const identity = event.identity as { claims?: Record<string, unknown> } | null;
+  const email = identity?.claims?.email;
+  return {
+    sub: callerSub(event.identity),
+    email: typeof email === "string" ? email : null,
+  };
+}
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
   switch (opFieldName(event)) {
     case "sendAgreement": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return sendAgreement(event.arguments.agreementId!);
+    }
+    case "createQuote": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return createQuote(actorOf(event), {
+        customerId: event.arguments.customerId!,
+        planTemplateId: event.arguments.planTemplateId!,
+        priceCents: event.arguments.priceCents!,
+        initialFeeCents: event.arguments.initialFeeCents,
+        priceOverrideReason: event.arguments.priceOverrideReason,
+        notes: event.arguments.note,
+      });
     }
     case "createAgreement": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
@@ -160,6 +190,86 @@ async function sendCustomerEmail(
     html: emailShell(heading, body),
   });
   return { sent, to: customer.email };
+}
+
+/**
+ * Quote a customer from a plan template, with the typed price checked against
+ * the template's list price.
+ *
+ * The pricing architecture is the best thing in this codebase — the AI extracts
+ * facts, rateCards computes every dollar, and the model cannot invent a price.
+ * None of that survives a text box beside it that nothing compares to anything.
+ * A typo of 4 for 45 created a $4/mo plan that billed forever and no screen ever
+ * mentioned it.
+ *
+ * Templates with no list price are priced by the engine, not from memory: the
+ * only honest answer is to refuse and send the caller to Price a lead.
+ */
+async function createQuote(
+  actor: { sub: string | null; email: string | null },
+  args: {
+    customerId: string;
+    planTemplateId: string;
+    priceCents: number;
+    initialFeeCents?: number | null;
+    priceOverrideReason?: string | null;
+    notes?: string | null;
+  }
+) {
+  if (!Number.isInteger(args.priceCents) || args.priceCents <= 0) {
+    throw new Error("Enter a valid monthly price");
+  }
+
+  const client = await dataClient();
+  const [{ data: customer }, { data: template }] = await Promise.all([
+    client.models.Customer.get({ id: args.customerId }),
+    client.models.PlanTemplate.get({ id: args.planTemplateId }),
+  ]);
+  if (!customer) throw new Error(`Customer ${args.customerId} not found`);
+  if (!template) throw new Error(`Plan template ${args.planTemplateId} not found`);
+
+  if (template.priceCents == null) {
+    throw new Error(
+      `${template.name} is priced by the pricing engine, not by hand. Use "Price a lead" so the rate card sets the number.`
+    );
+  }
+
+  const override = (args.priceOverrideReason ?? "").trim();
+  if (args.priceCents !== template.priceCents && !override) {
+    const listed = (template.priceCents / 100).toFixed(2);
+    const typed = (args.priceCents / 100).toFixed(2);
+    throw new Error(
+      `${template.name} lists at $${listed}/mo and this quote is $${typed}/mo. Say why before it goes out — the price is recorded with your name on it.`
+    );
+  }
+
+  const { data: quote, errors } = await client.models.Quote.create({
+    customerId: args.customerId,
+    planTemplateId: template.id,
+    planName: template.name,
+    priceCents: args.priceCents,
+    initialFeeCents: args.initialFeeCents ?? undefined,
+    serviceFrequency: template.serviceFrequency,
+    status: "DRAFT",
+    notes: args.notes ?? undefined,
+    quotedAt: new Date().toISOString(),
+    listPriceCents: template.priceCents,
+    priceOverrideReason: override || undefined,
+    quotedBy: actor.sub ?? undefined,
+    quotedByEmail: actor.email ?? undefined,
+    accessGroups: customerAccessGroups(args.customerId, customer.groupId),
+  });
+  if (!quote) {
+    throw new Error(
+      `Could not create the quote: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return {
+    quoteId: quote.id,
+    priceCents: quote.priceCents,
+    listPriceCents: template.priceCents,
+    overridden: args.priceCents !== template.priceCents,
+  };
 }
 
 /**

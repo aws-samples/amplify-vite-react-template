@@ -195,6 +195,14 @@ const schema = a.schema({
       servicePlanId: a.id(),
       quotedAt: a.datetime(),
       convertedAt: a.datetime(),
+      // What the plan template said this costs, captured at quote time. A quote
+      // whose priceCents differs from it was priced by a human, and
+      // priceOverrideReason says why. Kept so the deviation is answerable later
+      // even if the template's list price moves.
+      listPriceCents: a.integer(),
+      priceOverrideReason: a.string(),
+      quotedBy: a.string(),
+      quotedByEmail: a.string(),
       accessGroups: a.string().array(),
       agreements: a.hasMany("Agreement", "quoteId"),
     })
@@ -768,6 +776,31 @@ const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
     .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Quote a customer from a plan template.
+   *
+   * A mutation because the price has to be checked against something, and a
+   * check in the browser is not a check. The deterministic pricing engine
+   * exists so nobody prices from memory; a free-text box beside it that nothing
+   * compares to the rate card is a hole straight through that. A price that
+   * differs from the template's list price needs a reason, recorded on the
+   * quote with the person who set it.
+   */
+  createQuote: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      planTemplateId: a.string().required(),
+      priceCents: a.integer().required(),
+      initialFeeCents: a.integer(),
+      /** Required when priceCents differs from the template's list price. */
+      priceOverrideReason: a.string(),
+      notes: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
 
   /**
    * Author an agreement for a customer. A mutation rather than a client-side

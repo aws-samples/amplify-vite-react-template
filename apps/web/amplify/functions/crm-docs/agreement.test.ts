@@ -14,6 +14,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type Agreement = Record<string, unknown> & { id: string; status: string };
 
 let agreements: Agreement[] = [];
+let templates: { id: string; name: string; priceCents: number | null; serviceFrequency: string }[] = [];
+const quotesCreated: Record<string, unknown>[] = [];
 const created: Record<string, unknown>[] = [];
 let createResult: { data: unknown; errors?: { message: string }[] } = {
   data: { id: "ag_1", status: "DRAFT" },
@@ -41,6 +43,17 @@ const fakeDataClient = {
         data: { id, displayName: "Dana", groupId: null },
       }),
     },
+    PlanTemplate: {
+      get: async ({ id }: { id: string }) => ({
+        data: templates.find((t) => t.id === id) ?? null,
+      }),
+    },
+    Quote: {
+      create: async (input: Record<string, unknown>) => {
+        quotesCreated.push(input);
+        return { data: { id: "q_1", priceCents: input.priceCents }, errors: undefined };
+      },
+    },
   },
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
@@ -67,6 +80,11 @@ const call = (
 beforeEach(() => {
   agreements = [];
   created.length = 0;
+  quotesCreated.length = 0;
+  templates = [
+    { id: "t_list", name: "Residential monthly", priceCents: 9900, serviceFrequency: "MONTHLY" },
+    { id: "t_ai", name: "General Pest Control", priceCents: null, serviceFrequency: "QUARTERLY" },
+  ];
   createResult = { data: { id: "ag_1", status: "DRAFT" } };
 });
 
@@ -180,5 +198,87 @@ describe("voidAgreement", () => {
     await expect(
       call("voidAgreement", { agreementId: "ag_1" }, ["TECH"])
     ).rejects.toThrow(/office role required/i);
+  });
+});
+
+describe("createQuote price guard", () => {
+  const quote = (args: Record<string, unknown>) =>
+    call("createQuote", { customerId: "c1", planTemplateId: "t_list", ...args });
+
+  it("quotes at the template's list price without ceremony", async () => {
+    await quote({ priceCents: 9900 });
+
+    expect(quotesCreated[0]).toMatchObject({
+      priceCents: 9900,
+      listPriceCents: 9900,
+      status: "DRAFT",
+    });
+  });
+
+  it("refuses a price that differs from the list price with no reason", async () => {
+    // The typo that started this: 4 for 45. A $4/mo plan that bills forever.
+    await expect(quote({ priceCents: 400 })).rejects.toThrow(/say why/i);
+    expect(quotesCreated).toHaveLength(0);
+  });
+
+  it("names both numbers so the CSR can see the slip", async () => {
+    await expect(quote({ priceCents: 400 })).rejects.toThrow(
+      /lists at \$99\.00\/mo and this quote is \$4\.00\/mo/i
+    );
+  });
+
+  it("allows a deviation with a reason, and records it", async () => {
+    await quote({ priceCents: 8900, priceOverrideReason: "Matched a competitor" });
+
+    expect(quotesCreated[0]).toMatchObject({
+      priceCents: 8900,
+      listPriceCents: 9900,
+      priceOverrideReason: "Matched a competitor",
+    });
+  });
+
+  it("records who set an overridden price", async () => {
+    await quote({ priceCents: 8900, priceOverrideReason: "Matched a competitor" });
+
+    expect(quotesCreated[0]).toMatchObject({
+      quotedBy: "sub-office",
+      quotedByEmail: "csr@x.com",
+    });
+  });
+
+  it("treats whitespace as no reason at all", async () => {
+    await expect(
+      quote({ priceCents: 400, priceOverrideReason: "   " })
+    ).rejects.toThrow(/say why/i);
+  });
+
+  it("refuses to price an engine-priced plan by hand", async () => {
+    // The flagship product. Its box used to prefill empty, so the standard path
+    // was to type a number from memory.
+    await expect(
+      call("createQuote", {
+        customerId: "c1",
+        planTemplateId: "t_ai",
+        priceCents: 12000,
+      })
+    ).rejects.toThrow(/priced by the pricing engine/i);
+    expect(quotesCreated).toHaveLength(0);
+  });
+
+  it("refuses a nonsense price", async () => {
+    await expect(quote({ priceCents: 0 })).rejects.toThrow(/valid monthly price/i);
+    await expect(quote({ priceCents: -5000 })).rejects.toThrow(/valid monthly price/i);
+  });
+
+  it("refuses a technician", async () => {
+    await expect(
+      call("createQuote", { customerId: "c1", planTemplateId: "t_list", priceCents: 9900 }, ["TECH"])
+    ).rejects.toThrow(/office role required/i);
+  });
+
+  it("refuses an unknown template", async () => {
+    await expect(
+      call("createQuote", { customerId: "c1", planTemplateId: "nope", priceCents: 9900 })
+    ).rejects.toThrow(/not found/i);
   });
 });
