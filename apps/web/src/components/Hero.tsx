@@ -5,10 +5,13 @@ type HeroProps = {
   video?: string;
   eyebrow?: string;
   headline: ReactNode;
+  subtitle?: ReactNode;
   sub?: ReactNode;
   body?: ReactNode;
   primaryCta?: { label: string; onClick?: () => void; href?: string };
   secondaryCta?: { label: string; onClick?: () => void; href?: string };
+  announceBanner?: boolean;
+  className?: string;
 };
 
 function CtaButton({
@@ -38,18 +41,42 @@ export default function Hero({
   video,
   eyebrow,
   headline,
+  subtitle,
   sub,
   body,
   primaryCta,
   secondaryCta,
+  announceBanner,
+  className,
 }: HeroProps) {
   return (
     <section
-      className={`bk-hero${video ? " bk-hero--video" : ""}`}
-      style={video ? undefined : { backgroundImage: `url(${image})` }}
-      role="img"
-      aria-label="BuzzKill Pest Control — professional pest management for condos and HOAs"
+      className={`bk-hero${video ? " bk-hero--video" : ""}${announceBanner ? " bk-hero--announce" : ""}${className ? ` ${className}` : ""}`}
     >
+      {announceBanner && (
+        <div className="bk-announce" aria-label="Trust signals">
+          <div className="bk-announce-inner">
+            <div className="bk-announce-trust">
+              <span className="bk-announce-stars" aria-label="4.9 star rating">★★★★★</span>
+              <span>4.9 Google Rating</span>
+              <span className="bk-announce-sep" aria-hidden="true">|</span>
+              <span>Licensed &amp; Insured</span>
+              <span className="bk-announce-sep" aria-hidden="true">|</span>
+              <span>Family Owned &amp; Operated</span>
+              <span className="bk-announce-sep" aria-hidden="true">|</span>
+              <span>Serving MA &amp; RI</span>
+            </div>
+          </div>
+        </div>
+      )}
+      {!video && (
+        <img
+          src={image}
+          alt=""
+          aria-hidden="true"
+          className="bk-hero-bg-img"
+        />
+      )}
       {video && (
         <video
           className="bk-hero-video"
@@ -64,8 +91,9 @@ export default function Hero({
       )}
       <div className="bk-hero-overlay" aria-hidden="true" />
       <div className="bk-hero-inner">
-        {eyebrow && <div className="bk-hero-eyebrow">{eyebrow}</div>}
+        {eyebrow && <p className="hero-eyebrow">{eyebrow}</p>}
         <h1 className="bk-hero-headline">{headline}</h1>
+        {subtitle && <p className="hero-subtitle">{subtitle}</p>}
         {sub && <p className="bk-hero-sub">{sub}</p>}
         {body && <p className="bk-hero-sub">{body}</p>}
         {(primaryCta || secondaryCta) && (

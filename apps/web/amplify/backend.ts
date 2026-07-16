@@ -71,6 +71,7 @@ const leadIntakeUrl = backend.leadIntake.resources.lambda.addFunctionUrl({
     allowedOrigins: [
       "https://www.pestbuzzkill.com",
       "https://pestbuzzkill.com",
+      "https://staging.pestbuzzkill.com",
       "https://buzzkill-pest-control.squarespace.com",
       "http://localhost:5173",
     ],
