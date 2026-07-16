@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 
 const VERIFY_MA =
@@ -6,8 +7,8 @@ const VERIFY_RI = "https://demri.my.site.com/agr/s/";
 
 const ShieldIcon = () => (
   <svg
-    width="28"
-    height="28"
+    width="26"
+    height="26"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
@@ -23,8 +24,8 @@ const ShieldIcon = () => (
 
 const DocIcon = () => (
   <svg
-    width="28"
-    height="28"
+    width="26"
+    height="26"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
@@ -41,8 +42,8 @@ const DocIcon = () => (
 
 const InsuranceIcon = () => (
   <svg
-    width="28"
-    height="28"
+    width="26"
+    height="26"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
@@ -75,73 +76,28 @@ function CredentialCard({
   accent,
 }: CredentialCardProps) {
   return (
-    <div
-      className="bk-credential"
-      style={{
-        background: "var(--bk-white)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-lg)",
-        padding: "28px 28px 24px",
-        borderTop: accent
-          ? "4px solid var(--bk-green)"
-          : "1px solid var(--border)",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          marginBottom: 16,
-          color: accent ? "var(--bk-green-deep)" : "var(--fg1)",
-        }}
-      >
+    <div className={`bk-credential-card${accent ? " bk-credential-card--accent" : ""}`}>
+      <div className="bk-credential-head">
         {icon}
-        <h3
-          className="bk-h4"
-          style={{ margin: 0, textTransform: "none", letterSpacing: 0 }}
-        >
-          {title}
-        </h3>
+        <h3 className="bk-credential-title">{title}</h3>
       </div>
 
-      <dl
-        style={{
-          margin: 0,
-          display: "grid",
-          gridTemplateColumns: "auto 1fr",
-          gap: "6px 16px",
-          fontSize: 14,
-          lineHeight: 1.6,
-        }}
-      >
+      <dl className="bk-credential-dl">
         {details.map((d, i) => (
-          <div key={i} style={{ display: "contents" }}>
-            <dt
-              style={{
-                fontWeight: 700,
-                color: "var(--fg2)",
-                fontSize: 12,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-                paddingTop: 2,
-              }}
-            >
-              {d.label}
-            </dt>
-            <dd style={{ margin: 0, color: "var(--fg1)" }}>{d.value}</dd>
+          <div key={i} className="bk-credential-row">
+            <dt className="bk-credential-dt">{d.label}</dt>
+            <dd className="bk-credential-dd">{d.value}</dd>
           </div>
         ))}
       </dl>
 
       {verifyUrl && (
-        <div style={{ marginTop: 20 }}>
+        <div className="bk-credential-verify">
           <a
             href={verifyUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="bk-btn bk-btn-outline"
-            style={{ fontSize: 13, padding: "8px 18px" }}
           >
             {verifyLabel} &rarr;
           </a>
@@ -180,14 +136,7 @@ export default function LicensedInsured() {
       <section className="bk-section bk-section-cream">
         <div className="bk-container" style={{ maxWidth: 880 }}>
           <h2 className="bk-h2">State Credentials</h2>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
-              gap: 24,
-              marginTop: 32,
-            }}
-          >
+          <div className="bk-credential-grid">
             <CredentialCard
               icon={<ShieldIcon />}
               title="Rhode Island Pesticide Company Registration"
@@ -201,11 +150,7 @@ export default function LicensedInsured() {
                 },
                 {
                   label: "Status",
-                  value: (
-                    <span style={{ color: "var(--success)", fontWeight: 700 }}>
-                      Active
-                    </span>
-                  ),
+                  value: <span className="bk-credential-status">Active</span>,
                 },
               ]}
               verifyUrl={VERIFY_RI}
@@ -229,11 +174,7 @@ export default function LicensedInsured() {
                 },
                 {
                   label: "Status",
-                  value: (
-                    <span style={{ color: "var(--success)", fontWeight: 700 }}>
-                      Active
-                    </span>
-                  ),
+                  value: <span className="bk-credential-status">Active</span>,
                 },
               ]}
               verifyUrl={VERIFY_MA}
@@ -252,11 +193,7 @@ export default function LicensedInsured() {
                 },
                 {
                   label: "Status",
-                  value: (
-                    <span style={{ color: "var(--success)", fontWeight: 700 }}>
-                      Active
-                    </span>
-                  ),
+                  value: <span className="bk-credential-status">Active</span>,
                 },
               ]}
               verifyUrl={VERIFY_MA}
@@ -283,34 +220,32 @@ export default function LicensedInsured() {
         </div>
       </section>
 
-      {/* COI CTA */}
-      <section className="bk-section bk-section-dark">
-        <div className="bk-container bk-narrow bk-center">
-          <h2 className="bk-h2 bk-on-dark">
-            Need a Certificate of Insurance?
-          </h2>
-          <p className="bk-body-lead bk-on-dark-soft">
-            HOA boards and property managers can request our COI at any time.
-            We&rsquo;ll have it to you within one business day.
-          </p>
-          <div
-            style={{
-              display: "flex",
-              gap: 14,
-              justifyContent: "center",
-              flexWrap: "wrap",
-              marginTop: 24,
-            }}
-          >
-            <a
-              href="mailto:info@pestbuzzkill.com?subject=COI%20Request&body=Hi%20BuzzKill%2C%0A%0AI%20would%20like%20to%20request%20a%20Certificate%20of%20Insurance%20for%20our%20property.%0A%0AProperty%20Name%3A%20%0AProperty%20Address%3A%20%0AContact%20Name%3A%20%0APhone%3A%20%0A%0AThank%20you!"
-              className="bk-btn bk-btn-primary"
-            >
-              Request Certificate of Insurance
-            </a>
-            <a href="tel:508-258-9294" className="bk-btn bk-btn-outline-light">
-              Call 508-258-9294
-            </a>
+      {/* Schedule Inspection CTA */}
+      <section className="bk-schedule-section">
+        <div className="bk-schedule-inner">
+          <div className="bk-schedule-card">
+            <div className="bk-schedule-brand">
+              <div className="bk-schedule-logo-badge">
+                <Link to="/"><img src="/images/logo.png" alt="BuzzKill Pest Control" /></Link>
+              </div>
+              <p className="bk-schedule-tagline">Licensed &amp; Insured</p>
+            </div>
+            <div className="bk-schedule-content">
+              <p className="bk-schedule-eyebrow">Need a Certificate of Insurance?</p>
+              <h2 className="bk-schedule-title">We'll Have It To You Within One Business Day</h2>
+              <p className="bk-schedule-sub">HOA boards and property managers can request our COI at any time.</p>
+              <div className="bk-com-cta-row">
+                <a
+                  href="mailto:info@pestbuzzkill.com?subject=COI%20Request&body=Hi%20BuzzKill%2C%0A%0AI%20would%20like%20to%20request%20a%20Certificate%20of%20Insurance%20for%20our%20property.%0A%0AProperty%20Name%3A%20%0AProperty%20Address%3A%20%0AContact%20Name%3A%20%0APhone%3A%20%0A%0AThank%20you!"
+                  className="bk-btn bk-schedule-cta"
+                >
+                  Request Certificate of Insurance
+                </a>
+                <a href="tel:508-258-9294" className="bk-btn bk-btn-outline-light bk-com-talk-btn">
+                  Call 508-258-9294
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       </section>

@@ -16,7 +16,7 @@ export default function ComingSoon({ title, subtitle }: Props) {
           <Link to="/request-quote" className="bk-btn bk-btn-primary">Get Instant Quote</Link>
           <a href="tel:+15082589294" className="bk-btn bk-btn-outline-light">Call (508) 258-9294</a>
         </div>
-        <p className="bk-coming-soon-tagline">BuzzKill Protects More Than Property™</p>
+        <p className="bk-coming-soon-tagline">BuzzKill Protects More Than Property</p>
       </div>
     </section>
   );

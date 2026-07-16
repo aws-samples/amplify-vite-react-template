@@ -3,6 +3,7 @@ export type CityEntry = {
   state: string;
   stateAbbr: string;
   slug: string;
+  hq?: boolean;
 };
 
 /** Generate a URL-safe slug from city + state */
@@ -13,12 +14,12 @@ function toSlug(city: string, stateAbbr: string): string {
     .replace(/[^a-z0-9-]/g, "");
 }
 
-function entry(city: string, state: string, stateAbbr: string): CityEntry {
-  return { city, state, stateAbbr, slug: toSlug(city, stateAbbr) };
+function entry(city: string, state: string, stateAbbr: string, hq?: boolean): CityEntry {
+  return { city, state, stateAbbr, slug: toSlug(city, stateAbbr), hq };
 }
 
 // ── Massachusetts ────────────────────────────────────────────────────
-const MA = (city: string) => entry(city, "Massachusetts", "MA");
+const MA = (city: string, hq?: boolean) => entry(city, "Massachusetts", "MA", hq);
 
 // ── Rhode Island ─────────────────────────────────────────────────────
 const RI = (city: string) => entry(city, "Rhode Island", "RI");
@@ -48,7 +49,7 @@ export const CITIES: CityEntry[] = [
   MA("Hopkinton"),
   MA("Hudson"),
   MA("Leominster"),
-  MA("Marlborough"),
+  MA("Marlborough", true),
   MA("Maynard"),
   MA("Medfield"),
   MA("Medway"),

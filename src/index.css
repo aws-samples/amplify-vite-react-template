@@ -3323,6 +3323,207 @@ a:focus-visible {
   }
 }
 
+/* ── Service Area Directory (search + city grid) ── */
+.bk-areas-directory {
+  background: var(--bk-cream);
+  padding: clamp(48px, 7vw, 80px) 0;
+}
+.bk-areas-directory-inner {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 clamp(16px, 5vw, 48px);
+}
+.bk-areas-directory-header {
+  text-align: center;
+  max-width: 640px;
+  margin: 0 auto clamp(32px, 5vw, 48px);
+}
+.bk-areas-search-wrap {
+  position: relative;
+  max-width: 440px;
+  margin: 28px auto 0;
+}
+.bk-areas-search-icon {
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(0,0,0,0.35);
+  pointer-events: none;
+}
+.bk-areas-search {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 14px 20px 14px 46px;
+  border-radius: 999px;
+  border: 2px solid rgba(0,0,0,0.1);
+  background: var(--bk-white);
+  color: var(--bk-ink);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.bk-areas-search::placeholder {
+  color: rgba(0,0,0,0.35);
+}
+.bk-areas-search:focus {
+  outline: none;
+  border-color: var(--bk-green);
+  box-shadow: 0 0 0 4px rgba(122,193,66,0.18);
+}
+.bk-areas-empty {
+  text-align: center;
+  color: rgba(0,0,0,0.6);
+  font-size: 0.95rem;
+  padding: 24px 0;
+}
+.bk-areas-empty a {
+  color: var(--bk-green-deep);
+  font-weight: 700;
+}
+.bk-areas-group {
+  margin-top: clamp(28px, 4vw, 40px);
+}
+.bk-areas-group-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 2px solid var(--bk-green);
+  padding-bottom: 10px;
+  margin-bottom: 20px;
+}
+.bk-areas-group-title {
+  font-family: var(--font-heading);
+  font-size: clamp(1.1rem, 2vw, 1.4rem);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bk-ink);
+  margin: 0;
+}
+.bk-areas-group-count {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(0,0,0,0.4);
+}
+.bk-areas-city-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+.bk-areas-city {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bk-white);
+  border: 1.5px solid rgba(0,0,0,0.08);
+  color: var(--bk-ink);
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.15s;
+}
+.bk-areas-city:hover {
+  border-color: var(--bk-green);
+  background: var(--bk-green);
+  color: var(--bk-white);
+  transform: translateY(-2px);
+}
+.bk-areas-hq-badge {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  background: var(--bk-black);
+  color: var(--bk-white);
+  border-radius: 999px;
+  padding: 2px 7px;
+  line-height: 1.5;
+}
+.bk-areas-city:hover .bk-areas-hq-badge {
+  background: var(--bk-white);
+  color: var(--bk-black);
+}
+@media (max-width: 480px) {
+  .bk-areas-city-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  }
+}
+
+/* ── Licensed & Insured — Credential Cards ── */
+.bk-credential-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 24px;
+  margin-top: 32px;
+}
+.bk-credential-card {
+  background: var(--bk-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px 28px 24px;
+}
+.bk-credential-card--accent {
+  border-top: 4px solid var(--bk-green);
+}
+.bk-credential-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: var(--fg1);
+}
+.bk-credential-card--accent .bk-credential-head {
+  color: var(--bk-green-deep);
+}
+.bk-credential-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.bk-credential-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.bk-credential-row {
+  display: contents;
+}
+.bk-credential-dt {
+  font-weight: 700;
+  color: var(--fg2);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-top: 2px;
+}
+.bk-credential-dd {
+  margin: 0;
+  color: var(--fg1);
+}
+.bk-credential-status {
+  color: var(--success);
+  font-weight: 700;
+}
+.bk-credential-verify {
+  margin-top: 20px;
+}
+.bk-credential-verify .bk-btn {
+  font-size: 13px;
+  padding: 8px 18px;
+}
+
 /* ── Why Choose BuzzKill Section ── */
 .bk-why-section {
   background: var(--bk-black);

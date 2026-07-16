@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Copy-Item -Path \"creative\\\\About\\\\hero.png\" -Destination \"public\\\\images\\\\service-areas-hero.png\" -Force)"
+    ]
+  }
+}
