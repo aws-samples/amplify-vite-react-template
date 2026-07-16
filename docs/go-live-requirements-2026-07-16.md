@@ -44,6 +44,36 @@ can do. That is a launch checklist, not a crisis list.
 **One item is urgent independent of go-live: R81. The Buildium client secret is committed to a
 public GitHub repo.** Rotate it today.
 
+### Engineering burn-down — 16 July, afternoon pass
+
+Closed against this document in `6af26cf` + `eed1e1b`, each implementation adversarially
+verified against the tree before commit (suites now 228 web / 68 CRM, all passing):
+
+- **R03, R05, R13** — money-out is never silent: subscription death alerts the office same-day
+  with visit resolution; every cancel path resolves queued visits; every charge and refund
+  emails the customer (receipt_email set as belt-and-braces, no-email customers routed to the
+  office).
+- **R09, R15** — `startJob`/`endApplication` stamp server time and TECH lost model-level Job
+  update; finalize refuses a never-started job; browser S3 grants on `reports/*`/`agreements/*`
+  and browser delete on Customer/Job/Technician are gone.
+- **R23, R26, R27** — the board can't rewrite history in either direction (unassign *and*
+  assign, and the pool no longer offers COMPLETED/IN_PROGRESS stops); the office Complete
+  confirm discloses the billing it starts, sharing sentences with Start billing; invite
+  controls render only for OWNER with honest words for everyone else.
+- **R29, R59, R60, R62** — /book re-checks live availability before charging; zone UNKNOWN is
+  never priced; rodent/roach carry the Zone-B adder; day prices floor at variable cost.
+- **R57, R58, R75** — HOA 101+ bimonthly is $230 (derived from the bracket series — **Jake to
+  confirm against the Thumbtack spec**); the phantom $99 is gone and $15/$99 are unwhitelisted;
+  the licensing gate fails closed on an unresolvable state.
+- **R18** — Clarity removed; the privacy policy describes only practices that exist.
+- **R77** — the `/schedule/:slug` resident signup page is deleted.
+- **R81 (code half)** — hardcoded Buildium credentials removed from the sync script; **rotation
+  at the vendor remains open and urgent** (the secret is still in public git history).
+
+Residuals from this pass, tracked under existing IDs: the dashboard-refund leg of R13 needs the
+`charge.refunded` webhook registration (R82, console); one dist rebuild must accompany the R18
+deploy so the stale built Clarity tag can't ship.
+
 ---
 
 ## What "go-live" means
