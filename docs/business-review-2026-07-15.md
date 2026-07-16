@@ -1,110 +1,147 @@
 # BuzzKill — business review of the CRM & booking funnel
 
-**To:** Engineering · **From:** Business review panel · **Date:** 15 July 2026
+**Revision 3** — updated against commit `372f30b` ("Close the three money holes") · 15 July 2026
 
-A ten-perspective review of the rough draft: CEO, leadership/finance, operations, front-desk CSR, technician, homeowner, property manager, unit economics, operator-proofing, and compliance. 149 features inventoried, 116 findings confirmed against code, 35 capability gaps verified as genuinely absent. Every finding cites a file and line so you can check our work — please do.
-
----
-
-## Executive summary
-
-**Yes — you built the right thing, and the architecture underneath it is better than most agencies would have delivered. The one structural problem: the system reliably automates every cost and leaves every dollar of revenue depending on a human remembering to click something.**
-
-That single sentence explains most of what follows. The booking funnel schedules the visit but never bills the plan. The tech completes the job but the charge waits on an office click. The rate card computes the price but a free-text box can overwrite it. Money-in is manual; money-out is automatic.
-
-### What you got right
-
-The pricing architecture is genuinely good and should not be touched: the AI extracts facts, `apps/web/amplify/functions/crm-pricing/rateCards.ts` computes every dollar, and the AI is structurally forbidden from inventing a price. Identical inputs give identical prices. The eligibility gate declines wildlife, bed bugs, and food service with an exact script instead of an improvised refusal. The Stripe webhook's booking-finalization lock (`bookingFinalize.ts:61`) is careful, correct concurrency work. The tech's "Complete & send" flow — one button, blocked until GPS and services are filled in — is close to the McDonald's standard. Card data never touches your servers, which keeps you out of PCI scope. The refund policy engine (`booking-public/handler.ts:670`) is the only place your locked 3-day rule exists as working code, and it encodes it correctly.
-
-### The five things that cost real money if shipped as-is
-
-1. **Recurring plans never start billing.** `startSubscription` has exactly one caller in the entire codebase: a small, unlabeled button in `CustomerDetail.tsx:499`. Neither job-completion path calls it. A website-booked plan customer pays $99, gets serviced every 30 days forever, and is never charged again — and the Dashboard counts them as healthy.
-
-2. **"Charge $X" appears on every already-paid website booking.** `bookingFinalize.ts` never writes an Invoice, so the duplicate-charge guard reads an empty table and always passes. One tap, no confirmation, customer charged twice — and there is no refund button anywhere in the CRM to fix it.
-
-3. **Cancelling doesn't cancel.** `booking-public/handler.ts:702` marks the plan CANCELED and never calls Stripe. Visits stop, charges continue. Your agreement says "Cancel anytime."
-
-4. **The booking funnel has no front end.** No `/book` page, no `/cancel` page. ~4,000 lines of correct backend earning $0, and every confirmation email you'd send contains a dead cancel link.
-
-5. **The field labeled "Internal notes (not shown to customer)" is printed on the customer's PDF** (`shared/pdf.ts:311`). Delete that line today. It's the highest damage-per-character defect in the repo.
-
-### Decisions only you can make
-
-- **Should billing start automatically after the first visit?** Yes. That's your own locked rule; it's currently a code comment.
-- **Should HOAs under ~50 units escalate to you?** No. Every trigger you remove is a day of vacation you get back.
-- **Is the $99 initial fee a loss leader or a priced service?** Recommend: loss leader, but only with a 12-month term. Today a customer can take the deep first visit for $99 and cancel.
-- **Do you want a refund button in the CRM?** Yes. Until it exists, you personally are the refund department and cannot leave.
-- **Is residential monthly $69 or $99?** Your landing pages say one, the rate card says the other. Pick one.
-
-### Numbers that matter
-
-One forgotten "Start billing" click = **$1,188/yr** per customer, plus you keep paying $42/hr labor and van costs to serve them. A mosquito+tick customer is billed **$1,668/yr for $834 of season** — an $834 overcharge with no season-end mechanism. Above 301 HOA units, quarterly costs **more** than bimonthly ($800 vs $775/mo) — you deliver six visits for less than four. Gross profit is overstated **$37–59 per one-time job** because drive time is charged one way. At the $199 rodent floor in Zone B, a discounted booking nets **negative $67**.
+Revision 1 reviewed the app from ten perspectives: 149 features, 116 findings confirmed against code, 35 gaps verified absent. Revisions 2 and 3 re-check every item against the tree after each commit, so the list burns down.
 
 ---
 
-## The priority list
+## Retraction: review item #6 was wrong
 
-The panel confirmed 116 findings and marked almost all of them high or critical. That is not a priority order — nobody can act on 116 equal alarms. So the findings were forced to compete on three axes: annual dollars at stake at your real scale, how likely the problem is to actually bite given how the business runs, and how much knowing it changes what gets built next. Here is what survived, in order.
+**Item #6 of Revision 2 claimed that quarterly and bimonthly plans are "billed twelve times a year — systematic overcharging." That is false, and the engineering team was right to refuse it.**
 
-**1. Recurring plans never start billing.** — *$1,188/yr per customer, compounding* · fix before launch
+The rate card returns `monthlyCents`. `$45` for a quarterly residential plan is **forty-five dollars per month**, and "quarterly" describes how often a technician visits, not how often the card is charged. `rateCards.ts:7` says so in its own worked example — *"quarterly residential → $45 + 3×$10 = $75/mo"* — and `bookingFinalize.ts:253` discloses it to the customer in those words: *"service continues quarterly at $75.00/month."* Billing monthly is the product.
 
-`startSubscription` has exactly one caller in the entire codebase: a button at `apps/crm/src/office/CustomerDetail.tsx:499`. The job-completion path (`crm-docs/handler.ts`) never calls it. Your own locked rule — "$99 at booking, monthly starts after the first visit completes" — exists as a comment, not as code. A website-booked plan customer pays $99, gets visits auto-queued forever, and is never charged again. The Dashboard counts them as healthy. This is the business, and it runs on someone remembering.
+Had this been actioned, quarterly plans would have been billed every three months and **quarterly recurring revenue would have fallen by roughly two thirds.** A review that costs the company money is worse than no review. This one was caught because the engineer verified the claim against the rate card instead of implementing it, and wrote the reasoning into `shared/subscription.ts:15-19` where the next person will find it.
 
-**2. The "internal" notes box is printed on the customer's report.** — *reputational, one-line fix* · fix today
+The residue of the finding is real and stays open: a CSR looking at *"$45/mo · service quarterly"* still cannot tell how often the card is charged. That is an operator-proofing defect, not a billing defect. It moves to Commit G.
 
-`apps/crm/src/tech/JobDetail.tsx:435` labels the field "Internal notes (not shown to customer)". `apps/web/amplify/functions/shared/pdf.ts:311` prints it on the PDF emailed to that customer. Whatever a technician honestly writes about a hoarding situation, a difficult customer, or a landlord gets mailed to the person it is about. Delete the line today, ahead of everything else in this document.
+**The same error class was in item #10, and I have corrected it.** I asserted a mosquito plan is "$1,668/yr charged for $834 of season — an $834 overcharge." That figure assumed the plan *should* bill only during the May–October season, which I never verified. The provable defect is narrower and still worth fixing: `ServicePlan` has no end date and no season field, so a mosquito plan bills every month **indefinitely** — through the off-season, into the next year, and forever. Whether a seasonal plan should bill six months or twelve is encoded nowhere. Somebody has to decide, and the code currently offers only "forever."
 
-**3. Every paid website booking looks unpaid, and the CRM offers to charge it again.** — *duplicate charges + you cannot close the books* · fix before launch
+Where the burn-down and the retained Revision 1 analysis disagree, the burn-down is correct.
 
-`shared/bookingFinalize.ts` creates the Customer, ServicePlan, Job and Agreement but never writes an Invoice. So the duplicate-charge guard at `crm-billing/handler.ts:279` queries an empty table and always passes, and the Charge button's visibility test at `CustomerDetail.tsx:629` is `!invoice` — permanently blind. When a tech completes a paid $299 wasp job, a blue "Charge $299" button appears with no confirmation and no paid indicator. A CSR working the completed-jobs list will tap it. That is what the button looks like it is for. And because no Invoice exists, an entire revenue channel is invisible to your ledger.
+---
 
-**4. You have three contradictory cancellation policies live at once, and the only one implemented is unreachable.** — *chargebacks + unenforceable terms* · fix before launch
+## Burn-down after `372f30b`
 
-Your published Terms of Service say 24 hours (`apps/web/src/pages/TermsOfService.tsx:81`). The standard agreement says 30 days. The booking code enforces 3 days (`booking-public/handler.ts:645`). When a company's own terms conflict, courts construe the ambiguity against the drafter — you. Worse, the 3-day rule is correctly implemented in exactly one place, reachable only through a link that 404s (see #8), and there is no refund button anywhere in the CRM. A customer inside your full-refund window cannot get their refund by any path: the link is dead, and the CSR they call has nothing to click. You charged them, promised a refund in writing at checkout, and built no way to give it back.
+| # | Item | Rev 2 | Now | Evidence |
+|---|---|---|---|---|
+| 1 | Recurring plans never start billing | Open | **CLOSED** | Both completion paths call it: `crm-docs/handler.ts:306` (finalizeServiceReport) and `:368` (completeJob). Idempotent on `stripeSubscriptionId`, guards `CANCELED`, never throws. |
+| 2 | "Internal notes" on customer PDF | Closed | **CLOSED** | `49f2c23` |
+| 3 | Paid bookings look unpaid; CRM re-charges | Open | **CLOSED** | `Job.paidAt`/`paidPaymentIntentId` written in the same create as the job. `chargeOneTimeJob` refuses on it *before* the ledger scan (`crm-billing/handler.ts:183`). Button hidden, "paid $299 online" badge shown. PAID Invoice written with id `booking-<id>`, so a retry is a no-op. |
+| 4 | Three cancellation policies; refunds unreachable | Open | **OPEN** | ToS 24h, agreement 30d, code 3d. `REFUNDED` still written by no code path; still no refund action in the CRM. |
+| 5 | Cancelling never stops Stripe | Open | **CLOSED** | `cancelPlanBilling` cancels at Stripe *first* and throws on any real error; `resource_missing` counts as success. Both the office mutation and the public funnel call the one implementation. The webhook now clears a dead subscription id. |
+| 6 | ~~Quarterly plans billed 12×/yr~~ | Open | **RETRACTED** | Not a defect. See above. |
+| 7 | Service report is not a valid MA pesticide record | Partial | **PARTIAL** | Unchanged. TECH/OFFICE can still update a FINALIZED report; licence number, application time, rate, re-entry interval still absent. |
+| 8 | Booking funnel has no front end | Deferred | **DEFERRED** | `docs/public-ui-handoff.md` |
+| 9 | No dunning; no dispute handling | Open | **OPEN** | Webhook still has no `charge.dispute.created`. |
+| 10 | Mosquito plans never stop | Open | **OPEN** *(reframed)* | No end date or season field. Bills indefinitely. The "$834 overcharge" framing is withdrawn; the missing end condition is not. |
+| 11 | Free-text prices; no audit trail | Partial | **PARTIAL** | Unchanged. Still no `createdBy` on any model. |
+| 12 | One tap charges $20,000, no confirmation | Partial | **PARTIAL** | Unchanged. Cap still `2_000_000`; still the only money action without a confirm. |
+| 13 | Cost model: one-way drive, bare wage | Open | **OPEN** | `rateCards.ts:362` unchanged. |
+| 14 | Technician has no honest option at a locked door | Open | **OPEN** | No no-access state. |
+| 15 | You are still the pricing department | Partial | **PARTIAL** | Unchanged. |
 
-**5. Cancelling does not stop the billing.** — *unauthorized recurring charges* · fix before launch
+**Closed: 4. Retracted: 1. Partial: 4. Deferred: 1. Open: 5.**
 
-`booking-public/handler.ts:699` sets `ServicePlan.status = CANCELED` and never calls Stripe. Visits stop; charges continue. Your agreement says "Cancel anytime." Continuing to charge a card after a customer cancels, when your own contract promises otherwise, is not a bug — under the FTC Act and ROSCA it is an unauthorized recurring charge, and it is the fact pattern regulators built those rules for.
+Started at fifteen. Nine remain, and the three most expensive are gone.
 
-**6. Quarterly and bimonthly plans are billed twelve times a year.** — *systematic overcharging* · fix before launch
+---
 
-`startSubscription` creates every subscription with `interval: "month"` regardless of the plan's frequency. The CSR sees "$45/mo · service quarterly" and cannot tell whether $45 is charged four times a year or twelve. It is twelve. A quarterly customer buying four visits pays $540/yr for what the rate card prices at $180.
+## What `372f30b` got right
 
-**7. The service report is not a valid Massachusetts pesticide record.** — *your license* · fix before launch
+This is the best commit of the three, and it is worth being precise about why, because the standard it sets is the standard the rest of the list should be held to.
 
-No applicator license number, no application time, no rate or dilution, no re-entry interval. Products are entirely optional — a report can be finalized and emailed with zero products, zero EPA numbers and zero quantities. The record is fully mutable after finalize, which is worse than having no record: an editable regulatory document is affirmative evidence of an uncontrolled system. Your right to operate depends on producing these on demand.
+**It refused a bad instruction and proved why.** That is the single most valuable thing in the commit. It would have been easy and profitable-looking to implement item #6.
 
-**8. The booking funnel has no front end.** — *~4,000 lines earning $0* · fix before launch
+**It picked the right guard.** The obvious fix for the double-charge was to write an Invoice and check for it. The commit writes the Invoice *and* puts `paidAt` on the Job in the same create, then checks `paidAt` first — reasoning that a field written atomically with the record cannot go missing the way a separate ledger row can. That is a better answer than the one Revision 1 proposed.
 
-`apps/web/src/App.tsx` has twelve routes. Neither `/book` nor `/cancel` is among them. The backend is careful, correct work — including the concurrency lock in `bookingFinalize.ts:61` — and no customer can reach any of it. Every confirmation email points at `pestbuzzkill.com/cancel?token=…` (`bookingFinalize.ts:297`), which 404s.
+**It got the failure ordering right in both directions.** `cancelPlanBilling` cancels at Stripe before it touches the record, so a Stripe failure leaves the plan visibly ACTIVE and retriable rather than silently cancelled-but-charging. In the funnel, cancellation runs *before* the refund, so a failure cannot refund a customer who is still being billed. Both orderings are the safe one, and neither is the obvious one.
 
-**9. Failed money is written off by inaction.** — *100% of failed collections* · fix before launch
+**It reasoned about idempotency where it counts.** `startPlanBilling` returns an outcome instead of throwing, because a technician finishing a visit must not fail because the office never collected a card. The PAID invoice uses a booking-derived id so a Stripe retry is a no-op. The Invoice write deliberately does not throw, because throwing would make Stripe retry a chain of non-idempotent creates and duplicate the customer.
 
-There is no dunning of any kind: `invoice.payment_failed` writes a red badge and sends nothing. No customer email, no retry, no task, no plan suspension. The portal has no "Pay now" button, so a customer who wants to pay cannot. And no code path anywhere handles disputes — the webhook handles six events and `charge.dispute.created` is not one of them. An unanswered dispute is auto-lost: the money goes back, plus a ~$15 fee, and it counts against your dispute ratio. Past roughly 0.75% of volume, card networks put you in a monitoring program.
+**The "Serviced but not billing" card is scoped correctly.** It lists ACTIVE plans with no subscription that have a COMPLETED job (`Dashboard.tsx:128-138`), deliberately excluding plans whose first visit hasn't happened — those are *supposed* to be unbilled, and listing them would bury the real ones. That distinction is the difference between a queue people clear and a queue people ignore.
 
-**10. Mosquito plans bill through the winter.** — *$834/yr per customer, in your favor* · fix before launch
+## What `372f30b` leaves open
 
-Mosquito is sold May–October at $139/mo. `ServicePlan` has no end date and no season field, and neither `recurring.ts` nor `crm-billing` mentions seasonality. A mosquito+tick customer is billed $1,668/yr for $834 of season. This one overcharges the customer, which is the direction that produces chargebacks and complaints rather than quiet losses.
+Four things, in order of how much they undermine the work above.
 
-**11. Prices are free-text boxes, and any employee can fabricate revenue.** — *unauditable* · fix before launch
+**1. The 14 assertions do not exist in this repository.** The commit says it was *"verified with a probe against a fake Stripe: 14 assertions,"* and that the monthly interval *"now carries a comment and a test saying why."* The comment is real and it is good (`shared/subscription.ts:15-19`). **The test is not in the repo.** There is no test file, no `vitest` or `jest` dependency, and no `test` script in either `package.json`. The probe was run and discarded.
 
-`QuoteSheet.tsx:65` validates price as "greater than zero." A typo of 4 instead of 45 creates a $4/mo plan that bills forever, and nothing compares the typed number to the rate card the whole pricing engine exists to enforce. One tap away, the "Record offline → Paid" mode writes a PAID Invoice directly from the browser, moving no money. No model in the schema has a `createdBy` field, so nothing records who did either. That is an unauditable cash-skim mechanism sitting next to the real charge button, and it falsifies the only revenue number you read.
+This matters more here than anywhere else in the codebase. The one misunderstanding that would cost two-thirds of quarterly recurring revenue is a misunderstanding a competent reviewer already made once — I made it — and the only thing standing between the next person and that mistake is a code comment. Comments do not fail builds. Stand up a test runner and commit those fourteen assertions; they are already written.
 
-**12. One tap charges up to $20,000 to any card, with no confirmation.** — *no undo exists* · fix before launch
+**2. Two silent failures were introduced, in the exact class `49f2c23` set out to eliminate.** Both are `console.error` and nothing else:
 
-`chargeManualAmount` is capped at `amountCents > 2_000_000` (`crm-billing/handler.ts:352`). A CSR who means $149.00 and types `14900` into a box labeled "Amount ($)" charges $14,900 off-session, instantly — and there is no refund in the CRM to fix it. Cancelling a plan asks for confirmation. Charging a card does not.
+- `bookingFinalize.ts:243` — *"money collected, ledger row missing."* A customer paid, the Invoice write failed, and the only record is a CloudWatch line nobody reads.
+- `crm-docs/handler.ts:36,44` — `startPlanBilling` did not start, or threw.
 
-**13. Every profitability gate is calibrated against a fabricated cost.** — *$37–59 overstated per job* · first 90 days
+The decision **not to throw** in both places is correct and well argued. But "don't throw" and "tell nobody" are different decisions, and the commit conflates them. The remedy is not to throw; it is to page a human, exactly as `lead-intake` already does. `bookingFinalize.ts` **already imports `notifyOffice` and already has `SES_NOTIFY_EMAIL` in scope** (line 344). This is two lines in the file that raised the problem.
 
-`rateCards.ts:362` charges one leg of the drive; the van has to come back. `LABOR_PER_HR = 42` is a bare wage — real loaded cost is 1.25–1.4× that once payroll tax and workers' comp (a high-rate class in pest control) are counted. The 3× lead-fee gate is the only profitability screen on paid Thumbtack leads and it is being fed inflated numbers. It also exempts recurring plans entirely, which is where CAC risk actually lives. Separately, the $99 initial fee loses $42.50 in Zone A and $61.50 in Zone B against the 75-minute visit it is sold to cover.
+The billing failure is partly covered by the Dashboard card. The missing ledger row is covered by nothing.
 
-**14. A technician facing a locked door has no honest option.** — *fabricated legal records* · first 90 days
+**3. The queue is a pull, not a push.** "Serviced but not billing" only exists for someone who opens the Dashboard. The commit removed a dependency on an office employee remembering to click "Start billing" and replaced it with a dependency on an office employee remembering to look at a card. That is a real improvement — the money now flows by default and the card catches the exceptions — but the system has exactly one scheduled job (`daily-reminders`), and adding the count to it would make the queue announce itself. Do that in the same commit as the notifications above.
 
-There is no NO_SHOW, no-access, or refused-entry state anywhere in the model. The tech's choices are: leave the job IN_PROGRESS forever, or file a report for a visit that never happened — which then charges the customer. The path of least resistance is a fabricated pesticide record with a GPS stamp that is never compared to the service address.
+**4. A customer whose cancellation fails is told to try again, and the clock is running.** This behaviour is new. `cancelPlanBilling` now throws when Stripe is unreachable, which is correct — but the public handler catches everything and returns *"Something went wrong on our side — please try again"* (`booking-public/handler.ts:181-183`). The customer's appointment is not cancelled, their card is still being charged, and retrying during a Stripe outage will not help.
 
-**15. You are still the pricing department.** — *answers your vacation question* · first 90 days
+The refund window makes this expensive: a cancellation attempted on day four that fails, and succeeds on retry on day three, costs the customer their full refund under your own policy. Tell them the truth — *"We couldn't cancel your plan just now. Call us at (number) and we will handle it; your cancellation will be honoured as of today."* — and record the attempt so the office can honour the date. Before `372f30b`, this endpoint always "succeeded"; the commit made it honest, and honesty now needs a script.
 
-Every HOA lead escalates unconditionally. Termite always escalates. Commercial over 15,000 sqft escalates. They all route to one inbox, by hand, with no queue, no SLA, no tracking — and the escalation email can fail silently while the screen promises the customer a callback. HOA is your highest-value segment ($110–$405/mo per property) and it is the one segment with zero automation.
+---
+
+## How to whittle this down
+
+Nine open items. A, B and C are done. What follows is re-ordered for what remains.
+
+**Commit D — "Nothing fails quietly"** · closes the residuals of A/B/C · *do this next, it is small*
+Notify the office when the ledger row is missing and when billing fails to start (`notifyOffice` is already in scope). Add "serviced but not billing" to the daily digest. Give the failed public cancellation a real message and record the attempt so the refund date is honoured. Stand up a test runner and commit the fourteen assertions. *Verified when:* the probe runs in CI, and a forced Invoice-write failure produces an email rather than a log line.
+
+**Commit E — "Cancel means cancel, and refunds exist"** · closes 4
+A refund is a first-class CRM action that writes `REFUNDED`. One cancellation policy lives in one place, and the published terms, the agreement template, the checkout disclosure, and the enforcement code all read it from there. *Verified when:* a CSR can refund without opening Stripe, and the three documents agree.
+
+**Commit F — "Seasons, dunning, disputes"** · closes 9, 10
+Decide whether a seasonal plan bills six months or twelve, then encode it: `ServicePlan` gets an end condition and stops on its own. A failed payment sends an email, retries, and creates a task; the portal grows a Pay Now button. The webhook handles `charge.dispute.created`.
+
+**Commit G — "The pesticide record is a record"** · closes 7 and the compliance cluster
+Applicator licence number, application time, rate or dilution, re-entry interval. Products required to finalize. Re-finalize blocked and a FINALIZED report immutable at the model and on the server. GPS compared against the service address before the PDF asserts on-site presence. Remove `create` on `Product` from TECH, or route it through approval.
+
+**Commit H — "The technician can tell the truth"** · closes 14
+A no-access state that clears the screen without filing a report and without charging the customer. Small; removes the incentive to fabricate a legal record. Pair it with G.
+
+**Commit I — "Operator-proofing the money screens"** · closes 11, 12, and the residue of the retracted 6
+A confirmation that restates the amount in words and the card's last four. A cap at what a BuzzKill job can plausibly cost, with the deferred approval UI above it. `createdBy` on every Invoice, stamped server-side. Recording an offline payment becomes a different screen with a different permission. A price that differs from the rate card requires a reason. **And the plan screen states the billing cadence in words — "$45 per month, technician visits every 3 months" — so no one ever makes the mistake this review made.**
+
+**Commit J — "Pricing integrity"** · closes 13 and the margin cluster
+Round-trip drive, loaded labour, assumptions written down in one place. The 3× lead-fee gate applies to recurring plans on twelve-month contribution. Fix the HOA 101+ bracket by raising BIMONTHLY to about $220 — do **not** swap it with QUARTERLY, which would underprice your largest contracts by $1,080–$3,240/yr. Zone `UNKNOWN` must not silently price as Zone B. Discounts floor at cost, not at 85% of list.
+
+**Commit K — "Delegate the pricing department"** · closes 15
+HOA quotes below a threshold go out automatically; the rate card already computes them. Escalation becomes a queue with an owner and an SLA, and a failed escalation email is loud.
+
+**Commit L — public booking UI** · closes 8 · tracked in `docs/public-ui-handoff.md`
+
+**Commit M — "Lead email goes to the sales inbox"** · small, independent
+
+Lead-related notifications must be delivered to **`sales@pestbuzzkill.com`**, not `info@pestbuzzkill.com`.
+
+`SES_NOTIFY_EMAIL` is the recipient for *every* internal notification and is hardcoded to `info@` in `apps/web/amplify/backend.ts:134` and `:155`. Six call sites read it, and they are not the same kind of mail:
+
+| Site | What it sends | Route to |
+|---|---|---|
+| `lead-intake/handler.ts:268` | New website lead captured | **sales@** |
+| `lead-intake/handler.ts:246` | "ACTION REQUIRED — lead could not be saved" | **sales@** |
+| `crm-pricing/handler.ts:755` | Pricing escalation (HOA, termite, large commercial) | **sales@** |
+| `booking-public/handler.ts:346` | New website booking placed | sales@ — a booking is a won lead |
+| `shared/bookingFinalize.ts:344` | Booking finalized, customer created | your call: sales or ops |
+| `agreement-public/handler.ts:315` | Agreement signed | your call |
+| `booking-public/handler.ts:734` | "Website booking canceled" | keep on info@ — operations |
+
+Add a second variable, `SES_LEADS_EMAIL`, defaulting to `sales@`. Do not overload the existing one; the point is that these are different audiences.
+
+**The sender does not change.** `SES_FROM_EMAIL` stays `info@` — it is the verified SES sender and the From: address on customer mail. **If SES is still in the sandbox, `sales@` must be verified as a recipient first,** or every lead notification silently fails to send, which is the false-success class again. Update `docs/crm-setup.md:54` in the same commit.
+
+Separately, and belonging to the frozen public-UI work: the marketing site publishes `info@` in the footer, Terms, Privacy Policy, structured data, and on the Certificate of Insurance request link (`LicensedInsured.tsx:306`) — a property manager raising their hand, which is the highest-value inbound lead you get. Fold the decision into `docs/public-ui-handoff.md`.
+
+---
+
+_Sections below are Revision 1, retained as the evidence base. Items 1, 2, 3 and 5 are now closed and item 6 is retracted; they are described below as open. The burn-down above supersedes them._
 
 ---
 
@@ -134,8 +171,8 @@ Costs are automated; revenue is manual. The van rolls, the labor bills, the chem
 
 | What | Where | The problem |
 |---|---|---|
-| Quarterly/bimonthly billed monthly | `crm-billing/handler.ts` | Every subscription is `interval: "month"`. A quarterly customer pays $540/yr for $180 of plan. |
-| Mosquito bills year-round | no season field on `ServicePlan` | $1,668/yr charged for $834 of May–Oct season. |
+| ~~Quarterly/bimonthly billed monthly~~ | — | **RETRACTED — this was wrong.** Plans are priced per month; "quarterly" is the visit cadence. Billing monthly is correct. See the retraction at the top of this document. |
+| Mosquito plans never stop | no end date or season field on `ServicePlan` | The plan bills every month indefinitely — through the off-season and into following years. Whether a May–Oct plan should bill 6 months or 12 is encoded nowhere. *(The "$834 overcharge" figure previously stated here assumed 6-month billing and was never verified; it is withdrawn.)* |
 | HOA 101+ bracket inverted | `rateCards.ts:160` | Bimonthly $150 vs quarterly $180 per 100 units. Past 301 units, quarterly costs *more* for two fewer visits. |
 | $99 fee quoted where it doesn't exist | `rateCards.ts:314` | Mosquito plans have `initialFeeCents: null` by design, but the reply quotes $99 anyway — in writing. In Zone B the real fee is $124 and it still quotes $99. |
 | Zone UNKNOWN prices as Zone B | `booking-public/handler.ts:378` | A Google Routes outage or expired key silently adds $25/mo plus $25 initial to *every* customer, including the ones five minutes from HQ. ~$325 in year one, charged to your closest customers. |
