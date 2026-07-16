@@ -62,6 +62,8 @@ type Args = {
   listPriceCents?: number;
   initialFeeCents?: number;
   priceOverrideReason?: string;
+  units?: number;
+  notes?: string;
   reason?: string;
   photoKey?: string;
   servicesPerformed?: string;
