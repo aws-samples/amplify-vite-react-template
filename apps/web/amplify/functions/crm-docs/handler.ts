@@ -13,6 +13,8 @@ import {
   scheduleNextRecurringVisit,
 } from "../shared/recurring";
 import { renderServiceReportPdf, type ReportProduct } from "../shared/pdf";
+import { stripeClient } from "../shared/stripeClient";
+import { startPlanBilling } from "../shared/subscription";
 
 const s3 = new S3Client();
 const BUCKET = () => {
@@ -301,15 +303,55 @@ async function finalizeServiceReport(reportId: string) {
     status: "COMPLETED",
     completedAt,
   });
+  await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });
 
   return { pdfKey, emailed, alreadyFinalized: false };
 }
 
 /**
+ * Completing a recurring plan's visit starts its billing. This is the rule the
+ * business already decided — "$99 at booking, monthly starts after the first
+ * visit completes" — which until now existed only as a comment and a button
+ * somebody had to remember to press. Every forgotten press was $1,188/yr.
+ *
+ * Idempotent via startPlanBilling, so the second and later visits of a plan
+ * are a no-op rather than a second subscription.
+ *
+ * Never throws: the technician's visit really happened and the completion must
+ * stand even if the customer has no card on file. A plan that could not start
+ * stays ACTIVE with no stripeSubscriptionId, which the Dashboard's
+ * "not billing" tile lists until someone clears it.
+ */
+async function startBillingForPlan(job: {
+  id: string;
+  type: string;
+  servicePlanId?: string | null;
+}) {
+  if (job.type !== "RECURRING" || !job.servicePlanId) return;
+  try {
+    const outcome = await startPlanBilling(stripeClient(), job.servicePlanId);
+    if (!outcome.started) {
+      console.error("startPlanBilling did not start after job completion", {
+        jobId: job.id,
+        servicePlanId: job.servicePlanId,
+        reason: outcome.reason,
+        message: outcome.message,
+      });
+    }
+  } catch (err) {
+    console.error("startPlanBilling threw after job completion", {
+      jobId: job.id,
+      servicePlanId: job.servicePlanId,
+      err,
+    });
+  }
+}
+
+/**
  * Office-side job completion without a field report (the exception path).
- * Marks the job COMPLETED and queues the next recurring visit, mirroring
- * what finalizeServiceReport does after a report.
+ * Marks the job COMPLETED, starts plan billing, and queues the next recurring
+ * visit, mirroring what finalizeServiceReport does after a report.
  */
 async function completeJob(jobId: string) {
   const client = await dataClient();
@@ -323,6 +365,7 @@ async function completeJob(jobId: string) {
   }
   const completedAt = new Date().toISOString();
   await client.models.Job.update({ id: jobId, status: "COMPLETED", completedAt });
+  await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });
   return { jobId, alreadyCompleted: false };
 }

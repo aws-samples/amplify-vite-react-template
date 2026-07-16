@@ -188,7 +188,10 @@ async function finalizeClaimed(
     servicePlanId = plan?.id;
   }
 
-  // 3. The scheduled first job — already paid.
+  // 3. The scheduled first job — already paid. paidAt/paidPaymentIntentId ride
+  // in this same create so that "this job is already paid" is true the instant
+  // the job exists, and stays true even if the Invoice write below fails.
+  const paidAtIso = new Date().toISOString();
   const { data: job } = await client.models.Job.create({
     customerId: customer.id,
     servicePlanId,
@@ -198,9 +201,49 @@ async function finalizeClaimed(
     timeWindow: windowLabel,
     priceCents: booking.amountCents ?? undefined,
     status: "SCHEDULED",
+    paidAt: booking.amountCents ? paidAtIso : undefined,
+    paidPaymentIntentId: booking.amountCents ? paymentIntentId : undefined,
     notes: `Website booking ${booking.id}. Paid up front (${paymentIntentId}).`,
     accessGroups,
   });
+
+  // 3b. The money already moved at checkout, so the ledger records it here.
+  // Without this row every dollar the funnel takes is invisible to the
+  // Dashboard and cannot be reconciled against Stripe.
+  //
+  // The id is derived from the booking so this is idempotent: if anything
+  // downstream throws, the webhook retries and this create is a no-op rather
+  // than a second invoice for the same money.
+  //
+  // Deliberately does not throw. The finalization claim is released on any
+  // error (see finalizeBooking), and none of the creates above are idempotent —
+  // so throwing here would have Stripe retry and duplicate the customer, plan
+  // and job. Job.paidAt (set atomically above) is what actually prevents the
+  // double charge; this row is the ledger. A missing one under-reports revenue
+  // and is recoverable by hand; a duplicate customer is not.
+  if (job?.id && booking.amountCents) {
+    const { data: paidInvoice, errors: invoiceErrors } =
+      await client.models.Invoice.create({
+        id: `booking-${booking.id}`,
+        customerId: customer.id,
+        jobId: job.id,
+        servicePlanId,
+        description: `${serviceLabel} — paid online at booking`,
+        amountCents: booking.amountCents,
+        status: "PAID",
+        method: "CARD",
+        stripePaymentIntentId: paymentIntentId,
+        issuedAt: paidAtIso,
+        paidAt: paidAtIso,
+        accessGroups,
+      });
+    if (!paidInvoice) {
+      console.error(
+        `finalizeBooking: PAID invoice not recorded for booking ${booking.id} (${paymentIntentId}) — money collected, ledger row missing`,
+        invoiceErrors
+      );
+    }
+  }
 
   // 4. T&C acceptance becomes the signed agreement + PDF on file.
   const signedAtIso = new Date().toISOString();

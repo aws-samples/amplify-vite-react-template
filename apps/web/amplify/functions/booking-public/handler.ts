@@ -15,6 +15,7 @@ import {
   money,
   type Zone,
 } from "../crm-pricing/rateCards";
+import { cancelPlanBilling } from "../shared/subscription";
 import { buildDayMatrix, type DayQuote } from "./availability";
 import { marketRate, sqftBucket } from "./marketRate";
 
@@ -684,6 +685,13 @@ async function cancel(body: Record<string, unknown>) {
     };
   }
 
+  // Stop the recurring billing BEFORE anything else and before we tell the
+  // customer they are cancelled. Marking the plan CANCELED while its Stripe
+  // subscription keeps charging is an unauthorized recurring charge, and the
+  // customer has no way to see it — their visits simply stopped.
+  if (booking.servicePlanId) {
+    await cancelPlanBilling(await stripeClient(), booking.servicePlanId);
+  }
   if (refundable && booking.stripePaymentIntentId) {
     const s = await stripeClient();
     await s.refunds.create({ payment_intent: booking.stripePaymentIntentId });
@@ -694,12 +702,6 @@ async function cancel(body: Record<string, unknown>) {
       status: "CANCELED",
       routeId: null,
       routeOrder: null,
-    });
-  }
-  if (booking.servicePlanId) {
-    await client.models.ServicePlan.update({
-      id: booking.servicePlanId,
-      status: "CANCELED",
     });
   }
   await client.models.BookingRequest.update({

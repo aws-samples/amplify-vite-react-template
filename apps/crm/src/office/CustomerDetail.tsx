@@ -612,6 +612,13 @@ export default function CustomerDetail() {
                   meta={
                     <>
                       <StatusBadge status={j.status} />
+                      {/* Paid online at booking. Shown on every status so the
+                          row never looks chargeable to someone scanning it. */}
+                      {j.paidAt ? (
+                        <Badge tone="ok">
+                          paid {j.priceCents ? money(j.priceCents) : ""} online
+                        </Badge>
+                      ) : null}
                       {roles.office &&
                       (j.status === "SCHEDULED" || j.status === "IN_PROGRESS") ? (
                         <Button
@@ -634,6 +641,7 @@ export default function CustomerDetail() {
                       j.type === "ONE_TIME" &&
                       j.status === "COMPLETED" &&
                       j.priceCents &&
+                      !j.paidAt &&
                       !invoice ? (
                         <Button
                           small

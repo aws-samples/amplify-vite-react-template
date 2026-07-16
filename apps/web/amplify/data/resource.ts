@@ -383,6 +383,12 @@ const schema = a.schema({
       technicianId: a.id(),
       technician: a.belongsTo("Technician", "technicianId"),
       completedAt: a.datetime(),
+      // Set when the customer paid up front (website booking). Written in the
+      // same create as the job, so it is the authoritative "already paid"
+      // answer even if the Invoice write later fails. Every charge path must
+      // refuse on this rather than on the absence of an Invoice row.
+      paidAt: a.datetime(),
+      paidPaymentIntentId: a.string(),
       notes: a.string(),
       accessGroups: a.string().array(),
       serviceReports: a.hasMany("ServiceReport", "jobId"),

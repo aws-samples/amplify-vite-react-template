@@ -1,4 +1,4 @@
-import { defineFunction } from "@aws-amplify/backend";
+import { defineFunction, secret } from "@aws-amplify/backend";
 
 /**
  * Document operations behind userPool-authorized custom ops:
@@ -14,10 +14,17 @@ import { defineFunction } from "@aws-amplify/backend";
  *                            customer, or customer-group members)
  *
  * S3 + SES permissions and the DOCS_BUCKET env come from backend.ts.
+ *
+ * STRIPE_SECRET_KEY is needed because completing the first visit of a recurring
+ * plan is what starts its subscription — the rule Jake locked. Before that,
+ * billing waited on someone remembering to press a button in the office.
  */
 export const crmDocs = defineFunction({
   name: "crm-docs",
   entry: "./handler.ts",
   timeoutSeconds: 60,
   memoryMB: 1024,
+  environment: {
+    STRIPE_SECRET_KEY: secret("STRIPE_SECRET_KEY"),
+  },
 });

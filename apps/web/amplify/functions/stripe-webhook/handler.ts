@@ -215,6 +215,9 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
   await client.models.ServicePlan.update({
     id: crmServicePlanId,
     status: "CANCELED",
+    // Clear the id too, so "the plan has a subscription id" always means a live
+    // one — a cancelled plan holding a dead id reads as healthy everywhere.
+    stripeSubscriptionId: null,
     canceledAt: new Date().toISOString(),
   });
 }

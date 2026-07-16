@@ -10,6 +10,7 @@ import {
 } from "../lib/api";
 import { fmtDate, money, todayEastern } from "../lib/format";
 import {
+  Badge,
   Button,
   Card,
   EmptyState,
@@ -117,6 +118,25 @@ export default function Dashboard() {
       !activePlanCustomers.has(c.id) &&
       !upcomingJobCustomers.has(c.id)
   );
+
+  // Plans whose first visit is done but which never started billing. Billing
+  // starts automatically on completion now, so anything landing here failed —
+  // usually no card on file. Each row is roughly $1,188/yr walking out.
+  //
+  // A plan with no completed visit yet is deliberately excluded: it is not
+  // supposed to be billing, and listing it would bury the real ones.
+  const servicedPlanIds = new Set(
+    jobs
+      .filter((j) => j.status === "COMPLETED" && j.servicePlanId)
+      .map((j) => j.servicePlanId as string)
+  );
+  const notBilling = plans.filter(
+    (p) =>
+      p.status === "ACTIVE" &&
+      !p.stripeSubscriptionId &&
+      servicedPlanIds.has(p.id)
+  );
+
   const openLeads = customers.filter((c) => c.status === "LEAD");
   const customerById = new Map(customers.map((c) => [c.id, c]));
 
@@ -167,6 +187,25 @@ export default function Dashboard() {
         </Card>
       ) : null}
 
+      {notBilling.length > 0 ? (
+        <Card title={`Serviced but not billing (${notBilling.length})`}>
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            These plans have had their first visit but no subscription is
+            running — usually no payment method on file. Every one of these is
+            money not being collected.
+          </p>
+          {notBilling.slice(0, 10).map((p) => (
+            <ListRow
+              key={p.id}
+              title={customerById.get(p.customerId)?.displayName ?? "Unknown"}
+              subtitle={`${p.planName} · ${money(p.priceCents)}/mo`}
+              meta={<Badge tone="danger">not billing</Badge>}
+              onClick={() => navigate(`/customers/${p.customerId}`)}
+            />
+          ))}
+        </Card>
+      ) : null}
+
       {needsAttention.length > 0 ? (
         <Card title="Needs attention">
           <p className="muted small" style={{ marginBottom: 6 }}>
@@ -183,10 +222,12 @@ export default function Dashboard() {
         </Card>
       ) : null}
 
-      {outstanding.length === 0 && needsAttention.length === 0 ? (
+      {outstanding.length === 0 &&
+      needsAttention.length === 0 &&
+      notBilling.length === 0 ? (
         <EmptyState
           title="All caught up"
-          body="No outstanding invoices and every active customer has a plan or upcoming job."
+          body="No outstanding invoices, every active customer has a plan or upcoming job, and every serviced plan is billing."
         />
       ) : null}
     </Page>

@@ -3,6 +3,12 @@ import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { assertCanActForCustomer, assertFinance } from "../shared/authz";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
+import {
+  cancelPlanBilling,
+  ensureStripeCustomer as sharedEnsureStripeCustomer,
+  getDefaultPaymentMethod as sharedGetDefaultPaymentMethod,
+  startPlanBilling,
+} from "../shared/subscription";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 
 type Args = {
@@ -12,7 +18,15 @@ type Args = {
   amountCents?: number;
   description?: string;
   idempotencyKey?: string;
+  approvedBy?: string;
 };
+
+// The shared helpers take an injected Stripe client because booking-public
+// resolves its secret differently. In here it is always the env-backed one.
+const ensureStripeCustomer = (customerId: string) =>
+  sharedEnsureStripeCustomer(stripeClient(), customerId);
+const getDefaultPaymentMethod = (stripeCustomerId: string) =>
+  sharedGetDefaultPaymentMethod(stripeClient(), stripeCustomerId);
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
   switch (opFieldName(event)) {
@@ -59,30 +73,6 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
 };
 
 
-/** Get or create the Stripe customer mirroring a CRM customer. */
-async function ensureStripeCustomer(customerId: string) {
-  const client = await dataClient();
-  const { data: customer } = await client.models.Customer.get({
-    id: customerId,
-  });
-  if (!customer) throw new Error(`Customer ${customerId} not found`);
-  if (customer.stripeCustomerId) {
-    return { customer, stripeCustomerId: customer.stripeCustomerId };
-  }
-  const stripe = stripeClient();
-  const created = await stripe.customers.create({
-    name: customer.displayName,
-    email: customer.email ?? undefined,
-    phone: customer.phone ?? undefined,
-    metadata: { crmCustomerId: customerId },
-  });
-  await client.models.Customer.update({
-    id: customerId,
-    stripeCustomerId: created.id,
-  });
-  return { customer, stripeCustomerId: created.id };
-}
-
 /**
  * SetupIntent for saving a card or US bank account for off-session reuse.
  * The webhook (setup_intent.succeeded) makes it the default payment method
@@ -103,16 +93,6 @@ async function createSetupIntent(customerId: string) {
     metadata: { crmCustomerId: customerId },
   });
   return { clientSecret: intent.client_secret, stripeCustomerId };
-}
-
-async function getDefaultPaymentMethod(stripeCustomerId: string) {
-  const stripe = stripeClient();
-  const customer = await stripe.customers.retrieve(stripeCustomerId, {
-    expand: ["invoice_settings.default_payment_method"],
-  });
-  if (customer.deleted) return null;
-  const pm = customer.invoice_settings?.default_payment_method;
-  return pm && typeof pm !== "string" ? pm : null;
 }
 
 async function getPaymentMethodSummary(customerId: string) {
@@ -138,95 +118,21 @@ async function getPaymentMethodSummary(customerId: string) {
 }
 
 /**
- * Subscription price_data requires a real Stripe product — keep exactly one
- * catalog product for all CRM plans (plan name rides on the price/metadata).
- */
-async function ensureProduct(): Promise<string> {
-  const stripe = stripeClient();
-  const { data: products } = await stripe.products.list({
-    active: true,
-    limit: 100,
-  });
-  const existing = products.find((p) => p.metadata?.crmProduct === "true");
-  if (existing) return existing.id;
-  const created = await stripe.products.create({
-    name: "BuzzKill Pest Control Service",
-    metadata: { crmProduct: "true" },
-  });
-  return created.id;
-}
-
-/**
- * Start monthly billing for a Subscription record. Uses price_data against
- * the single CRM product (no per-plan catalog to maintain) and the
- * customer's default payment method; invoices settle through the webhook.
+ * Office "Start billing" button. Job completion starts billing automatically
+ * (crm-docs); this stays as the manual path for plans whose first visit
+ * predates that, or whose card arrived late.
  */
 async function startSubscription(servicePlanId: string) {
-  const client = await dataClient();
-  const { data: sub } = await client.models.ServicePlan.get({
-    id: servicePlanId,
-  });
-  if (!sub) throw new Error(`Service plan ${servicePlanId} not found`);
-  if (sub.stripeSubscriptionId) {
-    return { stripeSubscriptionId: sub.stripeSubscriptionId, existing: true };
-  }
-  const { stripeCustomerId } = await ensureStripeCustomer(sub.customerId);
-  const pm = await getDefaultPaymentMethod(stripeCustomerId);
-  if (!pm) {
-    throw new Error(
-      "Customer has no saved payment method — collect payment info first"
-    );
-  }
-  const stripe = stripeClient();
-  const productId = await ensureProduct();
-  const created = await stripe.subscriptions.create(
-    {
-      customer: stripeCustomerId,
-      items: [
-        {
-          price_data: {
-            currency: "usd",
-            unit_amount: sub.priceCents,
-            recurring: { interval: "month" },
-            product: productId,
-          },
-        },
-      ],
-      default_payment_method: pm.id,
-      metadata: { crmServicePlanId: servicePlanId, crmCustomerId: sub.customerId },
-    },
-    { idempotencyKey: `crm-sub-${servicePlanId}` }
-  );
-  await client.models.ServicePlan.update({
-    id: servicePlanId,
-    stripeSubscriptionId: created.id,
-    status: "ACTIVE",
-    startDate: new Date().toISOString().slice(0, 10),
-  });
-  return { stripeSubscriptionId: created.id, existing: false };
+  const outcome = await startPlanBilling(stripeClient(), servicePlanId);
+  if (!outcome.started) throw new Error(outcome.message);
+  return {
+    stripeSubscriptionId: outcome.stripeSubscriptionId,
+    existing: outcome.alreadyRunning,
+  };
 }
 
 async function cancelSubscription(servicePlanId: string) {
-  const client = await dataClient();
-  const { data: sub } = await client.models.ServicePlan.get({
-    id: servicePlanId,
-  });
-  if (!sub) throw new Error(`Service plan ${servicePlanId} not found`);
-  if (sub.stripeSubscriptionId) {
-    const stripe = stripeClient();
-    try {
-      await stripe.subscriptions.cancel(sub.stripeSubscriptionId);
-    } catch (err) {
-      // Already canceled in Stripe is fine — still mark the record.
-      if ((err as { code?: string }).code !== "resource_missing") throw err;
-    }
-  }
-  await client.models.ServicePlan.update({
-    id: servicePlanId,
-    status: "CANCELED",
-    canceledAt: new Date().toISOString(),
-  });
-  return { canceled: true };
+  return cancelPlanBilling(stripeClient(), servicePlanId);
 }
 
 /**
@@ -270,6 +176,14 @@ async function chargeOneTimeJob(jobId: string) {
   if (!job) throw new Error(`Job ${jobId} not found`);
   if (!job.priceCents || job.priceCents <= 0) {
     throw new Error("Job has no price to charge");
+  }
+  // Paid up front at online checkout. This is checked before the Invoice scan
+  // because it is written in the same create as the job — it cannot be missing
+  // the way a ledger row can, and charging here would be the second charge.
+  if (job.paidAt) {
+    throw new Error(
+      `This job was already paid online on ${job.paidAt.slice(0, 10)} — charging again would double-charge the customer`
+    );
   }
   const { data: existingInvoices } = await client.models.Invoice.list({
     filter: {
