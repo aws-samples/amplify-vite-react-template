@@ -68,6 +68,9 @@ applications:
                 echo "outputs stale or missing (attempt $i) — backend deploy likely in flight, retrying in 30s"; sleep 30
               done
             - env | grep -E '^VITE_' >> .env || true
+            # The office money screens compute revenue. Same rule as the backend:
+            # a broken money rule fails the build rather than shipping.
+            - npm test
             - npm run build
       artifacts:
         baseDirectory: dist

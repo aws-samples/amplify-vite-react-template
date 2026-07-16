@@ -3,6 +3,7 @@ import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { assertCanActForCustomer, assertFinance } from "../shared/authz";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
+import { refundInvoice } from "../shared/refund";
 import {
   cancelPlanBilling,
   ensureStripeCustomer as sharedEnsureStripeCustomer,
@@ -19,6 +20,8 @@ type Args = {
   description?: string;
   idempotencyKey?: string;
   approvedBy?: string;
+  invoiceId?: string;
+  reason?: string;
 };
 
 // The shared helpers take an injected Stripe client because booking-public
@@ -57,6 +60,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "chargeOneTimeJob": {
       assertFinance(event.identity);
       return chargeOneTimeJob(event.arguments.jobId!);
+    }
+    case "refundInvoice": {
+      assertFinance(event.identity);
+      return refundInvoice(stripeClient(), {
+        invoiceId: event.arguments.invoiceId!,
+        amountCents: event.arguments.amountCents ?? null,
+        reason: event.arguments.reason ?? "",
+      });
     }
     case "chargeManualAmount": {
       assertFinance(event.identity);

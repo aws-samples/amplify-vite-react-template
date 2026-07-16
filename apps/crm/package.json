@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "outputs": "AWS_REGION=us-east-1 NODE_OPTIONS=--no-experimental-webstorage ampx generate outputs --app-id d26qpsjewk0bee --branch staging"
+    "outputs": "AWS_REGION=us-east-1 NODE_OPTIONS=--no-experimental-webstorage ampx generate outputs --app-id d26qpsjewk0bee --branch staging",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@aws-amplify/ui-react": "^6.15.4",
@@ -24,7 +26,8 @@
     "@types/react-dom": "~18.3.7",
     "@vitejs/plugin-react": "~5.1.2",
     "typescript": "~5.9.3",
-    "vite": "~7.3.1"
+    "vite": "~7.3.1",
+    "vitest": "^3.2.7"
   },
   "engines": {
     "node": ">= 20.20.0",

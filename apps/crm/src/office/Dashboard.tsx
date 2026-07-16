@@ -9,6 +9,7 @@ import {
   type ServicePlan,
 } from "../lib/api";
 import { fmtDate, money, todayEastern } from "../lib/format";
+import { revenueTotals } from "../lib/revenue";
 import {
   Badge,
   Button,
@@ -89,11 +90,14 @@ export default function Dashboard() {
   const inRange = invoices.filter(
     (i) => i.status !== "VOID" && i.status !== "DRAFT" && inPeriod(i.issuedAt, period)
   );
-  const sum = (list: Invoice[]) => list.reduce((s, i) => s + i.amountCents, 0);
-  const billed = sum(inRange);
-  const paid = sum(inRange.filter((i) => i.status === "PAID"));
-  const open = sum(inRange.filter((i) => i.status === "OPEN"));
-  const failed = sum(inRange.filter((i) => i.status === "FAILED"));
+  // Refund-aware; see lib/revenue.ts, which is where the rules are tested.
+  const {
+    billedCents: billed,
+    paidCents: paid,
+    openCents: open,
+    failedCents: failed,
+    refundedCents: refunded,
+  } = revenueTotals(inRange);
 
   const outstanding = invoices
     .filter((i) => i.status === "OPEN" || i.status === "FAILED")
@@ -159,6 +163,14 @@ export default function Dashboard() {
         <Stat label="Unpaid" value={money(open)} tone="warn" />
         <Stat label="Failed" value={money(failed)} tone={failed ? "danger" : undefined} />
       </div>
+
+      {refunded > 0 ? (
+        // Netted out of Billed and Paid above, but shown rather than silently
+        // subtracted — the numbers should be explainable, not just correct.
+        <div className="stat-grid">
+          <Stat label="Refunded" value={money(refunded)} tone="warn" />
+        </div>
+      ) : null}
 
       <div className="stat-grid">
         <Stat label="Open leads" value={openLeads.length} />

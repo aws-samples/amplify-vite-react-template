@@ -7,6 +7,7 @@ import { dataClient } from "../shared/dataClient";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 import { finalizeBooking } from "../shared/bookingFinalize";
+import { applyRefundToInvoice } from "../shared/refund";
 
 export const handler = async (
   event: APIGatewayProxyEventV2
@@ -63,6 +64,13 @@ export const handler = async (
         break;
       case "invoice.payment_failed":
         await onSubscriptionInvoice(stripeEvent.data.object, "FAILED");
+        break;
+      // Fires for refunds issued from the Stripe dashboard too, which is the
+      // only way one could be issued before the CRM had a refund action.
+      // Without this the invoice stays PAID and the money is counted as
+      // revenue forever.
+      case "charge.refunded":
+        await onChargeRefunded(stripeEvent.data.object);
         break;
       case "customer.subscription.deleted":
         await onSubscriptionDeleted(stripeEvent.data.object);
@@ -201,6 +209,23 @@ async function onSubscriptionInvoice(
       ? { failureReason: "Subscription payment failed" }
       : {}),
     accessGroups: customerAccessGroups(crmCustomerId, customer?.groupId),
+  });
+}
+
+/**
+ * Money went back — ours or one issued from the Stripe dashboard. Stripe's
+ * amount_refunded is the authority, so a replay converges instead of doubling.
+ */
+async function onChargeRefunded(charge: Stripe.Charge) {
+  const paymentIntentId =
+    typeof charge.payment_intent === "string"
+      ? charge.payment_intent
+      : charge.payment_intent?.id;
+  if (!paymentIntentId) return;
+  await applyRefundToInvoice({
+    paymentIntentId,
+    amountRefundedCents: charge.amount_refunded,
+    refundId: charge.refunds?.data?.[0]?.id,
   });
 }
 

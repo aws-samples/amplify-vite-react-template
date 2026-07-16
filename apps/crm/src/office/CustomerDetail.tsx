@@ -59,6 +59,7 @@ export default function CustomerDetail() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [refunding, setRefunding] = useState<Invoice | null>(null);
   const [sheet, setSheet] = useState<
     | null
     | "edit"
@@ -845,6 +846,12 @@ export default function CustomerDetail() {
                 : plan
                   ? plan.planName
                   : null;
+              const refundedCents = inv.refundedAmountCents ?? 0;
+              const refundable = Math.max(0, inv.amountCents - refundedCents);
+              const canRefund =
+                roles.finance &&
+                (inv.status === "PAID" || inv.status === "REFUNDED") &&
+                refundable > 0;
               return (
                 <ListRow
                   key={inv.id}
@@ -855,9 +862,28 @@ export default function CustomerDetail() {
                       {source ? (
                         <span className="nested-line">for {source}</span>
                       ) : null}
+                      {refundedCents > 0 ? (
+                        <span className="nested-line">
+                          {money(refundedCents)} refunded
+                          {inv.refundReason ? ` — ${inv.refundReason}` : ""}
+                        </span>
+                      ) : null}
                     </>
                   }
-                  meta={<StatusBadge status={inv.status} />}
+                  meta={
+                    <>
+                      <StatusBadge status={inv.status} />
+                      {canRefund ? (
+                        <Button
+                          small
+                          variant="ghost"
+                          onClick={() => setRefunding(inv)}
+                        >
+                          Refund
+                        </Button>
+                      ) : null}
+                    </>
+                  }
                 />
               );
             })
@@ -1067,6 +1093,25 @@ export default function CustomerDetail() {
       />
 
       <Sheet
+        open={Boolean(refunding)}
+        onClose={() => setRefunding(null)}
+        title="Refund an invoice"
+      >
+        {refunding ? (
+          <RefundSheet
+            invoice={refunding}
+            customer={customer}
+            onDone={async (msg) => {
+              setRefunding(null);
+              setNotice(msg);
+              window.setTimeout(() => setNotice(null), 6000);
+              await load();
+            }}
+          />
+        ) : null}
+      </Sheet>
+
+      <Sheet
         open={sheet === "charge"}
         onClose={() => setSheet(null)}
         title="Charge or record a payment"
@@ -1091,6 +1136,127 @@ export default function CustomerDetail() {
  * for an arbitrary amount, or record an offline payment / invoice (cash,
  * check, adjustment) with no card movement.
  */
+/**
+ * Refund an invoice, in full or in part.
+ *
+ * Two-step on purpose: money moving back to a customer is still money moving,
+ * and the second step restates the amount and who it goes to. Before this
+ * existed the only way to refund was the Stripe dashboard, which left the CRM's
+ * invoice PAID forever.
+ */
+function RefundSheet({
+  invoice,
+  customer,
+  onDone,
+}: {
+  invoice: Invoice;
+  customer: Customer;
+  onDone: (message: string) => Promise<void>;
+}) {
+  const alreadyRefunded = invoice.refundedAmountCents ?? 0;
+  const remaining = Math.max(0, invoice.amountCents - alreadyRefunded);
+  const isCardPayment = Boolean(invoice.stripePaymentIntentId);
+
+  const [amount, setAmount] = useState((remaining / 100).toFixed(2));
+  const [reason, setReason] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const cents = Math.round(parseFloat(amount) * 100);
+  const validAmount = Number.isFinite(cents) && cents > 0 && cents <= remaining;
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = opResult<{ refundedNowCents?: number; sentToStripe?: boolean }>(
+        await api().mutations.refundInvoice({
+          invoiceId: invoice.id,
+          amountCents: cents,
+          reason: reason.trim(),
+        })
+      );
+      await onDone(
+        res?.sentToStripe === false
+          ? `Recorded a ${money(cents)} refund — no card was charged for this invoice, so nothing was sent to Stripe.`
+          : `Refunded ${money(cents)} to ${customer.displayName}. It reaches their account in 5–10 days.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not refund this invoice");
+      setConfirming(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (confirming) {
+    return (
+      <div className="form-grid">
+        <p>
+          Refund <strong>{money(cents)}</strong> to{" "}
+          <strong>{customer.displayName}</strong>
+          {isCardPayment && customer.paymentMethodLabel
+            ? ` on ${customer.paymentMethodLabel}`
+            : ""}
+          ?
+        </p>
+        <p className="muted small" style={{ margin: 0 }}>
+          {isCardPayment
+            ? "The money goes back to the card that paid, and reaches them in 5–10 days. Refunds can't be undone."
+            : "This invoice was recorded as an offline payment, so no card was charged and nothing will be sent to Stripe. This records that you returned the money."}
+        </p>
+        <p className="muted small" style={{ margin: 0 }}>
+          Reason: {reason.trim()}
+        </p>
+        <ErrorNote error={error} />
+        <Button block variant="danger" loading={busy} onClick={() => void submit()}>
+          Yes, refund {money(cents)}
+        </Button>
+        <Button block variant="subtle" onClick={() => setConfirming(false)}>
+          Back
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="form-grid">
+      <p className="muted small" style={{ margin: 0 }}>
+        {invoice.description} · {money(invoice.amountCents)} paid
+        {alreadyRefunded > 0
+          ? ` · ${money(alreadyRefunded)} already refunded, ${money(remaining)} left`
+          : ""}
+      </p>
+      <Field label="Amount to refund ($)" hint={`Up to ${money(remaining)}`}>
+        <input
+          inputMode="decimal"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))}
+        />
+      </Field>
+      <Field
+        label="Reason"
+        hint="Goes on the invoice. Say what happened, not just 'refund'."
+      >
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Tech couldn't access the property"
+        />
+      </Field>
+      <ErrorNote error={error} />
+      <Button
+        block
+        disabled={!validAmount || !reason.trim()}
+        onClick={() => setConfirming(true)}
+      >
+        Review refund
+      </Button>
+    </div>
+  );
+}
+
 function ManualChargeSheet({
   customer,
   hasPaymentMethod,

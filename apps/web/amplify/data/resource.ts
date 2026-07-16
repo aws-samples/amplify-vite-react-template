@@ -508,6 +508,14 @@ const schema = a.schema({
       issuedAt: a.datetime(),
       paidAt: a.datetime(),
       failureReason: a.string(),
+      // Refunds. Cumulative, because an invoice can be refunded more than once
+      // in parts. status flips to REFUNDED only when the whole amount is back;
+      // until then the invoice stays PAID with a non-zero refundedAmountCents,
+      // and every revenue figure is amountCents - refundedAmountCents.
+      refundedAmountCents: a.integer(),
+      refundedAt: a.datetime(),
+      refundReason: a.string(),
+      stripeRefundId: a.string(),
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [
@@ -655,6 +663,26 @@ const schema = a.schema({
       idempotencyKey: a.string(),
       /** Cognito sub of the approving OWNER. Required above the threshold. */
       approvedBy: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Refund a paid invoice, in full or in part. The only way a refund happens:
+   * one issued from the Stripe dashboard leaves the CRM's invoice PAID forever
+   * and the Dashboard counts the money as revenue in perpetuity.
+   *
+   * amountCents omitted refunds whatever is still outstanding. Invoices with no
+   * stripePaymentIntentId were recorded as offline payments — no card was
+   * charged, so nothing is sent to Stripe and this records the cash going back.
+   */
+  refundInvoice: a
+    .mutation()
+    .arguments({
+      invoiceId: a.string().required(),
+      amountCents: a.integer(),
+      reason: a.string().required(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
