@@ -70,13 +70,21 @@ export default function More() {
             subtitle="AI-researched prices for services without a rate card"
             onClick={() => navigate("/market-rates")}
           />
+          {/* adminCreateUser is OWNER-only server-side — invites are what keep
+              the role split real. Non-owners get the honest line, not a row
+              that errors on tap. */}
           {roles.owner ? (
             <ListRow
               title="Invite a staff member"
               subtitle="Owner, office, finance, technician, or a combination"
               onClick={() => setStaffSheet(true)}
             />
-          ) : null}
+          ) : (
+            <ListRow
+              title="Invite a staff member"
+              subtitle="Ask the owner — staff invites are owner-only"
+            />
+          )}
           <ListRow
             title="Email log"
             subtitle="Recent emails sent to customers"

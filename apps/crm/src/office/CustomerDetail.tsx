@@ -22,13 +22,10 @@ import {
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { amountInWords } from "../lib/amountWords";
 import { planCadence } from "../lib/planCadence";
-
-/** Said out loud in the start-billing confirm, so "quarterly" is never read as the billing cadence. */
-const VISIT_NOTE: Record<string, string> = {
-  MONTHLY: "A technician visits every month.",
-  BIMONTHLY: "A technician visits every 2 months — the charge is still monthly.",
-  QUARTERLY: "A technician visits every 3 months — the charge is still monthly.",
-};
+import {
+  completeJobConfirmText,
+  startBillingConfirmText,
+} from "../lib/billingDisclosure";
 import {
   Badge,
   Button,
@@ -357,55 +354,69 @@ export default function CustomerDetail() {
                 ? `Invited${customer.portalInvitedAt ? ` ${fmtDate(customer.portalInvitedAt, true)}` : ""} — hasn't signed in yet.`
                 : "Invite the customer to view services, documents, and billing online."}
           </p>
-          <div className="row-split">
-            <Button
-              small
-              variant="subtle"
-              disabled={!customer.email}
-              loading={busyAction === "invite"}
-              onClick={() =>
-                void run(
-                  "invite",
-                  async () =>
-                    unwrap(
-                      await api().mutations.adminCreateUser({
-                        email: customer.email!,
-                        name: customer.contactName ?? customer.displayName,
-                        roles: ["CUSTOMER"],
-                        customerId: customer.id,
-                        resend: Boolean(customer.portalUserSub),
-                      })
-                    ),
-                  `Portal invite sent to ${customer.email}`
-                )
-              }
-            >
-              {customer.portalUserSub ? "Resend invite" : "Invite to portal"}
-            </Button>
-            {customer.portalUserSub ? (
-              <Button
-                small
-                variant="ghost"
-                loading={busyAction === "remind"}
-                onClick={() =>
-                  void run(
-                    "remind",
-                    async () =>
-                      unwrap(
-                        await api().mutations.sendCustomerEmail({
-                          customerId: customer.id,
-                          kind: "portal-reminder",
-                        })
-                      ),
-                    `Portal link emailed to ${customer.email}`
-                  )
-                }
-              >
-                Send portal link
-              </Button>
-            ) : null}
-          </div>
-          {!customer.email ? (
+          {/* adminCreateUser is OWNER-only server-side (deliberately). A
+              button every office employee can see but only the owner can use
+              is a dead button that teaches staff errors are normal — so it
+              renders only for the owner, and everyone else is told who to ask. */}
+          {roles.owner || customer.portalUserSub ? (
+            <div className="row-split">
+              {roles.owner ? (
+                <Button
+                  small
+                  variant="subtle"
+                  disabled={!customer.email}
+                  loading={busyAction === "invite"}
+                  onClick={() =>
+                    void run(
+                      "invite",
+                      async () =>
+                        unwrap(
+                          await api().mutations.adminCreateUser({
+                            email: customer.email!,
+                            name: customer.contactName ?? customer.displayName,
+                            roles: ["CUSTOMER"],
+                            customerId: customer.id,
+                            resend: Boolean(customer.portalUserSub),
+                          })
+                        ),
+                      `Portal invite sent to ${customer.email}`
+                    )
+                  }
+                >
+                  {customer.portalUserSub ? "Resend invite" : "Invite to portal"}
+                </Button>
+              ) : null}
+              {customer.portalUserSub ? (
+                <Button
+                  small
+                  variant="ghost"
+                  loading={busyAction === "remind"}
+                  onClick={() =>
+                    void run(
+                      "remind",
+                      async () =>
+                        unwrap(
+                          await api().mutations.sendCustomerEmail({
+                            customerId: customer.id,
+                            kind: "portal-reminder",
+                          })
+                        ),
+                      `Portal link emailed to ${customer.email}`
+                    )
+                  }
+                >
+                  Send portal link
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          {!roles.owner ? (
+            <p className="muted small" style={{ marginTop: 8 }}>
+              Ask the owner to {customer.portalUserSub ? "resend the invite" : "invite them"} — portal
+              invites are owner-only.
+            </p>
+          ) : null}
+          {roles.owner && !customer.email ? (
             <p className="muted small" style={{ marginTop: 8 }}>
               Add an email address first.
             </p>
@@ -521,7 +532,7 @@ export default function CustomerDetail() {
                             // wrong — worth a sentence before it starts.
                             if (
                               !window.confirm(
-                                `Start billing ${customer.displayName} ${money(p.priceCents)} every month for ${p.planName}?\n\nThe first charge goes to their card on file today, then monthly. ${VISIT_NOTE[p.serviceFrequency ?? ""] ?? ""}`
+                                startBillingConfirmText(customer.displayName, p)
                               )
                             ) {
                               return;
@@ -657,7 +668,17 @@ export default function CustomerDetail() {
                           variant="ghost"
                           loading={busyAction === `complete-${j.id}`}
                           onClick={() => {
-                            if (!window.confirm("Mark this job completed without a tech report? The customer won't get a field report for it.")) return;
+                            // Completing a recurring job may start the plan's
+                            // monthly billing server-side. When it will, the
+                            // confirm says so — in the Start-billing button's
+                            // words, since it moves the same money.
+                            if (
+                              !window.confirm(
+                                completeJobConfirmText(customer.displayName, j, plans)
+                              )
+                            ) {
+                              return;
+                            }
                             void run(`complete-${j.id}`, async () =>
                               unwrap(
                                 await api().mutations.completeJob({ jobId: j.id })

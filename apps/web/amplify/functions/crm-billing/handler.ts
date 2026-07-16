@@ -8,6 +8,8 @@ import {
   callerSub,
 } from "../shared/authz";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
+import { notifyOffice } from "../shared/email";
+import { sendChargeReceipt } from "../shared/receipts";
 import { refundInvoice } from "../shared/refund";
 import {
   cancelPlanBilling,
@@ -221,7 +223,34 @@ async function startSubscription(servicePlanId: string) {
 }
 
 async function cancelSubscription(servicePlanId: string) {
-  return cancelPlanBilling(stripeClient(), servicePlanId);
+  const result = await cancelPlanBilling(stripeClient(), servicePlanId);
+  // Auto-canceled visits need no email — the person who pressed Cancel gets the
+  // result back. A visit deliberately left on the schedule does: it is money or
+  // a promise already made (paid up front, or a tech on site), and this email
+  // is the only place that decision surfaces.
+  if (result.queuedVisits.needsDecision.length > 0) {
+    const client = await dataClient();
+    const { data: plan } = await client.models.ServicePlan.get({
+      id: servicePlanId,
+    });
+    const { data: customer } = plan
+      ? await client.models.Customer.get({ id: plan.customerId })
+      : { data: null };
+    const name = customer?.displayName ?? plan?.customerId ?? servicePlanId;
+    await notifyOffice({
+      subject: `Canceled plan has visits needing a decision: ${name}`,
+      heading: "A canceled plan still has visits on the schedule",
+      template: "ops-cancel-visits-decision",
+      customerId: plan?.customerId,
+      relatedId: servicePlanId,
+      bodyHtml: `<p><strong>${name}</strong>'s plan${plan ? ` <strong>${plan.planName}</strong>` : ""} was canceled, but ${result.queuedVisits.needsDecision.length === 1 ? "a queued visit was" : "queued visits were"} deliberately left on the schedule:</p>
+         <ul>${result.queuedVisits.needsDecision
+           .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — ${v.why}</li>`)
+           .join("")}</ul>
+         <p><strong>Decide what happens to ${result.queuedVisits.needsDecision.length === 1 ? "it" : "each one"}</strong> — honour it, refund it, or cancel it on the Schedule. Left alone it will dispatch a technician.</p>`,
+    });
+  }
+  return result;
 }
 
 /**
@@ -305,6 +334,9 @@ async function chargeOneTimeJob(actor: Actor, jobId: string) {
       off_session: true,
       confirm: true,
       description,
+      // Belt-and-braces: Stripe sends its own receipt here in live mode. The
+      // sendChargeReceipt below is the one that works in every mode.
+      receipt_email: customer.email ?? undefined,
       metadata: { crmJobId: jobId, crmCustomerId: job.customerId },
     },
     { idempotencyKey: `crm-job-${jobId}` }
@@ -324,6 +356,18 @@ async function chargeOneTimeJob(actor: Actor, jobId: string) {
       : {}),
     accessGroups: customerAccessGroups(job.customerId, customer.groupId),
   });
+
+  // A charge the customer can't recognize is a dispute. Anything not yet
+  // succeeded (bank debits) gets its receipt from the webhook when the
+  // invoice settles to PAID.
+  if (intent.status === "succeeded") {
+    await sendChargeReceipt({
+      customerId: job.customerId,
+      amountCents: job.priceCents,
+      description,
+      invoiceId: invoice?.id,
+    });
+  }
 
   return {
     invoiceId: invoice?.id,
@@ -378,6 +422,9 @@ async function chargeManualAmount(
       off_session: true,
       confirm: true,
       description: clean,
+      // Belt-and-braces: Stripe sends its own receipt here in live mode. The
+      // sendChargeReceipt below is the one that works in every mode.
+      receipt_email: customer.email ?? undefined,
       metadata: { crmCustomerId: customerId, manual: "true" },
     },
     { idempotencyKey: `crm-manual-${key}` }
@@ -397,6 +444,17 @@ async function chargeManualAmount(
     ...actorStamp(actor),
     accessGroups: customerAccessGroups(customerId, customer.groupId),
   });
+
+  // Same receipt as any other charge — the escape hatch is exactly where an
+  // unexplained card charge is most likely to turn into a dispute.
+  if (intent.status === "succeeded") {
+    await sendChargeReceipt({
+      customerId,
+      amountCents,
+      description: clean,
+      invoiceId: invoice?.id,
+    });
+  }
 
   return {
     invoiceId: invoice?.id,

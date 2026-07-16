@@ -128,6 +128,10 @@ for (const fn of [
   backend.crmPricing,
   backend.bookingPublic,
   backend.leadIntake,
+  // crm-billing sends charge/refund receipts and pages the office when a
+  // cancel leaves visits needing a decision — without this grant those
+  // sends fail silently inside notifyOffice.
+  backend.crmBilling,
 ]) {
   fn.resources.lambda.addToRolePolicy(sesPolicy);
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");

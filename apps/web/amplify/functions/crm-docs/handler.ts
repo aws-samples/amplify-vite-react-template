@@ -170,6 +170,18 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         event.arguments.contentType!
       );
     }
+    case "startJob": {
+      if (!isStaff(callerGroups(event.identity))) {
+        throw new Error("Staff role required");
+      }
+      return startJob(event.arguments.jobId!);
+    }
+    case "endApplication": {
+      if (!isStaff(callerGroups(event.identity))) {
+        throw new Error("Staff role required");
+      }
+      return endApplication(event.arguments.jobId!);
+    }
     case "completeJob": {
       return completeJob(event.arguments.jobId!);
     }
@@ -476,7 +488,7 @@ function assertReportIsARecord(
     geoLat?: number | null;
     geoLng?: number | null;
   },
-  job: { status: string | null }
+  job: { status: string | null; startedAt?: string | null }
 ) {
   if (job.status === "CANCELED") {
     throw new Error(
@@ -486,6 +498,11 @@ function assertReportIsARecord(
   if (job.status === "NO_ACCESS") {
     throw new Error(
       "This job is marked as no access — a report would be a record of an application that did not happen"
+    );
+  }
+  if (job.status === "SCHEDULED" && !job.startedAt) {
+    throw new Error(
+      "This job was never started — press Start job first, so the record carries the application's real start time, then complete the report"
     );
   }
   if (!report.servicesPerformed?.trim()) {
@@ -571,9 +588,11 @@ async function finalizeServiceReport(reportId: string) {
 
   // The application's real start is when the technician pressed Start, not when
   // the draft was first saved — a report written up the next morning used to
-  // carry the wrong date on a legal record, uncorrectably.
+  // carry the wrong date on a legal record, uncorrectably. Same for the end:
+  // it is when the technician said they were done (endApplication), not when
+  // finalize happened to run; the fallback covers only jobs with no stamp.
   const applicationStartIso = job.startedAt ?? report.serviceDate;
-  const applicationEndIso = new Date().toISOString();
+  const applicationEndIso = job.applicationEndAt ?? new Date().toISOString();
 
   const pdf = await renderServiceReportPdf({
     reportId,
@@ -670,6 +689,8 @@ async function finalizeServiceReport(reportId: string) {
     id: report.jobId,
     status: "COMPLETED",
     completedAt,
+    // Backfill when finalize supplied the fallback, so job and record agree.
+    applicationEndAt: applicationEndIso,
   });
   await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });
@@ -764,6 +785,75 @@ async function completeJob(jobId: string) {
   await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });
   return { jobId, alreadyCompleted: false };
+}
+
+/**
+ * The technician pressed Start. startedAt is the application's start time on
+ * the pesticide record, and it used to be a plain client-side Job.update —
+ * any TECH token could write (or rewrite) it with whatever time the browser
+ * supplied. The model is read-only for TECH now; this stamps the server's
+ * clock, and a start that already happened cannot be moved.
+ */
+async function startJob(jobId: string) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+  if (job.startedAt) {
+    return { jobId, startedAt: job.startedAt, alreadyStarted: true };
+  }
+  if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") {
+    throw new Error(`Can't start a ${job.status.toLowerCase()} job`);
+  }
+  const startedAt = new Date().toISOString();
+  const { data: updated, errors } = await client.models.Job.update({
+    id: jobId,
+    status: "IN_PROGRESS",
+    startedAt,
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not start the job: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { jobId, startedAt, alreadyStarted: false };
+}
+
+/**
+ * The technician finished applying. Stamps the application's end with the
+ * server's clock, once: the end used to be stamped at finalize, so a report
+ * finalized the next morning carried the wrong end time on a legal record —
+ * the same defect class as the start. The first stamp wins, which is what
+ * makes a finalize that fails on site and is retried tomorrow keep today's
+ * end rather than tomorrow's.
+ */
+async function endApplication(jobId: string) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+  if (job.applicationEndAt) {
+    return { jobId, applicationEndAt: job.applicationEndAt, alreadyEnded: true };
+  }
+  if (job.status === "SCHEDULED" && !job.startedAt) {
+    throw new Error(
+      "This job was never started — press Start job first, so the record carries the application's real start time"
+    );
+  }
+  if (job.status === "CANCELED" || job.status === "NO_ACCESS") {
+    throw new Error(
+      `Can't end an application on a ${job.status.toLowerCase()} job — no application happened`
+    );
+  }
+  const applicationEndAt = new Date().toISOString();
+  const { data: updated, errors } = await client.models.Job.update({
+    id: jobId,
+    applicationEndAt,
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not record the end of the application: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { jobId, applicationEndAt, alreadyEnded: false };
 }
 
 const PHOTO_TYPES: Record<string, string> = {

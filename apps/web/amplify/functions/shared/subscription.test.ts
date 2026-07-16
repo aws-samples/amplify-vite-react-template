@@ -21,11 +21,27 @@ type Plan = {
   canceledAt?: string | null;
 };
 
+type Job = {
+  id: string;
+  servicePlanId: string;
+  status: string;
+  scheduledDate?: string | null;
+  paidAt?: string | null;
+  routeId?: string | null;
+  routeOrder?: number | null;
+  notes?: string | null;
+};
+
 const plans = new Map<string, Plan>();
 const customers = new Map<
   string,
   { id: string; displayName: string; stripeCustomerId?: string | null }
 >();
+const jobs = new Map<string, Job>();
+let jobUpdate = async (patch: Partial<Job> & { id: string }) => {
+  jobs.set(patch.id, { ...jobs.get(patch.id)!, ...patch });
+  return { data: jobs.get(patch.id) ?? null };
+};
 
 const fakeDataClient = {
   models: {
@@ -43,6 +59,13 @@ const fakeDataClient = {
         return { data: customers.get(patch.id) };
       },
     },
+    Job: {
+      listJobByServicePlanId: async ({ servicePlanId }: { servicePlanId: string }) => ({
+        data: [...jobs.values()].filter((j) => j.servicePlanId === servicePlanId),
+        nextToken: null,
+      }),
+      update: (patch: Partial<Job> & { id: string }) => jobUpdate(patch),
+    },
   },
 };
 
@@ -50,7 +73,14 @@ vi.mock("./dataClient", () => ({
   dataClient: async () => fakeDataClient,
 }));
 
-const { startPlanBilling, cancelPlanBilling } = await import("./subscription");
+const notifyOffice = vi.fn(async () => true);
+vi.mock("./email", () => ({
+  notifyOffice: (...args: unknown[]) =>
+    (notifyOffice as unknown as (...a: unknown[]) => Promise<boolean>)(...args),
+}));
+
+const { startPlanBilling, cancelPlanBilling, cancelQueuedPlanVisits } =
+  await import("./subscription");
 
 type FakeStripe = Stripe & {
   __subsCreated: Stripe.SubscriptionCreateParams[];
@@ -96,6 +126,12 @@ function makeStripe(opts: { hasPaymentMethod: boolean }): FakeStripe {
 beforeEach(() => {
   plans.clear();
   customers.clear();
+  jobs.clear();
+  jobUpdate = async (patch) => {
+    jobs.set(patch.id, { ...jobs.get(patch.id)!, ...patch });
+    return { data: jobs.get(patch.id) ?? null };
+  };
+  notifyOffice.mockClear();
   customers.set("c1", {
     id: "c1",
     displayName: "Dana Whitlock",
@@ -116,6 +152,22 @@ const seedPlan = (over: Partial<Plan> = {}): Plan => {
   };
   plans.set(plan.id, plan);
   return plan;
+};
+
+const seedJob = (over: Partial<Job> = {}): Job => {
+  const job: Job = {
+    id: `j${jobs.size + 1}`,
+    servicePlanId: "p1",
+    status: "UNSCHEDULED",
+    scheduledDate: "2026-10-14",
+    paidAt: null,
+    routeId: null,
+    routeOrder: null,
+    notes: "Auto-queued quarterly visit after job j0.",
+    ...over,
+  };
+  jobs.set(job.id, job);
+  return job;
 };
 
 describe("startPlanBilling", () => {
@@ -299,5 +351,164 @@ describe("cancelPlanBilling", () => {
     await expect(
       cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "nope")
     ).rejects.toThrow(/not found/);
+  });
+});
+
+describe("cancelPlanBilling resolves the queued visits", () => {
+  // The recurring engine queues the next visit ahead of time, so every cancel
+  // path used to strand one: reminders fired, techs dispatched, and the visit
+  // completed unbillable — invisible even to the not-billing digest, which
+  // only scans ACTIVE plans.
+
+  it("cancels the auto-queued next visit so it cannot dispatch as a free service call", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const job = seedJob({ status: "UNSCHEDULED" });
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(jobs.get(job.id)).toMatchObject({ status: "CANCELED" });
+    expect(result.queuedVisits.canceled).toHaveLength(1);
+  });
+
+  it("takes a scheduled unpaid visit off its route too", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const job = seedJob({ status: "SCHEDULED", routeId: "r1", routeOrder: 3 });
+
+    await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(jobs.get(job.id)).toMatchObject({
+      status: "CANCELED",
+      routeId: null,
+      routeOrder: null,
+    });
+  });
+
+  it("writes why into the job's notes — an audit trail, not a vanished row", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const job = seedJob({ notes: "Auto-queued quarterly visit after job j0." });
+
+    await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    const notes = jobs.get(job.id)!.notes ?? "";
+    expect(notes).toContain("Auto-queued quarterly visit after job j0.");
+    expect(notes).toMatch(/auto-canceled/i);
+    expect(notes).toMatch(/plan was canceled/i);
+  });
+
+  it("leaves a paid-up-front visit alone and reports it for an office decision", async () => {
+    // The funnel's first visit is paid at booking. Money already moved, so
+    // "refund it or honour it" is an office decision, not a webhook's guess.
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const job = seedJob({ status: "SCHEDULED", paidAt: "2026-07-10T12:00:00Z" });
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(jobs.get(job.id)!.status).toBe("SCHEDULED");
+    expect(result.queuedVisits.needsDecision).toHaveLength(1);
+    expect(result.queuedVisits.needsDecision[0].why).toMatch(/paid up front/i);
+  });
+
+  it("leaves an in-progress visit alone — a technician is standing in the yard", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const job = seedJob({ status: "IN_PROGRESS" });
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(jobs.get(job.id)!.status).toBe("IN_PROGRESS");
+    expect(result.queuedVisits.needsDecision[0].why).toMatch(/on site/i);
+  });
+
+  it("does not touch completed, no-access or already-canceled visits", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const done = seedJob({ status: "COMPLETED" });
+    const noAccess = seedJob({ status: "NO_ACCESS" });
+    const gone = seedJob({ status: "CANCELED", notes: "old" });
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(jobs.get(done.id)!.status).toBe("COMPLETED");
+    expect(jobs.get(noAccess.id)!.status).toBe("NO_ACCESS");
+    expect(jobs.get(gone.id)!.notes).toBe("old");
+    expect(result.queuedVisits).toMatchObject({
+      canceled: [],
+      needsDecision: [],
+      failed: [],
+    });
+  });
+
+  it("still cancels the plan and pages the office when a visit refuses to cancel", async () => {
+    // The billing is already stopped by this point; failing the whole cancel
+    // over a job row would tell a customer their cancellation failed when it
+    // did not. The failure goes to a human instead.
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    seedJob({ status: "UNSCHEDULED" });
+    jobUpdate = async () => ({ data: null });
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(result.canceled).toBe(true);
+    expect(plans.get("p1")!.status).toBe("CANCELED");
+    expect(result.queuedVisits.failed).toHaveLength(1);
+    expect(notifyOffice).toHaveBeenCalledOnce();
+    const [alert] = notifyOffice.mock.calls[0] as unknown as [{ subject: string }];
+    expect(alert.subject).toMatch(/ACTION REQUIRED/);
+  });
+
+  it("pages the office when the schedule cannot be checked at all", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    fakeDataClient.models.Job.listJobByServicePlanId = (async () => {
+      throw new Error("throttled");
+    }) as never;
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(result.canceled).toBe(true);
+    expect(notifyOffice).toHaveBeenCalledOnce();
+
+    fakeDataClient.models.Job.listJobByServicePlanId = (async ({
+      servicePlanId,
+    }: {
+      servicePlanId: string;
+    }) => ({
+      data: [...jobs.values()].filter((j) => j.servicePlanId === servicePlanId),
+      nextToken: null,
+    })) as never;
+  });
+
+  it("sends no office email when everything resolved cleanly", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    seedJob({ status: "UNSCHEDULED" });
+
+    await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(notifyOffice).not.toHaveBeenCalled();
+  });
+});
+
+describe("cancelQueuedPlanVisits", () => {
+  // Exercised directly by the Stripe webhook, which does its own plan flip and
+  // folds this resolution into the office alert.
+
+  it("only touches the given plan's jobs", async () => {
+    seedPlan();
+    const ours = seedJob({ servicePlanId: "p1" });
+    const theirs = seedJob({ servicePlanId: "p2" });
+
+    await cancelQueuedPlanVisits("p1", "the service plan was canceled");
+
+    expect(jobs.get(ours.id)!.status).toBe("CANCELED");
+    expect(jobs.get(theirs.id)!.status).toBe("UNSCHEDULED");
+  });
+
+  it("puts the cause it was given into the audit note", async () => {
+    seedPlan();
+    const job = seedJob();
+
+    await cancelQueuedPlanVisits(
+      "p1",
+      "the plan's subscription was canceled at Stripe"
+    );
+
+    expect(jobs.get(job.id)!.notes).toContain("canceled at Stripe");
   });
 });

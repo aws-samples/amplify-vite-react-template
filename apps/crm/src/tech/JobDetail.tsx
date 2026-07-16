@@ -187,14 +187,20 @@ export default function TechJob() {
         <Button
           block
           onClick={() =>
+            // The application's start time on the pesticide record — stamped
+            // by the server's clock. The Job model is read-only for techs, so
+            // there is no browser-supplied timestamp to rewrite.
             api()
-              .models.Job.update({
-                id: job.id,
-                status: "IN_PROGRESS",
-                // The application's start time on the pesticide record.
-                startedAt: new Date().toISOString(),
+              .mutations.startJob({ jobId: job.id })
+              .then((res) => {
+                if (res.errors?.length) throw new Error(res.errors[0].message);
+                return load();
               })
-              .then(() => load())
+              .catch((err) =>
+                setError(
+                  err instanceof Error ? err.message : "Could not start the job"
+                )
+              )
           }
         >
           Start job
@@ -685,9 +691,20 @@ function ReportForm({
               setBusy("finalize");
               setError(null);
               save()
-                .then((id) =>
-                  api().mutations.finalizeServiceReport({ reportId: id })
-                )
+                .then(async (id) => {
+                  // Stop the application clock first, server-stamped. The
+                  // first stamp wins, so if finalize fails here and is
+                  // retried tomorrow morning, the record's end time is still
+                  // now — while the tech is on site — not whenever the retry
+                  // lands.
+                  const ended = await api().mutations.endApplication({
+                    jobId: job.id,
+                  });
+                  if (ended.errors?.length) {
+                    throw new Error(ended.errors[0].message);
+                  }
+                  return api().mutations.finalizeServiceReport({ reportId: id });
+                })
                 .then((res) => {
                   if (res.errors?.length) throw new Error(res.errors[0].message);
                   return onChanged();

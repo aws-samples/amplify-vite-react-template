@@ -33,6 +33,8 @@ const workingUpdate: UpdateFn = async (patch) => {
   return { data: invoices[i] };
 };
 
+let customerEmail: string | null = "dana@example.com";
+
 const fakeDataClient: {
   models: {
     Invoice: {
@@ -41,6 +43,9 @@ const fakeDataClient: {
       listInvoiceByStripePaymentIntentId: (a: {
         stripePaymentIntentId: string;
       }) => Promise<{ data: Invoice[] }>;
+    };
+    Customer: {
+      get: (a: { id: string }) => Promise<{ data: unknown }>;
     };
   };
 } = {
@@ -60,9 +65,22 @@ const fakeDataClient: {
         ),
       }),
     },
+    Customer: {
+      get: async ({ id }: { id: string }) => ({
+        data: { id, displayName: "Dana Whitlock", email: customerEmail },
+      }),
+    },
   },
 };
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
+
+const sendEmail = vi.fn(async () => true);
+const notifyOffice = vi.fn(async () => true);
+vi.mock("./email", () => ({
+  sendEmail: (opts: unknown) => sendEmail(opts as never),
+  notifyOffice: (opts: unknown) => notifyOffice(opts as never),
+  emailShell: (heading: string, body: string) => `${heading}\n${body}`,
+}));
 
 const { refundInvoice, applyRefundToInvoice, refundableRemaining } =
   await import("./refund");
@@ -91,6 +109,9 @@ beforeEach(() => {
   fakeDataClient.models.Invoice.update = workingUpdate;
   refundsCreate.mockClear();
   refundsCreate.mockImplementation(async () => ({ id: "re_1" }));
+  sendEmail.mockClear();
+  notifyOffice.mockClear();
+  customerEmail = "dana@example.com";
 });
 
 describe("refundInvoice", () => {
@@ -274,5 +295,99 @@ describe("applyRefundToInvoice (charge.refunded webhook)", () => {
     });
 
     expect(res).toBeNull();
+  });
+});
+
+describe("refund notices", () => {
+  // Every refund generates a customer notice, from either origin — the CRM's
+  // refund button or the Stripe dashboard. Money moving back in silence is the
+  // same defect as money moving out in silence.
+
+  it("tells the customer how much went back and when to expect it", async () => {
+    seed();
+
+    await refundInvoice(stripe, { invoiceId: "inv1", reason: "tech no-showed" });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const [notice] = sendEmail.mock.calls[0] as unknown as [
+      { to: string; subject: string; html: string },
+    ];
+    expect(notice.to).toBe("dana@example.com");
+    expect(notice.subject).toContain("$299.00");
+    expect(notice.html).toContain("3–5 business days");
+  });
+
+  it("announces the refunded amount, not the invoice total, on a partial refund", async () => {
+    seed();
+
+    await refundInvoice(stripe, {
+      invoiceId: "inv1",
+      amountCents: 10000,
+      reason: "goodwill",
+    });
+
+    const [notice] = sendEmail.mock.calls[0] as unknown as [{ html: string }];
+    expect(notice.html).toContain("$100.00");
+    expect(notice.html).not.toContain("$299.00");
+  });
+
+  it("skips the card-timing line for an offline refund", async () => {
+    seed({ stripePaymentIntentId: null });
+
+    await refundInvoice(stripe, { invoiceId: "inv1", reason: "cash returned" });
+
+    const [notice] = sendEmail.mock.calls[0] as unknown as [{ html: string }];
+    expect(notice.html).not.toContain("original payment method");
+  });
+
+  it("notifies the customer of a refund issued from the Stripe dashboard", async () => {
+    seed();
+
+    await applyRefundToInvoice({
+      paymentIntentId: "pi_1",
+      amountRefundedCents: 29900,
+      refundId: "re_dash",
+    });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const [notice] = sendEmail.mock.calls[0] as unknown as [{ html: string }];
+    expect(notice.html).toContain("$299.00");
+  });
+
+  it("sends exactly one notice when our refund's webhook echo arrives", async () => {
+    // refundInvoice sends the notice, then charge.refunded converges on the
+    // same total and must not repeat it.
+    seed();
+
+    await refundInvoice(stripe, { invoiceId: "inv1", reason: "duplicate charge" });
+    await applyRefundToInvoice({ paymentIntentId: "pi_1", amountRefundedCents: 29900 });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+  });
+
+  it("announces only the delta when the dashboard tops up a partial refund", async () => {
+    seed({ refundedAmountCents: 10000, refundReason: "goodwill" });
+
+    await applyRefundToInvoice({ paymentIntentId: "pi_1", amountRefundedCents: 29900 });
+
+    const [notice] = sendEmail.mock.calls[0] as unknown as [{ html: string }];
+    expect(notice.html).toContain("$199.00");
+  });
+
+  it("tells the office when the refunded customer has no email on file", async () => {
+    customerEmail = null;
+    seed();
+
+    const out = await refundInvoice(stripe, { invoiceId: "inv1", reason: "x" });
+
+    // The refund itself stands — the money is already on its way back.
+    expect(out.status).toBe("REFUNDED");
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(notifyOffice).toHaveBeenCalledOnce();
+    const [alert] = notifyOffice.mock.calls[0] as unknown as [
+      { subject: string; bodyHtml: string },
+    ];
+    expect(alert.subject).toMatch(/no email on file/i);
+    expect(alert.bodyHtml).toContain("$299.00");
   });
 });

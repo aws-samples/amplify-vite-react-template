@@ -353,6 +353,16 @@ describe("the finalize gate", () => {
     ).rejects.toThrow(/did not happen/i);
   });
 
+  it("refuses a job that was never started — the record needs a real start time", async () => {
+    jobs[0].status = "SCHEDULED";
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/never started/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
   it("stamps the application window on the record", async () => {
     jobs[0].startedAt = "2026-07-16T13:05:00Z";
     reports.push(validReport());
@@ -361,6 +371,81 @@ describe("the finalize gate", () => {
 
     expect(reports[0].applicationStartAt).toBe("2026-07-16T13:05:00Z");
     expect(reports[0].applicationEndAt).toBeTruthy();
+  });
+});
+
+describe("application times are server-stamped", () => {
+  it("startJob stamps the server's clock and ignores anything the browser sent", async () => {
+    jobs[0].status = "SCHEDULED";
+    const before = Date.now();
+
+    await call("startJob", { jobId: "j1", startedAt: "1999-01-01T00:00:00Z" });
+
+    expect(jobs[0].status).toBe("IN_PROGRESS");
+    expect(Date.parse(jobs[0].startedAt as string)).toBeGreaterThanOrEqual(
+      before
+    );
+  });
+
+  it("startJob will not move a start that already happened", async () => {
+    jobs[0].startedAt = "2026-07-16T13:05:00Z";
+
+    const res = (await call("startJob", { jobId: "j1" })) as {
+      alreadyStarted: boolean;
+    };
+
+    expect(res.alreadyStarted).toBe(true);
+    expect(jobs[0].startedAt).toBe("2026-07-16T13:05:00Z");
+  });
+
+  it("startJob refuses a job that is not there to start", async () => {
+    jobs[0].status = "CANCELED";
+
+    await expect(call("startJob", { jobId: "j1" })).rejects.toThrow(
+      /can't start a canceled job/i
+    );
+  });
+
+  it("endApplication stamps the server's clock", async () => {
+    const before = Date.now();
+
+    await call("endApplication", { jobId: "j1" });
+
+    expect(
+      Date.parse(jobs[0].applicationEndAt as string)
+    ).toBeGreaterThanOrEqual(before);
+  });
+
+  it("endApplication stamps once — the first end stands across retries", async () => {
+    await call("endApplication", { jobId: "j1" });
+    const first = jobs[0].applicationEndAt;
+
+    const res = (await call("endApplication", { jobId: "j1" })) as {
+      alreadyEnded: boolean;
+    };
+
+    expect(res.alreadyEnded).toBe(true);
+    expect(jobs[0].applicationEndAt).toBe(first);
+  });
+
+  it("endApplication refuses a job that was never started", async () => {
+    jobs[0].status = "SCHEDULED";
+
+    await expect(call("endApplication", { jobId: "j1" })).rejects.toThrow(
+      /never started/i
+    );
+  });
+
+  it("the record carries the stamped end, not the moment finalize ran", async () => {
+    // The report is written up the next morning: the end time must be
+    // yesterday's stamp, not this morning's finalize.
+    jobs[0].startedAt = "2026-07-16T13:05:00Z";
+    jobs[0].applicationEndAt = "2026-07-16T14:10:00Z";
+    reports.push(validReport());
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].applicationEndAt).toBe("2026-07-16T14:10:00Z");
   });
 });
 

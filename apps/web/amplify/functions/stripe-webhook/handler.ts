@@ -8,6 +8,12 @@ import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 import { finalizeBooking } from "../shared/bookingFinalize";
 import { applyRefundToInvoice } from "../shared/refund";
+import { notifyOffice } from "../shared/email";
+import { escapeHtml, sendChargeReceipt } from "../shared/receipts";
+import {
+  cancelQueuedPlanVisits,
+  type QueuedVisitsResolution,
+} from "../shared/subscription";
 
 export const handler = async (
   event: APIGatewayProxyEventV2
@@ -134,6 +140,18 @@ async function settlePaymentIntent(
             intent.last_payment_error?.message ?? "Payment failed",
         }),
   });
+  // The charge just became real money, so the customer hears about it now.
+  // Instant card charges got their receipt from chargeOneTimeJob /
+  // chargeManualAmount; this covers the ones that settle later (bank debits),
+  // and the status guard above keeps a replayed webhook from sending twice.
+  if (status === "PAID") {
+    await sendChargeReceipt({
+      customerId: invoice.customerId,
+      amountCents: invoice.amountCents,
+      description: invoice.description ?? "Pest control service",
+      invoiceId: invoice.id,
+    });
+  }
 }
 
 /**
@@ -184,6 +202,14 @@ async function onSubscriptionInvoice(
           ? { failureReason: "Subscription payment failed" }
           : {}),
       });
+      if (status === "PAID" && existing[0].amountCents > 0) {
+        await sendChargeReceipt({
+          customerId: crmCustomerId,
+          amountCents: existing[0].amountCents,
+          description: existing[0].description ?? "Subscription payment",
+          invoiceId: existing[0].id,
+        });
+      }
     }
     return;
   }
@@ -194,12 +220,13 @@ async function onSubscriptionInvoice(
   const { data: sub } = await client.models.ServicePlan.get({
     id: crmServicePlanId,
   });
-  await client.models.Invoice.create({
+  const description = `${sub?.planName ?? "Subscription"} — ${new Date(
+    stripeInvoice.created * 1000
+  ).toLocaleDateString("en-US", { month: "long", year: "numeric" })}`;
+  const { data: created } = await client.models.Invoice.create({
     customerId: crmCustomerId,
     servicePlanId: crmServicePlanId,
-    description: `${sub?.planName ?? "Subscription"} — ${new Date(
-      stripeInvoice.created * 1000
-    ).toLocaleDateString("en-US", { month: "long", year: "numeric" })}`,
+    description,
     amountCents: stripeInvoice.amount_due,
     status,
     stripeInvoiceId: stripeInvoice.id,
@@ -210,6 +237,17 @@ async function onSubscriptionInvoice(
       : {}),
     accessGroups: customerAccessGroups(crmCustomerId, customer?.groupId),
   });
+  // The monthly settlement is a real charge on a real card — it gets the same
+  // receipt as any other. The existing-invoice path above only emails on a
+  // status *change*, so a replayed webhook cannot send this twice.
+  if (status === "PAID" && stripeInvoice.amount_due > 0) {
+    await sendChargeReceipt({
+      customerId: crmCustomerId,
+      amountCents: stripeInvoice.amount_due,
+      description,
+      invoiceId: created?.id,
+    });
+  }
 }
 
 /**
@@ -229,6 +267,17 @@ async function onChargeRefunded(charge: Stripe.Charge) {
   });
 }
 
+/**
+ * A subscription died at Stripe without going through the CRM — canceled from
+ * the Stripe dashboard, or by Stripe itself after repeated failed payments.
+ * Losing a recurring customer must never be a silent database update: the plan
+ * flips, the stranded next visit comes off the schedule (or is surfaced for a
+ * decision), and the office is told the same day.
+ *
+ * The CRM's own cancel paths run cancelPlanBilling, which marks the plan
+ * CANCELED before this webhook arrives — the status guard below is what keeps
+ * those from being double-announced.
+ */
 async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
   const crmServicePlanId = stripeSub.metadata?.crmServicePlanId;
   if (!crmServicePlanId) return;
@@ -244,5 +293,72 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     // one — a cancelled plan holding a dead id reads as healthy everywhere.
     stripeSubscriptionId: null,
     canceledAt: new Date().toISOString(),
+  });
+
+  // Nothing below may throw: the plan is now CANCELED, so a Stripe retry of
+  // this event would hit the guard above and never send the alert at all.
+  // Failures are folded into the email instead.
+  let queued: QueuedVisitsResolution | null = null;
+  try {
+    queued = await cancelQueuedPlanVisits(
+      crmServicePlanId,
+      "the plan's subscription was canceled at Stripe"
+    );
+  } catch (err) {
+    console.error(
+      `onSubscriptionDeleted: could not resolve queued visits for plan ${crmServicePlanId}`,
+      err
+    );
+  }
+
+  let customerName = sub.customerId;
+  try {
+    const { data: customer } = await client.models.Customer.get({
+      id: sub.customerId,
+    });
+    if (customer?.displayName) customerName = customer.displayName;
+  } catch (err) {
+    console.error("onSubscriptionDeleted: customer lookup failed", err);
+  }
+
+  const monthly = `$${(sub.priceCents / 100).toFixed(2)}/mo`;
+  const perYear = `$${((sub.priceCents * 12) / 100).toFixed(2)}/yr`;
+  const visitLines: string[] = [];
+  if (!queued) {
+    visitLines.push(
+      `<p style="color:#b91c1c;"><strong>The schedule could not be checked for queued visits.</strong> Open the Schedule and cancel this customer's queued visits by hand — anything left will dispatch a technician for free.</p>`
+    );
+  } else {
+    if (queued.canceled.length > 0) {
+      visitLines.push(
+        `<p>Their queued visit${queued.canceled.length === 1 ? "" : "s"} (${queued.canceled
+          .map((v) => v.scheduledDate ?? "unscheduled")
+          .join(", ")}) ${queued.canceled.length === 1 ? "was" : "were"} taken off the schedule so no technician dispatches for free.</p>`
+      );
+    }
+    if (queued.failed.length > 0) {
+      visitLines.push(
+        `<p style="color:#b91c1c;"><strong>${queued.failed.length} queued visit${queued.failed.length === 1 ? "" : "s"} could not be taken off the schedule.</strong> Cancel ${queued.failed.length === 1 ? "it" : "them"} by hand or a technician will be dispatched for free.</p>`
+      );
+    }
+    if (queued.needsDecision.length > 0) {
+      visitLines.push(
+        `<p><strong>Still on the schedule and needing a decision:</strong></p>
+         <ul>${queued.needsDecision
+           .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — ${v.why}</li>`)
+           .join("")}</ul>`
+      );
+    }
+  }
+
+  await notifyOffice({
+    subject: `ACTION REQUIRED — recurring plan stopped at Stripe: ${customerName}`,
+    heading: "A recurring plan stopped billing at Stripe",
+    template: "ops-subscription-died",
+    customerId: sub.customerId,
+    relatedId: crmServicePlanId,
+    bodyHtml: `<p><strong>${escapeHtml(customerName)}</strong>'s <strong>${escapeHtml(sub.planName ?? "plan")}</strong> (${monthly} — about ${perYear}) stopped billing at Stripe. This did not come from the CRM: it was canceled from the Stripe dashboard, or by Stripe itself after repeated failed payments.</p>
+       ${visitLines.join("\n       ")}
+       <p><strong>Call ${escapeHtml(customerName)} today.</strong> If this is a mistake, collect a payment method and start a new plan. If they meant to leave, this is the retention call — either way, losing a recurring customer should never be a silent database update.</p>`,
   });
 }

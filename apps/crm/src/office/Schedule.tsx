@@ -7,7 +7,9 @@ import {
   type Route,
   type Technician,
 } from "../lib/api";
+import { useRoles } from "../lib/auth";
 import { addDays, fmtDate, prettyWeekday, todayEastern } from "../lib/format";
+import { assignBlockedNote, unassignBlockedNote } from "../lib/unassignStop";
 import {
   Badge,
   Button,
@@ -62,7 +64,9 @@ export default function Schedule() {
       const onDate = unwrap(jobsOnDate).filter((j) => j.status !== "CANCELED");
       setDayJobs(onDate);
       setPoolJobs([
-        ...onDate.filter((j) => !j.routeId),
+        // COMPLETED / IN_PROGRESS never belong in the pool: "needs scheduling"
+        // must not offer an Assign that rewrites a status billing acted on.
+        ...onDate.filter((j) => !j.routeId && !assignBlockedNote(j.status)),
         ...unwrap(unscheduled).filter((j) => j.scheduledDate !== date),
       ]);
       setCustomers(new Map(unwrap(customerList).map((c) => [c.id, c])));
@@ -92,6 +96,19 @@ export default function Schedule() {
   };
 
   const assign = async (job: Job, technicianId: string) => {
+    // Guarded like unassign: the board schedules, it never rewrites history.
+    const blocked = assignBlockedNote(job.status);
+    if (blocked) {
+      setError(`Can't assign this stop: ${blocked}`);
+      return;
+    }
+    if (
+      job.status === "NO_ACCESS" &&
+      !window.confirm(
+        "This visit ended NO ACCESS. Assigning re-books it as a normal stop. Continue?"
+      )
+    )
+      return;
     setBusy(job.id);
     setError(null);
     try {
@@ -123,6 +140,16 @@ export default function Schedule() {
   };
 
   const unassign = async (job: Job) => {
+    // The board schedules; it never rewrites history. Guarded here as well as
+    // at render, so nothing can flip a COMPLETED or IN_PROGRESS stop — status
+    // is what billing, the recurring engine, and the pesticide record key off.
+    const techName =
+      techs?.find((t) => t.id === job.technicianId)?.name ?? "the technician";
+    const blocked = unassignBlockedNote(job.status, techName);
+    if (blocked) {
+      setError(`Can't unassign this stop: ${blocked}`);
+      return;
+    }
     setBusy(job.id);
     try {
       unwrap(
@@ -218,14 +245,17 @@ export default function Schedule() {
                   title={customerName(j)}
                   subtitle={`${j.serviceType}${j.scheduledDate && j.scheduledDate !== date ? ` · wants ${fmtDate(j.scheduledDate)}` : ""}${customerCity(j) ? ` · ${customerCity(j)}` : ""}`}
                   meta={
-                    <Button
-                      small
-                      variant="subtle"
-                      loading={busy === j.id}
-                      onClick={() => setAssigning(j)}
-                    >
-                      Assign
-                    </Button>
+                    <>
+                      {j.status === "NO_ACCESS" ? <StatusBadge status={j.status} /> : null}
+                      <Button
+                        small
+                        variant="subtle"
+                        loading={busy === j.id}
+                        onClick={() => setAssigning(j)}
+                      >
+                        Assign
+                      </Button>
+                    </>
                   }
                 />
               ))}
@@ -260,29 +290,39 @@ export default function Schedule() {
                   {routeJobs.length === 0 ? (
                     <p className="muted small">No stops on this day's route.</p>
                   ) : (
-                    routeJobs.map((j, i) => (
-                      <ListRow
-                        key={j.id}
-                        title={`${i + 1}. ${customerName(j)}`}
-                        subtitle={`${j.serviceType}${j.timeWindow ? ` · ${j.timeWindow}` : ""}`}
-                        meta={
-                          <>
-                            <StatusBadge status={j.status} />
-                            <span style={{ display: "inline-flex", gap: 4 }}>
-                              <Button small variant="ghost" disabled={i === 0 || busy === j.id} onClick={() => void bump(j, -1, routeJobs)}>
-                                ↑
-                              </Button>
-                              <Button small variant="ghost" disabled={i === routeJobs.length - 1 || busy === j.id} onClick={() => void bump(j, 1, routeJobs)}>
-                                ↓
-                              </Button>
-                              <Button small variant="ghost" loading={busy === j.id} onClick={() => void unassign(j)}>
-                                ✕
-                              </Button>
-                            </span>
-                          </>
-                        }
-                      />
-                    ))
+                    routeJobs.map((j, i) => {
+                      const blocked = unassignBlockedNote(j.status, tech.name);
+                      return (
+                        <ListRow
+                          key={j.id}
+                          title={`${i + 1}. ${customerName(j)}`}
+                          subtitle={`${j.serviceType}${j.timeWindow ? ` · ${j.timeWindow}` : ""}`}
+                          meta={
+                            <>
+                              <StatusBadge status={j.status} />
+                              <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                                <Button small variant="ghost" disabled={i === 0 || busy === j.id} onClick={() => void bump(j, -1, routeJobs)}>
+                                  ↑
+                                </Button>
+                                <Button small variant="ghost" disabled={i === routeJobs.length - 1 || busy === j.id} onClick={() => void bump(j, 1, routeJobs)}>
+                                  ↓
+                                </Button>
+                                {/* ✕ is a scheduling move, not an eraser: a
+                                    completed or in-progress stop gets the
+                                    honest words instead of a status flip. */}
+                                {blocked ? (
+                                  <span className="muted small">{blocked}</span>
+                                ) : (
+                                  <Button small variant="ghost" loading={busy === j.id} onClick={() => void unassign(j)}>
+                                    ✕
+                                  </Button>
+                                )}
+                              </span>
+                            </>
+                          }
+                        />
+                      );
+                    })
                   )}
                 </Card>
               );
@@ -347,12 +387,20 @@ function TechForm({
   existing?: Technician | null;
   onDone: () => Promise<void>;
 }) {
+  const roles = useRoles();
   const [name, setName] = useState(existing?.name ?? "");
   const [email, setEmail] = useState(existing?.email ?? "");
   const [phone, setPhone] = useState(existing?.phone ?? "");
   const [invite, setInvite] = useState(!existing);
+  // A technician saved on an earlier attempt whose invite then failed — reused
+  // on retry so every attempt doesn't leave another Technician record behind.
+  const [createdTech, setCreatedTech] = useState<Technician | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // adminCreateUser is OWNER-only server-side (deliberately — invites are what
+  // keep the role split real). Offering the checkbox to office staff meant the
+  // record saved, the invite errored, and the error taught them errors are normal.
+  const sendInvite = !existing && roles.owner && invite;
 
   return (
     <div className="form-grid">
@@ -366,15 +414,22 @@ function TechForm({
         <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} />
       </Field>
       {!existing ? (
-        <label className="row-split" style={{ fontSize: 14 }}>
-          <span>Email them a CRM login invite</span>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={invite}
-            onChange={(e) => setInvite(e.target.checked)}
-          />
-        </label>
+        roles.owner ? (
+          <label className="row-split" style={{ fontSize: 14 }}>
+            <span>Email them a CRM login invite</span>
+            <input
+              type="checkbox"
+              style={{ width: "auto" }}
+              checked={invite}
+              onChange={(e) => setInvite(e.target.checked)}
+            />
+          </label>
+        ) : (
+          <p className="muted small" style={{ margin: 0 }}>
+            Ask the owner to send their CRM login invite — staff invites are
+            owner-only.
+          </p>
+        )
       ) : null}
       <ErrorNote error={error} />
       <Button
@@ -385,7 +440,7 @@ function TechForm({
             setError("Name is required");
             return;
           }
-          if (invite && !email.trim()) {
+          if (sendInvite && !email.trim()) {
             setError("Email is required to send a login invite");
             return;
           }
@@ -403,23 +458,47 @@ function TechForm({
               await onDone();
               return;
             }
-            const created = unwrap(
-              await api().models.Technician.create({
-                name: name.trim(),
-                email: email.trim() || undefined,
-                phone: phone.trim() || undefined,
-                active: true,
-              })
-            );
-            if (invite && created) {
+            // Retry after a failed invite updates the already-saved record
+            // instead of creating a duplicate technician per attempt.
+            let tech = createdTech;
+            if (tech) {
               unwrap(
-                await api().mutations.adminCreateUser({
-                  email: email.trim(),
+                await api().models.Technician.update({
+                  id: tech.id,
                   name: name.trim(),
-                  roles: ["TECH"],
-                  technicianId: created.id,
+                  email: email.trim() || undefined,
+                  phone: phone.trim() || undefined,
                 })
               );
+            } else {
+              tech = unwrap(
+                await api().models.Technician.create({
+                  name: name.trim(),
+                  email: email.trim() || undefined,
+                  phone: phone.trim() || undefined,
+                  active: true,
+                })
+              );
+              if (tech) setCreatedTech(tech);
+            }
+            if (sendInvite && tech) {
+              try {
+                unwrap(
+                  await api().mutations.adminCreateUser({
+                    email: email.trim(),
+                    name: name.trim(),
+                    roles: ["TECH"],
+                    technicianId: tech.id,
+                  })
+                );
+              } catch (err) {
+                // The technician exists; only the login invite failed. Say
+                // exactly that, so retrying (which reuses the record) is the
+                // obvious move.
+                throw new Error(
+                  `Technician saved, but the login invite failed: ${err instanceof Error ? err.message : String(err)}`
+                );
+              }
             }
             await onDone();
           })().catch((err) => {

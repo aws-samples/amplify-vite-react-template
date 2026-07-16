@@ -1,5 +1,6 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
+import { notifyOffice } from "./email";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -192,8 +193,104 @@ export async function startPlanBilling(
   }
 }
 
+/** One queued visit and where cancellation left it. */
+export type QueuedVisit = {
+  jobId: string;
+  scheduledDate: string | null;
+};
+
+export type QueuedVisitsResolution = {
+  /** Auto-canceled: never worked, never paid for — dispatching one is a free service call. */
+  canceled: QueuedVisit[];
+  /** Deliberately left on the schedule; the office must decide what happens to it. */
+  needsDecision: (QueuedVisit & { why: string })[];
+  /** Should have been canceled but the write failed — the caller must tell somebody. */
+  failed: QueuedVisit[];
+};
+
+const emptyResolution = (): QueuedVisitsResolution => ({
+  canceled: [],
+  needsDecision: [],
+  failed: [],
+});
+
 /**
- * Cancel a plan everywhere, in one operation: Stripe first, then the record.
+ * A canceled plan must not keep dispatching technicians. The recurring engine
+ * queues each next visit ahead of time (recurring.ts), so every cancel path
+ * leaves one behind: reminders still fire, the Schedule pool still routes it,
+ * and it completes unbillable and silent — the not-billing digest only scans
+ * ACTIVE plans, so a free visit on a canceled plan triggers nothing anywhere.
+ *
+ * Auto-cancels queued visits that were never worked and never paid for, with
+ * the reason written into the job's notes. Visits money or people are already
+ * committed to — paid up front, or a technician mid-visit — are left alone and
+ * reported back: "refund it, honour it, or reschedule it" is an office
+ * decision, not something a cancel path should guess at.
+ *
+ * Throws only if the schedule cannot be read at all; a single visit whose
+ * write fails lands in `failed` so the caller can page a human about it.
+ */
+export async function cancelQueuedPlanVisits(
+  servicePlanId: string,
+  cause: string
+): Promise<QueuedVisitsResolution> {
+  const client = await dataClient();
+  const resolution = emptyResolution();
+
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.Job.listJobByServicePlanId(
+      { servicePlanId },
+      { nextToken: token, limit: 200 }
+    );
+    for (const job of page.data) {
+      const visit: QueuedVisit = {
+        jobId: job.id,
+        scheduledDate: job.scheduledDate ?? null,
+      };
+      if (job.status === "IN_PROGRESS") {
+        resolution.needsDecision.push({
+          ...visit,
+          why: "a technician is on site right now",
+        });
+        continue;
+      }
+      if (job.status !== "UNSCHEDULED" && job.status !== "SCHEDULED") continue;
+      if (job.paidAt) {
+        resolution.needsDecision.push({
+          ...visit,
+          why: "it was paid up front — refund it or honour it",
+        });
+        continue;
+      }
+      const note = `Auto-canceled ${new Date().toISOString().slice(0, 10)}: ${cause}. Taken off the schedule so it cannot dispatch unbilled.`;
+      try {
+        const { data: updated } = await client.models.Job.update({
+          id: job.id,
+          status: "CANCELED",
+          routeId: null,
+          routeOrder: null,
+          notes: job.notes ? `${job.notes}\n${note}` : note,
+        });
+        if (updated) resolution.canceled.push(visit);
+        else resolution.failed.push(visit);
+      } catch (err) {
+        console.error(
+          `cancelQueuedPlanVisits: could not cancel job ${job.id}`,
+          err
+        );
+        resolution.failed.push(visit);
+      }
+    }
+    token = page.nextToken;
+  } while (token);
+
+  return resolution;
+}
+
+/**
+ * Cancel a plan everywhere, in one operation: Stripe first, then the record,
+ * then the queued visits the plan would otherwise strand.
  *
  * Stripe goes first deliberately. If Stripe fails we throw and leave the plan
  * ACTIVE, which is visibly wrong and gets retried — the opposite order marks
@@ -203,7 +300,11 @@ export async function startPlanBilling(
 export async function cancelPlanBilling(
   stripe: Stripe,
   servicePlanId: string
-): Promise<{ canceled: boolean; stripeSubscriptionCanceled: boolean }> {
+): Promise<{
+  canceled: boolean;
+  stripeSubscriptionCanceled: boolean;
+  queuedVisits: QueuedVisitsResolution;
+}> {
   const client = await dataClient();
   const { data: plan } = await client.models.ServicePlan.get({
     id: servicePlanId,
@@ -234,5 +335,45 @@ export async function cancelPlanBilling(
     canceledAt: new Date().toISOString(),
   });
 
-  return { canceled: true, stripeSubscriptionCanceled };
+  // The billing is stopped; now stop the trucks. Nothing past this point may
+  // throw — the cancellation is real, and a caller (the customer-facing
+  // /cancel included) must not be told it failed because a job row would not
+  // update. What could not be resolved is emailed to the office instead.
+  let queuedVisits: QueuedVisitsResolution | null = null;
+  try {
+    queuedVisits = await cancelQueuedPlanVisits(
+      servicePlanId,
+      "the service plan was canceled"
+    );
+  } catch (err) {
+    console.error(
+      `cancelPlanBilling: could not resolve queued visits for plan ${servicePlanId}`,
+      err
+    );
+  }
+  if (!queuedVisits || queuedVisits.failed.length > 0) {
+    const { data: customer } = await client.models.Customer.get({
+      id: plan.customerId,
+    }).catch(() => ({ data: null }));
+    const name = customer?.displayName ?? plan.customerId;
+    await notifyOffice({
+      subject: `ACTION REQUIRED — canceled plan still has visits on the schedule: ${name}`,
+      heading: "A canceled plan still has visits on the schedule",
+      template: "ops-cancel-visits-stranded",
+      customerId: plan.customerId,
+      relatedId: servicePlanId,
+      bodyHtml: `<p><strong>${name}</strong>'s plan <strong>${plan.planName}</strong> was just canceled and its billing is stopped, but ${
+        queuedVisits
+          ? `${queuedVisits.failed.length} queued visit${queuedVisits.failed.length === 1 ? "" : "s"} could not be taken off the schedule`
+          : "the schedule could not be checked for queued visits"
+      }.</p>
+         <p><strong>Open the Schedule and cancel this customer's queued visits by hand.</strong> Anything left will dispatch a technician for a visit nobody is paying for.</p>`,
+    });
+  }
+
+  return {
+    canceled: true,
+    stripeSubscriptionCanceled,
+    queuedVisits: queuedVisits ?? emptyResolution(),
+  };
 }

@@ -1,5 +1,6 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
+import { sendRefundNotice } from "./receipts";
 
 /**
  * Refunds.
@@ -149,6 +150,16 @@ export async function refundInvoice(
     );
   }
 
+  // The customer hears it from us rather than discovering a mystery credit —
+  // or worse, not discovering it and disputing the original charge anyway.
+  await sendRefundNotice({
+    customerId: invoice.customerId,
+    amountCents: requested,
+    description: invoice.description,
+    invoiceId: invoice.id,
+    sentToStripe,
+  });
+
   return {
     invoiceId: invoice.id,
     refundedNowCents: requested,
@@ -189,6 +200,7 @@ export async function applyRefundToInvoice(opts: {
     return { invoiceId: invoice.id, status: String(invoice.status) };
   }
 
+  const refundedNowCents = opts.amountRefundedCents - alreadyRefunded(invoice);
   const status = statusAfterRefund(invoice, opts.amountRefundedCents);
   await client.models.Invoice.update({
     id: invoice.id,
@@ -198,5 +210,17 @@ export async function applyRefundToInvoice(opts: {
     ...(opts.refundId ? { stripeRefundId: opts.refundId } : {}),
     ...(invoice.refundReason ? {} : { refundReason: "Refunded in Stripe" }),
   });
+  // A dashboard refund is still a refund the customer should hear about. Our
+  // own refundInvoice sends its notice and then converges here through the
+  // idempotency return above, so this only announces money Stripe moved first.
+  if (refundedNowCents > 0) {
+    await sendRefundNotice({
+      customerId: invoice.customerId,
+      amountCents: refundedNowCents,
+      description: invoice.description,
+      invoiceId: invoice.id,
+      sentToStripe: true,
+    });
+  }
   return { invoiceId: invoice.id, status };
 }

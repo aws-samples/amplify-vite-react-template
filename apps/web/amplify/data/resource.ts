@@ -130,8 +130,12 @@ const schema = a.schema({
       index("status").sortKeys(["displayName"]),
       index("portalUserSub"),
     ])
+    // No browser delete: finalized service reports and signed agreements
+    // reference this row, and a legal record whose customer can be
+    // hard-deleted from a browser does not survive its retention window.
+    // INACTIVE is how a customer leaves.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update"]),
       allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
@@ -371,8 +375,11 @@ const schema = a.schema({
       serviceReports: a.hasMany("ServiceReport", "technicianId"),
     })
     .secondaryIndexes((index) => [index("userSub")])
+    // No browser delete: every finalized pesticide record names this
+    // technician and carries their licence number. Deactivate instead —
+    // the record has to outlive the employment.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update"]),
       allow.groups(["TECH"]).to(["read"]),
     ]),
 
@@ -416,6 +423,11 @@ const schema = a.schema({
        *  pesticide record — serviceDate is when the draft was first saved,
        *  which is a different thing and was wrong on reports written up later. */
       startedAt: a.datetime(),
+      /** When the technician said the application was done (endApplication).
+       *  Server-stamped, once — finalize used to stamp the end with its own
+       *  clock, so a report finalized the next morning carried the wrong end
+       *  time on a legal record, the same defect class as the start. */
+      applicationEndAt: a.datetime(),
       completedAt: a.datetime(),
       // Set when the customer paid up front (website booking). Written in the
       // same create as the job, so it is the authoritative "already paid"
@@ -440,9 +452,17 @@ const schema = a.schema({
       index("status").sortKeys(["scheduledDate"]),
       index("servicePlanId"),
     ])
+    // TECH lost update: startedAt and applicationEndAt are the application
+    // window on the pesticide record, and a TECH token with model update
+    // could write either with any browser-supplied time, pre-finalize.
+    // Technicians act on jobs through the guarded mutations (startJob,
+    // endApplication, reportNoAccess, finalizeServiceReport), which stamp
+    // the server's clock. No browser delete either: finalized service
+    // reports reference this row, and a legal record whose job can be
+    // hard-deleted from a browser does not survive its retention window.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["TECH"]).to(["read", "update"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update"]),
+      allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -971,6 +991,34 @@ const schema = a.schema({
     .arguments({ agreementId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * The technician pressed Start. A mutation because startedAt is the
+   * application's start time on the pesticide record: it used to be a plain
+   * client-side Job.update with a browser-supplied timestamp, which any TECH
+   * token could rewrite pre-finalize. There is no time argument to pass —
+   * the server's clock is the record's, and a start that already happened
+   * cannot be moved.
+   */
+  startJob: a
+    .mutation()
+    .arguments({ jobId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * The technician finished applying. Stamps the application's end time with
+   * the server's clock, once — finalize used to stamp it, so a report
+   * finalized the next morning carried the wrong end time on a legal record.
+   * The first stamp wins: a finalize retried tomorrow keeps today's end.
+   */
+  endApplication: a
+    .mutation()
+    .arguments({ jobId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /**

@@ -16,12 +16,19 @@ let invoices: Invoice[] = [];
 let createResult: { data: unknown; errors?: { message: string }[] } = {
   data: { id: "inv_1", status: "PAID" },
 };
+let customerEmail: string | null = "dana@example.com";
 
 const fakeDataClient = {
   models: {
     Customer: {
       get: async ({ id }: { id: string }) => ({
-        data: { id, displayName: "Dana", stripeCustomerId: "cus_1", groupId: null },
+        data: {
+          id,
+          displayName: "Dana",
+          email: customerEmail,
+          stripeCustomerId: "cus_1",
+          groupId: null,
+        },
       }),
       update: async () => ({ data: null }),
     },
@@ -43,7 +50,13 @@ const fakeDataClient = {
     },
     Job: {
       get: async ({ id }: { id: string }) => ({
-        data: { id, customerId: "c1", priceCents: 29900, paidAt: null },
+        data: {
+          id,
+          customerId: "c1",
+          serviceType: "Wasp nest removal",
+          priceCents: 29900,
+          paidAt: null,
+        },
       }),
     },
   },
@@ -65,6 +78,14 @@ vi.mock("../shared/stripeClient", () => ({
     },
   }),
   paymentMethodLabel: () => ({ label: "Visa ••4242", kind: "CARD" }),
+}));
+
+const sendEmail = vi.fn(async () => true);
+const notifyOffice = vi.fn(async () => true);
+vi.mock("../shared/email", () => ({
+  sendEmail: (opts: unknown) => sendEmail(opts as never),
+  notifyOffice: (opts: unknown) => notifyOffice(opts as never),
+  emailShell: (heading: string, body: string) => `${heading}\n${body}`,
 }));
 
 const { handler } = await import("./handler");
@@ -96,6 +117,13 @@ beforeEach(() => {
   created.length = 0;
   invoices = [];
   paymentIntentsCreate.mockClear();
+  paymentIntentsCreate.mockImplementation(async () => ({
+    id: "pi_1",
+    status: "succeeded",
+  }));
+  sendEmail.mockClear();
+  notifyOffice.mockClear();
+  customerEmail = "dana@example.com";
   createResult = { data: { id: "inv_1", status: "PAID" } };
 });
 
@@ -368,5 +396,99 @@ describe("voidInvoice", () => {
     await expect(
       call("voidInvoice", { invoiceId: "inv_1", reason: "x" }, { groups: ["OFFICE"], sub: "s" })
     ).rejects.toThrow(/finance role required/i);
+  });
+});
+
+describe("charge receipts", () => {
+  // Every charge generates a customer notice. The funnel already emails a
+  // payment confirmation with the amount; these are the CRM paths, which used
+  // to take money in silence — a charge the customer can't recognize is a
+  // dispute.
+
+  it("emails a receipt with the amount when a manual charge succeeds", async () => {
+    await call("chargeManualAmount", {
+      customerId: "c1",
+      amountCents: 14900,
+      description: "Wasp nest follow-up",
+    });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const [receipt] = sendEmail.mock.calls[0] as unknown as [
+      { to: string; subject: string; html: string },
+    ];
+    expect(receipt.to).toBe("dana@example.com");
+    expect(receipt.subject).toContain("$149.00");
+    expect(receipt.html).toContain("Wasp nest follow-up");
+    expect(receipt.html).toContain("$149.00");
+  });
+
+  it("emails a receipt when a one-time job is charged", async () => {
+    await call("chargeOneTimeJob", { jobId: "job1" });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const [receipt] = sendEmail.mock.calls[0] as unknown as [
+      { to: string; html: string },
+    ];
+    expect(receipt.to).toBe("dana@example.com");
+    expect(receipt.html).toContain("$299.00");
+    expect(receipt.html).toContain("Wasp nest removal");
+  });
+
+  it("sets receipt_email on the Stripe charge as belt-and-braces", async () => {
+    await call("chargeOneTimeJob", { jobId: "job1" });
+
+    const [params] = paymentIntentsCreate.mock.calls[0] as unknown as [
+      { receipt_email?: string },
+    ];
+    expect(params.receipt_email).toBe("dana@example.com");
+  });
+
+  it("tells the office instead of crashing when there is no email on file", async () => {
+    customerEmail = null;
+
+    const res = (await call("chargeManualAmount", {
+      customerId: "c1",
+      amountCents: 14900,
+      description: "Wasp nest follow-up",
+    })) as { status: string };
+
+    // The charge itself must stand — the money moved.
+    expect(res.status).toBe("succeeded");
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(notifyOffice).toHaveBeenCalledOnce();
+    const [alert] = notifyOffice.mock.calls[0] as unknown as [
+      { subject: string; bodyHtml: string },
+    ];
+    expect(alert.subject).toMatch(/no email on file/i);
+    expect(alert.bodyHtml).toContain("$149.00");
+  });
+
+  it("holds the receipt until settlement for a charge that is still processing", async () => {
+    // Bank debits confirm asynchronously; the webhook sends the receipt when
+    // payment_intent.succeeded flips the invoice to PAID.
+    paymentIntentsCreate.mockImplementation(async () => ({
+      id: "pi_1",
+      status: "processing",
+    }));
+
+    await call("chargeManualAmount", {
+      customerId: "c1",
+      amountCents: 14900,
+      description: "Wasp nest follow-up",
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("sends no receipt for an offline record — no card was charged", async () => {
+    await call("recordOfflinePayment", {
+      customerId: "c1",
+      amountCents: 50000,
+      description: "Cheque from the HOA",
+      status: "PAID",
+      method: "CHEQUE",
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 });
