@@ -1,6 +1,6 @@
 # BuzzKill — business review of the CRM & booking funnel
 
-**Revision 4** — updated against commit `3d13b00` ("Nothing fails quietly") · 15 July 2026
+**Revision 5** — updated against `31fd0aa` and `8dbca55` ("Refunds exist") · 15 July 2026
 
 Revision 1 reviewed the app from ten perspectives: 149 features, 116 findings confirmed against code, 35 gaps verified absent. Each revision re-checks the list against the tree after a commit lands, so the work burns down.
 
@@ -10,11 +10,9 @@ Revision 1 reviewed the app from ten perspectives: 149 features, 116 findings co
 
 **Item #6 claimed that quarterly and bimonthly plans are "billed twelve times a year — systematic overcharging." That is false, and the engineering team was right to refuse it.**
 
-The rate card returns `monthlyCents`. `$45` for a quarterly residential plan is **forty-five dollars per month**, and "quarterly" describes how often a technician visits, not how often the card is charged. `rateCards.ts:7` says so in its own worked example — *"quarterly residential → $45 + 3×$10 = $75/mo"* — and `bookingFinalize.ts` discloses it to the customer in those words. Had it been actioned, quarterly recurring revenue would have fallen by roughly two thirds.
+The rate card returns `monthlyCents`. `$45` for a quarterly residential plan is **forty-five dollars per month**; "quarterly" describes how often a technician visits, not how often the card is charged. `rateCards.ts:7` says so in its own worked example, and `bookingFinalize.ts` discloses it to the customer in those words. Had it been actioned, quarterly recurring revenue would have fallen by roughly two thirds.
 
-It is now guarded by tests rather than by a comment. I reintroduced the bug myself against the current tree — setting `interval_count: 3` for quarterly plans — and the suite fails exactly two tests, by name: *"bills a quarterly plan MONTHLY at its monthly price"* and *"bills a QUARTERLY plan every single month."* Restored, suite green.
-
-**The same error class was in item #10, and I corrected it.** I asserted mosquito plans overcharge by "$834/yr," which assumed the plan *should* bill only during the May–October season — something I never verified. The figure is withdrawn. The provable defect stands: `ServicePlan` has no end condition, so the plan bills indefinitely, and whether a seasonal plan bills six months or twelve is encoded nowhere.
+It is now guarded by tests rather than by a comment. I reintroduced the bug myself against the tree and the suite failed exactly two tests, by name. **Item #10 carried the same error class**: my "$834/yr overcharge" figure assumed a mosquito plan *should* bill only May–October, which I never verified, and it is withdrawn. The provable defect stands — `ServicePlan` has no end condition, so the plan bills indefinitely, and whether a seasonal plan bills six months or twelve is encoded nowhere.
 
 Where the burn-down and the retained Revision 1 analysis disagree, the burn-down is correct.
 
@@ -22,82 +20,90 @@ Where the burn-down and the retained Revision 1 analysis disagree, the burn-down
 
 ## Burn-down
 
-The four residuals Revision 3 raised against `372f30b` are **all closed by `3d13b00`**, verified against the tree rather than the commit message:
+The three residuals Revision 4 raised are **all closed**, verified against the tree:
 
 | Residual | Now | How I checked |
 |---|---|---|
-| The 14 assertions aren't in the repo | **CLOSED** | 44 tests across 4 files. `npm test` runs, all pass. Wired into `amplify.yml:12` in the backend phase *before* `pipeline-deploy`, so a broken money rule fails the build. |
-| Two silent failures logged, nobody paged | **CLOSED** | `notifyOffice` pages a human when a paid booking's invoice can't be written (`bookingFinalize.ts:250`) and when a serviced plan fails to start billing (`crm-docs/handler.ts:366`). Both name the customer and say what to do. |
-| The queue is a pull, not a push | **CLOSED** | `daily-reminders` reports serviced plans with no subscription, totalled in annual dollars, correctly excluding plans whose first visit hasn't happened. |
-| A failed cancellation costs the customer their refund | **CLOSED** | `cancelRequestedOn` is persisted *before* Stripe is called, refundability is judged from it (`handler.ts:671`), the customer gets a 503 with a phone number instead of "try again", the office is paged with the date to honour, and the refund carries `idempotencyKey: booking-refund-<id>`. |
+| Three `notifyOffice` implementations | **CLOSED** | Exactly one definition remains, in `shared/email.ts`. The local copies and `lead-intake`'s raw SES client are gone, along with its silent `info@` fallback. Lead alerts now write `EmailLog` rows like every other send — they bypassed it entirely before. |
+| The cancellation-date write sits outside the `try` | **CLOSED** | Guarded. They went further than the finding: Amplify *resolves* errors rather than throwing, so the unguarded call had two failure modes and handled neither. Both handled. Deliberately non-fatal, and when the cancellation also fails the alert now says the date was not saved — at that point the email is the only record of it. |
+| `apps/crm` has no test harness | **CLOSED** | vitest stood up; `npm test` runs before `npm run build` in the CRM's own CI phase (`amplify.yml:32`). |
 
-The original fifteen stand where Revision 3.1 left them — `3d13b00` was cleanup of `372f30b`, not new ground:
+The fifteen:
 
 | # | Item | Status |
 |---|---|---|
 | 1 | Recurring plans never start billing | **CLOSED** |
 | 2 | "Internal notes" on customer PDF | **CLOSED** |
 | 3 | Paid bookings look unpaid; CRM re-charges | **CLOSED** |
-| 4 | Cancellation policy / refunds | **OPEN** *(split: no refund action is live; policy conflict is a launch gate)* |
+| 4 | Cancellation policy / refunds | **PARTIAL** — *the live half is closed: refunds exist.* The three-way policy conflict remains, and is a launch gate. |
 | 5 | Cancelling never stops Stripe | **CLOSED** |
 | 6 | ~~Quarterly plans billed 12×/yr~~ | **RETRACTED** |
 | 7 | Service report is not a valid MA pesticide record | **PARTIAL** |
 | 8 | Booking funnel has no front end | **DEFERRED** |
-| 9 | No dunning; no dispute handling | **OPEN** |
+| 9 | No dunning; no dispute handling | **OPEN** — `charge.refunded` landed; `charge.dispute.created` did not. |
 | 10 | Mosquito plans never stop | **OPEN** |
 | 11 | Free-text prices; no audit trail | **PARTIAL** |
-| 12 | One tap charges $20,000, no confirmation | **PARTIAL** |
+| 12 | One tap charges $20,000, no confirmation | **PARTIAL** — *and newly urgent, see below.* |
 | 13 | Cost model: one-way drive, bare wage | **OPEN** |
 | 14 | Technician has no honest option at a locked door | **OPEN** |
 | 15 | You are still the pricing department | **PARTIAL** |
 
-**Closed: 4. Retracted: 1. Partial: 4. Deferred: 1. Open: 5.**
+**Closed: 4. Retracted: 1. Partial: 5. Deferred: 1. Open: 4.** Suite: 76 tests, all passing (65 web, 11 CRM). I ran them.
 
 ---
 
-## What `3d13b00` got right
+## What these two commits got right
 
-**It conceded the false claim in plain words.** The previous commit said the monthly-billing rule "carries a comment and a test saying why"; the comment was real and the test was a scratch file that was run and discarded. This commit says so, without hedging. A team that writes that sentence down is a team whose next commit message can be trusted a little more.
+**The refund is the best-engineered thing in this codebase.** Partial refunds accumulate on `refundedAmountCents` and the invoice only flips to `REFUNDED` on the last cent, so a partly refunded invoice stays `PAID` and every revenue figure nets the refund out instead of filtering on status. Over-refunding throws. A reason is required and stored. Offline invoices refund without calling Stripe, because no card was ever charged — the same charge-versus-record split the product already makes.
 
-**Its own skepticism found a bug this review would have missed.** Mutation-checking the new tests revealed that asserting `interval === "month"` alone *passes* an every-three-months subscription, because `interval_count` is the half that moves the cadence. Both are asserted now (`subscription.test.ts:142-143, 158-159`). That is a sharper catch than the finding that prompted it, and it is the second time this team has improved on a recommendation from this review rather than merely executing it.
+**The idempotency key is the detail that shows the care**: `crm-refund-<invoiceId>-<alreadyRefunded>-<requested>`. A double-tap refunds once; a deliberate *second* partial refund has a different running total and goes through. Getting both halves of that right is not obvious.
 
-**The tests gate the build, which is the only thing that makes them real.** `npm test` runs in the backend phase before `pipeline-deploy` (`amplify.yml:12`), so a broken money rule fails the build rather than reaching production and waiting to be noticed.
+**`charge.refunded` catches dashboard-issued refunds**, which is what made the money invisible in the first place, and it takes Stripe's `amount_refunded` as the *total* rather than adding to ours — so a replayed webhook converges instead of doubling, and it will not overwrite a reason a CSR already gave.
 
-**It kept the alarm out of the subsystem it reports on.** `notifyOffice` is deliberately not used to report email failures — routing an alarm through email to say email is broken is how alarms go unheard. That is a distinction most teams get wrong.
+**It throws instead of returning an outcome, and says why.** Job completion must not fail because no card is on file; a refund has a person waiting for an answer, and one that did not happen must not look like one that did. When the money goes back but the ledger write fails, the error names the invoice and says to reconcile by hand. That is the single case where the customer has their money and the CRM still counts it as revenue, and it is called out rather than buried.
 
-**The refund fix is the right shape.** Judging refundability from the date the customer *first asked*, not the date the cancellation finally succeeded, means a Stripe outage on day four cannot cost them their refund when it retries on day three. The date is written before the Stripe call, so a retry reads the original. The refund is idempotency-keyed so a retry cannot double-refund. And the customer is told the truth with a phone number rather than "please try again," which was false when the outage is ours.
+**Revenue arithmetic became a pure module** (`apps/crm/src/lib/revenue.ts`) specifically so this review's acceptance criterion could be tested. Reintroducing the original bug — counting a `PAID` invoice in full regardless of refunds — fails three tests.
 
-## What `3d13b00` leaves open
+**And for the third time, they reported a bug in their own work that nobody asked about**: a test fixture swapped in a failing update and never restored it, so three later tests were passing against the wrong mock. A team that volunteers that is a team whose green suite means something.
 
-Three things, all small, none undoing the work above.
+## What `8dbca55` leaves open
 
-**1. There are now three `notifyOffice` implementations, not one.** The commit says the function "moves to `shared/email.ts`." It was *added* there; the two local copies remain — `booking-public/handler.ts:771` and `lead-intake/handler.ts:152` — with different signatures and, more importantly, different failure behaviour. The shared one and booking-public's log *"nobody was told"* when `SES_NOTIFY_EMAIL` is unset. `lead-intake`'s resolves its recipient through `SES_NOTIFY()`, which **silently falls back to `info@pestbuzzkill.com`**. Three alert paths with three semantics is how an alert quietly stops arriving.
+**1. Giving money back is now the best-guarded action in the product. Taking it is still the worst.**
 
-This collides directly with Commit M. Routing lead mail to `sales@` means changing a code path that does not go through the shared helper, and whose fallback will keep sending to `info@` if the new variable is missing. Consolidate to one implementation before doing Commit M, not after.
+This is the finding, and it is the direct consequence of building the undo before the guard.
 
-**2. The line that records the cancellation date is outside the `try`.** `cancelRequestedOn` is written before Stripe is called — correct — but that write is not itself protected. If the DynamoDB update fails, the endpoint falls through to the generic handler and returns *"Something went wrong on our side — please try again"* (`booking-public/handler.ts:181`). No date is recorded and **no office alert is sent**, so a retry on day three loses the refund the commit just protected. It is the same failure class, one line above the fix. Low probability, cheap to close: wrap it, and page the office if it fails.
+| | Refund | Charge |
+|---|---|---|
+| Confirmation | Two-step, restates the amount and who it goes to | **None.** `chargeOneTimeJob` goes straight to the mutation (`CustomerDetail.tsx:654`) |
+| Reason | **Required** and stored (`refundReason`) | Optional (`description: a.string()`) |
+| Ceiling | The invoice's outstanding balance | **$20,000** (`crm-billing/handler.ts:276`) |
+| Who | OWNER / FINANCE | OWNER / FINANCE |
 
-**3. `apps/crm` has no test harness, and its CI stage runs only `npm run build`.** Vitest lives in `apps/web` only, and `amplify.yml` runs `npm test` for that app alone. Items 11 and 12 — the confirmation that restates the amount, `createdBy` on invoices, the separated offline-payment screen — all live in `apps/crm`. When Commit I lands there will be nowhere to put a test that CI will run.
+A CSR who means $149.00 and types `14900` still charges $14,900 to a customer's card, instantly, with no dialog. What has changed is that a FINANCE user can now give it back — which is a real improvement, and it is why item 12 gets *more* urgent rather than less. The two controls now sit on the same screen, and the safer one is the one that does not move money out of the customer's account.
 
-Worth saying plainly: the suite now guards what was *reviewed*. It does not yet guard what is *reachable*. Of the items still bleeding today, none has a test, and three of them live in the app with no harness. Stand up vitest in `apps/crm` and add `npm test` to its build phase before Commit I, so the guardrails arrive with the code they guard rather than a commit later.
+The precondition you set for fixing this — a test harness in `apps/crm` — was met by this very commit. **Commit I is unblocked and should go next.**
 
-A note in credit, not criticism: the alert path itself can still fail. If SES is down, `notifyOffice` returns `false` and both call sites discard it. At this company's scale that is an acceptable terminal — there is no second channel worth building — but nothing records that a page was attempted and lost.
+**2. A refund never clears `Job.paidAt`, so the row keeps saying the customer paid.**
+
+`Job.paidAt` is written in exactly one place, `bookingFinalize.ts`. Nothing clears it. After a full refund of a booking's invoice the job row still shows the green *"paid $299 online"* badge (`CustomerDetail.tsx:617`), the Charge button stays hidden (`!j.paidAt`, `:644`), and `chargeOneTimeJob` refuses server-side (`crm-billing/handler.ts:194`). The badge asserts money that has gone back, and the only way to collect on that job afterwards is `chargeManualAmount` — the unguarded control from the row above.
+
+Scope this honestly: only the funnel writes `Job.paidAt`, and the funnel is unreachable. **Launch gate, no live victims.** It is a small fix and it belongs with Commit L, not with a hotfix.
+
+**3. The refund records *why* but not *who*.**
+
+`refundReason` is required. `createdBy` still does not exist on any model in the schema — I checked, zero occurrences. So the product now compels an explanation for an action whose actor is unrecorded, which is a strange place for an audit trail to stop. It belongs to item 11 and it is two lines.
 
 ---
 
 ## Rank by reachability, not by severity
 
-One fact reorders everything below, and it did not come from this review — the engineering team found it while verifying the reviews, and I confirmed it independently.
+The public booking funnel **cannot be reached**. `bookingApiUrl` (`backend.ts:232`) has zero consumers in either app's `src/`, and `tcAccepted` — hard-required at `booking-public/handler.ts:523` — is produced by nothing in the repository. `finalizeBooking` has never run in production and cannot until the front end in `docs/public-ui-handoff.md` is built. The engineering team found this while verifying the reviews; I confirmed it independently.
 
-**The public booking funnel cannot be reached.** `bookingApiUrl` is published from `backend.ts:232` and has **zero consumers** in either app's `src/`. `tcAccepted`, hard-required at `booking-public/handler.ts:523` before any booking is accepted, is **produced by nothing in the repository**. `finalizeBooking` has therefore never run in production, and cannot until the front end in `docs/public-ui-handoff.md` is built.
+That does not make the funnel's defects imaginary — they are launch gates. It makes them **defects with no live victims**, which is a different thing from an emergency.
 
-That does not make the funnel's defects imaginary — they are launch gates, and shipping the front end without them would be reckless. It makes them **defects with no live victims**, which is a different thing from an emergency.
+**Bleeding today** — reachable through the office CRM and the tech app, both in daily use: the unguarded money screens (11, 12), the pesticide record (7), the technician with no honest option at a locked door (14), the cost model behind every Thumbtack quote (13), the escalation bottleneck (15), and dunning and disputes (9) — the office charges cards today, so a decline or a chargeback today still has nowhere to go.
 
-**Bleeding today** — reachable through the office CRM and the tech app, both in daily use:
-the missing refund action (an office charge made through `chargeOneTimeJob` can be taken but never given back), the pesticide record (7), the unguarded money screens (11, 12), the technician with no honest option at a locked door (14), the cost model behind every Thumbtack quote (13), the escalation bottleneck (15), and dunning and disputes (9) — the office charges cards today, so a decline or a chargeback today has nowhere to go.
-
-**Launch gates, no live victims** — reachable only once the funnel front end exists:
-the dead cancel link, the checkout disclosure, the three-way policy conflict as it applies to funnel bookings, and capacity oversell. Fix them before the door opens, not before Tuesday.
+**Launch gates, no live victims** — the dead cancel link, the checkout disclosure, the three-way policy conflict, capacity oversell, and the stale `paidAt` badge above.
 
 Where this conflicts with the dollar rankings in Revision 1, reachability wins.
 
@@ -105,16 +111,13 @@ Where this conflicts with the dollar rankings in Revision 1, reachability wins.
 
 ## How to whittle this down
 
-Commits A, B, C and D are done. Five open items, four partials, one deferred.
+Commits A through E are done. Four open items, five partials, one deferred.
 
-**Commit E — "Refunds exist"** · closes the live half of 4 · *next, and bleeding today*
-A refund is a first-class CRM action that writes `REFUNDED`. Today an office charge can be taken and never given back without opening the Stripe dashboard, and a refund issued there leaves the Invoice `PAID` forever, so the Dashboard counts refunded money as revenue in perpetuity. Reachable now, through a button office staff already use. *Verified when:* a CSR can refund without opening Stripe, and the Dashboard stops counting it.
-
-**Commit E2 — "One cancellation policy"** · closes the launch-gate half of 4 · *before the funnel ships*
-The published terms say 24 hours, the agreement says 30 days, the code enforces 3. One policy in one place; the terms, the agreement template, the checkout disclosure and the enforcement code all read it from there. Pair with Commit L.
+**Commit I — "Operator-proofing the money screens"** · closes 11, 12, the residue of the retracted 6 · **next, and now unblocked**
+A confirmation on charging that restates the amount in words and the card's last four — the same courtesy the refund already extends. A cap at what a BuzzKill job can plausibly cost, with the deferred approval UI above it. A required reason on a charge, matching the refund. `createdBy` on every Invoice and refund, stamped server-side. Recording an offline payment becomes a different screen with a different permission. A price that differs from the rate card requires a reason. **And the plan screen states the billing cadence in words — "$45 per month, technician visits every 3 months" — so no one repeats the mistake this review made.** The harness for all of it landed in `8dbca55`.
 
 **Commit F — "Seasons, dunning, disputes"** · closes 9, 10
-Decide whether a seasonal plan bills six months or twelve, then encode it: `ServicePlan` gets an end condition and stops on its own. A failed payment sends an email, retries, and creates a task; the portal grows a Pay Now button. The webhook handles `charge.dispute.created`.
+`charge.dispute.created` — an unanswered dispute is auto-lost, costs the amount plus a ~$15 fee, and counts against a ratio that puts you in a monitoring programme past ~0.75% of volume. A failed payment sends an email, retries, and creates a task; the portal grows a Pay Now button. Decide whether a seasonal plan bills six months or twelve, then encode it so `ServicePlan` stops on its own.
 
 **Commit G — "The pesticide record is a record"** · closes 7 and the compliance cluster
 Applicator licence number, application time, rate or dilution, re-entry interval. Products required to finalize. Re-finalize blocked and a FINALIZED report immutable at the model and on the server. GPS compared against the service address before the PDF asserts on-site presence. Remove `create` on `Product` from TECH, or route it through approval.
@@ -122,35 +125,33 @@ Applicator licence number, application time, rate or dilution, re-entry interval
 **Commit H — "The technician can tell the truth"** · closes 14
 A no-access state that clears the screen without filing a report and without charging the customer. Small; removes the incentive to fabricate a legal record. Pair with G.
 
-**Commit I — "Operator-proofing the money screens"** · closes 11, 12, and the residue of the retracted 6 · *stand up vitest in `apps/crm` first*
-A confirmation that restates the amount in words and the card's last four. A cap at what a BuzzKill job can plausibly cost, with the deferred approval UI above it. `createdBy` on every Invoice, stamped server-side. Recording an offline payment becomes a different screen with a different permission. A price that differs from the rate card requires a reason. **And the plan screen states the billing cadence in words — "$45 per month, technician visits every 3 months" — so no one ever makes the mistake this review made.**
-
 **Commit J — "Pricing integrity"** · closes 13 and the margin cluster
 Round-trip drive, loaded labour, assumptions written down in one place. The 3× lead-fee gate applies to recurring plans on twelve-month contribution. Fix the HOA 101+ bracket by raising BIMONTHLY to about $220 — do **not** swap it with QUARTERLY, which would underprice your largest contracts by $1,080–$3,240/yr. Zone `UNKNOWN` must not silently price as Zone B. Discounts floor at cost, not at 85% of list.
 
 **Commit K — "Delegate the pricing department"** · closes 15
 HOA quotes below a threshold go out automatically; the rate card already computes them. Escalation becomes a queue with an owner and an SLA, and a failed escalation email is loud.
 
-**Commit L — public booking UI** · closes 8 · tracked in `docs/public-ui-handoff.md`
+**Commit E2 + L — the funnel opens** · closes 4's remaining half, 8, and the stale `paidAt` badge
+One cancellation policy in one place, read by the terms, the agreement template, the checkout disclosure and the enforcement code. Then the public `/book` and `/cancel` pages, per `docs/public-ui-handoff.md`. Nothing here has a live victim until the door opens, and all of it must be true before it does.
 
-**Commit M — "Lead email goes to the sales inbox"** · *consolidate `notifyOffice` first*
+**Commit M — "Lead email goes to the sales inbox"** · *now a one-function change*
 
-Lead-related notifications must be delivered to **`sales@pestbuzzkill.com`**, not `info@pestbuzzkill.com`.
+Lead-related notifications must be delivered to **`sales@pestbuzzkill.com`**, not `info@`. `31fd0aa` collapsed `notifyOffice` to a single implementation, so this is now one function with one fallback rather than three with three.
 
-`SES_NOTIFY_EMAIL` is the recipient for every internal notification, hardcoded to `info@` in `backend.ts:134` and `:155`. Its consumers are not the same kind of mail:
+`SES_NOTIFY_EMAIL` is the recipient for every internal notification, hardcoded in `backend.ts:134` and `:155`. Its consumers are not the same kind of mail:
 
 | Site | What it sends | Route to |
 |---|---|---|
-| `lead-intake/handler.ts:268` | New website lead captured | **sales@** |
-| `lead-intake/handler.ts:246` | "ACTION REQUIRED — lead could not be saved" | **sales@** |
-| `crm-pricing/handler.ts:755` | Pricing escalation (HOA, termite, large commercial) | **sales@** |
-| `booking-public/handler.ts:346` | New website booking placed | sales@ — a booking is a won lead |
-| `shared/bookingFinalize.ts:250` | Invoice could not be written | ops — this is a money alarm, not a lead |
-| `crm-docs/handler.ts:366` | Serviced plan failed to start billing | ops |
-| `booking-public/handler.ts:724` | Customer could not cancel | ops |
-| `booking-public/handler.ts:764` | Website booking canceled | ops |
+| `lead-intake` — new lead captured | A lead | **sales@** |
+| `lead-intake` — "lead could not be saved" | A lead, about to be lost | **sales@** |
+| `crm-pricing` — pricing escalation (HOA, termite, commercial) | A lead awaiting a quote | **sales@** |
+| `booking-public` — new website booking | A won lead | **sales@** |
+| `bookingFinalize` — invoice could not be written | A money alarm | ops |
+| `crm-docs` — serviced plan failed to start billing | A money alarm | ops |
+| `booking-public` — customer could not cancel | An ops alarm | ops |
+| `booking-public` — website booking canceled | Operations | ops |
 
-Add a second variable, `SES_LEADS_EMAIL`, defaulting to `sales@`. Do not overload the existing one; the point is that these are different audiences. **Collapse the three `notifyOffice` implementations into the shared one first**, or the lead path will keep resolving its recipient through `lead-intake`'s silent `info@` fallback.
+Add `SES_LEADS_EMAIL`, defaulting to `sales@`. Do not overload the existing variable; the point is that these are different audiences.
 
 **The sender does not change.** `SES_FROM_EMAIL` stays `info@` — it is the verified SES sender and the From: address on customer mail. **If SES is still in the sandbox, `sales@` must be verified as a recipient first,** or every lead notification silently fails to send, which is the false-success class again. Update `docs/crm-setup.md:54` in the same commit.
 
@@ -158,7 +159,7 @@ Separately, belonging to the frozen public-UI work: the marketing site publishes
 
 ---
 
-_Sections below are Revision 1, retained as the evidence base. Items 1, 2, 3 and 5 are closed and item 6 is retracted; they are described below as open. The burn-down above supersedes them._
+_Sections below are Revision 1, retained as the evidence base. Items 1, 2, 3 and 5 are closed, item 4's refund half is closed, and item 6 is retracted; they are described below as open. The burn-down above supersedes them._
 
 ---
 
