@@ -121,14 +121,24 @@ export default function LicensedInsured() {
 
       {/* Hero */}
       <section className="bk-section bk-section-light">
-        <div className="bk-container bk-narrow">
-          <div className="bk-eyebrow">Credentials</div>
-          <h1 className="bk-h1-lower">Licensed &amp; Insured</h1>
-          <p className="bk-body-lead">
-            BuzzKill Pest Control operates under full state licensure and
-            registration in every jurisdiction we serve. Our credentials are
-            verifiable through the official state agency portals linked below.
-          </p>
+        <div className="bk-container bk-credentials-layout">
+          <div className="bk-credentials-content">
+            <div className="bk-eyebrow">Credentials</div>
+            <h1 className="bk-h1-lower">Licensed &amp; Insured</h1>
+            <p className="bk-body-lead">
+              BuzzKill Pest Control operates under full state licensure and
+              registration in every jurisdiction we serve. Our credentials are
+              verifiable through the official state agency portals linked below.
+            </p>
+          </div>
+          <div className="bk-credentials-visual">
+            <img
+              src="/images/licensed-insured-consult.png"
+              alt=""
+              aria-hidden="true"
+              className="bk-credentials-photo"
+            />
+          </div>
         </div>
       </section>
 

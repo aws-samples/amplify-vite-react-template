@@ -1814,6 +1814,44 @@ h6 {
 /* =========================================================================
    FAQ
    ========================================================================= */
+.bk-faq-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 340px);
+  gap: clamp(32px, 5vw, 64px);
+  align-items: start;
+}
+.bk-faq-visual {
+  position: sticky;
+  top: calc(var(--header-h) + 24px);
+}
+.bk-faq-photo {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  object-fit: cover;
+  object-position: top center;
+  border-radius: var(--radius-lg, 16px);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.14);
+}
+.bk-faq-content {
+  min-width: 0;
+}
+@media (max-width: 880px) {
+  .bk-faq-layout {
+    grid-template-columns: 1fr;
+  }
+  .bk-faq-visual {
+    position: static;
+    max-width: 320px;
+    margin: 0 auto;
+  }
+  .bk-faq-content {
+    text-align: center;
+  }
+  .bk-faq-q {
+    text-align: left;
+  }
+}
 .bk-faq {
   list-style: none;
   padding: 0;
@@ -3456,10 +3494,37 @@ a:focus-visible {
   }
 }
 
-/* ── Licensed & Insured — Credential Cards ── */
+/* ── Licensed & Insured — Hero ── */
+.bk-credentials-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 380px);
+  gap: clamp(32px, 5vw, 64px);
+  align-items: center;
+}
+.bk-credentials-content {
+  min-width: 0;
+}
+.bk-credentials-photo {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  object-fit: cover;
+  object-position: top center;
+  border-radius: var(--radius-lg, 16px);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.14);
+}
+@media (max-width: 880px) {
+  .bk-credentials-layout {
+    grid-template-columns: 1fr;
+  }
+  .bk-credentials-visual {
+    max-width: 320px;
+    margin: 0 auto;
+  }
+}
 .bk-credential-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 24px;
   margin-top: 32px;
 }

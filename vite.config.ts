@@ -1,13 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import path from 'path'
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
   server: {
     watch: {
-      ignored: [path.resolve(__dirname, 'creative/**')],
+      // Plain glob (no path.resolve) — chokidar treats backslashes as glob
+      // escapes, so a Windows-style resolved path never matches here.
+      ignored: ['**/creative/**'],
     },
   },
 })

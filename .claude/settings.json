@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(Copy-Item -Path \"creative\\\\About\\\\hero.png\" -Destination \"public\\\\images\\\\service-areas-hero.png\" -Force)"
+      "PowerShell(Copy-Item -Path \"creative\\\\About\\\\hero.png\" -Destination \"public\\\\images\\\\service-areas-hero.png\" -Force)",
+      "Read(//c/Users/ChristinaAlbertDanie/AppData/Local/GitHubDesktop/**)"
     ]
   }
 }
