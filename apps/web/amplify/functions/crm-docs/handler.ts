@@ -815,7 +815,11 @@ function assertReportIsARecord(
     geoLat?: number | null;
     geoLng?: number | null;
   },
-  job: { status: string | null; startedAt?: string | null }
+  job: {
+    status: string | null;
+    startedAt?: string | null;
+    applicationEndAt?: string | null;
+  }
 ) {
   if (job.status === "CANCELED") {
     throw new Error(
@@ -827,9 +831,18 @@ function assertReportIsARecord(
       "This job is marked as no access — a report would be a record of an application that did not happen"
     );
   }
-  if (job.status === "SCHEDULED" && !job.startedAt) {
+  // Both ends of the application window are server-stamped facts (Start job,
+  // End application) — never inferred at finalize. A legal record whose times
+  // the server invented is not a record of when the application happened; it is
+  // a record of when someone pressed send. Refuse rather than substitute.
+  if (!job.startedAt) {
     throw new Error(
       "This job was never started — press Start job first, so the record carries the application's real start time, then complete the report"
+    );
+  }
+  if (!job.applicationEndAt) {
+    throw new Error(
+      "The application was never ended — the record needs the real time you finished on site, not the moment this report was sent"
     );
   }
   if (!report.servicesPerformed?.trim()) {
@@ -916,13 +929,15 @@ async function finalizeServiceReport(reportId: string) {
     .filter(Boolean)
     .join(", ");
 
-  // The application's real start is when the technician pressed Start, not when
-  // the draft was first saved — a report written up the next morning used to
-  // carry the wrong date on a legal record, uncorrectably. Same for the end:
-  // it is when the technician said they were done (endApplication), not when
-  // finalize happened to run; the fallback covers only jobs with no stamp.
-  const applicationStartIso = job.startedAt ?? report.serviceDate;
-  const applicationEndIso = job.applicationEndAt ?? new Date().toISOString();
+  // assertReportIsARecord has already refused any report whose job is missing a
+  // server-stamped start or end, so both are real times the technician's Start
+  // job / End application produced on site. The application's real start is when
+  // they pressed Start (not when the draft was first saved), and the end is when
+  // they pressed End (not when finalize happened to run) — neither is ever
+  // invented here, so a report written up the next morning still carries
+  // yesterday's real window on the legal record.
+  const applicationStartIso = job.startedAt!;
+  const applicationEndIso = job.applicationEndAt!;
   assertTechnicianCompliance(technician ?? {}, {
     workDate: applicationStartIso.slice(0, 10),
   });
@@ -1022,8 +1037,6 @@ async function finalizeServiceReport(reportId: string) {
     id: report.jobId,
     status: "COMPLETED",
     completedAt,
-    // Backfill when finalize supplied the fallback, so job and record agree.
-    applicationEndAt: applicationEndIso,
   });
   await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });

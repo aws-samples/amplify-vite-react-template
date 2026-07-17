@@ -419,6 +419,14 @@ describe("no access — the honest exit", () => {
 });
 
 describe("the finalize gate", () => {
+  // The real flow stamps both ends of the application window on site — Start job
+  // then End application — before finalize ever runs. Every gate test below
+  // starts from that fully-stamped job so each one can break exactly one rule.
+  beforeEach(() => {
+    jobs[0].startedAt = "2026-07-16T13:05:00Z";
+    jobs[0].applicationEndAt = "2026-07-16T14:10:00Z";
+  });
+
   it("finalizes a report that is actually a record", async () => {
     reports.push(validReport());
 
@@ -611,11 +619,26 @@ describe("the finalize gate", () => {
 
   it("refuses a job that was never started — the record needs a real start time", async () => {
     jobs[0].status = "SCHEDULED";
+    jobs[0].startedAt = null;
     reports.push(validReport());
 
     await expect(
       call("finalizeServiceReport", { reportId: "rep_1" })
     ).rejects.toThrow(/never started/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("refuses a job whose application was never ended — finalize never invents the end time", async () => {
+    // The report can only reach finalize with a server-stamped end (End
+    // application). Without it, the old code substituted the moment finalize
+    // ran — turning "when we sent the paperwork" into "when we finished
+    // spraying" on a legal record. It must refuse instead.
+    jobs[0].applicationEndAt = null;
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/never ended/i);
     expect(reports[0].status).toBe("DRAFT");
   });
 
