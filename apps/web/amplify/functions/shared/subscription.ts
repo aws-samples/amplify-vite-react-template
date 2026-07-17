@@ -1,6 +1,7 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
 import { notifyOffice } from "./email";
+import { openOwnedWork } from "./ownedWork";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -253,6 +254,18 @@ export async function cancelQueuedPlanVisits(
           ...visit,
           why: "a technician is on site right now",
         });
+        await openOwnedWork({
+          kind: "PAID_VISIT_CANCELLATION",
+          dedupeKey: job.id,
+          title: "Canceled plan has a visit in progress",
+          detail: `Plan ${servicePlanId} was canceled while job ${job.id} had a technician on site. The system did not guess whether to stop or honor the visit.`,
+          customerId: job.customerId,
+          relatedId: job.id,
+          sourceUrl: `/customers/${job.customerId}`,
+          resolutionAction:
+            "Confirm what service was performed, settle any refund or charge, and document the decision on the customer record.",
+          ownerTeam: "OPS",
+        });
         continue;
       }
       if (job.status !== "UNSCHEDULED" && job.status !== "SCHEDULED") continue;
@@ -260,6 +273,18 @@ export async function cancelQueuedPlanVisits(
         resolution.needsDecision.push({
           ...visit,
           why: "it was paid up front — refund it or honour it",
+        });
+        await openOwnedWork({
+          kind: "PAID_VISIT_CANCELLATION",
+          dedupeKey: job.id,
+          title: "Canceled plan still has a paid visit",
+          detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was paid up front before plan ${servicePlanId} was canceled. It remains on the schedule pending a refund-or-honor decision.`,
+          customerId: job.customerId,
+          relatedId: job.id,
+          sourceUrl: `/customers/${job.customerId}`,
+          resolutionAction:
+            "Refund and cancel the visit, or confirm it will be honored; update the schedule and tell the customer.",
+          ownerTeam: "FINANCE",
         });
         continue;
       }

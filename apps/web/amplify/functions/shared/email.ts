@@ -1,5 +1,9 @@
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
 import { dataClient } from "./dataClient";
+import {
+  openOwnedWork,
+  type WorkOwnerTeam,
+} from "./ownedWork";
 
 const ses = new SESClient();
 
@@ -73,6 +77,7 @@ export async function sendEmail(opts: {
   customerId?: string | null;
   relatedId?: string;
   attachments?: EmailAttachment[];
+  ownerTeam?: WorkOwnerTeam;
 }): Promise<boolean> {
   const from = process.env.SES_FROM_EMAIL ?? "info@pestbuzzkill.com";
   let error: string | undefined;
@@ -113,6 +118,21 @@ export async function sendEmail(opts: {
     console.error("EmailLog write failed", logErr);
   }
 
+  if (error) {
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `${opts.template}:${opts.relatedId ?? opts.to}:${opts.to}`,
+      title: `Email failed: ${opts.subject}`,
+      detail: `The ${opts.template} email to ${opts.to} failed: ${error}`,
+      customerId: opts.customerId,
+      relatedId: opts.relatedId ?? opts.to,
+      sourceUrl: opts.customerId ? `/customers/${opts.customerId}` : "/more",
+      resolutionAction:
+        "Correct the address or delivery problem, resend the message, and record how delivery was confirmed.",
+      ownerTeam: opts.ownerTeam ?? "OPS",
+    });
+  }
+
   return !error;
 }
 
@@ -122,8 +142,8 @@ export async function sendEmail(opts: {
  * This is for the cases where an operation cannot safely fail — a technician's
  * completed visit, a card that has already been charged — but something
  * downstream did not happen. Not throwing is right; telling nobody is not. The
- * send is recorded in EmailLog like any other, so a failed alert is at least
- * visible in More → Email log rather than being lost entirely.
+ * send is recorded in EmailLog and any failed send becomes durable EMAIL_FAILURE
+ * work with an owner, deadline, resolution action, escalation, and history.
  *
  * Deliberately not used for *email* failures: routing an alarm through the
  * subsystem it is reporting on is how alarms go unheard.
@@ -147,6 +167,18 @@ export async function notifyOffice(opts: {
       "notifyOffice: SES_NOTIFY_EMAIL is not configured — nobody was told",
       opts.subject
     );
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `office-unconfigured:${opts.template}:${opts.relatedId ?? opts.subject}`,
+      title: `Office alert could not be sent: ${opts.subject}`,
+      detail: "SES_NOTIFY_EMAIL is not configured, so the office alert had no destination.",
+      customerId: opts.customerId,
+      relatedId: opts.relatedId ?? opts.subject,
+      sourceUrl: opts.customerId ? `/customers/${opts.customerId}` : "/more",
+      resolutionAction:
+        "Configure the office notification address, deliver the missed alert, and verify the next send.",
+      ownerTeam: "OPS",
+    });
     return false;
   }
   try {
@@ -198,6 +230,19 @@ export async function notifyLeads(opts: {
       "notifyLeads: neither SES_LEADS_EMAIL nor SES_NOTIFY_EMAIL is configured — nobody was told",
       opts.subject
     );
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `sales-unconfigured:${opts.template}:${opts.relatedId ?? opts.subject}`,
+      title: `Sales alert could not be sent: ${opts.subject}`,
+      detail:
+        "Neither SES_LEADS_EMAIL nor SES_NOTIFY_EMAIL is configured, so the sales alert had no destination.",
+      customerId: opts.customerId,
+      relatedId: opts.relatedId ?? opts.subject,
+      sourceUrl: opts.customerId ? `/customers/${opts.customerId}` : "/more",
+      resolutionAction:
+        "Configure the sales notification address, deliver the missed alert, and verify the next send.",
+      ownerTeam: "SALES",
+    });
     return false;
   }
   try {
@@ -207,6 +252,7 @@ export async function notifyLeads(opts: {
       template: opts.template,
       customerId: opts.customerId,
       relatedId: opts.relatedId,
+      ownerTeam: "SALES",
       html: emailShell(opts.heading, opts.bodyHtml),
     });
   } catch (err) {

@@ -10,7 +10,9 @@ import {
 } from "../shared/compliance";
 import { opFieldName } from "../shared/opEvent";
 import {
+  callerEmail,
   callerGroups,
+  callerIsFinance,
   callerIsOffice,
   callerSub,
   isStaff,
@@ -25,6 +27,11 @@ import {
 import { renderServiceReportPdf, type ReportProduct } from "../shared/pdf";
 import { stripeClient } from "../shared/stripeClient";
 import { startPlanBilling } from "../shared/subscription";
+import {
+  openMissingContactWork,
+  openOwnedWork,
+  workItemId,
+} from "../shared/ownedWork";
 
 const s3 = new S3Client();
 const BUCKET = () => {
@@ -93,6 +100,8 @@ type Args = {
   routeOrder?: number;
   otherJobId?: string;
   otherRouteOrder?: number;
+  workItemId?: string;
+  action?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -182,6 +191,26 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return updateJobSchedule(event.arguments);
     }
+    case "rebookJob": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return rebookJob(
+        event.arguments.jobId!,
+        callerSub(event.identity),
+        callerEmail(event.identity)
+      );
+    }
+    case "updateOwnedWork": {
+      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
+        throw new Error("Office or finance role required");
+      }
+      return updateOwnedWork({
+        workItemId: event.arguments.workItemId!,
+        action: event.arguments.action!,
+        note: event.arguments.note,
+        actorSub: callerSub(event.identity),
+        actorEmail: callerEmail(event.identity),
+      });
+    }
     case "getDocumentUrl": {
       return getDocumentUrl(event.arguments.key!, callerGroups(event.identity));
     }
@@ -207,6 +236,110 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
   }
 };
 
+export async function updateOwnedWork(args: {
+  workItemId: string;
+  action: string;
+  note?: string;
+  actorSub: string | null;
+  actorEmail: string | null;
+}) {
+  const client = await dataClient();
+  const { data: item } = await client.models.WorkItem.get({ id: args.workItemId });
+  if (!item) throw new Error("Work item not found");
+  const actorEmail = args.actorEmail ?? args.actorSub ?? "unknown staff";
+  const now = new Date().toISOString();
+
+  if (args.action === "CLAIM") {
+    if (item.status !== "OPEN") throw new Error("Resolved work cannot be claimed");
+    const claimed = await client.models.WorkItem.update({
+      id: item.id,
+      ownerSub: args.actorSub ?? undefined,
+      ownerEmail: actorEmail,
+    });
+    if (!claimed.data) {
+      throw new Error(
+        claimed.errors?.map((error) => error.message).join("; ") ||
+          "Could not claim work"
+      );
+    }
+    const claimEvent = await client.models.WorkEvent.create({
+      workItemId: item.id,
+      eventType: "CLAIMED",
+      actorSub: args.actorSub ?? undefined,
+      actorEmail,
+      note: args.note?.trim() || "Claimed responsibility for this work.",
+      occurredAt: now,
+    });
+    if (!claimEvent.data) {
+      // Keep the queue honest: without history, the ownership change did not
+      // happen. Roll it back so the user can retry the whole action.
+      await client.models.WorkItem.update({
+        id: item.id,
+        ownerSub: item.ownerSub ?? null,
+        ownerEmail: item.ownerEmail,
+      });
+      throw new Error(
+        claimEvent.errors?.map((error) => error.message).join("; ") ||
+          "Could not record ownership history"
+      );
+    }
+    return { workItemId: item.id, status: "OPEN", ownerEmail: actorEmail };
+  }
+
+  if (args.action === "RESOLVE") {
+    const note = args.note?.trim();
+    if (!note) throw new Error("Say how this was resolved before closing it");
+    if (item.status === "RESOLVED") {
+      return { workItemId: item.id, status: "RESOLVED", alreadyResolved: true };
+    }
+    const resolved = await client.models.WorkItem.update({
+      id: item.id,
+      status: "RESOLVED",
+      ownerSub: args.actorSub ?? item.ownerSub ?? undefined,
+      ownerEmail: actorEmail,
+      resolvedAt: now,
+      resolvedBySub: args.actorSub ?? undefined,
+      resolvedByEmail: actorEmail,
+      resolutionNote: note,
+    });
+    if (!resolved.data) {
+      throw new Error(
+        resolved.errors?.map((error) => error.message).join("; ") ||
+          "Could not resolve work"
+      );
+    }
+    const resolutionEvent = await client.models.WorkEvent.create({
+      workItemId: item.id,
+      eventType: "RESOLVED",
+      actorSub: args.actorSub ?? undefined,
+      actorEmail,
+      note,
+      occurredAt: now,
+    });
+    if (!resolutionEvent.data) {
+      // A resolution without permanent history is not a resolution. Reopen
+      // the row so the action remains visible and can be retried.
+      await client.models.WorkItem.update({
+        id: item.id,
+        status: "OPEN",
+        ownerSub: item.ownerSub ?? null,
+        ownerEmail: item.ownerEmail,
+        resolvedAt: null,
+        resolvedBySub: null,
+        resolvedByEmail: null,
+        resolutionNote: null,
+      });
+      throw new Error(
+        resolutionEvent.errors?.map((error) => error.message).join("; ") ||
+          "Could not record resolution history"
+      );
+    }
+    return { workItemId: item.id, status: "RESOLVED" };
+  }
+
+  throw new Error("Unknown work action — use CLAIM or RESOLVE");
+}
+
 /** Office-initiated transactional emails (payment request, portal reminder,
  *  booking link — the lead's one conversion path). */
 async function sendCustomerEmail(
@@ -218,7 +351,16 @@ async function sendCustomerEmail(
   const { data: customer } = await client.models.Customer.get({
     id: customerId,
   });
-  if (!customer?.email) throw new Error("Customer has no email address on file");
+  if (!customer?.email) {
+    if (customer) {
+      await openMissingContactWork({
+        customerId,
+        displayName: customer.displayName,
+        context: `The office tried to send the ${kind} message.`,
+      });
+    }
+    throw new Error("Customer has no email address on file");
+  }
   const hi = `<p>Hi ${customer.contactName ?? customer.displayName},</p>`;
   const noteHtml = note
     ? `<p style="border-left:3px solid #e4e6ea;padding-left:12px;color:#444;">${note}</p>`
@@ -344,6 +486,17 @@ function assertJobCanBeScheduled(job: { status?: string | null }) {
   if (job.status === "IN_PROGRESS") {
     throw new Error("This job is in progress — call the technician instead of changing its route");
   }
+  // A no-access or canceled visit is a terminal record: its reason, time,
+  // note, and door photo are evidence that the attempt happened. Reusing the
+  // row (assign flipping it back to SCHEDULED) destroys that record. Rebooking
+  // is a new, linked visit — see rebookJob — never a mutation of this one.
+  if (job.status === "NO_ACCESS" || job.status === "CANCELED") {
+    throw new Error(
+      `A ${
+        job.status === "NO_ACCESS" ? "no-access" : "canceled"
+      } visit is a terminal record and cannot be reused — rebook it to create a new linked visit`
+    );
+  }
 }
 
 /**
@@ -384,10 +537,6 @@ async function updateJobSchedule(args: Args) {
       routeOrder: args.routeOrder ?? 1,
       scheduledDate: args.scheduledDate,
       status: "SCHEDULED",
-      noAccessReason: null,
-      noAccessAt: null,
-      noAccessNote: null,
-      noAccessPhotoKey: null,
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
     return { jobId: data.id };
@@ -455,6 +604,98 @@ async function updateJobSchedule(args: Args) {
   }
 
   throw new Error(`Unknown scheduling operation: ${args.operation ?? ""}`);
+}
+
+/**
+ * Rebook a terminal visit that did not happen — NO_ACCESS (couldn't get in)
+ * or CANCELED — as a NEW, linked visit attempt. The original is never
+ * touched: its reason, time, note, and door photo stay as the record of that
+ * attempt. The new job carries rebookedFromJobId so the attempts stay linked.
+ *
+ * A COMPLETED visit is not rebooked (it succeeded — a new service is its own
+ * job); a live SCHEDULED/UNSCHEDULED job is assigned, not rebooked.
+ */
+async function rebookJob(
+  jobId: string,
+  actorSub: string | null,
+  actorEmail: string | null
+) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+  if (job.status !== "NO_ACCESS" && job.status !== "CANCELED") {
+    throw new Error(
+      "Only a no-access or canceled visit is rebooked — a live job is scheduled, and a completed one stays on the record"
+    );
+  }
+  const rebookedJobId = `rebook-${job.id}`;
+  const { data: existingRebook } = await client.models.Job.get({
+    id: rebookedJobId,
+  });
+  if (existingRebook) {
+    await resolveRebookedNoAccessWork(job, existingRebook.id, actorSub, actorEmail);
+    return {
+      jobId: existingRebook.id,
+      rebookedFromJobId: job.id,
+      alreadyRebooked: true,
+    };
+  }
+  const { data: created, errors } = await client.models.Job.create({
+    id: rebookedJobId,
+    customerId: job.customerId,
+    servicePlanId: job.servicePlanId ?? undefined,
+    type: job.type,
+    serviceType: job.serviceType,
+    description: job.description ?? undefined,
+    priceCents: job.priceCents ?? undefined,
+    // A rebook is the same paid service attempt, not a second sale. Carry the
+    // up-front payment marker so no later screen can charge this visit again.
+    paidAt: job.paidAt ?? undefined,
+    paidPaymentIntentId: job.paidPaymentIntentId ?? undefined,
+    timeWindow: job.timeWindow ?? undefined,
+    notes: job.notes ?? undefined,
+    status: "UNSCHEDULED",
+    rebookedFromJobId: job.id,
+    accessGroups: job.accessGroups ?? undefined,
+  });
+  if (!created) {
+    throw new Error(
+      errors?.map((e) => e.message).join("; ") || "Could not rebook the visit"
+    );
+  }
+  await resolveRebookedNoAccessWork(job, created.id, actorSub, actorEmail);
+  return {
+    jobId: created.id,
+    rebookedFromJobId: job.id,
+    alreadyRebooked: false,
+  };
+}
+
+/** Rebooking is the concrete resolution for a no-access exception. */
+async function resolveRebookedNoAccessWork(
+  sourceJob: { id: string; status?: string | null },
+  rebookedJobId: string,
+  actorSub: string | null,
+  actorEmail: string | null
+) {
+  if (sourceJob.status !== "NO_ACCESS") return;
+  const client = await dataClient();
+  if (!("WorkItem" in client.models) || !("WorkEvent" in client.models)) return;
+  try {
+    await updateOwnedWork({
+      workItemId: workItemId("NO_ACCESS", sourceJob.id),
+      action: "RESOLVE",
+      note: `Rebooked as linked visit ${rebookedJobId}; the original no-access record remains unchanged.`,
+      actorSub,
+      actorEmail,
+    });
+  } catch (err) {
+    // A legacy no-access row may predate owned work. That is the only benign
+    // miss; a real history/write failure must make the idempotent mutation
+    // retry so the job can never be rebooked while its obligation stays open.
+    if (err instanceof Error && err.message === "Work item not found") return;
+    throw err;
+  }
 }
 
 /**
@@ -652,7 +893,7 @@ async function finalizeServiceReport(reportId: string) {
       html: emailShell(
         "Your service is complete",
         `<p>Hi ${customer.contactName ?? customer.displayName},</p>
-         <p>${technician?.name ?? "Your technician"} completed your <strong>${job.serviceType}</strong> service. Your full service report is attached, and it's always available in your BuzzKill portal.</p>
+         <p>${technician?.name ?? "Your technician"} completed your <strong>${job.serviceType}</strong> service. Your full service report is attached${customer.portalUserSub ? ", and it's always available in your BuzzKill portal" : ""}.</p>
          ${
            nextIso
              ? `<p><strong>Your next visit is planned for around ${prettyDate(nextIso)}</strong> — we'll confirm the exact time and send reminders as it gets closer.</p>`
@@ -1091,6 +1332,20 @@ async function reportNoAccess(args: {
       : Promise.resolve({ data: null }),
   ]);
 
+  await openOwnedWork({
+    kind: "NO_ACCESS",
+    dedupeKey: job.id,
+    title: `Resolve no-access visit: ${customer?.displayName ?? job.customerId}`,
+    detail: `${label}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}. No service was performed${job.paidAt ? "; the visit was already paid up front" : " and no charge was made"}.`,
+    customerId: job.customerId,
+    relatedId: job.id,
+    sourceUrl: `/customers/${job.customerId}`,
+    resolutionAction: job.paidAt
+      ? "Review the attendance evidence, then rebook the same paid visit or issue the approved refund and tell the customer."
+      : "Review the attendance evidence, then rebook the visit or document the approved no-charge disposition.",
+    ownerTeam: "OPS",
+  });
+
   // The office owns what happens next: rebook, charge a no-access fee, or let
   // it go. None of those are the technician's call from a driveway.
   await notifyOffice({
@@ -1101,7 +1356,7 @@ async function reportNoAccess(args: {
     relatedId: job.id,
     bodyHtml: `<p><strong>${technician?.name ?? "A technician"}</strong> attended <strong>${customer?.displayName ?? "this customer"}</strong> for ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} and couldn't do the work.</p>
        <p><strong>${label}</strong>${args.note?.trim() ? ` — ${args.note.trim()}` : ""}</p>
-       <p>No service report was filed and nothing has been charged. The job is off the route and is waiting on a decision: rebook it, charge a no-access fee, or let it go.</p>
+       <p>No service report was filed and no new charge was made.${job.paidAt ? " This visit was already paid online, so rebook that paid service or decide the refund." : ""} The job is off the route and is waiting on a decision: rebook it${job.paidAt ? " or refund it" : " or document that no follow-up is owed"}.</p>
        <p style="margin:20px 0;"><a href="${CRM_URL()}/customers/${job.customerId}" style="background:#176b2c;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open the customer</a></p>`,
   });
 

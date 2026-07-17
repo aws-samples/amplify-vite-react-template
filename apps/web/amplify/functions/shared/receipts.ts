@@ -1,5 +1,6 @@
 import { dataClient } from "./dataClient";
 import { emailShell, notifyOffice, sendEmail } from "./email";
+import { openMissingContactWork } from "./ownedWork";
 
 /**
  * Customer notices for money movement — the receipt after a charge, the notice
@@ -47,6 +48,13 @@ async function customerContact(customerId: string): Promise<{
   const { data: customer } = await client.models.Customer.get({
     id: customerId,
   });
+  if (customer && !customer.email) {
+    await openMissingContactWork({
+      customerId,
+      displayName: customer.displayName,
+      context: "A payment, refund, or invoice notice needed to be delivered.",
+    });
+  }
   return {
     email: customer?.email ?? null,
     greetingName: customer?.contactName ?? customer?.displayName ?? "there",

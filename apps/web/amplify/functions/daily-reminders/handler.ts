@@ -15,6 +15,11 @@ import {
   nextDunningAtIso,
   settleInvoiceOnCard,
 } from "../shared/recovery";
+import {
+  defaultWorkOwner,
+  openMissingContactWork,
+  openOwnedWork,
+} from "../shared/ownedWork";
 
 type OwedInvoice = {
   id: string;
@@ -73,6 +78,9 @@ const prettyDate = (isoDate: string) =>
 
 export const handler = async () => {
   const totals: Record<string, unknown>[] = [];
+  // Do this first: an unrelated reminder failure must not stop an already
+  // overdue obligation from reaching its escalation path.
+  const overdueWork = await escalateOverdueOwnedWork();
   // T-1 and T-7 reminders — the cron runs once a day, so each fires once.
   // Only T-1 gets the staffing gate: a week out, most visits legitimately
   // aren't routed yet, but by the day before every dated job must be on an
@@ -101,6 +109,7 @@ export const handler = async () => {
     invoiceReminders,
     aging,
     disputes,
+    overdueWork,
   ];
 };
 
@@ -458,6 +467,18 @@ async function reportUnstaffedJobs(
     rows.push(
       `<li><strong>${names.get(job.customerId)}</strong> — ${job.serviceType}${job.timeWindow ? `, ${job.timeWindow}` : ""}: ${why}</li>`
     );
+    await openOwnedWork({
+      kind: "UNSTAFFED_VISIT",
+      dedupeKey: job.id,
+      title: `Staff tomorrow's visit: ${names.get(job.customerId)}`,
+      detail: `${job.serviceType}${job.timeWindow ? ` (${job.timeWindow})` : ""} is scheduled for ${date}, but ${why}. The customer reminder was suppressed.`,
+      customerId: job.customerId,
+      relatedId: job.id,
+      sourceUrl: "/schedule",
+      resolutionAction:
+        "Assign the visit to an active technician or move it, then notify the customer of the confirmed plan.",
+      ownerTeam: "OPS",
+    });
   }
 
   return notifyOffice({
@@ -520,7 +541,16 @@ async function remind(date: string, phrasing: string, staffingGate: boolean) {
     const { data: customer } = await client.models.Customer.get({
       id: customerId,
     });
-    if (!customer?.email) continue;
+    if (!customer?.email) {
+      if (customer) {
+        await openMissingContactWork({
+          customerId,
+          displayName: customer.displayName,
+          context: `The ${phrasing} service reminder for ${prettyDate(date)} could not be sent.`,
+        });
+      }
+      continue;
+    }
 
     const visitLines = customerJobs
       .map(
@@ -862,6 +892,90 @@ async function reportDisputeDeadlines() {
     `Dispute deadlines: ${soon.length} near, notified=${notified}`
   );
   return { disputesDueSoon: soon.length, notified };
+}
+
+/**
+ * Escalate every overdue exception exactly once. The queue row is still the
+ * authority; email is only the manager nudge, and a failed nudge creates its
+ * own EMAIL_FAILURE work item through sendEmail.
+ */
+export async function escalateOverdueOwnedWork() {
+  const client = await dataClient();
+  if (!("WorkItem" in client.models) || !("WorkEvent" in client.models)) {
+    return { overdueWorkEscalated: 0 };
+  }
+  const now = new Date().toISOString();
+  const overdue: {
+    id: string;
+    title: string;
+    detail: string;
+    ownerEmail: string;
+    ownerTeam: string;
+    dueAt: string;
+    customerId?: string | null;
+  }[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.WorkItem.listWorkItemByStatusAndDueAt(
+      { status: "OPEN" },
+      { nextToken, limit: 200 }
+    );
+    overdue.push(
+      ...page.data.filter((item) => !item.escalatedAt && item.dueAt < now)
+    );
+    nextToken = page.nextToken;
+  } while (nextToken);
+
+  let escalated = 0;
+  for (const item of overdue) {
+    try {
+      const escalationSent = await sendEmail({
+        to: defaultWorkOwner("OPS"),
+        subject: `OVERDUE owned work — ${item.title}`,
+        template: "owned-work-overdue",
+        customerId: item.customerId,
+        relatedId: item.id,
+        html: emailShell(
+          "Owned work is overdue",
+          `<p><strong>${escapeHtmlLite(item.title)}</strong> was due ${escapeHtmlLite(item.dueAt)}.</p>
+           <p>Owner: <strong>${escapeHtmlLite(item.ownerEmail)}</strong> (${escapeHtmlLite(item.ownerTeam)}).</p>
+           <p>${escapeHtmlLite(item.detail)}</p>
+           <p><a href="${process.env.CRM_APP_URL ?? ""}/work">Open the work queue</a></p>`
+        ),
+      });
+      const escalatedAt = new Date().toISOString();
+      // History lands first. If the row update fails, a later pass may append
+      // a second overdue event, but it can never claim escalation happened
+      // while leaving no permanent record of it.
+      const event = await client.models.WorkEvent.create({
+        workItemId: item.id,
+        eventType: "OVERDUE",
+        actorEmail: "system@pestbuzzkill.com",
+        note: escalationSent
+          ? `Deadline passed; escalated to ${defaultWorkOwner("OPS")}.`
+          : `Deadline passed; escalation email failed and created separate email-failure work.`,
+        occurredAt: escalatedAt,
+      });
+      if (!event.data) {
+        throw new Error(
+          event.errors?.map((error) => error.message).join("; ") ||
+            "Could not record overdue history"
+        );
+      }
+      const updated = await client.models.WorkItem.update({ id: item.id, escalatedAt });
+      if (!updated.data) {
+        throw new Error(
+          updated.errors?.map((error) => error.message).join("; ") ||
+            "Could not mark work escalated"
+        );
+      }
+      escalated++;
+    } catch (err) {
+      // One broken row must not suppress escalation of the rest of the queue.
+      console.error("Owned-work escalation failed", item.id, err);
+    }
+  }
+  return { overdueWorkEscalated: escalated };
 }
 
 /** Small HTML escaper — email bodies here interpolate names and emails. */

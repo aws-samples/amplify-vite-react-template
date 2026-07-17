@@ -70,6 +70,18 @@ vi.mock("../shared/email", () => ({
   },
 }));
 
+const workOpened: { kind: string; relatedId: string; resolutionAction: string }[] = [];
+vi.mock("../shared/ownedWork", () => ({
+  openOwnedWork: async (work: {
+    kind: string;
+    relatedId: string;
+    resolutionAction: string;
+  }) => {
+    workOpened.push(work);
+    return "work-cancel";
+  },
+}));
+
 const cancelPlanBilling = vi.fn(async () => ({
   canceled: true,
   stripeSubscriptionCanceled: true,
@@ -124,6 +136,7 @@ beforeEach(() => {
   updates.length = 0;
   officeEmails.length = 0;
   customerEmails.length = 0;
+  workOpened.length = 0;
   cancelPlanBilling.mockClear();
   refundsCreate.mockClear();
   cancelPlanBilling.mockImplementation(async () => ({
@@ -283,7 +296,7 @@ describe("when the cancellation date cannot be recorded", () => {
     expect(res.body.error).not.toMatch(/try again/i);
   });
 
-  it("tells the office the date was not saved, since the email is then the only record", async () => {
+  it("tells the office the date was not saved and points it to owned work", async () => {
     freezeEastern("2026-07-16");
     breakDateWrite();
     cancelPlanBilling.mockImplementation(async () => {
@@ -294,6 +307,7 @@ describe("when the cancellation date cannot be recorded", () => {
 
     expect(officeEmails).toHaveLength(1);
     expect(officeEmails[0].bodyHtml).toContain("not saved on the booking");
+    expect(officeEmails[0].bodyHtml).toContain("owned cancellation work item");
     expect(officeEmails[0].bodyHtml).toContain("2026-07-16");
   });
 });
@@ -324,12 +338,18 @@ describe("cancellation failure", () => {
     expect(updates[0]).toMatchObject({ cancelRequestedOn: "2026-07-16" });
   });
 
-  it("pages the office so a human finishes the cancellation", async () => {
+  it("creates owned work and pages the office so a human finishes the cancellation", async () => {
     freezeEastern("2026-07-16");
 
     await call({ token: "tok", confirm: true });
 
     expect(officeEmails.some((e) => e.subject.includes("ACTION REQUIRED"))).toBe(true);
+    expect(workOpened).toContainEqual(
+      expect.objectContaining({
+        kind: "PAID_VISIT_CANCELLATION",
+        relatedId: "b1",
+      })
+    );
   });
 
   it("does not mark the booking canceled or tell the customer it worked", async () => {

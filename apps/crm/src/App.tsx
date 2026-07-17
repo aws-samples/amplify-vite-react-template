@@ -15,6 +15,7 @@ import InstallBanner from "./components/InstallBanner";
 import { confirmSignIn, signIn, signOut } from "aws-amplify/auth";
 
 import Dashboard from "./office/Dashboard";
+import WorkQueue from "./office/Work";
 import Leads from "./office/Leads";
 import Customers from "./office/Customers";
 import CustomerDetail from "./office/CustomerDetail";
@@ -162,7 +163,7 @@ function Shell() {
   const roles = useRoles();
   if (roles.loading) return <Spinner label="Loading your account…" />;
 
-  if (!roles.office && !roles.tech && !roles.customer) {
+  if (!roles.office && !roles.finance && !roles.tech && !roles.customer) {
     return (
       <div className="auth-shell">
         <EmptyState
@@ -179,6 +180,7 @@ function Shell() {
   }
 
   const staff = roles.office;
+  const workStaff = roles.office || roles.finance;
   const techOnly = roles.tech && !roles.office && !roles.customer;
   const customerOnly = roles.customer && !roles.office && !roles.tech;
 
@@ -189,6 +191,7 @@ function Shell() {
 
         {/* Office */}
         <Route path="/dashboard" element={<Require when={staff}><Dashboard /></Require>} />
+        <Route path="/work" element={<Require when={workStaff}><WorkQueue /></Require>} />
         <Route path="/leads" element={<Require when={staff}><Leads /></Require>} />
         <Route path="/customers" element={<Require when={staff}><Customers /></Require>} />
         <Route path="/customers/:id" element={<Require when={staff || roles.tech}><CustomerDetail /></Require>} />
@@ -212,7 +215,7 @@ function Shell() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
 
-      {roles.office || roles.tech ? <InstallBanner /> : null}
+      {workStaff || roles.tech ? <InstallBanner /> : null}
 
       <nav className="tabbar">
         <div className="tabbar-inner">
@@ -222,6 +225,11 @@ function Shell() {
               <Tab to="/leads" icon="leads" label="Leads" />
               <Tab to="/customers" icon="customers" label="Customers" />
               <Tab to="/schedule" icon="schedule" label="Schedule" />
+              <Tab to="/more" icon="more" label="More" />
+            </>
+          ) : roles.finance ? (
+            <>
+              <Tab to="/work" icon="dashboard" label="Owned work" />
               <Tab to="/more" icon="more" label="More" />
             </>
           ) : techOnly ? (
@@ -259,6 +267,12 @@ function Tab({ to, icon, label }: { to: string; icon: IconName; label: string })
 
 function HomeRedirect() {
   const roles = useRoles();
-  const to = roles.office ? "/dashboard" : roles.tech ? "/tech" : "/portal";
+  const to = roles.office
+    ? "/dashboard"
+    : roles.finance
+      ? "/work"
+      : roles.tech
+        ? "/tech"
+        : "/portal";
   return <Navigate to={to} replace />;
 }

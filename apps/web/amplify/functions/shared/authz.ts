@@ -22,6 +22,19 @@ export function callerSub(
   return cognitoIdentity(identity)?.sub ?? null;
 }
 
+export function callerEmail(
+  identity: AppSyncIdentity | undefined | null
+): string | null {
+  const cognito = cognitoIdentity(identity);
+  const email = cognito?.claims?.email;
+  if (typeof email === "string" && email.trim()) {
+    return email.trim().toLowerCase();
+  }
+  return cognito?.username?.includes("@")
+    ? cognito.username.trim().toLowerCase()
+    : null;
+}
+
 /**
  * OWNER is a superset of every staff role, so an owner never needs a second
  * login to do office or finance work.

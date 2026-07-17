@@ -24,6 +24,16 @@ export type Agreement = Schema["Agreement"]["type"];
 export type ServiceReport = Schema["ServiceReport"]["type"];
 export type LeadPricingRun = Schema["LeadPricingRun"]["type"];
 export type Product = Schema["Product"]["type"];
+export type WorkItem = Schema["WorkItem"]["type"];
+export type WorkEvent = Schema["WorkEvent"]["type"];
+
+export function updateOwnedWork(input: {
+  workItemId: string;
+  action: "CLAIM" | "RESOLVE";
+  note?: string;
+}): OpResult {
+  return api().mutations.updateOwnedWork(input);
+}
 
 /**
  * Recovery-lifecycle contract boundary (R02/R31/R52/R78), same shape as the

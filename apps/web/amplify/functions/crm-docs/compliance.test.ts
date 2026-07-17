@@ -35,6 +35,11 @@ const fakeDataClient = {
         jobs[i] = { ...jobs[i], ...patch };
         return { data: jobs[i], errors: undefined };
       },
+      create: async (input: Record<string, unknown>) => {
+        const j = { id: `job_${jobs.length + 1}`, ...input } as Job;
+        jobs.push(j);
+        return { data: j, errors: undefined };
+      },
     },
     Route: {
       get: async ({ id }: { id: string }) => ({
@@ -240,7 +245,7 @@ describe("no access — the honest exit", () => {
 
     expect(officeEmails).toHaveLength(1);
     expect(officeEmails[0].subject).toContain("Couldn't access");
-    expect(officeEmails[0].bodyHtml).toContain("nothing has been charged");
+    expect(officeEmails[0].bodyHtml).toContain("no new charge was made");
   });
 
   it("refuses a reason it does not know rather than recording a blank one", async () => {
@@ -633,5 +638,101 @@ describe("office completion is for administrative job types only", () => {
     await expect(call("completeJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow();
 
     expect(scheduleNextRecurringVisit).not.toHaveBeenCalled();
+  });
+});
+
+describe("terminal visits are immutable — rebooking makes a new linked attempt", () => {
+  const noAccessJob = () => ({
+    id: "j1",
+    customerId: "c1",
+    servicePlanId: "p1",
+    type: "RECURRING",
+    serviceType: "General pest",
+    status: "NO_ACCESS",
+    noAccessReason: "LOCKED_OUT",
+    noAccessAt: "2026-07-20T14:00:00Z",
+    noAccessNote: "Gate padlocked, dog in yard",
+    noAccessPhotoKey: "jobs/j1/door.jpg",
+    routeId: null,
+    scheduledDate: "2026-07-20",
+    paidAt: "2026-07-10T12:00:00Z",
+    paidPaymentIntentId: "pi_paid_once",
+    accessGroups: ["cus-c1"],
+  });
+
+  it("refuses to assign a no-access visit — its reason, time, note, and photo are untouched", async () => {
+    jobs = [noAccessJob()];
+    routes = [{ id: "r1", technicianId: "t1", date: "2026-07-25" }];
+
+    await expect(
+      call(
+        "updateJobSchedule",
+        { jobId: "j1", operation: "ASSIGN", technicianId: "t1", routeId: "r1", routeOrder: 1, scheduledDate: "2026-07-25" },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/terminal record|rebook/i);
+
+    // The terminal record survives completely.
+    expect(jobs[0]).toMatchObject({
+      status: "NO_ACCESS",
+      noAccessReason: "LOCKED_OUT",
+      noAccessAt: "2026-07-20T14:00:00Z",
+      noAccessNote: "Gate padlocked, dog in yard",
+      noAccessPhotoKey: "jobs/j1/door.jpg",
+    });
+  });
+
+  it("refuses to unassign a canceled visit — terminal records don't move", async () => {
+    jobs = [{ id: "j1", customerId: "c1", type: "ONE_TIME", serviceType: "General pest", status: "CANCELED", routeId: "r1", technicianId: "t1" }];
+
+    await expect(
+      call("updateJobSchedule", { jobId: "j1", operation: "UNASSIGN" }, ["OFFICE"])
+    ).rejects.toThrow(/terminal record|rebook/i);
+    expect(jobs[0].status).toBe("CANCELED");
+  });
+
+  it("rebooks a no-access visit as a NEW unscheduled job linked to the original", async () => {
+    jobs = [noAccessJob()];
+
+    const res = (await call("rebookJob", { jobId: "j1" }, ["OFFICE"])) as {
+      jobId: string;
+      rebookedFromJobId: string;
+    };
+
+    // A brand-new job was created; the original is byte-for-byte intact.
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]).toMatchObject({ status: "NO_ACCESS", noAccessPhotoKey: "jobs/j1/door.jpg" });
+    const fresh = jobs.find((j) => j.id === res.jobId)!;
+    expect(fresh).toMatchObject({
+      status: "UNSCHEDULED",
+      customerId: "c1",
+      servicePlanId: "p1",
+      serviceType: "General pest",
+      rebookedFromJobId: "j1",
+      paidAt: "2026-07-10T12:00:00Z",
+      paidPaymentIntentId: "pi_paid_once",
+    });
+    // The new attempt carries none of the terminal evidence.
+    expect(fresh.noAccessReason).toBeUndefined();
+    expect(fresh.noAccessPhotoKey).toBeUndefined();
+    expect(res.rebookedFromJobId).toBe("j1");
+
+    // A retried click/Lambda invocation returns the same new attempt instead
+    // of quietly putting two visits into the scheduling pool.
+    const retry = (await call("rebookJob", { jobId: "j1" }, ["OFFICE"])) as {
+      jobId: string;
+      alreadyRebooked: boolean;
+    };
+    expect(retry).toMatchObject({ jobId: res.jobId, alreadyRebooked: true });
+    expect(jobs).toHaveLength(2);
+  });
+
+  it("refuses to rebook a completed visit — a finished visit is not retried", async () => {
+    jobs = [{ id: "j1", customerId: "c1", type: "ONE_TIME", serviceType: "General pest", status: "COMPLETED" }];
+
+    await expect(call("rebookJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow(
+      /no-access or canceled/i
+    );
+    expect(jobs).toHaveLength(1);
   });
 });

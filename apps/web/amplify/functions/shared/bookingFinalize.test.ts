@@ -124,6 +124,34 @@ vi.mock("./pdf", () => ({
 vi.mock("./stripeClient", () => ({
   stripeClient: () => ({ customers: { update: async () => ({}) } }),
 }));
+// R41: portal provisioning is part of conversion — captured, and failable.
+const portalInvites: { customerId: string; email: string; name: string }[] = [];
+let portalProvisionError: Error | null = null;
+let portalLinkSent = true;
+vi.mock("./portalProvision", () => ({
+  provisionPortalLogin: async (o: {
+    customerId: string;
+    email: string;
+    name: string;
+  }) => {
+    if (portalProvisionError) throw portalProvisionError;
+    portalInvites.push(o);
+    return {
+      sub: "sub-1",
+      username: o.email,
+      created: true,
+      groupsAdded: [],
+      linkSent: portalLinkSent,
+    };
+  },
+}));
+const workOpened: { kind: string; title: string; detail: string }[] = [];
+vi.mock("./ownedWork", () => ({
+  openOwnedWork: async (o: { kind: string; title: string; detail: string }) => {
+    workOpened.push(o);
+    return "work-1";
+  },
+}));
 
 const { finalizeBooking } = await import("./bookingFinalize");
 
@@ -170,6 +198,10 @@ beforeEach(() => {
   jobsCreated.length = 0;
   emails.length = 0;
   leadAlerts.length = 0;
+  portalInvites.length = 0;
+  portalProvisionError = null;
+  portalLinkSent = true;
+  workOpened.length = 0;
   delete process.env.DOCS_BUCKET; // skip the S3 write
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   booking = {
@@ -425,6 +457,59 @@ describe("new booking shapes finalize into the right records", () => {
       priceCents: 31300,
       paidPaymentIntentId: "pi_1",
     });
+  });
+});
+
+describe("R41 — the portal login is part of conversion", () => {
+  it("provisions a portal login for a fresh customer and says so in the confirmation", async () => {
+    await finalize();
+
+    expect(portalInvites).toEqual([
+      {
+        customerId: "cust-new",
+        email: "dana@example.com",
+        name: "Dana Whitlock",
+      },
+    ]);
+    const confirmation = emails.find((e) => e.subject.startsWith("You're booked"));
+    expect(confirmation).toBeDefined();
+    expect(confirmation!.html).toContain("customer portal sign-in link");
+  });
+
+  it("provisions for a converted lead that never had a login", async () => {
+    seedLead();
+
+    await finalize();
+
+    expect(portalInvites).toEqual([
+      { customerId: "lead-1", email: "dana@example.com", name: "Dana Whitlock" },
+    ]);
+  });
+
+  it("leaves a repeat customer who already has a portal login alone", async () => {
+    seedLead({ status: "ACTIVE", portalUserSub: "sub-existing" });
+
+    await finalize();
+
+    expect(portalInvites).toHaveLength(0);
+    const confirmation = emails.find((e) => e.subject.startsWith("You're booked"));
+    expect(confirmation!.html).not.toContain("customer portal sign-in link");
+  });
+
+  it("a failed invite never bricks the paid finalization — it lands in the owned-work queue", async () => {
+    portalProvisionError = new Error("Cognito is down");
+
+    await finalize();
+
+    // The paid booking still finalizes end to end.
+    expect(jobsCreated).toHaveLength(1);
+    const confirmation = emails.find((e) => e.subject.startsWith("You're booked"));
+    expect(confirmation).toBeDefined();
+    expect(confirmation!.html).not.toContain("customer portal sign-in link");
+    // And the gap is owned work, not a log line.
+    const item = workOpened.find((w) => w.kind === "PORTAL_FAILURE");
+    expect(item).toBeDefined();
+    expect(item!.detail).toContain("Cognito is down");
   });
 });
 

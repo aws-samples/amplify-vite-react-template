@@ -3,8 +3,10 @@ import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "./email";
+import { provisionPortalLogin } from "./portalProvision";
 import { renderAgreementPdf } from "./pdf";
 import { stripeClient } from "./stripeClient";
+import { openOwnedWork } from "./ownedWork";
 
 const s3 = new S3Client();
 
@@ -188,6 +190,7 @@ type ExistingCustomer = {
   stripeCustomerId?: string | null;
   convertedAt?: string | null;
   groupId?: string | null;
+  portalUserSub?: string | null;
 };
 
 /**
@@ -394,6 +397,8 @@ async function finalizeClaimed(
   const leadNotes = attributionNotes(attribution);
   const matchClient = client as unknown as FinalizeDataClient;
   let customer: { id: string; groupId?: string | null } | null = null;
+  let hadPortalLogin = false;
+  let reactivatedWithPortal = false;
   let matchFallbackReason: string | null = null;
   try {
     const existing = await findCustomerByEmail(matchClient, booking.email);
@@ -402,6 +407,9 @@ async function finalizeClaimed(
         leadSource,
         leadNotes,
       });
+      hadPortalLogin = Boolean(existing.portalUserSub);
+      reactivatedWithPortal =
+        hadPortalLogin && existing.status === "INACTIVE";
     }
   } catch (err) {
     matchFallbackReason = err instanceof Error ? err.message : String(err);
@@ -447,6 +455,93 @@ async function finalizeClaimed(
   }
   const accessGroups = customerAccessGroups(customer.id, customer.groupId);
   await client.models.Customer.update({ id: customer.id, accessGroups });
+
+  // 1b. The portal login is part of conversion (R41). Every email this
+  // customer will now receive — the receipt, the service report, payment
+  // recovery — points at the portal, so the login must exist the moment the
+  // customer does, not when someone remembers the invite button. A repeat
+  // customer who already has one is left alone. Best-effort: a failed invite
+  // must never brick a paid finalization — it lands in the owned-work queue
+  // (PORTAL_FAILURE) and the manual Invite-to-portal button covers the gap.
+  let portalInvited = false;
+  if (!hadPortalLogin) {
+    try {
+      const portal = await provisionPortalLogin({
+        customerId: customer.id,
+        email: booking.email,
+        name: booking.name,
+      });
+      portalInvited = portal.linkSent;
+      if (!portal.linkSent) {
+        // The login exists but the invite never went out — the customer
+        // doesn't know the portal exists and can't sign in until they get a
+        // link. The confirmation email makes no portal promise in this case.
+        await openOwnedWork({
+          kind: "PORTAL_FAILURE",
+          dedupeKey: `booking-invite:${customer.id}`,
+          title: `Portal invite email did not send: ${booking.name}`,
+          detail: `The paid booking provisioned this customer's portal login, but the magic-link invite email failed to send. Their receipts and payment links point at a portal they have never been told about.`,
+          customerId: customer.id,
+          relatedId: booking.id,
+          sourceUrl: `/customers/${customer.id}`,
+          resolutionAction:
+            "Open the customer and use “Invite to portal” to resend the sign-in link, then verify it arrived.",
+          ownerTeam: "OPS",
+        });
+      }
+    } catch (err) {
+      console.error(
+        `finalizeBooking: portal provisioning failed for customer ${customer.id}`,
+        err
+      );
+      await openOwnedWork({
+        kind: "PORTAL_FAILURE",
+        dedupeKey: `booking-invite:${customer.id}`,
+        title: `New customer has no portal login: ${booking.name}`,
+        detail: `The paid booking converted this customer but their portal login could not be provisioned: ${err instanceof Error ? err.message : String(err)}. Their receipts and payment links point at a portal they cannot sign in to until it exists.`,
+        customerId: customer.id,
+        relatedId: booking.id,
+        sourceUrl: `/customers/${customer.id}`,
+        resolutionAction:
+          "Open the customer and use “Invite to portal”, then verify they can sign in.",
+        ownerTeam: "OPS",
+      });
+    }
+  } else if (reactivatedWithPortal) {
+    // Deactivation disables the portal login (revokePortalAccess), and
+    // conversion does not re-enable it — restorePortalAccess pairs with the
+    // office reactivate button, not the funnel. A re-booking INACTIVE
+    // customer therefore arrives here with a login that exists but is likely
+    // disabled, while their receipts and pay links assert the portal works.
+    // Owned work, not silence.
+    await openOwnedWork({
+      kind: "PORTAL_FAILURE",
+      dedupeKey: `booking-reactivation:${customer.id}`,
+      title: `Re-booked customer's portal login may be disabled: ${booking.name}`,
+      detail: `This customer was INACTIVE and re-booked through the funnel. Deactivation disables the portal login and booking conversion does not re-enable it, so their existing login may still be disabled while their receipts and payment links point at the portal.`,
+      customerId: customer.id,
+      relatedId: booking.id,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Restore the customer's portal access (re-enable the login) and verify they can sign in.",
+      ownerTeam: "OPS",
+    });
+  }
+
+  if (matchFallbackReason) {
+    await openOwnedWork({
+      kind: "DUPLICATE_LEAD",
+      dedupeKey: booking.id,
+      title: `Check possible duplicate lead: ${booking.name}`,
+      detail: `The paid booking created customer ${customer.id} after the existing-lead match failed for ${booking.email}: ${matchFallbackReason}`,
+      customerId: customer.id,
+      relatedId: booking.id,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Search for the existing lead by email, merge or cross-reference the records, and preserve the original source and pricing history.",
+      ownerTeam: "SALES",
+    });
+  }
 
   // R73: the booking is the outcome of this customer's pricing runs.
   await markPricingRunsWon(matchClient, customer.id);
@@ -633,7 +728,12 @@ async function finalizeClaimed(
            ? `, and your ${stored.recurringOffer.frequency.toLowerCase()} plan ($${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
            : ""
        }. Your service agreement is attached.</p>
-       <p>We'll remind you 7 days and 1 day before the visit.</p>
+       <p>We'll remind you 7 days and 1 day before the visit.</p>${
+         portalInvited
+           ? `
+       <p>Your customer portal sign-in link is on its way in a separate email — your visits, service reports, and receipts live there.</p>`
+           : ""
+       }
        <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than ${CANCEL_FULL_REFUND_DAYS} days out is a full refund; ${CANCEL_FULL_REFUND_DAYS} days or less is non-refundable.</p>`
     ),
   });

@@ -503,6 +503,15 @@ The record itself is now server-enforced and immutable — these are the last fo
   rebooking has no guarded control (board Assign silently erases the exception status); and
   from the next day the job appears on no operational surface. An email is not a queue.
   *(medium)*
+  **PARTIALLY RESOLVED (2026-07-17) — immutability + guarded rebook.** A NO_ACCESS (or CANCELED)
+  visit is now a terminal, immutable record: ASSIGN no longer flips it back to SCHEDULED or clears
+  its reason/time/note/door-photo. Rebooking is a new guarded mutation (`rebookJob`) that creates a
+  fresh UNSCHEDULED Job carrying `rebookedFromJobId` back to the original, so the evidence survives
+  and the new attempt is a distinct linked visit. The board offers a **Rebook** control (not Assign)
+  on no-access stops in the pool; the owned-work queue carries the reason/note, deadline, owner,
+  and rebook-or-disposition action until it is resolved. *Still open under R20:* the door photo
+  remains unviewable (`getDocumentUrl` rejects `jobs/` keys), so the visual-evidence half is not
+  complete yet.
 
 - **R21 — No customer reminder for a visit nobody is staffed to make.** The reminder cron
   filters on status alone; jobs assigned to a deactivated tech, or dated with no route, still
@@ -518,6 +527,12 @@ The record itself is now server-enforced and immutable — these are the last fo
   including COMPLETED (finalized report, billing started) and IN_PROGRESS (tech on site),
   flipping it back to UNSCHEDULED unconfirmed — status is what billing, the recurring engine,
   and the pesticide record all key off. *(small)*
+  **RESOLVED (2026-07-17).** `assertJobCanBeScheduled` now blocks every terminal status —
+  COMPLETED, IN_PROGRESS, NO_ACCESS, and CANCELED — so no ASSIGN/UNASSIGN/REORDER/CANCEL/
+  RESCHEDULE operation on `updateJobSchedule` can repurpose a finished record. The board mirrors
+  the guard with block-notes (`unassignBlockedNote`/`assignBlockedNote`) instead of a working ✕
+  or Assign. Server tests in `crm-docs/compliance.test.ts`; UI-note tests in
+  `apps/crm/src/lib/unassignStop.test.ts`.
 
 - **R28 — The tech knows what the business knows at the doorstep.** The tech job screen
   renders service type, window, address, phone, and machine-generated notes; `Customer.notes`
@@ -775,6 +790,11 @@ victim big enough to hold the launch, and all of it compounds with customer coun
   make the email log newest-first with the stored error shown and a resend button. *(small)*
 - **R78 — Escalations become a queue with an SLA**, not an inbox — and the escalation email
   can currently fail with zero signal while the screen promises a callback. *(small)*
+  **RESOLVED (2026-07-17).** Callback promises and pricing escalations now create durable
+  owned-work rows before notification. The shared queue assigns an owner and SLA, exposes a
+  prescribed resolution action, escalates overdue rows, and retains an append-only event and
+  resolution history. Failed escalation email creates separate `EMAIL_FAILURE` work; email is
+  never the queue of record.
 - **R79 — Geofence the GPS stamp** against the geocoded service address with an accuracy
   floor; the honest-disclaimer wording already shipped, the measurement was explicitly
   deferred. *(medium)*

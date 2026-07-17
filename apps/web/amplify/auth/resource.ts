@@ -1,6 +1,7 @@
 import { defineAuth } from "@aws-amplify/backend";
 import { crmAdmin } from "../functions/crm-admin/resource";
 import { postAuth } from "../functions/post-auth/resource";
+import { stripeWebhook } from "../functions/stripe-webhook/resource";
 import {
   createChallenge,
   defineChallenge,
@@ -77,5 +78,17 @@ export const auth = defineAuth({
     // REQUEST_LINK answer and burns it on redemption. create issues the
     // challenge and touches nothing.
     allow.resource(verifyChallenge).to(["manageUsers"]),
+    // Portal provisioning at conversion (R41): finalizeBooking runs in the
+    // Stripe webhook and creates the customer's portal login the moment a
+    // booking converts them — same bundle as crm-admin's invite path, because
+    // it is literally the same shared code (shared/portalProvision).
+    allow
+      .resource(stripeWebhook)
+      .to([
+        "manageUsers",
+        "manageGroups",
+        "manageGroupMembership",
+        "setUserPassword",
+      ]),
   ],
 });

@@ -22,6 +22,18 @@ describe("unassignBlockedNote", () => {
     );
   });
 
+  it("never moves a no-access stop — it is a terminal record", () => {
+    expect(unassignBlockedNote("NO_ACCESS", "Ray")).toBe(
+      "no access — a terminal record; rebook instead"
+    );
+  });
+
+  it("never moves a canceled stop — it is a terminal record", () => {
+    expect(unassignBlockedNote("CANCELED", "Ray")).toBe(
+      "canceled — a terminal record; rebook instead"
+    );
+  });
+
   it.each(["SCHEDULED", "UNSCHEDULED"])(
     "leaves a plain %s move working as today",
     (status) => {
@@ -48,8 +60,16 @@ describe("assignBlockedNote", () => {
     );
   });
 
-  it("leaves NO_ACCESS assignable — re-booking is legitimate office work", () => {
-    expect(assignBlockedNote("NO_ACCESS")).toBeNull();
+  it("blocks assigning a no-access stop — it is rebooked, never reused", () => {
+    expect(assignBlockedNote("NO_ACCESS")).toBe(
+      "no access — rebook to create a new visit"
+    );
+  });
+
+  it("blocks assigning a canceled stop — it is rebooked, never reused", () => {
+    expect(assignBlockedNote("CANCELED")).toBe(
+      "canceled — rebook to create a new visit"
+    );
   });
 
   it.each(["SCHEDULED", "UNSCHEDULED"])(

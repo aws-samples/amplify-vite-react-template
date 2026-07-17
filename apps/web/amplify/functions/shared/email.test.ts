@@ -26,12 +26,34 @@ vi.mock("@aws-sdk/client-ses", () => ({
 }));
 
 const emailLogs: Record<string, unknown>[] = [];
+const workRows: (Record<string, unknown> & { id: string })[] = [];
+const workHistory: Record<string, unknown>[] = [];
 vi.mock("./dataClient", () => ({
   dataClient: async () => ({
     models: {
       EmailLog: {
         create: async (input: Record<string, unknown>) => {
           emailLogs.push(input);
+          return { data: input };
+        },
+      },
+      WorkItem: {
+        get: async ({ id }: { id: string }) => ({
+          data: workRows.find((row) => row.id === id) ?? null,
+        }),
+        create: async (input: Record<string, unknown> & { id: string }) => {
+          workRows.push(input);
+          return { data: input };
+        },
+        update: async (input: Record<string, unknown> & { id: string }) => {
+          const row = workRows.find((candidate) => candidate.id === input.id);
+          if (row) Object.assign(row, input);
+          return { data: row ?? null };
+        },
+      },
+      WorkEvent: {
+        create: async (input: Record<string, unknown>) => {
+          workHistory.push(input);
           return { data: input };
         },
       },
@@ -61,6 +83,8 @@ const alert = {
 beforeEach(() => {
   sesSend.mockClear();
   emailLogs.length = 0;
+  workRows.length = 0;
+  workHistory.length = 0;
   delete process.env.SES_LEADS_EMAIL;
   delete process.env.SES_NOTIFY_EMAIL;
 });
@@ -135,5 +159,29 @@ describe("notifyOffice still routes ops alarms to the ops inbox (R80 anti-regres
       toEmail: "info@pestbuzzkill.com",
       template: "ops-subscription-died",
     });
+  });
+
+  it("turns a failed send into durable owned work instead of only an email log", async () => {
+    process.env.SES_NOTIFY_EMAIL = "info@pestbuzzkill.com";
+    sesSend.mockRejectedValueOnce(new Error("SES rejected the message"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ok = await notifyOffice({
+      subject: "Visit needs attention",
+      heading: "Visit needs attention",
+      bodyHtml: "<p>Act now.</p>",
+      template: "ops-visit",
+      relatedId: "job-1",
+    });
+
+    expect(ok).toBe(false);
+    expect(emailLogs[0]).toMatchObject({ status: "FAILED" });
+    expect(workRows[0]).toMatchObject({
+      kind: "EMAIL_FAILURE",
+      status: "OPEN",
+      relatedId: "job-1",
+      ownerEmail: "info@pestbuzzkill.com",
+    });
+    expect(workHistory[0]).toMatchObject({ eventType: "OPENED" });
   });
 });

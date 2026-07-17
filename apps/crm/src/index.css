@@ -1047,6 +1047,13 @@ textarea {
   vertical-align: baseline;
 }
 
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 /* ---------- Report photos ---------- */
 
 .photo-block {

@@ -1,27 +1,31 @@
-import { createHash, randomBytes } from "node:crypto";
 import type { AppSyncResolverEvent } from "aws-lambda";
 import {
-  AdminAddUserToGroupCommand,
-  AdminCreateUserCommand,
   AdminDisableUserCommand,
   AdminEnableUserCommand,
-  AdminGetUserCommand,
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
-  AdminSetUserPasswordCommand,
-  AdminUpdateUserAttributesCommand,
   AdminUserGlobalSignOutCommand,
   CognitoIdentityProviderClient,
-  CreateGroupCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "../shared/dataClient";
 import { assertTechnicianCanBeSaved } from "../shared/compliance";
 import { opFieldName } from "../shared/opEvent";
-import { emailShell, notifyOffice, sendEmail } from "../shared/email";
+import { notifyOffice } from "../shared/email";
+import {
+  addToGroup,
+  ensureCognitoGroup,
+  ensureLogin,
+  grantCustomerPortal,
+  sendMagicLinkInvite,
+} from "../shared/portalProvision";
 import {
   customerAccessGroups,
   grpGroup,
 } from "../shared/dynamicGroups";
+import {
+  openMissingContactWork,
+  openOwnedWork,
+} from "../shared/ownedWork";
 
 const cognito = new CognitoIdentityProviderClient();
 
@@ -64,14 +68,41 @@ type AdminArgs =
 
 export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
   switch (opFieldName(event)) {
-    case "adminCreateUser":
-      return adminCreateUser(event.arguments as AdminCreateUserArgs);
+    case "adminCreateUser": {
+      const args = event.arguments as AdminCreateUserArgs;
+      try {
+        return await adminCreateUser(args);
+      } catch (err) {
+        if (args.roles.includes("CUSTOMER") && args.customerId) {
+          await recordPortalFailure(
+            args.customerId,
+            `Portal invite failed for ${args.name}`,
+            err
+          );
+        }
+        throw err;
+      }
+    }
     case "setCustomerGroup":
       return setCustomerGroup(event.arguments as SetCustomerGroupArgs);
-    case "revokePortalAccess":
-      return revokePortalAccess((event.arguments as CustomerIdArgs).customerId);
-    case "restorePortalAccess":
-      return restorePortalAccess((event.arguments as CustomerIdArgs).customerId);
+    case "revokePortalAccess": {
+      const customerId = (event.arguments as CustomerIdArgs).customerId;
+      try {
+        return await revokePortalAccess(customerId);
+      } catch (err) {
+        await recordPortalFailure(customerId, "Portal access revocation failed", err);
+        throw err;
+      }
+    }
+    case "restorePortalAccess": {
+      const customerId = (event.arguments as CustomerIdArgs).customerId;
+      try {
+        return await restorePortalAccess(customerId);
+      } catch (err) {
+        await recordPortalFailure(customerId, "Portal access restoration failed", err);
+        throw err;
+      }
+    }
     case "deactivateTechnician":
       return deactivateTechnician(
         (event.arguments as TechnicianIdArgs).technicianId
@@ -82,6 +113,26 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
       throw new Error(`Unknown field ${opFieldName(event)}`);
   }
 };
+
+async function recordPortalFailure(
+  customerId: string,
+  title: string,
+  err: unknown
+) {
+  const detail = err instanceof Error ? err.message : String(err);
+  await openOwnedWork({
+    kind: "PORTAL_FAILURE",
+    dedupeKey: `${customerId}:${title}`,
+    title,
+    detail,
+    customerId,
+    relatedId: customerId,
+    sourceUrl: `/customers/${customerId}`,
+    resolutionAction:
+      "Repair the portal account or group membership, verify the customer can sign in, and record the result.",
+    ownerTeam: "OPS",
+  });
+}
 
 async function saveTechnician(args: SaveTechnicianArgs) {
   const name = args.name.trim();
@@ -109,30 +160,6 @@ async function saveTechnician(args: SaveTechnicianArgs) {
     );
   }
   return { technicianId: result.data.id };
-}
-
-async function ensureCognitoGroup(groupName: string) {
-  try {
-    await cognito.send(
-      new CreateGroupCommand({
-        UserPoolId: USER_POOL_ID,
-        GroupName: groupName,
-        Description: "CRM dynamic access group",
-      })
-    );
-  } catch (err) {
-    if ((err as { name?: string }).name !== "GroupExistsException") throw err;
-  }
-}
-
-async function addToGroup(username: string, groupName: string) {
-  await cognito.send(
-    new AdminAddUserToGroupCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username,
-      GroupName: groupName,
-    })
-  );
 }
 
 async function removeFromGroup(username: string, groupName: string) {
@@ -196,87 +223,30 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
   if (roles.includes("CUSTOMER") && !args.customerId)
     throw new Error("customerId is required when creating a CUSTOMER login");
 
-  // Create (or find) the Cognito user. No temporary-password email —
-  // we send a single-use magic sign-in link instead (below).
-  let username = email;
-  let sub: string | undefined;
-  let created = false;
-  let needsPassword = false;
-  try {
-    const res = await cognito.send(
-      new AdminCreateUserCommand({
-        UserPoolId: USER_POOL_ID,
-        Username: email,
-        MessageAction: "SUPPRESS",
-        UserAttributes: [
-          { Name: "email", Value: email },
-          { Name: "email_verified", Value: "true" },
-          { Name: "name", Value: args.name },
-        ],
-      })
-    );
-    username = res.User?.Username ?? email;
-    sub = res.User?.Attributes?.find((a) => a.Name === "sub")?.Value;
-    created = true;
-    needsPassword = true;
-  } catch (err) {
-    if ((err as { name?: string }).name !== "UsernameExistsException") {
-      throw err;
-    }
-    const existing = await cognito.send(
-      new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: email })
-    );
-    username = existing.Username ?? email;
-    sub = existing.UserAttributes?.find((a) => a.Name === "sub")?.Value;
-    needsPassword = existing.UserStatus === "FORCE_CHANGE_PASSWORD";
-  }
-  if (!sub) throw new Error("Could not resolve Cognito sub for user");
+  // The login/grant/invite core lives in shared/portalProvision — the same
+  // implementation the booking webhook uses to provision portal access at
+  // conversion (R41), so an invite from this button and an invite from a paid
+  // booking cannot drift apart.
+  const { username, sub, created } = await ensureLogin(email, args.name);
 
-  // Users sign in via magic link (or later set their own password with the
-  // reset flow). A random permanent password moves the account out of
-  // FORCE_CHANGE_PASSWORD, which would otherwise block the custom auth flow.
-  if (needsPassword) {
-    await cognito.send(
-      new AdminSetUserPasswordCommand({
-        UserPoolId: USER_POOL_ID,
-        Username: username,
-        Password: `Bk1!${randomBytes(24).toString("base64url")}`,
-        Permanent: true,
-      })
-    );
-  }
-
-  const client = await dataClient();
   const groupsAdded: string[] = [];
-
   for (const role of roles.filter((r) => r !== "CUSTOMER")) {
     await addToGroup(username, role);
     groupsAdded.push(role);
   }
 
   if (roles.includes("CUSTOMER")) {
-    const customerId = args.customerId!;
-    const { data: customer } = await client.models.Customer.get({
-      id: customerId,
-    });
-    if (!customer) throw new Error(`Customer ${customerId} not found`);
-
-    const dynamicGroups = customerAccessGroups(customerId, customer.groupId);
-    for (const g of ["CUSTOMER", ...dynamicGroups]) {
-      if (g !== "CUSTOMER") await ensureCognitoGroup(g);
-      await addToGroup(username, g);
-      groupsAdded.push(g);
-    }
-
-    await client.models.Customer.update({
-      id: customerId,
-      portalUserSub: sub,
-      portalInvitedAt: new Date().toISOString(),
-      accessGroups: dynamicGroups,
-    });
+    groupsAdded.push(
+      ...(await grantCustomerPortal({
+        username,
+        sub,
+        customerId: args.customerId!,
+      }))
+    );
   }
 
   if (args.technicianId) {
+    const client = await dataClient();
     await client.models.Technician.update({
       id: args.technicianId,
       userSub: sub,
@@ -284,40 +254,14 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
     });
   }
 
-  // Magic sign-in link: single-use token, 7-day expiry for invites.
-  const token = randomBytes(32).toString("base64url");
-  await cognito.send(
-    new AdminUpdateUserAttributesCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username,
-      UserAttributes: [
-        {
-          Name: "custom:loginTokenHash",
-          Value: createHash("sha256").update(token).digest("hex"),
-        },
-        {
-          Name: "custom:loginTokenExp",
-          Value: String(Date.now() + 7 * 24 * 60 * 60_000),
-        },
-      ],
-    })
-  );
-  const crmUrl = process.env.CRM_APP_URL ?? "";
-  const link = `${crmUrl}/welcome#email=${encodeURIComponent(email)}&token=${token}`;
-  const linkSent = await sendEmail({
-    to: email,
-    subject: created
-      ? "Welcome to BuzzKill — tap to sign in"
-      : "Your BuzzKill sign-in link",
-    template: "magic-link-invite",
+  const linkSent = await sendMagicLinkInvite({
+    username,
+    email,
+    name: args.name,
+    sub,
+    created,
+    portal: roles.includes("CUSTOMER"),
     customerId: args.customerId ?? undefined,
-    relatedId: sub,
-    html: emailShell(
-      created ? `Welcome, ${args.name}!` : "Your sign-in link",
-      `<p>Your BuzzKill ${roles.includes("CUSTOMER") ? "customer portal" : "CRM"} account is ready. Tap below to sign in — no password needed.</p>
-       <p style="margin:24px 0"><a href="${link}" style="background:#176b2c;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600">Sign in to BuzzKill</a></p>
-       <p style="color:#666;font-size:13px;">The link works once and expires in 7 days. Need a new one? Use “Email me a sign-in link” on the login page. You can also set a password any time from the More tab.</p>`
-    ),
   });
 
   return { sub, username, created, groupsAdded, linkSent };
@@ -457,6 +401,11 @@ async function revokePortalAccess(customerId: string) {
   }
   const username = customer.email?.toLowerCase();
   if (!username) {
+    await openMissingContactWork({
+      customerId,
+      displayName: customer.displayName,
+      context: "Portal access could not be revoked because the login has no email identifier.",
+    });
     throw new Error(
       `Customer ${customerId} has a portal login but no email to identify it — remove the Cognito user by hand`
     );
@@ -483,6 +432,11 @@ async function restorePortalAccess(customerId: string) {
   }
   const username = customer.email?.toLowerCase();
   if (!username) {
+    await openMissingContactWork({
+      customerId,
+      displayName: customer.displayName,
+      context: "Portal access could not be restored because the login has no email identifier.",
+    });
     throw new Error(
       `Customer ${customerId} has a portal login but no email to identify it`
     );

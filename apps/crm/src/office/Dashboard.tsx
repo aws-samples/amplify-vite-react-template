@@ -10,8 +10,9 @@ import {
   type Invoice,
   type Job,
   type ServicePlan,
+  type WorkItem,
 } from "../lib/api";
-import { fmtDate, money, todayEastern } from "../lib/format";
+import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { revenueTotals } from "../lib/revenue";
 import { plansWithoutNextVisit, unchargedOneTimeJobs } from "../lib/workQueues";
 import {
@@ -61,23 +62,26 @@ export default function Dashboard() {
   const [plans, setPlans] = useState<ServicePlan[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [disputes, setDisputes] = useState<Dispute[]>([]);
+  const [ownedWork, setOwnedWork] = useState<WorkItem[]>([]);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [inv, cus, pl, jb, dp] = await Promise.all([
+      const [inv, cus, pl, jb, dp, work] = await Promise.all([
         listAll((t) => api().models.Invoice.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.Customer.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.ServicePlan.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.Job.list({ limit: 1000, nextToken: t })),
         listAll((t) => listDisputes({ limit: 1000, nextToken: t })),
+        listAll((t) => api().models.WorkItem.list({ limit: 1000, nextToken: t })),
       ]);
       setInvoices(inv);
       setCustomers(cus);
       setPlans(pl);
       setJobs(jb);
       setDisputes(dp);
+      setOwnedWork(work);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load dashboard");
     }
@@ -198,6 +202,9 @@ export default function Dashboard() {
 
   const openLeads = customers.filter((c) => c.status === "LEAD");
   const customerById = new Map(customers.map((c) => [c.id, c]));
+  const openOwnedWork = ownedWork
+    .filter((item) => item.status === "OPEN")
+    .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
 
   return (
     <Page title="Dashboard">
@@ -218,6 +225,38 @@ export default function Dashboard() {
         <Stat label="Unpaid" value={money(open)} tone="warn" />
         <Stat label="Failed" value={money(failed)} tone={failed ? "danger" : undefined} />
       </div>
+
+      <Card
+        title={`Exception work queue (${openOwnedWork.length})`}
+        actions={
+          <Button small variant="subtle" onClick={() => navigate("/work")}>
+            Open queue
+          </Button>
+        }
+      >
+        {openOwnedWork.length === 0 ? (
+          <p className="muted small">No owned exception work is open.</p>
+        ) : (
+          <>
+            <p className="muted small" style={{ marginBottom: 6 }}>
+              Every exception has an owner, deadline, resolution action, overdue escalation,
+              and permanent history. Email alerts do not clear this queue.
+            </p>
+            {openOwnedWork.slice(0, 5).map((item) => {
+              const overdue = item.dueAt < new Date().toISOString();
+              return (
+                <ListRow
+                  key={item.id}
+                  title={item.title}
+                  subtitle={`Owner: ${item.ownerSub === roles.sub ? "you" : item.ownerEmail} · due ${fmtDateTime(item.dueAt)}`}
+                  meta={<Badge tone={overdue ? "danger" : "warn"}>{overdue ? "overdue" : "open"}</Badge>}
+                  onClick={() => navigate("/work")}
+                />
+              );
+            })}
+          </>
+        )}
+      </Card>
 
       {refunded > 0 ? (
         // Netted out of Billed and Paid above, but shown rather than silently
@@ -444,6 +483,7 @@ export default function Dashboard() {
       ) : null}
 
       {aging.count === 0 &&
+      openOwnedWork.length === 0 &&
       recoveryQueue.length === 0 &&
       openDisputes.length === 0 &&
       needsAttention.length === 0 &&

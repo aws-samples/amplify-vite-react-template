@@ -8,6 +8,7 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
+import { openOwnedWork } from "../shared/ownedWork";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
   zoneFromMinutes,
@@ -668,6 +669,17 @@ async function quote(
       quoteJson: JSON.stringify({ contactMessage: message }),
       ...extra,
     });
+    await openOwnedWork({
+      kind: "CALLBACK_PROMISE",
+      dedupeKey: booking.id,
+      title: `Website callback promised: ${name}`,
+      detail: `${name} was promised a call within one hour about ${service.toLowerCase().replace("_", " ")} at ${address}. ${opsNote.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`.trim(),
+      relatedId: booking.id,
+      sourceUrl: "/work",
+      resolutionAction:
+        "Call the lead within the promised hour, record the outcome, and send the correct booking or referral next step.",
+      ownerTeam: "SALES",
+    });
     await notifyLeads({
       subject: "Website lead needs a call",
       heading: "Website lead needs a call",
@@ -1273,6 +1285,18 @@ async function cancel(body: Record<string, unknown>) {
     // "please try again" is false when the outage is ours, and retrying into a
     // Stripe outage just burns the customer's refund window.
     console.error(`cancel failed for booking ${booking.id}`, err);
+    await openOwnedWork({
+      kind: "PAID_VISIT_CANCELLATION",
+      dedupeKey: `failed-cancel:${booking.id}`,
+      title: `Finish paid cancellation: ${booking.name}`,
+      detail: `${booking.name} asked to cancel the ${String(booking.selectedDate)} paid visit on ${requestedOn}, but billing/refund cancellation failed: ${err instanceof Error ? err.message : String(err)}.${refundable ? ` Honor the full ${money(booking.amountCents ?? 0)} refund.` : ""}`,
+      customerId: booking.customerId,
+      relatedId: booking.id,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : "/schedule",
+      resolutionAction:
+        "Stop any live billing, cancel the visit, issue the refund owed as of the original request date, and confirm completion to the customer.",
+      ownerTeam: "FINANCE",
+    });
     await notifyOffice({
       subject: `ACTION REQUIRED — customer could not cancel: ${booking.name}`,
       heading: "A customer tried to cancel and it failed",
@@ -1284,7 +1308,7 @@ async function cancel(body: Record<string, unknown>) {
        ${
          datePersisted
            ? ""
-           : `<p style="color:#b91c1c;"><strong>That date is not saved on the booking</strong> — this email is the only record of it. If they retry after ${escapeHtml(requestedOn)} the system will judge their refund by the later date, so handle it from here.</p>`
+           : `<p style="color:#b91c1c;"><strong>That date is not saved on the booking</strong> — it is preserved on the owned cancellation work item as well as this alert. If they retry after ${escapeHtml(requestedOn)} the system will judge their refund by the later date, so handle it from the work queue.</p>`
        }
        <p style="color:#666;font-size:13px;">Booking: ${escapeHtml(booking.id)}<br/>Error: ${escapeHtml(err instanceof Error ? err.message : String(err))}</p>`,
     });

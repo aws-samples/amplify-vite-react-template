@@ -95,9 +95,14 @@ export default function Schedule() {
       const onDate = jobsOnDate.filter((j) => j.status !== "CANCELED");
       setDayJobs(onDate);
       setPoolJobs([
-        // COMPLETED / IN_PROGRESS never belong in the pool: "needs scheduling"
-        // must not offer an Assign that rewrites a status billing acted on.
-        ...onDate.filter((j) => !j.routeId && !assignBlockedNote(j.status)),
+        // COMPLETED / IN_PROGRESS / CANCELED never belong in the pool. A
+        // NO_ACCESS visit does, but only to be rebooked — the render offers
+        // Rebook, not Assign — so it is let through the assign-blocked filter.
+        ...onDate.filter(
+          (j) =>
+            !j.routeId &&
+            (!assignBlockedNote(j.status) || j.status === "NO_ACCESS")
+        ),
         ...unscheduled.filter((j) => j.scheduledDate !== date),
       ]);
       setCustomers(new Map(customerList.map((c) => [c.id, c])));
@@ -128,18 +133,13 @@ export default function Schedule() {
 
   const assign = async (job: Job, technicianId: string) => {
     // Guarded like unassign: the board schedules, it never rewrites history.
+    // Terminal visits (completed / canceled / no-access) are blocked here —
+    // a no-access visit is rebooked as a new linked stop, never reassigned.
     const blocked = assignBlockedNote(job.status);
     if (blocked) {
       setError(`Can't assign this stop: ${blocked}`);
       return;
     }
-    if (
-      job.status === "NO_ACCESS" &&
-      !window.confirm(
-        "This visit ended NO ACCESS. Assigning re-books it as a normal stop. Continue?"
-      )
-    )
-      return;
     setBusy(job.id);
     setError(null);
     try {
@@ -165,6 +165,28 @@ export default function Schedule() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not assign job");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Rebook a no-access visit as a NEW linked stop. The terminal visit — its
+  // reason, time, note, and door photo — stays untouched; the server creates
+  // a fresh UNSCHEDULED job pointing back at it.
+  const rebook = async (job: Job) => {
+    if (
+      !window.confirm(
+        `Rebook ${customerName(job)}'s no-access visit as a new stop to schedule? The no-access record (reason, note, photo) stays on file untouched.`
+      )
+    )
+      return;
+    setBusy(job.id);
+    setError(null);
+    try {
+      opResult(await api().mutations.rebookJob({ jobId: job.id }));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not rebook");
     } finally {
       setBusy(null);
     }
@@ -278,8 +300,19 @@ export default function Schedule() {
                   title={customerName(j)}
                   subtitle={`${j.serviceType}${j.scheduledDate && j.scheduledDate !== date ? ` · wants ${fmtDate(j.scheduledDate)}` : ""}${customerCity(j) ? ` · ${customerCity(j)}` : ""}`}
                   meta={
-                    <>
-                      {j.status === "NO_ACCESS" ? <StatusBadge status={j.status} /> : null}
+                    j.status === "NO_ACCESS" ? (
+                      <>
+                        <StatusBadge status={j.status} />
+                        <Button
+                          small
+                          variant="subtle"
+                          loading={busy === j.id}
+                          onClick={() => void rebook(j)}
+                        >
+                          Rebook
+                        </Button>
+                      </>
+                    ) : (
                       <Button
                         small
                         variant="subtle"
@@ -288,7 +321,7 @@ export default function Schedule() {
                       >
                         Assign
                       </Button>
-                    </>
+                    )
                   }
                 />
               ))}

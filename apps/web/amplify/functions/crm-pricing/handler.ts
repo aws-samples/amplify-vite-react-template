@@ -12,6 +12,7 @@ import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { callerIsOffice } from "../shared/authz";
 import { notifyLeads } from "../shared/email";
+import { openOwnedWork } from "../shared/ownedWork";
 import {
   clearsLeadFee,
   freqLabel,
@@ -1177,6 +1178,17 @@ async function notifyEscalation(
         ? `${money(priced.oneTimeCents)} flat`
         : "no card price"
     : "no card price";
+  await openOwnedWork({
+    kind: "PRICING_ESCALATION",
+    dedupeKey: runId ?? `${extracted.customerName ?? "unknown"}:${extracted.town ?? "unknown"}:${reason}`,
+    title: `Price manually: ${extracted.customerName ?? extracted.pest ?? "lead"}`,
+    detail: `${reason}. Computed quote: ${priceLine}.`,
+    relatedId: runId ?? "pricing-escalation",
+    sourceUrl: "/pricing",
+    resolutionAction:
+      "Review the pricing run, call the prospect the same day with an approved price or pass decision, and record the outcome.",
+    ownerTeam: "SALES",
+  });
   // R80: a pricing escalation is a lead needing a call — route it to sales@.
   await notifyLeads({
     subject: `Pricing escalation: ${extracted.town ?? "unknown town"} — ${extracted.pest || "lead"}`,

@@ -72,6 +72,26 @@ export const schema = a.schema({
   ]),
   PaymentMethodKind: a.enum(["CARD", "BANK"]),
   EmailStatus: a.enum(["SENT", "FAILED"]),
+  WorkKind: a.enum([
+    "NO_ACCESS",
+    "EMAIL_FAILURE",
+    "CALLBACK_PROMISE",
+    "DUPLICATE_LEAD",
+    "UNSTAFFED_VISIT",
+    "PAID_VISIT_CANCELLATION",
+    "PORTAL_FAILURE",
+    "PRICING_ESCALATION",
+    "MISSING_CONTACT",
+  ]),
+  WorkStatus: a.enum(["OPEN", "RESOLVED"]),
+  WorkEventType: a.enum([
+    "OPENED",
+    "REOCCURRED",
+    "REOPENED",
+    "CLAIMED",
+    "OVERDUE",
+    "RESOLVED",
+  ]),
   // A card dispute's lifecycle at Stripe. NEEDS_RESPONSE is the one with a
   // clock on it (evidenceDueBy); WON/LOST are terminal.
   DisputeStatus: a.enum([
@@ -467,6 +487,10 @@ export const schema = a.schema({
       noAccessAt: a.datetime(),
       noAccessNote: a.string(),
       noAccessPhotoKey: a.string(),
+      // A rebooked visit points at the terminal (no-access / canceled) visit
+      // it retries. The original stays immutable; this links the new attempt
+      // to it so the history reads as a chain, not a reused row.
+      rebookedFromJobId: a.id(),
       notes: a.string(),
       accessGroups: a.string().array(),
       serviceReports: a.hasMany("ServiceReport", "jobId"),
@@ -768,6 +792,65 @@ export const schema = a.schema({
     ]),
 
   /**
+   * Durable exception work. Alerts may accompany these rows, but the row is
+   * the authority: it always names an owner, a due time and a concrete next
+   * action, remains visible until somebody resolves it, and is never deleted.
+   *
+   * Producers use a deterministic id (kind + source record) so Lambda retries
+   * add history instead of making duplicate queue entries. Browser roles are
+   * read-only; claim/resolve goes through updateOwnedWork so the actor and the
+   * append-only WorkEvent ledger are stamped server-side.
+   */
+  WorkItem: a
+    .model({
+      kind: a.ref("WorkKind").required(),
+      status: a.ref("WorkStatus").required(),
+      title: a.string().required(),
+      detail: a.string().required(),
+      customerId: a.id(),
+      relatedId: a.string().required(),
+      sourceUrl: a.string(),
+      resolutionAction: a.string().required(),
+      ownerTeam: a.string().required(),
+      ownerSub: a.string(),
+      ownerEmail: a.string().required(),
+      dueAt: a.datetime().required(),
+      lastOccurredAt: a.datetime().required(),
+      occurrenceCount: a.integer().required(),
+      escalatedAt: a.datetime(),
+      resolvedAt: a.datetime(),
+      resolvedBySub: a.string(),
+      resolvedByEmail: a.string(),
+      resolutionNote: a.string(),
+      events: a.hasMany("WorkEvent", "workItemId"),
+    })
+    .secondaryIndexes((index) => [
+      index("status").sortKeys(["dueAt"]),
+      index("kind").sortKeys(["lastOccurredAt"]),
+    ])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+    ]),
+
+  /** Permanent, append-only history for a WorkItem. */
+  WorkEvent: a
+    .model({
+      workItemId: a.id().required(),
+      workItem: a.belongsTo("WorkItem", "workItemId"),
+      eventType: a.ref("WorkEventType").required(),
+      actorSub: a.string(),
+      actorEmail: a.string().required(),
+      note: a.string().required(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [
+      index("workItemId").sortKeys(["occurredAt"]),
+    ])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+    ]),
+
+  /**
    * Provision a Cognito login for staff (roles OWNER/OFFICE/FINANCE/TECH —
    * combinations are simply multiple roles) or a customer (roles
    * ["CUSTOMER"] + customerId). Optionally links a Technician record via
@@ -932,6 +1015,18 @@ export const schema = a.schema({
       otherJobId: a.string(),
       otherRouteOrder: a.integer(),
     })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * Rebook a terminal (no-access / canceled) visit as a NEW linked attempt.
+   * The original stays immutable; the new job carries rebookedFromJobId. A
+   * completed visit is not rebooked, and a live job is scheduled, not rebooked.
+   */
+  rebookJob: a
+    .mutation()
+    .arguments({ jobId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmDocs)),
@@ -1132,6 +1227,22 @@ export const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE", "OFFICE"])])
     .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Claim or resolve durable exception work. CLAIM assigns the signed-in
+   * staff member. RESOLVE requires a note describing what actually happened;
+   * both changes append an immutable WorkEvent.
+   */
+  updateOwnedWork: a
+    .mutation()
+    .arguments({
+      workItemId: a.string().required(),
+      action: a.string().required(),
+      note: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .handler(a.handler.function(crmDocs)),
 
   /**
    * Refund a paid invoice, in full or in part. The only way a refund happens:
