@@ -507,3 +507,24 @@ describe("a finalized report is immutable", () => {
     ).rejects.toThrow(/isn't linked to a technician record/i);
   });
 });
+
+describe("office completion is for administrative job types only", () => {
+  it("refuses to complete field/pesticide work from the office — that needs a finalized report", async () => {
+    // jobs[0] is "General pest": field work. No administrative type is defined,
+    // so the office cannot complete it; the technician's report is the only path.
+    await expect(call("completeJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow(
+      /finalized service report|administrative job types/i
+    );
+    expect(jobs[0].status).toBe("IN_PROGRESS"); // untouched — no COMPLETED, no billing
+    expect(jobs[0].completedAt).toBeUndefined();
+  });
+
+  it("does not start billing or queue a next visit when it refuses", async () => {
+    const { scheduleNextRecurringVisit } = await import("../shared/recurring");
+    vi.mocked(scheduleNextRecurringVisit).mockClear(); // earlier finalize tests called it
+
+    await expect(call("completeJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow();
+
+    expect(scheduleNextRecurringVisit).not.toHaveBeenCalled();
+  });
+});

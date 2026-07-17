@@ -532,6 +532,28 @@ async function startBillingForPlan(job: {
  * Marks the job COMPLETED, starts plan billing, and queues the next recurring
  * visit, mirroring what finalizeServiceReport does after a report.
  */
+/**
+ * The defined set of administrative job types the office may complete
+ * WITHOUT a technician's finalized report — stored lowercased for a
+ * case-insensitive match. Field and pesticide work is never here: its
+ * completion IS the tech's finalized service report, which is the legal
+ * pesticide application record. Office-completing such a job would mark it
+ * done with no record behind it — the exact editable-regulatory-gap the
+ * report immutability work closed, reopened from the office side.
+ *
+ * Empty today: no administrative job type is defined, so every job
+ * completes via a finalized report. Add an exact (lowercased) serviceType
+ * here to make that one type office-completable. KEEP IN SYNC with
+ * apps/crm/src/lib/jobTypes.ts (the UI hides the button for the same set).
+ */
+export const ADMIN_JOB_SERVICE_TYPES = new Set<string>([]);
+
+export function isOfficeCompletableServiceType(
+  serviceType: string | null | undefined
+): boolean {
+  return ADMIN_JOB_SERVICE_TYPES.has((serviceType ?? "").trim().toLowerCase());
+}
+
 async function completeJob(jobId: string) {
   const client = await dataClient();
   const { data: job } = await client.models.Job.get({ id: jobId });
@@ -541,6 +563,13 @@ async function completeJob(jobId: string) {
   }
   if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") {
     throw new Error(`Can't complete a ${job.status.toLowerCase()} job`);
+  }
+  // Field/pesticide work is completed by the technician's finalized report,
+  // never from the office — that report is the legal application record.
+  if (!isOfficeCompletableServiceType(job.serviceType)) {
+    throw new Error(
+      `"${job.serviceType}" is field work — it is completed by the technician's finalized service report (the legal pesticide record), not from the office. Only defined administrative job types can be office-completed.`
+    );
   }
   const completedAt = new Date().toISOString();
   await client.models.Job.update({ id: jobId, status: "COMPLETED", completedAt });

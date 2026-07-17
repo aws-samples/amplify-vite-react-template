@@ -21,6 +21,7 @@ import {
   completeJobConfirmText,
   startBillingConfirmText,
 } from "../lib/billingDisclosure";
+import { isOfficeCompletableServiceType } from "../lib/jobTypes";
 import {
   Badge,
   Button,
@@ -643,8 +644,14 @@ export default function CustomerDetail() {
                           paid {j.priceCents ? money(j.priceCents) : ""} online
                         </Badge>
                       ) : null}
+                      {/* Office completion is for defined administrative job
+                          types only. Field/pesticide work is completed by the
+                          technician's finalized report — the legal application
+                          record — so it never gets an office "Complete" button;
+                          the server refuses it too. */}
                       {roles.office &&
-                      (j.status === "SCHEDULED" || j.status === "IN_PROGRESS") ? (
+                      (j.status === "SCHEDULED" || j.status === "IN_PROGRESS") &&
+                      isOfficeCompletableServiceType(j.serviceType) ? (
                         <Button
                           small
                           variant="ghost"

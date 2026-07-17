@@ -175,6 +175,19 @@ by card, schedule)"; suites 367 web / 140 CRM):
   (the manual-quote, sign-page, e-sign-consent, and agreement-textarea surfaces no longer
   exist); **R72's quote-status half retires** with the Quote model (lead follow-ups continue
   via LeadPricingRun).
+- **Office "Complete without a report" side door closed** (follow-up, compliance): the
+  CustomerDetail "✓ Complete" button (CustomerDetail.tsx:646) let office staff mark any
+  SCHEDULED/IN_PROGRESS job COMPLETED — starting billing and queuing the next visit — with no
+  technician report, i.e. a finished pesticide job with no legal application record (the
+  editable-record gap the R09–R11 work closed, reopened from the office side). Field work now
+  completes only through the tech's `finalizeServiceReport`, which does the identical
+  completion sequence (COMPLETED + billing + next visit) *plus* produces the immutable record.
+  A new defined-and-currently-empty `ADMIN_JOB_SERVICE_TYPES` set is the only thing the office
+  may complete without a report; `completeJob` refuses everything else server-side and the
+  button hides for it. **Jake to name the administrative job types** (non-pesticide tasks with
+  no field visit) — until then, every job completes via a report. Residual: OFFICE holds
+  model-level `Job.update`, so raw GraphQL could still set COMPLETED — same structural-guard
+  follow-up as the customer-status door (route office job writes through guarded mutations).
 - **Customer-status side door closed** (follow-up, same principle): the Customers screen's
   "+ Customer" button minted an ACTIVE customer directly (Customers.tsx:177,
   `status: "ACTIVE"`). It is now "+ Lead" and creates a LEAD — so a new customer reaches ACTIVE
