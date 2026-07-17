@@ -511,6 +511,47 @@ describe("R41 — the portal login is part of conversion", () => {
     expect(item).toBeDefined();
     expect(item!.detail).toContain("Cognito is down");
   });
+
+  it("a provisioned login whose invite email failed to send makes no promise and is owned work", async () => {
+    portalLinkSent = false;
+
+    await finalize();
+
+    // The account exists, but the customer was never told — so the
+    // confirmation must not promise a link, and someone must resend it.
+    const confirmation = emails.find((e) => e.subject.startsWith("You're booked"));
+    expect(confirmation!.html).not.toContain("customer portal sign-in link");
+    const item = workOpened.find((w) => w.kind === "PORTAL_FAILURE");
+    expect(item).toBeDefined();
+    expect(item!.title).toMatch(/invite email did not send/i);
+  });
+
+  it("a re-booking INACTIVE customer with an existing (likely disabled) login becomes owned work", async () => {
+    seedLead({ status: "INACTIVE", portalUserSub: "sub-existing" });
+
+    await finalize();
+
+    // No duplicate invite — but no silence either: deactivation disabled
+    // the login and conversion doesn't re-enable it.
+    expect(portalInvites).toHaveLength(0);
+    const item = workOpened.find((w) => w.kind === "PORTAL_FAILURE");
+    expect(item).toBeDefined();
+    expect(item!.title).toMatch(/may be disabled/i);
+  });
+
+  it("still provisions when lead matching fails and finalization falls back to a fresh customer", async () => {
+    customerListError = new Error("DynamoDB flaked");
+
+    await finalize();
+
+    expect(portalInvites).toEqual([
+      {
+        customerId: "cust-new",
+        email: "dana@example.com",
+        name: "Dana Whitlock",
+      },
+    ]);
+  });
 });
 
 describe("idempotency and payment guards survive the matching", () => {

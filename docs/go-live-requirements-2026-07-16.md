@@ -44,6 +44,38 @@ can do. That is a launch checklist, not a crisis list.
 **One item is urgent independent of go-live: R81. The Buildium client secret is committed to a
 public GitHub repo.** Rotate it today.
 
+**Portal access is part of conversion — R41 closed** (Jake's directive, 17 July: "Provision the
+portal as part of conversion — paid customers are not automatically invited, yet reports,
+receipts, and payment-recovery messages direct customers to the portal"; suites 561 web /
+188 CRM, adversarially verified, one defect caught in verification and fixed):
+
+- `bookingFinalize` now provisions the customer-portal login the moment a booking converts
+  the customer: Cognito account created (or reused by email), CUSTOMER + cus-/grp- groups
+  granted, `portalUserSub`/`portalInvitedAt` stamped, magic-link invite sent — so the
+  receipts, service reports, and payment-recovery emails that all point at the portal point
+  at something the customer can actually open. A repeat customer who already has a login is
+  left alone, and the booking confirmation mentions the portal only when the invite actually
+  went out (the verifier caught the provisioned-but-email-failed case asserting a link that
+  never sent; fixed and pinned by test).
+- The provisioning core moved to `shared/portalProvision.ts`; crm-admin's `adminCreateUser`
+  now delegates to it — one implementation behind the invite button and the webhook, verified
+  behavior-identical (same Cognito call order, group bookkeeping, email copy, return shape).
+- Failure is owned work, never a bricked finalization: a provisioning throw, a dead invite
+  email, or a re-booking INACTIVE customer whose login deactivation disabled (conversion does
+  not re-enable logins — `restorePortalAccess` is the fix) each open a PORTAL_FAILURE work
+  item (OPS, 4-hour SLA) instead of failing the paid booking or logging silently.
+- The service-report email's "always available in your BuzzKill portal" clause now renders
+  only for customers who actually hold a login — R41's honesty half for the one
+  legacy-reachable email.
+- **Deploy note:** `stripeWebhook` gains the same Cognito access bundle as crm-admin
+  (auth/resource.ts — the grant that injects `AMPLIFY_AUTH_USERPOOL_ID`). Structurally
+  identical to the proven crmAdmin grant, but watch the first staging deploy: a CDK synth was
+  not possible locally.
+- **Residual (ops backfill):** customers converted before this change still have no login
+  until someone presses Invite to portal — the recovery emails' pay links dead-end for
+  exactly that cohort. A one-time sweep (invite every ACTIVE customer with an email and no
+  `portalUserSub`) closes it.
+
 **Lead emails to sales@** (Jake's directive, 17 July: "lead related emails only ever go to
 sales@pestbuzzkill.com" — R80's routing half; suites 441 web / 143 CRM):
 
