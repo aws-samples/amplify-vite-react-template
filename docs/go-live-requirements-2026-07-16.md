@@ -160,11 +160,13 @@ bypass and reassignment also lack the required reasoned audit.
 **Business outcome:** A finalized service report is an accurate, delivered, correctable legal
 record—not merely a PDF the UI says was sent.
 
-**Why this is still a gate after commit `b9d75df`:** Finalization no longer infers the application
-window—it refuses any report whose job lacks a server-stamped Start and End, and never substitutes
-its own clock, so the record's times are the real on-site times. The remaining gaps stand: field
-staff can still enter an arbitrary manual pesticide, location evidence is not validated, delivery can
-fail while the UI says sent, and no append-only amendment workflow exists.
+**Why this is still a gate after commits `b9d75df` and `af289df`:** Finalization no longer infers the
+application window—it refuses any report whose job lacks a server-stamped Start and End, so the
+record's times are the real on-site times. It also refuses any product that is not an active,
+label-approved catalog row (matched by EPA number and name), so an arbitrary manual pesticide can no
+longer reach a finalized record—an unknown product must be reviewed into the catalog by the office
+first. The remaining gaps stand: location evidence is not validated, delivery can fail while the UI
+says sent, and no append-only amendment workflow exists.
 
 **Required acceptance evidence:**
 
