@@ -2,13 +2,16 @@
 
 **Business review date:** 17 July 2026
 
+**Latest implementation review:** commits `0dd973d` and `940a4b9`
+
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** document. It intentionally excludes capabilities that are already
-working in the reviewed draft. An omitted item is not a request to rebuild it. The requirements
-below are the remaining business outcomes that must be proved before production launch.
+working in the reviewed draft. The two latest commits were verified against their code and targeted
+tests; only their unclosed residuals remain in GL-08 and GL-12. An omitted item is not a request to
+rebuild it.
 
 The standard is the “McDonald's test”: a week-one employee must be able to do the right thing
 without remembering policy, performing mental math, interpreting system internals, or inventing
@@ -28,151 +31,50 @@ Go-live requires all of the following:
 4. A failure test is required wherever money, customer status, access, scheduling capacity, or a
    regulated service record changes. A happy-path demonstration alone does not pass a gate.
 
+## Priority model
+
+- **P0 — Critical:** Close first. Failure can create unauthorized access or charges, invalid
+  regulated records, direct financial loss, or a customer commitment the business cannot honor.
+- **P1 — High:** Close after P0. Failure creates predictable revenue leakage, service breakdown,
+  repeat work, or customer escalation.
+- **P2 — Launch proof:** Close after the product gates. These prove that real data, people,
+  procedures, and first-week users can operate the release safely.
+
+Priority changes implementation order, not launch status: **P0, P1, and P2 are all go-live
+blockers.**
+
 ## Gate register
 
-| ID | Remaining gate | Accountable business owner | Primary seats at risk |
-|---|---|---|---|
-| GL-01 | One truthful, complete service catalog | CEO | Leadership, customer, operations |
-| GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | CEO, sales, customer |
-| GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer, operations |
-| GL-04 | Capacity that cannot be oversold | Head of Operations | Customer, technician, operations |
-| GL-05 | Exactly-once paid booking conversion | CEO + Engineering lead | Customer, operations, finance |
-| GL-06 | Honest handling of processing and failed payments | Finance lead | Customer, operations |
-| GL-07 | One safe office cancel/reschedule workflow | Head of Operations | Customer, finance, operations |
-| GL-08 | Customer self-service plan cancellation | CEO | Customer, operations, finance |
-| GL-09 | Atomic customer and plan lifecycle controls | Head of Operations | Customer, finance, security |
-| GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | Customer, technician, finance |
-| GL-11 | Minimum complete customer/group portal | Head of Operations | Customer, property manager |
-| GL-12 | Dispatch-ready job packet | Head of Operations | Technician, customer, safety |
-| GL-13 | Technician least-privilege and assignment enforcement | CEO | Customer, technician, compliance |
-| GL-14 | Staff identity, linking, and offboarding | CEO | Security, operations |
-| GL-15 | Legally reliable service-report completion | Compliance owner | Technician, customer, operations |
-| GL-16 | Governed pricing and margin protection | CEO + Finance lead | CEO, finance, customer |
-| GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Customer, finance, technician |
-| GL-18 | Verifiable exception resolution | Head of Operations | Leadership, operations |
-| GL-19 | Launch reconciliation and command view | CEO + Finance lead | CEO, leadership, operations |
-| GL-20 | Public promises and legal terms match operations | CEO | Customer, legal, brand |
-| GL-21 | Production accounts, integrations, and live money rehearsal | Engineering lead + Finance lead | Entire business |
-| GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | Entire business |
-| GL-23 | Production master data and launch-day operating model | Head of Operations | Operations, technician, customer |
-| GL-24 | Low-skill usability and role certification | Head of Operations | Every role |
+| Priority | ID | Remaining gate | Accountable business owner | Impact if missed |
+|---|---|---|---|---|
+| P0 | GL-05 | Exactly-once paid booking conversion | CEO + Engineering lead | Paid customer without service, duplicate commitments, or duplicate money |
+| P0 | GL-13 | Technician least-privilege and assignment enforcement | CEO | Customer-data exposure or unauthorized regulated field action |
+| P0 | GL-15 | Legally reliable service-report completion | Compliance owner | Invalid or undelivered regulated record |
+| P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Sell work the company cannot staff or legally perform |
+| P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI/employee can publish loss-making or nonsensical prices |
+| P0 | GL-09 | Atomic customer and plan lifecycle controls | Head of Operations | Billing, access, service, and status disagree |
+| P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | Customer believes billing stopped when it may continue |
+| P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer promise made before money is settled |
+| P0 | GL-07 | One safe office cancel/reschedule workflow | Head of Operations | Incorrect refund, route, plan, or customer notice |
+| P0 | GL-14 | Staff identity, linking, and offboarding | CEO | Departed/unlinked staff retain access or work |
+| P0 | GL-01 | One truthful, complete service catalog | CEO | Unsupported service sold; downstream rules have no owner |
+| P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure |
+| P0 | GL-21 | Production accounts, integrations, and live money rehearsal | Engineering lead + Finance lead | Staging assumptions or secrets fail with real customers/money |
+| P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | Critical failure stays silent or records cannot be restored |
+| P1 | GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | Revenue leaks through unowned or stale leads |
+| P1 | GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer waits on a contact that did not happen |
+| P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | Public promise becomes uncontrolled free work or customer dispute |
+| P1 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | Unsafe, unperformable, or inefficient field visit |
+| P1 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Wrong billing season or work outside licensed scope |
+| P1 | GL-18 | Verifiable exception resolution | Head of Operations | Dashboard turns green while customer problem remains |
+| P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Property/customer requests and records fall back to calls |
+| P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot detect revenue/work/customer mismatches |
+| P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs with wrong facts or no queue owner |
+| P2 | GL-24 | Low-skill usability and role certification | Head of Operations | Launch still depends on tribal knowledge |
 
 ---
 
-## Customer acquisition and booking
-
-### GL-01 — One truthful, complete service catalog
-
-**Business outcome:** A customer can never be promised a service the operating system cannot
-price, staff, perform, document, and support profitably.
-
-**Why this is still a gate:** The public site advertises more services than the quote funnel can
-select, while the funnel says every service gets an exact price. Several distinct services collapse
-into broad pricing categories with no approved duration, license scope, or service template.
-
-**Required acceptance evidence:**
-
-- The CEO approves one launch catalog that maps every marketed service to all of: supported
-  property types, service area, intake questions, price method, minimum margin, expected duration,
-  required technician credential, job instructions, allowed products, report requirements,
-  cancellation rule, and guarantee/return-service rule.
-- Every public call-to-action has one valid result: a genuinely bookable service, or an honest
-  specialist-review path. It may not send a customer to an option that does not exist.
-- Services not approved for self-serve quoting are clearly labeled for review before the customer
-  supplies payment. “Exact price” and “no callback” language appears only where it is true.
-- Termite, wildlife, exclusion, attic/restoration, mosquito/tick, community, commercial, and other
-  specialized offers are individually approved or removed from launch. They may not inherit a
-  generic service merely because no matching category exists.
-- The same catalog drives marketing, quoting, scheduling duration, technician instructions,
-  reporting, plans, callbacks, refunds, and leadership reporting. A service cannot mean something
-  different in each screen.
-- A test quote for every retained site service reaches the correct price or review outcome, then
-  creates the correct job/plan terms and technician packet.
-
-**Pass owner:** CEO, with written sign-off from Operations, Finance, and Compliance.
-
-### GL-02 — A lead lifecycle in which no lead can disappear
-
-**Business outcome:** Every lead always has an accountable person, a next action, and an auditable
-outcome until it becomes a customer or is deliberately closed.
-
-**Why this is still a gate:** A lead can currently be saved with insufficient contact information,
-has no assigned owner or follow-up deadline, and has no complete stage/lost lifecycle. Duplicate
-people can also be created before the safe paid-conversion path is reached.
-
-**Required acceptance evidence:**
-
-- The business approves a small, unambiguous pipeline: at minimum **New**, **Attempting contact**,
-  **Qualified**, **Booking sent**, **Booked/Won**, **Lost**, and **Do not contact**.
-- Every open lead has an owner, created time, last-touch time, next action, and due time. Missing or
-  overdue actions appear in an owner and manager queue; they are not found by browsing a list.
-- A lead cannot be saved without a usable contact route. If incomplete third-party data must be
-  accepted, the save creates a clearly owned “obtain contact information” exception automatically.
-- Email/phone normalization and duplicate detection run before creation. A week-one employee gets
-  a simple **Use existing**, **Create separate**, or **Ask manager** decision with enough context;
-  the system never silently merges people.
-- Every call, email, text, and booking-link attempt records time, channel, actor, and actual outcome.
-  A failed delivery does not count as a successful touch.
-- Lost leads require a controlled reason. Do-not-contact immediately suppresses non-essential sales
-  outreach and records who made the decision.
-- The CEO sets response and follow-up SLAs by lead source. The launch rehearsal proves a new lead,
-  failed contact, overdue follow-up, duplicate, booking, and lost lead all land in the correct queue.
-- The CEO explicitly decides how phone-only and non-card customers are handled. If they are not a
-  supported launch segment, staff receive a truthful close reason instead of a dead-end conversion
-  path. If they are supported, the approved path retains the same pricing, terms, identity, and
-  audit controls as self-service booking.
-
-**Pass owner:** Head of Sales.
-
-### GL-03 — Honest fallback contact and communication outcomes
-
-**Business outcome:** Customers are told what will actually happen, and staff never see a success
-message for a communication that was not delivered.
-
-**Why this is still a gate:** The quote fallback promises a call even when phone is optional, and
-some CRM communication actions can return a non-delivery result while the screen presents success.
-
-**Required acceptance evidence:**
-
-- A quote that needs human review captures a usable preferred contact channel. If a call is
-  promised, a valid phone number and call consent are required; otherwise the promise says email.
-- The customer sees a specific response window the sales team has accepted and can meet during
-  published business hours. After-hours submissions receive a truthful next-business-window time.
-- Every send action branches on the delivery result: **sent**, **not sent—fix this now**, or
-  **queued for retry**. Only the first state can display “sent.”
-- Bounce, suppression, missing mailbox, and provider failure create an owned exception tied to the
-  lead/customer and expose an approved alternate-contact next step.
-- A test using an invalid address and a suppressed address proves that neither the customer record
-  nor the employee screen falsely records successful contact.
-
-**Pass owner:** Head of Sales.
-
-### GL-04 — Capacity that cannot be oversold
-
-**Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
-cannot buy the same last unit of capacity.
-
-**Why this is still a gate:** Public availability is based on a coarse active-technician/day count,
-offers capacity even with no active technician, and only rechecks availability before payment. It
-does not reserve the slot while payment completes.
-
-**Required acceptance evidence:**
-
-- Sellable capacity uses the technician's actual working day, approved leave/blackouts, credential
-  validity on the service date, service duration, service territory, travel allowance, and time
-  window. Zero eligible technicians means zero sellable dates.
-- Capacity rules are the same in the public funnel and the dispatch board. A day/window cannot be
-  “available” to the customer and over capacity to Operations.
-- Selecting checkout places a short, visible capacity hold. A successful payment consumes it;
-  abandonment, failure, and expiry release it. The CEO approves the hold duration.
-- A concurrency test starts two purchases for the last slot. Exactly one may be booked; the other
-  receives a truthful alternate-date/refund outcome without manual database repair.
-- Operations can block a day, technician, territory, or window and can see why a date is or is not
-  sellable. Removing capacity immediately protects all unconsumed public slots.
-- The system prevents staffing a service outside the assigned technician's active license/scope,
-  even if the slot was quoted earlier.
-
-**Pass owner:** Head of Operations.
+## Priority 0 — Critical money, security, compliance, and customer commitments
 
 ### GL-05 — Exactly-once paid booking conversion
 
@@ -203,233 +105,6 @@ booking complete even when a required child record was not created.
 
 **Pass owner:** CEO and Engineering lead jointly; Finance verifies the reconciliation.
 
-### GL-06 — Honest handling of processing and failed payments
-
-**Business outcome:** A customer is never told they are booked or paid while the payment can still
-fail, and Operations never dispatches an unconfirmed payment as if it were settled.
-
-**Why this is still a gate:** A payment in `processing` can currently produce “You're booked” and
-“paid today” language even though final booking creation waits for a later success event.
-
-**Required acceptance evidence:**
-
-- The CEO chooses which payment methods are allowed to finalize instantly and which require a
-  **Payment processing—slot held, not yet booked** state.
-- Processing copy states what is reserved, what is not yet confirmed, when the customer will hear,
-  and what happens if payment fails. It never uses “paid” or “booked” prematurely.
-- Success finalizes the held booking once. Failure/timeout releases capacity, informs the customer,
-  and records the lead/customer outcome without creating a service commitment.
-- Operations can distinguish **processing**, **paid/finalizing**, **booked**, and **failed** without
-  interpreting Stripe terminology.
-- Tests cover delayed success, delayed failure, duplicate events, events delivered out of order,
-  and a payment that succeeds after its capacity hold expired.
-
-**Pass owner:** Finance lead.
-
----
-
-## Customer, plan, and service lifecycle
-
-### GL-07 — One safe office cancel/reschedule workflow
-
-**Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
-plan, capacity, route, and customer-notification consequences in one guided action.
-
-**Why this is still a gate:** The office job controls change schedule state directly and do not
-provide a unified refund/credit decision, recurring-plan effect, or guaranteed customer notice.
-
-**Required acceptance evidence:**
-
-- Before confirmation, the employee sees customer, visit, amount paid/open, policy deadline,
-  calculated refund/credit/fee, plan consequence, route consequence, and exact notice to be sent.
-- The allowed choices are plain business decisions such as **Reschedule**, **Cancel and refund**,
-  **Cancel and retain approved credit**, or **Manager exception**. Staff never calculate an amount.
-- One confirmation performs all approved consequences. If any consequence fails, the screen does
-  not claim completion and the case stays in an owned exception with a safe resume action.
-- Rescheduling revalidates capacity and technician license, moves the capacity claim, updates the
-  route, and notifies the customer with old and new details.
-- Cancellation records initiator, reason, policy used, amount and disposition, timestamps, and the
-  customer communication result. Recurring-plan cancellation is never implied by canceling one
-  visit unless the employee explicitly chooses it.
-- Tests cover paid/unpaid, one-time/recurring, inside/outside policy, assigned/unassigned, refund
-  failure, notice failure, and two employees acting on the same visit.
-
-**Pass owner:** Head of Operations; Finance approves money dispositions.
-
-### GL-08 — Customer self-service plan cancellation
-
-**Business outcome:** A recurring customer can stop future service and billing online without
-calling, while seeing the exact consequence before confirming.
-
-**Why this is still a gate:** The portal does not currently provide an ongoing plan-cancellation
-path even though public language promises cancellation flexibility.
-
-**Required acceptance evidence:**
-
-- An authenticated customer can cancel an active plan from the portal in a short, accessible flow.
-- The confirmation preview states the effective date, final charge/refund/credit, treatment of
-  queued visits, loss of guarantee/coverage, and whether any already-paid visit remains.
-- Cancellation reason is optional for the customer and must never block cancellation. A pause or
-  save offer may be presented once but cannot obscure or delay the cancel action.
-- One confirmation stops future billing and visits, preserves required records, frees capacity,
-  updates plan/customer views, and sends a durable confirmation.
-- A failure does not show cancellation. It creates a customer-visible pending state and an urgent
-  owned exception so the customer is not billed while believing they canceled.
-- Tests cover no queued visit, queued visit, open/failed invoice, pending payment, duplicate clicks,
-  and provider/API failure.
-
-**Pass owner:** CEO, with Finance and Operations approval.
-
-### GL-09 — Atomic customer and plan lifecycle controls
-
-**Business outcome:** Customer status, login access, billing, and scheduled work can never disagree,
-and routine staff cannot bypass the approved lifecycle with a raw field change.
-
-**Why this is still a gate:** Customer deactivation and portal revocation are separate client
-actions; rebooking an inactive customer can leave a paid customer with disabled access; and broad
-record-update permissions can bypass guarded status, plan, pricing, or provider-linked workflows.
-
-**Required acceptance evidence:**
-
-- **Deactivate customer** is one server-owned business action covering plan billing, queued visits,
-  open balances, customer login, communications, and status. A partial failure resumes safely.
-- Rebooking/reactivating an inactive customer explicitly restores the approved access and service
-  state before confirmation, or blocks purchase with a truthful assisted-resolution path.
-- Statuses, plan price/status, Stripe identifiers, access groups, paid state, and other protected
-  lifecycle fields can change only through named business actions with validation and audit. Office
-  screens retain only safe contact/address/note edits.
-- Two employees performing conflicting lifecycle actions cannot produce mixed state; the second
-  receives the current fact and one safe next step.
-- Every transition records actor, timestamp, reason, prior state, new state, and related money/job
-  effects. Leadership can retrieve the history without engineering assistance.
-- Tests cover deactivation with active plan/queued visit/open invoice, partial provider failure,
-  rebooking an inactive customer, reactivation, and attempted direct protected-field updates.
-
-**Pass owner:** Head of Operations; Finance and CEO approve protected fields and transition policy.
-
-### GL-10 — Guarantee, callback, and no-access lifecycle
-
-**Business outcome:** Every public service promise has a defined, measurable operational path, and
-a failed access visit cannot be “resolved” without actually completing the approved customer and
-money outcome.
-
-**Why this is still a gate:** Public pages promise return service/guarantees, but the app has no
-distinct linked callback lifecycle. No-access evidence and customer status are incomplete, and the
-resolution can be closed without verifying notification, refund, or rebooking.
-
-**Required acceptance evidence:**
-
-- The CEO approves a guarantee matrix by service: eligibility, term, covered pests/conditions,
-  exclusions, customer obligations, maximum response time, charge, and approval authority. The
-  accepted customer terms contain the same matrix.
-- Customers and staff can request a callback/return service. The resulting job is visibly linked to
-  the original service and cannot accidentally be charged as a new sale.
-- Operations sees callback volume, reason, original technician/service, days to resolution, and
-  repeat-callback rate. Leadership can use it as a quality and margin signal.
-- A no-access outcome is visible to the customer, includes the approved reason and evidence, and
-  sends a truthful next step. Operations can open the evidence from the case.
-- The CEO approves the no-access financial policy. The system must not charge a fee unless that
-  exact policy was disclosed before purchase and the case meets it; the employee never decides or
-  calculates a fee ad hoc.
-- No-access resolution closes only after the chosen rebook/refund/credit/customer-notice outcome is
-  verified. It cannot be closed by typing a note that claims the work happened.
-- Tests cover guaranteed/not guaranteed, repeat callback, linked zero-price visit, no access with
-  paid/unpaid work, evidence access, refund failure, notice failure, and rebooking collision.
-
-**Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
-
-### GL-11 — Minimum complete customer/group portal
-
-**Business outcome:** A customer or property manager can complete the tasks the business directs
-them to the portal for without calling the office.
-
-**Why this is still a gate:** The group/property-manager view lacks the financial and service
-documents needed to manage properties, and the portal lacks key ongoing-service request paths.
-
-**Required acceptance evidence:**
-
-- An authorized group/property manager can retrieve service reports, agreements, receipts/invoices,
-  and amounts for the correct properties without gaining access to unrelated customers.
-- Customers can initiate the approved reschedule request, callback/guarantee request, and general
-  service help path with a visible response commitment and case/reference number.
-- Plan cancellation satisfies GL-08 from the same portal.
-- Portal actions show current status and do not disappear after submission. Failed submissions are
-  visibly pending and enter an owned operations queue.
-- The business defines what a group manager may see and do versus an individual resident. Tests
-  prove both allowed access and denial across two unrelated groups.
-- Public claims that residents can schedule in-unit service are either backed by an approved,
-  property-scoped resident flow or removed before launch.
-
-**Pass owner:** Head of Operations.
-
----
-
-## Technician and operations safety
-
-### GL-12 — Dispatch-ready job packet
-
-**Business outcome:** A technician receives everything necessary to arrive safely, perform the
-correct service, avoid an improper collection, and explain the visit to the customer.
-
-**Why this is still a gate:** Job assignment can occur without required address/access/safety and
-service context; customer notes and prior relevant outcomes are not reliably in the field packet.
-
-**Required acceptance evidence:**
-
-- A field job cannot be assigned or routed without a deliverable address and the launch catalog's
-  minimum service instructions, duration, credential, and preparation requirements.
-- The technician packet shows, in one place: customer/contact, address and navigation, access/gate
-  instructions, pets/children/hazards/sensitivities, service and scope, prep status, approved
-  products/constraints, payment expectation (**collect nothing**, **payment due through office**, or
-  other approved wording), and relevant prior report/no-access/callback history.
-- Office-created jobs capture job-specific instructions instead of relying on permanent customer
-  notes or a phone call. Critical safety/access facts are visibly distinguished from general notes.
-- Missing information blocks dispatch with a small checklist and the owner who must fix it. A
-  manager exception requires a reason and never bypasses address, credential, or regulated-record
-  minimums.
-- The technician can report wrong address, unsafe conditions, scope mismatch, or missing prep in
-  one tap without falsely starting/completing service. The case returns to an owned operations
-  queue and the customer receives the approved next step.
-- A first-week technician completes scripted residential, commercial/community, repeat, callback,
-  no-access, and unsafe-site scenarios without verbal coaching.
-
-**Pass owner:** Head of Operations.
-
-**Engineering status (2026-07-17):** the dispatch-packet backbone landed; the gate is not yet
-owner-certifiable end to end. Evidence, per acceptance bullet:
-
-- *Cannot assign/route without a deliverable address* — **done.** `assertDeliverableAddress`
-  (`apps/web/amplify/functions/shared/compliance.ts`) is enforced in `updateJobSchedule` ASSIGN and
-  in `createOfficeJob` when a job is created already scheduled
-  (`apps/web/amplify/functions/crm-docs/handler.ts`). The technician *credential* minimum was
-  already enforced (`assertTechnicianCompliance`). The *launch-catalog* per-service minimums
-  (duration, prep, required instructions) are **not** enforced — no service catalog model exists
-  yet; `serviceType` is still a free string. **Remaining.**
-- *Packet shows everything in one place, safety distinguished* — **done** for contact, address +
-  navigation, access/entry, hazards/safety (rendered as a distinct red safety block), service +
-  scope, prep status, payment expectation, and prior no-access/canceled/completed history
-  (`apps/crm/src/tech/JobDetail.tsx`). Pre-scoped *approved products/constraints* are still chosen
-  at report time rather than shown on the packet. **Partial.**
-- *Office captures job-specific instructions, not permanent notes; safety distinguished* — **done.**
-  New job-specific Job fields (`accessInstructions`, `hazardNotes`, `prepInstructions`,
-  `prepConfirmed`, `paymentExpectation`) captured at create and via the guarded `updateJobPacket`
-  mutation; office UI in `apps/crm/src/office/CustomerDetail.tsx` (New job + Packet sheet).
-- *Missing info blocks dispatch with a checklist and owner; minimums never bypassed* — **done for the
-  hard minimums:** the address/credential block is a plain-language message that names the office as
-  the owner who fixes it, and there is no override path, so address and credential minimums cannot be
-  bypassed. A *manager soft-exception (with reason)* for non-minimum packet gaps is **not** built.
-  **Partial.**
-- *One-tap wrong-address/unsafe/scope/missing-prep → owned queue + customer next step* — wrong
-  address and unsafe conditions are already one-tap via the no-access exit (`NoAccessCard` →
-  `reportNoAccess` → owned NO_ACCESS work item). *Scope mismatch* and *missing prep* are not yet
-  distinct one-tap reasons. **Partial (pre-existing).**
-- *First-week technician certification* — an operations rehearsal, not code (overlaps GL-24).
-  **Owner-run, remaining.**
-
-Verification: `apps/web` typecheck + full unit suite green (596 tests, incl. 6 new GL-12 cases in
-`crm-docs/compliance.test.ts`); `apps/crm` typecheck + build green. Not yet exercised end to end
-against a deployed backend.
-
 ### GL-13 — Technician least-privilege and assignment enforcement
 
 **Business outcome:** A technician can see and change only the customers and work legitimately
@@ -456,30 +131,6 @@ record ID must never be enough to act on another technician's job.
   no shared technician logins are permitted.
 
 **Pass owner:** CEO, with Compliance and Operations verification.
-
-### GL-14 — Staff identity, linking, and offboarding
-
-**Business outcome:** Every staff login maps to one real worker and role, and a departed or
-misconfigured employee cannot retain access.
-
-**Why this is still a gate:** A technician login can be created without a linked technician record,
-and there is no complete owner workflow to review, change, or disable every staff role.
-
-**Required acceptance evidence:**
-
-- Creating a technician login atomically creates/links exactly one technician profile with required
-  active license data, or refuses with a fixable error. “Invite now, link later” is not available.
-- An owner-only staff roster shows person, email, role(s), linked profile, status, last login, and
-  pending invite. Duplicate/shared identities and unlinked users are visibly blocked.
-- Owners can change role and offboard OWNER, OFFICE, FINANCE, and TECH users. Offboarding disables
-  login/sessions, removes groups, reassigns owned work and future jobs, and preserves audit/legal
-  records in one guided action.
-- The system prevents removal of the last usable owner. At least two named owners and one tested
-  break-glass procedure exist before launch.
-- Tests cover abandoned invite, duplicate email, unlinked technician, role change, immediate
-  offboarding, offboarding with assigned future work, and attempted access using an old session.
-
-**Pass owner:** CEO.
 
 ### GL-15 — Legally reliable service-report completion
 
@@ -514,9 +165,32 @@ the UI says sent, and no append-only amendment workflow exists.
 
 **Pass owner:** Named Compliance owner.
 
----
+### GL-04 — Capacity that cannot be oversold
 
-## Pricing, leadership control, and exception management
+**Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
+cannot buy the same last unit of capacity.
+
+**Why this is still a gate:** Public availability is based on a coarse active-technician/day count,
+offers capacity even with no active technician, and only rechecks availability before payment. It
+does not reserve the slot while payment completes.
+
+**Required acceptance evidence:**
+
+- Sellable capacity uses the technician's actual working day, approved leave/blackouts, credential
+  validity on the service date, service duration, service territory, travel allowance, and time
+  window. Zero eligible technicians means zero sellable dates.
+- Capacity rules are the same in the public funnel and the dispatch board. A day/window cannot be
+  “available” to the customer and over capacity to Operations.
+- Selecting checkout places a short, visible capacity hold. A successful payment consumes it;
+  abandonment, failure, and expiry release it. The CEO approves the hold duration.
+- A concurrency test starts two purchases for the last slot. Exactly one may be booked; the other
+  receives a truthful alternate-date/refund outcome without manual database repair.
+- Operations can block a day, technician, territory, or window and can see why a date is or is not
+  sellable. Removing capacity immediately protects all unconsumed public slots.
+- The system prevents staffing a service outside the assigned technician's active license/scope,
+  even if the slot was quoted earlier.
+
+**Pass owner:** Head of Operations.
 
 ### GL-16 — Governed pricing and margin protection
 
@@ -545,94 +219,170 @@ and cost floors do not cover every sellable service, recurring cadence, add-on, 
 
 **Pass owner:** CEO and Finance lead jointly.
 
-### GL-17 — Seasonal plan and licensed-scope decisions
+### GL-09 — Atomic customer and plan lifecycle controls
 
-**Business outcome:** Seasonal and specialized services bill and schedule exactly as customers were
-told, and are performed only under valid business and technician authority.
+**Business outcome:** Customer status, login access, billing, and scheduled work can never disagree,
+and routine staff cannot bypass the approved lifecycle with a raw field change.
 
-**Why this is still a gate:** The business has not encoded a final mosquito/seasonal billing and
-renewal policy, while some specialized/RI service claims require explicit scope and credential
-validation.
-
-**Required acceptance evidence:**
-
-- The CEO approves for each seasonal plan: service months, number/frequency of visits, annual vs
-  in-season billing, first-year proration, renewal date/notice, off-season customer status, pause/
-  cancel/refund handling, and missed-visit treatment.
-- The system stops billing and scheduling where the approved policy says it should; it cannot leave
-  an in-season cadence or monthly charge running indefinitely by omission.
-- Compliance maps each launch service and state/territory to the required company registration,
-  supervisor/applicator credential, expiry, and prohibited scope. Wildlife trapping/removal,
-  exclusion, termite, pesticide, and restoration scopes are not treated as interchangeable.
-- Expiring/expired company or technician credentials remove affected capacity before an appointment
-  is sold and create an advance owner alert with enough time to renew/reassign.
-- Customer quote, accepted terms, schedule, invoice, and job packet all use the approved seasonal
-  and licensed scope. Tests cross season boundaries, renewal, cancellation, expired credentials,
-  and an unsupported service/state combination.
-
-**Pass owner:** CEO and Compliance owner jointly.
-
-### GL-18 — Verifiable exception resolution
-
-**Business outcome:** An operational failure stays visible until the promised real-world outcome is
-true; employees cannot make the dashboard green by writing a note.
-
-**Why this is still a gate:** Generic manual resolution can close cases whose refund, email,
-rebooking, duplicate merge, access restoration, or other corrective action has not been verified.
+**Why this is still a gate:** Customer deactivation and portal revocation are separate client
+actions; rebooking an inactive customer can leave a paid customer with disabled access; and broad
+record-update permissions can bypass guarded status, plan, pricing, or provider-linked workflows.
 
 **Required acceptance evidence:**
 
-- Each exception type has a named team/owner, severity, response deadline, customer-impact label,
-  and a small set of valid resolution actions.
-- Where the app can verify the outcome, it closes only from the verified event: refund settled,
-  message delivered/alternate contact recorded, job rebooked, payment finalized, portal access
-  restored, or duplicate decision completed.
-- Manual closure is limited to an owner/manager, requires a controlled reason plus evidence, and is
-  separately reported. A free-text “done” from routine staff is insufficient.
-- Reoccurrence reopens the same underlying issue or links the repeat; it cannot disappear because a
-  prior case was closed.
-- The queue supports clear handoff, claim, escalation, age, and overdue state. No required action is
-  owned only by a shared mailbox or a person who has been offboarded.
-- The final rehearsal deliberately causes every exception type and proves it reaches the right
-  owner, cannot falsely close, and clears automatically after the real corrective outcome.
+- **Deactivate customer** is one server-owned business action covering plan billing, queued visits,
+  open balances, customer login, communications, and status. A partial failure resumes safely.
+- Rebooking/reactivating an inactive customer explicitly restores the approved access and service
+  state before confirmation, or blocks purchase with a truthful assisted-resolution path.
+- Statuses, plan price/status, Stripe identifiers, access groups, paid state, and other protected
+  lifecycle fields can change only through named business actions with validation and audit. Office
+  screens retain only safe contact/address/note edits.
+- Two employees performing conflicting lifecycle actions cannot produce mixed state; the second
+  receives the current fact and one safe next step.
+- Every transition records actor, timestamp, reason, prior state, new state, and related money/job
+  effects. Leadership can retrieve the history without engineering assistance.
+- Tests cover deactivation with active plan/queued visit/open invoice, partial provider failure,
+  rebooking an inactive customer, reactivation, and attempted direct protected-field updates.
 
-**Pass owner:** Head of Operations.
+**Pass owner:** Head of Operations; Finance and CEO approve protected fields and transition policy.
 
-### GL-19 — Launch reconciliation and command view
+### GL-08 — Finish failure-safe customer plan cancellation
 
-**Business outcome:** Leadership can tell each morning whether customers, work, and money agree,
-without asking engineering to query production.
+**Business outcome:** A customer's online cancellation is a durable instruction, and every
+customer message matches the actual billing, plan, schedule, and delivery state.
 
-**Why this is still a gate:** Existing operational views do not provide one launch reconciliation
-across the payment provider, bookings, plans, invoices/refunds, staffing, lead SLA, and required
-service records.
+**Why this is still a gate after commit `0dd973d`:** Remaining failure paths can overstate the
+outcome: the pending screen promises no further charge while the Stripe subscription is still
+active; an unsuccessful CRM plan or queued-job write can be followed by “canceled/visits stopped”;
+and the response says a confirmation was emailed even when delivery failed or no email exists.
 
 **Required acceptance evidence:**
 
-- A daily money reconciliation proves: successful provider payments equal CRM paid invoices;
-  refunds/disputes equal CRM dispositions; net cash is explainable; and every mismatch is an owned
-  case. Finance signs the report during rehearsal.
-- A daily booking reconciliation shows paid-not-finalized, complete booking without payment,
-  duplicate customer/plan/job/payment, processing beyond SLA, and capacity/route mismatch.
-- A daily plan reconciliation shows provider subscription vs CRM plan mismatches, active plans
-  without next service, delinquent plans still scheduled, canceled plans still billing/scheduled,
-  and recurring revenue at risk.
-- A next-day operations view shows every job's staffing, credential, dispatch-readiness, customer
-  notice, payment expectation, and exception state.
-- A sales view shows leads by stage/owner/age, first-response SLA, overdue next action, source, and
-  conversion/loss. A service-quality view shows completion, report delivery, no access, callbacks,
-  repeat callbacks, and technician trends.
-- The CEO defines the launch thresholds that force pause/rollback—for example any double charge,
-  paid customer without a job, unauthorized access, unlicensed assignment, or unexplained money
-  mismatch—and names who makes the decision.
-- During the final rehearsal, the command view is run on a fixed daily schedule and all induced
-  mismatches are detected without reading logs.
+- A cancellation request is durably recorded before or with the provider attempt. Failure to write
+  the pending request, owner case, or retry state cannot reduce the customer's instruction to a log
+  line.
+- A **Canceled** result appears only after the provider subscription is confirmed stopped and the
+  CRM plan transition is confirmed written. A provider success followed by a CRM write failure
+  resumes the same cancellation; it never reports the plan as active billing or creates a second
+  action.
+- While the provider subscription remains active, the portal does not promise “you won't be charged
+  again” unless the business has an enforceable automatic stop/refund guarantee. It states the
+  truthful pending status, resolution time, and what happens if a charge posts.
+- The screen and confirmation say recurring visits stopped only when all cancelable queued visits
+  were actually removed. Any failed schedule write creates durable owned work and a truthful
+  outstanding-visit disposition; an office email alone is not the system of record.
+- “Confirmation emailed” appears only when delivery succeeded. Missing/failed email produces an
+  on-screen confirmation plus an owned alternate-delivery task without weakening the cancellation.
+- Duplicate or concurrent clicks return the same request/outcome. Customer-visible pending state
+  clears only after the real provider, CRM, schedule, and notice outcomes are recorded.
+- Failure injection covers provider failure, provider success plus CRM-plan write failure, queued-job
+  write failure, pending-request/work-item write failure, missing/failed email, duplicate/concurrent
+  confirmation, and an attempted cancellation of another customer's plan.
 
-**Pass owner:** CEO and Finance lead jointly; Sales and Operations sign their views.
+**Pass owner:** CEO, with Finance and Operations sign-off.
 
----
+### GL-06 — Honest handling of processing and failed payments
 
-## Public trust and production readiness
+**Business outcome:** A customer is never told they are booked or paid while the payment can still
+fail, and Operations never dispatches an unconfirmed payment as if it were settled.
+
+**Why this is still a gate:** A payment in `processing` can currently produce “You're booked” and
+“paid today” language even though final booking creation waits for a later success event.
+
+**Required acceptance evidence:**
+
+- The CEO chooses which payment methods are allowed to finalize instantly and which require a
+  **Payment processing—slot held, not yet booked** state.
+- Processing copy states what is reserved, what is not yet confirmed, when the customer will hear,
+  and what happens if payment fails. It never uses “paid” or “booked” prematurely.
+- Success finalizes the held booking once. Failure/timeout releases capacity, informs the customer,
+  and records the lead/customer outcome without creating a service commitment.
+- Operations can distinguish **processing**, **paid/finalizing**, **booked**, and **failed** without
+  interpreting Stripe terminology.
+- Tests cover delayed success, delayed failure, duplicate events, events delivered out of order,
+  and a payment that succeeds after its capacity hold expired.
+
+**Pass owner:** Finance lead.
+
+### GL-07 — One safe office cancel/reschedule workflow
+
+**Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
+plan, capacity, route, and customer-notification consequences in one guided action.
+
+**Why this is still a gate:** The office job controls change schedule state directly and do not
+provide a unified refund/credit decision, recurring-plan effect, or guaranteed customer notice.
+
+**Required acceptance evidence:**
+
+- Before confirmation, the employee sees customer, visit, amount paid/open, policy deadline,
+  calculated refund/credit/fee, plan consequence, route consequence, and exact notice to be sent.
+- The allowed choices are plain business decisions such as **Reschedule**, **Cancel and refund**,
+  **Cancel and retain approved credit**, or **Manager exception**. Staff never calculate an amount.
+- One confirmation performs all approved consequences. If any consequence fails, the screen does
+  not claim completion and the case stays in an owned exception with a safe resume action.
+- Rescheduling revalidates capacity and technician license, moves the capacity claim, updates the
+  route, and notifies the customer with old and new details.
+- Cancellation records initiator, reason, policy used, amount and disposition, timestamps, and the
+  customer communication result. Recurring-plan cancellation is never implied by canceling one
+  visit unless the employee explicitly chooses it.
+- Tests cover paid/unpaid, one-time/recurring, inside/outside policy, assigned/unassigned, refund
+  failure, notice failure, and two employees acting on the same visit.
+
+**Pass owner:** Head of Operations; Finance approves money dispositions.
+
+### GL-14 — Staff identity, linking, and offboarding
+
+**Business outcome:** Every staff login maps to one real worker and role, and a departed or
+misconfigured employee cannot retain access.
+
+**Why this is still a gate:** A technician login can be created without a linked technician record,
+and there is no complete owner workflow to review, change, or disable every staff role.
+
+**Required acceptance evidence:**
+
+- Creating a technician login atomically creates/links exactly one technician profile with required
+  active license data, or refuses with a fixable error. “Invite now, link later” is not available.
+- An owner-only staff roster shows person, email, role(s), linked profile, status, last login, and
+  pending invite. Duplicate/shared identities and unlinked users are visibly blocked.
+- Owners can change role and offboard OWNER, OFFICE, FINANCE, and TECH users. Offboarding disables
+  login/sessions, removes groups, reassigns owned work and future jobs, and preserves audit/legal
+  records in one guided action.
+- The system prevents removal of the last usable owner. At least two named owners and one tested
+  break-glass procedure exist before launch.
+- Tests cover abandoned invite, duplicate email, unlinked technician, role change, immediate
+  offboarding, offboarding with assigned future work, and attempted access using an old session.
+
+**Pass owner:** CEO.
+
+### GL-01 — One truthful, complete service catalog
+
+**Business outcome:** A customer can never be promised a service the operating system cannot
+price, staff, perform, document, and support profitably.
+
+**Why this is still a gate:** The public site advertises more services than the quote funnel can
+select, while the funnel says every service gets an exact price. Several distinct services collapse
+into broad pricing categories with no approved duration, license scope, or service template.
+
+**Required acceptance evidence:**
+
+- The CEO approves one launch catalog that maps every marketed service to all of: supported
+  property types, service area, intake questions, price method, minimum margin, expected duration,
+  required technician credential, job instructions, allowed products, report requirements,
+  cancellation rule, and guarantee/return-service rule.
+- Every public call-to-action has one valid result: a genuinely bookable service, or an honest
+  specialist-review path. It may not send a customer to an option that does not exist.
+- Services not approved for self-serve quoting are clearly labeled for review before the customer
+  supplies payment. “Exact price” and “no callback” language appears only where it is true.
+- Termite, wildlife, exclusion, attic/restoration, mosquito/tick, community, commercial, and other
+  specialized offers are individually approved or removed from launch. They may not inherit a
+  generic service merely because no matching category exists.
+- The same catalog drives marketing, quoting, scheduling duration, technician instructions,
+  reporting, plans, callbacks, refunds, and leadership reporting. A service cannot mean something
+  different in each screen.
+- A test quote for every retained site service reaches the correct price or review outcome, then
+  creates the correct job/plan terms and technician packet.
+
+**Pass owner:** CEO, with written sign-off from Operations, Finance, and Compliance.
 
 ### GL-20 — Public promises and legal terms match operations
 
@@ -725,6 +475,240 @@ records can be restored after human or provider error.
   billing, post customer messaging, preserve evidence, and authorize restart.
 
 **Pass owner:** CEO and Engineering lead jointly; Compliance approves retention.
+
+---
+
+## Priority 1 — High revenue and operating reliability
+
+### GL-02 — A lead lifecycle in which no lead can disappear
+
+**Business outcome:** Every lead always has an accountable person, a next action, and an auditable
+outcome until it becomes a customer or is deliberately closed.
+
+**Why this is still a gate:** A lead can currently be saved with insufficient contact information,
+has no assigned owner or follow-up deadline, and has no complete stage/lost lifecycle. Duplicate
+people can also be created before the safe paid-conversion path is reached.
+
+**Required acceptance evidence:**
+
+- The business approves a small, unambiguous pipeline: at minimum **New**, **Attempting contact**,
+  **Qualified**, **Booking sent**, **Booked/Won**, **Lost**, and **Do not contact**.
+- Every open lead has an owner, created time, last-touch time, next action, and due time. Missing or
+  overdue actions appear in an owner and manager queue; they are not found by browsing a list.
+- A lead cannot be saved without a usable contact route. If incomplete third-party data must be
+  accepted, the save creates a clearly owned “obtain contact information” exception automatically.
+- Email/phone normalization and duplicate detection run before creation. A week-one employee gets
+  a simple **Use existing**, **Create separate**, or **Ask manager** decision with enough context;
+  the system never silently merges people.
+- Every call, email, text, and booking-link attempt records time, channel, actor, and actual outcome.
+  A failed delivery does not count as a successful touch.
+- Lost leads require a controlled reason. Do-not-contact immediately suppresses non-essential sales
+  outreach and records who made the decision.
+- The CEO sets response and follow-up SLAs by lead source. The launch rehearsal proves a new lead,
+  failed contact, overdue follow-up, duplicate, booking, and lost lead all land in the correct queue.
+- The CEO explicitly decides how phone-only and non-card customers are handled. If they are not a
+  supported launch segment, staff receive a truthful close reason instead of a dead-end conversion
+  path. If they are supported, the approved path retains the same pricing, terms, identity, and
+  audit controls as self-service booking.
+
+**Pass owner:** Head of Sales.
+
+### GL-03 — Honest fallback contact and communication outcomes
+
+**Business outcome:** Customers are told what will actually happen, and staff never see a success
+message for a communication that was not delivered.
+
+**Why this is still a gate:** The quote fallback promises a call even when phone is optional, and
+some CRM communication actions can return a non-delivery result while the screen presents success.
+
+**Required acceptance evidence:**
+
+- A quote that needs human review captures a usable preferred contact channel. If a call is
+  promised, a valid phone number and call consent are required; otherwise the promise says email.
+- The customer sees a specific response window the sales team has accepted and can meet during
+  published business hours. After-hours submissions receive a truthful next-business-window time.
+- Every send action branches on the delivery result: **sent**, **not sent—fix this now**, or
+  **queued for retry**. Only the first state can display “sent.”
+- Bounce, suppression, missing mailbox, and provider failure create an owned exception tied to the
+  lead/customer and expose an approved alternate-contact next step.
+- A test using an invalid address and a suppressed address proves that neither the customer record
+  nor the employee screen falsely records successful contact.
+
+**Pass owner:** Head of Sales.
+
+### GL-10 — Guarantee, callback, and no-access lifecycle
+
+**Business outcome:** Every public service promise has a defined, measurable operational path, and
+a failed access visit cannot be “resolved” without actually completing the approved customer and
+money outcome.
+
+**Why this is still a gate:** Public pages promise return service/guarantees, but the app has no
+distinct linked callback lifecycle. No-access evidence and customer status are incomplete, and the
+resolution can be closed without verifying notification, refund, or rebooking.
+
+**Required acceptance evidence:**
+
+- The CEO approves a guarantee matrix by service: eligibility, term, covered pests/conditions,
+  exclusions, customer obligations, maximum response time, charge, and approval authority. The
+  accepted customer terms contain the same matrix.
+- Customers and staff can request a callback/return service. The resulting job is visibly linked to
+  the original service and cannot accidentally be charged as a new sale.
+- Operations sees callback volume, reason, original technician/service, days to resolution, and
+  repeat-callback rate. Leadership can use it as a quality and margin signal.
+- A no-access outcome is visible to the customer, includes the approved reason and evidence, and
+  sends a truthful next step. Operations can open the evidence from the case.
+- The CEO approves the no-access financial policy. The system must not charge a fee unless that
+  exact policy was disclosed before purchase and the case meets it; the employee never decides or
+  calculates a fee ad hoc.
+- No-access resolution closes only after the chosen rebook/refund/credit/customer-notice outcome is
+  verified. It cannot be closed by typing a note that claims the work happened.
+- Tests cover guaranteed/not guaranteed, repeat callback, linked zero-price visit, no access with
+  paid/unpaid work, evidence access, refund failure, notice failure, and rebooking collision.
+
+**Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
+
+### GL-12 — Finish service-specific dispatch readiness
+
+**Business outcome:** A technician is dispatched only with the service-specific facts and approved
+scope needed to complete the visit safely, and can exit an unperformable visit without inventing a
+workaround.
+
+**Why this is still a gate after commit `940a4b9`:** Readiness is still based on free-text service
+data; the address is not proven valid/in service area; products, constraints, and prior treatment
+findings are absent; and scope mismatch or missing prep has no dedicated field outcome. Packet
+changes after assignment/start also have no technician acknowledgement or versioned safety trail.
+
+**Required acceptance evidence:**
+
+- Before assignment, the approved GL-01 catalog enforces the selected service's valid in-area
+  address, duration, scope, required prep/confirmation, required instructions, credential, and
+  approved product/constraint minimums. Nonblank placeholders do not count as a valid address or
+  complete packet.
+- The field packet includes the service's approved product/scope constraints and relevant prior
+  treatment findings/callback lineage—not only the status of earlier visits.
+- **Scope does not match** and **required prep missing** are dedicated one-tap field outcomes. They
+  do not falsely start/complete service, create an owned operations case, preserve capacity/money
+  facts, and send the approved customer next step.
+- Any safety/access/scope/prep change after assignment is versioned and brought to the assigned
+  technician's attention. After service starts, material changes require an audited manager action
+  and technician acknowledgement.
+- Tests cover each retained service type, invalid/out-of-area address, missing service minimum,
+  product/scope restriction, packet edit after assignment/start, scope mismatch, missing prep, and
+  retry of the resulting office/customer actions.
+
+**Pass owner:** Head of Operations, with Compliance sign-off.
+
+### GL-17 — Seasonal plan and licensed-scope decisions
+
+**Business outcome:** Seasonal and specialized services bill and schedule exactly as customers were
+told, and are performed only under valid business and technician authority.
+
+**Why this is still a gate:** The business has not encoded a final mosquito/seasonal billing and
+renewal policy, while some specialized/RI service claims require explicit scope and credential
+validation.
+
+**Required acceptance evidence:**
+
+- The CEO approves for each seasonal plan: service months, number/frequency of visits, annual vs
+  in-season billing, first-year proration, renewal date/notice, off-season customer status, pause/
+  cancel/refund handling, and missed-visit treatment.
+- The system stops billing and scheduling where the approved policy says it should; it cannot leave
+  an in-season cadence or monthly charge running indefinitely by omission.
+- Compliance maps each launch service and state/territory to the required company registration,
+  supervisor/applicator credential, expiry, and prohibited scope. Wildlife trapping/removal,
+  exclusion, termite, pesticide, and restoration scopes are not treated as interchangeable.
+- Expiring/expired company or technician credentials remove affected capacity before an appointment
+  is sold and create an advance owner alert with enough time to renew/reassign.
+- Customer quote, accepted terms, schedule, invoice, and job packet all use the approved seasonal
+  and licensed scope. Tests cross season boundaries, renewal, cancellation, expired credentials,
+  and an unsupported service/state combination.
+
+**Pass owner:** CEO and Compliance owner jointly.
+
+### GL-18 — Verifiable exception resolution
+
+**Business outcome:** An operational failure stays visible until the promised real-world outcome is
+true; employees cannot make the dashboard green by writing a note.
+
+**Why this is still a gate:** Generic manual resolution can close cases whose refund, email,
+rebooking, duplicate merge, access restoration, or other corrective action has not been verified.
+
+**Required acceptance evidence:**
+
+- Each exception type has a named team/owner, severity, response deadline, customer-impact label,
+  and a small set of valid resolution actions.
+- Where the app can verify the outcome, it closes only from the verified event: refund settled,
+  message delivered/alternate contact recorded, job rebooked, payment finalized, portal access
+  restored, or duplicate decision completed.
+- Manual closure is limited to an owner/manager, requires a controlled reason plus evidence, and is
+  separately reported. A free-text “done” from routine staff is insufficient.
+- Reoccurrence reopens the same underlying issue or links the repeat; it cannot disappear because a
+  prior case was closed.
+- The queue supports clear handoff, claim, escalation, age, and overdue state. No required action is
+  owned only by a shared mailbox or a person who has been offboarded.
+- The final rehearsal deliberately causes every exception type and proves it reaches the right
+  owner, cannot falsely close, and clears automatically after the real corrective outcome.
+
+**Pass owner:** Head of Operations.
+
+### GL-11 — Minimum complete customer/group portal
+
+**Business outcome:** A customer or property manager can complete the tasks the business directs
+them to the portal for without calling the office.
+
+**Why this is still a gate:** The group/property-manager view lacks the financial and service
+documents needed to manage properties, and the portal lacks key ongoing-service request paths.
+
+**Required acceptance evidence:**
+
+- An authorized group/property manager can retrieve service reports, agreements, receipts/invoices,
+  and amounts for the correct properties without gaining access to unrelated customers.
+- Customers can initiate the approved reschedule request, callback/guarantee request, and general
+  service help path with a visible response commitment and case/reference number.
+- Portal actions show current status and do not disappear after submission. Failed submissions are
+  visibly pending and enter an owned operations queue.
+- The business defines what a group manager may see and do versus an individual resident. Tests
+  prove both allowed access and denial across two unrelated groups.
+- Public claims that residents can schedule in-unit service are either backed by an approved,
+  property-scoped resident flow or removed before launch.
+
+**Pass owner:** Head of Operations.
+
+### GL-19 — Launch reconciliation and command view
+
+**Business outcome:** Leadership can tell each morning whether customers, work, and money agree,
+without asking engineering to query production.
+
+**Why this is still a gate:** Existing operational views do not provide one launch reconciliation
+across the payment provider, bookings, plans, invoices/refunds, staffing, lead SLA, and required
+service records.
+
+**Required acceptance evidence:**
+
+- A daily money reconciliation proves: successful provider payments equal CRM paid invoices;
+  refunds/disputes equal CRM dispositions; net cash is explainable; and every mismatch is an owned
+  case. Finance signs the report during rehearsal.
+- A daily booking reconciliation shows paid-not-finalized, complete booking without payment,
+  duplicate customer/plan/job/payment, processing beyond SLA, and capacity/route mismatch.
+- A daily plan reconciliation shows provider subscription vs CRM plan mismatches, active plans
+  without next service, delinquent plans still scheduled, canceled plans still billing/scheduled,
+  and recurring revenue at risk.
+- A next-day operations view shows every job's staffing, credential, dispatch-readiness, customer
+  notice, payment expectation, and exception state.
+- A sales view shows leads by stage/owner/age, first-response SLA, overdue next action, source, and
+  conversion/loss. A service-quality view shows completion, report delivery, no access, callbacks,
+  repeat callbacks, and technician trends.
+- The CEO defines the launch thresholds that force pause/rollback—for example any double charge,
+  paid customer without a job, unauthorized access, unlicensed assignment, or unexplained money
+  mismatch—and names who makes the decision.
+- During the final rehearsal, the command view is run on a fixed daily schedule and all induced
+  mismatches are detected without reading logs.
+
+**Pass owner:** CEO and Finance lead jointly; Sales and Operations sign their views.
+
+---
+
+## Priority 2 — Launch proof and operating readiness
 
 ### GL-23 — Production master data and launch-day operating model
 
