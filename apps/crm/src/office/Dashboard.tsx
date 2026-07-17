@@ -5,6 +5,7 @@ import {
   assignRecoveryOwner,
   listAll,
   listDisputes,
+  listWorkItems,
   type Customer,
   type Dispute,
   type Invoice,
@@ -74,7 +75,7 @@ export default function Dashboard() {
         listAll((t) => api().models.ServicePlan.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.Job.list({ limit: 1000, nextToken: t })),
         listAll((t) => listDisputes({ limit: 1000, nextToken: t })),
-        listAll((t) => api().models.WorkItem.list({ limit: 1000, nextToken: t })),
+        listAll((t) => listWorkItems({ limit: 1000, nextToken: t })),
       ]);
       setInvoices(inv);
       setCustomers(cus);

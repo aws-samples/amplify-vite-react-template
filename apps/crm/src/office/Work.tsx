@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import {
   api,
   listAll,
+  listWorkEvents,
+  listWorkItems,
   opResult,
   updateOwnedWork,
   type WorkEvent,
@@ -51,8 +53,8 @@ export default function WorkQueue() {
   const load = useCallback(async () => {
     try {
       const [work, history] = await Promise.all([
-        listAll((t) => api().models.WorkItem.list({ limit: 1000, nextToken: t })),
-        listAll((t) => api().models.WorkEvent.list({ limit: 1000, nextToken: t })),
+        listAll((t) => listWorkItems({ limit: 1000, nextToken: t })),
+        listAll((t) => listWorkEvents({ limit: 1000, nextToken: t })),
       ]);
       setItems(work);
       setEvents(history);

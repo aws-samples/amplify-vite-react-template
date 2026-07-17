@@ -235,6 +235,57 @@ export function listDisputes(args?: {
 }
 
 /**
+ * List WorkItems, tolerant of the model being absent before the backend wave
+ * lands — same reason as listDisputes. Without this guard the Dashboard and
+ * Work queue throw "Cannot read properties of undefined (reading 'list')" and
+ * white-screen against a backend that hasn't deployed WorkItem yet.
+ */
+export function listWorkItems(args?: {
+  filter?: unknown;
+  limit?: number;
+  nextToken?: string;
+}): Promise<{
+  data: WorkItem[];
+  nextToken?: string | null;
+  errors?: { message: string }[];
+}> {
+  const models = api().models as unknown as {
+    WorkItem?: {
+      list: (a?: typeof args) => Promise<{
+        data: WorkItem[];
+        nextToken?: string | null;
+        errors?: { message: string }[];
+      }>;
+    };
+  };
+  if (!models.WorkItem) return Promise.resolve({ data: [], nextToken: null });
+  return models.WorkItem.list(args);
+}
+
+/** List WorkEvents, tolerant of the model being absent (see listWorkItems). */
+export function listWorkEvents(args?: {
+  filter?: unknown;
+  limit?: number;
+  nextToken?: string;
+}): Promise<{
+  data: WorkEvent[];
+  nextToken?: string | null;
+  errors?: { message: string }[];
+}> {
+  const models = api().models as unknown as {
+    WorkEvent?: {
+      list: (a?: typeof args) => Promise<{
+        data: WorkEvent[];
+        nextToken?: string | null;
+        errors?: { message: string }[];
+      }>;
+    };
+  };
+  if (!models.WorkEvent) return Promise.resolve({ data: [], nextToken: null });
+  return models.WorkEvent.list(args);
+}
+
+/**
  * Contract boundary with the backend wave landing alongside this one:
  * MarketRate gains `pinned` (an office-edited row never expires or
  * re-researches until the office un-pins it). Intersected here so the CRM
