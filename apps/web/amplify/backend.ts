@@ -21,6 +21,7 @@ import {
 } from "./functions/auth-challenge/resource";
 import { crmPricing } from "./functions/crm-pricing/resource";
 import { bookingPublic } from "./functions/booking-public/resource";
+import { pricingRefresh } from "./functions/pricing-refresh/resource";
 
 const backend = defineBackend({
   auth,
@@ -36,6 +37,7 @@ const backend = defineBackend({
   verifyChallenge,
   crmPricing,
   bookingPublic,
+  pricingRefresh,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
@@ -116,6 +118,9 @@ for (const fn of [
   // cancel leaves visits needing a decision — without this grant those
   // sends fail silently inside notifyOffice.
   backend.crmBilling,
+  // pricing-refresh emails the office (new-rate heads-ups, the weekly
+  // report) and waiting leads ("your exact prices are ready").
+  backend.pricingRefresh,
 ]) {
   fn.resources.lambda.addToRolePolicy(sesPolicy);
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
@@ -147,6 +152,10 @@ backend.crmPricing.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
 backend.bookingPublic.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.bookingPublic.addEnvironment("AMPLIFY_BRANCH", branch);
+// pricing-refresh is where ALL market-rate research runs now, so it needs
+// the same Anthropic key lookup as the engines that used to research inline.
+backend.pricingRefresh.addEnvironment("AMPLIFY_APP_ID", appId);
+backend.pricingRefresh.addEnvironment("AMPLIFY_BRANCH", branch);
 // The marketing-site origin, branch-derived so main never links staging.
 // stripe-webhook builds the customer's cancel link from it; crm-docs and
 // crm-pricing build the funnel booking link (MARKETING_URL + "/quote") — the
@@ -159,6 +168,9 @@ backend.stripeWebhook.addEnvironment("MARKETING_URL", marketingUrl);
 backend.bookingPublic.addEnvironment("MARKETING_URL", marketingUrl);
 backend.crmDocs.addEnvironment("MARKETING_URL", marketingUrl);
 backend.crmPricing.addEnvironment("MARKETING_URL", marketingUrl);
+// pricing-refresh's "your exact prices are ready" email sends the lead
+// back down the funnel (MARKETING_URL + /quote).
+backend.pricingRefresh.addEnvironment("MARKETING_URL", marketingUrl);
 backend.bookingPublic.addEnvironment(
   "BOOKING_CORS_ORIGINS",
   branch === "main"
@@ -172,9 +184,26 @@ for (const key of ["ANTHROPIC_API_KEY", "GOOGLE_ROUTES_API_KEY"] as const) {
   const v = process.env[key];
   if (v && v !== "placeholder-set-me") {
     backend.crmPricing.addEnvironment(key, v);
-    backend.bookingPublic.addEnvironment(key, v);
+    // The funnel is a pure rate READER now — it keeps Routes (drive times,
+    // day matrix) but has no business holding the research key.
+    if (key === "GOOGLE_ROUTES_API_KEY") {
+      backend.bookingPublic.addEnvironment(key, v);
+    }
+    if (key === "ANTHROPIC_API_KEY") {
+      backend.pricingRefresh.addEnvironment(key, v);
+    }
   }
 }
+// SSM fallback for the research key, mirroring crm-pricing's grant.
+backend.pricingRefresh.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/ANTHROPIC_API_KEY`,
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/ANTHROPIC_API_KEY`,
+    ],
+  })
+);
 backend.crmPricing.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     actions: ["ssm:GetParameter"],
@@ -190,10 +219,8 @@ backend.bookingPublic.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     actions: ["ssm:GetParameter"],
     resources: [
-      `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/ANTHROPIC_API_KEY`,
       `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/GOOGLE_ROUTES_API_KEY`,
       `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/STRIPE_SECRET_KEY`,
-      `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/ANTHROPIC_API_KEY`,
       `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/GOOGLE_ROUTES_API_KEY`,
       `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/STRIPE_SECRET_KEY`,
     ],

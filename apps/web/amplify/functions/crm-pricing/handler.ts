@@ -26,9 +26,11 @@ import {
   type Zone,
 } from "./rateCards";
 import {
+  enqueueRateResearch,
+  getCachedRate,
   hoaBandFor,
-  marketRate,
   type MarketRateResult,
+  type MarketRateService,
   type PlanCadence,
 } from "../shared/marketRate";
 
@@ -315,11 +317,14 @@ const PASS_SCRIPTS: Record<string, string> = {
 // ---------- AI base price → priced plan (deterministic zone overlay) ----------
 
 /**
- * Escalation reason when the engine cannot produce a sheet — research
- * budget spent, key missing, junk research. The human IS the fallback:
- * never a silent skip, never an invented price.
+ * Escalation reason when no cached sheet exists for the combo. The live
+ * path is a pure read now — it never researches inline. The miss is queued
+ * on the RateCoverage ledger and the hourly pricing-refresh cron researches
+ * DEMAND rows first, so the honest instruction to the office is: re-price
+ * in an hour. Never a silent skip, never an invented price.
  */
-export const AI_UNAVAILABLE_REASON = "AI pricing unavailable — price by hand";
+export const AI_RATE_QUEUED_REASON =
+  "AI rate queued — re-price this lead in an hour";
 
 const CUSTOM_QUOTE_SCRIPT =
   "Thanks for reaching out! This one needs a custom quote from our owner — he'll call you today to walk through the details and get you an exact price.";
@@ -675,19 +680,35 @@ async function priceLead(args: Args) {
   // Kept for the value-fallback plan strings in the reply.
   let gpRate: MarketRateResult | null = null;
 
-  // Research failure → the human prices it. Never a silent skip, never an
-  // invented number: the office gets the escalation with the holding script.
-  const escalateAiUnavailable = async (serviceLabel: string) => {
+  // No cached sheet → queue the research and hand the lead to a human for
+  // now. The hourly pricing-refresh cron picks DEMAND rows up first, so the
+  // office re-runs this lead in an hour and gets a real price. Never a
+  // silent skip, never an invented number: the office gets the escalation
+  // with the holding script.
+  const escalateRateQueued = async (
+    serviceLabel: string,
+    engineService: MarketRateService,
+    sqft?: number
+  ) => {
+    // Never throws (its own contract) — the escalation below reaches a
+    // human either way. town is guaranteed by the needsTown gate at every
+    // call site, and state by the R75 gate.
+    await enqueueRateResearch({
+      service: engineService,
+      city: extracted.town!,
+      state: extracted.state!,
+      sqft,
+    });
     const run = await persist({
       decision: "ESCALATE",
-      reason: AI_UNAVAILABLE_REASON,
+      reason: AI_RATE_QUEUED_REASON,
       zone,
       driveMinutes: minutes ?? undefined,
       leadFeeCents,
       service: serviceLabel,
       replyText: CUSTOM_QUOTE_SCRIPT,
     });
-    await notifyEscalation(run?.id, extracted, AI_UNAVAILABLE_REASON, null);
+    await notifyEscalation(run?.id, extracted, AI_RATE_QUEUED_REASON, null);
     return run;
   };
   // The engine caches per service + area; the area key needs the town.
@@ -710,14 +731,15 @@ async function priceLead(args: Args) {
     const sqft = extracted.sqft ?? 2000;
     if (extracted.sqft == null)
       assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
-    const rate = await marketRate({
-      anthropicKey: apiKey,
+    const rate = await getCachedRate({
       service: "WILDLIFE",
       city: town,
       state: extracted.state,
       sqft,
     });
-    if (!rate) return escalateAiUnavailable("Wildlife exclusion and removal");
+    if (!rate) {
+      return escalateRateQueued("Wildlife exclusion and removal", "WILDLIFE", sqft);
+    }
     priced = oneTimeFromSheet({
       service: "Wildlife exclusion and removal",
       lines: [
@@ -741,14 +763,15 @@ async function priceLead(args: Args) {
       const sqft = extracted.sqft ?? 2000;
       if (extracted.sqft == null)
         assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
-      const rate = await marketRate({
-        anthropicKey: apiKey,
+      const rate = await getCachedRate({
         service: "TERMITE",
         city: town,
         state: extracted.state,
         sqft,
       });
-      if (!rate) return escalateAiUnavailable("Termite treatment");
+      if (!rate) {
+        return escalateRateQueued("Termite treatment", "TERMITE", sqft);
+      }
       priced = oneTimeFromSheet({
         service: "Termite treatment",
         lines: [
@@ -769,13 +792,14 @@ async function priceLead(args: Args) {
       );
     } else if (extracted.specialtyKind === "wasp_nest") {
       if (!town) return needsTown();
-      const rate = await marketRate({
-        anthropicKey: apiKey,
+      const rate = await getCachedRate({
         service: "WASP_NEST",
         city: town,
         state: extracted.state,
       });
-      if (!rate) return escalateAiUnavailable("Wasp / hornet nest removal");
+      if (!rate) {
+        return escalateRateQueued("Wasp / hornet nest removal", "WASP_NEST");
+      }
       const nests = Math.max(1, extracted.nestCount ?? 1);
       if (extracted.nestCount == null) {
         assumptions.push("assumed a single nest — we'll confirm when scheduling");
@@ -783,7 +807,10 @@ async function priceLead(args: Args) {
       // The sheet must actually price what was asked: a multi-nest job with
       // no extra-nest component is an unpriceable request.
       if (nests > 1 && rate.sheet.extraNestCents == null) {
-        return escalateAiUnavailable("Wasp / hornet nest removal — multiple nests");
+        return escalateRateQueued(
+          "Wasp / hornet nest removal — multiple nests",
+          "WASP_NEST"
+        );
       }
       const lines: PriceLine[] = [
         { label: "AI market rate — first nest", cents: rate.priceCents },
@@ -811,8 +838,7 @@ async function priceLead(args: Args) {
       const sqft = extracted.sqft ?? 2000;
       if (extracted.sqft == null)
         assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
-      const rate = await marketRate({
-        anthropicKey: apiKey,
+      const rate = await getCachedRate({
         service: roach ? "ROACH" : "RODENT",
         city: town,
         state: extracted.state,
@@ -821,7 +847,9 @@ async function priceLead(args: Args) {
       const label = roach
         ? "Specialized roach treatment"
         : "Rodent treatment (trapping + exclusion check)";
-      if (!rate) return escalateAiUnavailable(label);
+      if (!rate) {
+        return escalateRateQueued(label, roach ? "ROACH" : "RODENT", sqft);
+      }
       priced = oneTimeFromSheet({
         service: label,
         lines: [{ label: "AI market rate — one-time treatment", cents: rate.priceCents }],
@@ -845,14 +873,15 @@ async function priceLead(args: Args) {
     // HOA auto-quotes like everything else now — the every-HOA-escalates-to-
     // Jake policy is retired by Jake's decision. Escalation remains only the
     // fallback when research fails.
-    const rate = await marketRate({
-      anthropicKey: apiKey,
+    const rate = await getCachedRate({
       service: "HOA",
       city: town,
       state: extracted.state,
     });
     const hoa = rate?.sheet.hoaPerUnitMonthly;
-    if (!hoa) return escalateAiUnavailable("Association/HOA common areas");
+    if (!hoa) {
+      return escalateRateQueued("Association/HOA common areas", "HOA");
+    }
     const freq: PlanCadence =
       statedFreq && statedFreq !== "ONE_TIME" ? statedFreq : "MONTHLY";
     if (statedFreq === "ONE_TIME") {
@@ -887,14 +916,15 @@ async function priceLead(args: Args) {
     const sqft = extracted.sqft ?? 2000;
     if (extracted.sqft == null) assumptions.push("assumed ~2,000 sqft — confirm on booking");
     if (!town) return needsTown();
-    const rate = await marketRate({
-      anthropicKey: apiKey,
+    const rate = await getCachedRate({
       service: "COMMERCIAL",
       city: town,
       state: extracted.state,
       sqft,
     });
-    if (!rate) return escalateAiUnavailable("Commercial pest control");
+    if (!rate) {
+      return escalateRateQueued("Commercial pest control", "COMMERCIAL", sqft);
+    }
     const freq = statedFreq ?? "MONTHLY";
     if (freq === "ONE_TIME") {
       priced = oneTimeFromSheet({
@@ -911,8 +941,13 @@ async function priceLead(args: Args) {
     } else {
       priced = planFromSheet(rate, freq, zone, "Commercial pest control");
       // A COMMERCIAL sheet without plan cadences can't price a plan lead.
-      if (!priced)
-        return escalateAiUnavailable(`Commercial pest control — ${freqLabel(freq)}`);
+      if (!priced) {
+        return escalateRateQueued(
+          `Commercial pest control — ${freqLabel(freq)}`,
+          "COMMERCIAL",
+          sqft
+        );
+      }
     }
   } else if (extracted.propertyType === "mosquito") {
     if (extracted.halfAcres == null)
@@ -936,14 +971,19 @@ async function priceLead(args: Args) {
     if (extracted.sqft == null)
       assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
     if (!town) return needsTown();
-    const rate = await marketRate({
-      anthropicKey: apiKey,
+    const rate = await getCachedRate({
       service: "GENERAL_PEST",
       city: town,
       state: extracted.state,
       sqft,
     });
-    if (!rate) return escalateAiUnavailable("Residential general pest control");
+    if (!rate) {
+      return escalateRateQueued(
+        "Residential general pest control",
+        "GENERAL_PEST",
+        sqft
+      );
+    }
     gpRate = rate;
     gpKind = "one_time_gpc";
     const freq = statedFreq ?? "QUARTERLY";
@@ -975,7 +1015,13 @@ async function priceLead(args: Args) {
     } else {
       priced = planFromSheet(rate, freq, zone);
       // A GENERAL_PEST sheet without plan cadences can't price a plan lead.
-      if (!priced) return escalateAiUnavailable(`Residential GPC — ${freqLabel(freq)}`);
+      if (!priced) {
+        return escalateRateQueued(
+          `Residential GPC — ${freqLabel(freq)}`,
+          "GENERAL_PEST",
+          sqft
+        );
+      }
     }
   }
 

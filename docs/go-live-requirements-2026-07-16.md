@@ -113,6 +113,27 @@ available"; suites 408 web / 143 CRM):
   strictly as exclusion/removal (sealing entry points), not trapping — confirm that framing
   keeps it inside licence scope, or say the word and wildlife goes back to pass/escalate.
 
+**Batch AI pricing** (Jake's directive, 17 July: "AI runs weekly to research our pricing
+database and update it — faster and more stable quoting flows"; suites 436 web / 143 CRM):
+
+- **Live quoting is pure reads.** The funnel and the office engine never research inline —
+  no Anthropic call, no 10–60s spinner, no timeout class. Serve-last-known-good: an expired
+  sheet still serves (`expiresAt` now means "due for refresh", never "refuse"); pinned office
+  rows serve forever; only a combo with no sheet at all falls back.
+- **The hourly `pricing-refresh` cron owns all research**: demand-first (a live miss enqueues
+  a RateCoverage row — with the waiting lead's email on the funnel path — and is researched
+  within the hour, then the lead gets a "your exact prices are ready" email), weekly refresh
+  of every sheet (pinned skipped), idempotent coverage seeding (SEED_TOWNS × services × bands,
+  plus combos derived from customers/bookings — **the town list is Jake's to curate**), caps
+  of 20/run and 150/day with commented economics.
+- **The Monday 10:00 UTC report** is the pricing governance artifact: price moves ranked by %,
+  floors that bound, failing combos, stale rows (>21-day age alert), coverage gaps, weekly
+  research counts. Visibility, not a gate, per the standing rule.
+- Residuals: a live-but-partial sheet (possible only via office edits/legacy data — the engine
+  writes all-or-nothing) re-researches weekly rather than within the hour; the notify list
+  caps at 5 leads per combo; the within-the-hour promise slips if the daily research cap is
+  already spent that day.
+
 **One conversion road** (Jake's directive, 17 July: the office-sold quote → e-sign → convert
 branch "can be removed from the code. We should always force the other route (day picked, pays
 by card, schedule)"; suites 367 web / 140 CRM):

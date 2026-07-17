@@ -49,14 +49,16 @@ import {
 const STATUS_TONE: Record<RateStatus, BadgeTone> = {
   active: "ok",
   pinned: "info",
-  expired: "warn",
+  stale: "warn",
   retired: "muted",
 };
 
 const STATUS_LABEL: Record<RateStatus, string> = {
   active: "active",
   pinned: "pinned — never re-researches",
-  expired: "expired",
+  // Serve-last-known-good: a row past its refresh date keeps quoting until
+  // the pricing cron replaces the sheet — amber, not an outage.
+  stale: "stale — serving last known, refresh due",
   retired: "retired",
 };
 
@@ -104,7 +106,7 @@ export default function MarketRates() {
       ) : rates.length === 0 ? (
         <EmptyState
           title="No market rates yet"
-          body="Every base price is AI-researched: the first quote for a service + area (+ size band) researches the local market once and caches the full rate sheet here. Review, edit (which pins the rate), or retire any row."
+          body="Every base price is AI-researched: the hourly pricing refresh researches each service + area (+ size band) and caches the full rate sheet here, re-checking it weekly. Review, edit (which pins the rate), or retire any row."
         />
       ) : (
         <Card>
@@ -316,12 +318,14 @@ function RateForm({
             <dd>{fmtDate(rate.researchedAt, true)}</dd>
           </>
         ) : null}
-        <dt>Re-researches</dt>
+        <dt>Refresh due</dt>
         <dd>
           {rate.pinned
             ? "never — pinned until you un-pin it"
             : rate.expiresAt
-              ? fmtDate(rate.expiresAt, true)
+              ? // Past-due rows keep serving the last known sheet until the
+                // pricing cron refreshes them — due, never dark.
+                fmtDate(rate.expiresAt, true)
               : "—"}
         </dd>
       </dl>
@@ -422,7 +426,7 @@ function RateForm({
         </>
       ) : null}
 
-      <Field label="Active" hint="Retire to force fresh AI research on the next quote">
+      <Field label="Active" hint="Retire to stop serving this rate — the refresh cron researches a replacement">
         <SegControl
           options={[
             { value: "yes" as const, label: "Active" },

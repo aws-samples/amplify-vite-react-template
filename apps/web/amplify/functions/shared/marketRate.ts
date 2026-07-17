@@ -9,17 +9,32 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  * One research call per (service, area, size band) returns a full rate
  * sheet — one-time price, recurring-plan cadences with monthly + initial
  * fees, the wasp extra-nest increment, HOA per-unit monthly rates by
- * unit-count band — cached on ONE MarketRate row with a shelf life.
- * Consistency rule: identical inputs → identical prices, so research runs
- * at most once per rate key and the office can edit or retire any cached
- * rate from the CRM. The office override surface is the FULL sheet: the
- * Market Rates screen edits ratesJson components and mirrors `priceCents`
- * to the sheet's one-time price on save. An office edit sets `pinned`,
- * and a pinned row NEVER expires or re-researches — the office's number
+ * unit-count band — cached on ONE MarketRate row. Consistency rule:
+ * identical inputs → identical prices, and the office can edit or retire
+ * any cached rate from the CRM. The office override surface is the FULL
+ * sheet: the Market Rates screen edits ratesJson components and mirrors
+ * `priceCents` to the sheet's one-time price on save. An office edit sets
+ * `pinned`, and a pinned row is NEVER re-researched — the office's number
  * stands until the office un-pins or retires it.
  *
- * Exactly two guardrails — deliberately no min/max clamps and no review
- * queue, and deliberately no upper bound:
+ * The live path is PURE READS. getCachedRate serves last-known-good and
+ * never researches: an expired sheet still serves (a week-old price beats
+ * a callback), so `expiresAt` means "due for refresh", never "refuse";
+ * pinned rows serve forever until un-pinned; only a combo with NO sheet at
+ * all returns null. On null the caller records the miss with
+ * enqueueRateResearch (an idempotent RateCoverage upsert, optionally
+ * carrying the waiting lead's email) and takes its honest fallback — the
+ * hourly pricing-refresh cron researches the combo and emails the lead
+ * when their exact prices are ready.
+ *
+ * Research (researchAndCacheRate) is exported ONLY as the cron's
+ * machinery: no quote request ever waits 10–60s on an Anthropic call
+ * anymore, and the research budget lives in the cron's caps
+ * (RESEARCH_PER_RUN / RESEARCH_PER_DAY in pricing-refresh), which replaced
+ * the old live-path NEW_RESEARCH_PER_DAY.
+ *
+ * Guardrails — deliberately no min/max clamps, no review queue, and
+ * deliberately no upper bound:
  *
  *   1. Variable-cost floor. A researched one-time price never ships below
  *      the deterministic Zone-A variable cost from crm-pricing/rateCards
@@ -31,21 +46,21 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  *      rates — carry NO floor; that fact is recorded on the rate row's
  *      basis rather than inventing economics.
  *
- *   2. Callback fallback. No research result — daily budget spent, key
- *      missing, junk or partial response, expired cache whose re-research
- *      fails — NEVER yields a made-up price: the engine returns null and
- *      the caller falls to its CONTACT path. An expired row is never
- *      served; it re-researches or refuses.
+ *   2. No invented prices. Junk or partial research NEVER yields a made-up
+ *      number — every component parses or the whole result is discarded
+ *      and the previous sheet keeps serving.
  *
- * When a NEW sheet is researched and cached (not on cache hits) the office
- * gets a short heads-up email pointing at the Market Rates screen. That is
- * visibility, not a gate — the quote proceeds immediately.
+ * When a NEW sheet is researched and cached the office gets a short
+ * heads-up email pointing at the Market Rates screen. That is visibility,
+ * not a gate — the sheet quotes immediately.
  */
 
-const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
-
-/** Global ceiling on brand-new (uncached) AI research runs per day. */
-export const NEW_RESEARCH_PER_DAY = 25;
+/**
+ * Refresh cadence: a sheet older than this is due for re-research by the
+ * cron. Also what a fresh row's `expiresAt` is set to — the "due" date the
+ * office sees, not a serve deadline.
+ */
+export const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type MarketRateService =
   | "GENERAL_PEST"
@@ -202,18 +217,7 @@ function applyFloor(
   return { sheet: { ...sheet, oneTimeCents }, floorNotes: notes };
 }
 
-// -------------------------------------------------------------- the engine
-
-/** Global ceiling on brand-new (uncached) AI research runs per day. */
-async function researchBudgetLeft(): Promise<boolean> {
-  const client = await dataClient();
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { data } = await client.models.MarketRate.list({
-    filter: { researchedAt: { gt: since } },
-    limit: NEW_RESEARCH_PER_DAY + 1,
-  });
-  return data.length < NEW_RESEARCH_PER_DAY;
-}
+// ---------------------------------------------------- the live path (reads)
 
 function parseSheet(raw: unknown): RateSheet | null {
   if (raw == null) return null;
@@ -233,62 +237,236 @@ function parseSheet(raw: unknown): RateSheet | null {
   return null;
 }
 
-export async function marketRate(opts: {
-  anthropicKey: string | null;
+/** The combo key: identical for MarketRate.rateKey and RateCoverage.id. */
+export function rateKeyFor(
+  service: MarketRateService,
+  areaKey: string,
+  bucket: number | null
+): string {
+  return `${service}#${areaKey}${bucket ? `#${bucket}` : ""}`;
+}
+
+/**
+ * Which row serves for a rate key: a pinned row is the office's word and
+ * always wins; otherwise the freshest research does. Expiry does not
+ * disqualify anything — serve-last-known-good. Shared with the cron so
+ * "the row that serves" and "the row that refreshes" are the same row.
+ */
+export function pickLiveRow<
+  T extends {
+    active: boolean;
+    pinned?: boolean | null;
+    researchedAt?: string | null;
+  },
+>(rows: T[]): T | null {
+  const live = rows.filter((r) => r.active);
+  return (
+    live.find((r) => r.pinned) ??
+    live.reduce<T | null>(
+      (best, r) =>
+        !best || (r.researchedAt ?? "") > (best.researchedAt ?? "") ? r : best,
+      null
+    )
+  );
+}
+
+/**
+ * The live path: return the freshest usable cached sheet, or null. NEVER
+ * researches, never waits — an expired sheet still serves (it is merely
+ * due for refresh), a pinned sheet serves forever, and only a combo with
+ * no sheet at all returns null. Callers pair a null with
+ * enqueueRateResearch + their honest fallback.
+ */
+export async function getCachedRate(opts: {
   service: MarketRateService;
   city: string;
   state: string;
   sqft?: number;
 }): Promise<MarketRateResult | null> {
-  const { anthropicKey, service, city, state, sqft } = opts;
+  const { service, city, state, sqft } = opts;
   const areaKey = areaKeyFor(city, state);
   const bucket = sqft != null ? sqftBucket(sqft) : null;
-  const rateKey = `${service}#${areaKey}${bucket ? `#${bucket}` : ""}`;
+  const rateKey = rateKeyFor(service, areaKey, bucket);
 
   const client = await dataClient();
   const { data: existing } =
     await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
-  // A pinned row is an office edit and never expires — it serves until the
-  // office un-pins or retires it. Unpinned rows expire on schedule.
-  const live = existing.find(
-    (r) =>
-      r.active &&
-      (r.pinned ||
-        !r.expiresAt ||
-        new Date(r.expiresAt).getTime() > Date.now())
-  );
-  if (live) {
-    const stored = parseSheet(live.ratesJson);
-    if (stored?.hoaPerUnitMonthly) {
-      // HOA sheets have no one-time component; the office edits the
-      // per-unit rates in ratesJson directly and priceCents is only the
-      // model's required mirror column.
-      return {
-        priceCents: live.priceCents,
-        sheet: stored,
-        basis: live.basis ?? "",
-        cached: true,
-      };
-    }
-    // priceCents is mirrored to the sheet's one-time on office save, and it
-    // wins over the stored one-time — that keeps rows edited before the
-    // full-sheet override surface existed honest too.
-    const sheet: RateSheet = {
-      ...(stored ?? {}),
-      oneTimeCents: live.priceCents,
-    };
+  const live = pickLiveRow(existing);
+  if (!live) return null;
+
+  const stored = parseSheet(live.ratesJson);
+  if (stored?.hoaPerUnitMonthly) {
+    // HOA sheets have no one-time component; the office edits the
+    // per-unit rates in ratesJson directly and priceCents is only the
+    // model's required mirror column.
     return {
       priceCents: live.priceCents,
-      sheet,
+      sheet: stored,
       basis: live.basis ?? "",
       cached: true,
     };
   }
+  // priceCents is mirrored to the sheet's one-time on office save, and it
+  // wins over the stored one-time — that keeps rows edited before the
+  // full-sheet override surface existed honest too.
+  return {
+    priceCents: live.priceCents,
+    sheet: { ...(stored ?? {}), oneTimeCents: live.priceCents },
+    basis: live.basis ?? "",
+    cached: true,
+  };
+}
 
-  // Cache miss, expired, or retired: research or refuse — never serve a
-  // stale price, never invent one.
+// ------------------------------------------------- demand-enqueue (misses)
+
+export type RateNotifyEntry = { email: string; bookingRequestId?: string };
+
+/** Waiting-lead entries kept per coverage row — enough for a small shop's
+ *  hour of misses on one combo; anything past this still gets researched,
+ *  the overflow lead just isn't individually emailed. */
+export const NOTIFY_CAP = 5;
+
+export function parseNotify(raw: unknown): RateNotifyEntry[] {
+  if (raw == null) return [];
+  try {
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(value)) {
+      return value.filter(
+        (e): e is RateNotifyEntry =>
+          typeof e === "object" && e !== null && typeof e.email === "string"
+      );
+    }
+  } catch {
+    /* corrupt notify — treat as empty */
+  }
+  return [];
+}
+
+/**
+ * Record that somebody needed a combo we have no sheet for (or that
+ * seeding wants one researched). Idempotent per combo: one RateCoverage
+ * row keyed by the combo, upserted; a waiting lead's email is appended to
+ * its notify list (deduped, capped at NOTIFY_CAP) so the cron can send
+ * "your exact prices are ready" when the sheet lands. A live-path miss is
+ * DEMAND and jumps the refresh queue — including promoting an existing
+ * seeded row. Never throws: losing a miss record must never fail a quote.
+ */
+export async function enqueueRateResearch(opts: {
+  service: MarketRateService;
+  city: string;
+  state: string;
+  sqft?: number;
+  notifyEmail?: string;
+  bookingRequestId?: string;
+  /** Coverage provenance; live-path misses are DEMAND (the default). */
+  source?: "SEED" | "SERVED" | "DEMAND";
+}): Promise<void> {
+  try {
+    const { service, city, state, sqft } = opts;
+    const source = opts.source ?? "DEMAND";
+    const areaKey = areaKeyFor(city, state);
+    const band = sqft != null ? sqftBucket(sqft) : null;
+    const id = rateKeyFor(service, areaKey, band);
+    const entry: RateNotifyEntry | null = opts.notifyEmail
+      ? {
+          email: opts.notifyEmail.trim().toLowerCase(),
+          ...(opts.bookingRequestId
+            ? { bookingRequestId: opts.bookingRequestId }
+            : {}),
+        }
+      : null;
+
+    const client = await dataClient();
+    let { data: existing } = await client.models.RateCoverage.get({ id });
+    if (!existing) {
+      const { data: createdRow, errors } =
+        await client.models.RateCoverage.create({
+          id,
+          service,
+          areaKey,
+          city: city.trim(),
+          state: state.trim().toUpperCase(),
+          band,
+          source,
+          failCount: 0,
+          active: true,
+          notify: JSON.stringify(entry ? [entry] : []),
+        });
+      if (createdRow && !errors?.length) return;
+      // Lost a create race — re-read and merge into the winner's row.
+      existing = (await client.models.RateCoverage.get({ id })).data;
+      if (!existing) return;
+    }
+
+    const patch: Record<string, unknown> = {};
+    // A real customer miss promotes a seeded row so it jumps the refresh
+    // queue (self-heal within the hour). Never demote the other way.
+    if (source === "DEMAND" && existing.source !== "DEMAND") {
+      patch.source = "DEMAND";
+    }
+    if (!existing.active) patch.active = true;
+    if (entry) {
+      const list = parseNotify(existing.notify);
+      const dup = list.some(
+        (e) =>
+          e.email === entry.email &&
+          e.bookingRequestId === entry.bookingRequestId
+      );
+      if (!dup && list.length < NOTIFY_CAP) {
+        patch.notify = JSON.stringify([...list, entry]);
+      }
+    }
+    if (Object.keys(patch).length) {
+      await client.models.RateCoverage.update({ id, ...patch });
+    }
+  } catch (err) {
+    console.error("enqueueRateResearch failed", opts.service, opts.city, err);
+  }
+}
+
+// --------------------------------------- research + cache (cron machinery)
+
+export type RefreshResult = {
+  priceCents: number;
+  sheet: RateSheet;
+  basis: string;
+  /** The Zone-A variable-cost floor raised the researched one-time price. */
+  floorApplied: boolean;
+  /** The superseded sheet's mirror price/time — null on first research. */
+  prevPriceCents: number | null;
+  prevResearchedAt: string | null;
+};
+
+/**
+ * Research one combo and cache the sheet — the pricing-refresh cron's
+ * machinery, and nothing else's: no live request path reaches this
+ * anymore. Refuses over a pinned combo (the office's word stands). On
+ * success where a previous sheet existed, the new row carries
+ * prevPriceCents/prevResearchedAt for the weekly report's price-move
+ * ranking, and the superseded rows are retired so exactly one live row
+ * serves per combo. The office's new-rate heads-up email still goes out on
+ * every fresh sheet — visibility, not a gate.
+ */
+export async function researchAndCacheRate(opts: {
+  anthropicKey: string | null;
+  service: MarketRateService;
+  city: string;
+  state: string;
+  sqft?: number;
+}): Promise<RefreshResult | null> {
+  const { anthropicKey, service, city, state, sqft } = opts;
   if (!anthropicKey) return null;
-  if (!(await researchBudgetLeft())) return null;
+  const areaKey = areaKeyFor(city, state);
+  const bucket = sqft != null ? sqftBucket(sqft) : null;
+  const rateKey = rateKeyFor(service, areaKey, bucket);
+
+  const client = await dataClient();
+  const { data: existing } =
+    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const prev = pickLiveRow(existing);
+  // The cron skips pinned combos before selection; this refusal is defense
+  // in depth so nothing can ever research over an office edit.
+  if (prev?.pinned) return null;
 
   const researched = await research(anthropicKey, service, city, state, bucket);
   if (!researched) return null;
@@ -296,6 +474,8 @@ export async function marketRate(opts: {
   const { sheet, floorNotes } = applyFloor(service, researched.sheet);
   const basis = [researched.basis, ...floorNotes].join(" · ").slice(0, 800);
   const priceCents = mirrorCents(sheet);
+  const prevPriceCents = prev?.priceCents ?? null;
+  const prevResearchedAt = prev?.researchedAt ?? null;
 
   await client.models.MarketRate.create({
     rateKey,
@@ -306,17 +486,36 @@ export async function marketRate(opts: {
     basis,
     sources: researched.sources.slice(0, 1000),
     researchedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + NINETY_DAYS_MS).toISOString(),
+    // "Due for refresh", not a serve deadline: getCachedRate serves past
+    // this — it is the weekly cadence made visible on the row.
+    expiresAt: new Date(Date.now() + REFRESH_AFTER_MS).toISOString(),
     active: true,
     // Fresh research is never pinned — only an office edit pins a row.
     pinned: false,
+    prevPriceCents: prevPriceCents ?? undefined,
+    prevResearchedAt: prevResearchedAt ?? undefined,
   });
 
+  // Retire the superseded rows so one live row serves per combo. Pinned
+  // rows are untouched (unreachable here — a pinned combo refused above).
+  for (const row of existing) {
+    if (row.active && !row.pinned) {
+      await client.models.MarketRate.update({ id: row.id, active: false });
+    }
+  }
+
   // Visibility, not a gate: the office hears about every new sheet and can
-  // override it, but the quote proceeds immediately.
+  // override it, but the sheet quotes immediately.
   await notifyNewRate({ service, areaKey, bucket, sheet, floorNotes });
 
-  return { priceCents, sheet, basis, cached: false };
+  return {
+    priceCents,
+    sheet,
+    basis,
+    floorApplied: floorNotes.some((n) => n.startsWith("one-time floored")),
+    prevPriceCents,
+    prevResearchedAt,
+  };
 }
 
 // ---------------------------------------------------------------- research

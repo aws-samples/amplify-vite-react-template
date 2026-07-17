@@ -21,13 +21,18 @@ import {
  * AI-first pricing — every base price (GENERAL_PEST one-time + plans,
  * WASP_NEST first + extra nests, rodent/roach, termite/wildlife one-times,
  * commercial one-time + plans, community per-unit plans) comes from the
- * cached AI rate sheet (shared/marketRate). No sheet → CONTACT, never a
- * made-up price. The deterministic overlay (Zone B adders, day pricing)
- * stays on top of the AI base.
+ * cached AI rate sheet via the PURE-READ getCachedRate API
+ * (shared/marketRate) — the live path never researches, and a stale sheet
+ * still serves. No sheet at all → the miss is queued for the hourly
+ * pricing-refresh cron (with the lead's email + booking id, so the cron can
+ * send their day board) and the lead gets the CONTACT holding copy with the
+ * within-the-hour inbox promise — never a made-up price. The deterministic
+ * overlay (Zone B adders, day pricing) stays on top of the AI base.
  *
  * Every ask is priced: all six form services × all three property kinds get
  * a day board. The ONLY surviving CONTACT outcomes are zone OUT, zone
- * UNKNOWN (R59), research failure/budget, and a fully-booked month.
+ * UNKNOWN (R59), a combo with no cached sheet yet, and a fully-booked
+ * month.
  */
 
 const bookings: Record<string, unknown>[] = [];
@@ -95,19 +100,29 @@ type FakeRate = {
   sheet: FakeSheet;
   basis: string;
   cached: boolean;
+  /** Row metadata a stale (past-expiresAt) sheet would carry — the caller
+   *  must serve it untouched, never inspect or refuse it. */
+  expiresAt?: string;
 } | null;
 let marketRateResult: FakeRate;
 /** Per-engine-kind results for multi-service scenarios; a kind not present
  *  here falls back to marketRateResult. */
 let marketRateByService: Record<string, FakeRate>;
 const marketRateCalls: Record<string, unknown>[] = [];
+/** Every enqueueRateResearch call — the live path's only research surface. */
+const enqueueCalls: Record<string, unknown>[] = [];
 vi.mock("../shared/marketRate", () => ({
-  marketRate: async (opts: Record<string, unknown>) => {
+  // The pure-read API: never researches, serves stale — the handler must
+  // trust whatever comes back and never fall to any research path.
+  getCachedRate: async (opts: Record<string, unknown>) => {
     marketRateCalls.push(opts);
     const service = String(opts.service);
     return service in marketRateByService
       ? marketRateByService[service]
       : marketRateResult;
+  },
+  enqueueRateResearch: async (opts: Record<string, unknown>) => {
+    enqueueCalls.push(opts);
   },
   sqftBucket: (sqft: number) => Math.max(500, Math.ceil(sqft / 500) * 500),
   hoaBandFor: (units: number) =>
@@ -158,6 +173,7 @@ beforeEach(() => {
   pricingRuns.length = 0;
   officeEmails.length = 0;
   marketRateCalls.length = 0;
+  enqueueCalls.length = 0;
   stopsEveryDay = [];
   hqMinutes = 20;
   marketRateByService = {};
@@ -308,6 +324,29 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     expect(res.body.decision).toBe("CONTACT");
     expect(res.body.days).toBeUndefined();
     expect(bookings[0]).toMatchObject({ status: "CONTACT" });
+  });
+
+  it("a miss queues the research with the lead's email + booking id and promises the inbox", async () => {
+    marketRateResult = null;
+
+    const res = await postQuote(gpInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(enqueueCalls).toEqual([
+      {
+        service: "GENERAL_PEST",
+        city: "Ware",
+        state: "MA",
+        sqft: 2000,
+        notifyEmail: "dana@example.com",
+        bookingRequestId: res.body.bookingId,
+      },
+    ]);
+    // The honest holding copy: no call promised — the cron emails the exact
+    // day-by-day prices within the hour.
+    expect(res.body.message).toMatch(/pricing your area right now/i);
+    expect(res.body.message).toMatch(/inbox within the hour/i);
+    expect(officeEmails[0].subject).toBe("Website lead waiting on AI pricing");
   });
 
   it("falls to CONTACT when the sheet is missing the chosen plan cadence", async () => {
@@ -661,6 +700,33 @@ describe("every ask is priced — the full service × property-kind sweep", () =
         ).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("the live path is a pure read (serve-last-known-good)", () => {
+  it("a hit never enqueues research — the day board prices as before", async () => {
+    const res = await postQuote(rodentInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    expect((res.body.days as unknown[]).length).toBeGreaterThan(0);
+    expect(enqueueCalls).toHaveLength(0);
+    expect(marketRateCalls).toHaveLength(1); // one read, nothing else
+  });
+
+  it("a stale sheet still serves — staleness beats a callback", async () => {
+    marketRateResult = {
+      priceCents: 19900,
+      sheet: { oneTimeCents: 19900 },
+      basis: "researched months ago",
+      cached: true,
+      expiresAt: "2020-01-01T00:00:00.000Z", // long past — served anyway
+    };
+
+    const res = await postQuote(rodentInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 19900 });
+    expect(enqueueCalls).toHaveLength(0);
   });
 });
 

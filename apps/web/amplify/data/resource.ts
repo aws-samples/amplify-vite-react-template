@@ -8,6 +8,7 @@ import { postAuth } from "../functions/post-auth/resource";
 import { crmPricing } from "../functions/crm-pricing/resource";
 import { bookingPublic } from "../functions/booking-public/resource";
 import { leadIntake } from "../functions/lead-intake/resource";
+import { pricingRefresh } from "../functions/pricing-refresh/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -262,11 +263,14 @@ export const schema = a.schema({
   // One research per service+area(+sqft band) returns a full rate sheet
   // (one-time, plan cadences with monthly + initial fees, wasp extra-nest,
   // HOA per-unit monthly rates by unit band) stored in ratesJson; priceCents
-  // mirrors the sheet's one-time price. The office override surface is the
-  // FULL sheet: the Market Rates screen edits ratesJson components, keeps
-  // priceCents mirrored, and sets pinned — a pinned row never expires or
-  // re-researches until the office un-pins or retires it. Cached so
-  // identical inputs keep identical prices.
+  // mirrors the sheet's one-time price. Research happens ONLY in the hourly
+  // pricing-refresh cron; the live quoting paths are pure reads with
+  // serve-last-known-good semantics — expiresAt means "due for refresh",
+  // never "refuse". The office override surface is the FULL sheet: the
+  // Market Rates screen edits ratesJson components, keeps priceCents
+  // mirrored, and sets pinned — a pinned row is never re-researched and
+  // serves until the office un-pins or retires it. Cached so identical
+  // inputs keep identical prices.
   MarketRate: a
     .model({
       rateKey: a.string().required(),
@@ -279,10 +283,47 @@ export const schema = a.schema({
       researchedAt: a.datetime(),
       expiresAt: a.datetime(),
       active: a.boolean().required(),
-      // Office-edited. Pinned rows are the office's word and never expire.
+      // Office-edited. Pinned rows are the office's word and never refresh.
       pinned: a.boolean(),
+      // The superseded sheet's mirror price + research time, stamped by the
+      // refresh cron when it replaces a sheet — the weekly report diffs
+      // prev vs current to rank price moves.
+      prevPriceCents: a.integer(),
+      prevResearchedAt: a.datetime(),
     })
     .secondaryIndexes((index) => [index("rateKey")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+    ]),
+
+  // The research work-list for the pricing-refresh cron: one row per
+  // (service, area, sqft band) combo the AI pricer should keep a fresh
+  // sheet for, with the row id doubling as the combo key (identical to the
+  // MarketRate rateKey format). Rows are born from idempotent seeding
+  // (SEED: the curated core-town list; SERVED: combos derived from existing
+  // rates, customer towns and booking requests) or from a live-path cache
+  // miss (DEMAND — those jump the refresh queue so a waiting lead is priced
+  // within the hour). The live quoting paths only ever READ MarketRate;
+  // this model belongs to enqueueRateResearch and the cron.
+  RateCoverage: a
+    .model({
+      service: a.string().required(),
+      areaKey: a.string().required(),
+      // Human-readable town for the research prompt (areaKey is the key).
+      city: a.string().required(),
+      state: a.string().required(),
+      // sqft band (bucket ceiling) for sqft-priced services; null for
+      // WASP_NEST / HOA, whose sheets are not sized.
+      band: a.integer(),
+      source: a.string().required(), // SEED | SERVED | DEMAND
+      lastAttemptAt: a.datetime(),
+      lastSuccessAt: a.datetime(),
+      failCount: a.integer(),
+      active: a.boolean().required(),
+      // Waiting leads to email when this combo's sheet lands:
+      // [{email, bookingRequestId?}], capped at NOTIFY_CAP (5).
+      notify: a.json(),
+    })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
     ]),
@@ -1012,6 +1053,7 @@ export const schema = a.schema({
   allow.resource(crmPricing),
   allow.resource(bookingPublic),
   allow.resource(leadIntake),
+  allow.resource(pricingRefresh),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

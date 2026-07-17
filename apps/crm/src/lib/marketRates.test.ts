@@ -72,11 +72,13 @@ describe("keys and bands (must mirror the engine)", () => {
   });
 });
 
-describe("pinned semantics", () => {
-  it("an expired row is expired — unless pinned, which never expires", () => {
-    const expired = rate({ expiresAt: new Date(NOW - DAY).toISOString() });
-    expect(rateStatus(expired, NOW)).toBe("expired");
-    expect(isServable(expired, NOW)).toBe(false);
+describe("pinned and serve-stale semantics", () => {
+  it("a row past expiresAt is stale — still served as the last known good sheet", () => {
+    const stale = rate({ expiresAt: new Date(NOW - DAY).toISOString() });
+    expect(rateStatus(stale, NOW)).toBe("stale");
+    // Serve-last-known-good: staleness beats a callback; the refresh cron
+    // owes the row new research, but the engine keeps quoting from it.
+    expect(isServable(stale, NOW)).toBe(true);
 
     const pinned = rate({
       expiresAt: new Date(NOW - DAY).toISOString(),
@@ -203,16 +205,26 @@ describe("selectPlanRate", () => {
     expect(selectPlanRate(rows, "GENERAL_PEST", "ware-ma", 3500, NOW)).toBeNull();
   });
 
-  it("skips rows the engine would refuse (expired, retired) but serves pinned", () => {
+  it("skips rows the engine would refuse (retired) but serves stale and pinned", () => {
+    const retiredOnly = [
+      rate({ id: "retired", rateKey: "GENERAL_PEST#ware-ma#2000", active: false }),
+    ];
+    expect(
+      selectPlanRate(retiredOnly, "GENERAL_PEST", "ware-ma", 2000, NOW)
+    ).toBeNull();
+
+    // Serve-last-known-good: a stale row still prices — exactly what the
+    // engine's getCachedRate would serve.
     const stale = [
       rate({
-        id: "expired",
+        id: "stale",
         rateKey: "GENERAL_PEST#ware-ma#2000",
         expiresAt: new Date(NOW - DAY).toISOString(),
       }),
-      rate({ id: "retired", rateKey: "GENERAL_PEST#ware-ma#2000", active: false }),
     ];
-    expect(selectPlanRate(stale, "GENERAL_PEST", "ware-ma", 2000, NOW)).toBeNull();
+    expect(selectPlanRate(stale, "GENERAL_PEST", "ware-ma", 2000, NOW)?.id).toBe(
+      "stale"
+    );
 
     const pinned = [
       rate({

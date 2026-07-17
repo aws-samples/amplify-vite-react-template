@@ -22,9 +22,11 @@ import {
 } from "../shared/bookingTerms";
 import { buildDayMatrix, type DayQuote } from "./availability";
 import {
+  enqueueRateResearch,
+  getCachedRate,
   hoaBandFor,
-  marketRate,
   sqftBucket,
+  type MarketRateService,
   type PlanCadence,
 } from "../shared/marketRate";
 
@@ -299,12 +301,10 @@ const json = (
 /**
  * Layered abuse control for the unauthenticated endpoint: an optional bot
  * token (enforced as soon as TURNSTILE_SECRET is configured) and a
- * best-effort per-IP hourly cap. The hard global ceiling on how many *new*
- * AI market researches can run per day lives inside the engine
- * (shared/marketRate — NEW_RESEARCH_PER_DAY), so cached rates keep serving
- * even after the day's research budget is spent. The endpoint spends real
- * money per call (Claude + web search + Google Routes), so nothing billed
- * runs until these pass.
+ * best-effort per-IP hourly cap. The live path is pure reads now — AI
+ * research runs only inside the hourly pricing-refresh cron, behind its own
+ * per-run/per-day caps — but the endpoint still spends real money per call
+ * (Google Routes), so nothing billed runs until these pass.
  */
 const QUOTES_PER_IP_PER_HOUR = 12;
 
@@ -491,17 +491,50 @@ async function quote(input: QuoteInput, sourceIp: string) {
   }
   const priceZone: Zone = zone;
 
-  // AI base price. Every service prices from the cached market-rate sheet
-  // (one research per service + area + size band; an office-edited row
-  // wins). No sheet — budget spent, key missing, junk research, expired
-  // cache — is never a made-up number: the lead falls to the callback path.
-  // The deterministic overlay stays on top of the AI base: the Zone B
-  // adders here, then day pricing / capacity / the R62 cost floor below.
-  const anthropicKey = await getSecret("ANTHROPIC_API_KEY");
-  const contactForPrice = () =>
-    contact(
-      "This one takes a quick look at local specifics — a specialist will call you within the hour with an exact price."
-    );
+  // AI base price. Every service prices from the cached market-rate sheet —
+  // a PURE READ. The live path never researches: getCachedRate serves the
+  // freshest usable row (a stale sheet still serves — staleness beats a
+  // callback; pinned office rows serve forever), and only a combo with no
+  // sheet at all comes back null. On null we queue the research on the
+  // RateCoverage ledger — the hourly pricing-refresh cron picks DEMAND rows
+  // up first and emails the lead their exact day-by-day prices — and the
+  // lead gets the honest holding copy now. Never a made-up number. The
+  // deterministic overlay stays on top of the AI base: the Zone B adders
+  // here, then day pricing / capacity / the R62 cost floor below.
+  const contactForPrice = async (
+    engineService: MarketRateService,
+    sqft?: number
+  ) => {
+    const booking = await makeBooking({ status: "CONTACT" });
+    // Never throws (its own contract) — a lost miss record must never fail
+    // the lead, and the cron's seeding pass rediscovers this combo from the
+    // BookingRequest row anyway.
+    await enqueueRateResearch({
+      service: engineService,
+      city: addr.city!,
+      state: addr.state!,
+      sqft,
+      notifyEmail: email,
+      bookingRequestId: booking.id,
+    });
+    await notifyOffice({
+      subject: "Website lead waiting on AI pricing",
+      heading: "Website lead waiting on AI pricing",
+      template: "ops-booking-rate-queued",
+      relatedId: booking.id,
+      bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}, and no cached rate exists for that combo yet.</p>
+       ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
+       ${attribution?.source ? `<p>Lead source: utm:${escapeHtml(attribution.source)}${attribution.campaign ? ` · campaign:${escapeHtml(attribution.campaign)}` : ""}</p>` : ""}
+       <p>The research is queued: the hourly pricing refresh prices it and emails them their exact day-by-day prices — the website promised their inbox within the hour. Nothing is blocked on you, but the lead is in the CRM if you want to call sooner.</p>
+       <p>Booking request ${booking.id}.</p>`,
+    });
+    return {
+      bookingId: booking.id,
+      decision: "CONTACT",
+      message:
+        "We're pricing your area right now — your exact day-by-day prices will be in your inbox within the hour.",
+    };
+  };
 
   let baseCents: number | null = null;
   let serviceLabel = "";
@@ -524,14 +557,13 @@ async function quote(input: QuoteInput, sourceIp: string) {
   if (propertyKind === "COMMUNITY") {
     // Any service asked at a community is a common-area plan quote from the
     // HOA per-unit sheet: per-unit monthly × units for the chosen cadence.
-    const rate = await marketRate({
-      anthropicKey,
+    const rate = await getCachedRate({
       service: "HOA",
       city: addr.city!,
       state: addr.state!,
     });
     const hoa = rate?.sheet.hoaPerUnitMonthly;
-    if (!hoa) return contactForPrice();
+    if (!hoa) return contactForPrice("HOA");
     const units = input.units!;
     const perUnit = hoa[hoaBandFor(units)][freq];
     let monthly = perUnit * units;
@@ -550,15 +582,14 @@ async function quote(input: QuoteInput, sourceIp: string) {
   } else if (propertyKind === "COMMERCIAL") {
     // Commercial prices like residential general pest — one-time day-priced
     // plus a plan offer — but from the COMMERCIAL sheet for this sqft band.
-    const rate = await marketRate({
-      anthropicKey,
+    const rate = await getCachedRate({
       service: "COMMERCIAL",
       city: addr.city!,
       state: addr.state!,
       sqft: input.sqft!,
     });
     const plan = rate?.sheet.plans?.[freq];
-    if (!rate || !plan) return contactForPrice();
+    if (!rate || !plan) return contactForPrice("COMMERCIAL", input.sqft!);
     baseCents = rate.priceCents;
     serviceLabel = `Commercial pest control — up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`;
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
@@ -570,15 +601,14 @@ async function quote(input: QuoteInput, sourceIp: string) {
         plan.initialFeeCents + (priceZone === "B" ? ZONE_B.ONE_TIME_FLAT : 0),
     };
   } else if (service === "GENERAL_PEST") {
-    const rate = await marketRate({
-      anthropicKey,
+    const rate = await getCachedRate({
       service: "GENERAL_PEST",
       city: addr.city!,
       state: addr.state!,
       sqft: input.sqft!,
     });
     const plan = rate?.sheet.plans?.[freq];
-    if (!rate || !plan) return contactForPrice();
+    if (!rate || !plan) return contactForPrice("GENERAL_PEST", input.sqft!);
     baseCents = rate.priceCents;
     serviceLabel = "General pest control — one-time treatment";
     // R60: the same deterministic Zone B travel adders the rate cards
@@ -592,8 +622,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
         plan.initialFeeCents + (priceZone === "B" ? ZONE_B.ONE_TIME_FLAT : 0),
     };
   } else if (service === "WASP_NEST") {
-    const rate = await marketRate({
-      anthropicKey,
+    const rate = await getCachedRate({
       service: "WASP_NEST",
       city: addr.city!,
       state: addr.state!,
@@ -602,7 +631,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
     // The sheet must actually price what was asked: a multi-nest job with
     // no extra-nest component on the sheet is an unpriceable request.
     if (!rate || (extraNests > 0 && rate.sheet.extraNestCents == null)) {
-      return contactForPrice();
+      return contactForPrice("WASP_NEST");
     }
     baseCents =
       rate.priceCents + extraNests * (rate.sheet.extraNestCents ?? 0);
@@ -611,14 +640,14 @@ async function quote(input: QuoteInput, sourceIp: string) {
   } else {
     // RODENT / ROACH / TERMITE / WILDLIFE — one-time treatments priced from
     // their sqft-banded sheets.
-    const rate = await marketRate({
-      anthropicKey,
-      service: service as "RODENT" | "ROACH" | "TERMITE" | "WILDLIFE",
+    const engineService = service as "RODENT" | "ROACH" | "TERMITE" | "WILDLIFE";
+    const rate = await getCachedRate({
+      service: engineService,
       city: addr.city!,
       state: addr.state!,
       sqft: input.sqft!,
     });
-    if (!rate) return contactForPrice();
+    if (!rate) return contactForPrice(engineService, input.sqft!);
     baseCents = rate.priceCents;
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
     const sizeLabel = `up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`;

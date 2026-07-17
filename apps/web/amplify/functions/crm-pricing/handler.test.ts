@@ -13,9 +13,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * Hartford, Nashua, and Brattleboro all sit inside the 90-minute zone check.
  *
  * And the AI-pricing contract: every base price comes from the cached
- * market-rate sheet (deterministic Zone B adders on top, like the funnel);
- * research failure ESCALATES to a human — never a silent skip, never an
- * invented price; HOA leads auto-quote per-unit like everything else.
+ * market-rate sheet via the PURE-READ getCachedRate API (deterministic
+ * Zone B adders on top, like the funnel). The live path never researches:
+ * a stale sheet still serves, and a combo with no sheet at all enqueues
+ * the research for the hourly pricing-refresh cron and ESCALATES to a
+ * human with the re-price-in-an-hour reason — never a silent skip, never
+ * an invented price; HOA leads auto-quote per-unit like everything else.
  */
 
 const pricingRuns: Record<string, unknown>[] = [];
@@ -63,25 +66,40 @@ const fetchMock = vi.fn(async () => ({
 }));
 vi.stubGlobal("fetch", fetchMock);
 
-/** The AI market-rate engine: tests set the cached sheet per service. */
+/** The AI market-rate cache: tests set the cached sheet per service. The
+ *  handler only ever READS it (getCachedRate) — a miss enqueues research
+ *  for the cron instead of researching inline. */
 type FakeSheet = Record<string, unknown> | null;
 let sheets: Record<string, FakeSheet>;
-const marketRateMock = vi.fn(async (opts: { service: string }) => {
-  const sheet = sheets[opts.service];
-  if (!sheet) return null;
-  const hoa = sheet.hoaPerUnitMonthly as
-    | { UNITS_1_10: { MONTHLY: number } }
-    | undefined;
-  return {
-    priceCents: (sheet.oneTimeCents as number) ?? hoa?.UNITS_1_10.MONTHLY ?? 0,
-    sheet,
-    basis: "test basis",
-    cached: true,
-  };
-});
+type FakeRate = {
+  priceCents: number;
+  sheet: Record<string, unknown>;
+  basis: string;
+  cached: boolean;
+  /** Row metadata a stale (past-expiresAt) sheet would carry — the caller
+   *  must price from it untouched. */
+  expiresAt?: string;
+} | null;
+const marketRateMock = vi.fn(
+  async (opts: { service: string }): Promise<FakeRate> => {
+    const sheet = sheets[opts.service];
+    if (!sheet) return null;
+    const hoa = sheet.hoaPerUnitMonthly as
+      | { UNITS_1_10: { MONTHLY: number } }
+      | undefined;
+    return {
+      priceCents: (sheet.oneTimeCents as number) ?? hoa?.UNITS_1_10.MONTHLY ?? 0,
+      sheet,
+      basis: "test basis",
+      cached: true,
+    };
+  }
+);
+const enqueueMock = vi.fn(async (_opts: Record<string, unknown>) => undefined);
 vi.mock("../shared/marketRate", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../shared/marketRate")>()),
-  marketRate: (opts: never) => marketRateMock(opts),
+  getCachedRate: (opts: never) => marketRateMock(opts),
+  enqueueRateResearch: (opts: never) => enqueueMock(opts),
 }));
 
 const { handler, replyUsesOnlyAllowedAmounts, templateReply } = await import(
@@ -125,6 +143,7 @@ beforeEach(() => {
   messagesCreate.mockClear();
   fetchMock.mockClear();
   marketRateMock.mockClear();
+  enqueueMock.mockClear();
   extraction = { ...baseExtraction };
   composedReply = "Sounds good!"; // no dollar amounts — always passes the guard
   // The cached AI sheets every price comes from. The quarterly plan is
@@ -265,9 +284,10 @@ describe("every base price comes from the AI market-rate sheet", () => {
         city: "Ware",
         state: "MA",
         sqft: 3200,
-        anthropicKey: "test-anthropic-key",
       })
     );
+    // A hit is a pure read — nothing gets queued for the cron.
+    expect(enqueueMock).not.toHaveBeenCalled();
   });
 
   it("lays the deterministic Zone B adders on top, exactly like the funnel", async () => {
@@ -343,17 +363,23 @@ describe("every base price comes from the AI market-rate sheet", () => {
   });
 });
 
-describe("research failure escalates — the human is the fallback", () => {
-  it("no GP sheet → ESCALATE with the price-by-hand reason and the holding script", async () => {
+describe("a cache miss enqueues and escalates — the human holds it for an hour", () => {
+  it("no GP sheet → enqueue for the cron + ESCALATE with the re-price reason and the holding script", async () => {
     sheets.GENERAL_PEST = null;
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe("AI pricing unavailable — price by hand");
+    expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
     expect(String(run.replyText)).toContain("custom quote from our owner");
     expect(run.monthlyPriceCents).toBeUndefined();
     expect(run.oneTimePriceCents).toBeUndefined();
+    expect(enqueueMock).toHaveBeenCalledWith({
+      service: "GENERAL_PEST",
+      city: "Ware",
+      state: "MA",
+      sqft: 3200,
+    });
   });
 
   it("a multi-nest wasp job with no extra-nest component is unpriceable → ESCALATE", async () => {
@@ -369,7 +395,32 @@ describe("research failure escalates — the human is the fallback", () => {
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe("AI pricing unavailable — price by hand");
+    expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
+    expect(enqueueMock).toHaveBeenCalledWith({
+      service: "WASP_NEST",
+      city: "Ware",
+      state: "MA",
+    });
+  });
+
+  it("a stale sheet still prices — serve-last-known-good, no enqueue", async () => {
+    // getCachedRate serves the last known good sheet even past expiresAt;
+    // the caller must price from whatever comes back and never queue or
+    // refuse a served rate.
+    marketRateMock.mockImplementationOnce(async () => ({
+      priceCents: 31900,
+      sheet: sheets.GENERAL_PEST as Record<string, unknown>,
+      basis: "researched months ago",
+      cached: true,
+      expiresAt: "2020-01-01T00:00:00.000Z", // long past — served anyway
+    }));
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.monthlyPriceCents).toBe(7500);
+    expect(run.initialFeeCents).toBe(9900);
+    expect(enqueueMock).not.toHaveBeenCalled();
   });
 });
 
@@ -445,7 +496,7 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
     expect(run.oneTimePriceCents).toBe(42400); // $399 + $25 Zone B flat
   });
 
-  it("research failure still escalates to a human for each new kind", async () => {
+  it("a cache miss still escalates to a human for each new kind — and queues the combo", async () => {
     sheets.TERMITE = null;
     sheets.WILDLIFE = null;
     sheets.COMMERCIAL = null;
@@ -455,13 +506,15 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
       { propertyType: "commercial" },
     ]) {
       pricingRuns.length = 0;
+      enqueueMock.mockClear();
       extraction = { ...baseExtraction, ...patch };
 
       const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
       expect(run.decision).toBe("ESCALATE");
-      expect(run.reason).toBe("AI pricing unavailable — price by hand");
+      expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
       expect(String(run.replyText)).toContain("custom quote from our owner");
+      expect(enqueueMock).toHaveBeenCalledTimes(1);
     }
   });
 });
@@ -508,14 +561,19 @@ describe("HOA auto-quotes per unit — the always-escalate policy is retired", (
     expect(String(run.reason)).toMatch(/unit count/i);
   });
 
-  it("HOA research failure escalates like every other service", async () => {
+  it("an HOA cache miss escalates like every other service — band-less enqueue", async () => {
     sheets.HOA = null;
     extraction = hoaExtraction();
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe("AI pricing unavailable — price by hand");
+    expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
+    expect(enqueueMock).toHaveBeenCalledWith({
+      service: "HOA",
+      city: "Ware",
+      state: "MA",
+    });
   });
 });
 
