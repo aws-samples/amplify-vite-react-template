@@ -16,6 +16,8 @@ vi.mock("../shared/email", () => ({
     return true;
   },
   notifyOffice: async () => true,
+  // R80: the new-booking-landed alert routes to sales@ via notifyLeads.
+  notifyLeads: async () => true,
 }));
 
 const pdfBodies: string[] = [];

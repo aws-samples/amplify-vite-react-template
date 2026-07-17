@@ -34,9 +34,22 @@ const fakeDataClient = {
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
+// R80: a pricing escalation is a lead needing a call — it routes to sales@ via
+// notifyLeads now (was a hand-rolled sendEmail to the ops inbox).
+const leadEscalations: { subject: string; bodyHtml: string; template: string }[] =
+  [];
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
   sendEmail: async () => true,
+  notifyOffice: async () => true,
+  notifyLeads: async (o: {
+    subject: string;
+    bodyHtml: string;
+    template: string;
+  }) => {
+    leadEscalations.push(o);
+    return true;
+  },
 }));
 
 /** First model call (extraction, has output_config) returns the canned
@@ -140,6 +153,7 @@ const baseExtraction = {
 
 beforeEach(() => {
   pricingRuns.length = 0;
+  leadEscalations.length = 0;
   messagesCreate.mockClear();
   fetchMock.mockClear();
   marketRateMock.mockClear();
@@ -380,6 +394,11 @@ describe("a cache miss enqueues and escalates — the human holds it for an hour
       state: "MA",
       sqft: 3200,
     });
+    // R80: the escalation email is a lead alert — it routes to sales@ via
+    // notifyLeads with the pricing-escalation template, not the ops inbox.
+    expect(leadEscalations).toHaveLength(1);
+    expect(leadEscalations[0].template).toBe("pricing-escalation");
+    expect(leadEscalations[0].subject).toContain("Pricing escalation");
   });
 
   it("a multi-nest wasp job with no extra-nest component is unpriceable → ESCALATE", async () => {

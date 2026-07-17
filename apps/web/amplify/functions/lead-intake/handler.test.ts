@@ -32,12 +32,20 @@ vi.mock("../shared/dataClient", () => ({
   dataClient: async () => fakeDataClient,
 }));
 
-const officeEmails: { subject: string; bodyHtml: string }[] = [];
+// R80: both lead-intake alerts (new-lead, write-failed) route to sales@ via
+// notifyLeads now. notifyOffice stays mocked so an accidental ops route here
+// would be caught (leadEmails would come up empty).
+const leadEmails: { subject: string; bodyHtml: string; template: string }[] = [];
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
   sendEmail: async () => true,
-  notifyOffice: async (opts: { subject: string; bodyHtml: string }) => {
-    officeEmails.push(opts);
+  notifyOffice: async () => true,
+  notifyLeads: async (opts: {
+    subject: string;
+    bodyHtml: string;
+    template: string;
+  }) => {
+    leadEmails.push(opts);
     return true;
   },
 }));
@@ -74,7 +82,7 @@ const lpCallPayload = {
 
 beforeEach(() => {
   created.length = 0;
-  officeEmails.length = 0;
+  leadEmails.length = 0;
   createResult = { data: { id: "cust_1" } };
 });
 
@@ -151,15 +159,25 @@ describe("lead-intake", () => {
     expect(res.body.error).toMatch(/call us/i);
   });
 
-  it("pages the office with the lead when the CRM write fails", async () => {
+  it("pages sales with the lead when the CRM write fails", async () => {
     // The lead exists nowhere else at this point — an email is the only copy.
     createResult = { data: null, errors: [{ message: "boom" }] };
 
     await post(lpCallPayload);
 
-    expect(officeEmails).toHaveLength(1);
-    expect(officeEmails[0].subject).toContain("ACTION REQUIRED");
-    expect(officeEmails[0].bodyHtml).toContain("Dana");
+    expect(leadEmails).toHaveLength(1);
+    expect(leadEmails[0].subject).toContain("ACTION REQUIRED");
+    expect(leadEmails[0].bodyHtml).toContain("Dana");
+    // R80: the write-failed alert is a lead alert — it routes to sales@.
+    expect(leadEmails[0].template).toBe("ops-lead-write-failed");
+  });
+
+  it("routes the new-lead alert to sales, not the ops inbox (R80)", async () => {
+    await post(lpCallPayload);
+
+    expect(leadEmails).toHaveLength(1);
+    expect(leadEmails[0].template).toBe("ops-new-lead");
+    expect(leadEmails[0].subject).toContain("New website lead");
   });
 
   it("captures first-touch attribution against the lead", async () => {

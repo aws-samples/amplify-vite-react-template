@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
-import { emailShell, notifyOffice, sendEmail } from "../shared/email";
+import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
   zoneFromMinutes,
@@ -449,7 +449,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
     opsNote = ""
   ) => {
     const booking = await makeBooking({ status: "CONTACT", ...extra });
-    await notifyOffice({
+    await notifyLeads({
       subject: "Website lead needs a call",
       heading: "Website lead needs a call",
       template: "ops-booking-contact",
@@ -517,7 +517,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
       notifyEmail: email,
       bookingRequestId: booking.id,
     });
-    await notifyOffice({
+    await notifyLeads({
       subject: "Website lead waiting on AI pricing",
       heading: "Website lead waiting on AI pricing",
       template: "ops-booking-rate-queued",

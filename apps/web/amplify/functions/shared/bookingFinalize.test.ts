@@ -25,6 +25,8 @@ const runUpdates: Row[] = [];
 const plansCreated: Row[] = [];
 const jobsCreated: Row[] = [];
 const emails: { to: string; subject: string; html: string }[] = [];
+// R80: the new-booking-landed alert routes to sales@ via notifyLeads now.
+const leadAlerts: { subject: string; heading: string; bodyHtml: string; template: string }[] = [];
 let booking: Record<string, unknown>;
 
 const fakeDataClient = {
@@ -106,6 +108,15 @@ vi.mock("./email", () => ({
     return true;
   },
   notifyOffice: async () => true,
+  notifyLeads: async (o: {
+    subject: string;
+    heading: string;
+    bodyHtml: string;
+    template: string;
+  }) => {
+    leadAlerts.push(o);
+    return true;
+  },
 }));
 vi.mock("./pdf", () => ({
   renderAgreementPdf: async () => Buffer.from("pdf"),
@@ -158,6 +169,7 @@ beforeEach(() => {
   plansCreated.length = 0;
   jobsCreated.length = 0;
   emails.length = 0;
+  leadAlerts.length = 0;
   delete process.env.DOCS_BUCKET; // skip the S3 write
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   booking = {
@@ -301,15 +313,16 @@ describe("matching failure never breaks a paid finalization", () => {
     });
   });
 
-  it("says so in the office alert", async () => {
+  it("says so in the sales alert", async () => {
     customerListError = new Error("DynamoDB flaked");
 
     await finalize();
 
-    const office = emails.find((e) => e.to === "office@pestbuzzkill.com");
-    expect(office).toBeDefined();
-    expect(office!.html).toMatch(/matching this booking to an existing CRM lead failed/i);
-    expect(office!.html).toContain("DynamoDB flaked");
+    // R80: the new-booking alert routes to sales@ (notifyLeads), not info@.
+    expect(leadAlerts).toHaveLength(1);
+    expect(leadAlerts[0].template).toBe("office-booking-alert");
+    expect(leadAlerts[0].bodyHtml).toMatch(/matching this booking to an existing CRM lead failed/i);
+    expect(leadAlerts[0].bodyHtml).toContain("DynamoDB flaked");
   });
 
   it("falls back to create when the convert update is refused", async () => {
@@ -319,8 +332,8 @@ describe("matching failure never breaks a paid finalization", () => {
     await finalize();
 
     expect(customersCreated).toHaveLength(1);
-    const office = emails.find((e) => e.to === "office@pestbuzzkill.com");
-    expect(office!.html).toMatch(/merge the two by hand/i);
+    expect(leadAlerts).toHaveLength(1);
+    expect(leadAlerts[0].bodyHtml).toMatch(/merge the two by hand/i);
   });
 
   it("a clean conversion carries no fallback warning", async () => {
@@ -328,8 +341,8 @@ describe("matching failure never breaks a paid finalization", () => {
 
     await finalize();
 
-    const office = emails.find((e) => e.to === "office@pestbuzzkill.com");
-    expect(office!.html).not.toMatch(/matching this booking/i);
+    expect(leadAlerts).toHaveLength(1);
+    expect(leadAlerts[0].bodyHtml).not.toMatch(/matching this booking/i);
   });
 });
 

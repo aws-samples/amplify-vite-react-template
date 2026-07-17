@@ -127,6 +127,11 @@ export async function sendEmail(opts: {
  *
  * Deliberately not used for *email* failures: routing an alarm through the
  * subsystem it is reporting on is how alarms go unheard.
+ *
+ * R80 — routing partition: this is the *ops* inbox (SES_NOTIFY_EMAIL, info@).
+ * Lead-pipeline alerts (a new website lead, a lead waiting on pricing, a paid
+ * website booking, a pricing escalation) must use notifyLeads, not this — they
+ * go to the sales inbox (SES_LEADS_EMAIL, sales@). Keep money/ops alarms here.
  */
 export async function notifyOffice(opts: {
   subject: string;
@@ -155,6 +160,57 @@ export async function notifyOffice(opts: {
     });
   } catch (err) {
     console.error("notifyOffice failed", opts.subject, err);
+    return false;
+  }
+}
+
+/**
+ * Page the *sales* inbox about a lead that needs a human, and never throw doing
+ * it. Identical in shape and behavior to notifyOffice — the send is recorded in
+ * EmailLog, the copy is wrapped in emailShell — but it routes to SES_LEADS_EMAIL
+ * (sales@) instead of the ops inbox. R80: lead-pipeline alerts go to sales so
+ * they never get lost in the ops noise.
+ *
+ * Safety: a lead alert must reach a human even if the deploy forgot to set
+ * SES_LEADS_EMAIL. If it is unset we fall back to SES_NOTIFY_EMAIL and log
+ * loudly — the alert still lands, just in the wrong inbox, and the log says so.
+ * In deployed envs backend.ts sets SES_LEADS_EMAIL on every lead-sending
+ * function, so the fallback never fires.
+ */
+export async function notifyLeads(opts: {
+  subject: string;
+  heading: string;
+  bodyHtml: string;
+  template: string;
+  customerId?: string | null;
+  relatedId?: string;
+}): Promise<boolean> {
+  let leads = process.env.SES_LEADS_EMAIL;
+  if (!leads) {
+    leads = process.env.SES_NOTIFY_EMAIL;
+    console.error(
+      "SES_LEADS_EMAIL not configured — lead alert fell back to the ops inbox",
+      opts.subject
+    );
+  }
+  if (!leads) {
+    console.error(
+      "notifyLeads: neither SES_LEADS_EMAIL nor SES_NOTIFY_EMAIL is configured — nobody was told",
+      opts.subject
+    );
+    return false;
+  }
+  try {
+    return await sendEmail({
+      to: leads,
+      subject: opts.subject,
+      template: opts.template,
+      customerId: opts.customerId,
+      relatedId: opts.relatedId,
+      html: emailShell(opts.heading, opts.bodyHtml),
+    });
+  } catch (err) {
+    console.error("notifyLeads failed", opts.subject, err);
     return false;
   }
 }

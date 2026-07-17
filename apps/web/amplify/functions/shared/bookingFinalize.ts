@@ -2,7 +2,7 @@ import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
-import { emailShell, notifyOffice, sendEmail } from "./email";
+import { emailShell, notifyLeads, notifyOffice, sendEmail } from "./email";
 import { renderAgreementPdf } from "./pdf";
 import { stripeClient } from "./stripeClient";
 
@@ -638,24 +638,19 @@ async function finalizeClaimed(
     ),
   });
 
-  const office = process.env.SES_NOTIFY_EMAIL;
-  if (office) {
-    await sendEmail({
-      to: office,
-      subject: `Website booking: ${booking.name} — ${booking.selectedDate}`,
-      template: "office-booking-alert",
-      customerId: customer.id,
-      relatedId: booking.id,
-      html: emailShell(
-        "New paid website booking",
-        `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
+  // R80: a paid website booking is a lead landing — route it to sales@.
+  await notifyLeads({
+    subject: `Website booking: ${booking.name} — ${booking.selectedDate}`,
+    template: "office-booking-alert",
+    heading: "New paid website booking",
+    customerId: customer.id,
+    relatedId: booking.id,
+    bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
          <p>The job is on the Needs-scheduling board for route assignment.</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
          <p style="color:#666;font-size:13px;">Reason: ${matchFallbackReason}</p>`
              : ""
-         }`
-      ),
-    });
-  }
+         }`,
+  });
 }

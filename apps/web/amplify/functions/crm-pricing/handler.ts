@@ -11,7 +11,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { callerIsOffice } from "../shared/authz";
-import { emailShell, sendEmail } from "../shared/email";
+import { notifyLeads } from "../shared/email";
 import {
   clearsLeadFee,
   freqLabel,
@@ -1170,8 +1170,6 @@ async function notifyEscalation(
   reason: string,
   priced: PricedPlan | null
 ) {
-  const office = process.env.SES_NOTIFY_EMAIL;
-  if (!office) return;
   const priceLine = priced
     ? priced.monthlyCents != null
       ? `${money(priced.monthlyCents)}/mo${priced.initialFeeCents != null ? ` + ${money(priced.initialFeeCents)} initial` : ""}`
@@ -1179,17 +1177,15 @@ async function notifyEscalation(
         ? `${money(priced.oneTimeCents)} flat`
         : "no card price"
     : "no card price";
-  await sendEmail({
-    to: office,
+  // R80: a pricing escalation is a lead needing a call — route it to sales@.
+  await notifyLeads({
     subject: `Pricing escalation: ${extracted.town ?? "unknown town"} — ${extracted.pest || "lead"}`,
     template: "pricing-escalation",
     relatedId: runId,
-    html: emailShell(
-      "Lead needs your call",
-      `<p><strong>Reason:</strong> ${reason}</p>
+    heading: "Lead needs your call",
+    bodyHtml: `<p><strong>Reason:</strong> ${reason}</p>
        <p><strong>Lead:</strong> ${extracted.customerName ?? "unknown"} — ${extracted.pest || "?"} — ${extracted.town ?? "?"}, ${extracted.state ?? "?"}</p>
        <p><strong>Computed quote:</strong> ${priceLine}</p>
-       <p>The receptionist has told the prospect a manager will follow up same day. Full details are in the CRM pricing log.</p>`
-    ),
+       <p>The receptionist has told the prospect a manager will follow up same day. Full details are in the CRM pricing log.</p>`,
   });
 }

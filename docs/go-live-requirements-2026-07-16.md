@@ -44,6 +44,22 @@ can do. That is a launch checklist, not a crisis list.
 **One item is urgent independent of go-live: R81. The Buildium client secret is committed to a
 public GitHub repo.** Rotate it today.
 
+**Lead emails to sales@** (Jake's directive, 17 July: "lead related emails only ever go to
+sales@pestbuzzkill.com" — R80's routing half; suites 441 web / 143 CRM):
+
+- New `notifyLeads()` helper routes the six lead-pipeline office emails to `SES_LEADS_EMAIL`
+  (sales@): new-website-lead, lead-write-failed, booking-needs-a-call, booking-rate-queued, the
+  new-paid-booking alert, and the Thumbtack pricing-escalation. Routing is now structural (a
+  distinct helper), not a per-call-site choice — verified by an independent reclassification of
+  all 22 office-facing sends: every money/ops alarm (subscription death, digests, receipt/
+  refund/invoice failures, no-access, existing-booking cancels, weekly report) stays on info@,
+  and no customer-facing email moved. Guardrail: an unset `SES_LEADS_EMAIL` falls back to info@
+  with a loud log — a lead alert can misconfigure but never silently vanish.
+- **Ops precondition (Jake):** `sales@pestbuzzkill.com` must be a real, monitored mailbox before
+  this deploys. SES is in production mode (delivers to any recipient, no verification needed)
+  and sales@ is clean on the suppression list — but if the mailbox doesn't exist, lead alerts
+  bounce and repeated bounces suppress the address, silently killing all future lead mail.
+
 ### Engineering burn-down — 16 July, afternoon pass
 
 Closed against this document in `6af26cf` + `eed1e1b`, each implementation adversarially

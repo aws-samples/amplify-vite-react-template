@@ -144,6 +144,20 @@ backend.stripeWebhook.resources.lambda.addToRolePolicy(sesPolicy);
 backend.stripeWebhook.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
 backend.stripeWebhook.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com");
 
+// R80: lead-pipeline alerts route to the sales inbox, not the ops inbox. Set
+// SES_LEADS_EMAIL only on the functions that send a lead email — leadIntake
+// (new-lead / write-failed), bookingPublic (contact / rate-queued), crmPricing
+// (pricing-escalation), and stripeWebhook (the office-booking-alert fires in
+// bookingFinalize inside the webhook Lambda). Ops/money alarms stay on info@.
+for (const fn of [
+  backend.leadIntake,
+  backend.bookingPublic,
+  backend.crmPricing,
+  backend.stripeWebhook,
+]) {
+  fn.addEnvironment("SES_LEADS_EMAIL", "sales@pestbuzzkill.com");
+}
+
 // The pricing engine reads its API keys from SSM at runtime so the deploy
 // never depends on the secrets existing (they're added via the console).
 const appId = process.env.AWS_APP_ID ?? "d26qpsjewk0bee";

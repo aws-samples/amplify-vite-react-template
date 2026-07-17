@@ -1,6 +1,6 @@
 import type { Handler } from "aws-lambda";
 import { dataClient } from "../shared/dataClient";
-import { notifyOffice } from "../shared/email";
+import { notifyLeads } from "../shared/email";
 
 /**
  * Lead intake for every public form on the marketing site.
@@ -247,7 +247,7 @@ export const handler: Handler = async (event) => {
     // The CRM write is the only durable store. If it failed, the lead exists
     // nowhere — page a human with the raw payload and tell the caller the truth.
     console.error("lead-intake: CRM write failed", { writeError, record });
-    await notifyOffice({
+    await notifyLeads({
       subject: `ACTION REQUIRED — website lead could not be saved: ${record.displayName}`,
       heading: "A website lead was not saved",
       template: "ops-lead-write-failed",
@@ -267,7 +267,7 @@ export const handler: Handler = async (event) => {
     });
   }
 
-  await notifyOffice({
+  await notifyLeads({
     subject: `New website lead — ${record.displayName}`,
     heading: "New website lead",
     template: "ops-new-lead",

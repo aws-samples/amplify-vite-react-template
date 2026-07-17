@@ -70,12 +70,20 @@ const fakeDataClient = {
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const officeEmails: { subject: string; bodyHtml: string }[] = [];
+// R80: the two quote-path lead alerts (ops-booking-contact, ops-booking-rate-
+// queued) route to sales@ via notifyLeads now. notifyOffice stays mocked so a
+// stray ops route would leave leadEmails empty and fail the assertions.
+const leadEmails: { subject: string; bodyHtml: string; template: string }[] = [];
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
   sendEmail: async () => true,
-  notifyOffice: async (o: { subject: string; bodyHtml: string }) => {
-    officeEmails.push(o);
+  notifyOffice: async () => true,
+  notifyLeads: async (o: {
+    subject: string;
+    bodyHtml: string;
+    template: string;
+  }) => {
+    leadEmails.push(o);
     return true;
   },
 }));
@@ -171,7 +179,7 @@ const rodentInput = {
 beforeEach(() => {
   bookings.length = 0;
   pricingRuns.length = 0;
-  officeEmails.length = 0;
+  leadEmails.length = 0;
   marketRateCalls.length = 0;
   enqueueCalls.length = 0;
   stopsEveryDay = [];
@@ -206,9 +214,11 @@ describe("zone UNKNOWN never prices (R59)", () => {
 
     await postQuote(rodentInput);
 
-    expect(officeEmails).toHaveLength(1);
-    expect(officeEmails[0].subject).toBe("Website lead needs a call");
-    expect(officeEmails[0].bodyHtml).toContain("Drive-time zone lookup failed");
+    expect(leadEmails).toHaveLength(1);
+    expect(leadEmails[0].subject).toBe("Website lead needs a call");
+    expect(leadEmails[0].bodyHtml).toContain("Drive-time zone lookup failed");
+    // R80: the contact alert is a lead alert — it routes to sales@.
+    expect(leadEmails[0].template).toBe("ops-booking-contact");
   });
 });
 
@@ -346,7 +356,9 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     // day-by-day prices within the hour.
     expect(res.body.message).toMatch(/pricing your area right now/i);
     expect(res.body.message).toMatch(/inbox within the hour/i);
-    expect(officeEmails[0].subject).toBe("Website lead waiting on AI pricing");
+    expect(leadEmails[0].subject).toBe("Website lead waiting on AI pricing");
+    // R80: the rate-queued alert is a lead alert — it routes to sales@.
+    expect(leadEmails[0].template).toBe("ops-booking-rate-queued");
   });
 
   it("falls to CONTACT when the sheet is missing the chosen plan cadence", async () => {
@@ -820,8 +832,8 @@ describe("first-touch attribution rides on the booking", () => {
       source: "facebook",
       campaign: "spring-ants",
     });
-    expect(officeEmails[0].bodyHtml).toContain("utm:facebook");
-    expect(officeEmails[0].bodyHtml).toContain("campaign:spring-ants");
+    expect(leadEmails[0].bodyHtml).toContain("utm:facebook");
+    expect(leadEmails[0].bodyHtml).toContain("campaign:spring-ants");
   });
 
   it("survives junk attribution as a no-op — the quote never fails over it", async () => {
