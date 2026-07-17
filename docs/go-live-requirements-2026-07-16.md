@@ -116,6 +116,32 @@ in both directions against the actual child records.
   failure, duplicate/out-of-order webhooks, and deployed end-to-end recovery with real Stripe test
   events.
 
+**Engineering status (implemented this commit):**
+
+- No succeeded booking payment exits `finalizeBooking` through a log or silent return anymore.
+  Missing booking, a `CANCELED`/`EXPIRED` booking that never finalized, a superseded PaymentIntent,
+  and an amount mismatch each open a durable Finance-owned `PAID_NOT_FINALIZED` case with the
+  customer, amount, reason, and a **finish or refund** action (`shared/bookingFinalize.ts`).
+- The **Booked** write is checked before any confirmation is sent: if the status write does not
+  persist, finalization throws (opening the exception, releasing the claim for an idempotent retry)
+  and no message claims completion.
+- Customer confirmation and the internal booking alert now carry durable outbox markers
+  (`BookingRequest.confirmationSentAt` / `officeAlertSentAt`). A hard kill after **Booked** but
+  before or between the two sends is picked up on the next webhook delivery, which resends only the
+  message whose marker is unset — never a duplicate commitment or duplicate message.
+- A scheduled production reconciliation runs in the daily cron (`daily-reminders`): it reads
+  Stripe's succeeded booking PaymentIntents and the real booking/invoice tables and proves both
+  directions — each succeeded payment has exactly one complete booking for the exact amount, and each
+  BOOKED booking's checkpoint IDs still resolve to real child rows (a nonblank `jobId` is loaded and
+  checked, not trusted). It opens owned cases for missing/duplicate/contradictory records and for a
+  Stripe read failure, and resolves the case on a booking that proves whole
+  (`shared/bookingReconcile.ts`, `daily-reminders/handler.ts`).
+- Failure-injection unit tests cover the guard states, the failed **Booked** write, a kill on each
+  side of the two sends, and reconciliation anomalies plus provider failure.
+
+**Still required for the owners' sign-off (not code):** the deployed end-to-end recovery rehearsal
+with real Stripe test events, and Finance's review of the first production reconciliation output.
+
 **Pass owner:** CEO and Engineering lead jointly; Finance signs the production reconciliation.
 
 ### GL-13 — Finish technician read scope and audited override

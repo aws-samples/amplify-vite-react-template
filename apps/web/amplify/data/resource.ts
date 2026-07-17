@@ -310,6 +310,13 @@ export const schema = a.schema({
       // finally succeeded: an attempt that fails on day 4 because Stripe is
       // down must not cost the customer their refund when it retries on day 3.
       cancelRequestedOn: a.date(),
+      // GL-05 durable communication outbox markers. Stamped only after the
+      // corresponding send actually succeeds, so a finalization hard-killed
+      // after BOOKED but before (or between) its sends is detected on the next
+      // webhook delivery and resends ONLY the unsent message — never a
+      // duplicate confirmation or duplicate sales alert.
+      confirmationSentAt: a.datetime(),
+      officeAlertSentAt: a.datetime(),
     })
     .secondaryIndexes((index) => [index("cancelToken"), index("status")])
     .authorization((allow) => [
