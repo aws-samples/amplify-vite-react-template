@@ -2,16 +2,16 @@
 
 **Business review date:** 17 July 2026
 
-**Latest implementation review:** commits `0dd973d` and `940a4b9`
+**Latest implementation review:** commits `108ea58` and `2949dd5`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
-This is a **delta-only** document. It intentionally excludes capabilities that are already
-working in the reviewed draft. The two latest commits were verified against their code and targeted
-tests; only their unclosed residuals remain in GL-08 and GL-12. An omitted item is not a request to
-rebuild it.
+This is a **delta-only** document. It intentionally excludes capabilities that are already working
+in the reviewed draft. The current two latest commits were verified against their code and tests;
+only their unclosed residuals remain in GL-05 and GL-13. An omitted item is not a request to rebuild
+it.
 
 The standard is the “McDonald's test”: a week-one employee must be able to do the right thing
 without remembering policy, performing mental math, interpreting system internals, or inventing
@@ -47,8 +47,8 @@ blockers.**
 
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed |
 |---|---|---|---|---|
-| P0 | GL-05 | Exactly-once paid booking conversion | CEO + Engineering lead | Paid customer without service, duplicate commitments, or duplicate money |
-| P0 | GL-13 | Technician least-privilege and assignment enforcement | CEO | Customer-data exposure or unauthorized regulated field action |
+| P0 | GL-05 | Finish paid-booking reconciliation and communication durability | CEO + Engineering lead | Succeeded payment can remain invisible or customer confirmation can be lost |
+| P0 | GL-13 | Finish technician read scope and audited override | CEO | Customer-data exposure persists outside the guarded field actions |
 | P0 | GL-15 | Legally reliable service-report completion | Compliance owner | Invalid or undelivered regulated record |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Sell work the company cannot staff or legally perform |
 | P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI/employee can publish loss-making or nonsensical prices |
@@ -67,8 +67,8 @@ blockers.**
 | P1 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | Unsafe, unperformable, or inefficient field visit |
 | P1 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Wrong billing season or work outside licensed scope |
 | P1 | GL-18 | Verifiable exception resolution | Head of Operations | Dashboard turns green while customer problem remains |
-| P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Property/customer requests and records fall back to calls |
 | P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot detect revenue/work/customer mismatches |
+| P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Property/customer requests and records fall back to calls |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs with wrong facts or no queue owner |
 | P2 | GL-24 | Low-skill usability and role certification | Head of Operations | Launch still depends on tribal knowledge |
 
@@ -76,101 +76,82 @@ blockers.**
 
 ## Priority 0 — Critical money, security, compliance, and customer commitments
 
-### GL-05 — Exactly-once paid booking conversion
+### GL-05 — Finish paid-booking reconciliation and communication durability
 
-**Business outcome:** One successful payment produces exactly one complete customer commitment—no
-duplicate plans/jobs, no paid customer without a visit, and no confirmation before the facts exist.
+**Business outcome:** Every succeeded booking payment is either one complete, confirmed customer
+commitment or one visible refund/recovery case, including when execution stops between technical
+steps.
 
-**Why this is still a gate:** Booking finalization performs several dependent record and document
-steps. A mid-sequence failure can be retried from the beginning, create duplicates, or mark the
-booking complete even when a required child record was not created.
-
-**Required acceptance evidence:**
-
-- A successful payment reaches **Booked** only when the correct customer, job, accepted terms,
-  invoice/payment record, and—when sold—service plan all exist and agree on
-  identity, service, price, and date.
-- Retrying any finalization step resumes the same business transaction. It never creates a second
-  customer, plan, job, agreement, invoice, capacity claim, or confirmation.
-- No “you're booked,” “paid,” receipt, or internal sale notification is sent before the complete
-  booking commitment exists. Each communication is itself retry-safe.
-- Any partial failure leaves a visible **Paid—not finalized** exception with amount, customer,
-  selected date, failed step, age, and one safe recovery action. It never relies on a log search.
-- Recovery either finishes the original booking or performs an approved refund/reselection flow;
-  it cannot ask staff to recreate records by hand.
-- Failure injection proves recovery after each material step, including customer/plan/job creation,
-  accepted-terms document storage, invoice recording, and email delivery.
-- A reconciliation test confirms every successful booking payment has exactly one complete booking
-  and every complete paid booking has exactly one matching payment.
-
-**Pass owner:** CEO and Engineering lead jointly; Finance verifies the reconciliation.
-
-**Engineering status (2026-07-17):** the exactly-once spine landed and was adversarially reviewed
-(15-agent review; the idempotency design survived, three findings refuted, six confirmed and fixed
-or documented below). Evidence, per acceptance bullet:
-
-- *Reaches Booked only when every record exists and agrees* — **done.** `finalizeClaimed`
-  (`apps/web/amplify/functions/shared/bookingFinalize.ts`) now asserts customer, job, agreement, and
-  (paid) invoice, and (recurring) plan all exist before flipping `BOOKED`; a silent null return can
-  no longer mark a paid booking complete without its job or ledger row.
-- *Retrying resumes the same transaction, never a duplicate* — **done.** Plan/job/agreement/invoice
-  use booking-derived deterministic ids through a `createOrGet` helper; the customer id is
-  checkpointed onto `BookingRequest.customerId` the instant it exists, and the fallback fresh
-  customer also uses a deterministic id with get-before-create, so an ambiguous-email retry cannot
-  mint a duplicate. Proven by failure-injection tests that inject a failure after each material step
-  and assert the retry creates no second customer/plan/job/agreement/invoice
-  (`bookingFinalize.test.ts`).
-- *No confirmation before the commitment; each comm retry-safe* — **done for duplication.** Comms run
-  only after `BOOKED`, and the top-of-function status short-circuit makes them exactly-once; a send
-  failure becomes owned work (`EMAIL_FAILURE`), never a throw that un-books. **Residual:** a hard
-  Lambda kill in the window between the `BOOKED` write and the send loses the confirmation silently
-  (no duplicate, but no send). Detectable by the reconciliation below; a `confirmationSentAt` marker
-  is the follow-up to close it fully.
-- *Durable "Paid—not finalized" exception* — **done.** A new `PAID_NOT_FINALIZED` work kind
-  (30-min SLA, FINANCE-owned) opens on any finalize failure with amount, customer, date, failed
-  step, and a one-tap recovery; it is auto-resolved when a later attempt succeeds. A hard-killed run
-  that orphans its finalization claim is reclaimed on the next delivery (claims older than 2× the
-  30s Lambda timeout are provably dead), and a stray captured payment on a superseded PaymentIntent
-  now opens its own finance exception instead of a lone log line.
-- *Recovery finishes the original booking, no hand-recreated records* — **done.** A
-  `retryBookingFinalization` mutation (OWNER/OFFICE/FINANCE) re-confirms the Stripe payment and
-  resumes the same idempotent finalization; the CRM "Retry finalization" button drives it from the
-  queue item. Retry verifies the booking actually reached `BOOKED` before reporting success, and
-  clears a stale exception on the already-booked path.
-- *Failure injection after each material step* — **done** in `bookingFinalize.test.ts` (customer,
-  plan, job, agreement, invoice, orphaned-claim, superseded-PI, and comms paths).
-- *Reconciliation: one complete booking per payment, and vice versa* — **predicate + test done**
-  (`bookingReconcile.ts` + `.test.ts`). **Not yet wired** to a scheduled job — that runtime sweep
-  (feeding it Stripe's succeeded-PI set) is the remaining backstop for the orphaned-claim and
-  lost-confirmation residuals, and overlaps GL-19's command view.
-
-Not owner-certifiable until the reconciliation sweep is scheduled and the whole path is exercised
-end to end against a deployed backend with injected Stripe/Lambda failures.
-
-### GL-13 — Technician least-privilege and assignment enforcement
-
-**Business outcome:** A technician can see and change only the customers and work legitimately
-assigned to them.
-
-**Why this is still a gate:** The technician role can read broad customer/job data, and key field
-mutations do not consistently prove that the signed-in technician is the job's assignee. Knowing a
-record ID must never be enough to act on another technician's job.
+**Why this is still a gate after commit `108ea58`:** Record creation is now resumable and
+duplicate-safe, but several paid states can still be invisible or overstated. A missing/non-quoted
+booking or amount mismatch returns before owned work is opened; the final **Booked** write is not
+checked before confirmation is sent; communications have no durable sent marker; and the new
+reconciliation predicate is not scheduled and does not yet prove the Stripe-to-booking relationship
+in both directions against the actual child records.
 
 **Required acceptance evidence:**
 
-- Technician lists and searches return only the signed-in technician's assigned/current work and
-  the minimum customer data needed for it. Billing, unrelated customers, other technicians' jobs,
-  and organization-wide notes are not accessible.
-- Every field action—start, end application, draft/finalize report, add/remove photo, no access,
-  document view, and any future job mutation—server-verifies the signed-in identity against the
-  current assignment and active credential.
-- Reassignment is an explicit office action with timestamp, reason, former/new technician, route
-  effect, and audit. Access changes immediately; the former technician cannot continue a stale
-  draft without manager resolution.
-- Direct API tests prove Technician A cannot list, fetch, mutate, or obtain document links for
-  Technician B's customer/job. UI hiding alone does not pass.
-- Office/owner emergency access and temporary ride-along rules are explicitly approved and audited;
-  no shared technician logins are permitted.
+- Every succeeded booking PaymentIntent that cannot enter finalization—missing booking, canceled or
+  expired booking, superseded intent, missing stored intent, or amount mismatch—creates a durable
+  Finance-owned case with customer, amount, reason, and an approved **finish or refund** action. No
+  succeeded payment may exit through only a log or silent return.
+- The transition to **Booked** is checked and confirmed before customer or internal confirmation.
+  If that write fails after the child records exist, retry resumes the same booking and no message
+  claims completion.
+- Customer confirmation and the internal booking alert have durable delivery/outbox state. A hard
+  kill after **Booked** but before/after either send is detected and retried without duplicate
+  commitments or untracked duplicate messages.
+- A scheduled production reconciliation reads Stripe succeeded payments and the actual CRM customer,
+  booking, job, plan when applicable, agreement, and paid invoice records. It proves both directions:
+  each succeeded payment has exactly one complete booking, and each paid booked commitment has one
+  succeeded payment for the exact amount.
+- Reconciliation opens, updates, and resolves owned cases automatically for missing, duplicate, or
+  contradictory records. It also detects dangling checkpoint IDs rather than treating a nonblank ID
+  as proof that the child record still exists.
+- The recovery action either completes the original deterministic records or records an approved
+  refund and customer notice. Routine staff cannot manually resolve a paid-not-finalized case while
+  the payment remains unmatched.
+- Failure injection covers the early guard states, failed **Booked** write, hard termination while a
+  claim is held, termination on both sides of each communication, reconciliation input/provider
+  failure, duplicate/out-of-order webhooks, and deployed end-to-end recovery with real Stripe test
+  events.
+
+**Pass owner:** CEO and Engineering lead jointly; Finance signs the production reconciliation.
+
+### GL-13 — Finish technician read scope and audited override
+
+**Business outcome:** A technician can see only the minimum customer and work data needed for an
+authorized assignment, while office emergency access is explicit and accountable.
+
+**Why this is still a gate after commit `2949dd5`:** Field mutations now verify the signed-in
+assignee, but the underlying models still let the TECH role read broad customer, job, plan, report,
+group, route, and technician data. Document access is granted when the technician has any historical
+job for the customer, not only a legitimate current assignment or approved lookback. Office/owner
+bypass and reassignment also lack the required reasoned audit.
+
+**Required acceptance evidence:**
+
+- Technician list, search, get, and subscription results are server-scoped to the signed-in
+  technician's current/approved assignments. Knowing a customer, job, route, report, plan, group, or
+  technician ID cannot reveal another worker's data.
+- The technician receives only the fields needed to perform the visit. Billing, plan price/provider
+  identifiers, organization-wide customer/group notes, unrelated contacts, and other technicians'
+  work are not exposed through the model API even if the UI hides them.
+- Route create/read/update and every remaining technician-accessible model operation are restricted
+  to the caller's own authorized route/work. The same rule applies to direct API calls, realtime
+  subscriptions, pagination, and cached/offline data after reassignment.
+- Document access is limited to the assigned visit and an Operations/Compliance-approved historical
+  lookback. A completed job from years ago cannot grant indefinite access to every future agreement,
+  report, or photo for that customer; inactive/expired technicians receive no document links.
+- Reassignment records actor, reason, former/new technician, effective time, route effect, and stale
+  draft disposition. Access changes immediately and cached work is invalidated or refused on the
+  next operation.
+- Office/owner emergency field access has an approved purpose, requires a reason, records the actor
+  and affected job/report, and is reviewed. Shared logins and silent impersonation of the assigned
+  applicator are prohibited.
+- Direct authorization tests prove Technician A cannot list, fetch, subscribe to, mutate, or obtain
+  document links for Technician B's data; cannot retain access after reassignment/deactivation; and
+  cannot regain broad access through an old completed job.
 
 **Pass owner:** CEO, with Compliance and Operations verification.
 
@@ -693,29 +674,6 @@ rebooking, duplicate merge, access restoration, or other corrective action has n
 
 **Pass owner:** Head of Operations.
 
-### GL-11 — Minimum complete customer/group portal
-
-**Business outcome:** A customer or property manager can complete the tasks the business directs
-them to the portal for without calling the office.
-
-**Why this is still a gate:** The group/property-manager view lacks the financial and service
-documents needed to manage properties, and the portal lacks key ongoing-service request paths.
-
-**Required acceptance evidence:**
-
-- An authorized group/property manager can retrieve service reports, agreements, receipts/invoices,
-  and amounts for the correct properties without gaining access to unrelated customers.
-- Customers can initiate the approved reschedule request, callback/guarantee request, and general
-  service help path with a visible response commitment and case/reference number.
-- Portal actions show current status and do not disappear after submission. Failed submissions are
-  visibly pending and enter an owned operations queue.
-- The business defines what a group manager may see and do versus an individual resident. Tests
-  prove both allowed access and denial across two unrelated groups.
-- Public claims that residents can schedule in-unit service are either backed by an approved,
-  property-scoped resident flow or removed before launch.
-
-**Pass owner:** Head of Operations.
-
 ### GL-19 — Launch reconciliation and command view
 
 **Business outcome:** Leadership can tell each morning whether customers, work, and money agree,
@@ -747,6 +705,29 @@ service records.
   mismatches are detected without reading logs.
 
 **Pass owner:** CEO and Finance lead jointly; Sales and Operations sign their views.
+
+### GL-11 — Minimum complete customer/group portal
+
+**Business outcome:** A customer or property manager can complete the tasks the business directs
+them to the portal for without calling the office.
+
+**Why this is still a gate:** The group/property-manager view lacks the financial and service
+documents needed to manage properties, and the portal lacks key ongoing-service request paths.
+
+**Required acceptance evidence:**
+
+- An authorized group/property manager can retrieve service reports, agreements, receipts/invoices,
+  and amounts for the correct properties without gaining access to unrelated customers.
+- Customers can initiate the approved reschedule request, callback/guarantee request, and general
+  service help path with a visible response commitment and case/reference number.
+- Portal actions show current status and do not disappear after submission. Failed submissions are
+  visibly pending and enter an owned operations queue.
+- The business defines what a group manager may see and do versus an individual resident. Tests
+  prove both allowed access and denial across two unrelated groups.
+- Public claims that residents can schedule in-unit service are either backed by an approved,
+  property-scoped resident flow or removed before launch.
+
+**Pass owner:** Head of Operations.
 
 ---
 
