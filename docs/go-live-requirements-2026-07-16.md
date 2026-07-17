@@ -198,6 +198,29 @@ by card, schedule)"; suites 367 web / 140 CRM):
   create/update, so raw GraphQL could set ACTIVE — the structural server guarantee (a guarded
   migration mutation, OWNER-only) is the home for the "manager-approved legacy migration" path
   if the "may only" is ever wanted at the database level rather than the UI.
+- **Deactivation resolves live work — R24 + R07 closed** (Jake's directive, 17 July:
+  "deactivation must resolve future jobs, subscriptions, balances, access, and assigned work —
+  not a simple status switch"; suites 462 web / 147 CRM, adversarially verified 9/9):
+  - **Customer (R24):** `deactivateCustomer` (OWNER/FINANCE) cancels every ACTIVE plan's Stripe
+    subscription (via cancelPlanBilling, which also resolves that plan's queued visits), sweeps
+    remaining future jobs to CANCELED with routes cleared, computes and **reports** the
+    outstanding balance without charging it, then flips INACTIVE **last** — a mid-flow failure
+    keeps the customer ACTIVE, pages the office, and never leaves an INACTIVE-while-still-billing
+    state. `revokePortalAccess` disables the portal login, drops its groups, and global-signs-out;
+    `restorePortalAccess` re-enables it on reactivation. The recurring engine now also skips an
+    INACTIVE customer (defense in depth). The bare `status: "INACTIVE"` UI flip is gone.
+  - **Technician (R07):** `deactivateTechnician` (OWNER) unassigns the tech's future SCHEDULED
+    jobs back to the reassignment pool, disables + global-signs-out + drops the TECH group (a
+    fired employee loses the whole customer book in that call), flips `active:false`, and pages
+    the office with the reassignment count. The bare `active:false` UI flip is gone; the control
+    is OWNER-gated with an ask-the-owner line (R27 pattern).
+  - Residuals: the portal-revoke is a UI-chained second call after the money teardown (a network
+    gap can leave INACTIVE + live portal login, retryable — low severity, portal reaches only the
+    customer's own records); a strictly-past still-SCHEDULED job stays pinned to an offboarded
+    tech (history-side, not dispatchable); and — same class as the other doors — FINANCE/OFFICE/
+    OWNER still hold model-level Customer/Technician update, so raw GraphQL could bare-flip status
+    outside the mutation. The structural close (drop model update, route all status writes through
+    guarded mutations) is the shared follow-up.
 
 **AI pricing rearchitecture, `e734ee5` + `fe85d00`** (Jake's directive, 16 July: "absolutely
 everything priced with AI — no other way is acceptable"; suites 364 web / 134 CRM):

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   listAll,
+  opResult,
   unwrap,
   type Customer,
   type Job,
@@ -528,29 +529,56 @@ function TechForm({
         {existing ? "Save technician" : "Add technician"}
       </Button>
       {existing ? (
-        <Button
-          block
-          variant="danger"
-          loading={busy}
-          onClick={() => {
-            if (!window.confirm(`Deactivate ${existing.name}? Their history stays, but they disappear from Schedule and My day.`)) return;
-            setBusy(true);
-            (async () => {
-              unwrap(
-                await api().models.Technician.update({
-                  id: existing.id,
-                  active: false,
-                })
-              );
-              await onDone();
-            })().catch((err) => {
-              setError(err.message ?? "Could not deactivate");
-              setBusy(false);
-            });
-          }}
-        >
-          Deactivate technician
-        </Button>
+        roles.owner ? (
+          <Button
+            block
+            variant="danger"
+            loading={busy}
+            onClick={() => {
+              // Offboarding kills a login and moves work — OWNER-only, and the
+              // confirm says both consequences out loud before it runs.
+              if (
+                !window.confirm(
+                  `Offboard ${existing.name}?\n\n• Their future assigned jobs go back to the scheduling pool for reassignment.\n• Their login is disabled and signed out immediately — they lose access to the customer book right now.\n\nTheir history stays.`
+                )
+              ) {
+                return;
+              }
+              setBusy(true);
+              (async () => {
+                const res = opResult<{
+                  jobsUnassigned: number;
+                  loginDisabled: boolean;
+                }>(
+                  await api().mutations.deactivateTechnician({
+                    technicianId: existing.id,
+                  })
+                );
+                await onDone();
+                const n = res?.jobsUnassigned ?? 0;
+                if (n > 0) {
+                  window.alert(
+                    `${existing.name} offboarded. ${n} job${
+                      n === 1 ? " is" : "s are"
+                    } back in the scheduling pool and need${
+                      n === 1 ? "s" : ""
+                    } reassigning on the Schedule board.`
+                  );
+                }
+              })().catch((err) => {
+                setError(err.message ?? "Could not offboard technician");
+                setBusy(false);
+              });
+            }}
+          >
+            Offboard technician
+          </Button>
+        ) : (
+          <p className="muted small" style={{ margin: 0 }}>
+            Ask the owner to offboard this technician — it disables their login,
+            so it is owner-only.
+          </p>
+        )
       ) : null}
     </div>
   );

@@ -58,6 +58,13 @@ export const auth = defineAuth({
     // setUserPassword is granted separately — the manageUsers bundle does not
     // include AdminSetUserPassword, and invites need it to move a new account
     // out of FORCE_CHANGE_PASSWORD (which blocks the magic-link custom flow).
+    //
+    // Offboarding (deactivateTechnician, revokePortalAccess/restorePortalAccess)
+    // needs AdminDisableUser, AdminEnableUser, and AdminUserGlobalSignOut. All
+    // three already ride inside `manageUsers` — verified against the Amplify
+    // action→IAM map — and global sign-out has no granular action of its own, so
+    // it can ONLY come from this bundle. No extra grant is added: manageUsers is
+    // the grant that authorizes the offboarding calls.
     allow
       .resource(crmAdmin)
       .to([

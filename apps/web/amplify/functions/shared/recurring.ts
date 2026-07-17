@@ -59,6 +59,21 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     const interval = FREQUENCY_DAYS[plan.serviceFrequency];
     if (!interval) return;
 
+    // Defense in depth: never queue a visit for a deactivated customer. Their
+    // deactivation already cancels the plans, so an ACTIVE plan on an INACTIVE
+    // customer means one slipped through — queueing the next visit anyway would
+    // put a technician on the route for someone who left. The engine reads the
+    // customer for access groups below regardless; this reads it once, up front.
+    const { data: customer } = await client.models.Customer.get({
+      id: job.customerId,
+    });
+    if (customer?.status === "INACTIVE") {
+      console.log(
+        `Skipping next-visit queue for plan ${job.servicePlanId}: customer ${job.customerId} is INACTIVE`
+      );
+      return;
+    }
+
     // Idempotency: don't double-queue if a future visit already exists.
     // Query the servicePlanId index and page fully — a filtered scan would
     // miss the sibling once the Job table grows past one page.
@@ -82,10 +97,6 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
 
     const base = (job.completedAt ?? new Date().toISOString()).slice(0, 10);
     const dueDate = toWeekday(addDays(base, interval));
-
-    const { data: customer } = await client.models.Customer.get({
-      id: job.customerId,
-    });
 
     await client.models.Job.create({
       customerId: job.customerId,

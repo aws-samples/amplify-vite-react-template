@@ -705,6 +705,54 @@ export const schema = a.schema({
     .handler(a.handler.function(crmAdmin)),
 
   /**
+   * End a deactivated customer's portal login: drop its portal + dynamic group
+   * memberships, disable the Cognito account, and globally sign it out. The
+   * access half of deactivation (deactivateCustomer is the money/work half) —
+   * without it a former customer keeps a working login into their own billing
+   * and document records. Idempotent; a no-op when there is no portal user.
+   *
+   * FINANCE/OWNER, matching deactivateCustomer so the same person can do both
+   * halves of the same offboarding.
+   */
+  revokePortalAccess: a
+    .mutation()
+    .arguments({ customerId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * Re-enable a reactivated customer's portal login: enable the Cognito account
+   * and restore its CUSTOMER + dynamic group memberships. Access only — the
+   * canceled plans stay canceled (a reactivated customer re-subscribes through
+   * a new booking). Idempotent; a no-op when there is no portal user.
+   */
+  restorePortalAccess: a
+    .mutation()
+    .arguments({ customerId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * Offboard a technician for real: return their future assigned jobs to the
+   * scheduling pool for reassignment (route/tech cleared, back to UNSCHEDULED),
+   * disable and globally sign out their Cognito login, flip active → false, and
+   * page the office with the count that now needs reassignment. A job the tech
+   * is mid-visit on is left in place and surfaced, not yanked; history is
+   * untouched.
+   *
+   * OWNER-only, mirroring adminCreateUser: it kills a login, which is a
+   * management action, and the same bar that provisions one should end one.
+   */
+  deactivateTechnician: a
+    .mutation()
+    .arguments({ technicianId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
    * Stripe: collect a payment method (card or US bank) before the first
    * treatment. Office can initiate for any customer; a portal user only
    * for their own record (handler-enforced via dynamic groups).
@@ -737,6 +785,24 @@ export const schema = a.schema({
   cancelSubscription: a
     .mutation()
     .arguments({ servicePlanId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Deactivate a customer for real, not as a status flag. In order: cancel
+   * every ACTIVE plan's Stripe subscription and resolve its queued visits,
+   * sweep the remaining future jobs off their routes, compute (and RETURN, not
+   * charge) the outstanding balance, and only then flip status → INACTIVE — so
+   * a mid-flow failure never leaves an INACTIVE customer still billing. Pair
+   * with revokePortalAccess to end their portal login.
+   *
+   * FINANCE/OWNER: it cancels subscriptions, which is money authority, the same
+   * bar as cancelSubscription.
+   */
+  deactivateCustomer: a
+    .mutation()
+    .arguments({ customerId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
     .handler(a.handler.function(crmBilling)),

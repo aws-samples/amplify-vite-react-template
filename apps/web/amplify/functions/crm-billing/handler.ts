@@ -17,6 +17,7 @@ import {
   getDefaultPaymentMethod as sharedGetDefaultPaymentMethod,
   startPlanBilling,
 } from "../shared/subscription";
+import { deactivateCustomer as sharedDeactivateCustomer } from "../shared/deactivation";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 
 type Args = {
@@ -107,6 +108,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "cancelSubscription": {
       assertFinance(event.identity);
       return cancelSubscription(event.arguments.servicePlanId!);
+    }
+    case "deactivateCustomer": {
+      // Cancels subscriptions = money authority, so FINANCE/OWNER, mirroring
+      // cancelSubscription.
+      assertFinance(event.identity);
+      return sharedDeactivateCustomer(stripeClient(), event.arguments.customerId!);
     }
     case "pausePlan": {
       assertFinance(event.identity);

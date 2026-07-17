@@ -43,6 +43,43 @@ import PriceLeadSheet from "../components/PriceLeadSheet";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
 
+/**
+ * What deactivation actually does, said before the button runs it. The money
+ * and the visits are stated because they are real consequences the office is
+ * committing to; the outstanding balance is not knowable until the server
+ * computes it, so it is reported in the result, not the confirm.
+ */
+function deactivateConfirmText(
+  name: string,
+  counts: {
+    activePlanCount: number;
+    upcomingVisits: number;
+    hasPortal: boolean;
+  }
+): string {
+  const lines: string[] = [];
+  if (counts.activePlanCount > 0) {
+    lines.push(
+      `• cancel ${counts.activePlanCount} active plan${
+        counts.activePlanCount === 1 ? "" : "s"
+      } — the Stripe subscription stops charging`
+    );
+  }
+  if (counts.upcomingVisits > 0) {
+    lines.push(
+      `• cancel ${counts.upcomingVisits} upcoming visit${
+        counts.upcomingVisits === 1 ? "" : "s"
+      } and take ${counts.upcomingVisits === 1 ? "it" : "them"} off the route`
+    );
+  }
+  if (counts.hasPortal) lines.push("• end their portal login");
+  const body =
+    lines.length > 0
+      ? `\n\nThis will:\n${lines.join("\n")}`
+      : "\n\nThey have no live billing, visits, or portal login to stop.";
+  return `Mark ${name} inactive?${body}\n\nAny unpaid balance is reported, not charged. Their history stays.`;
+}
+
 export default function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -919,24 +956,121 @@ export default function CustomerDetail() {
         </Card>
       ) : null}
 
-      {roles.office && customer.status !== "LEAD" ? (
-        <Button
-          block
-          variant={customer.status === "ACTIVE" ? "danger" : "subtle"}
-          loading={busyAction === "toggle"}
-          onClick={() =>
-            void run("toggle", async () =>
-              unwrap(
-                await api().models.Customer.update({
-                  id: customer.id,
-                  status: customer.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
-                })
+      {(roles.office || roles.finance) && customer.status !== "LEAD" ? (
+        customer.status === "ACTIVE" ? (
+          roles.finance ? (
+            <Button
+              block
+              variant="danger"
+              loading={busyAction === "deactivate"}
+              onClick={() => {
+                const activePlanCount = plans.filter(
+                  (p) => p.status === "ACTIVE"
+                ).length;
+                const upcomingVisits = jobs.filter(
+                  (j) =>
+                    (j.status === "SCHEDULED" || j.status === "UNSCHEDULED") &&
+                    !j.paidAt
+                ).length;
+                if (
+                  !window.confirm(
+                    deactivateConfirmText(customer.displayName, {
+                      activePlanCount,
+                      upcomingVisits,
+                      hasPortal: !!customer.portalUserSub,
+                    })
+                  )
+                ) {
+                  return;
+                }
+                void run("deactivate", async () => {
+                  const res = opResult<{
+                    plansCanceled: number;
+                    jobsCanceled: number;
+                    visitsResolved: number;
+                    outstandingBalanceCents: number;
+                    partial: boolean;
+                  }>(
+                    await api().mutations.deactivateCustomer({
+                      customerId: customer.id,
+                    })
+                  );
+                  // A plan's Stripe cancel failed: the customer is still ACTIVE
+                  // and still billing on purpose, and the office was paged. Do
+                  // NOT go on to revoke the portal — the deactivation didn't
+                  // finish. Surface it instead of claiming success.
+                  if (res?.partial) {
+                    throw new Error(
+                      "A plan could not be canceled at Stripe, so the customer is still active and still billing. The office has been notified — try again once Stripe is reachable."
+                    );
+                  }
+                  unwrap(
+                    await api().mutations.revokePortalAccess({
+                      customerId: customer.id,
+                    })
+                  );
+                  const bal = res?.outstandingBalanceCents ?? 0;
+                  setNotice(
+                    `${customer.displayName} deactivated — billing stopped, ${
+                      res?.jobsCanceled ?? 0
+                    } upcoming visit(s) canceled, portal login ended.${
+                      bal > 0
+                        ? ` Outstanding balance of ${money(
+                            bal
+                          )} is NOT charged — settle it separately.`
+                        : ""
+                    }`
+                  );
+                  window.setTimeout(
+                    () => setNotice((n) => (n && n.startsWith(customer.displayName) ? null : n)),
+                    12000
+                  );
+                });
+              }}
+            >
+              Mark inactive
+            </Button>
+          ) : (
+            <p className="muted small" style={{ margin: 0 }}>
+              Ask finance or an owner to mark this customer inactive — it cancels
+              their billing and ends their portal access.
+            </p>
+          )
+        ) : roles.finance ? (
+          <Button
+            block
+            variant="subtle"
+            loading={busyAction === "reactivate"}
+            onClick={() =>
+              void run(
+                "reactivate",
+                async () => {
+                  unwrap(
+                    await api().models.Customer.update({
+                      id: customer.id,
+                      status: "ACTIVE",
+                    })
+                  );
+                  // Re-enable the portal login (idempotent, no-op if none). The
+                  // canceled plans stay canceled — a reactivated customer
+                  // re-subscribes through a new booking.
+                  unwrap(
+                    await api().mutations.restorePortalAccess({
+                      customerId: customer.id,
+                    })
+                  );
+                },
+                "Customer reactivated — their portal login is back on. Canceled plans stay canceled; add a new plan through a booking."
               )
-            )
-          }
-        >
-          {customer.status === "ACTIVE" ? "Mark inactive" : "Reactivate customer"}
-        </Button>
+            }
+          >
+            Reactivate customer
+          </Button>
+        ) : (
+          <p className="muted small" style={{ margin: 0 }}>
+            Ask finance or an owner to reactivate this customer.
+          </p>
+        )
       ) : null}
 
       {/* ---------- Sheets ---------- */}
