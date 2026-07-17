@@ -48,8 +48,9 @@ export const FAILING_THRESHOLD = 2;
  *  out at 900s and one research can hold the line for ~60s. */
 const RUN_TIME_BUDGET_MS = 13 * 60_000;
 
-/** The weekly report slot: Monday 10:00 UTC (the hourly cron fires on the
- *  hour, so exactly one run a week lands here). */
+/** The weekly report slot: Monday 10:00 UTC. The cron fires every 5
+ *  minutes, so the report (and seeding) are additionally gated to the top
+ *  of the hour — see topOfHour in the handler — to fire exactly once. */
 const WEEKLY_REPORT_UTC_DAY = 1;
 const WEEKLY_REPORT_UTC_HOUR = 10;
 
@@ -508,13 +509,21 @@ async function sendWeeklyReport(): Promise<boolean> {
 
 export const handler = async () => {
   const startedAt = Date.now();
+  const now = new Date();
+  // The cron fires every 5 minutes for fast demand self-heal, but seeding
+  // (a full re-scan of rates/customers/bookings) and the weekly report only
+  // belong once an hour: the first run of the hour owns them. Off the hour,
+  // the run is a pure drain over the already-seeded work-list.
+  const topOfHour = now.getUTCMinutes() < 5;
 
   let seeded = 0;
-  try {
-    seeded = await seedCoverage();
-  } catch (err) {
-    // Seeding trouble must not stop the drain — demand rows still self-heal.
-    console.error("pricing-refresh: seeding failed", err);
+  if (topOfHour) {
+    try {
+      seeded = await seedCoverage();
+    } catch (err) {
+      // Seeding trouble must not stop the drain — demand rows still self-heal.
+      console.error("pricing-refresh: seeding failed", err);
+    }
   }
 
   const client = await dataClient();
@@ -595,9 +604,9 @@ export const handler = async () => {
     );
   }
 
-  const now = new Date();
   let reported = false;
   if (
+    topOfHour &&
     now.getUTCDay() === WEEKLY_REPORT_UTC_DAY &&
     now.getUTCHours() === WEEKLY_REPORT_UTC_HOUR
   ) {

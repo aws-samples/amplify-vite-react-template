@@ -210,7 +210,36 @@ afterEach(() => {
   delete process.env.ANTHROPIC_API_KEY;
 });
 
-describe("coverage seeding — idempotent, every run", () => {
+describe("coverage seeding — top of the hour only, demand drains every run", () => {
+  it("skips seeding off the top of the hour, but still drains a waiting DEMAND miss", async () => {
+    // Seed once at the top of an hour (beforeEach is 14:00), then run again
+    // mid-hour: no re-seed, but the lead waiting since the seed still gets
+    // priced — the 5-minute self-heal the every-5-min cadence exists for.
+    await seedOnly();
+    quietAll(); // every seeded combo has a fresh sheet — nothing due
+    const seededCount = covRows.length;
+    covRows.push({
+      id: "TERMITE#springfield-ma#3000",
+      service: "TERMITE",
+      areaKey: "springfield-ma",
+      city: "Springfield",
+      state: "MA",
+      band: 3000,
+      source: "DEMAND",
+      active: true,
+      failCount: 0,
+      notify: "[]",
+    });
+    vi.setSystemTime(new Date("2026-07-15T14:05:00Z")); // 5 past — off the hour
+
+    const summary = await handler();
+
+    expect(summary.seeded).toBe(0); // no re-scan mid-hour
+    expect(covRows).toHaveLength(seededCount + 1); // only the demand row we added
+    expect(summary.attempted).toBe(1); // the demand miss still drained
+    expect(createdRates[0].rateKey).toBe("TERMITE#springfield-ma#3000");
+  });
+
   it("seeds the curated town list across every service kind and common band", async () => {
     await seedOnly();
 
@@ -566,6 +595,21 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
   it("fires ONLY on the weekly slot — same data, Monday 11:00, no report", async () => {
     vi.setSystemTime(new Date("2026-07-20T11:00:00Z"));
     await reportFixtures();
+
+    const summary = await handler();
+
+    expect(summary.reported).toBe(false);
+    expect(
+      officeEmails.filter((e) => e.template === "ops-pricing-weekly-report")
+    ).toHaveLength(0);
+  });
+
+  it("fires once, not twelve times — the 10:05 run in the same hour sends nothing", async () => {
+    // The cron now fires every 5 minutes; only the top-of-hour run may report.
+    // Seed + build fixtures at the top of the hour, then run again 5 past.
+    vi.setSystemTime(new Date("2026-07-20T10:00:00Z")); // Monday 10:00 UTC
+    await reportFixtures();
+    vi.setSystemTime(new Date("2026-07-20T10:05:00Z")); // 5 past — off the hour
 
     const summary = await handler();
 

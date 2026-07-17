@@ -3,13 +3,16 @@ import { defineFunction } from "@aws-amplify/backend";
 /**
  * The AI pricing-refresh cron — the ONLY place market-rate research runs.
  *
- * Hourly: seeds the RateCoverage work-list idempotently (curated core
- * towns, plus combos derived from existing rates, customer towns and
- * booking requests), then drains due work under RESEARCH_PER_RUN /
+ * Every 5 minutes: drains due work under RESEARCH_PER_RUN /
  * RESEARCH_PER_DAY caps — DEMAND misses first (a lead waiting on a combo
- * with no sheet is priced within the hour and emailed), then sheets past
- * their weekly refresh, skipping pinned rows. On the Monday 10:00 UTC run
- * it also emails the office the weekly report: price moves ranked by %,
+ * with no sheet is priced within minutes and emailed), then sheets past
+ * their weekly refresh, skipping pinned rows. So a cold miss self-heals in
+ * minutes, not up to an hour. Seeding the RateCoverage work-list (curated
+ * core towns, plus combos derived from existing rates, customer towns and
+ * booking requests) and the weekly report both run only at the top of the
+ * hour — background grid maintenance needs no 5-minute cadence, and the
+ * report must fire once, not twelve times. On the Monday 10:00 UTC run it
+ * emails the office the weekly report: price moves ranked by %,
  * floors that bound, failing combos, stale rows, coverage gaps, and the
  * week's research counts. Visibility, not a gate — nothing holds for
  * approval.
@@ -26,5 +29,5 @@ export const pricingRefresh = defineFunction({
   entry: "./handler.ts",
   timeoutSeconds: 900,
   memoryMB: 512,
-  schedule: "0 * * * ? *", // hourly, on the hour
+  schedule: "*/5 * * * ? *", // every 5 minutes; seeds + reports at :00
 });

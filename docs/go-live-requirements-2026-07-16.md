@@ -136,18 +136,19 @@ database and update it — faster and more stable quoting flows"; suites 436 web
   no Anthropic call, no 10–60s spinner, no timeout class. Serve-last-known-good: an expired
   sheet still serves (`expiresAt` now means "due for refresh", never "refuse"); pinned office
   rows serve forever; only a combo with no sheet at all falls back.
-- **The hourly `pricing-refresh` cron owns all research**: demand-first (a live miss enqueues
-  a RateCoverage row — with the waiting lead's email on the funnel path — and is researched
-  within the hour, then the lead gets a "your exact prices are ready" email), weekly refresh
-  of every sheet (pinned skipped), idempotent coverage seeding (SEED_TOWNS × services × bands,
-  plus combos derived from customers/bookings — **the town list is Jake's to curate**), caps
-  of 20/run and 150/day with commented economics.
+- **The `pricing-refresh` cron owns all research, firing every 5 minutes**: demand-first (a
+  live miss enqueues a RateCoverage row — with the waiting lead's email on the funnel path —
+  and is researched within minutes, then the lead gets a "your exact prices are ready" email),
+  weekly refresh of every sheet (pinned skipped), caps of 20/run and 150/day. Seeding (the
+  SEED_TOWNS × services × bands grid plus combos derived from customers/bookings — **the town
+  list is Jake's to curate**) and the weekly report run only at the top of the hour, so a cold
+  miss self-heals in minutes without re-scanning the tables 288×/day or firing the report 12×.
 - **The Monday 10:00 UTC report** is the pricing governance artifact: price moves ranked by %,
   floors that bound, failing combos, stale rows (>21-day age alert), coverage gaps, weekly
   research counts. Visibility, not a gate, per the standing rule.
 - Residuals: a live-but-partial sheet (possible only via office edits/legacy data — the engine
-  writes all-or-nothing) re-researches weekly rather than within the hour; the notify list
-  caps at 5 leads per combo; the within-the-hour promise slips if the daily research cap is
+  writes all-or-nothing) re-researches weekly rather than within minutes; the notify list
+  caps at 5 leads per combo; the within-minutes promise slips if the daily research cap is
   already spent that day.
 
 **One conversion road** (Jake's directive, 17 July: the office-sold quote → e-sign → convert
