@@ -24,15 +24,14 @@ import {
  * cached AI rate sheet via the PURE-READ getCachedRate API
  * (shared/marketRate) — the live path never researches, and a stale sheet
  * still serves. No sheet at all → the miss is queued for the hourly
- * pricing-refresh cron (with the lead's email + booking id, so the cron can
- * send their day board) and the lead gets the CONTACT holding copy with the
- * within-the-hour inbox promise — never a made-up price. The deterministic
+ * pricing-refresh worker (with the lead's email + booking id), returns a
+ * token-authenticated PENDING request for the loading screen, and emails a
+ * secure resume link if the lead leaves — never a made-up price. The deterministic
  * overlay (Zone B adders, day pricing) stays on top of the AI base.
  *
  * Every ask is priced: all six form services × all three property kinds get
- * a day board. The ONLY surviving CONTACT outcomes are zone OUT, zone
- * UNKNOWN (R59), a combo with no cached sheet yet, and a fully-booked
- * month.
+ * a day board. CONTACT is reserved for zone OUT, zone UNKNOWN (R59), and a
+ * fully-booked month; a cold rate cache is PENDING while research runs.
  */
 
 const bookings: Record<string, unknown>[] = [];
@@ -51,8 +50,17 @@ const fakeDataClient = {
     MarketRate: { list: async () => ({ data: [] }) },
     BookingRequest: {
       create: async (input: Record<string, unknown>) => {
-        bookings.push(input);
-        return { data: { id: `b${bookings.length}`, ...input } };
+        const row = { id: `b${bookings.length + 1}`, ...input };
+        bookings.push(row);
+        return { data: row };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: bookings.find((b) => b.id === id) ?? null,
+      }),
+      update: async (input: Record<string, unknown> & { id: string }) => {
+        const row = bookings.find((b) => b.id === input.id);
+        if (row) Object.assign(row, input);
+        return { data: row ?? null };
       },
     },
     LeadPricingRun: {
@@ -133,6 +141,10 @@ vi.mock("../shared/marketRate", () => ({
     enqueueCalls.push(opts);
   },
   sqftBucket: (sqft: number) => Math.max(500, Math.ceil(sqft / 500) * 500),
+  areaKeyFor: (city: string, state: string) =>
+    `${city.trim().toLowerCase().replace(/\s+/g, "-")}-${state.trim().toLowerCase()}`,
+  rateKeyFor: (service: string, areaKey: string, bucket: number | null) =>
+    `${service}#${areaKey}${bucket ? `#${bucket}` : ""}`,
   hoaBandFor: (units: number) =>
     units <= 10
       ? "UNITS_1_10"
@@ -154,6 +166,22 @@ vi.mock("@aws-sdk/client-ssm", () => ({
   GetParameterCommand: class {},
 }));
 
+const pricingInvokes: Record<string, unknown>[] = [];
+vi.mock("@aws-sdk/client-lambda", () => ({
+  LambdaClient: class {
+    async send(command: { input?: Record<string, unknown> }) {
+      pricingInvokes.push(command.input ?? {});
+      return { StatusCode: 202 };
+    }
+  },
+  InvokeCommand: class {
+    input: Record<string, unknown>;
+    constructor(input: Record<string, unknown>) {
+      this.input = input;
+    }
+  },
+}));
+
 const { handler } = await import("./handler");
 
 const postQuote = async (input: unknown) => {
@@ -161,6 +189,18 @@ const postQuote = async (input: unknown) => {
     headers: {},
     requestContext: {
       http: { method: "POST", path: "/quote", sourceIp: "1.2.3.4" },
+    },
+    body: JSON.stringify(input),
+    isBase64Encoded: false,
+  } as never)) as { statusCode: number; body: string };
+  return { status: res.statusCode, body: JSON.parse(res.body) };
+};
+
+const postQuoteStatus = async (input: unknown) => {
+  const res = (await handler({
+    headers: {},
+    requestContext: {
+      http: { method: "POST", path: "/quote-status", sourceIp: "1.2.3.4" },
     },
     body: JSON.stringify(input),
     isBase64Encoded: false,
@@ -182,6 +222,7 @@ beforeEach(() => {
   leadEmails.length = 0;
   marketRateCalls.length = 0;
   enqueueCalls.length = 0;
+  pricingInvokes.length = 0;
   stopsEveryDay = [];
   hqMinutes = 20;
   marketRateByService = {};
@@ -194,6 +235,7 @@ beforeEach(() => {
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   process.env.GOOGLE_ROUTES_API_KEY = "test-routes-key";
   process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+  process.env.PRICING_REFRESH_FUNCTION_NAME = "pricing-refresh-test";
   delete process.env.TURNSTILE_SECRET;
 });
 
@@ -326,14 +368,14 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     expect(Math.min(...prices)).toBeLessThan(30000);
   });
 
-  it("falls to CONTACT when no rate sheet is available (never a made-up price)", async () => {
+  it("returns PENDING when no rate sheet is available (never a made-up price)", async () => {
     marketRateResult = null;
 
     const res = await postQuote(gpInput);
 
-    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.decision).toBe("PENDING");
     expect(res.body.days).toBeUndefined();
-    expect(bookings[0]).toMatchObject({ status: "CONTACT" });
+    expect(bookings[0]).toMatchObject({ status: "PENDING" });
   });
 
   it("a miss queues the research with the lead's email + booking id and promises the inbox", async () => {
@@ -341,7 +383,7 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
 
     const res = await postQuote(gpInput);
 
-    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.decision).toBe("PENDING");
     expect(enqueueCalls).toEqual([
       {
         service: "GENERAL_PEST",
@@ -352,16 +394,41 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
         bookingRequestId: res.body.bookingId,
       },
     ]);
-    // The honest holding copy: no call promised — the cron emails the exact
-    // day-by-day prices within the hour.
-    expect(res.body.message).toMatch(/pricing your area right now/i);
-    expect(res.body.message).toMatch(/inbox within the hour/i);
+    // The honest holding copy: the loading screen stays attached to this
+    // durable request and email is the leave-safe fallback.
+    expect(res.body.message).toMatch(/building your exact price/i);
+    expect(res.body.statusToken).toBeTruthy();
+    expect(pricingInvokes).toHaveLength(1);
     expect(leadEmails[0].subject).toBe("Website lead waiting on AI pricing");
     // R80: the rate-queued alert is a lead alert — it routes to sales@.
     expect(leadEmails[0].template).toBe("ops-booking-rate-queued");
   });
 
-  it("falls to CONTACT when the sheet is missing the chosen plan cadence", async () => {
+  it("the secure status poll turns the same PENDING request into its day board", async () => {
+    marketRateResult = null;
+    const pending = await postQuote(gpInput);
+    const bookingId = pending.body.bookingId as string;
+    const statusToken = pending.body.statusToken as string;
+
+    marketRateResult = {
+      priceCents: 30000,
+      sheet: { oneTimeCents: 30000, plans: gpSheet.plans },
+      basis: "research completed",
+      cached: true,
+    };
+    const ready = await postQuoteStatus({ bookingId, statusToken });
+
+    expect(ready.status).toBe(200);
+    expect(ready.body.decision).toBe("PRICED");
+    expect(ready.body.bookingId).toBe(bookingId);
+    expect((ready.body.days as unknown[]).length).toBeGreaterThan(0);
+    expect(bookings).toHaveLength(1);
+    expect(bookings[0]).toMatchObject({ id: bookingId, status: "QUOTED" });
+    expect(pricingInvokes).toHaveLength(1);
+    expect(leadEmails).toHaveLength(1);
+  });
+
+  it("returns PENDING when the sheet is missing the chosen plan cadence", async () => {
     marketRateResult = {
       priceCents: 30000,
       sheet: { oneTimeCents: 30000 }, // no plans on the sheet
@@ -371,7 +438,7 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
 
     const res = await postQuote({ ...gpInput, recurringPreference: "MONTHLY" });
 
-    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.decision).toBe("PENDING");
   });
 });
 
@@ -408,15 +475,15 @@ describe("WASP_NEST prices from the cached AI sheet", () => {
     expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 49700 });
   });
 
-  it("falls to CONTACT when research is unavailable", async () => {
+  it("returns PENDING when research is unavailable", async () => {
     marketRateResult = null;
 
     const res = await postQuote(waspInput);
 
-    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.decision).toBe("PENDING");
   });
 
-  it("falls to CONTACT when a multi-nest job has no extra-nest component", async () => {
+  it("returns PENDING when a multi-nest job has no extra-nest component", async () => {
     marketRateResult = {
       priceCents: 29900,
       sheet: { oneTimeCents: 29900 }, // no extra-nest price on the sheet
@@ -426,7 +493,7 @@ describe("WASP_NEST prices from the cached AI sheet", () => {
 
     const res = await postQuote({ ...waspInput, nestCount: 2 });
 
-    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.decision).toBe("PENDING");
   });
 });
 
@@ -463,13 +530,13 @@ describe("TERMITE and WILDLIFE price from their sheets — no specialist callbac
     expect(res.body.service).toContain("Wildlife exclusion and removal");
   });
 
-  it("falls to CONTACT only when research is unavailable", async () => {
+  it("returns PENDING only when research is unavailable", async () => {
     marketRateResult = null;
 
     const res = await postQuote(termiteInput);
 
-    expect(res.body.decision).toBe("CONTACT");
-    expect(bookings[0]).toMatchObject({ status: "CONTACT" });
+    expect(res.body.decision).toBe("PENDING");
+    expect(bookings[0]).toMatchObject({ status: "PENDING" });
   });
 
   it("requires sqft — the sheets are sqft-banded", async () => {
@@ -568,12 +635,12 @@ describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
     expect(pricingRuns[0].oneTimePriceCents).toBeUndefined();
   });
 
-  it("falls to CONTACT when the HOA sheet is unavailable", async () => {
+  it("returns PENDING when the HOA sheet is unavailable", async () => {
     marketRateByService = { HOA: null };
 
     const res = await postQuote(communityInput);
 
-    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.decision).toBe("PENDING");
   });
 });
 

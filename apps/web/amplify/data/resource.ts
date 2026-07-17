@@ -178,7 +178,14 @@ export const schema = a.schema({
   // public booking Lambda (Function URL) - no public model access.
   BookingRequest: a
     .model({
-      status: a.enum(["QUOTED", "BOOKED", "CANCELED", "EXPIRED", "CONTACT"]),
+      status: a.enum([
+        "PENDING",
+        "QUOTED",
+        "BOOKED",
+        "CANCELED",
+        "EXPIRED",
+        "CONTACT",
+      ]),
       propertyKind: a.enum(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]),
       service: a.enum([
         "GENERAL_PEST",

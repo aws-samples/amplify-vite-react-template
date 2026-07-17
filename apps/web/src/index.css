@@ -2771,6 +2771,82 @@ a:focus-visible {
   line-height: 1.4;
 }
 
+/* Async quote preparation */
+.bk-quote-loading {
+  max-width: 620px;
+}
+.bk-quote-spinner {
+  width: 62px;
+  height: 62px;
+  margin: 0 auto 20px;
+  border: 6px solid rgba(114, 224, 0, 0.2);
+  border-top-color: var(--bk-green-deep);
+  border-radius: 50%;
+  animation: bkQuoteSpin 0.85s linear infinite;
+}
+.bk-quote-progress {
+  display: grid;
+  gap: 10px;
+  max-width: 420px;
+  margin: 30px auto;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+.bk-quote-progress li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--fg3);
+  font-weight: 650;
+}
+.bk-quote-progress li span {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+  font-size: 13px;
+}
+.bk-quote-progress li.is-done,
+.bk-quote-progress li.is-active {
+  color: var(--fg1);
+}
+.bk-quote-progress li.is-done span {
+  border-color: var(--bk-green-deep);
+  background: var(--bk-green);
+  color: var(--bk-black);
+}
+.bk-quote-progress li.is-active span {
+  border-color: var(--bk-green-deep);
+  box-shadow: 0 0 0 4px rgba(114, 224, 0, 0.16);
+}
+.bk-quote-loading__hint {
+  color: var(--fg2);
+}
+.bk-quote-loading__reassurance {
+  max-width: 500px;
+  margin: 24px auto;
+  padding: 18px 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bk-white);
+}
+.bk-quote-loading__reassurance p {
+  margin: 8px 0 0;
+  color: var(--fg2);
+  line-height: 1.55;
+}
+@keyframes bkQuoteSpin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bk-quote-spinner { animation-duration: 1.8s; }
+}
+
 /* Day picker */
 .bk-day-grid {
   display: grid;

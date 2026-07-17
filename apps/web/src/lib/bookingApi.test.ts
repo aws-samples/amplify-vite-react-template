@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { requestQuote, type QuoteRequest } from "./bookingApi";
+import {
+  checkQuoteStatus,
+  requestQuote,
+  type QuoteRequest,
+} from "./bookingApi";
 import { captureAttribution, readAttribution } from "./leadIntake";
 
 /**
@@ -112,6 +116,26 @@ describe("requestQuote attribution", () => {
       source: "google",
       gclid: "abc123",
       landingPage: "/lp/quote?utm_source=google&gclid=abc123",
+    });
+  });
+});
+
+describe("checkQuoteStatus", () => {
+  it("polls the saved request without resending the lead's contact details", async () => {
+    const result = await checkQuoteStatus({
+      bookingId: "bk-1",
+      statusToken: "opaque-status-token",
+    });
+
+    expect(result.ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("https://booking.test/quote-status");
+    expect(JSON.parse(String(init.body))).toEqual({
+      bookingId: "bk-1",
+      statusToken: "opaque-status-token",
     });
   });
 });

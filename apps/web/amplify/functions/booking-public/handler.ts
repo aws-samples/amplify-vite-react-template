@@ -3,6 +3,7 @@ import type {
   APIGatewayProxyResultV2,
 } from "aws-lambda";
 import { randomUUID } from "node:crypto";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
@@ -23,8 +24,10 @@ import {
 import { buildDayMatrix, type DayQuote } from "./availability";
 import {
   enqueueRateResearch,
+  areaKeyFor,
   getCachedRate,
   hoaBandFor,
+  rateKeyFor,
   sqftBucket,
   type MarketRateService,
   type PlanCadence,
@@ -39,6 +42,7 @@ import {
  */
 
 const ssm = new SSMClient();
+const lambda = new LambdaClient();
 const secretCache = new Map<string, string>();
 
 async function getSecret(name: string): Promise<string | null> {
@@ -250,6 +254,12 @@ export const handler = async (
         await quote(body as QuoteInput, event.requestContext.http.sourceIp)
       );
     }
+    if (path.endsWith("/quote-status")) {
+      return json(
+        headers,
+        await quoteStatus(body, event.requestContext.http.sourceIp)
+      );
+    }
     if (path.endsWith("/book")) {
       return json(
         headers,
@@ -295,6 +305,142 @@ const json = (
   headers,
   body: JSON.stringify(payload),
 });
+
+type StoredQuoteBooking = {
+  id: string;
+  status?: string | null;
+  cancelToken?: string | null;
+  quoteJson?: unknown;
+  expiresAt?: string | null;
+  propertyKind?: string | null;
+  service?: string | null;
+  name: string;
+  email: string;
+  phone?: string | null;
+  street?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  units?: number | null;
+  sqft?: number | null;
+  nestCount?: number | null;
+  comments?: string | null;
+  recurringPreference?: string | null;
+  attribution?: unknown;
+  zone?: string | null;
+  driveMinutes?: number | null;
+};
+
+function parseStoredQuote(raw: unknown): {
+  days?: DayQuote[];
+  serviceLabel?: string;
+  recurringOffer?: {
+    frequency: string;
+    monthlyCents: number;
+    initialFeeCents: number;
+  } | null;
+  planOnly?: boolean;
+  contactMessage?: string;
+} {
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Rehydrate the exact stored day board without recalculating its price. */
+function pricedResponse(booking: StoredQuoteBooking) {
+  const stored = parseStoredQuote(booking.quoteJson);
+  if (
+    !stored.serviceLabel ||
+    !stored.days?.length ||
+    !booking.expiresAt
+  ) {
+    throw new HttpError(409, {
+      error: "This quote is incomplete — we're fixing it and will email you when it is ready.",
+    });
+  }
+  return {
+    bookingId: booking.id,
+    decision: "PRICED" as const,
+    service: stored.serviceLabel,
+    recurringOffer: stored.recurringOffer ?? null,
+    planOnly: stored.planOnly || undefined,
+    days: stored.days.map(({ date, windows, priceCents }) => ({
+      date,
+      windows,
+      priceCents,
+    })),
+    expiresAt: booking.expiresAt,
+    terms: { version: BOOKING_TERMS_VERSION, text: BOOKING_TERMS_TEXT },
+  };
+}
+
+/**
+ * Secure polling endpoint for the loading screen and the emailed resume link.
+ * The token is the booking's existing high-entropy customer token; the
+ * response never exposes the lead's contact details.
+ */
+async function quoteStatus(
+  body: Record<string, unknown>,
+  sourceIp: string
+) {
+  const bookingId = String(body.bookingId ?? "");
+  const statusToken = String(body.statusToken ?? "");
+  if (!bookingId || !statusToken) {
+    throw new HttpError(400, { error: "Missing quote request token." });
+  }
+
+  const client = await dataClient();
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: bookingId,
+  });
+  if (!booking || booking.cancelToken !== statusToken) {
+    throw new HttpError(404, { error: "Quote request not found." });
+  }
+
+  if (booking.status === "QUOTED") return pricedResponse(booking);
+  if (booking.status === "CONTACT") {
+    return {
+      bookingId: booking.id,
+      decision: "CONTACT" as const,
+      message:
+        parseStoredQuote(booking.quoteJson).contactMessage ??
+        "A specialist is reviewing your request and will contact you shortly.",
+    };
+  }
+  if (booking.status !== "PENDING") {
+    throw new HttpError(409, {
+      error: "This quote request is no longer awaiting pricing.",
+    });
+  }
+
+  return quote(
+    {
+      propertyKind: booking.propertyKind ?? undefined,
+      name: booking.name,
+      email: booking.email,
+      phone: booking.phone ?? undefined,
+      address: {
+        street: booking.street ?? undefined,
+        city: booking.city ?? undefined,
+        state: booking.state ?? undefined,
+        zip: booking.zip ?? undefined,
+      },
+      units: booking.units ?? undefined,
+      service: booking.service ?? undefined,
+      sqft: booking.sqft ?? undefined,
+      nestCount: booking.nestCount ?? undefined,
+      comments: booking.comments ?? undefined,
+      recurringPreference: booking.recurringPreference ?? undefined,
+      attribution: booking.attribution,
+    },
+    sourceIp,
+    { bookingId, statusToken }
+  );
+}
 
 // ---------------------------------------------------------------- /quote
 
@@ -349,7 +495,45 @@ async function throttleOk(ip: string): Promise<boolean> {
   return true;
 }
 
-async function quote(input: QuoteInput, sourceIp: string) {
+type ResumeQuote = { bookingId: string; statusToken: string };
+
+/**
+ * Wake the pricing worker for this exact cold-cache miss. Invocation is
+ * asynchronous: /quote returns the durable PENDING request immediately and
+ * the browser polls /quote-status. The five-minute schedule is still the
+ * recovery path if this best-effort wake-up fails.
+ */
+async function triggerPricingRefresh(rateKey: string): Promise<void> {
+  const functionName = process.env.PRICING_REFRESH_FUNCTION_NAME;
+  if (!functionName) {
+    console.error(
+      "quote pending: PRICING_REFRESH_FUNCTION_NAME is not configured; scheduled recovery will pick it up",
+      rateKey
+    );
+    return;
+  }
+  try {
+    await lambda.send(
+      new InvokeCommand({
+        FunctionName: functionName,
+        InvocationType: "Event",
+        Payload: Buffer.from(JSON.stringify({ rateKey, source: "quote" })),
+      })
+    );
+  } catch (err) {
+    console.error(
+      "quote pending: immediate pricing wake-up failed; scheduled recovery will pick it up",
+      rateKey,
+      err
+    );
+  }
+}
+
+async function quote(
+  input: QuoteInput,
+  sourceIp: string,
+  resume?: ResumeQuote
+) {
   const errors: Record<string, string> = {};
   const name = (input.name ?? "").trim();
   const email = (input.email ?? "").trim().toLowerCase();
@@ -392,18 +576,42 @@ async function quote(input: QuoteInput, sourceIp: string) {
   }
   if (Object.keys(errors).length) throw new HttpError(400, { errors });
 
-  if (!(await verifyBotToken(input.botToken))) {
-    throw new HttpError(400, {
-      error: "We couldn't verify that request came from a browser — please reload and try again.",
-    });
-  }
-  if (!(await throttleOk(sourceIp))) {
-    throw new HttpError(429, {
-      error: "That's a lot of quotes from one place — give it an hour, or call us at the office and we'll sort it out directly.",
-    });
+  // The original public submission carries the bot check and spend throttle.
+  // A token-authenticated status poll resumes the already-accepted request;
+  // charging every poll against the IP cap would lock a real lead out before
+  // their rate finishes.
+  if (!resume) {
+    if (!(await verifyBotToken(input.botToken))) {
+      throw new HttpError(400, {
+        error: "We couldn't verify that request came from a browser — please reload and try again.",
+      });
+    }
+    if (!(await throttleOk(sourceIp))) {
+      throw new HttpError(429, {
+        error: "That's a lot of quotes from one place — give it an hour, or call us at the office and we'll sort it out directly.",
+      });
+    }
   }
 
   const client = await dataClient();
+  let resumedBooking: StoredQuoteBooking | null = null;
+  if (resume) {
+    const { data: existing } = await client.models.BookingRequest.get({
+      id: resume.bookingId,
+    });
+    if (!existing || existing.cancelToken !== resume.statusToken) {
+      throw new HttpError(404, { error: "Quote request not found." });
+    }
+    if (existing.status === "QUOTED") {
+      return pricedResponse(existing);
+    }
+    if (existing.status !== "PENDING") {
+      throw new HttpError(409, {
+        error: "This quote request is no longer waiting for pricing.",
+      });
+    }
+    resumedBooking = existing;
+  }
   const address = `${addr.street}, ${addr.city}, ${addr.state}${addr.zip ? ` ${addr.zip}` : ""}`;
   // First-touch ad attribution rides along on every booking this quote
   // creates, so finalization can derive the customer's lead source. Malformed
@@ -411,8 +619,7 @@ async function quote(input: QuoteInput, sourceIp: string) {
   const attribution = sanitizeAttribution(input.attribution);
 
   const makeBooking = async (fields: Record<string, unknown>) => {
-    const { data: booking, errors: gqlErrors } =
-      await client.models.BookingRequest.create({
+    const base = {
         name,
         email,
         phone: phone ?? undefined,
@@ -434,9 +641,17 @@ async function quote(input: QuoteInput, sourceIp: string) {
         comments: input.comments?.slice(0, 2000) || undefined,
         recurringPreference: input.recurringPreference ?? undefined,
         attribution: attribution ? JSON.stringify(attribution) : undefined,
-        cancelToken: randomUUID(),
         ...fields,
-      });
+    };
+    const { data: booking, errors: gqlErrors } = resume
+      ? await client.models.BookingRequest.update({
+          id: resume.bookingId,
+          ...base,
+        })
+      : await client.models.BookingRequest.create({
+          ...base,
+          cancelToken: randomUUID(),
+        });
     if (!booking) {
       throw new Error(gqlErrors?.[0]?.message ?? "Could not store the request");
     }
@@ -448,7 +663,11 @@ async function quote(input: QuoteInput, sourceIp: string) {
     extra: Record<string, unknown> = {},
     opsNote = ""
   ) => {
-    const booking = await makeBooking({ status: "CONTACT", ...extra });
+    const booking = await makeBooking({
+      status: "CONTACT",
+      quoteJson: JSON.stringify({ contactMessage: message }),
+      ...extra,
+    });
     await notifyLeads({
       subject: "Website lead needs a call",
       heading: "Website lead needs a call",
@@ -465,10 +684,20 @@ async function quote(input: QuoteInput, sourceIp: string) {
 
   // Zone from live drive time.
   const routesKey = await getSecret("GOOGLE_ROUTES_API_KEY");
-  const minutes = routesKey
-    ? await driveMinutesBetween(routesKey, HQ_ADDRESS, address)
-    : null;
-  const zone: Zone = minutes == null ? "UNKNOWN" : zoneFromMinutes(minutes);
+  const storedZone = resumedBooking?.zone;
+  const hasStoredZone = ["A", "B", "OUT", "UNKNOWN"].includes(
+    storedZone ?? ""
+  );
+  const minutes = hasStoredZone
+    ? (resumedBooking?.driveMinutes ?? null)
+    : routesKey
+      ? await driveMinutesBetween(routesKey, HQ_ADDRESS, address)
+      : null;
+  const zone: Zone = hasStoredZone
+    ? (storedZone as Zone)
+    : minutes == null
+      ? "UNKNOWN"
+      : zoneFromMinutes(minutes);
   if (zone === "OUT") {
     return contact(
       "You're a bit outside our standard service area — a specialist will call within the hour to see what we can do.",
@@ -494,18 +723,30 @@ async function quote(input: QuoteInput, sourceIp: string) {
   // AI base price. Every service prices from the cached market-rate sheet —
   // a PURE READ. The live path never researches: getCachedRate serves the
   // freshest usable row (a stale sheet still serves — staleness beats a
-  // callback; pinned office rows serve forever), and only a combo with no
-  // sheet at all comes back null. On null we queue the research on the
-  // RateCoverage ledger — the hourly pricing-refresh cron picks DEMAND rows
-  // up first and emails the lead their exact day-by-day prices — and the
-  // lead gets the honest holding copy now. Never a made-up number. The
+  // callback; pinned office rows serve forever), and only a combo without a
+  // usable requested price comes back null. On null we queue the research on
+  // the RateCoverage ledger, wake the refresh worker immediately, and retain
+  // the five-minute schedule as recovery. The worker emails the lead a secure
+  // resume link when the price is ready. Never a made-up number. The
   // deterministic overlay stays on top of the AI base: the Zone B adders
   // here, then day pricing / capacity / the R62 cost floor below.
   const contactForPrice = async (
     engineService: MarketRateService,
     sqft?: number
   ) => {
-    const booking = await makeBooking({ status: "CONTACT" });
+    const booking =
+      resume && resumedBooking
+        ? resumedBooking
+        : await makeBooking({
+            status: "PENDING",
+            zone,
+            driveMinutes: minutes ?? undefined,
+          });
+    const rateKey = rateKeyFor(
+      engineService,
+      areaKeyFor(addr.city!, addr.state!),
+      sqft != null ? sqftBucket(sqft) : null
+    );
     // Never throws (its own contract) — a lost miss record must never fail
     // the lead, and the cron's seeding pass rediscovers this combo from the
     // BookingRequest row anyway.
@@ -517,22 +758,28 @@ async function quote(input: QuoteInput, sourceIp: string) {
       notifyEmail: email,
       bookingRequestId: booking.id,
     });
-    await notifyLeads({
-      subject: "Website lead waiting on AI pricing",
-      heading: "Website lead waiting on AI pricing",
-      template: "ops-booking-rate-queued",
-      relatedId: booking.id,
-      bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}, and no cached rate exists for that combo yet.</p>
-       ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
-       ${attribution?.source ? `<p>Lead source: utm:${escapeHtml(attribution.source)}${attribution.campaign ? ` · campaign:${escapeHtml(attribution.campaign)}` : ""}</p>` : ""}
-       <p>The research is queued: the hourly pricing refresh prices it and emails them their exact day-by-day prices — the website promised their inbox within the hour. Nothing is blocked on you, but the lead is in the CRM if you want to call sooner.</p>
-       <p>Booking request ${booking.id}.</p>`,
-    });
+    // Only the original submission wakes the worker and pages sales. Polling
+    // must be a pure status check until the cached sheet appears.
+    if (!resume) {
+      await triggerPricingRefresh(rateKey);
+      await notifyLeads({
+        subject: "Website lead waiting on AI pricing",
+        heading: "Website lead waiting on AI pricing",
+        template: "ops-booking-rate-queued",
+        relatedId: booking.id,
+        bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}, and no cached rate exists for that combo yet.</p>
+         ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
+         ${attribution?.source ? `<p>Lead source: utm:${escapeHtml(attribution.source)}${attribution.campaign ? ` · campaign:${escapeHtml(attribution.campaign)}` : ""}</p>` : ""}
+         <p>The website is holding the lead on a live pricing screen while the rate worker runs. If they leave, the completed quote link will be emailed automatically. Booking request ${booking.id}.</p>`,
+      });
+    }
     return {
       bookingId: booking.id,
-      decision: "CONTACT",
+      statusToken: booking.cancelToken,
+      decision: "PENDING",
+      stage: "RESEARCHING",
       message:
-        "We're pricing your area right now — your exact day-by-day prices will be in your inbox within the hour.",
+        "We're building your exact price and checking available appointment times now.",
     };
   };
 
@@ -728,7 +975,11 @@ async function quote(input: QuoteInput, sourceIp: string) {
     // Plan-only quotes (community common-area) carry no one-time offer: the
     // day picks the first visit and the amount charged is the first month.
     planOnly: planOnly || undefined,
-    days: days.map(({ factors: _f, ...d }) => d),
+    days: days.map(({ date, windows, priceCents }) => ({
+      date,
+      windows,
+      priceCents,
+    })),
     expiresAt,
     // R17: the checkout must render exactly what /book will hold them to.
     terms: { version: BOOKING_TERMS_VERSION, text: BOOKING_TERMS_TEXT },

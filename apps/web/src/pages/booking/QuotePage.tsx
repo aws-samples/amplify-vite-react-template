@@ -4,8 +4,10 @@ import { useNavigate } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
 import {
+  checkQuoteStatus,
   requestQuote,
   type ContactQuote,
+  type PendingQuote,
   type PricedQuote,
   type PropertyKind,
   type QuoteRequest,
@@ -29,6 +31,48 @@ import {
 } from "../../lib/bookingFunnel";
 
 const OFFICE_PHONE = "508-258-9294";
+const PENDING_QUOTE_KEY = "buzzkill.pendingQuote.v1";
+const LONG_WAIT_MS = 90_000;
+
+type PendingQuoteState = {
+  quote: PendingQuote;
+  startedAt: number;
+};
+
+function loadPendingQuote(storage: Storage): PendingQuoteState | null {
+  try {
+    const parsed = JSON.parse(storage.getItem(PENDING_QUOTE_KEY) ?? "null") as
+      | PendingQuoteState
+      | null;
+    if (
+      parsed?.quote?.decision === "PENDING" &&
+      typeof parsed.quote.bookingId === "string" &&
+      typeof parsed.quote.statusToken === "string" &&
+      typeof parsed.startedAt === "number"
+    ) {
+      return parsed;
+    }
+  } catch {
+    /* corrupt or storage-disabled — start clean */
+  }
+  return null;
+}
+
+function savePendingQuote(storage: Storage, pending: PendingQuoteState): void {
+  try {
+    storage.setItem(PENDING_QUOTE_KEY, JSON.stringify(pending));
+  } catch {
+    /* polling still works for this page load */
+  }
+}
+
+function clearPendingQuote(storage: Storage): void {
+  try {
+    storage.removeItem(PENDING_QUOTE_KEY);
+  } catch {
+    /* no-op */
+  }
+}
 
 type Fields = {
   name: string;
@@ -81,14 +125,50 @@ export default function QuotePage() {
   const [submitting, setSubmitting] = useState(false);
   const [priced, setPriced] = useState<PricedQuote | null>(null);
   const [contact, setContact] = useState<ContactQuote | null>(null);
+  const [pending, setPending] = useState<PendingQuoteState | null>(null);
+  const [pendingError, setPendingError] = useState<string | null>(null);
+  const [waitedMs, setWaitedMs] = useState(0);
 
   // Day-picker selection
   const [selDate, setSelDate] = useState<string | null>(null);
   const [selWindow, setSelWindow] = useState<WindowCode | null>(null);
   const [plan, setPlan] = useState<"ONE_TIME" | "PLAN">("ONE_TIME");
 
-  // A refresh (or a round trip to /book) must not lose the quote.
+  // A refresh, an emailed resume link, or a round trip to /book must not lose
+  // either the pending request or the finished quote.
   useEffect(() => {
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const request = hash.get("request");
+    const token = hash.get("token");
+    if (request && token) {
+      const resumed: PendingQuoteState = {
+        quote: {
+          bookingId: request,
+          statusToken: token,
+          decision: "PENDING",
+          stage: "BUILDING_AVAILABILITY",
+          message: "Your price is ready. We're loading the available appointment times.",
+        },
+        startedAt: Date.now(),
+      };
+      savePendingQuote(window.sessionStorage, resumed);
+      setPending(resumed);
+      // Capability tokens do not belong in browser history or referrers.
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}${window.location.search}`
+      );
+      return;
+    }
+
+    const savedPending = loadPendingQuote(window.sessionStorage);
+    if (savedPending) {
+      setPending(savedPending);
+      setWaitedMs(Math.max(0, Date.now() - savedPending.startedAt));
+      return;
+    }
+
     const stored = loadFunnelState(window.sessionStorage);
     if (!stored) return;
     if (isQuoteExpired(stored.quote.expiresAt)) {
@@ -106,6 +186,73 @@ export default function QuotePage() {
     }
   }, []);
 
+  // Poll sequentially: a slow availability calculation must finish before a
+  // second poll starts. Transient network/server failures keep the durable
+  // request on screen and retry; an invalid/expired token stops cleanly.
+  useEffect(() => {
+    const bookingId = pending?.quote.bookingId;
+    const statusToken = pending?.quote.statusToken;
+    if (!bookingId || !statusToken) return;
+
+    let stopped = false;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    const clock = window.setInterval(() => {
+      setWaitedMs(Math.max(0, Date.now() - (pending?.startedAt ?? Date.now())));
+    }, 1000);
+
+    const poll = async () => {
+      const result = await checkQuoteStatus({ bookingId, statusToken });
+      if (stopped) return;
+
+      if (result.ok) {
+        setPendingError(null);
+        if (result.body.decision === "PRICED") {
+          clearPendingQuote(window.sessionStorage);
+          setPending(null);
+          acceptPricedQuote(result.body);
+          return;
+        }
+        if (result.body.decision === "CONTACT") {
+          clearPendingQuote(window.sessionStorage);
+          setPending(null);
+          setContact(result.body);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          return;
+        }
+        setPending((current) =>
+          current
+            ? { ...current, quote: result.body as PendingQuote }
+            : current
+        );
+      } else if ([400, 404, 409, 410].includes(result.status)) {
+        clearPendingQuote(window.sessionStorage);
+        setPending(null);
+        setBanner(
+          result.body.error ??
+            "We couldn't reopen that quote request. Please submit a fresh one."
+        );
+        return;
+      } else {
+        setPendingError(
+          "We lost the connection briefly, but your request is saved. Retrying automatically…"
+        );
+      }
+
+      const elapsed = Date.now() - (pending?.startedAt ?? Date.now());
+      pollTimer = setTimeout(poll, elapsed >= LONG_WAIT_MS ? 5000 : 3000);
+    };
+
+    pollTimer = setTimeout(poll, 750);
+    return () => {
+      stopped = true;
+      window.clearInterval(clock);
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+    // Only a new request/token restarts the poller. Message/stage updates do
+    // not create overlapping loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending?.quote.bookingId, pending?.quote.statusToken]);
+
   const set = (k: keyof Fields) => (v: string) =>
     setFields((f) => ({ ...f, [k]: v }));
 
@@ -116,6 +263,25 @@ export default function QuotePage() {
   const offersPlanChoice =
     fields.propertyKind === "COMMERCIAL" ||
     (fields.propertyKind === "RESIDENTIAL" && fields.service === "GENERAL_PEST");
+
+  function acceptPricedQuote(
+    response: PricedQuote,
+    planOnlyFallback = false
+  ) {
+    const quote = {
+      ...response,
+      planOnly: response.planOnly ?? planOnlyFallback,
+    };
+    setPriced(quote);
+    setContact(null);
+    setSelDate(null);
+    setSelWindow(null);
+    setPlan(
+      quote.planOnly || fields.recurringPreference ? "PLAN" : "ONE_TIME"
+    );
+    saveFunnelState(window.sessionStorage, { quote });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -158,23 +324,18 @@ export default function QuotePage() {
 
     if (result.ok) {
       if (result.body.decision === "PRICED") {
-        // Community quotes are plan-only; stamp the flag from the submitted
-        // property kind so the board renders right even if the server's
-        // response omits it.
-        const quote = {
-          ...result.body,
-          planOnly: result.body.planOnly ?? isCommunity,
-        };
-        setPriced(quote);
-        setSelDate(null);
-        setSelWindow(null);
-        setPlan(
-          quote.planOnly || fields.recurringPreference ? "PLAN" : "ONE_TIME"
-        );
-        saveFunnelState(window.sessionStorage, { quote });
+        acceptPricedQuote(result.body, isCommunity);
+      } else if (result.body.decision === "PENDING") {
+        const waiting = { quote: result.body, startedAt: Date.now() };
+        clearFunnelState(window.sessionStorage);
+        savePendingQuote(window.sessionStorage, waiting);
+        setPending(waiting);
+        setPendingError(null);
+        setWaitedMs(0);
         window.scrollTo({ top: 0, behavior: "smooth" });
       } else {
         setContact(result.body);
+        clearPendingQuote(window.sessionStorage);
         clearFunnelState(window.sessionStorage);
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
@@ -196,8 +357,12 @@ export default function QuotePage() {
 
   function startOver() {
     clearFunnelState(window.sessionStorage);
+    clearPendingQuote(window.sessionStorage);
     setPriced(null);
     setContact(null);
+    setPending(null);
+    setPendingError(null);
+    setWaitedMs(0);
     setSelDate(null);
     setSelWindow(null);
     setBanner(null);
@@ -234,6 +399,77 @@ export default function QuotePage() {
         {fieldErrors[key]}
       </div>
     ) : null;
+
+  // ── PENDING outcome — live async pricing + availability ──────────
+  if (pending) {
+    const buildingDays = pending.quote.stage === "BUILDING_AVAILABILITY";
+    const longWait = waitedMs >= LONG_WAIT_MS;
+    return (
+      <>
+        <SEO title="Preparing Your Instant Quote" noindex />
+        <section className="bk-section bk-section-light">
+          <div
+            className="bk-container bk-narrow bk-confirm bk-quote-loading"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="bk-quote-spinner" aria-hidden="true" />
+            <div className="bk-eyebrow">Your request is saved</div>
+            <h1 className="bk-h2">We&rsquo;re building your exact quote.</h1>
+            <p className="bk-body-lead">{pending.quote.message}</p>
+
+            <ol className="bk-quote-progress" aria-label="Quote progress">
+              <li className="is-done">
+                <span aria-hidden="true">✓</span>
+                Property details checked
+              </li>
+              <li className={buildingDays ? "is-done" : "is-active"}>
+                <span aria-hidden="true">{buildingDays ? "✓" : "2"}</span>
+                Exact service price
+              </li>
+              <li className={buildingDays ? "is-active" : ""}>
+                <span aria-hidden="true">3</span>
+                Available days and times
+              </li>
+            </ol>
+
+            {pendingError && (
+              <div className="bk-notice" role="alert">
+                {pendingError}
+              </div>
+            )}
+
+            {longWait ? (
+              <div className="bk-quote-loading__reassurance">
+                <strong>You don&rsquo;t have to keep this page open.</strong>
+                <p>
+                  This is taking longer than usual. We&rsquo;ll email a secure
+                  link to the finished quote automatically, and this page will
+                  keep checking while you&rsquo;re here.
+                </p>
+              </div>
+            ) : (
+              <p className="bk-p bk-quote-loading__hint">
+                Most quotes finish shortly. If you leave, we&rsquo;ll email a
+                secure link as soon as it&rsquo;s ready.
+              </p>
+            )}
+
+            <p className="bk-p">
+              Need help now? Call <strong>{OFFICE_PHONE}</strong>.
+            </p>
+            <button
+              type="button"
+              className="bk-btn bk-btn-outline"
+              onClick={startOver}
+            >
+              Change my details
+            </button>
+          </div>
+        </section>
+      </>
+    );
+  }
 
   // ── CONTACT outcome — the office really was emailed ───────────────
   if (contact) {

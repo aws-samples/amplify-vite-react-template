@@ -319,7 +319,12 @@ export async function getCachedRate(opts: {
 
 // ------------------------------------------------- demand-enqueue (misses)
 
-export type RateNotifyEntry = { email: string; bookingRequestId?: string };
+export type RateNotifyEntry = {
+  email: string;
+  bookingRequestId?: string;
+  /** Research finished, but the ready-email delivery still needs retrying. */
+  ready?: boolean;
+};
 
 /** Waiting-lead entries kept per coverage row — enough for a small shop's
  *  hour of misses on one combo; anything past this still gets researched,
@@ -725,7 +730,17 @@ async function research(
       basis: basisLine,
       sources: text.slice(0, 1000),
     };
-  } catch {
+  } catch (err) {
+    // Authentication, credits, model access and request-shape failures used
+    // to collapse into the same silent null as an unusable research answer.
+    // Keep the lead pending, but preserve the provider's actionable error in
+    // CloudWatch so operations can fix the dependency instead of guessing.
+    console.error(
+      "market-rate research request failed",
+      service,
+      areaKeyFor(city, state),
+      err instanceof Error ? err.message : String(err)
+    );
     return null;
   }
 }

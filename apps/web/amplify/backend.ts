@@ -166,6 +166,16 @@ backend.crmPricing.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
 backend.bookingPublic.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.bookingPublic.addEnvironment("AMPLIFY_BRANCH", branch);
+// A cold pricing miss starts the existing refresh worker immediately. The
+// five-minute schedule remains the recovery sweep, so a failed async invoke
+// never strands the lead.
+backend.pricingRefresh.resources.lambda.grantInvoke(
+  backend.bookingPublic.resources.lambda
+);
+backend.bookingPublic.addEnvironment(
+  "PRICING_REFRESH_FUNCTION_NAME",
+  backend.pricingRefresh.resources.lambda.functionName
+);
 // pricing-refresh is where ALL market-rate research runs now, so it needs
 // the same Anthropic key lookup as the engines that used to research inline.
 backend.pricingRefresh.addEnvironment("AMPLIFY_APP_ID", appId);

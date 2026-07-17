@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * The hourly pricing-refresh cron — the only place research runs now.
+ * The pricing-refresh worker — the only place research runs now. It wakes
+ * immediately for a live quote miss and every five minutes for recovery.
  *
  * Every run: idempotent coverage seeding (curated towns + combos derived
  * from rates/customers/bookings), then drain due work under the caps —
@@ -85,19 +86,25 @@ const fakeDataClient = {
       },
     },
     Customer: { list: async () => ({ data: [...customers] }) },
-    BookingRequest: { list: async () => ({ data: [...bookings] }) },
+    BookingRequest: {
+      list: async () => ({ data: [...bookings] }),
+      get: async ({ id }: { id: string }) => ({
+        data: bookings.find((b) => b.id === id) ?? null,
+      }),
+    },
   },
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
 const sentEmails: { to: string; subject: string; template: string; html: string }[] =
   [];
+const emailsThatFail = new Set<string>();
 const officeEmails: { subject: string; template: string; bodyHtml: string }[] = [];
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
   sendEmail: async (o: { to: string; subject: string; template: string; html: string }) => {
     sentEmails.push(o);
-    return true;
+    return !emailsThatFail.has(o.to);
   },
   notifyOffice: async (o: { subject: string; template: string; bodyHtml: string }) => {
     officeEmails.push(o);
@@ -191,6 +198,7 @@ beforeEach(() => {
   customers.length = 0;
   bookings.length = 0;
   sentEmails.length = 0;
+  emailsThatFail.clear();
   officeEmails.length = 0;
   messagesCreate.mockClear();
   messagesCreate.mockImplementation(async () => ({
@@ -486,6 +494,7 @@ describe("the self-heal email — a waiting lead hears the moment prices exist",
   it("emails every waiting lead once, then clears the notify list", async () => {
     await seedOnly();
     quietAll();
+    bookings.push({ id: "bk1", cancelToken: "resume-token-1" });
     covRows.push(demandRow());
 
     await handler();
@@ -493,7 +502,9 @@ describe("the self-heal email — a waiting lead hears the moment prices exist",
     const ready = sentEmails.filter((e) => e.template === "booking-rate-ready");
     expect(ready.map((e) => e.to)).toEqual(["lead1@x.com", "lead2@x.com"]);
     expect(ready[0].subject).toContain("Your exact prices are ready");
-    expect(ready[0].html).toContain("https://staging.example.test/quote");
+    expect(ready[0].html).toContain(
+      "https://staging.example.test/quote#request=bk1&token=resume-token-1"
+    );
     const cov = covRows.find((c) => c.id === "GENERAL_PEST#springfield-ma#2000")!;
     expect(JSON.parse(cov.notify!)).toEqual([]);
 
@@ -501,6 +512,52 @@ describe("the self-heal email — a waiting lead hears the moment prices exist",
     sentEmails.length = 0;
     await handler();
     expect(sentEmails.filter((e) => e.template === "booking-rate-ready")).toHaveLength(0);
+  });
+
+  it("keeps a failed delivery queued and retries it without researching again", async () => {
+    await seedOnly();
+    quietAll();
+    covRows.push(demandRow());
+    emailsThatFail.add("lead2@x.com");
+
+    await handler();
+
+    const cov = covRows.find((c) => c.id === "GENERAL_PEST#springfield-ma#2000")!;
+    expect(JSON.parse(cov.notify!)).toEqual([
+      { email: "lead2@x.com", bookingRequestId: "bk2", ready: true },
+    ]);
+
+    emailsThatFail.clear();
+    sentEmails.length = 0;
+    await handler();
+
+    expect(messagesCreate).toHaveBeenCalledTimes(1); // first run only
+    expect(sentEmails.filter((e) => e.template === "booking-rate-ready").map((e) => e.to))
+      .toEqual(["lead2@x.com"]);
+    expect(JSON.parse(cov.notify!)).toEqual([]);
+  });
+
+  it("does not announce ready when a live partial sheet still needs research", async () => {
+    await seedOnly();
+    quietAll();
+    const demand = demandRow();
+    covRows.push(demand);
+    rateRows.push({
+      id: "partial-sheet",
+      rateKey: demand.id,
+      service: demand.service,
+      areaKey: demand.areaKey,
+      priceCents: 32000,
+      active: true,
+      researchedAt: new Date().toISOString(),
+    });
+
+    const summary = await handler();
+
+    expect(summary.attempted).toBe(0);
+    expect(sentEmails.filter((e) => e.template === "booking-rate-ready"))
+      .toHaveLength(0);
+    expect(JSON.parse(demand.notify!)).toHaveLength(2);
   });
 
   it("sends nothing when research fails — the lead is emailed only with real prices", async () => {

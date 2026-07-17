@@ -8,6 +8,7 @@ import {
   pickLiveRow,
   researchAndCacheRate,
   REFRESH_AFTER_MS,
+  type RateNotifyEntry,
   type MarketRateService,
 } from "../shared/marketRate";
 
@@ -37,6 +38,11 @@ import {
  */
 export const RESEARCH_PER_RUN = 20;
 export const RESEARCH_PER_DAY = 150;
+/** Live quote misses retain a small daily reserve even when background
+ *  seeding/refresh has consumed the normal budget. The public endpoint is
+ *  separately throttled, so this restores conversion without opening an
+ *  unbounded research surface. */
+export const DEMAND_RESEARCH_PER_DAY = 25;
 
 /** lastSuccess older than this makes the weekly report's stale list —
  *  the age ceiling alert (three missed weekly refreshes). */
@@ -350,12 +356,44 @@ function selectWork(
  * before its sheet existed. Honest copy: their quote fell to the callback
  * path, and now the day-by-day prices genuinely exist.
  */
-async function sendRateReadyEmails(cov: CoverageRow): Promise<number> {
+async function sendRateReadyEmails(
+  cov: CoverageRow,
+  mode: "UNREADY_ONLY" | "READY_ONLY"
+): Promise<{ sent: number; remaining: RateNotifyEntry[] }> {
   const entries = parseNotify(cov.notify);
-  if (!entries.length) return 0;
-  const quoteUrl = `${process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com"}/quote`;
+  if (!entries.length) return { sent: 0, remaining: [] };
+  const quoteBase = `${process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com"}/quote`;
+  const client = await dataClient();
   let sent = 0;
+  const remaining: RateNotifyEntry[] = [];
   for (const entry of entries) {
+    const isReadyRetry = entry.ready === true;
+    const shouldSend =
+      mode === "READY_ONLY" ? isReadyRetry : !isReadyRetry;
+    if (!shouldSend) {
+      remaining.push(entry);
+      continue;
+    }
+    let quoteUrl = quoteBase;
+    if (entry.bookingRequestId) {
+      try {
+        const { data: booking } = await client.models.BookingRequest.get({
+          id: entry.bookingRequestId,
+        });
+        if (booking?.cancelToken) {
+          // The fragment is not sent in HTTP requests or referrer headers. The
+          // quote page consumes it, clears it from the address bar, and polls
+          // the token-authenticated status endpoint.
+          quoteUrl = `${quoteBase}#request=${encodeURIComponent(entry.bookingRequestId)}&token=${encodeURIComponent(booking.cancelToken)}`;
+        }
+      } catch (err) {
+        console.error(
+          "pricing-refresh: could not build secure quote resume link",
+          entry.bookingRequestId,
+          err
+        );
+      }
+    }
     const ok = await sendEmail({
       to: entry.email,
       subject: "Your exact prices are ready — pick your day",
@@ -364,14 +402,15 @@ async function sendRateReadyEmails(cov: CoverageRow): Promise<number> {
       html: emailShell(
         "Your exact prices are ready",
         `<p>When you asked for a quote, we were still researching pricing for your area — that's done now.</p>
-         <p>Run your quote again and every available day will show its exact price. Pick the day that works and book online in about a minute.</p>
-         <p style="margin:20px 0;"><a href="${quoteUrl}" style="background:#72E000;color:#0A0A0A;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:700;">See my day-by-day prices</a></p>
+         <p>Open your saved request to see the exact price and every available day. Pick the day that works and book online in about a minute.</p>
+         <p style="margin:20px 0;"><a href="${quoteUrl}" style="background:#72E000;color:#0A0A0A;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:700;">Open my exact quote</a></p>
          <p style="color:#666;font-size:13px;">Prefer to talk it through? Just reply to this email.</p>`
       ),
     });
     if (ok) sent++;
+    else remaining.push({ ...entry, ready: true });
   }
-  return sent;
+  return { sent, remaining };
 }
 
 // -------------------------------------------------------- weekly report
@@ -507,14 +546,24 @@ async function sendWeeklyReport(): Promise<boolean> {
 
 // --------------------------------------------------------------- handler
 
-export const handler = async () => {
+type PricingRefreshEvent = {
+  /** Internal on-demand wake-up from booking-public. */
+  rateKey?: string;
+  source?: "quote";
+};
+
+export const handler = async (event: PricingRefreshEvent = {}) => {
   const startedAt = Date.now();
   const now = new Date();
+  const targetedRateKey =
+    event.source === "quote" && typeof event.rateKey === "string"
+      ? event.rateKey
+      : null;
   // The cron fires every 5 minutes for fast demand self-heal, but seeding
   // (a full re-scan of rates/customers/bookings) and the weekly report only
   // belong once an hour: the first run of the hour owns them. Off the hour,
   // the run is a pure drain over the already-seeded work-list.
-  const topOfHour = now.getUTCMinutes() < 5;
+  const topOfHour = !targetedRateKey && now.getUTCMinutes() < 5;
 
   let seeded = 0;
   if (topOfHour) {
@@ -529,7 +578,34 @@ export const handler = async () => {
   const client = await dataClient();
   const coverage = await listAll<CoverageRow>(client.models.RateCoverage);
   const live = liveRowsByKey(await listAll<RateRow>(client.models.MarketRate));
-  const queue = selectWork(coverage, live, startedAt);
+  let notified = 0;
+
+  // Email delivery has its own retry lifecycle. A rate can be fresh while a
+  // transient SES failure still leaves waiting leads on the coverage row;
+  // retry those notifications without paying to research the rate again.
+  for (const cov of coverage) {
+    if (
+      !live.has(cov.id) ||
+      !parseNotify(cov.notify).some((entry) => entry.ready === true)
+    ) {
+      continue;
+    }
+    const delivery = await sendRateReadyEmails(cov, "READY_ONLY");
+    notified += delivery.sent;
+    await client.models.RateCoverage.update({
+      id: cov.id,
+      notify: JSON.stringify(delivery.remaining),
+    });
+  }
+  const selected = selectWork(coverage, live, startedAt);
+  const targetedRow = targetedRateKey
+    ? coverage.find((row) => row.id === targetedRateKey)
+    : null;
+  const queue = targetedRateKey
+    ? targetedRow && !live.get(targetedRateKey)?.pinned
+      ? [targetedRow]
+      : []
+    : selected;
 
   // The day's budget: attempts across the last 24h (per-combo latest
   // stamps — a combo retried twice in a day counts once, so this can
@@ -537,10 +613,20 @@ export const handler = async () => {
   const attemptsToday = coverage.filter(
     (c) => c.lastAttemptAt && Date.parse(c.lastAttemptAt) > startedAt - DAY_MS
   ).length;
-  const budget = Math.max(
-    0,
-    Math.min(RESEARCH_PER_RUN, RESEARCH_PER_DAY - attemptsToday)
-  );
+  const demandAttemptsToday = coverage.filter(
+    (c) =>
+      c.source === "DEMAND" &&
+      c.lastAttemptAt &&
+      Date.parse(c.lastAttemptAt) > startedAt - DAY_MS
+  ).length;
+  const budget = targetedRateKey
+    ? queue.length > 0 && demandAttemptsToday < DEMAND_RESEARCH_PER_DAY
+      ? 1
+      : 0
+    : Math.max(
+        0,
+        Math.min(RESEARCH_PER_RUN, RESEARCH_PER_DAY - attemptsToday)
+      );
 
   const anthropicKey =
     budget > 0 && queue.length > 0 ? await getSecret("ANTHROPIC_API_KEY") : null;
@@ -548,7 +634,6 @@ export const handler = async () => {
   let attempted = 0;
   let succeeded = 0;
   let failed = 0;
-  let notified = 0;
   if (anthropicKey) {
     for (const cov of queue) {
       if (attempted >= budget) break;
@@ -567,13 +652,15 @@ export const handler = async () => {
           succeeded++;
           // Waiting leads first, then clear the list — a clear that fails
           // can re-send next success, which beats a lead never told.
-          notified += await sendRateReadyEmails(cov);
+          const delivery = await sendRateReadyEmails(cov, "UNREADY_ONLY");
+          notified += delivery.sent;
           await client.models.RateCoverage.update({
             id: cov.id,
             lastAttemptAt: nowIso,
             lastSuccessAt: nowIso,
             failCount: 0,
-            notify: JSON.stringify([]),
+            // A transient SES failure must not permanently lose a lead.
+            notify: JSON.stringify(delivery.remaining),
           });
         } else {
           failed++;
@@ -618,6 +705,7 @@ export const handler = async () => {
   }
 
   const summary = {
+    targetedRateKey,
     seeded,
     queued: queue.length,
     budget,

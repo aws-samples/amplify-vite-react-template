@@ -124,7 +124,16 @@ export type ContactQuote = {
   message: string;
 };
 
-export type QuoteResponse = PricedQuote | ContactQuote;
+export type PendingQuote = {
+  bookingId: string;
+  /** Opaque capability used only to poll this saved request. */
+  statusToken: string;
+  decision: "PENDING";
+  stage: "RESEARCHING" | "BUILDING_AVAILABILITY";
+  message: string;
+};
+
+export type QuoteResponse = PricedQuote | PendingQuote | ContactQuote;
 
 export type BookRequest = {
   bookingId: string;
@@ -229,6 +238,14 @@ export function requestQuote(input: QuoteRequest): Promise<ApiResult<QuoteRespon
     "/quote",
     attribution ? { ...input, attribution } : input,
   );
+}
+
+/** Poll a previously accepted cold-cache quote without resubmitting PII. */
+export function checkQuoteStatus(input: {
+  bookingId: string;
+  statusToken: string;
+}): Promise<ApiResult<QuoteResponse>> {
+  return post<QuoteResponse>("/quote-status", input);
 }
 
 export function bookVisit(input: BookRequest): Promise<ApiResult<BookResponse>> {
