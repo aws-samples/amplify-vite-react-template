@@ -3,6 +3,11 @@ import type { AppSyncResolverEvent } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
+import {
+  assertProductCanBeSaved,
+  assertTechnicianCompliance,
+  EPA_REGISTRATION_RE,
+} from "../shared/compliance";
 import { opFieldName } from "../shared/opEvent";
 import {
   callerGroups,
@@ -50,6 +55,7 @@ type Args = {
   customerId?: string;
   kind?: string;
   note?: string;
+  notes?: string;
   contentType?: string;
   reason?: string;
   photoKey?: string;
@@ -66,6 +72,27 @@ type Args = {
   geoAccuracyM?: number;
   geoCapturedAt?: string;
   photoKeys?: (string | null)[];
+  productId?: string;
+  name?: string;
+  epaNumber?: string;
+  activeIngredient?: string;
+  defaultQuantity?: string;
+  defaultRate?: string;
+  reEntryHours?: number;
+  labelApproved?: boolean;
+  active?: boolean;
+  sortOrder?: number;
+  servicePlanId?: string;
+  serviceType?: string;
+  priceCents?: number;
+  scheduledDate?: string;
+  timeWindow?: string;
+  operation?: string;
+  technicianId?: string;
+  routeId?: string;
+  routeOrder?: number;
+  otherJobId?: string;
+  otherRouteOrder?: number;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -142,6 +169,18 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         throw new Error("Staff role required");
       }
       return finalizeServiceReport(event.arguments.reportId!);
+    }
+    case "saveProduct": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return saveProduct(event.arguments);
+    }
+    case "createOfficeJob": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return createOfficeJob(event.arguments);
+    }
+    case "updateJobSchedule": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return updateJobSchedule(event.arguments);
     }
     case "getDocumentUrl": {
       return getDocumentUrl(event.arguments.key!, callerGroups(event.identity));
@@ -230,8 +269,193 @@ async function sendCustomerEmail(
   return { sent, to: customer.email };
 }
 
-/** A format-valid EPA registration number, e.g. 432-1234 or 432-1234-4321. */
-const EPA_RE = /^\d{2,7}-\d{1,5}(-\d{1,7})?$/;
+async function saveProduct(args: Args) {
+  const name = args.name?.trim() ?? "";
+  if (!name) throw new Error("Product name is required");
+  const fields = {
+    name,
+    epaNumber: args.epaNumber?.trim() || null,
+    activeIngredient: args.activeIngredient?.trim() || null,
+    defaultQuantity: args.defaultQuantity?.trim() || null,
+    defaultRate: args.defaultRate?.trim() || null,
+    reEntryHours: args.reEntryHours ?? null,
+    labelApproved: args.labelApproved ?? false,
+    targetPests: args.targetPests?.trim() || null,
+    notes: args.notes?.trim() || null,
+    active: args.active ?? false,
+    sortOrder: args.sortOrder ?? null,
+  };
+  assertProductCanBeSaved(fields);
+
+  const client = await dataClient();
+  const result = args.productId
+    ? await client.models.Product.update({ id: args.productId, ...fields })
+    : await client.models.Product.create(fields);
+  if (!result.data) {
+    throw new Error(
+      `Could not save the product: ${result.errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { productId: result.data.id };
+}
+
+/** Jobs created by the office always start unassigned. */
+async function createOfficeJob(args: Args) {
+  const customerId = args.customerId?.trim() ?? "";
+  const serviceType = args.serviceType?.trim() ?? "";
+  if (!customerId) throw new Error("Customer is required");
+  if (!serviceType) throw new Error("Service type is required");
+
+  const client = await dataClient();
+  const { data: customer } = await client.models.Customer.get({ id: customerId });
+  if (!customer) throw new Error(`Customer ${customerId} not found`);
+  if (args.servicePlanId) {
+    const { data: plan } = await client.models.ServicePlan.get({
+      id: args.servicePlanId,
+    });
+    if (!plan || plan.customerId !== customerId) {
+      throw new Error("That service plan does not belong to this customer");
+    }
+  }
+
+  const { data: created, errors } = await client.models.Job.create({
+    customerId,
+    servicePlanId: args.servicePlanId || undefined,
+    type: args.servicePlanId ? "RECURRING" : "ONE_TIME",
+    serviceType,
+    priceCents: args.priceCents ?? undefined,
+    status: args.scheduledDate ? "SCHEDULED" : "UNSCHEDULED",
+    scheduledDate: args.scheduledDate || undefined,
+    timeWindow: args.timeWindow?.trim() || undefined,
+    accessGroups: customerAccessGroups(customerId, customer.groupId),
+  });
+  if (!created) {
+    throw new Error(
+      `Could not create the job: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { jobId: created.id };
+}
+
+function assertJobCanBeScheduled(job: { status?: string | null }) {
+  if (job.status === "COMPLETED") {
+    throw new Error("A completed job stays on the record and cannot be rescheduled");
+  }
+  if (job.status === "IN_PROGRESS") {
+    throw new Error("This job is in progress — call the technician instead of changing its route");
+  }
+}
+
+/**
+ * Narrow scheduling command surface. No caller can use it to write completion
+ * or pesticide-record timestamps, and ASSIGN cannot store an ineligible tech.
+ */
+async function updateJobSchedule(args: Args) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: args.jobId! });
+  if (!job) throw new Error(`Job ${args.jobId} not found`);
+  const operation = args.operation?.trim().toUpperCase();
+
+  if (operation === "ASSIGN") {
+    assertJobCanBeScheduled(job);
+    if (!args.technicianId || !args.routeId || !args.scheduledDate) {
+      throw new Error("Assignment requires a technician, route, and service date");
+    }
+    const [{ data: technician }, { data: route }] = await Promise.all([
+      client.models.Technician.get({ id: args.technicianId }),
+      client.models.Route.get({ id: args.routeId }),
+    ]);
+    if (!technician) throw new Error(`Technician ${args.technicianId} not found`);
+    assertTechnicianCompliance(technician, {
+      requireActive: true,
+      workDate: args.scheduledDate,
+    });
+    if (
+      !route ||
+      route.technicianId !== technician.id ||
+      route.date !== args.scheduledDate
+    ) {
+      throw new Error("The selected route does not belong to that technician and date");
+    }
+    const { data, errors } = await client.models.Job.update({
+      id: job.id,
+      routeId: route.id,
+      technicianId: technician.id,
+      routeOrder: args.routeOrder ?? 1,
+      scheduledDate: args.scheduledDate,
+      status: "SCHEDULED",
+      noAccessReason: null,
+      noAccessAt: null,
+      noAccessNote: null,
+      noAccessPhotoKey: null,
+    });
+    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
+    return { jobId: data.id };
+  }
+
+  if (operation === "UNASSIGN") {
+    assertJobCanBeScheduled(job);
+    const { data, errors } = await client.models.Job.update({
+      id: job.id,
+      routeId: null,
+      technicianId: null,
+      routeOrder: null,
+      status: "UNSCHEDULED",
+    });
+    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not unassign job");
+    return { jobId: data.id };
+  }
+
+  if (operation === "REORDER") {
+    assertJobCanBeScheduled(job);
+    if (args.routeOrder == null || !args.otherJobId || args.otherRouteOrder == null) {
+      throw new Error("Reordering requires both stops and their positions");
+    }
+    const { data: other } = await client.models.Job.get({ id: args.otherJobId });
+    if (!other || !job.routeId || other.routeId !== job.routeId) {
+      throw new Error("Stops can only be reordered on the same route");
+    }
+    assertJobCanBeScheduled(other);
+    const [first, second] = await Promise.all([
+      client.models.Job.update({ id: job.id, routeOrder: args.routeOrder }),
+      client.models.Job.update({ id: other.id, routeOrder: args.otherRouteOrder }),
+    ]);
+    if (!first.data || !second.data) throw new Error("Could not reorder the route");
+    return { jobId: job.id, otherJobId: other.id };
+  }
+
+  if (operation === "CANCEL") {
+    assertJobCanBeScheduled(job);
+    const { data, errors } = await client.models.Job.update({
+      id: job.id,
+      status: "CANCELED",
+      routeId: null,
+      technicianId: null,
+      routeOrder: null,
+    });
+    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not cancel job");
+    return { jobId: data.id };
+  }
+
+  if (operation === "RESCHEDULE") {
+    assertJobCanBeScheduled(job);
+    const date = args.scheduledDate || null;
+    const dateChanged = date !== (job.scheduledDate ?? null);
+    const { data, errors } = await client.models.Job.update({
+      id: job.id,
+      scheduledDate: date,
+      timeWindow: args.timeWindow?.trim() || null,
+      status: date ? "SCHEDULED" : "UNSCHEDULED",
+      ...(dateChanged
+        ? { routeId: null, technicianId: null, routeOrder: null }
+        : {}),
+    });
+    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not reschedule job");
+    return { jobId: data.id };
+  }
+
+  throw new Error(`Unknown scheduling operation: ${args.operation ?? ""}`);
+}
 
 /**
  * What has to be true before a service report becomes a pesticide record.
@@ -299,13 +523,16 @@ function assertReportIsARecord(
     if (!p.epaNumber?.trim()) {
       throw new Error(`${name} needs its EPA registration number`);
     }
-    if (!EPA_RE.test(p.epaNumber.trim())) {
+    if (!EPA_REGISTRATION_RE.test(p.epaNumber.trim())) {
       throw new Error(
         `“${p.epaNumber}” isn't a valid EPA registration number for ${name} — it looks like 432-1234`
       );
     }
     if (!p.quantity?.trim()) {
       throw new Error(`How much ${name} was applied?`);
+    }
+    if (!p.rate?.trim()) {
+      throw new Error(`Record the label application rate or dilution for ${name}`);
     }
   }
   if (report.reEntryIntervalHours == null) {
@@ -355,6 +582,9 @@ async function finalizeServiceReport(reportId: string) {
   // finalize happened to run; the fallback covers only jobs with no stamp.
   const applicationStartIso = job.startedAt ?? report.serviceDate;
   const applicationEndIso = job.applicationEndAt ?? new Date().toISOString();
+  assertTechnicianCompliance(technician ?? {}, {
+    workDate: applicationStartIso.slice(0, 10),
+  });
 
   const pdf = await renderServiceReportPdf({
     reportId,
@@ -595,6 +825,14 @@ async function startJob(jobId: string) {
   if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") {
     throw new Error(`Can't start a ${job.status.toLowerCase()} job`);
   }
+  if (!job.technicianId) {
+    throw new Error("This regulated job has no assigned technician");
+  }
+  const { data: technician } = await client.models.Technician.get({
+    id: job.technicianId,
+  });
+  if (!technician) throw new Error("The assigned technician record no longer exists");
+  assertTechnicianCompliance(technician, { requireActive: true });
   const startedAt = new Date().toISOString();
   const { data: updated, errors } = await client.models.Job.update({
     id: jobId,

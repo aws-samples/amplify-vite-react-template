@@ -385,7 +385,9 @@ export const schema = a.schema({
     // technician and carries their licence number. Deactivate instead —
     // the record has to outlive the employment.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update"]),
+      // Browser writes go through saveTechnician, which conditionally requires
+      // current license data before active:true can ever be stored.
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groups(["TECH"]).to(["read"]),
     ]),
 
@@ -467,7 +469,10 @@ export const schema = a.schema({
     // reports reference this row, and a legal record whose job can be
     // hard-deleted from a browser does not survive its retention window.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update"]),
+      // Scheduling writes go through createOfficeJob/updateJobSchedule. In
+      // particular, assignment must resolve and validate the technician's
+      // current license; a raw Job.update cannot provide that guarantee.
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
@@ -519,6 +524,9 @@ export const schema = a.schema({
       defaultRate: a.string(),
       /** Label re-entry interval in hours. 0 for baits and exterior-only work. */
       reEntryHours: a.float(),
+      /** Office confirmation that the values above were checked against the
+       *  approved product label. Active catalog rows require this true. */
+      labelApproved: a.boolean(),
       targetPests: a.string(),
       notes: a.string(),
       active: a.boolean().required(),
@@ -531,7 +539,10 @@ export const schema = a.schema({
     // technician then picked from. A manual product now lives on that one
     // report; adding it to the catalog is an office decision.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      // Browser writes go through saveProduct, which is the conditional
+      // active-product compliance gate. Keep historical inactive rows instead
+      // of deleting products referenced by pesticide records.
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groups(["TECH"]).to(["read"]),
     ]),
 
@@ -697,6 +708,26 @@ export const schema = a.schema({
     .handler(a.handler.function(crmAdmin)),
 
   /**
+   * Create or edit a technician. Inactive historical records may have blank
+   * compliance fields; active technicians must have a current applicator
+   * license. Direct model writes are read-only so this gate cannot be skipped.
+   */
+  saveTechnician: a
+    .mutation()
+    .arguments({
+      technicianId: a.string(),
+      name: a.string().required(),
+      email: a.string(),
+      phone: a.string(),
+      active: a.boolean().required(),
+      licenseNumber: a.string(),
+      licenseExpiresOn: a.date(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
    * Move a customer into/out of a CustomerGroup, rewriting accessGroups on
    * the customer + child records and fixing the portal user's dynamic
    * Cognito group membership.
@@ -758,6 +789,68 @@ export const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * Curate the product catalog. Inactive rows can be retained while label
+   * facts are gathered; activation requires an approved label, EPA number,
+   * application rate/dilution, and a non-negative re-entry interval.
+   */
+  saveProduct: a
+    .mutation()
+    .arguments({
+      productId: a.string(),
+      name: a.string().required(),
+      epaNumber: a.string(),
+      activeIngredient: a.string(),
+      defaultQuantity: a.string(),
+      defaultRate: a.string(),
+      reEntryHours: a.float(),
+      labelApproved: a.boolean().required(),
+      targetPests: a.string(),
+      notes: a.string(),
+      active: a.boolean().required(),
+      sortOrder: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** Create an unassigned office job; assignments use updateJobSchedule. */
+  createOfficeJob: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      servicePlanId: a.string(),
+      serviceType: a.string().required(),
+      priceCents: a.integer(),
+      scheduledDate: a.date(),
+      timeWindow: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * The only browser scheduling write. ASSIGN validates the target technician
+   * and route server-side; the remaining operations expose only scheduling
+   * fields, never completion/application timestamps.
+   */
+  updateJobSchedule: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      operation: a.string().required(),
+      scheduledDate: a.date(),
+      timeWindow: a.string(),
+      technicianId: a.string(),
+      routeId: a.string(),
+      routeOrder: a.integer(),
+      otherJobId: a.string(),
+      otherRouteOrder: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
 
   /**
    * Stripe: collect a payment method (card or US bank) before the first

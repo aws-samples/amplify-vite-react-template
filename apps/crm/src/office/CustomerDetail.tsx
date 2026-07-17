@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   api,
@@ -12,7 +12,6 @@ import {
   type ServicePlan,
   type ServiceReport,
 } from "../lib/api";
-import { customerAccessGroups } from "../lib/accessGroups";
 import { bookingFunnelSpoken, bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { amountInWords } from "../lib/amountWords";
@@ -109,11 +108,6 @@ export default function CustomerDetail() {
     | "price"
   >(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-
-  const accessGroups = useMemo(
-    () => (customer ? customerAccessGroups(customer.id, customer.groupId) : []),
-    [customer]
-  );
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -765,12 +759,10 @@ export default function CustomerDetail() {
                             onClick={() => {
                               if (!window.confirm("Cancel this job?")) return;
                               void run(`canceljob-${j.id}`, async () =>
-                                unwrap(
-                                  await api().models.Job.update({
-                                    id: j.id,
-                                    status: "CANCELED",
-                                    routeId: null,
-                                    routeOrder: null,
+                                opResult(
+                                  await api().mutations.updateJobSchedule({
+                                    jobId: j.id,
+                                    operation: "CANCEL",
                                   })
                                 )
                               );
@@ -1126,17 +1118,14 @@ export default function CustomerDetail() {
         <JobForm
           plans={plans}
           onSubmit={async (v) => {
-            unwrap(
-              await api().models.Job.create({
+            opResult(
+              await api().mutations.createOfficeJob({
                 customerId: customer.id,
                 servicePlanId: v.servicePlanId || undefined,
-                type: v.servicePlanId ? "RECURRING" : "ONE_TIME",
                 serviceType: v.serviceType,
                 priceCents: v.priceCents ?? undefined,
-                status: v.scheduledDate ? "SCHEDULED" : "UNSCHEDULED",
                 scheduledDate: v.scheduledDate || undefined,
                 timeWindow: v.timeWindow || undefined,
-                accessGroups,
               })
             );
             setSheet(null);
@@ -1665,15 +1654,14 @@ function RescheduleForm({
           setBusy(true);
           setError(null);
           api()
-            .models.Job.update({
-              id: job.id,
+            .mutations.updateJobSchedule({
+              jobId: job.id,
+              operation: "RESCHEDULE",
               scheduledDate: date || null,
               timeWindow: timeWindow.trim() || null,
-              status: date ? "SCHEDULED" : "UNSCHEDULED",
-              ...(dateChanged ? { routeId: null, routeOrder: null } : {}),
             })
             .then((res) => {
-              unwrap(res);
+              opResult(res);
               return onDone();
             })
             .catch((err) => {

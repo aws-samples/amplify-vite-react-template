@@ -26,6 +26,18 @@ import {
   StatusBadge,
 } from "../ui/kit";
 
+function technicianComplianceIssue(
+  technician: Technician,
+  workDate: string
+): string | null {
+  if (!technician.licenseNumber?.trim()) return "license number missing";
+  if (!technician.licenseExpiresOn) return "license expiration missing";
+  if (technician.licenseExpiresOn < workDate) {
+    return `license expired ${fmtDate(technician.licenseExpiresOn, true)}`;
+  }
+  return null;
+}
+
 /**
  * Day board: one card per active technician (their route for the selected
  * day — created on demand, so every tech always has a daily route), plus
@@ -139,14 +151,14 @@ export default function Schedule() {
             .filter((j) => j.routeId === route.id)
             .map((j) => j.routeOrder ?? 0)
         ) + 1;
-      unwrap(
-        await api().models.Job.update({
-          id: job.id,
+      opResult(
+        await api().mutations.updateJobSchedule({
+          jobId: job.id,
+          operation: "ASSIGN",
           routeId: route.id,
           technicianId,
           routeOrder: order,
           scheduledDate: date,
-          status: "SCHEDULED",
         })
       );
       setAssigning(null);
@@ -171,13 +183,10 @@ export default function Schedule() {
     }
     setBusy(job.id);
     try {
-      unwrap(
-        await api().models.Job.update({
-          id: job.id,
-          routeId: null,
-          technicianId: null,
-          routeOrder: null,
-          status: "UNSCHEDULED",
+      opResult(
+        await api().mutations.updateJobSchedule({
+          jobId: job.id,
+          operation: "UNASSIGN",
         })
       );
       await load();
@@ -194,10 +203,15 @@ export default function Schedule() {
     if (!swap) return;
     setBusy(job.id);
     try {
-      await Promise.all([
-        api().models.Job.update({ id: job.id, routeOrder: swap.routeOrder ?? 0 }),
-        api().models.Job.update({ id: swap.id, routeOrder: job.routeOrder ?? 0 }),
-      ]);
+      opResult(
+        await api().mutations.updateJobSchedule({
+          jobId: job.id,
+          operation: "REORDER",
+          routeOrder: swap.routeOrder ?? 0,
+          otherJobId: swap.id,
+          otherRouteOrder: job.routeOrder ?? 0,
+        })
+      );
       await load();
     } finally {
       setBusy(null);
@@ -289,6 +303,7 @@ export default function Schedule() {
             />
           ) : (
             techs.map((tech) => {
+              const complianceIssue = technicianComplianceIssue(tech, date);
               const route = routes.find((r) => r.technicianId === tech.id);
               const routeJobs = dayJobs
                 .filter((j) => j.routeId && j.routeId === route?.id)
@@ -299,6 +314,11 @@ export default function Schedule() {
                   title={`${tech.name} — ${routeJobs.length} stop${routeJobs.length === 1 ? "" : "s"}`}
                   actions={
                     <>
+                      {complianceIssue ? (
+                        <Badge tone="warn">{complianceIssue}</Badge>
+                      ) : (
+                        <Badge tone="ok">license current</Badge>
+                      )}
                       {route ? <StatusBadge status={route.status} /> : <Badge tone="muted">empty route</Badge>}
                       <Button small variant="ghost" onClick={() => setEditingTech(tech)}>
                         Edit
@@ -363,10 +383,14 @@ export default function Schedule() {
             key={t.id}
             block
             variant="ghost"
+            disabled={technicianComplianceIssue(t, date) !== null}
             loading={busy === assigning?.id}
             onClick={() => assigning && void assign(assigning, t.id)}
           >
             {t.name}
+            {technicianComplianceIssue(t, date)
+              ? ` — ${technicianComplianceIssue(t, date)}`
+              : ""}
           </Button>
         ))}
       </Sheet>
@@ -410,10 +434,16 @@ function TechForm({
   const [name, setName] = useState(existing?.name ?? "");
   const [email, setEmail] = useState(existing?.email ?? "");
   const [phone, setPhone] = useState(existing?.phone ?? "");
+  const [licenseNumber, setLicenseNumber] = useState(
+    existing?.licenseNumber ?? ""
+  );
+  const [licenseExpiresOn, setLicenseExpiresOn] = useState(
+    existing?.licenseExpiresOn ?? ""
+  );
   const [invite, setInvite] = useState(!existing);
   // A technician saved on an earlier attempt whose invite then failed — reused
   // on retry so every attempt doesn't leave another Technician record behind.
-  const [createdTech, setCreatedTech] = useState<Technician | null>(null);
+  const [createdTechId, setCreatedTechId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // adminCreateUser is OWNER-only server-side (deliberately — invites are what
@@ -432,6 +462,25 @@ function TechForm({
       <Field label="Phone">
         <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} />
       </Field>
+      <div className="form-row-2">
+        <Field
+          label="Applicator license #"
+          hint="Required before this technician can be active or assigned"
+        >
+          <input
+            value={licenseNumber}
+            onChange={(e) => setLicenseNumber(e.target.value)}
+            placeholder="MA-12345"
+          />
+        </Field>
+        <Field label="License expires">
+          <input
+            type="date"
+            value={licenseExpiresOn}
+            onChange={(e) => setLicenseExpiresOn(e.target.value)}
+          />
+        </Field>
+      </div>
       {!existing ? (
         roles.owner ? (
           <label className="row-split" style={{ fontSize: 14 }}>
@@ -463,15 +512,24 @@ function TechForm({
             setError("Email is required to send a login invite");
             return;
           }
+          if (!licenseNumber.trim() || !licenseExpiresOn) {
+            setError(
+              "Applicator license number and expiration date are required before activation"
+            );
+            return;
+          }
           setBusy(true);
           (async () => {
             if (existing) {
-              unwrap(
-                await api().models.Technician.update({
-                  id: existing.id,
+              opResult(
+                await api().mutations.saveTechnician({
+                  technicianId: existing.id,
                   name: name.trim(),
                   email: email.trim() || undefined,
                   phone: phone.trim() || undefined,
+                  active: true,
+                  licenseNumber: licenseNumber.trim(),
+                  licenseExpiresOn,
                 })
               );
               await onDone();
@@ -479,35 +537,42 @@ function TechForm({
             }
             // Retry after a failed invite updates the already-saved record
             // instead of creating a duplicate technician per attempt.
-            let tech = createdTech;
-            if (tech) {
-              unwrap(
-                await api().models.Technician.update({
-                  id: tech.id,
-                  name: name.trim(),
-                  email: email.trim() || undefined,
-                  phone: phone.trim() || undefined,
-                })
-              );
-            } else {
-              tech = unwrap(
-                await api().models.Technician.create({
+            let technicianId = createdTechId;
+            if (technicianId) {
+              opResult(
+                await api().mutations.saveTechnician({
+                  technicianId,
                   name: name.trim(),
                   email: email.trim() || undefined,
                   phone: phone.trim() || undefined,
                   active: true,
+                  licenseNumber: licenseNumber.trim(),
+                  licenseExpiresOn,
                 })
               );
-              if (tech) setCreatedTech(tech);
+            } else {
+              const saved = opResult<{ technicianId?: string }>(
+                await api().mutations.saveTechnician({
+                  name: name.trim(),
+                  email: email.trim() || undefined,
+                  phone: phone.trim() || undefined,
+                  active: true,
+                  licenseNumber: licenseNumber.trim(),
+                  licenseExpiresOn,
+                })
+              );
+              technicianId = saved?.technicianId ?? null;
+              if (!technicianId) throw new Error("Could not save technician");
+              setCreatedTechId(technicianId);
             }
-            if (sendInvite && tech) {
+            if (sendInvite && technicianId) {
               try {
                 unwrap(
                   await api().mutations.adminCreateUser({
                     email: email.trim(),
                     name: name.trim(),
                     roles: ["TECH"],
-                    technicianId: tech.id,
+                    technicianId,
                   })
                 );
               } catch (err) {

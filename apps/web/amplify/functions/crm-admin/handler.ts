@@ -15,10 +15,10 @@ import {
   CreateGroupCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "../shared/dataClient";
+import { assertTechnicianCanBeSaved } from "../shared/compliance";
 import { opFieldName } from "../shared/opEvent";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
-  cusGroup,
   customerAccessGroups,
   grpGroup,
 } from "../shared/dynamicGroups";
@@ -45,12 +45,22 @@ type SetCustomerGroupArgs = {
 
 type CustomerIdArgs = { customerId: string };
 type TechnicianIdArgs = { technicianId: string };
+type SaveTechnicianArgs = {
+  technicianId?: string | null;
+  name: string;
+  email?: string | null;
+  phone?: string | null;
+  active: boolean;
+  licenseNumber?: string | null;
+  licenseExpiresOn?: string | null;
+};
 
 type AdminArgs =
   | AdminCreateUserArgs
   | SetCustomerGroupArgs
   | CustomerIdArgs
-  | TechnicianIdArgs;
+  | TechnicianIdArgs
+  | SaveTechnicianArgs;
 
 export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
   switch (opFieldName(event)) {
@@ -66,10 +76,40 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
       return deactivateTechnician(
         (event.arguments as TechnicianIdArgs).technicianId
       );
+    case "saveTechnician":
+      return saveTechnician(event.arguments as SaveTechnicianArgs);
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);
   }
 };
+
+async function saveTechnician(args: SaveTechnicianArgs) {
+  const name = args.name.trim();
+  if (!name) throw new Error("Technician name is required");
+  const fields = {
+    name,
+    email: args.email?.trim() || undefined,
+    phone: args.phone?.trim() || undefined,
+    active: args.active,
+    licenseNumber: args.licenseNumber?.trim() || undefined,
+    licenseExpiresOn: args.licenseExpiresOn?.trim() || undefined,
+  };
+  assertTechnicianCanBeSaved(fields);
+
+  const client = await dataClient();
+  const result = args.technicianId
+    ? await client.models.Technician.update({
+        id: args.technicianId,
+        ...fields,
+      })
+    : await client.models.Technician.create(fields);
+  if (!result.data) {
+    throw new Error(
+      `Could not save the technician: ${result.errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return { technicianId: result.data.id };
+}
 
 async function ensureCognitoGroup(groupName: string) {
   try {

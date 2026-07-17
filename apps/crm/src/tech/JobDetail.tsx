@@ -36,6 +36,7 @@ type ProductRow = {
   name: string;
   epaNumber: string;
   quantity: string;
+  rate?: string;
   targetPest: string;
   /** UI-only: row is being typed manually instead of picked from the log. */
   custom?: boolean;
@@ -132,7 +133,17 @@ export default function TechJob() {
       setReport(unwrap(reps)[0] ?? null);
       setCatalog(
         prods
-          .filter((pr) => pr.active)
+          // Existing rows from before the server gate may still say active.
+          // Do not offer one in the field until its approved label facts are
+          // complete; saveProduct makes this invariant permanent for new edits.
+          .filter(
+            (pr) =>
+              pr.active &&
+              pr.labelApproved &&
+              !!pr.epaNumber?.trim() &&
+              !!pr.defaultRate?.trim() &&
+              pr.reEntryHours != null
+          )
           .sort(
             (a, b) =>
               (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
@@ -665,7 +676,13 @@ function ReportForm({
             // Picker-mode rows display the catalog's EPA # — save that same
             // value so the PDF matches what the tech saw on screen.
             const m = !custom ? catalog.find((c) => c.name === keep.name) : null;
-            return m ? { ...keep, epaNumber: m.epaNumber ?? "" } : keep;
+            return m
+              ? {
+                  ...keep,
+                  epaNumber: m.epaNumber ?? "",
+                  rate: keep.rate?.trim() || m.defaultRate || "",
+                }
+              : keep;
           })
       ),
       targetPests: targetPests.trim() || undefined,
@@ -794,7 +811,11 @@ function ReportForm({
     retryRef.current = dirty && busy === null ? runSave : null;
   });
 
-  const setProduct = (i: number, k: "name" | "epaNumber" | "quantity" | "targetPest", v: string) =>
+  const setProduct = (
+    i: number,
+    k: "name" | "epaNumber" | "quantity" | "rate" | "targetPest",
+    v: string
+  ) =>
     setProducts((list) =>
       list.map((p, idx) =>
         idx === i
@@ -859,7 +880,7 @@ function ReportForm({
                 row={p}
                 catalog={catalog}
                 onChange={(k, v) => setProduct(i, k, v)}
-                onPick={(picked) =>
+                onPick={(picked) => {
                   setProducts((list) =>
                     list.map((row, idx) =>
                       idx === i
@@ -867,6 +888,7 @@ function ReportForm({
                             ...row,
                             name: picked.name,
                             epaNumber: picked.epaNumber ?? "",
+                            rate: picked.defaultRate ?? "",
                             quantity:
                               row.quantityTouched && row.quantity
                                 ? row.quantity
@@ -878,9 +900,16 @@ function ReportForm({
                             custom: false,
                           }
                         : row
-                    )
-                  )
-                }
+                      )
+                  );
+                  if (picked.reEntryHours != null) {
+                    setReEntry((current) =>
+                      current === ""
+                        ? String(picked.reEntryHours)
+                        : String(Math.max(Number(current), picked.reEntryHours!))
+                    );
+                  }
+                }}
                 onCustom={() =>
                   setProducts((list) =>
                     list.map((row, idx) =>
@@ -895,7 +924,16 @@ function ReportForm({
               small
               variant="ghost"
               onClick={() =>
-                setProducts((l) => [...l, { name: "", epaNumber: "", quantity: "", targetPest: "" }])
+                setProducts((l) => [
+                  ...l,
+                  {
+                    name: "",
+                    epaNumber: "",
+                    quantity: "",
+                    rate: "",
+                    targetPest: "",
+                  },
+                ])
               }
             >
               + Add product
@@ -924,15 +962,14 @@ function ReportForm({
             label="Safe to re-enter after (hours)"
             hint="Off the product label. 0 for baits or exterior-only work."
           >
-            <select value={reEntry} onChange={(e) => setReEntry(e.target.value)}>
-              <option value="">Choose…</option>
-              <option value="0">0 — no wait needed</option>
-              <option value="2">2 hours</option>
-              <option value="4">4 hours (until dry)</option>
-              <option value="12">12 hours</option>
-              <option value="24">24 hours</option>
-              <option value="48">48 hours</option>
-            </select>
+            <input
+              type="number"
+              min="0"
+              step="0.5"
+              value={reEntry}
+              onChange={(e) => setReEntry(e.target.value)}
+              placeholder="Prefilled from the selected product label"
+            />
           </Field>
         ) : null}
         <Field label="Internal notes (not shown to customer)">
@@ -1007,7 +1044,10 @@ function ProductRowEditor({
 }: {
   row: ProductRow;
   catalog: CatalogProduct[];
-  onChange: (k: "name" | "epaNumber" | "quantity" | "targetPest", v: string) => void;
+  onChange: (
+    k: "name" | "epaNumber" | "quantity" | "rate" | "targetPest",
+    v: string
+  ) => void;
   onPick: (p: CatalogProduct) => void;
   onCustom: () => void;
   onRemove: () => void;
@@ -1060,6 +1100,11 @@ function ProductRowEditor({
               value={row.epaNumber}
               onChange={(e) => onChange("epaNumber", e.target.value)}
             />
+            <input
+              placeholder="Label rate / dilution — e.g. 1 oz / gal"
+              value={row.rate ?? ""}
+              onChange={(e) => onChange("rate", e.target.value)}
+            />
             <p className="muted small" style={{ margin: 0 }}>
               This product is recorded on this report only. To add it to the
               product log for everyone, ask the office.
@@ -1069,7 +1114,18 @@ function ProductRowEditor({
           <p className="muted small" style={{ margin: 0 }}>
             EPA #{matched.epaNumber}
             {matched.activeIngredient ? ` · ${matched.activeIngredient}` : ""}
+            {matched.defaultRate ? ` · ${matched.defaultRate}` : ""}
+            {matched.reEntryHours != null
+              ? ` · re-entry ${matched.reEntryHours}h`
+              : ""}
           </p>
+        ) : null}
+        {!manualMode ? (
+          <input
+            placeholder="Application rate / dilution"
+            value={row.rate ?? ""}
+            onChange={(e) => onChange("rate", e.target.value)}
+          />
         ) : null}
         <div className="form-row-2">
           <input

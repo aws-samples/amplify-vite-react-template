@@ -19,6 +19,8 @@ type Report = Record<string, unknown> & { id: string; status: string };
 
 let jobs: Job[] = [];
 let reports: Report[] = [];
+let technician: Record<string, unknown>;
+let routes: Record<string, unknown>[] = [];
 const officeEmails: { subject: string; bodyHtml: string }[] = [];
 
 const fakeDataClient = {
@@ -33,6 +35,11 @@ const fakeDataClient = {
         jobs[i] = { ...jobs[i], ...patch };
         return { data: jobs[i], errors: undefined };
       },
+    },
+    Route: {
+      get: async ({ id }: { id: string }) => ({
+        data: routes.find((r) => r.id === id) ?? null,
+      }),
     },
     ServiceReport: {
       get: async ({ id }: { id: string }) => ({
@@ -57,10 +64,10 @@ const fakeDataClient = {
     },
     Technician: {
       get: async ({ id }: { id: string }) => ({
-        data: { id, name: "Marco Reyes", licenseNumber: "MA-12345" },
+        data: { id, ...technician },
       }),
       list: async () => ({
-        data: [{ id: "t1", name: "Marco Reyes", userSub: "sub-tech" }],
+        data: [{ id: "t1", ...technician }],
       }),
     },
   },
@@ -124,9 +131,65 @@ const validReport = (over: Partial<Report> = {}): Report => ({
 
 beforeEach(() => {
   process.env.DOCS_BUCKET = "docs";
-  jobs = [{ id: "j1", customerId: "c1", status: "IN_PROGRESS", serviceType: "General pest", type: "ONE_TIME" }];
+  technician = {
+    name: "Marco Reyes",
+    userSub: "sub-tech",
+    active: true,
+    licenseNumber: "MA-12345",
+    licenseExpiresOn: "2027-07-16",
+  };
+  jobs = [{ id: "j1", customerId: "c1", technicianId: "t1", status: "IN_PROGRESS", serviceType: "General pest", type: "ONE_TIME" }];
   reports = [];
+  routes = [];
   officeEmails.length = 0;
+});
+
+describe("regulated assignment", () => {
+  it("refuses to assign an active technician whose license data is incomplete", async () => {
+    jobs[0].status = "UNSCHEDULED";
+    technician.licenseNumber = null;
+    routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
+
+    await expect(
+      call(
+        "updateJobSchedule",
+        {
+          jobId: "j1",
+          operation: "ASSIGN",
+          technicianId: "t1",
+          routeId: "r1",
+          routeOrder: 1,
+          scheduledDate: "2026-07-20",
+        },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/license number/i);
+    expect(jobs[0].status).toBe("UNSCHEDULED");
+  });
+
+  it("assigns a licensed active technician through the guarded mutation", async () => {
+    jobs[0].status = "UNSCHEDULED";
+    routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
+
+    await call(
+      "updateJobSchedule",
+      {
+        jobId: "j1",
+        operation: "ASSIGN",
+        technicianId: "t1",
+        routeId: "r1",
+        routeOrder: 1,
+        scheduledDate: "2026-07-20",
+      },
+      ["OFFICE"]
+    );
+
+    expect(jobs[0]).toMatchObject({
+      status: "SCHEDULED",
+      technicianId: "t1",
+      routeId: "r1",
+    });
+  });
 });
 
 describe("no access — the honest exit", () => {
@@ -218,6 +281,34 @@ describe("the finalize gate", () => {
     expect(reports[0].status).toBe("FINALIZED");
   });
 
+  it("refuses to complete regulated work without the applicator license number", async () => {
+    technician.licenseNumber = null;
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/applicator license number/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("refuses to complete regulated work without the license expiration", async () => {
+    technician.licenseExpiresOn = null;
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/license expiration date/i);
+  });
+
+  it("refuses a license that had expired before the application", async () => {
+    technician.licenseExpiresOn = "2026-07-15";
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/expired.*not valid for work/i);
+  });
+
   it("refuses a report with no products — a pesticide record needs pesticide", async () => {
     // This used to finalize and email happily.
     reports.push(validReport({ productsUsed: JSON.stringify([]) }));
@@ -281,7 +372,9 @@ describe("the finalize gate", () => {
     async (epaNumber) => {
       reports.push(
         validReport({
-          productsUsed: JSON.stringify([{ name: "P", epaNumber, quantity: "1 oz" }]),
+          productsUsed: JSON.stringify([
+            { name: "P", epaNumber, quantity: "1 oz", rate: "1 oz / gal" },
+          ]),
         })
       );
 
@@ -301,6 +394,20 @@ describe("the finalize gate", () => {
     await expect(
       call("finalizeServiceReport", { reportId: "rep_1" })
     ).rejects.toThrow(/how much Suspend was applied/i);
+  });
+
+  it("refuses a product with no label application rate", async () => {
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([
+          { name: "Suspend", epaNumber: "432-1514", quantity: "1 oz" },
+        ]),
+      })
+    );
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/label application rate or dilution/i);
   });
 
   it("refuses without a re-entry interval — the occupant has to be told", async () => {

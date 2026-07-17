@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, unwrap, type Product } from "../lib/api";
+import { api, opResult, unwrap, type Product } from "../lib/api";
 import {
   Badge,
   Button,
@@ -13,6 +13,14 @@ import {
   Sheet,
   Spinner,
 } from "../ui/kit";
+
+function productComplianceIssue(product: Product): string | null {
+  if (!product.labelApproved) return "label not approved";
+  if (!product.epaNumber?.trim()) return "EPA number missing";
+  if (!product.defaultRate?.trim()) return "application rate missing";
+  if (product.reEntryHours == null) return "re-entry rule missing";
+  return null;
+}
 
 /**
  * Master product log. Technicians pick from this catalog when recording
@@ -72,27 +80,34 @@ export default function ProductLog() {
         />
       ) : (
         <Card>
-          {products.map((p) => (
-            <ListRow
-              key={p.id}
-              title={p.name}
-              subtitle={[
-                p.epaNumber ? `EPA #${p.epaNumber}` : null,
-                p.activeIngredient,
-                p.targetPests ? `targets ${p.targetPests}` : null,
-              ]
-                .filter(Boolean)
-                .join(" · ") || "No details yet"}
-              meta={
-                p.active ? (
-                  <Badge tone="ok">active</Badge>
-                ) : (
-                  <Badge tone="muted">inactive</Badge>
-                )
-              }
-              onClick={() => setEditing(p)}
-            />
-          ))}
+          {products.map((p) => {
+            const issue = p.active ? productComplianceIssue(p) : null;
+            return (
+              <ListRow
+                key={p.id}
+                title={p.name}
+                subtitle={[
+                  p.epaNumber ? `EPA #${p.epaNumber}` : null,
+                  p.activeIngredient,
+                  p.defaultRate ? `rate ${p.defaultRate}` : null,
+                  p.reEntryHours != null ? `re-entry ${p.reEntryHours}h` : null,
+                  p.targetPests ? `targets ${p.targetPests}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || "No details yet"}
+                meta={
+                  issue ? (
+                    <Badge tone="warn">blocked · {issue}</Badge>
+                  ) : p.active ? (
+                    <Badge tone="ok">active</Badge>
+                  ) : (
+                    <Badge tone="muted">inactive</Badge>
+                  )
+                }
+                onClick={() => setEditing(p)}
+              />
+            );
+          })}
         </Card>
       )}
 
@@ -130,6 +145,13 @@ function ProductForm({
   const [defaultQuantity, setDefaultQuantity] = useState(
     existing?.defaultQuantity ?? ""
   );
+  const [defaultRate, setDefaultRate] = useState(existing?.defaultRate ?? "");
+  const [reEntryHours, setReEntryHours] = useState(
+    existing?.reEntryHours != null ? String(existing.reEntryHours) : ""
+  );
+  const [labelApproved, setLabelApproved] = useState(
+    existing?.labelApproved ?? false
+  );
   const [targetPests, setTargetPests] = useState(existing?.targetPests ?? "");
   const [notes, setNotes] = useState(existing?.notes ?? "");
   const [active, setActive] = useState(existing?.active ?? true);
@@ -141,6 +163,27 @@ function ProductForm({
       setError("Enter the product name");
       return;
     }
+    if (
+      active &&
+      (!labelApproved ||
+        !epaNumber.trim() ||
+        !defaultRate.trim() ||
+        reEntryHours.trim() === "")
+    ) {
+      setError(
+        "Active products require approved label data, an EPA number, application rate, and re-entry rule"
+      );
+      return;
+    }
+    const parsedReEntry =
+      reEntryHours.trim() === "" ? undefined : Number(reEntryHours);
+    if (
+      parsedReEntry != null &&
+      (!Number.isFinite(parsedReEntry) || parsedReEntry < 0)
+    ) {
+      setError("Re-entry hours must be zero or greater");
+      return;
+    }
     setBusy(true);
     setError(null);
     const fields = {
@@ -148,18 +191,20 @@ function ProductForm({
       epaNumber: epaNumber.trim() || null,
       activeIngredient: activeIngredient.trim() || null,
       defaultQuantity: defaultQuantity.trim() || null,
+      defaultRate: defaultRate.trim() || null,
+      reEntryHours: parsedReEntry,
+      labelApproved,
       targetPests: targetPests.trim() || null,
       notes: notes.trim() || null,
       active,
     };
     try {
-      if (existing) {
-        unwrap(
-          await api().models.Product.update({ id: existing.id, ...fields })
-        );
-      } else {
-        unwrap(await api().models.Product.create(fields));
-      }
+      opResult(
+        await api().mutations.saveProduct({
+          productId: existing?.id,
+          ...fields,
+        })
+      );
       await onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save product");
@@ -193,11 +238,11 @@ function ProductForm({
         </Field>
       </div>
       <div className="form-row-2">
-        <Field label="Default amount" hint="Prefills the report">
+        <Field label="Default amount" hint="Typical amount applied; tech can adjust">
           <input
             value={defaultQuantity}
             onChange={(e) => setDefaultQuantity(e.target.value)}
-            placeholder="1 oz / gal"
+            placeholder="2 oz"
           />
         </Field>
         <Field label="Active">
@@ -211,6 +256,39 @@ function ProductForm({
           />
         </Field>
       </div>
+      <div className="form-row-2">
+        <Field label="Label application rate / dilution" hint="Required when active">
+          <input
+            value={defaultRate}
+            onChange={(e) => setDefaultRate(e.target.value)}
+            placeholder="1 oz / gal (0.06%)"
+          />
+        </Field>
+        <Field label="Label re-entry (hours)" hint="Use 0 when the label permits immediate re-entry">
+          <input
+            type="number"
+            min="0"
+            step="0.5"
+            value={reEntryHours}
+            onChange={(e) => setReEntryHours(e.target.value)}
+            placeholder="4"
+          />
+        </Field>
+      </div>
+      <Field label="Approved label data">
+        <label style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto", marginTop: 3 }}
+            checked={labelApproved}
+            onChange={(e) => setLabelApproved(e.target.checked)}
+          />
+          <span>
+            I checked the EPA number, application rate, and re-entry rule
+            against the approved product label.
+          </span>
+        </label>
+      </Field>
       <Field label="Target pests">
         <input
           value={targetPests}
