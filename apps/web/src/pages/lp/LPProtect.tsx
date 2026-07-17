@@ -6,8 +6,8 @@
  * - Shows consequences of inaction (complaints, health, property value)
  * - Social proof: number of communities served, trust signals
  * - Urgency: seasonal messaging, limited capacity
- * - Single CTA: the instant-quote funnel — community/HOA requests are
- *   captured there and a specialist calls back within the hour
+ * - Single CTA: the instant-quote funnel — community/HOA requests price
+ *   instantly there as per-unit monthly plans and book online
  */
 import { Link } from "react-router-dom";
 import SEO from "../../components/SEO";
@@ -147,9 +147,9 @@ export default function LPProtect() {
         >
           <h2 className="bk-lp-h2">Get Your Community a Plan</h2>
           <p className="bk-lp-lead" style={{ maxWidth: 440, margin: "0 auto" }}>
-            Start with our instant quote — tell us about your property and a
-            BuzzKill specialist will call you within the hour to build a
-            custom plan. No obligation.
+            Start with our instant quote — tell us about your community, see
+            your per-month price in seconds, and lock in your first visit
+            online. No obligation.
           </p>
 
           <Link
@@ -177,7 +177,7 @@ export default function LPProtect() {
           </p>
 
           <div className="bk-lp-trust">
-            {["Specialist call within the hour", "No obligation"].map(
+            {["Priced online in seconds", "No obligation"].map(
               (t, i) => (
                 <div key={i} className="bk-lp-trust__item">
                   <svg

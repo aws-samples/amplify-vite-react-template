@@ -22,7 +22,7 @@ export default function CityPage() {
   const cityFaqs = [
     { q: `Do you service condos and HOAs in ${name}?`, a: `Yes! BuzzKill provides professional pest control for condominiums, HOAs, and multi-unit communities throughout ${name}, ${stateAbbr} and surrounding areas.` },
     { q: "Is in-unit service required?", a: `No. In-unit service is optional and scheduled directly by ${name} unit owners. The HOA contract covers common areas only.` },
-    { q: `How do I get a quote for my ${name} property?`, a: "Use the instant quote below — enter your property details, see your price in seconds, and book online. For condo/HOA and anything we can't price on the spot, a specialist calls you within the hour. Or call us at 508-258-9294." },
+    { q: `How do I get a quote for my ${name} property?`, a: "Use the instant quote below — enter your property details, see your price in seconds, and book online. Homes, condo/HOA communities, and commercial properties all price instantly. Or call us at 508-258-9294." },
   ];
 
   return (
@@ -197,7 +197,7 @@ export default function CityPage() {
           },
           {
             q: `How do I get a quote for my ${name} property?`,
-            a: "Use the instant quote below — enter your property details, see your price in seconds, and book online. For condo/HOA and anything we can't price on the spot, a specialist calls you within the hour. Or call us at 508-258-9294.",
+            a: "Use the instant quote below — enter your property details, see your price in seconds, and book online. Homes, condo/HOA communities, and commercial properties all price instantly. Or call us at 508-258-9294.",
           },
         ]}
       />

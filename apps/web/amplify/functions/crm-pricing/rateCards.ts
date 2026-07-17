@@ -2,14 +2,14 @@
  * BuzzKill cost-and-zone module.
  *
  * Base PRICES come from the AI market-rate engine (shared/marketRate) — the
- * residential, association/HOA, and specialty price cards that used to live
- * here are retired. What remains is everything deterministic that overlays
- * or bounds an AI price:
+ * residential, association/HOA, specialty, and commercial price cards that
+ * used to live here are retired. What remains is everything deterministic
+ * that overlays or bounds an AI price:
  *   - the Zone B travel adders (R60) and zoneFromMinutes,
  *   - the Step-5 variable-cost constants and oneTimeGrossProfitCents (the
  *     engine's price floor and the 3× lead-fee test),
- *   - the two cards the engine has no service kind for yet: commercial and
- *     seasonal mosquito/tick (worked example: mosquito+tick ~1 acre →
+ *   - the one card the engine has no service kind for yet: seasonal
+ *     mosquito/tick (worked example: mosquito+tick ~1 acre →
  *     $139 + $30 = $169/mo, no initial fee).
  */
 
@@ -39,68 +39,6 @@ export const ZONE_B = {
   ONE_TIME_FLAT: $(25), // one-time / specialty / initial visit
   MOSQUITO_MONTHLY: $(25),
 };
-
-const INITIAL_FEE = $(99);
-
-// ---------- Commercial (non-food only) ----------
-
-export function priceCommercial(opts: {
-  frequency: Frequency;
-  sqft: number;
-  zone: Zone;
-}): PricedPlan {
-  const { frequency, sqft, zone } = opts;
-  if (sqft > 15000) {
-    return {
-      service: "Commercial (over 15,000 sqft)",
-      frequency,
-      monthlyCents: null,
-      oneTimeCents: null,
-      initialFeeCents: null,
-      lines: [],
-      escalate: "Commercial over 15,000 sqft — Jake quotes custom",
-    };
-  }
-  const small = sqft <= 5000;
-  const card: Record<Frequency, number | null> = small
-    ? { MONTHLY: $(149), BIMONTHLY: $(119), QUARTERLY: $(99), ONE_TIME: $(399) }
-    : { MONTHLY: $(199), BIMONTHLY: $(159), QUARTERLY: $(129), ONE_TIME: null };
-
-  const base = card[frequency];
-  if (base === null) {
-    return {
-      service: "Commercial one-time (5,001–15,000 sqft)",
-      frequency,
-      monthlyCents: null,
-      oneTimeCents: null,
-      initialFeeCents: null,
-      lines: [],
-      escalate: "Commercial one-time over 5,000 sqft — Jake quotes custom",
-    };
-  }
-
-  const lines: PriceLine[] = [
-    { label: `Base (${small ? "≤5,000" : "5,001–15,000"} sqft, ${freqLabel(frequency)})`, cents: base },
-  ];
-  let total = base;
-  const isRecurring = frequency !== "ONE_TIME";
-  let initial: number | null = isRecurring ? INITIAL_FEE : null;
-  if (zone === "B") {
-    const adder = isRecurring ? ZONE_B[frequency] : ZONE_B.ONE_TIME_FLAT;
-    lines.push({ label: "Zone B travel adder", cents: adder });
-    total += adder;
-    if (initial !== null) initial += ZONE_B.ONE_TIME_FLAT;
-  }
-
-  return {
-    service: `Commercial — ${freqLabel(frequency)}`,
-    frequency,
-    monthlyCents: isRecurring ? total : null,
-    oneTimeCents: isRecurring ? null : total,
-    initialFeeCents: initial,
-    lines,
-  };
-}
 
 // ---------- Mosquito & tick (seasonal, May–October) ----------
 

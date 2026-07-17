@@ -92,6 +92,27 @@ deploy so the stale built Clarity tag can't ship.
   app's hosting env; Turnstile (`TURNSTILE_SECRET` + widget) before ad spend if bot volume
   appears; production Stripe webhook registration (R82) before the funnel opens on main.
 
+**Airline pricing for everyone** (Jake's directive, 17 July: "every single person who asks for
+a quote on our website should get the 'Airline' pricing model with a price for every day
+available"; suites 408 web / 143 CRM):
+
+- **Every service × property kind prices** — termite and wildlife join as one-time engine
+  kinds; COMMUNITY prices as a common-area plan (per-unit × units for the chosen cadence,
+  first month charged at booking, day board picks the first visit); COMMERCIAL prices like
+  residential GP from its own sheet. An 18-combination sweep test pins the invariant. The only
+  surviving callbacks: zone OUT, zone UNKNOWN (R59), AI research failure (the chosen
+  guardrail), and a fully booked month. The office/Thumbtack engine gained the same kinds —
+  termite/wildlife/commercial leads auto-quote there too.
+- **BOOKING_TERMS_VERSION bumped to 2026-07-17** (terms now cover the community first-month
+  charge); in-flight old-version quotes re-ask at checkout by design.
+- **Deterministic remainder shrinks to**: the mosquito/tick card (no engine kind — blocked on
+  R32's seasonal decision), the rodent-exclusion escalate card, Zone-B adders, and the Step-5
+  cost constants.
+- **⚠ Wildlife licensing flag for Jake**: the old hard-PASS existed because live-animal
+  trapping needs a separate MA wildlife-control licence. Wildlife now auto-quotes framed
+  strictly as exclusion/removal (sealing entry points), not trapping — confirm that framing
+  keeps it inside licence scope, or say the word and wildlife goes back to pass/escalate.
+
 **One conversion road** (Jake's directive, 17 July: the office-sold quote → e-sign → convert
 branch "can be removed from the code. We should always force the other route (day picked, pays
 by card, schedule)"; suites 367 web / 140 CRM):

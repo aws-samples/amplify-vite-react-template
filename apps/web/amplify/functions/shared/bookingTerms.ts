@@ -15,11 +15,11 @@
 
 export const CANCEL_FULL_REFUND_DAYS = 3;
 
-export const BOOKING_TERMS_VERSION = "2026-07-16";
+export const BOOKING_TERMS_VERSION = "2026-07-17";
 
 export const BOOKING_TERMS_TEXT = [
   "Your card is charged the amount shown today, when you book.",
   `Cancel more than ${CANCEL_FULL_REFUND_DAYS} whole days before your visit for a full refund. Cancellations ${CANCEL_FULL_REFUND_DAYS} days or less before the visit are not refundable.`,
   "Your cancellation link arrives in the booking confirmation email.",
-  "If you choose a recurring plan, today's charge is the plan's initial fee; the monthly subscription starts after your first completed visit.",
+  "If you book a recurring plan, today's charge is the plan's initial fee (for community common-area plans, your first month); the monthly subscription starts after your first completed visit.",
 ].join("\n\n");

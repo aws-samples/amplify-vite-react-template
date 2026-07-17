@@ -179,7 +179,7 @@ export default function CondoServices() {
       <QuoteCTA
         eyebrow="For HOA Boards & Property Managers"
         title="Start Your HOA Proposal"
-        intro="Tell us about your community in our instant quote form — a BuzzKill specialist will call you within the hour to build a custom common-area program."
+        intro="Tell us about your community in our instant quote form, see your common-area plan price in seconds, and lock in your first visit online."
       />
     </>
   );

@@ -245,6 +245,40 @@ describe("booking re-checks live availability (R29)", () => {
   });
 });
 
+describe("plan-only quotes always book the plan", () => {
+  // A community common-area quote has no one-time offer: whatever the
+  // client sends, the booking is the plan and the charge is the first month.
+  beforeEach(() => {
+    booking.service = "GENERAL_PEST";
+    booking.quoteJson = JSON.stringify({
+      days: [{ ...QUOTED_DAY, priceCents: 28800 }],
+      baseCents: 28800,
+      serviceLabel: "Community common-area pest control — 24 units",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 28800,
+        initialFeeCents: 28800,
+      },
+      planOnly: true,
+    });
+  });
+
+  it("charges the first month and records recurring even when the client sends recurring: false", async () => {
+    const res = await bookIt({ recurring: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body.amountCents).toBe(28800);
+    expect(intentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 28800 })
+    );
+    expect(bookingUpdates[0]).toMatchObject({
+      recurring: true,
+      amountCents: 28800,
+    });
+    expect(res.body.summary).toContain("$288/mo");
+  });
+});
+
 describe("terms acceptance is versioned and recorded (R17)", () => {
   const freshTerms = {
     version: BOOKING_TERMS_VERSION,

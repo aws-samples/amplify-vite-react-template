@@ -5,11 +5,13 @@ import {
   decodeFunnelState,
   encodeFunnelState,
   formatDay,
+  hoaMoneyLine,
   humanizeServiceEnum,
   isQuoteExpired,
   loadFunnelState,
   money,
   normalizePhone,
+  quoteFieldNeeds,
   saveFunnelState,
   clearFunnelState,
   serviceOption,
@@ -25,12 +27,14 @@ const validFields: QuoteFormFields = {
   email: "dana@example.com",
   phone: "(413) 555-0123",
   service: "GENERAL_PEST",
+  propertyKind: "RESIDENTIAL",
   street: "12 Elm St",
   city: "Ware",
   state: "MA",
   zip: "01082",
   sqft: "2400",
   nestCount: "",
+  units: "",
 };
 
 function fakeStorage(): StorageLike & { store: Map<string, string> } {
@@ -100,17 +104,20 @@ describe("validateQuoteForm", () => {
     expect(validateQuoteForm({ ...validFields, phone: "call me" }).phone).toBeTruthy();
   });
 
-  it("requires sqft in 100..50000 only for sqft services", () => {
-    for (const service of ["GENERAL_PEST", "RODENT", "ROACH"]) {
+  it("requires sqft in 100..50000 for every sqft-banded service", () => {
+    for (const service of [
+      "GENERAL_PEST",
+      "RODENT",
+      "ROACH",
+      "TERMITE",
+      "WILDLIFE",
+    ]) {
       expect(validateQuoteForm({ ...validFields, service, sqft: "" }).sqft).toBeTruthy();
       expect(validateQuoteForm({ ...validFields, service, sqft: "99" }).sqft).toBeTruthy();
       expect(validateQuoteForm({ ...validFields, service, sqft: "50001" }).sqft).toBeTruthy();
       expect(validateQuoteForm({ ...validFields, service, sqft: "100" })).toEqual({});
       expect(validateQuoteForm({ ...validFields, service, sqft: "50000" })).toEqual({});
     }
-    expect(
-      validateQuoteForm({ ...validFields, service: "TERMITE", sqft: "" })
-    ).toEqual({});
   });
 
   it("requires nestCount >= 1 only for wasp nests", () => {
@@ -118,6 +125,67 @@ describe("validateQuoteForm", () => {
     expect(validateQuoteForm({ ...wasp, nestCount: "" }).nestCount).toBeTruthy();
     expect(validateQuoteForm({ ...wasp, nestCount: "0" }).nestCount).toBeTruthy();
     expect(validateQuoteForm({ ...wasp, nestCount: "2" })).toEqual({});
+  });
+
+  it("COMMUNITY requires units and drops the sqft/nest requirements", () => {
+    const hoa = {
+      ...validFields,
+      propertyKind: "COMMUNITY",
+      sqft: "",
+      nestCount: "",
+    };
+    expect(validateQuoteForm({ ...hoa, units: "" }).units).toBeTruthy();
+    expect(validateQuoteForm({ ...hoa, units: "0" }).units).toBeTruthy();
+    expect(validateQuoteForm({ ...hoa, units: "48" })).toEqual({});
+    // Even a wasp-nest ask at a community is a per-unit plan quote.
+    expect(
+      validateQuoteForm({ ...hoa, service: "WASP_NEST", units: "48" })
+    ).toEqual({});
+  });
+
+  it("COMMERCIAL requires sqft for every service and never nests or units", () => {
+    const biz = { ...validFields, propertyKind: "COMMERCIAL", nestCount: "" };
+    expect(
+      validateQuoteForm({ ...biz, service: "WASP_NEST", sqft: "" }).sqft
+    ).toBeTruthy();
+    expect(validateQuoteForm({ ...biz, service: "WASP_NEST", sqft: "3000" })).toEqual({});
+    expect(validateQuoteForm({ ...biz, service: "TERMITE", sqft: "3000" })).toEqual({});
+  });
+});
+
+describe("quoteFieldNeeds", () => {
+  it("residential follows the service catalog", () => {
+    expect(quoteFieldNeeds("TERMITE", "RESIDENTIAL")).toEqual({
+      sqft: true,
+      nestCount: false,
+      units: false,
+    });
+    expect(quoteFieldNeeds("WILDLIFE", "RESIDENTIAL")).toEqual({
+      sqft: true,
+      nestCount: false,
+      units: false,
+    });
+    expect(quoteFieldNeeds("WASP_NEST", "RESIDENTIAL")).toEqual({
+      sqft: false,
+      nestCount: true,
+      units: false,
+    });
+  });
+
+  it("community is a per-unit plan quote whatever the service", () => {
+    expect(quoteFieldNeeds("RODENT", "COMMUNITY")).toEqual({
+      sqft: false,
+      nestCount: false,
+      units: true,
+    });
+  });
+
+  it("commercial is sqft-banded whatever the service", () => {
+    expect(quoteFieldNeeds("WASP_NEST", "COMMERCIAL")).toEqual({
+      sqft: true,
+      nestCount: false,
+      units: false,
+    });
   });
 });
 
@@ -175,7 +243,24 @@ describe("labels", () => {
     expect(serviceOption("WASP_NEST")?.needsNestCount).toBe(true);
     expect(serviceOption("GENERAL_PEST")?.offersRecurring).toBe(true);
     expect(serviceOption("RODENT")?.offersRecurring).toBe(false);
+    // Termite and wildlife price like rodent/roach now: sqft-banded.
+    expect(serviceOption("TERMITE")?.needsSqft).toBe(true);
+    expect(serviceOption("WILDLIFE")?.needsSqft).toBe(true);
     expect(serviceOption("BOGUS")).toBeUndefined();
+  });
+});
+
+describe("hoaMoneyLine", () => {
+  it("says the first month is charged today, then the monthly price", () => {
+    expect(
+      hoaMoneyLine({
+        frequency: "QUARTERLY",
+        monthlyCents: 16000,
+        initialFeeCents: 16000,
+      })
+    ).toBe(
+      "Your first month ($160) is charged today to lock in your first visit, then $160/mo."
+    );
   });
 });
 
@@ -198,6 +283,14 @@ describe("funnel state codec", () => {
   it("round-trips a quote with a selection", () => {
     const state = {
       quote: pricedQuote,
+      selection: { date: "2026-07-21", window: "MORNING" as const, recurring: true },
+    };
+    expect(decodeFunnelState(encodeFunnelState(state))).toEqual(state);
+  });
+
+  it("keeps the planOnly flag through a round trip (community quotes)", () => {
+    const state = {
+      quote: { ...pricedQuote, planOnly: true },
       selection: { date: "2026-07-21", window: "MORNING" as const, recurring: true },
     };
     expect(decodeFunnelState(encodeFunnelState(state))).toEqual(state);

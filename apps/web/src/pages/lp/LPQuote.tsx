@@ -5,8 +5,8 @@
  * - One promise, one CTA: a real, bookable price in seconds
  * - The old on-page calculator is gone — the /quote funnel returns live
  *   priced days and takes payment, so ad traffic goes straight there
- * - Anything the funnel can't price (termite, wildlife, HOA, commercial)
- *   is still captured and a specialist calls within the hour
+ * - Every service and property type prices instantly; only the rare
+ *   unpriceable case is captured for a specialist call within the hour
  */
 import { Link } from "react-router-dom";
 import SEO from "../../components/SEO";
@@ -67,8 +67,7 @@ export default function LPQuote() {
           }}
         >
           Termites, wildlife, condo / HOA, or a commercial property? Same
-          form — a specialist will call you within the hour with a tailored
-          plan.
+          form, same instant price, and you pick your day online.
         </p>
 
         <div className="bk-lp-trust">

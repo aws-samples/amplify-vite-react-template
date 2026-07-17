@@ -59,7 +59,15 @@ const tidyDollars = (cents: number) => Math.round(cents / 100) * 100;
  * R62: funnel service → variable-cost kind for the discount floor
  * (`oneTimeGrossProfitCents` in crm-pricing/rateCards). Without this mapping
  * the market-rate services had no cost model, so a discounted day could
- * price below what the visit costs to run.
+ * price below what the visit costs to run. TERMITE and WILDLIFE have NO
+ * entry on purpose: no deterministic cost model exists for that work, so no
+ * cost floor applies — the same no-floor decision the engine records on
+ * those rate rows' basis. The lookup keys on the pest service, so a
+ * COMMERCIAL-property quote for a carded pest still borrows the residential
+ * visit cost as a conservative lower bound (it can only raise a discounted
+ * day, never lower it); COMMUNITY quotes never reach this floor — their day
+ * prices are overwritten with the fixed plan total. The 85% discount floor
+ * below still bounds every day.
  */
 const COST_KIND: Record<string, string> = {
   GENERAL_PEST: "one_time_gpc",
@@ -88,13 +96,12 @@ export async function buildDayMatrix(opts: {
   // R62: a discount must never take a day below its variable cost. A Zone B
   // rodent quote at the $199 clamp floor used to discount to $169 against
   // ~$177 of drive + labor + materials — a loss on every such booking.
+  // Services with no cost model (termite, wildlife, commercial, community)
+  // skip this floor rather than borrowing another service's economics.
+  const costKind = COST_KIND[service];
   const gp =
-    zone != null
-      ? oneTimeGrossProfitCents(
-          COST_KIND[service] ?? "one_time_gpc",
-          baseCents,
-          zone
-        )
+    zone != null && costKind != null
+      ? oneTimeGrossProfitCents(costKind, baseCents, zone)
       : null;
   const costCents = gp != null ? baseCents - gp : null;
 

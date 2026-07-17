@@ -72,6 +72,8 @@ export type QuoteRequest = {
   address: { street: string; city: string; state: string; zip?: string };
   sqft?: number;
   nestCount?: number;
+  /** Unit count — required when propertyKind is COMMUNITY (per-unit plan). */
+  units?: number;
   comments?: string;
   recurringPreference?: RecurringFrequency;
   botToken?: string;
@@ -106,6 +108,14 @@ export type PricedQuote = {
   expiresAt: string;
   /** R17 — the checkout terms this quote was issued under. */
   terms?: BookingTerms;
+  /**
+   * Community/HOA quotes are plan-only: there is no one-time option, the
+   * day board picks the FIRST visit, and today's charge is the plan's
+   * initial fee (the first month's total). The client also stamps this
+   * flag from the submitted property kind, so a server that omits it
+   * still renders correctly.
+   */
+  planOnly?: boolean;
 };
 
 export type ContactQuote = {

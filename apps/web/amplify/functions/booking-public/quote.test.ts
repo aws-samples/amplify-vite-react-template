@@ -19,14 +19,22 @@ import {
  * UI renders exactly what /book will hold the customer to.
  *
  * AI-first pricing — every base price (GENERAL_PEST one-time + plans,
- * WASP_NEST first + extra nests, rodent/roach) comes from the cached AI
- * rate sheet (shared/marketRate). No sheet → CONTACT, never a made-up
- * price. The deterministic overlay (Zone B adders, day pricing) stays on
- * top of the AI base.
+ * WASP_NEST first + extra nests, rodent/roach, termite/wildlife one-times,
+ * commercial one-time + plans, community per-unit plans) comes from the
+ * cached AI rate sheet (shared/marketRate). No sheet → CONTACT, never a
+ * made-up price. The deterministic overlay (Zone B adders, day pricing)
+ * stays on top of the AI base.
+ *
+ * Every ask is priced: all six form services × all three property kinds get
+ * a day board. The ONLY surviving CONTACT outcomes are zone OUT, zone
+ * UNKNOWN (R59), research failure/budget, and a fully-booked month.
  */
 
 const bookings: Record<string, unknown>[] = [];
 const pricingRuns: Record<string, unknown>[] = [];
+/** Scheduled stops returned for EVERY day — 8 fills a one-tech schedule. */
+let stopsEveryDay: { customerId: string; serviceType: string; status: string }[] =
+  [];
 
 const fakeDataClient = {
   models: {
@@ -51,7 +59,7 @@ const fakeDataClient = {
     Technician: {
       list: async () => ({ data: [{ id: "t1", active: true }] }),
     },
-    Job: { listJobByScheduledDate: async () => ({ data: [] }) },
+    Job: { listJobByScheduledDate: async () => ({ data: stopsEveryDay }) },
     Customer: { get: async () => ({ data: null }) },
   },
 };
@@ -77,23 +85,41 @@ vi.mock("../shared/driveTime", () => ({
 }));
 
 type FakeSheet = {
-  oneTimeCents: number;
+  oneTimeCents?: number;
   extraNestCents?: number;
   plans?: Record<string, { monthlyCents: number; initialFeeCents: number }>;
+  hoaPerUnitMonthly?: Record<string, Record<string, number>>;
 };
-let marketRateResult: {
+type FakeRate = {
   priceCents: number;
   sheet: FakeSheet;
   basis: string;
   cached: boolean;
 } | null;
+let marketRateResult: FakeRate;
+/** Per-engine-kind results for multi-service scenarios; a kind not present
+ *  here falls back to marketRateResult. */
+let marketRateByService: Record<string, FakeRate>;
 const marketRateCalls: Record<string, unknown>[] = [];
 vi.mock("../shared/marketRate", () => ({
   marketRate: async (opts: Record<string, unknown>) => {
     marketRateCalls.push(opts);
-    return marketRateResult;
+    const service = String(opts.service);
+    return service in marketRateByService
+      ? marketRateByService[service]
+      : marketRateResult;
   },
   sqftBucket: (sqft: number) => Math.max(500, Math.ceil(sqft / 500) * 500),
+  hoaBandFor: (units: number) =>
+    units <= 10
+      ? "UNITS_1_10"
+      : units <= 25
+        ? "UNITS_11_25"
+        : units <= 50
+          ? "UNITS_26_50"
+          : units <= 100
+            ? "UNITS_51_100"
+            : "UNITS_101_PLUS",
 }));
 
 vi.mock("@aws-sdk/client-ssm", () => ({
@@ -132,7 +158,9 @@ beforeEach(() => {
   pricingRuns.length = 0;
   officeEmails.length = 0;
   marketRateCalls.length = 0;
+  stopsEveryDay = [];
   hqMinutes = 20;
+  marketRateByService = {};
   marketRateResult = {
     priceCents: 19900,
     sheet: { oneTimeCents: 19900 },
@@ -348,6 +376,315 @@ describe("WASP_NEST prices from the cached AI sheet", () => {
     const res = await postQuote({ ...waspInput, nestCount: 2 });
 
     expect(res.body.decision).toBe("CONTACT");
+  });
+});
+
+describe("TERMITE and WILDLIFE price from their sheets — no specialist callback", () => {
+  const termiteInput = { ...rodentInput, service: "TERMITE" };
+
+  beforeEach(() => {
+    marketRateResult = {
+      priceCents: 84900,
+      sheet: { oneTimeCents: 84900 },
+      basis: "test sheet",
+      cached: true,
+    };
+  });
+
+  it("day-prices a termite ask from the TERMITE sheet (Zone A)", async () => {
+    const res = await postQuote(termiteInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(marketRateCalls[0]).toMatchObject({ service: "TERMITE", sqft: 2000 });
+    expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 84900 });
+    expect(res.body.service).toContain("Termite treatment");
+    expect((res.body.days as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it("adds the Zone B one-time adder to a wildlife quote (R60)", async () => {
+    hqMinutes = 80; // Zone B
+
+    const res = await postQuote({ ...rodentInput, service: "WILDLIFE" });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(marketRateCalls[0]).toMatchObject({ service: "WILDLIFE" });
+    expect(pricingRuns[0]).toMatchObject({ zone: "B", oneTimePriceCents: 87400 });
+    expect(res.body.service).toContain("Wildlife exclusion and removal");
+  });
+
+  it("falls to CONTACT only when research is unavailable", async () => {
+    marketRateResult = null;
+
+    const res = await postQuote(termiteInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(bookings[0]).toMatchObject({ status: "CONTACT" });
+  });
+
+  it("requires sqft — the sheets are sqft-banded", async () => {
+    const res = await postQuote({ ...termiteInput, sqft: undefined });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors.sqft).toBeDefined();
+  });
+});
+
+describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
+  const hoaGrid = {
+    UNITS_1_10: { MONTHLY: 2200, BIMONTHLY: 1800, QUARTERLY: 1500 },
+    UNITS_11_25: { MONTHLY: 1200, BIMONTHLY: 1000, QUARTERLY: 850 },
+    UNITS_26_50: { MONTHLY: 900, BIMONTHLY: 750, QUARTERLY: 600 },
+    UNITS_51_100: { MONTHLY: 675, BIMONTHLY: 550, QUARTERLY: 450 },
+    UNITS_101_PLUS: { MONTHLY: 425, BIMONTHLY: 350, QUARTERLY: 275 },
+  };
+  const communityInput = {
+    ...rodentInput,
+    service: "GENERAL_PEST",
+    propertyKind: "COMMUNITY",
+    units: 24,
+    sqft: undefined,
+  };
+
+  beforeEach(() => {
+    marketRateByService = {
+      HOA: {
+        priceCents: 2200,
+        sheet: { hoaPerUnitMonthly: hoaGrid },
+        basis: "test sheet",
+        cached: true,
+      },
+    };
+  });
+
+  it("prices per-unit × units for the chosen cadence, first month charged at booking", async () => {
+    const res = await postQuote({ ...communityInput, recurringPreference: "MONTHLY" });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(marketRateCalls[0]).toMatchObject({ service: "HOA", city: "Ware", state: "MA" });
+    // 24 units → 11–25 band → $12/unit → $288/mo; charged at booking = the
+    // first month's total.
+    expect(res.body.recurringOffer).toEqual({
+      frequency: "MONTHLY",
+      monthlyCents: 28800,
+      initialFeeCents: 28800,
+    });
+    expect(res.body.planOnly).toBe(true);
+  });
+
+  it("defaults to the quarterly cadence", async () => {
+    const res = await postQuote(communityInput);
+
+    expect(res.body.recurringOffer).toMatchObject({
+      frequency: "QUARTERLY",
+      monthlyCents: 20400, // 24 × $8.50
+    });
+  });
+
+  it("the day board picks the first visit — the plan price never varies by day", async () => {
+    const res = await postQuote({ ...communityInput, recurringPreference: "MONTHLY" });
+
+    const prices = (res.body.days as { priceCents: number }[]).map(
+      (d) => d.priceCents
+    );
+    expect(prices.length).toBeGreaterThan(0);
+    for (const p of prices) expect(p).toBe(28800);
+  });
+
+  it("adds the Zone B monthly adder to the plan", async () => {
+    hqMinutes = 80; // Zone B
+
+    const res = await postQuote({ ...communityInput, recurringPreference: "MONTHLY" });
+
+    expect(res.body.recurringOffer).toEqual({
+      frequency: "MONTHLY",
+      monthlyCents: 31300, // $288 + $25 monthly adder
+      initialFeeCents: 31300,
+    });
+  });
+
+  it("requires the unit count with a clear field error", async () => {
+    const res = await postQuote({ ...communityInput, units: undefined });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors.units).toMatch(/units/i);
+  });
+
+  it("reports the plan on the pricing run without a phantom one-time price", async () => {
+    await postQuote({ ...communityInput, recurringPreference: "MONTHLY" });
+
+    expect(pricingRuns[0].monthlyPriceCents).toBe(28800);
+    expect(pricingRuns[0].initialFeeCents).toBe(28800);
+    expect(pricingRuns[0].oneTimePriceCents).toBeUndefined();
+  });
+
+  it("falls to CONTACT when the HOA sheet is unavailable", async () => {
+    marketRateByService = { HOA: null };
+
+    const res = await postQuote(communityInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+  });
+});
+
+describe("COMMERCIAL prices like residential GP from the COMMERCIAL sheet", () => {
+  const commercialSheet: FakeSheet = {
+    oneTimeCents: 39900,
+    plans: {
+      MONTHLY: { monthlyCents: 14900, initialFeeCents: 19900 },
+      BIMONTHLY: { monthlyCents: 11900, initialFeeCents: 19900 },
+      QUARTERLY: { monthlyCents: 9900, initialFeeCents: 17900 },
+    },
+  };
+  const commercialInput = {
+    ...rodentInput,
+    service: "GENERAL_PEST",
+    propertyKind: "COMMERCIAL",
+    sqft: 4800,
+  };
+
+  beforeEach(() => {
+    marketRateByService = {
+      COMMERCIAL: {
+        priceCents: 39900,
+        sheet: commercialSheet,
+        basis: "test sheet",
+        cached: true,
+      },
+    };
+  });
+
+  it("prices the one-time and the chosen plan from the COMMERCIAL sheet", async () => {
+    const res = await postQuote({ ...commercialInput, recurringPreference: "MONTHLY" });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(marketRateCalls[0]).toMatchObject({ service: "COMMERCIAL", sqft: 4800 });
+    expect(res.body.recurringOffer).toEqual({
+      frequency: "MONTHLY",
+      monthlyCents: 14900,
+      initialFeeCents: 19900,
+    });
+    expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 39900 });
+    expect(res.body.service).toContain("Commercial pest control");
+  });
+
+  it("keeps the deterministic Zone B adders on top", async () => {
+    hqMinutes = 80; // Zone B
+
+    const res = await postQuote({ ...commercialInput, recurringPreference: "QUARTERLY" });
+
+    expect(pricingRuns[0]).toMatchObject({ zone: "B", oneTimePriceCents: 42400 });
+    expect(res.body.recurringOffer).toEqual({
+      frequency: "QUARTERLY",
+      monthlyCents: 10700, // $99 + $8 quarterly adder
+      initialFeeCents: 20400, // $179 + $25 flat adder
+    });
+  });
+
+  it("requires sqft — the commercial sheet is sqft-banded", async () => {
+    const res = await postQuote({ ...commercialInput, sqft: undefined });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors.sqft).toBeDefined();
+  });
+
+  it("any pest asked at a commercial property prices from the COMMERCIAL sheet", async () => {
+    const res = await postQuote({ ...commercialInput, service: "WASP_NEST" });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(marketRateCalls[0]).toMatchObject({ service: "COMMERCIAL" });
+  });
+});
+
+describe("every ask is priced — the full service × property-kind sweep", () => {
+  const gpPlans = {
+    MONTHLY: { monthlyCents: 9900, initialFeeCents: 11900 },
+    BIMONTHLY: { monthlyCents: 5900, initialFeeCents: 11900 },
+    QUARTERLY: { monthlyCents: 4900, initialFeeCents: 10900 },
+  };
+  const rate = (sheet: FakeSheet): FakeRate => ({
+    priceCents: sheet.oneTimeCents ?? 0,
+    sheet,
+    basis: "test sheet",
+    cached: true,
+  });
+
+  it("decision is PRICED for all 18 combinations when research succeeds", async () => {
+    marketRateByService = {
+      GENERAL_PEST: rate({ oneTimeCents: 30000, plans: gpPlans }),
+      WASP_NEST: rate({ oneTimeCents: 29900, extraNestCents: 9900 }),
+      RODENT: rate({ oneTimeCents: 39900 }),
+      ROACH: rate({ oneTimeCents: 34900 }),
+      TERMITE: rate({ oneTimeCents: 84900 }),
+      WILDLIFE: rate({ oneTimeCents: 59900 }),
+      COMMERCIAL: rate({ oneTimeCents: 39900, plans: gpPlans }),
+      HOA: {
+        priceCents: 2200,
+        sheet: {
+          hoaPerUnitMonthly: {
+            UNITS_1_10: { MONTHLY: 2200, BIMONTHLY: 1800, QUARTERLY: 1500 },
+            UNITS_11_25: { MONTHLY: 1200, BIMONTHLY: 1000, QUARTERLY: 850 },
+            UNITS_26_50: { MONTHLY: 900, BIMONTHLY: 750, QUARTERLY: 600 },
+            UNITS_51_100: { MONTHLY: 675, BIMONTHLY: 550, QUARTERLY: 450 },
+            UNITS_101_PLUS: { MONTHLY: 425, BIMONTHLY: 350, QUARTERLY: 275 },
+          },
+        },
+        basis: "test sheet",
+        cached: true,
+      },
+    };
+    marketRateResult = null; // any un-mapped engine kind would fail loudly
+
+    for (const service of [
+      "GENERAL_PEST",
+      "WASP_NEST",
+      "RODENT",
+      "ROACH",
+      "TERMITE",
+      "WILDLIFE",
+    ]) {
+      for (const propertyKind of ["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]) {
+        bookings.length = 0;
+        const res = await postQuote({
+          ...rodentInput,
+          service,
+          propertyKind,
+          sqft: 2000,
+          nestCount: 2,
+          units: 24,
+        });
+
+        expect(res.status, `${service} × ${propertyKind}`).toBe(200);
+        expect(res.body.decision, `${service} × ${propertyKind}`).toBe("PRICED");
+        expect(
+          (res.body.days as unknown[]).length,
+          `${service} × ${propertyKind}`
+        ).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+describe("the only surviving CONTACT outcomes", () => {
+  it("zone OUT still falls to the callback path", async () => {
+    hqMinutes = 120; // beyond the 90-minute zone
+
+    const res = await postQuote(rodentInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(bookings[0]).toMatchObject({ status: "CONTACT", zone: "OUT" });
+  });
+
+  it("a fully-booked month falls to the callback path", async () => {
+    stopsEveryDay = Array.from({ length: 8 }, (_, i) => ({
+      customerId: `c${i}`,
+      serviceType: "GENERAL_PEST",
+      status: "SCHEDULED",
+    }));
+
+    const res = await postQuote(rodentInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.message).toMatch(/fully booked/i);
   });
 });
 

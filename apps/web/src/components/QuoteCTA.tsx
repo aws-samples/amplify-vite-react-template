@@ -12,11 +12,11 @@ type QuoteCTAProps = {
 
 /**
  * The site's single service-request entry point, replacing the old
- * multi-step lead form. The /quote funnel prices residential general
- * pest / wasp / rodent / roach on the spot and books online; everything
- * it can't price (termite, wildlife, condo/HOA, commercial, unresolvable
- * addresses) is captured there too and a specialist calls within the
- * hour — so every prospect type funnels through the same door.
+ * multi-step lead form. The /quote funnel prices every service for every
+ * property type on the spot and books online — homes, communities, and
+ * commercial alike. Only the rare unpriceable case (unresolvable address,
+ * fully booked month, research fallback) is captured for a specialist
+ * call, so every prospect type still funnels through the same door.
  *
  * Keeps `id="form"` so the Footer's `/#form` link and every page's
  * scroll-to-form CTA still land here.
@@ -33,8 +33,8 @@ export default function QuoteCTA({
         <h2 className="bk-h2">{title}</h2>
         <p className="bk-body-lead">{intro}</p>
         <p className="bk-p" style={{ maxWidth: 560, margin: "0 auto" }}>
-          Termites, wildlife, condo &amp; HOA, or commercial? Start the same
-          quote — a specialist will call you within the hour.
+          Termites, wildlife, condo &amp; HOA, or commercial? Same quote,
+          same instant price, with a day picker for every open date.
         </p>
         <div
           style={{

@@ -4,8 +4,8 @@
  * Conversion strategy: MINIMAL FRICTION / PHONE-FIRST
  * - Hypothesis: HOA board members and PMs prefer talking to a person
  * - Primary CTA: Click-to-call (one tap on mobile)
- * - Secondary: the instant-quote funnel — it captures HOA/commercial
- *   requests and a specialist calls back within the hour
+ * - Secondary: the instant-quote funnel — HOA/commercial requests price
+ *   instantly there and book online
  * - Speed to lead: fastest path from ad click to conversation
  */
 import { Link } from "react-router-dom";
@@ -118,7 +118,7 @@ export default function LPCall() {
           style={{ maxWidth: 400, margin: "0 auto 20px", fontSize: 15 }}
         >
           Answer a few questions and see your price in seconds. Condo, HOA,
-          or commercial? A specialist will call you within the hour.
+          and commercial properties price instantly too.
         </p>
         <Link
           to="/quote"

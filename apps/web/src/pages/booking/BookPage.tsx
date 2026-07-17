@@ -335,6 +335,10 @@ export default function BookPage() {
             <span className="bk-summary-key">Due today</span>
             <span className="bk-summary-val">
               {amountCents != null ? money(amountCents) : "—"}
+              {/* Community/HOA plans: today's charge is the first month. */}
+              {quote.planOnly && selection.recurring && amountCents != null
+                ? " (your first month)"
+                : null}
             </span>
           </li>
           {selection.recurring && offer && (

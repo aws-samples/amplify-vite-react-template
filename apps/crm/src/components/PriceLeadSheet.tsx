@@ -20,8 +20,14 @@ type Extracted = {
 
 /**
  * AI lead pricing: paste the Thumbtack lead (or attach a screenshot), enter
- * the lead fee, and get QUOTE / PASS / ESCALATE with the exact rate-card
- * breakdown and a paste-ready reply. The reply is the whole next step — it
+ * the lead fee, and get QUOTE / PASS / ESCALATE with the exact breakdown
+ * and a paste-ready reply. Every service auto-quotes from the same cached
+ * AI market-rate sheets the website funnel prices from — general pest,
+ * wasp, rodent, roach, termite, wildlife, commercial, and HOA/association
+ * common areas alike. ESCALATE is the fallback, not a category: it fires
+ * when no rate sheet is available (research budget/failure) or the lead
+ * carries a special situation (multi-property portfolio, below-floor price
+ * match, compliance paperwork). The reply is the whole next step — it
  * answers "what will it cost" and points the lead at the online booking
  * funnel, where they pick a day and pay by card to convert themselves.
  */

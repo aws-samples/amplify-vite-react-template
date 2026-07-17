@@ -21,7 +21,12 @@ import {
   CANCEL_FULL_REFUND_DAYS,
 } from "../shared/bookingTerms";
 import { buildDayMatrix, type DayQuote } from "./availability";
-import { marketRate, sqftBucket, type PlanCadence } from "../shared/marketRate";
+import {
+  hoaBandFor,
+  marketRate,
+  sqftBucket,
+  type PlanCadence,
+} from "../shared/marketRate";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -192,6 +197,17 @@ const SERVICES = new Set([
   "WILDLIFE",
 ]);
 
+const PROPERTY_KINDS = new Set(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]);
+
+/** Residential services priced from a sqft-banded sheet. */
+const SQFT_SERVICES = new Set([
+  "GENERAL_PEST",
+  "RODENT",
+  "ROACH",
+  "TERMITE",
+  "WILDLIFE",
+]);
+
 export const handler = async (
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> => {
@@ -347,16 +363,32 @@ async function quote(input: QuoteInput, sourceIp: string) {
     errors.phone = "Enter a valid phone number, e.g. (413) 555-0123";
   }
   if (!SERVICES.has(service)) errors.service = "Unknown service";
+  if (!PROPERTY_KINDS.has(propertyKind)) {
+    errors.propertyKind = "Unknown property type";
+  }
   if (!addr.street?.trim()) errors["address.street"] = "Street address is required";
   if (!addr.city?.trim()) errors["address.city"] = "City is required";
   if (!addr.state?.trim()) errors["address.state"] = "State is required";
-  if (service === "GENERAL_PEST" || service === "RODENT" || service === "ROACH") {
-    if (!input.sqft || input.sqft < 100 || input.sqft > 50000) {
-      errors.sqft = "Square footage is required for this service";
+  if (propertyKind === "COMMUNITY") {
+    // A community asks for a common-area plan, priced per unit — the unit
+    // count is the price input, so it is required.
+    if (!input.units || input.units < 1) {
+      errors.units = "How many units are in the community? The unit count sets the plan price.";
     }
-  }
-  if (service === "WASP_NEST" && (!input.nestCount || input.nestCount < 1)) {
-    errors.nestCount = "How many nests need removal?";
+  } else if (propertyKind === "COMMERCIAL") {
+    // Commercial quotes price from a sqft-banded sheet, whatever the pest.
+    if (!input.sqft || input.sqft < 100 || input.sqft > 50000) {
+      errors.sqft = "Square footage is required for a commercial quote";
+    }
+  } else {
+    if (SQFT_SERVICES.has(service)) {
+      if (!input.sqft || input.sqft < 100 || input.sqft > 50000) {
+        errors.sqft = "Square footage is required for this service";
+      }
+    }
+    if (service === "WASP_NEST" && (!input.nestCount || input.nestCount < 1)) {
+      errors.nestCount = "How many nests need removal?";
+    }
   }
   if (Object.keys(errors).length) throw new HttpError(400, { errors });
 
@@ -431,18 +463,6 @@ async function quote(input: QuoteInput, sourceIp: string) {
     return { bookingId: booking.id, decision: "CONTACT", message };
   };
 
-  // Specialist-call paths: no instant price.
-  if (service === "TERMITE" || service === "WILDLIFE") {
-    return contact(
-      "Thanks — a BuzzKill specialist will call you within the hour to talk through it and give you an exact price."
-    );
-  }
-  if (propertyKind !== "RESIDENTIAL") {
-    return contact(
-      "Community and commercial properties get a custom walkthrough quote — a specialist will call you within the hour."
-    );
-  }
-
   // Zone from live drive time.
   const routesKey = await getSecret("GOOGLE_ROUTES_API_KEY");
   const minutes = routesKey
@@ -490,8 +510,66 @@ async function quote(input: QuoteInput, sourceIp: string) {
     monthlyCents: number;
     initialFeeCents: number;
   } | null = null;
+  // Community common-area quotes are plan-only: the day board picks the
+  // FIRST VISIT and the price does not vary by day; there is no one-time
+  // offer, and /book always books the plan.
+  let planOnly = false;
 
-  if (service === "GENERAL_PEST") {
+  const freq = (["MONTHLY", "BIMONTHLY", "QUARTERLY"].includes(
+    input.recurringPreference ?? ""
+  )
+    ? input.recurringPreference
+    : "QUARTERLY") as PlanCadence;
+
+  if (propertyKind === "COMMUNITY") {
+    // Any service asked at a community is a common-area plan quote from the
+    // HOA per-unit sheet: per-unit monthly × units for the chosen cadence.
+    const rate = await marketRate({
+      anthropicKey,
+      service: "HOA",
+      city: addr.city!,
+      state: addr.state!,
+    });
+    const hoa = rate?.sheet.hoaPerUnitMonthly;
+    if (!hoa) return contactForPrice();
+    const units = input.units!;
+    const perUnit = hoa[hoaBandFor(units)][freq];
+    let monthly = perUnit * units;
+    // R60: the same deterministic Zone B travel adder every plan carries.
+    if (priceZone === "B") monthly += ZONE_B[freq];
+    baseCents = monthly;
+    planOnly = true;
+    serviceLabel = `Community common-area pest control — ${units} units`;
+    recurringOffer = {
+      frequency: freq,
+      monthlyCents: monthly,
+      // Charged at booking: the first month's total. The subscription
+      // starts after the first completed visit, like every other plan.
+      initialFeeCents: monthly,
+    };
+  } else if (propertyKind === "COMMERCIAL") {
+    // Commercial prices like residential general pest — one-time day-priced
+    // plus a plan offer — but from the COMMERCIAL sheet for this sqft band.
+    const rate = await marketRate({
+      anthropicKey,
+      service: "COMMERCIAL",
+      city: addr.city!,
+      state: addr.state!,
+      sqft: input.sqft!,
+    });
+    const plan = rate?.sheet.plans?.[freq];
+    if (!rate || !plan) return contactForPrice();
+    baseCents = rate.priceCents;
+    serviceLabel = `Commercial pest control — up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`;
+    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    recurringOffer = {
+      frequency: freq,
+      monthlyCents:
+        plan.monthlyCents + (priceZone === "B" ? ZONE_B[freq] : 0),
+      initialFeeCents:
+        plan.initialFeeCents + (priceZone === "B" ? ZONE_B.ONE_TIME_FLAT : 0),
+    };
+  } else if (service === "GENERAL_PEST") {
     const rate = await marketRate({
       anthropicKey,
       service: "GENERAL_PEST",
@@ -499,11 +577,6 @@ async function quote(input: QuoteInput, sourceIp: string) {
       state: addr.state!,
       sqft: input.sqft!,
     });
-    const freq = (["MONTHLY", "BIMONTHLY", "QUARTERLY"].includes(
-      input.recurringPreference ?? ""
-    )
-      ? input.recurringPreference
-      : "QUARTERLY") as PlanCadence;
     const plan = rate?.sheet.plans?.[freq];
     if (!rate || !plan) return contactForPrice();
     baseCents = rate.priceCents;
@@ -536,10 +609,11 @@ async function quote(input: QuoteInput, sourceIp: string) {
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
     serviceLabel = `Wasp / hornet nest removal${(input.nestCount ?? 1) > 1 ? ` — ${input.nestCount} nests` : ""}`;
   } else {
-    // RODENT / ROACH — market rate for this area + size, as before.
+    // RODENT / ROACH / TERMITE / WILDLIFE — one-time treatments priced from
+    // their sqft-banded sheets.
     const rate = await marketRate({
       anthropicKey,
-      service: service as "RODENT" | "ROACH",
+      service: service as "RODENT" | "ROACH" | "TERMITE" | "WILDLIFE",
       city: addr.city!,
       state: addr.state!,
       sqft: input.sqft!,
@@ -547,14 +621,17 @@ async function quote(input: QuoteInput, sourceIp: string) {
     if (!rate) return contactForPrice();
     baseCents = rate.priceCents;
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
-    serviceLabel =
-      service === "RODENT"
-        ? `Rodent treatment — up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`
-        : `Specialized roach treatment — up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`;
+    const sizeLabel = `up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`;
+    serviceLabel = {
+      RODENT: `Rodent treatment — ${sizeLabel}`,
+      ROACH: `Specialized roach treatment — ${sizeLabel}`,
+      TERMITE: `Termite treatment — ${sizeLabel}`,
+      WILDLIFE: `Wildlife exclusion and removal — ${sizeLabel}`,
+    }[service]!;
   }
 
   // Day-priced availability from the live schedule.
-  const days = await buildDayMatrix({
+  let days = await buildDayMatrix({
     routesKey,
     candidateAddress: address,
     service,
@@ -566,13 +643,28 @@ async function quote(input: QuoteInput, sourceIp: string) {
       "We're fully booked this month — a specialist will call within the hour to find you the first opening."
     );
   }
+  if (planOnly) {
+    // The day board only picks the first visit: availability and
+    // feasibility per day are real, but the plan price never varies by day.
+    days = days.map((d) => ({
+      ...d,
+      priceCents: baseCents!,
+      factors: ["community plan, first month charged at booking, price fixed per day"],
+    }));
+  }
 
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const booking = await makeBooking({
     status: "QUOTED",
     zone,
     driveMinutes: minutes ?? undefined,
-    quoteJson: JSON.stringify({ days, baseCents, serviceLabel, recurringOffer }),
+    quoteJson: JSON.stringify({
+      days,
+      baseCents,
+      serviceLabel,
+      recurringOffer,
+      planOnly: planOnly || undefined,
+    }),
     monthlyCents: recurringOffer?.monthlyCents ?? undefined,
     expiresAt,
   });
@@ -588,7 +680,9 @@ async function quote(input: QuoteInput, sourceIp: string) {
     town: addr.city,
     state: addr.state?.toUpperCase(),
     service: serviceLabel,
-    oneTimePriceCents: baseCents,
+    // A plan-only quote (community) has no one-time price — baseCents there
+    // is the monthly total, already reported on monthlyPriceCents.
+    oneTimePriceCents: planOnly ? undefined : baseCents,
     monthlyPriceCents: recurringOffer?.monthlyCents ?? undefined,
     initialFeeCents: recurringOffer?.initialFeeCents ?? undefined,
     priceBreakdown: JSON.stringify(
@@ -602,6 +696,9 @@ async function quote(input: QuoteInput, sourceIp: string) {
     decision: "PRICED",
     service: serviceLabel,
     recurringOffer,
+    // Plan-only quotes (community common-area) carry no one-time offer: the
+    // day picks the first visit and the amount charged is the first month.
+    planOnly: planOnly || undefined,
     days: days.map(({ factors: _f, ...d }) => d),
     expiresAt,
     // R17: the checkout must render exactly what /book will hold them to.
@@ -618,7 +715,6 @@ async function book(
   const bookingId = String(body.bookingId ?? "");
   const date = String(body.date ?? "");
   const window = String(body.window ?? "");
-  const recurring = body.recurring === true;
   if (!body.tcAccepted) {
     throw new HttpError(400, {
       error: "Please accept the terms & cancellation policy to book.",
@@ -648,7 +744,11 @@ async function book(
     days?: DayQuote[];
     serviceLabel?: string;
     recurringOffer?: { frequency: string; monthlyCents: number; initialFeeCents: number } | null;
+    planOnly?: boolean;
   };
+  // A plan-only quote (community common-area) has no one-time offer — the
+  // booking is always the plan, whatever the client sent.
+  const recurring = body.recurring === true || stored.planOnly === true;
   const day = stored.days?.find((d) => d.date === date);
   if (!day || !day.windows.includes(window)) {
     throw new HttpError(409, {

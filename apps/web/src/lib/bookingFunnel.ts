@@ -9,6 +9,7 @@
 import type {
   PricedQuote,
   RecurringFrequency,
+  RecurringOffer,
   ServiceCode,
   WindowCode,
 } from "./bookingApi";
@@ -28,12 +29,49 @@ export const SERVICE_OPTIONS: ServiceOption[] = [
   { code: "WASP_NEST", label: "Wasp / hornet nest removal", needsSqft: false, needsNestCount: true, offersRecurring: false },
   { code: "RODENT", label: "Rodent treatment", needsSqft: true, needsNestCount: false, offersRecurring: false },
   { code: "ROACH", label: "Roach treatment", needsSqft: true, needsNestCount: false, offersRecurring: false },
-  { code: "TERMITE", label: "Termite inspection & treatment", needsSqft: false, needsNestCount: false, offersRecurring: false },
-  { code: "WILDLIFE", label: "Wildlife removal", needsSqft: false, needsNestCount: false, offersRecurring: false },
+  // Termite and wildlife are sqft-banded day-priced services like
+  // rodent/roach — every service on this form prices instantly.
+  { code: "TERMITE", label: "Termite inspection & treatment", needsSqft: true, needsNestCount: false, offersRecurring: false },
+  { code: "WILDLIFE", label: "Wildlife removal", needsSqft: true, needsNestCount: false, offersRecurring: false },
 ];
 
 export function serviceOption(code: string): ServiceOption | undefined {
   return SERVICE_OPTIONS.find((s) => s.code === code);
+}
+
+/**
+ * Which extra inputs a quote needs, by service AND property kind — the
+ * property kind can override the service's own needs:
+ *
+ * - COMMUNITY: every service is a common-area plan quote priced per unit,
+ *   so the unit count is required and sqft/nest count are not collected.
+ * - COMMERCIAL: every service prices from the sqft-banded commercial rate
+ *   sheet (one-time + plans, like residential general pest), so sqft is
+ *   required and nest count is not collected.
+ * - RESIDENTIAL: the service's own needs stand.
+ */
+export type QuoteFieldNeeds = {
+  sqft: boolean;
+  nestCount: boolean;
+  units: boolean;
+};
+
+export function quoteFieldNeeds(
+  service: string,
+  propertyKind: string
+): QuoteFieldNeeds {
+  if (propertyKind === "COMMUNITY") {
+    return { sqft: false, nestCount: false, units: true };
+  }
+  if (propertyKind === "COMMERCIAL") {
+    return { sqft: true, nestCount: false, units: false };
+  }
+  const svc = serviceOption(service);
+  return {
+    sqft: svc?.needsSqft ?? false,
+    nestCount: svc?.needsNestCount ?? false,
+    units: false,
+  };
 }
 
 export const FREQUENCY_LABELS: Record<RecurringFrequency, string> = {
@@ -79,6 +117,17 @@ export function humanizeServiceEnum(service: string): string {
   return service.toLowerCase().replace(/_/g, " ");
 }
 
+/**
+ * The money line for a plan-only (community/HOA) quote, where the plan's
+ * initial fee IS the first month's total. Rendered on the quote's plan
+ * card; it must stay consistent with the checkout terms, which say
+ * today's charge is the plan's initial fee and the subscription starts
+ * after the first completed visit.
+ */
+export function hoaMoneyLine(offer: RecurringOffer): string {
+  return `Your first month (${money(offer.initialFeeCents)}) is charged today to lock in your first visit, then ${money(offer.monthlyCents)}/mo.`;
+}
+
 // ── Client-side validation (mirrors booking-public/handler.ts) ──────
 
 /** Same pattern the server enforces (AWSEmail compatibility). */
@@ -102,12 +151,14 @@ export type QuoteFormFields = {
   email: string;
   phone: string;
   service: string;
+  propertyKind: string;
   street: string;
   city: string;
   state: string;
   zip: string;
   sqft: string;
   nestCount: string;
+  units: string;
 };
 
 /**
@@ -117,6 +168,7 @@ export type QuoteFormFields = {
 export function validateQuoteForm(f: QuoteFormFields): Record<string, string> {
   const errors: Record<string, string> = {};
   const svc = serviceOption(f.service);
+  const needs = quoteFieldNeeds(f.service, f.propertyKind);
   if (!f.name.trim()) errors.name = "Name is required";
   if (!EMAIL_RE.test(f.email.trim().toLowerCase()))
     errors.email = "A valid email is required";
@@ -126,15 +178,22 @@ export function validateQuoteForm(f: QuoteFormFields): Record<string, string> {
   if (!f.street.trim()) errors["address.street"] = "Street address is required";
   if (!f.city.trim()) errors["address.city"] = "City is required";
   if (!f.state.trim()) errors["address.state"] = "State is required";
-  if (svc?.needsSqft) {
+  if (needs.sqft) {
     const sqft = parseInt(f.sqft, 10);
     if (!sqft || sqft < SQFT_MIN || sqft > SQFT_MAX) {
       errors.sqft = `Square footage between ${SQFT_MIN} and ${SQFT_MAX.toLocaleString()} is required for this service`;
     }
   }
-  if (svc?.needsNestCount) {
+  if (needs.nestCount) {
     const nests = parseInt(f.nestCount, 10);
     if (!nests || nests < 1) errors.nestCount = "How many nests need removal?";
+  }
+  if (needs.units) {
+    const units = parseInt(f.units, 10);
+    if (!units || units < 1) {
+      errors.units =
+        "How many units are in the community? The unit count sets the plan price.";
+    }
   }
   return errors;
 }

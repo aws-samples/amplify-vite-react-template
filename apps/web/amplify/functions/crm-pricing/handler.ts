@@ -17,7 +17,6 @@ import {
   freqLabel,
   money,
   oneTimeGrossProfitCents,
-  priceCommercial,
   priceMosquito,
   zoneFromMinutes,
   ZONE_B,
@@ -206,11 +205,11 @@ const EXTRACTION_SCHEMA = {
 const EXTRACTION_SYSTEM = `You are the intake extractor for BuzzKill Pest Control's lead-pricing engine (office: Marlborough MA; technician dispatched from Ware MA; licensed in MA and RI only). You read a pasted Thumbtack lead (text and/or screenshot) and extract structured facts. You NEVER compute prices — a deterministic rate-card engine does that.
 
 Eligibility (hard passes):
-- "wildlife": LIVE animal trapping/removal/relocation — squirrels, raccoons, bats, birds, snakes, skunks, opossums. NOTE: dead rodents, mice, and rats INSIDE a structure are pest control (eligibility "ok"), not wildlife. Live animal trapping is out of scope.
 - "bed_bugs": any bed bug work.
 - "food_service": restaurants, cafés, bars, commercial kitchens, food processing/handling, grocery.
 - "fumigation": fumigation or tenting requests.
 - "out_of_area": service address clearly outside MA and RI (CT, NH, VT, NY — even if close).
+- "wildlife" is NOT a pass: set eligibility "wildlife" for wildlife work — squirrels, raccoons, bats, birds, snakes, skunks, opossums — and the engine quotes it as a one-time wildlife exclusion/removal visit. NOTE: dead rodents, mice, and rats INSIDE a structure are pest control (eligibility "ok"), not wildlife.
 Otherwise "ok".
 
 Property type: "association" for HOA/condo-association COMMON AREAS (unit counts); an individual condo unit is "residential". "mosquito" when the request is mosquito and/or tick yard treatment. "specialty" for wasp/hornet nest removal, rodent nest removal, rodent exclusion, a specialized roach/German-cockroach cleanout, or termite work (set specialtyKind). Otherwise "residential"/"commercial"/"unknown".
@@ -303,8 +302,6 @@ async function driveMinutes(address: string): Promise<number | null> {
 // ---------- pass scripts (deterministic, straight from the spec) ----------
 
 const PASS_SCRIPTS: Record<string, string> = {
-  wildlife:
-    "Thanks for reaching out! We're a licensed structural pest control company, and live wildlife removal requires a separate MA wildlife control license that we don't hold — so rather than waste your time, I'd point you to a licensed wildlife control operator for this one. If you ever need insect or rodent control, we'd love to help.",
   bed_bugs:
     "Thanks for reaching out! Bed bug treatment is outside the services we offer, so I don't want to hold you up — you'll want a company that specializes there. If you ever need general pest, rodent, or mosquito control, we'd be glad to help.",
   food_service:
@@ -335,7 +332,8 @@ const CUSTOM_QUOTE_SCRIPT =
 function planFromSheet(
   rate: MarketRateResult,
   cadence: PlanCadence,
-  zone: Zone
+  zone: Zone,
+  serviceName = "Residential GPC"
 ): PricedPlan | null {
   const plan = rate.sheet.plans?.[cadence];
   if (!plan) return null;
@@ -358,7 +356,7 @@ function planFromSheet(
     initial += ZONE_B.ONE_TIME_FLAT;
   }
   return {
-    service: `Residential GPC — ${freqLabel(cadence)}`,
+    service: `${serviceName} — ${freqLabel(cadence)}`,
     frequency: cadence,
     monthlyCents: monthly,
     oneTimeCents: null,
@@ -564,8 +562,10 @@ async function priceLead(args: Args) {
   // Lead fee: explicit arg wins; 0 means "direct lead / no fee".
   const leadFeeCents = args.leadFeeCents ?? extracted.leadFeeCents;
 
-  // 1. Hard eligibility passes.
-  if (extracted.eligibility !== "ok") {
+  // 1. Hard eligibility passes. Wildlife is no longer one of them — it
+  // prices from the WILDLIFE market-rate sheet as a one-time
+  // exclusion/removal visit, so it flows through the normal pipeline.
+  if (extracted.eligibility !== "ok" && extracted.eligibility !== "wildlife") {
     const run = await persist({
       decision: "PASS",
       reason: `Eligibility: ${extracted.eligibility.replace(/_/g, " ")}`,
@@ -656,8 +656,9 @@ async function priceLead(args: Args) {
 
   // 5. Map to the AI market-rate engine and price from the cached sheet
   // (deterministic Zone B adders on top, exactly as the website funnel does
-  // it). Commercial and mosquito/tick keep their deterministic cards — the
-  // engine has no service kind for them yet.
+  // it). Only mosquito/tick keeps its deterministic card — the engine has
+  // no service kind for it yet (its seasonal end-condition is an open
+  // decision, R32). Rodent exclusion also stays a custom escalation.
   const statedFreq: Frequency | null =
     extracted.frequencyInterest === "monthly"
       ? "MONTHLY"
@@ -702,9 +703,64 @@ async function priceLead(args: Args) {
     });
   const town = extracted.town;
 
-  if (extracted.propertyType === "specialty" && extracted.specialtyKind !== "none") {
+  if (extracted.eligibility === "wildlife") {
+    // Wildlife exclusion/removal prices from its sheet like every other
+    // one-time service — the every-wildlife-passes policy is retired.
+    if (!town) return needsTown();
+    const sqft = extracted.sqft ?? 2000;
+    if (extracted.sqft == null)
+      assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+    const rate = await marketRate({
+      anthropicKey: apiKey,
+      service: "WILDLIFE",
+      city: town,
+      state: extracted.state,
+      sqft,
+    });
+    if (!rate) return escalateAiUnavailable("Wildlife exclusion and removal");
+    priced = oneTimeFromSheet({
+      service: "Wildlife exclusion and removal",
+      lines: [
+        {
+          label: "AI market rate — one-time exclusion/removal visit",
+          cents: rate.priceCents,
+        },
+      ],
+      baseCents: rate.priceCents,
+      zone,
+    });
+    // No deterministic cost model exists for wildlife work; the exclusion
+    // constants (180-minute onsite, exclusion materials) are the closest
+    // deterministic economics for the 3× lead-fee test.
+    gpKind = "rodent_exclusion";
+  } else if (extracted.propertyType === "specialty" && extracted.specialtyKind !== "none") {
     if (extracted.specialtyKind === "termite") {
-      priced = escalateOnly("Termite (any)", "Termite work — Jake quotes custom");
+      // Termite prices from its sheet — the Jake-quotes-custom policy is
+      // retired; escalation remains only the research-failure fallback.
+      if (!town) return needsTown();
+      const sqft = extracted.sqft ?? 2000;
+      if (extracted.sqft == null)
+        assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+      const rate = await marketRate({
+        anthropicKey: apiKey,
+        service: "TERMITE",
+        city: town,
+        state: extracted.state,
+        sqft,
+      });
+      if (!rate) return escalateAiUnavailable("Termite treatment");
+      priced = oneTimeFromSheet({
+        service: "Termite treatment",
+        lines: [
+          { label: "AI market rate — one-time treatment", cents: rate.priceCents },
+        ],
+        baseCents: rate.priceCents,
+        zone,
+      });
+      // No deterministic cost model exists for termite work; the 90-minute
+      // GPC visit is the closest deterministic economics for the lead-fee
+      // test rather than inventing new constants.
+      gpKind = "one_time_gpc";
     } else if (extracted.specialtyKind === "rodent_exclusion") {
       // No engine service kind for exclusion work — custom, not researched.
       priced = escalateOnly(
@@ -826,9 +882,38 @@ async function priceLead(args: Args) {
       lines,
     };
   } else if (extracted.propertyType === "commercial") {
+    // Commercial prices from its sheet (one-time + all three plan cadences)
+    // exactly like the funnel — the deterministic commercial card retired.
     const sqft = extracted.sqft ?? 2000;
     if (extracted.sqft == null) assumptions.push("assumed ~2,000 sqft — confirm on booking");
-    priced = priceCommercial({ frequency: statedFreq ?? "MONTHLY", sqft, zone });
+    if (!town) return needsTown();
+    const rate = await marketRate({
+      anthropicKey: apiKey,
+      service: "COMMERCIAL",
+      city: town,
+      state: extracted.state,
+      sqft,
+    });
+    if (!rate) return escalateAiUnavailable("Commercial pest control");
+    const freq = statedFreq ?? "MONTHLY";
+    if (freq === "ONE_TIME") {
+      priced = oneTimeFromSheet({
+        service: "Commercial pest control — one-time",
+        lines: [
+          { label: "AI market rate — one-time treatment", cents: rate.priceCents },
+        ],
+        baseCents: rate.priceCents,
+        zone,
+      });
+      // No deterministic cost model exists for commercial work; the GPC
+      // visit constants stand in for the 3× lead-fee test.
+      gpKind = "one_time_gpc";
+    } else {
+      priced = planFromSheet(rate, freq, zone, "Commercial pest control");
+      // A COMMERCIAL sheet without plan cadences can't price a plan lead.
+      if (!priced)
+        return escalateAiUnavailable(`Commercial pest control — ${freqLabel(freq)}`);
+    }
   } else if (extracted.propertyType === "mosquito") {
     if (extracted.halfAcres == null)
       assumptions.push("assumed up to ½ acre yard — we'll confirm on the first visit");

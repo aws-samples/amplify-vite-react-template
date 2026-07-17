@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  SERVICE_LABEL,
   areaKeyFor,
   bandOfKey,
   hoaBandFor,
@@ -165,6 +166,23 @@ describe("sheet parsing and office edits", () => {
   });
 });
 
+describe("service labels", () => {
+  it("names every engine kind the console can meet", () => {
+    for (const service of [
+      "GENERAL_PEST",
+      "WASP_NEST",
+      "RODENT",
+      "ROACH",
+      "TERMITE",
+      "WILDLIFE",
+      "COMMERCIAL",
+      "HOA",
+    ]) {
+      expect(SERVICE_LABEL[service]).toBeTruthy();
+    }
+  });
+});
+
 describe("selectPlanRate", () => {
   const rows = [
     rate({ id: "small", rateKey: "GENERAL_PEST#ware-ma#1500" }),
@@ -258,6 +276,40 @@ describe("planPrefill", () => {
     // No unit count → no honest price to suggest.
     expect(planPrefill(hoa, "QUARTERLY")).toBeNull();
     expect(planPrefill(hoa, "QUARTERLY", { units: 0 })).toBeNull();
+  });
+
+  it("a COMMERCIAL sheet prefills plans exactly like general pest", () => {
+    const commercial = rate({
+      service: "COMMERCIAL",
+      rateKey: "COMMERCIAL#ware-ma#5000",
+      priceCents: 39900,
+      ratesJson: JSON.stringify({
+        oneTimeCents: 39900,
+        plans: {
+          MONTHLY: { monthlyCents: 14900, initialFeeCents: 24900 },
+          BIMONTHLY: { monthlyCents: 11900, initialFeeCents: 24900 },
+          QUARTERLY: { monthlyCents: 9900, initialFeeCents: 27900 },
+        },
+      }),
+    });
+    expect(planPrefill(commercial, "QUARTERLY")).toEqual({
+      monthlyCents: 9900,
+      initialFeeCents: 27900,
+    });
+  });
+
+  it("TERMITE and WILDLIFE sheets are one-time only: no plan prefill", () => {
+    for (const service of ["TERMITE", "WILDLIFE"]) {
+      const oneTimeOnly = rate({
+        service,
+        rateKey: `${service}#ware-ma#2000`,
+        priceCents: 54900,
+        ratesJson: JSON.stringify({ oneTimeCents: 54900 }),
+      });
+      expect(planPrefill(oneTimeOnly, "QUARTERLY")).toBeNull();
+      // The one-time price mirrors through priceCents like rodent/roach.
+      expect(sheetOf(oneTimeOnly).oneTimeCents).toBe(54900);
+    }
   });
 
   it("an HOA row is found without a key band (all bands live in one sheet)", () => {

@@ -22,6 +22,8 @@ let customerUpdateFails = false;
 const customersCreated: Row[] = [];
 const customerUpdates: Row[] = [];
 const runUpdates: Row[] = [];
+const plansCreated: Row[] = [];
+const jobsCreated: Row[] = [];
 const emails: { to: string; subject: string; html: string }[] = [];
 let booking: Record<string, unknown>;
 
@@ -73,14 +75,16 @@ const fakeDataClient = {
       },
     },
     ServicePlan: {
-      create: async (input: Record<string, unknown>) => ({
-        data: { id: "plan1", ...input },
-      }),
+      create: async (input: Record<string, unknown>) => {
+        plansCreated.push({ id: "plan1", ...input });
+        return { data: { id: "plan1", ...input } };
+      },
     },
     Job: {
-      create: async (input: Record<string, unknown>) => ({
-        data: { id: "job1", ...input },
-      }),
+      create: async (input: Record<string, unknown>) => {
+        jobsCreated.push({ id: "job1", ...input });
+        return { data: { id: "job1", ...input } };
+      },
     },
     Invoice: {
       create: async (input: Record<string, unknown>) => ({
@@ -151,6 +155,8 @@ beforeEach(() => {
   customersCreated.length = 0;
   customerUpdates.length = 0;
   runUpdates.length = 0;
+  plansCreated.length = 0;
+  jobsCreated.length = 0;
   emails.length = 0;
   delete process.env.DOCS_BUCKET; // skip the S3 write
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
@@ -324,6 +330,88 @@ describe("matching failure never breaks a paid finalization", () => {
 
     const office = emails.find((e) => e.to === "office@pestbuzzkill.com");
     expect(office!.html).not.toMatch(/matching this booking/i);
+  });
+});
+
+describe("new booking shapes finalize into the right records", () => {
+  it("a community plan booking creates the plan at the monthly total; the first month was the charge", async () => {
+    booking.quoteJson = JSON.stringify({
+      serviceLabel: "Community common-area pest control — 24 units",
+      recurringOffer: {
+        frequency: "QUARTERLY",
+        monthlyCents: 28800,
+        initialFeeCents: 28800,
+      },
+      planOnly: true,
+    });
+    booking.recurring = true;
+    booking.amountCents = 28800;
+
+    await finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_1",
+      amountReceived: 28800,
+    });
+
+    expect(plansCreated).toHaveLength(1);
+    expect(plansCreated[0]).toMatchObject({
+      planName: "Community common-area pest control plan",
+      priceCents: 28800, // the monthly total, not a per-unit rate
+      serviceFrequency: "QUARTERLY",
+      status: "ACTIVE",
+    });
+    expect(jobsCreated[0]).toMatchObject({
+      type: "RECURRING",
+      serviceType: "Community common-area pest control — 24 units",
+      priceCents: 28800,
+      status: "SCHEDULED",
+    });
+  });
+
+  it("a commercial plan booking creates the plan from the commercial offer", async () => {
+    booking.quoteJson = JSON.stringify({
+      serviceLabel: "Commercial pest control — up to 5,000 sqft",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 14900,
+        initialFeeCents: 19900,
+      },
+    });
+    booking.recurring = true;
+    booking.amountCents = 19900;
+
+    await finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_1",
+      amountReceived: 19900,
+    });
+
+    expect(plansCreated[0]).toMatchObject({
+      planName: "Commercial pest control plan",
+      priceCents: 14900,
+      serviceFrequency: "MONTHLY",
+    });
+    expect(jobsCreated[0]).toMatchObject({
+      serviceType: "Commercial pest control — up to 5,000 sqft",
+      priceCents: 19900,
+    });
+  });
+
+  it("a termite booking finalizes as a paid one-time job with its label", async () => {
+    booking.quoteJson = JSON.stringify({
+      serviceLabel: "Termite treatment — up to 2,000 sqft",
+      recurringOffer: null,
+    });
+
+    await finalize();
+
+    expect(plansCreated).toHaveLength(0);
+    expect(jobsCreated[0]).toMatchObject({
+      type: "ONE_TIME",
+      serviceType: "Termite treatment — up to 2,000 sqft",
+      priceCents: 31300,
+      paidPaymentIntentId: "pi_1",
+    });
   });
 });
 

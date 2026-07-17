@@ -18,11 +18,12 @@ import {
   SERVICE_OPTIONS,
   clearFunnelState,
   formatDay,
+  hoaMoneyLine,
   isQuoteExpired,
   loadFunnelState,
   money,
+  quoteFieldNeeds,
   saveFunnelState,
-  serviceOption,
   validateQuoteForm,
   windowLabel,
 } from "../../lib/bookingFunnel";
@@ -41,6 +42,7 @@ type Fields = {
   zip: string;
   sqft: string;
   nestCount: string;
+  units: string;
   comments: string;
   /** "" = one-time visit only */
   recurringPreference: "" | RecurringFrequency;
@@ -58,6 +60,7 @@ const EMPTY_FIELDS: Fields = {
   zip: "",
   sqft: "",
   nestCount: "1",
+  units: "",
   comments: "",
   recurringPreference: "",
 };
@@ -106,7 +109,13 @@ export default function QuotePage() {
   const set = (k: keyof Fields) => (v: string) =>
     setFields((f) => ({ ...f, [k]: v }));
 
-  const svc = serviceOption(fields.service);
+  const needs = quoteFieldNeeds(fields.service, fields.propertyKind);
+  const isCommunity = fields.propertyKind === "COMMUNITY";
+  // GP-style plan preference: residential general pest and every commercial
+  // service (commercial prices like general pest, one-time + plans).
+  const offersPlanChoice =
+    fields.propertyKind === "COMMERCIAL" ||
+    (fields.propertyKind === "RESIDENTIAL" && fields.service === "GENERAL_PEST");
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -118,6 +127,8 @@ export default function QuotePage() {
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) return;
 
+    // Community quotes are always a plan: default the cadence to quarterly.
+    const cadence = fields.recurringPreference || undefined;
     const payload: QuoteRequest = {
       name: fields.name.trim(),
       email: fields.email.trim(),
@@ -130,12 +141,14 @@ export default function QuotePage() {
         state: fields.state.trim(),
         zip: fields.zip.trim() || undefined,
       },
-      sqft: svc?.needsSqft ? parseInt(fields.sqft, 10) : undefined,
-      nestCount: svc?.needsNestCount ? parseInt(fields.nestCount, 10) : undefined,
+      sqft: needs.sqft ? parseInt(fields.sqft, 10) : undefined,
+      nestCount: needs.nestCount ? parseInt(fields.nestCount, 10) : undefined,
+      units: needs.units ? parseInt(fields.units, 10) : undefined,
       comments: fields.comments.trim() || undefined,
-      recurringPreference:
-        fields.service === "GENERAL_PEST" && fields.recurringPreference
-          ? fields.recurringPreference
+      recurringPreference: isCommunity
+        ? (cadence ?? "QUARTERLY")
+        : offersPlanChoice
+          ? cadence
           : undefined,
     };
 
@@ -145,11 +158,20 @@ export default function QuotePage() {
 
     if (result.ok) {
       if (result.body.decision === "PRICED") {
-        setPriced(result.body);
+        // Community quotes are plan-only; stamp the flag from the submitted
+        // property kind so the board renders right even if the server's
+        // response omits it.
+        const quote = {
+          ...result.body,
+          planOnly: result.body.planOnly ?? isCommunity,
+        };
+        setPriced(quote);
         setSelDate(null);
         setSelWindow(null);
-        setPlan(fields.recurringPreference ? "PLAN" : "ONE_TIME");
-        saveFunnelState(window.sessionStorage, { quote: result.body });
+        setPlan(
+          quote.planOnly || fields.recurringPreference ? "PLAN" : "ONE_TIME"
+        );
+        saveFunnelState(window.sessionStorage, { quote });
         window.scrollTo({ top: 0, behavior: "smooth" });
       } else {
         setContact(result.body);
@@ -197,7 +219,10 @@ export default function QuotePage() {
       selection: {
         date: selDate,
         window: selWindow,
-        recurring: plan === "PLAN" && Boolean(priced.recurringOffer),
+        // A plan-only (community) quote always checks out as the plan.
+        recurring:
+          (plan === "PLAN" || Boolean(priced.planOnly)) &&
+          Boolean(priced.recurringOffer),
       },
     });
     navigate("/book");
@@ -239,6 +264,9 @@ export default function QuotePage() {
   if (priced) {
     const selectedDay = priced.days.find((d) => d.date === selDate) ?? null;
     const offer = priced.recurringOffer;
+    // Community/HOA: a plan-only quote — the day board picks the first
+    // visit, the plan price itself does not vary by day.
+    const planOnly = Boolean(priced.planOnly && offer);
     const expiresText = new Date(priced.expiresAt).toLocaleString("en-US", {
       weekday: "short",
       month: "short",
@@ -255,12 +283,16 @@ export default function QuotePage() {
             <div className="bk-eyebrow">Your instant quote</div>
             <h1 className="bk-h2">{priced.service}</h1>
             <p className="bk-body-lead">
-              Pick a day and arrival window. This quote is held until{" "}
+              {planOnly
+                ? "Pick your first visit day and arrival window. This quote is held until "
+                : "Pick a day and arrival window. This quote is held until "}
               {expiresText}.
             </p>
 
             <div className="bk-form-card">
-              <h3 className="bk-form-step__title">1. Pick your day</h3>
+              <h3 className="bk-form-step__title">
+                {planOnly ? "1. Pick your first visit day" : "1. Pick your day"}
+              </h3>
               <div className="bk-day-grid">
                 {priced.days.map((d) => (
                   <button
@@ -276,7 +308,9 @@ export default function QuotePage() {
                     }}
                   >
                     <div className="bk-day-card__date">{formatDay(d.date)}</div>
-                    <div className="bk-day-card__price">{money(d.priceCents)}</div>
+                    {(!planOnly || d.priceCents > 0) && (
+                      <div className="bk-day-card__price">{money(d.priceCents)}</div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -300,7 +334,26 @@ export default function QuotePage() {
                 </>
               )}
 
-              {selectedDay && selWindow && offer && (
+              {selectedDay && selWindow && offer && planOnly && (
+                <>
+                  <h3 className="bk-form-step__title">3. Your plan</h3>
+                  <div className="bk-quote-card">
+                    <div className="bk-quote-card__label">
+                      {FREQUENCY_LABELS[offer.frequency]} plan
+                    </div>
+                    <div className="bk-quote-card__price">
+                      {money(offer.monthlyCents)}
+                      <span className="bk-quote-card__per">/mo</span>
+                    </div>
+                    <div className="bk-quote-card__meta">
+                      {hoaMoneyLine(offer)} The subscription starts after your
+                      first completed visit.
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {selectedDay && selWindow && offer && !planOnly && (
                 <>
                   <h3 className="bk-form-step__title">3. One-time or a plan?</h3>
                   <div className="bk-choice-row">
@@ -372,9 +425,9 @@ export default function QuotePage() {
           <div className="bk-eyebrow">Instant quote</div>
           <h1 className="bk-h2">Price it now, book it online.</h1>
           <p className="bk-body-lead">
-            Tell us what you&rsquo;re dealing with and where. Most services get
-            an exact price and open days immediately — the rest get a
-            specialist call within the hour.
+            Tell us what you&rsquo;re dealing with and where. Every service
+            gets an exact price and open days immediately, whether it&rsquo;s
+            your home, your community, or your business.
           </p>
 
           <div className="bk-form-card">
@@ -425,7 +478,7 @@ export default function QuotePage() {
                   </div>
                 </div>
 
-                {svc?.needsSqft && (
+                {needs.sqft && (
                   <div className="bk-field bk-full">
                     <label htmlFor="bq-sqft">Square footage *</label>
                     <input
@@ -441,7 +494,7 @@ export default function QuotePage() {
                   </div>
                 )}
 
-                {svc?.needsNestCount && (
+                {needs.nestCount && (
                   <div className="bk-field bk-full">
                     <label htmlFor="bq-nests">How many nests? *</label>
                     <input
@@ -457,7 +510,38 @@ export default function QuotePage() {
                   </div>
                 )}
 
-                {fields.service === "GENERAL_PEST" && (
+                {needs.units && (
+                  <div className="bk-field bk-full">
+                    <label htmlFor="bq-units">How many units? *</label>
+                    <input
+                      id="bq-units"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={fields.units}
+                      onChange={(e) => set("units")(onlyDigits(e.target.value).slice(0, 5))}
+                      placeholder="48"
+                    />
+                    {fieldError("units")}
+                  </div>
+                )}
+
+                {isCommunity && (
+                  <div className="bk-field bk-full">
+                    <label htmlFor="bq-cadence">How often should we visit?</label>
+                    <select
+                      id="bq-cadence"
+                      value={fields.recurringPreference || "QUARTERLY"}
+                      onChange={(e) => set("recurringPreference")(e.target.value)}
+                    >
+                      <option value="QUARTERLY">Quarterly visits</option>
+                      <option value="BIMONTHLY">Every-2-months visits</option>
+                      <option value="MONTHLY">Monthly visits</option>
+                    </select>
+                  </div>
+                )}
+
+                {offersPlanChoice && (
                   <div className="bk-field bk-full">
                     <label htmlFor="bq-recurring">Ongoing protection?</label>
                     <select
@@ -612,8 +696,9 @@ export default function QuotePage() {
                 </div>
                 <p style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
                   We only use these details to price and schedule your service.
-                  If your service needs a specialist, we&rsquo;ll call you about
-                  this request.
+                  In the rare case we can&rsquo;t price your address on the
+                  spot, we&rsquo;ll call you about this request within the
+                  hour.
                 </p>
               </div>
             </form>

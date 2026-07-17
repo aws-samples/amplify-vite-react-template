@@ -142,6 +142,16 @@ beforeEach(() => {
     WASP_NEST: { oneTimeCents: 28900, extraNestCents: 9900 },
     RODENT: { oneTimeCents: 39900 },
     ROACH: { oneTimeCents: 34900 },
+    TERMITE: { oneTimeCents: 84900 },
+    WILDLIFE: { oneTimeCents: 59900 },
+    COMMERCIAL: {
+      oneTimeCents: 39900,
+      plans: {
+        MONTHLY: { monthlyCents: 14900, initialFeeCents: 19900 },
+        BIMONTHLY: { monthlyCents: 11900, initialFeeCents: 19900 },
+        QUARTERLY: { monthlyCents: 9900, initialFeeCents: 17900 },
+      },
+    },
     HOA: {
       hoaPerUnitMonthly: {
         UNITS_1_10: { MONTHLY: 2200, BIMONTHLY: 1800, QUARTERLY: 1500 },
@@ -360,6 +370,99 @@ describe("research failure escalates — the human is the fallback", () => {
 
     expect(run.decision).toBe("ESCALATE");
     expect(run.reason).toBe("AI pricing unavailable — price by hand");
+  });
+});
+
+describe("termite, wildlife, and commercial auto-quote from the engine", () => {
+  it("prices a termite lead from the TERMITE sheet — the quote-custom policy is retired", async () => {
+    extraction = {
+      ...baseExtraction,
+      propertyType: "specialty",
+      specialtyKind: "termite",
+      pest: "termites",
+      frequencyInterest: "one_time",
+    };
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.oneTimePriceCents).toBe(84900);
+    expect(marketRateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ service: "TERMITE", city: "Ware", sqft: 3200 })
+    );
+  });
+
+  it("prices a wildlife lead as an exclusion/removal visit — the wildlife pass is retired", async () => {
+    extraction = {
+      ...baseExtraction,
+      eligibility: "wildlife",
+      pest: "squirrels in the attic",
+    };
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.oneTimePriceCents).toBe(59900);
+    expect(String(run.service)).toContain("Wildlife exclusion and removal");
+    expect(marketRateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ service: "WILDLIFE", sqft: 3200 })
+    );
+  });
+
+  it("prices a commercial monthly plan from the COMMERCIAL sheet — the deterministic card retired", async () => {
+    extraction = {
+      ...baseExtraction,
+      propertyType: "commercial",
+      frequencyInterest: "monthly",
+      sqft: 8000,
+    };
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.monthlyPriceCents).toBe(14900);
+    expect(run.initialFeeCents).toBe(19900);
+    expect(String(run.service)).toContain("Commercial pest control");
+    expect(marketRateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ service: "COMMERCIAL", sqft: 8000 })
+    );
+  });
+
+  it("prices a commercial one-time from the sheet with the Zone B adder on top", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ routes: [{ duration: "3600s" }] }), // 60 min → Zone B
+    } as never);
+    extraction = {
+      ...baseExtraction,
+      propertyType: "commercial",
+      frequencyInterest: "one_time",
+    };
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.oneTimePriceCents).toBe(42400); // $399 + $25 Zone B flat
+  });
+
+  it("research failure still escalates to a human for each new kind", async () => {
+    sheets.TERMITE = null;
+    sheets.WILDLIFE = null;
+    sheets.COMMERCIAL = null;
+    for (const patch of [
+      { propertyType: "specialty", specialtyKind: "termite" },
+      { eligibility: "wildlife" },
+      { propertyType: "commercial" },
+    ]) {
+      pricingRuns.length = 0;
+      extraction = { ...baseExtraction, ...patch };
+
+      const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+      expect(run.decision).toBe("ESCALATE");
+      expect(run.reason).toBe("AI pricing unavailable — price by hand");
+      expect(String(run.replyText)).toContain("custom quote from our owner");
+    }
   });
 });
 

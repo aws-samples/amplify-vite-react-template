@@ -414,6 +414,133 @@ describe("variable-cost floor — the only downside guardrail", () => {
   });
 });
 
+describe("TERMITE and WILDLIFE — sqft-banded one-time sheets with no cost floor", () => {
+  it("stores a sqft-banded TERMITE sheet and records the no-floor basis", async () => {
+    researchText =
+      "Local operators quote full liquid soil treatments around here.\nONE_TIME_USD: 850";
+
+    const res = await marketRate({
+      anthropicKey: "test-key",
+      service: "TERMITE",
+      city: "Ware",
+      state: "MA",
+      sqft: 1800,
+    });
+
+    expect(created[0].rateKey).toBe("TERMITE#ware-ma#2000");
+    expect(res!.sheet).toEqual({ oneTimeCents: 84900 }); // tidy($850)
+    expect(res!.priceCents).toBe(84900);
+    expect(String(created[0].basis)).toContain(
+      "one-time price carries no variable-cost floor"
+    );
+  });
+
+  it("ships a low researched WILDLIFE price unfloored — no cost model, no invented economics", async () => {
+    researchText = "Exclusion visits in this area.\nONE_TIME_USD: 60";
+
+    const res = await marketRate({
+      anthropicKey: "test-key",
+      service: "WILDLIFE",
+      city: "Ware",
+      state: "MA",
+      sqft: 2400,
+    });
+
+    expect(created[0].rateKey).toBe("WILDLIFE#ware-ma#2500");
+    expect(res!.priceCents).toBe(5900); // tidy($60), deliberately unfloored
+    expect(String(created[0].basis)).toContain(
+      "one-time price carries no variable-cost floor"
+    );
+  });
+
+  it("junk termite research refuses rather than pricing", async () => {
+    researchText = "Termite pricing varies too much to say.";
+
+    const res = await marketRate({
+      anthropicKey: "test-key",
+      service: "TERMITE",
+      city: "Ware",
+      state: "MA",
+      sqft: 2000,
+    });
+
+    expect(res).toBeNull();
+    expect(rows).toHaveLength(0);
+  });
+});
+
+describe("COMMERCIAL — one-time + all three plan cadences on one sheet", () => {
+  const COMMERCIAL_TEXT = `Commercial pricing for a ~5,000 sqft office/retail space in central MA.
+ONE_TIME_USD: 400
+MONTHLY_PLAN_PER_MONTH_USD: 150
+MONTHLY_PLAN_INITIAL_FEE_USD: 200
+BIMONTHLY_PLAN_PER_MONTH_USD: 120
+BIMONTHLY_PLAN_INITIAL_FEE_USD: 200
+QUARTERLY_PLAN_PER_MONTH_USD: 100
+QUARTERLY_PLAN_INITIAL_FEE_USD: 180`;
+
+  const commercialCall = () =>
+    marketRate({
+      anthropicKey: "test-key",
+      service: "COMMERCIAL",
+      city: "Ware",
+      state: "MA",
+      sqft: 4800,
+    });
+
+  it("stores the full commercial sheet on one sqft-banded row", async () => {
+    researchText = COMMERCIAL_TEXT;
+
+    const res = await commercialCall();
+
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+    expect(created[0].rateKey).toBe("COMMERCIAL#ware-ma#5000");
+    const sheet = JSON.parse(String(created[0].ratesJson));
+    expect(sheet).toEqual({
+      oneTimeCents: 39900, // tidy($400)
+      plans: {
+        MONTHLY: { monthlyCents: 14900, initialFeeCents: 19900 },
+        BIMONTHLY: { monthlyCents: 11900, initialFeeCents: 19900 },
+        QUARTERLY: { monthlyCents: 9900, initialFeeCents: 17900 },
+      },
+    });
+    expect(res).toMatchObject({ priceCents: 39900, cached: false });
+  });
+
+  it("a partial commercial sheet is a junk sheet — every component or nothing", async () => {
+    researchText = COMMERCIAL_TEXT.split("\n").slice(0, -1).join("\n");
+
+    const res = await commercialCall();
+
+    expect(res).toBeNull();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("records that no floor applies anywhere on the commercial sheet", async () => {
+    researchText = COMMERCIAL_TEXT;
+
+    await commercialCall();
+
+    const basis = String(created[0].basis);
+    expect(basis).toContain("one-time price carries no variable-cost floor");
+    expect(basis).toContain("plan prices carry no variable-cost floor");
+  });
+
+  it("the new-rate office email renders the commercial shape", async () => {
+    researchText = COMMERCIAL_TEXT;
+
+    await commercialCall();
+
+    expect(officeEmails).toHaveLength(1);
+    expect(officeEmails[0].subject).toBe(
+      "New AI rate cached — COMMERCIAL · ware-ma · up to 5,000 sqft"
+    );
+    expect(officeEmails[0].bodyHtml).toContain("$399");
+    expect(officeEmails[0].bodyHtml).toContain("$149/mo");
+    expect(officeEmails[0].bodyHtml).toContain("$179");
+  });
+});
+
 describe("HOA — per-unit monthly rates by unit-count band", () => {
   const HOA_TEXT = `Association common-area contracts in central MA, per unit per month.
 UNITS_1_10_MONTHLY_PER_UNIT_USD: 22

@@ -38,6 +38,11 @@ export const SERVICE_LABEL: Record<string, string> = {
   WASP_NEST: "Wasp/hornet nest",
   RODENT: "Rodent treatment",
   ROACH: "Specialized roach",
+  // One-time-only sqft-banded kinds, priced like rodent/roach.
+  TERMITE: "Termite treatment",
+  WILDLIFE: "Wildlife removal",
+  // Sqft-banded one-time + plans, priced like general pest.
+  COMMERCIAL: "Commercial pest",
   HOA: "Association / HOA",
 };
 

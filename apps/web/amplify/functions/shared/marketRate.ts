@@ -52,6 +52,9 @@ export type MarketRateService =
   | "WASP_NEST"
   | "RODENT"
   | "ROACH"
+  | "TERMITE"
+  | "WILDLIFE"
+  | "COMMERCIAL"
   | "HOA";
 
 export type PlanCadence = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
@@ -139,9 +142,10 @@ export function areaKeyFor(city: string, state: string): string {
 
 /**
  * Funnel service → one-time cost kind in crm-pricing/rateCards (the same
- * mapping the day-pricing overlay uses for R62). HOA has no entry: no
- * deterministic cost model exists for common-area work, so its rates carry
- * no floor — recorded on the row's basis, not invented.
+ * mapping the day-pricing overlay uses for R62). HOA, TERMITE, WILDLIFE,
+ * and COMMERCIAL have no entry: no deterministic cost model exists for that
+ * work, so their rates carry no floor — recorded on the row's basis, not
+ * invented.
  */
 const COST_KIND: Partial<Record<MarketRateService, string>> = {
   GENERAL_PEST: "one_time_gpc",
@@ -171,6 +175,14 @@ function applyFloor(
       oneTimeCents = floor;
       notes.push(`one-time floored at Zone-A variable cost ${money(floor)}`);
     }
+  }
+  if (costKind == null && oneTimeCents != null) {
+    // TERMITE / WILDLIFE / COMMERCIAL: no deterministic cost model exists
+    // for the work, so the researched price ships unfloored — recorded here
+    // rather than inventing economics.
+    notes.push(
+      "one-time price carries no variable-cost floor (no cost model exists for this service)"
+    );
   }
   if (sheet.plans) {
     notes.push(
@@ -384,6 +396,57 @@ ONE_TIME_USD: <number>`,
 ONE_TIME_USD: <number>`,
     lines: ["ONE_TIME_USD"],
     assemble: (c) => ({ oneTimeCents: c.ONE_TIME_USD }),
+  },
+  TERMITE: {
+    ask: (city, state, bucket) =>
+      `What do pest-control companies near ${city}, ${state} charge for a one-time termite treatment of a ~${bucket ?? 2000} sqft single-family home (liquid soil-applied barrier or comparable localized treatment, as quality local operators actually quote it)? Give the realistic local going rate for the full treatment — not an inspection fee, not a per-linear-foot component. ${LINE_INSTRUCTION}
+ONE_TIME_USD: <number>`,
+    lines: ["ONE_TIME_USD"],
+    assemble: (c) => ({ oneTimeCents: c.ONE_TIME_USD }),
+  },
+  WILDLIFE: {
+    ask: (city, state, bucket) =>
+      `What do pest and wildlife companies near ${city}, ${state} charge for a one-time wildlife exclusion and removal visit at a ~${bucket ?? 2000} sqft single-family home (squirrels, raccoons, bats, or similar — getting the animals out and sealing the entry points)? Give the realistic local going rate for the complete visit including the exclusion work, not an inspection-only fee. ${LINE_INSTRUCTION}
+ONE_TIME_USD: <number>`,
+    lines: ["ONE_TIME_USD"],
+    assemble: (c) => ({ oneTimeCents: c.ONE_TIME_USD }),
+  },
+  COMMERCIAL: {
+    ask: (city, state, bucket) =>
+      `What do pest-control companies near ${city}, ${state} charge a commercial property (office, retail, warehouse, or similar non-food business) of ~${bucket ?? 2000} sqft for pest control? Price ALL of: (1) a one-time interior+exterior commercial pest treatment; (2) a recurring service plan with monthly visits; (3) a recurring plan with visits every two months; (4) a recurring plan with quarterly visits. Recurring plans are billed as a flat monthly subscription price regardless of visit cadence, and each plan starts with a one-time initial/startup fee for the first intensive visit. ${LINE_INSTRUCTION}
+ONE_TIME_USD: <number>
+MONTHLY_PLAN_PER_MONTH_USD: <number>
+MONTHLY_PLAN_INITIAL_FEE_USD: <number>
+BIMONTHLY_PLAN_PER_MONTH_USD: <number>
+BIMONTHLY_PLAN_INITIAL_FEE_USD: <number>
+QUARTERLY_PLAN_PER_MONTH_USD: <number>
+QUARTERLY_PLAN_INITIAL_FEE_USD: <number>`,
+    lines: [
+      "ONE_TIME_USD",
+      "MONTHLY_PLAN_PER_MONTH_USD",
+      "MONTHLY_PLAN_INITIAL_FEE_USD",
+      "BIMONTHLY_PLAN_PER_MONTH_USD",
+      "BIMONTHLY_PLAN_INITIAL_FEE_USD",
+      "QUARTERLY_PLAN_PER_MONTH_USD",
+      "QUARTERLY_PLAN_INITIAL_FEE_USD",
+    ],
+    assemble: (c) => ({
+      oneTimeCents: c.ONE_TIME_USD,
+      plans: {
+        MONTHLY: {
+          monthlyCents: c.MONTHLY_PLAN_PER_MONTH_USD,
+          initialFeeCents: c.MONTHLY_PLAN_INITIAL_FEE_USD,
+        },
+        BIMONTHLY: {
+          monthlyCents: c.BIMONTHLY_PLAN_PER_MONTH_USD,
+          initialFeeCents: c.BIMONTHLY_PLAN_INITIAL_FEE_USD,
+        },
+        QUARTERLY: {
+          monthlyCents: c.QUARTERLY_PLAN_PER_MONTH_USD,
+          initialFeeCents: c.QUARTERLY_PLAN_INITIAL_FEE_USD,
+        },
+      },
+    }),
   },
   HOA: {
     ask: (city, state) =>
