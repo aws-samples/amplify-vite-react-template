@@ -160,7 +160,11 @@ deploy so the stale built Clarity tag can't ship.
   button (unchecked-by-default acceptance); `/book` requires the acknowledged terms version and
   records version + server-stamped time + IP + user-agent on the booking; the 3-day constant is
   single-sourced into every rendered copy. The cross-document half (ToS says 24-hour, agreement
-  says 30-day — Jake picks one policy per product line) remains open.
+  says 30-day — Jake picks one policy per product line) remains open. **ToS half fixed
+  (2026-07-17):** Jake chose the enforced 3-day rule; `TermsOfService.tsx` §7 now states it and
+  drops the false "cancellation fees" language, so the published Terms match checkout, the signed
+  agreement PDF, the /cancel refund logic, and the confirmation email. The external
+  agreement-template 30-day text is a separate document (not in the repo) still to reconcile.
 - **Launch-gate status for section B**: R29, R59, R60, R62 closed earlier today; R63 (LLM
   market-rate engine cut-vs-guard) remains Jake's decision — the funnel runs with it guarded by
   the daily research budget in the meantime.
@@ -372,7 +376,11 @@ and went green, so the AI-pricing wave is now live on staging):
   new-booking + needs-a-call alerts. The lead-form contract section of
   [public-ui-handoff.md](public-ui-handoff.md) is obsolete.
 - Standing residual now more visible: two office phone numbers in the tree (401 vs 508) — R38's
-  decision.
+  decision. **Phone half resolved (2026-07-17):** Jake confirmed `(508) 258-9294` as canonical;
+  all seven stray `(401) 526-0323` occurrences (QuoteCTA, CancelPage, both BookPage payment
+  failures, and the booking-public + lead-intake Lambda error strings) are unified to it. The
+  other R38 half — printing a real number in transactional emails, PDFs, and the portal (they say
+  "give us a call" with no number) — is untouched.
 
 **Second pass, `00e26a8`** (same verification discipline; suites 262 web / 114 CRM):
 
@@ -662,9 +670,15 @@ should treat this list as the integration contract, alongside
   bypasses the $199–$2,500 clamp entirely via a free-text money field) and fix the `tidy()`
   wasp-band floor dip. *(medium)*
 - **Public-site truth items** (owned by the site overhaul, per
-  [public-ui-handoff.md](public-ui-handoff.md)): the Customer Login links point at
-  decommissioned FieldRoutes (needs `VITE_PORTAL_URL`); four pages advertise self-service that
-  doesn't exist; statistics and licence-status claims need sourcing or removal.
+  [public-ui-handoff.md](public-ui-handoff.md)): ~~the Customer Login links point at
+  decommissioned FieldRoutes (needs `VITE_PORTAL_URL`)~~ **fixed 2026-07-17** — both Header and
+  Footer now read a single-sourced `PORTAL_URL` (`src/lib/portal.ts`, overridable via
+  `VITE_PORTAL_URL`, defaulting to the prod CRM app `main.d5ln2hbbp9s2j.amplifyapp.com`); and the
+  office payment-request / failed-payment / open-invoice emails now link the real `/portal/billing`
+  route instead of the dead `/billing` (which redirected to portal home). Still open: four pages
+  advertise self-service that doesn't exist; statistics and licence-status claims need sourcing or
+  removal. **Console follow-up:** set `VITE_PORTAL_URL` per environment in the marketing app's
+  Amplify build env (staging → the staging CRM URL) so staging QA points at the staging portal.
 
 ---
 

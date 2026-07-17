@@ -543,16 +543,20 @@ async function triggerPricingRefresh(rateKey: string): Promise<void> {
  * upgrade over email matching, not a gate.
  */
 async function resolveLeadToken(
-  client: Awaited<ReturnType<typeof dataClient>>,
+  // `client` is `any` on purpose: the generated result type of the index query
+  // below is deep enough that instantiating it trips TypeScript's depth ceiling
+  // (TS2321) on unrelated edits. The result is cast to the shallow shape this
+  // function actually reads. See the same note in shared/bookingLink.ts.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
   raw: unknown
 ): Promise<string | null> {
   if (typeof raw !== "string" || !BOOKING_LINK_TOKEN_RE.test(raw)) return null;
   try {
-    const { data } =
-      await client.models.Customer.listCustomerByBookingLinkToken(
-        { bookingLinkToken: raw },
-        { limit: 2 }
-      );
+    const { data } = (await client.models.Customer.listCustomerByBookingLinkToken(
+      { bookingLinkToken: raw },
+      { limit: 2 }
+    )) as { data: { id: string }[] };
     return data.length === 1 ? data[0].id : null;
   } catch (err) {
     console.error("resolveLeadToken: lookup failed — quoting without identity", err);

@@ -47,7 +47,7 @@ type LeadInput = {
   attribution?: Attribution;
 };
 
-const SUPPORT_PHONE = "(401) 526-0323";
+const SUPPORT_PHONE = "(508) 258-9294";
 
 function jsonResponse(statusCode: number, body: unknown) {
   return {

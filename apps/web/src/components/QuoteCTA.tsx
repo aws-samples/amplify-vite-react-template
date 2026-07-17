@@ -1,8 +1,8 @@
 import { Link } from "react-router-dom";
 
 /** Office line — the human path for anyone who'd rather not self-serve. */
-const OFFICE_PHONE_DISPLAY = "(401) 526-0323";
-const OFFICE_PHONE_HREF = "tel:401-526-0323";
+const OFFICE_PHONE_DISPLAY = "(508) 258-9294";
+const OFFICE_PHONE_HREF = "tel:+15082589294";
 
 type QuoteCTAProps = {
   eyebrow?: string;

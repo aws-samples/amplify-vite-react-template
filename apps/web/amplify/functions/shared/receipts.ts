@@ -21,7 +21,7 @@ const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
 /** The portal billing page a customer pays / updates their card on. */
 export const portalBillingUrl = () =>
-  `${process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com"}/billing`;
+  `${process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com"}/portal/billing`;
 
 const prettyDate = (isoDate: string) =>
   new Date(`${isoDate.slice(0, 10)}T12:00:00Z`).toLocaleDateString("en-US", {

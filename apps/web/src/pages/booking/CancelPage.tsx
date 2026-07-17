@@ -15,7 +15,7 @@ import {
 } from "../../lib/bookingFunnel";
 
 /** The number customers should call when self-service can't help. */
-const SUPPORT_PHONE = "(401) 526-0323";
+const SUPPORT_PHONE = "(508) 258-9294";
 
 type Phase =
   | { kind: "no-token" }

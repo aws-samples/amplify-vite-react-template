@@ -79,9 +79,17 @@ export default function TermsOfService() {
         </p>
 
         <h2>7. Cancellations &amp; Rescheduling</h2>
+        {/*
+          Mirrors the enforced booking policy: CANCEL_FULL_REFUND_DAYS in
+          amplify/functions/shared/bookingTerms.ts, which is the same text a
+          customer accepts at online checkout and the /cancel flow enforces.
+          Keep this sentence identical to BOOKING_TERMS_TEXT if that constant
+          ever changes.
+        */}
         <p>
-          24-hour notice is typically required to avoid cancellation fees, though
-          policies vary by service type.
+          Cancel more than 3 whole days before your visit for a full refund.
+          Cancellations 3 days or less before the visit are not refundable. This
+          is the same policy shown and accepted at checkout when you book online.
         </p>
 
         <h2>8. Customer Responsibilities</h2>

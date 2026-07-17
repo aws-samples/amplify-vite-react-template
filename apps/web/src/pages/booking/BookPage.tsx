@@ -485,7 +485,7 @@ function PaymentForm({
       // integration faults; those are ours, not the customer's card.
       console.error("confirmPayment threw", err);
       setError(
-        "Your payment could not be started — that's a fault on our side, and your card was not charged. Please try again shortly, or call (401) 526-0323 to book by phone."
+        "Your payment could not be started — that's a fault on our side, and your card was not charged. Please try again shortly, or call (508) 258-9294 to book by phone."
       );
     } finally {
       setBusy(false);
@@ -499,7 +499,7 @@ function PaymentForm({
         onLoadError={(ev) => {
           console.error("PaymentElement failed to load", ev.error);
           setLoadError(
-            "The payment form couldn't load — that's a fault on our side, not your card, and nothing was charged. Please try again shortly, or call (401) 526-0323 to book by phone."
+            "The payment form couldn't load — that's a fault on our side, not your card, and nothing was charged. Please try again shortly, or call (508) 258-9294 to book by phone."
           );
         }}
       />

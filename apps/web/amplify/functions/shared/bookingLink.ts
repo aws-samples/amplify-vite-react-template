@@ -35,12 +35,12 @@ type CustomerSlice = {
   bookingLinkToken?: string | null;
 };
 
-// `data` is typed `unknown`, not `{ id: string } | null`, on purpose: the only
-// caller passes the full Amplify V6Client, and a concrete `data` shape here
-// forces TypeScript to deep-instantiate the generated Customer type to prove
-// assignability, which trips the instantiation-depth ceiling (TS2321/TS2345)
-// on unrelated edits. ensureBookingLinkToken only truthiness-checks `data`.
-type BookingLinkDataClient = {
+/**
+ * What ensureBookingLinkToken needs from the data client: just
+ * `models.Customer.update`, whose result it only truthiness-checks. It is NOT
+ * used as the parameter type below on purpose — see the `any` note there.
+ */
+export type BookingLinkDataClient = {
   models: {
     Customer: {
       update: (args: object) => Promise<{ data: unknown }>;
@@ -54,14 +54,22 @@ type BookingLinkDataClient = {
  * written — a bare funnel URL still works, it just falls back to email
  * matching at finalization.
  */
+// `client` is `any`, not BookingLinkDataClient, on purpose. Every caller passes
+// the full Amplify V6Client (from dataClient()); structurally comparing that
+// generated type against ANY concrete shape forces TypeScript to deep-
+// instantiate it, which trips the instantiation-depth ceiling (TS2321) and
+// cascades spurious "not assignable" errors across unrelated files on the
+// smallest edit. BookingLinkDataClient above documents the real contract; this
+// function only calls client.models.Customer.update.
 export async function ensureBookingLinkToken(
-  client: BookingLinkDataClient,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
   customer: CustomerSlice
 ): Promise<string | null> {
   if (customer.bookingLinkToken) return customer.bookingLinkToken;
   try {
     const token = mintBookingLinkToken();
-    const { data } = await client.models.Customer.update({
+    const { data } = await (client as BookingLinkDataClient).models.Customer.update({
       id: customer.id,
       bookingLinkToken: token,
     });
