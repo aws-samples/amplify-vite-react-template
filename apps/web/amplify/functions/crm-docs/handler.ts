@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { AppSyncResolverEvent } from "aws-lambda";
+import type { AppSyncIdentity, AppSyncResolverEvent } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
@@ -16,9 +16,13 @@ import {
   callerIsFinance,
   callerIsOffice,
   callerSub,
-  isStaff,
 } from "../shared/authz";
 import { cusGroup, customerAccessGroups, grpGroup } from "../shared/dynamicGroups";
+import {
+  assertCanActOnJobId,
+  assertCanActOnReportId,
+  technicianServesCustomer,
+} from "../shared/jobAssignment";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
@@ -114,9 +118,9 @@ type Args = {
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
   switch (opFieldName(event)) {
     case "saveServiceReportDraft": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      // Must own the job being reported on; editing an existing report is
+      // additionally checked against that report inside the function.
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       return saveServiceReportDraft(callerSub(event.identity), {
         jobId: event.arguments.jobId!,
         reportId: event.arguments.reportId,
@@ -135,9 +139,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "setReportPhotos": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      await assertCanActOnReportId(event.identity, event.arguments.reportId!);
       return setReportPhotos(
         event.arguments.reportId!,
         (event.arguments.photoKeys ?? []).filter(
@@ -146,9 +148,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "reportNoAccess": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       return reportNoAccess({
         jobId: event.arguments.jobId!,
         reason: event.arguments.reason ?? "",
@@ -157,33 +157,29 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "getNoAccessPhotoUploadUrl": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       return getNoAccessPhotoUploadUrl(
         event.arguments.jobId!,
         event.arguments.contentType!
       );
     }
     case "startJob": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       return startJob(event.arguments.jobId!);
     }
     case "endApplication": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       return endApplication(event.arguments.jobId!);
     }
     case "completeJob": {
+      // Office-completable admin job types only (enforced in completeJob), but
+      // it still ends a job and starts billing — prove assignment/office first
+      // rather than leaving it open to any caller who knows the id.
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       return completeJob(event.arguments.jobId!);
     }
     case "finalizeServiceReport": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      await assertCanActOnReportId(event.identity, event.arguments.reportId!);
       return finalizeServiceReport(event.arguments.reportId!);
     }
     case "saveProduct": {
@@ -223,12 +219,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "getDocumentUrl": {
-      return getDocumentUrl(event.arguments.key!, callerGroups(event.identity));
+      return getDocumentUrl(event.identity, event.arguments.key!);
     }
     case "getReportPhotoUploadUrl": {
-      if (!isStaff(callerGroups(event.identity))) {
-        throw new Error("Staff role required");
-      }
+      await assertCanActOnReportId(event.identity, event.arguments.reportId!);
       return getReportPhotoUploadUrl(
         event.arguments.reportId!,
         event.arguments.contentType!
@@ -1286,6 +1280,12 @@ async function saveServiceReportDraft(
       id: args.reportId,
     });
     if (!existing) throw new Error(`Report ${args.reportId} not found`);
+    // The caller proved they own args.jobId; make sure the report they're
+    // editing actually belongs to that job, so a valid job id can't be paired
+    // with another job's report id to edit it.
+    if (existing.jobId !== args.jobId) {
+      throw new Error("This report does not belong to that job");
+    }
     if (existing.status === "FINALIZED") {
       throw new Error(
         "This report has been finalized and sent to the customer — it is the record of the application and cannot be changed. Ask the office to issue an amendment."
@@ -1510,13 +1510,20 @@ async function getReportPhotoUploadUrl(reportId: string, contentType: string) {
  * is office/tech, the customer's own dynamic group, or their
  * customer-group.
  */
-async function getDocumentUrl(key: string, groups: string[]) {
+async function getDocumentUrl(
+  identity: AppSyncIdentity | undefined | null,
+  key: string
+) {
   const match = /^(reports|agreements)\/([^/]+)\//.exec(key);
   if (!match) throw new Error("Invalid document key");
   const customerId = match[2];
+  const groups = callerGroups(identity);
 
-  const staff = isStaff(groups);
-  if (!staff) {
+  // Office/owner may pull any document. A TECH is NOT blanket-entitled the way
+  // "any staff" was: they may only pull documents for a customer they actually
+  // serve (an assigned job), so a job/report id for another technician's
+  // customer yields no link. The customer's own portal access is unchanged.
+  if (!callerIsOffice(identity)) {
     let allowed = groups.includes(cusGroup(customerId));
     if (!allowed) {
       const client = await dataClient();
@@ -1526,6 +1533,9 @@ async function getDocumentUrl(key: string, groups: string[]) {
       allowed = Boolean(
         customer?.groupId && groups.includes(grpGroup(customer.groupId))
       );
+    }
+    if (!allowed && groups.includes("TECH")) {
+      allowed = await technicianServesCustomer(identity, customerId);
     }
     if (!allowed) throw new Error("Not authorized for this document");
   }
