@@ -1,1014 +1,772 @@
-# BuzzKill — Go-live requirements
+# BuzzKill — remaining go-live requirements
 
-**16 July 2026 · verified against `54ae329` (staging) · suite: 187 tests passing (141 web, 46 CRM)**
+**Business review date:** 17 July 2026
 
-This is the business review of the current draft, taken from five seats — the CEO, the
-leadership team, the operations desk, the customer, and the technician — plus the two standing
-lenses of the July review cycle: the McDonald's test (a week-one, $18/hour employee must be
-able to run every screen without judgment, memory, mental math, or free text) and
-compliance/licence. Every requirement below was independently checked against the code by an
-adversarial verification pass. Four findings from this round were **refuted in verification
-and must not be built**; they are listed near the bottom so they don't come back.
+**Decision:** **NO-GO until every gate in this document is closed**
 
-Requirements are stated as outcomes a tester can prove, not implementations. Each carries an
-ID (R01–R83) for burn-down tracking, an owner, and a size.
+**Review seats:** CEO, leadership, operations, customer, technician
 
----
+This is a **delta-only** document. It intentionally excludes capabilities that are already
+working in the reviewed draft. An omitted item is not a request to rebuild it. The requirements
+below are the remaining business outcomes that must be proved before production launch.
 
-## Where this stands
+The standard is the “McDonald's test”: a week-one employee must be able to do the right thing
+without remembering policy, performing mental math, interpreting system internals, or inventing
+free-text workarounds. The system must prevent an unsafe or financially incorrect action, explain
+the one next step in plain language, and put failures in an owned queue.
 
-The July 15 reviews reached a NO-GO on one root cause: irreversible customer-visible acts
-fired before the durable writes that made them true, and every failure resolved to a log line
-plus a success message. Nine engineering commits later, **that root cause is fixed**. Verified
-against the tree this round, all previously-open items from the 15-item burn-down are closed
-except the ones below:
+## Go-live rule
 
-- **The compliance pair (items 7+14) closed** with `6297c0a`: a technician at a locked door
-  now has an honest one-tap exit (NO_ACCESS with fixed reason chips and a door photo) that
-  files no report, arms no charge, and advances no plan cadence; the service report now
-  carries the MA pesticide-record fields and is **server-side immutable after finalize** —
-  read-only to every browser role, with 31 new tests. Residuals are itemized below (R09–R11,
-  R20) — real, but small against what closed.
-- Also verified closed since rev 7: the Void button no longer renders on SIGNED agreements;
-  the paid-online badge reads `Job.paidAt` written atomically with verified payment and cannot
-  go stale in the double-charge direction; LPCall leads save durably end-to-end; recurring
-  billing auto-starts on first completed visit with a Dashboard queue **and** a daily digest
-  backstop; and the HOA escalation email now includes the computed quote instead of throwing
-  it away.
+Go-live requires all of the following:
 
-What remains is no longer "the ledger is rewritable." It is: money-out flows that don't exist
-yet (disputes, dunning, receipts), the last compliance residuals, an unopened booking funnel
-with known launch gates, a handful of decisions only Jake can make, and console work no code
-can do. That is a launch checklist, not a crisis list.
+1. Every requirement below is marked **Passed** by its named business owner using the stated
+   acceptance evidence.
+2. There are no open launch-severity defects and no open operational exceptions created during
+   the final end-to-end rehearsal.
+3. Any offer, promise, role, or workflow that will not be supported at launch is removed from the
+   site and app before approval. “Staff will remember not to use it” is not an acceptable control.
+4. A failure test is required wherever money, customer status, access, scheduling capacity, or a
+   regulated service record changes. A happy-path demonstration alone does not pass a gate.
 
-**One item is urgent independent of go-live: R81. The Buildium client secret is committed to a
-public GitHub repo.** Rotate it today.
+## Gate register
 
-**Lead conversion is unambiguous — booking links carry the lead's identity** (Jake's
-directive, 17 July: "Matching a paid booking by email alone can convert the wrong duplicate,
-merge unrelated people sharing an email, or create a second customer when the checkout email
-differs"; suites 766 web / 188 CRM, adversarially verified — no defect found):
-
-- **Every booking link now names its lead.** An unguessable token (`Customer.bookingLinkToken`,
-  192-bit, indexed, resolved only server-side) is minted lazily wherever a link is produced —
-  the booking-link email, the AI Thumbtack replies, and the CRM lead page's copyable link —
-  and carried as `?lead=<token>` on the funnel URL. The funnel stashes it for the session,
-  strips it from the address bar (capability tokens don't belong in history or referrers, and
-  the stash expires after 24 h so a reused office tab can't convert a stale lead), and
-  `/quote` resolves it to `BookingRequest.leadCustomerId` — silently, so a stale token never
-  blocks a quote and the response is not a probing oracle.
-- **Finalization's resolution order is identity, then unambiguity, then a human**: a
-  lead-referenced booking converts exactly that record — even when the checkout email differs
-  (the difference is written into the lead notes); with no reference, an email match converts
-  only when exactly ONE record matches; a dangling reference or several records sharing the
-  checkout email creates a fresh customer and opens DUPLICATE_LEAD owned work naming the
-  candidates, instead of converting an arbitrary one. The portal-provisioning skip and the
-  INACTIVE-reactivation signal from the R41 work ride the same path unchanged.
-- **The verifier confirmed the riskiest spot holds**: a resumed PENDING quote (the async
-  pricing path re-updates the booking without a token) cannot clear a stored lead identity —
-  pinned by test against the same serialization semantics attribution already relies on.
-- Rides along, adopted from the parallel site pass: the funnel's support number unified to
-  (508) 258-9294 (the stale test assertion updated with it).
-- Residual: the phone-read URL stays bare by design (nobody dictates a token), so phone-typed
-  visits still land on the email-match path — now safe against ambiguity by construction.
-
-**Portal access is part of conversion — R41 closed** (Jake's directive, 17 July: "Provision the
-portal as part of conversion — paid customers are not automatically invited, yet reports,
-receipts, and payment-recovery messages direct customers to the portal"; suites 561 web /
-188 CRM, adversarially verified, one defect caught in verification and fixed):
-
-- `bookingFinalize` now provisions the customer-portal login the moment a booking converts
-  the customer: Cognito account created (or reused by email), CUSTOMER + cus-/grp- groups
-  granted, `portalUserSub`/`portalInvitedAt` stamped, magic-link invite sent — so the
-  receipts, service reports, and payment-recovery emails that all point at the portal point
-  at something the customer can actually open. A repeat customer who already has a login is
-  left alone, and the booking confirmation mentions the portal only when the invite actually
-  went out (the verifier caught the provisioned-but-email-failed case asserting a link that
-  never sent; fixed and pinned by test).
-- The provisioning core moved to `shared/portalProvision.ts`; crm-admin's `adminCreateUser`
-  now delegates to it — one implementation behind the invite button and the webhook, verified
-  behavior-identical (same Cognito call order, group bookkeeping, email copy, return shape).
-- Failure is owned work, never a bricked finalization: a provisioning throw, a dead invite
-  email, or a re-booking INACTIVE customer whose login deactivation disabled (conversion does
-  not re-enable logins — `restorePortalAccess` is the fix) each open a PORTAL_FAILURE work
-  item (OPS, 4-hour SLA) instead of failing the paid booking or logging silently.
-- The service-report email's "always available in your BuzzKill portal" clause now renders
-  only for customers who actually hold a login — R41's honesty half for the one
-  legacy-reachable email.
-- **Deploy note:** `stripeWebhook` gains the same Cognito access bundle as crm-admin
-  (auth/resource.ts — the grant that injects `AMPLIFY_AUTH_USERPOOL_ID`). Structurally
-  identical to the proven crmAdmin grant, but watch the first staging deploy: a CDK synth was
-  not possible locally.
-- **Residual (ops backfill):** customers converted before this change still have no login
-  until someone presses Invite to portal — the recovery emails' pay links dead-end for
-  exactly that cohort. A one-time sweep (invite every ACTIVE customer with an email and no
-  `portalUserSub`) closes it.
-
-**Lead emails to sales@** (Jake's directive, 17 July: "lead related emails only ever go to
-sales@pestbuzzkill.com" — R80's routing half; suites 441 web / 143 CRM):
-
-- New `notifyLeads()` helper routes the six lead-pipeline office emails to `SES_LEADS_EMAIL`
-  (sales@): new-website-lead, lead-write-failed, booking-needs-a-call, booking-rate-queued, the
-  new-paid-booking alert, and the Thumbtack pricing-escalation. Routing is now structural (a
-  distinct helper), not a per-call-site choice — verified by an independent reclassification of
-  all 22 office-facing sends: every money/ops alarm (subscription death, digests, receipt/
-  refund/invoice failures, no-access, existing-booking cancels, weekly report) stays on info@,
-  and no customer-facing email moved. Guardrail: an unset `SES_LEADS_EMAIL` falls back to info@
-  with a loud log — a lead alert can misconfigure but never silently vanish.
-- **Ops precondition (Jake):** `sales@pestbuzzkill.com` must be a real, monitored mailbox before
-  this deploys. SES is in production mode (delivers to any recipient, no verification needed)
-  and sales@ is clean on the suppression list — but if the mailbox doesn't exist, lead alerts
-  bounce and repeated bounces suppress the address, silently killing all future lead mail.
-
-### Engineering burn-down — 16 July, afternoon pass
-
-Closed against this document in `6af26cf` + `eed1e1b`, each implementation adversarially
-verified against the tree before commit (suites now 228 web / 68 CRM, all passing):
-
-- **R03, R05, R13** — money-out is never silent: subscription death alerts the office same-day
-  with visit resolution; every cancel path resolves queued visits; every charge and refund
-  emails the customer (receipt_email set as belt-and-braces, no-email customers routed to the
-  office).
-- **R09, R15** — `startJob`/`endApplication` stamp server time and TECH lost model-level Job
-  update; finalize refuses a never-started job; browser S3 grants on `reports/*`/`agreements/*`
-  and browser delete on Customer/Job/Technician are gone.
-- **R23, R26, R27** — the board can't rewrite history in either direction (unassign *and*
-  assign, and the pool no longer offers COMPLETED/IN_PROGRESS stops); the office Complete
-  confirm discloses the billing it starts, sharing sentences with Start billing; invite
-  controls render only for OWNER with honest words for everyone else.
-- **R29, R59, R60, R62** — /book re-checks live availability before charging; zone UNKNOWN is
-  never priced; rodent/roach carry the Zone-B adder; day prices floor at variable cost.
-- **R57, R58, R75** — HOA 101+ bimonthly is $230 (derived from the bracket series — **Jake to
-  confirm against the Thumbtack spec**); the phantom $99 is gone and $15/$99 are unwhitelisted;
-  the licensing gate fails closed on an unresolvable state.
-- **R18** — Clarity removed; the privacy policy describes only practices that exist.
-- **R77** — the `/schedule/:slug` resident signup page is deleted.
-- **R81 (code half)** — hardcoded Buildium credentials removed from the sync script; **rotation
-  at the vendor remains open and urgent** (the secret is still in public git history).
-
-Residuals from this pass, tracked under existing IDs: the dashboard-refund leg of R13 needs the
-`charge.refunded` webhook registration (R82, console); one dist rebuild must accompany the R18
-deploy so the stale built Clarity tag can't ship.
-
-**Funnel pass, `9d0add9`** (same verification discipline; suites 301 web / 114 CRM):
-
-- **R01 closed** — public `/quote`, `/book`, `/cancel` pages exist, routed, and styled native to
-  the site; every emailed URL now resolves. Verified live in-browser against the deployed
-  staging API: real-time quote, live day pricing, checkout summary. Full pay→finalize→cancel
-  loop to be re-verified after the next staging deploy (the terms contract ships with it).
-- **R17 funnel half closed** — checkout renders the booking & cancellation terms above the pay
-  button (unchecked-by-default acceptance); `/book` requires the acknowledged terms version and
-  records version + server-stamped time + IP + user-agent on the booking; the 3-day constant is
-  single-sourced into every rendered copy. The cross-document half (ToS says 24-hour, agreement
-  says 30-day — Jake picks one policy per product line) remains open. **ToS half fixed
-  (2026-07-17):** Jake chose the enforced 3-day rule; `TermsOfService.tsx` §7 now states it and
-  drops the false "cancellation fees" language, so the published Terms match checkout, the signed
-  agreement PDF, the /cancel refund logic, and the confirmation email. The external
-  agreement-template 30-day text is a separate document (not in the repo) still to reconcile.
-- **Launch-gate status for section B**: R29, R59, R60, R62 closed earlier today; R63 (LLM
-  market-rate engine cut-vs-guard) remains Jake's decision — the funnel runs with it guarded by
-  the daily research budget in the meantime.
-- **Go-live console needs for the funnel**: `VITE_STRIPE_PUBLISHABLE_KEY` on the marketing
-  app's hosting env; Turnstile (`TURNSTILE_SECRET` + widget) before ad spend if bot volume
-  appears; production Stripe webhook registration (R82) before the funnel opens on main.
-
-**Airline pricing for everyone** (Jake's directive, 17 July: "every single person who asks for
-a quote on our website should get the 'Airline' pricing model with a price for every day
-available"; suites 408 web / 143 CRM):
-
-- **Every service × property kind prices** — termite and wildlife join as one-time engine
-  kinds; COMMUNITY prices as a common-area plan (per-unit × units for the chosen cadence,
-  first month charged at booking, day board picks the first visit); COMMERCIAL prices like
-  residential GP from its own sheet. An 18-combination sweep test pins the invariant. The only
-  surviving callbacks: zone OUT, zone UNKNOWN (R59), AI research failure (the chosen
-  guardrail), and a fully booked month. The office/Thumbtack engine gained the same kinds —
-  termite/wildlife/commercial leads auto-quote there too.
-- **BOOKING_TERMS_VERSION bumped to 2026-07-17** (terms now cover the community first-month
-  charge); in-flight old-version quotes re-ask at checkout by design.
-- **Deterministic remainder shrinks to**: the mosquito/tick card (no engine kind — blocked on
-  R32's seasonal decision), the rodent-exclusion escalate card, Zone-B adders, and the Step-5
-  cost constants.
-- **⚠ Wildlife licensing flag for Jake**: the old hard-PASS existed because live-animal
-  trapping needs a separate MA wildlife-control licence. Wildlife now auto-quotes framed
-  strictly as exclusion/removal (sealing entry points), not trapping — confirm that framing
-  keeps it inside licence scope, or say the word and wildlife goes back to pass/escalate.
-
-**Batch AI pricing** (Jake's directive, 17 July: "AI runs weekly to research our pricing
-database and update it — faster and more stable quoting flows"; suites 436 web / 143 CRM):
-
-- **Live quoting is pure reads.** The funnel and the office engine never research inline —
-  no Anthropic call, no 10–60s spinner, no timeout class. Serve-last-known-good: an expired
-  sheet still serves (`expiresAt` now means "due for refresh", never "refuse"); pinned office
-  rows serve forever; only a combo with no sheet at all falls back.
-- **The `pricing-refresh` cron owns all research, firing every 5 minutes**: demand-first (a
-  live miss enqueues a RateCoverage row — with the waiting lead's email on the funnel path —
-  and is researched within minutes, then the lead gets a "your exact prices are ready" email),
-  weekly refresh of every sheet (pinned skipped), caps of 20/run and 150/day. Seeding (the
-  SEED_TOWNS × services × bands grid plus combos derived from customers/bookings — **the town
-  list is Jake's to curate**) and the weekly report run only at the top of the hour, so a cold
-  miss self-heals in minutes without re-scanning the tables 288×/day or firing the report 12×.
-- **The Monday 10:00 UTC report** is the pricing governance artifact: price moves ranked by %,
-  floors that bound, failing combos, stale rows (>21-day age alert), coverage gaps, weekly
-  research counts. Visibility, not a gate, per the standing rule.
-- Residuals: a live-but-partial sheet (possible only via office edits/legacy data — the engine
-  writes all-or-nothing) re-researches weekly rather than within minutes; the notify list
-  caps at 5 leads per combo; the within-minutes promise slips if the daily research cap is
-  already spent that day.
-
-**One conversion road** (Jake's directive, 17 July: the office-sold quote → e-sign → convert
-branch "can be removed from the code. We should always force the other route (day picked, pays
-by card, schedule)"; suites 367 web / 140 CRM):
-
-- **The office-sold conversion path is gone**: Quote model, `quotePlan`, agreement authoring/
-  sending/voiding, the e-sign flow (SignPage + the agreement-public Lambda, deleted entirely),
-  QuoteSheet, and the convert-lead / + Plan sheets. Every lead converts one way — the funnel:
-  day picked, terms accepted, paid by card, webhook schedules. The Agreement model survives
-  only as the booking's terms-acceptance record (read-only PDFs).
-- **The funnel now converts existing leads instead of duplicating them**: bookingFinalize
-  matches by email (case-insensitive, paginated), flips the lead ACTIVE, fills only blank
-  fields, preserves the original leadSource, and appends the booking + attribution to the lead
-  notes; a matching failure falls back to create with a merge-by-hand ops flag — a paid
-  finalization can never fail on bookkeeping. PENDING LeadPricingRuns flip to WON on
-  conversion (**R73's auto-WON write lands** for the funnel channel).
-- **The lead's page has one affordance**: "Email the booking link" (new `booking-link` email
-  kind → MARKETING_URL/quote) plus the URL rendered for a phone CSR to read aloud; job/plan
-  creation renders only for ACTIVE customers. Thumbtack replies now end at the funnel link —
-  no more scheduling-by-reply promises.
-- **Requirements closed or retired by structure**: **R25 closed** (browser ServicePlan.create
-  removed — no path types a price into a subscription); **R30, R42, R54, R65 retired as moot**
-  (the manual-quote, sign-page, e-sign-consent, and agreement-textarea surfaces no longer
-  exist); **R72's quote-status half retires** with the Quote model (lead follow-ups continue
-  via LeadPricingRun).
-- **Office "Complete without a report" side door closed** (follow-up, compliance): the
-  CustomerDetail "✓ Complete" button (CustomerDetail.tsx:646) let office staff mark any
-  SCHEDULED/IN_PROGRESS job COMPLETED — starting billing and queuing the next visit — with no
-  technician report, i.e. a finished pesticide job with no legal application record (the
-  editable-record gap the R09–R11 work closed, reopened from the office side). Field work now
-  completes only through the tech's `finalizeServiceReport`, which does the identical
-  completion sequence (COMPLETED + billing + next visit) *plus* produces the immutable record.
-  A new defined-and-currently-empty `ADMIN_JOB_SERVICE_TYPES` set is the only thing the office
-  may complete without a report; `completeJob` refuses everything else server-side and the
-  button hides for it. **Jake to name the administrative job types** (non-pesticide tasks with
-  no field visit) — until then, every job completes via a report. Residual: OFFICE holds
-  model-level `Job.update`, so raw GraphQL could still set COMPLETED — same structural-guard
-  follow-up as the customer-status door (route office job writes through guarded mutations).
-- **Customer-status side door closed** (follow-up, same principle): the Customers screen's
-  "+ Customer" button minted an ACTIVE customer directly (Customers.tsx:177,
-  `status: "ACTIVE"`). It is now "+ Lead" and creates a LEAD — so a new customer reaches ACTIVE
-  only through a paid booking (bookingFinalize converts the lead) or a manager-approved legacy
-  migration, never from a staff add with no payment behind it. The reactivate toggle
-  (INACTIVE↔ACTIVE) is unaffected — it is gated to non-LEAD, so it restores an existing
-  customer, it does not create one. Residual: OFFICE still holds model-level Customer
-  create/update, so raw GraphQL could set ACTIVE — the structural server guarantee (a guarded
-  migration mutation, OWNER-only) is the home for the "manager-approved legacy migration" path
-  if the "may only" is ever wanted at the database level rather than the UI.
-- **Deactivation resolves live work — R24 + R07 closed** (Jake's directive, 17 July:
-  "deactivation must resolve future jobs, subscriptions, balances, access, and assigned work —
-  not a simple status switch"; suites 462 web / 147 CRM, adversarially verified 9/9):
-  - **Customer (R24):** `deactivateCustomer` (OWNER/FINANCE) cancels every ACTIVE plan's Stripe
-    subscription (via cancelPlanBilling, which also resolves that plan's queued visits), sweeps
-    remaining future jobs to CANCELED with routes cleared, computes and **reports** the
-    outstanding balance without charging it, then flips INACTIVE **last** — a mid-flow failure
-    keeps the customer ACTIVE, pages the office, and never leaves an INACTIVE-while-still-billing
-    state. `revokePortalAccess` disables the portal login, drops its groups, and global-signs-out;
-    `restorePortalAccess` re-enables it on reactivation. The recurring engine now also skips an
-    INACTIVE customer (defense in depth). The bare `status: "INACTIVE"` UI flip is gone.
-  - **Technician (R07):** `deactivateTechnician` (OWNER) unassigns the tech's future SCHEDULED
-    jobs back to the reassignment pool, disables + global-signs-out + drops the TECH group (a
-    fired employee loses the whole customer book in that call), flips `active:false`, and pages
-    the office with the reassignment count. The bare `active:false` UI flip is gone; the control
-    is OWNER-gated with an ask-the-owner line (R27 pattern).
-  - Residuals: the portal-revoke is a UI-chained second call after the money teardown (a network
-    gap can leave INACTIVE + live portal login, retryable — low severity, portal reaches only the
-    customer's own records); a strictly-past still-SCHEDULED job stays pinned to an offboarded
-    tech (history-side, not dispatchable); and — same class as the other doors — FINANCE/OFFICE/
-    OWNER still hold model-level Customer/Technician update, so raw GraphQL could bare-flip status
-    outside the mutation. The structural close (drop model update, route all status writes through
-    guarded mutations) is the shared follow-up.
-- **Money-out recovery lifecycle — R02 + R31 + R52 + R78** (Jake's directive, 17 July: open
-  invoices and failed payments get "due dates, customer payment links, settlement against an
-  existing invoice, retry cadence, reminders, aging, dispute deadlines, and ownership"; suites
-  534 web / 185 CRM, adversarially verified per layer):
-  - **Settlement + due dates (R31):** `settleInvoice` (OWNER/FINANCE) marks an existing OPEN/
-    FAILED invoice PAID — OFFLINE (cash/cheque/transfer, actor + note) or CARD — refusing a
-    VOID/DRAFT/already-PAID row and an offline settle while a card/bank charge is in flight.
-    `recordOfflinePayment` raises an invoice-for-later with terms (Due-on-receipt/Net-15/Net-30 →
-    due date) and a PO. The check-paying HOA/commercial segment finally has a settle path.
-  - **Customer payment links:** the portal gives every OPEN/FAILED invoice a "Pay $X now" button
-    (`payInvoice`, charging the customer's own saved card, authorized against the invoice's own
-    customerId so A can't pay or probe B's); a decline reads as FAILED, never a false "paid".
-  - **Disputes + deadlines (R02):** `charge.dispute.created` (was `default:break`) creates a
-    read-only Dispute row with Stripe's evidence deadline, links customer/invoice, dedupes by
-    dispute id, and pages the office ACTION-REQUIRED with the deadline + dashboard link; `.closed`
-    records WON/LOST; the Dashboard shows a disputes queue. **Ops: register the two dispute events
-    on the Stripe webhook endpoint.**
-  - **Dunning + suspension (R02):** a failed subscription payment stores the real decline reason,
-    emails the customer the amount + reason + pay link, pages the office, and **suspends the plan
-    from dispatch immediately** (recurring.ts skips a delinquent plan — the dispatch-to-non-payer
-    leak is closed); a successful Stripe retry (`invoice.paid`) lifts it. Subscription retries are
-    left to Stripe; our cron's card-retry cadence runs only on standalone invoices — a deliberate
-    fix for a double-charge/desync bug the verifier caught (our cron + Stripe both charging the
-    same card, our success never settling the Stripe invoice).
-  - **Reminders + aging (R52):** due-soon (T-3) and overdue customer reminders with the pay link,
-    an office AR-aging digest and Dashboard summary (current/1-30/31-60/61-90/90+, identical
-    buckets both sides), and dispute-deadline alerts.
-  - **Ownership (R78):** `assignRecoveryOwner` stamps the caller ("Assign to me"); the Dashboard
-    "Recovery queue" sorts most-urgent-first with SLA + owner.
-  - Follow-ups: standalone one-time invoices have the cron retry machinery but it isn't armed in
-    production (recovery there is reminder + pay-button driven); the emailed link is the portal
-    page, not a per-invoice deep link.
-
-**AI pricing rearchitecture, `e734ee5` + `fe85d00`** (Jake's directive, 16 July: "absolutely
-everything priced with AI — no other way is acceptable"; suites 364 web / 134 CRM):
-
-- **R63 resolved by reversal**: the LLM market-rate engine is not cut — it is now the ONLY
-  pricing engine. One cached research per service+area+size band returns a full rate sheet
-  (one-time, extra nests, all plan cadences with initial fees, HOA per-unit by unit band);
-  the funnel and the office/Thumbtack engine both price from it. Deterministic survivors, by
-  Jake's explicit choice: the drive-time day-pricing overlay + zone adders (locked decision)
-  and the variable-cost floor. **Clamps and review gates were explicitly declined — there is
-  no upper price bound**; the compensating control is the new-rate office email plus the
-  Market Rates console (full-sheet edit, pin/un-pin — a pinned override never re-researches).
-- **HOA auto-quotes** — the every-HOA-lead-escalates-to-Jake policy is retired (this also
-  resolves section C's "HOA auto-quote threshold": there is none; escalation remains only the
-  research-failure fallback). The two-weeks-off test now passes by construction.
-- **Plan templates retired** (Jake: "simpler is better; production never used") — model,
-  screen, and mutation gone; quotes verify their baseline against the live AI sheet
-  server-side with the deviation guard intact; agreement bodies come from the code template,
-  closing R65's direction for the quote flow. R57's monotonicity suite retired with the
-  hand-priced HOA card it kept honest. Rodent/roach's guard work from R63 is moot (the office
-  override is now the pinned sheet, not a free-text bypass).
-- Residuals now tracked: commercial + mosquito still price from their deterministic cards (no
-  engine service kind yet); plan cadences and HOA rates carry no cost floor (no per-visit cost
-  constants exist — noted on each rate row); CRM quotes don't apply the Zone-B travel adder
-  the funnel applies (product decision needed); template pest photos on e-sign pages died with
-  templates.
-
-**Deploy 41 post-mortem, `7c00031`** (suites 366 web / 134 CRM; deploy 42 carried the fix
-and went green, so the AI-pricing wave is now live on staging):
-
-- Deploy 41 failed at backend synth — after all 364 tests and both type checks passed — with
-  "Object type extension 'Mutation' cannot redeclare field createQuote": the wave's custom
-  `createQuote` mutation shared its name with the create mutation the Quote model's
-  transformer generates. Deploy 40's guard (`tsc -p amplify` inside `npm test`) cannot see
-  this class — the schema is a plain object whose keys never meet until synth. The DEPLOY log
-  is empty; the pipeline never reached the deploy phase, so staging ran the
-  pre-rearchitecture backend until deploy 42 (16 July, 17:47 ET) shipped the wave.
-- The custom mutation is now `quotePlan` end-to-end (schema, crm-docs dispatch, CRM client,
-  tests); the deviation guard is behaviorally unchanged. The generated `createQuote` keeps its
-  name because PriceLeadSheet's direct `Quote.create` is deliberate (the engine's own output,
-  never typed by a human).
-- Same discipline as deploy 40: `npm test` now derives every generated model operation name
-  from the transformed schema and fails on any custom-operation collision
-  (`amplify/data/resource.test.ts`) — proven by reintroducing the collision and watching the
-  test name it.
-
-**Lead-form retirement, `cdc8c18`** (Jake's directive; suites 314 web / 114 CRM):
-
-- The website lead form is gone everywhere (ContactForm + all three LP inline forms); the
-  instant-quote funnel is the site's only intake, with the office phone as the second path. The
-  funnel's CONTACT decision already covered every prospect type the form handled.
-- First-touch ad attribution now rides the funnel: sanitized onto the BookingRequest and
-  surfaced as the customer's `leadSource`/`leadNotes` at finalization — R73's raw material
-  survives the form's removal.
-- The lead-intake Lambda now has **zero site callers** — decommission it (and its Function URL)
-  in a later deliberate pass; R80's "three lead notifications" reduces to the funnel's
-  new-booking + needs-a-call alerts. The lead-form contract section of
-  [public-ui-handoff.md](public-ui-handoff.md) is obsolete.
-- Standing residual now more visible: two office phone numbers in the tree (401 vs 508) — R38's
-  decision. **Phone half resolved (2026-07-17):** Jake confirmed `(508) 258-9294` as canonical;
-  all seven stray `(401) 526-0323` occurrences (QuoteCTA, CancelPage, both BookPage payment
-  failures, and the booking-public + lead-intake Lambda error strings) are unified to it. The
-  other R38 half — printing a real number in transactional emails, PDFs, and the portal (they say
-  "give us a call" with no number) — is untouched.
-
-**Second pass, `00e26a8`** (same verification discipline; suites 262 web / 114 CRM):
-
-- **R04, R06** — completed-but-never-charged one-time jobs and ACTIVE-plans-with-no-next-visit
-  each get a Dashboard queue card and a daily digest that repeats until cleared; "All caught up"
-  requires both empty.
-- **R08 closed in full** — charge path checks work was performed server-side; covering-invoice
-  scan paginates; idempotency key cycles per attempt (a retry can't replay a decline); voiding
-  an OPEN invoice cancels its cancellable Stripe intent or honestly refuses mid-debit.
-- **R21** — unstaffed visits (no route, route gone, deactivated tech) suppress the customer
-  reminder and alert the office by the morning before.
-- **R22** — Schedule board and tech day queries page to exhaustion.
-- **R12** — report drafts persist locally on every edit, restore by content (not clocks), the
-  sync badge never over-claims, and regained signal auto-sends unsent words.
+| ID | Remaining gate | Accountable business owner | Primary seats at risk |
+|---|---|---|---|
+| GL-01 | One truthful, complete service catalog | CEO | Leadership, customer, operations |
+| GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | CEO, sales, customer |
+| GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer, operations |
+| GL-04 | Capacity that cannot be oversold | Head of Operations | Customer, technician, operations |
+| GL-05 | Exactly-once paid booking conversion | CEO + Engineering lead | Customer, operations, finance |
+| GL-06 | Honest handling of processing and failed payments | Finance lead | Customer, operations |
+| GL-07 | One safe office cancel/reschedule workflow | Head of Operations | Customer, finance, operations |
+| GL-08 | Customer self-service plan cancellation | CEO | Customer, operations, finance |
+| GL-09 | Atomic customer and plan lifecycle controls | Head of Operations | Customer, finance, security |
+| GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | Customer, technician, finance |
+| GL-11 | Minimum complete customer/group portal | Head of Operations | Customer, property manager |
+| GL-12 | Dispatch-ready job packet | Head of Operations | Technician, customer, safety |
+| GL-13 | Technician least-privilege and assignment enforcement | CEO | Customer, technician, compliance |
+| GL-14 | Staff identity, linking, and offboarding | CEO | Security, operations |
+| GL-15 | Legally reliable service-report completion | Compliance owner | Technician, customer, operations |
+| GL-16 | Governed pricing and margin protection | CEO + Finance lead | CEO, finance, customer |
+| GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Customer, finance, technician |
+| GL-18 | Verifiable exception resolution | Head of Operations | Leadership, operations |
+| GL-19 | Launch reconciliation and command view | CEO + Finance lead | CEO, leadership, operations |
+| GL-20 | Public promises and legal terms match operations | CEO | Customer, legal, brand |
+| GL-21 | Production accounts, integrations, and live money rehearsal | Engineering lead + Finance lead | Entire business |
+| GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | Entire business |
+| GL-23 | Production master data and launch-day operating model | Head of Operations | Operations, technician, customer |
+| GL-24 | Low-skill usability and role certification | Head of Operations | Every role |
 
 ---
 
-## What "go-live" means
+## Customer acquisition and booking
 
-The public booking funnel opens to the market; the CRM runs daily operations with low-skill
-staff; technicians run their day from the tech app; customers are charged, refunded, and
-notified correctly; and the pesticide licence and payments compliance are protected.
+### GL-01 — One truthful, complete service catalog
 
-The four rules every screen is graded against (unchanged from the July reviews, restated
-because they are the acceptance criteria for everything below):
+**Business outcome:** A customer can never be promised a service the operating system cannot
+price, staff, perform, document, and support profitably.
 
-1. **A money button states the money before it moves.**
-2. **If the label promises something, the code must enforce it.**
-3. **Every real-world outcome gets a button, and the honest button is the easy one.**
-4. **Failure lands in a queue somebody clears to zero, not in a log nobody reads.**
+**Why this is still a gate:** The public site advertises more services than the quote funnel can
+select, while the funnel says every service gets an exact price. Several distinct services collapse
+into broad pricing categories with no approved duration, license scope, or service template.
 
----
+**Required acceptance evidence:**
 
-## A. Go-live blockers reachable today (engineering)
+- The CEO approves one launch catalog that maps every marketed service to all of: supported
+  property types, service area, intake questions, price method, minimum margin, expected duration,
+  required technician credential, job instructions, allowed products, report requirements,
+  cancellation rule, and guarantee/return-service rule.
+- Every public call-to-action has one valid result: a genuinely bookable service, or an honest
+  specialist-review path. It may not send a customer to an option that does not exist.
+- Services not approved for self-serve quoting are clearly labeled for review before the customer
+  supplies payment. “Exact price” and “no callback” language appears only where it is true.
+- Termite, wildlife, exclusion, attic/restoration, mosquito/tick, community, commercial, and other
+  specialized offers are individually approved or removed from launch. They may not inherit a
+  generic service merely because no matching category exists.
+- The same catalog drives marketing, quoting, scheduling duration, technician instructions,
+  reporting, plans, callbacks, refunds, and leadership reporting. A service cannot mean something
+  different in each screen.
+- A test quote for every retained site service reaches the correct price or review outcome, then
+  creates the correct job/plan terms and technician packet.
 
-These run on flows that are live right now — office quoting, e-sign conversion, tech visits,
-CRM billing. Grouped by what they protect.
+**Pass owner:** CEO, with written sign-off from Operations, Finance, and Compliance.
 
-### Money in
+### GL-02 — A lead lifecycle in which no lead can disappear
 
-- **R04 — Every completed one-time job becomes a charge or a queue entry.** Completion calls
-  `startBillingForPlan`, which exits immediately for anything that isn't a recurring-plan job
-  (`crm-docs/handler.ts:700`); the only charge path is a per-customer button no worklist
-  feeds. The recurring side has three backstops; the one-time side has zero — the Dashboard
-  can read "All caught up" while completed, uncharged jobs exist. Work performed must never
-  depend on someone remembering to press Charge. *(medium)*
+**Business outcome:** Every lead always has an accountable person, a next action, and an auditable
+outcome until it becomes a customer or is deliberately closed.
 
-- **R06 — Every ACTIVE plan always has a next visit, or the office is told.** The money
-  direction (serviced-but-not-billing) has an email, a tile, and a daily digest; the service
-  direction (billing-but-never-visited) has nothing, and `Dashboard.tsx:119-124` structurally
-  excludes plan customers from "Needs attention." A customer paying monthly with no visit on
-  the calendar is the highest-harm outcome in the system and a chargeback waiting to happen —
-  and NO_ACCESS deliberately leaves a plan in exactly this state. One widened filter over data
-  already in browser memory. *(small)*
+**Why this is still a gate:** A lead can currently be saved with insufficient contact information,
+has no assigned owner or follow-up deadline, and has no complete stage/lost lifecycle. Duplicate
+people can also be created before the safe paid-conversion path is reached.
 
-- **R25 — No hand-typed price enters a live subscription unguarded.** The quote path got the
-  deviation guard; "+ Plan" and "Convert lead" still take a free-typed monthly price straight
-  into an ACTIVE plan (`CustomerDetail.tsx:1719`) — and billing now auto-starts on completion,
-  so the $4-instead-of-$45 typo goes to the card with no human re-reading it. Same guard, same
-  reason field, same actor stamp as `quotePlan` (né `createQuote`). *(small)*
+**Required acceptance evidence:**
 
-- **R26 — The office "✓ Complete" button discloses that it starts billing.** Its confirm says
-  "the customer won't get a field report"; the server behind it may create a Stripe
-  subscription and take the first monthly charge today. The dedicated Start-billing button
-  spells all of that out; the button that now does the same thing by side effect must say the
-  same words. *(small)*
+- The business approves a small, unambiguous pipeline: at minimum **New**, **Attempting contact**,
+  **Qualified**, **Booking sent**, **Booked/Won**, **Lost**, and **Do not contact**.
+- Every open lead has an owner, created time, last-touch time, next action, and due time. Missing or
+  overdue actions appear in an owner and manager queue; they are not found by browsing a list.
+- A lead cannot be saved without a usable contact route. If incomplete third-party data must be
+  accepted, the save creates a clearly owned “obtain contact information” exception automatically.
+- Email/phone normalization and duplicate detection run before creation. A week-one employee gets
+  a simple **Use existing**, **Create separate**, or **Ask manager** decision with enough context;
+  the system never silently merges people.
+- Every call, email, text, and booking-link attempt records time, channel, actor, and actual outcome.
+  A failed delivery does not count as a successful touch.
+- Lost leads require a controlled reason. Do-not-contact immediately suppresses non-essential sales
+  outreach and records who made the decision.
+- The CEO sets response and follow-up SLAs by lead source. The launch rehearsal proves a new lead,
+  failed contact, overdue follow-up, duplicate, booking, and lost lead all land in the correct queue.
+- The CEO explicitly decides how phone-only and non-card customers are handled. If they are not a
+  supported launch segment, staff receive a truthful close reason instead of a dead-end conversion
+  path. If they are supported, the approved path retains the same pricing, terms, identity, and
+  audit controls as self-service booking.
 
-- **R30 — A manual quote carries the initial fee and signing always creates the first
-  visit.** `QuoteSheet` never sends `initialFeeCents` (the mutation already accepts it), so
-  every phoned-in recurring quote silently drops the $99/$124 fee — and because job creation
-  is coupled to the fee, signing dispatches nobody. Zero-fee plans (mosquito) can bill monthly
-  with no visit ever queued and no queue catches it. Decouple the visit from the fee. *(small)*
+**Pass owner:** Head of Sales.
 
-- **R31 — An invoice raised for later payment can be settled.** `recordOfflinePayment` can
-  only create an already-paid row; nothing marks an OPEN invoice paid when the check arrives —
-  the only button an OPEN invoice offers is Void. The check-paying HOA/commercial segment
-  additionally needs terms/due-date/PO and a send-invoice collection path; today a Stripe-
-  dashboard invoice is silently dropped by the mirroring webhook, so the workaround corrupts
-  the ledger. *(medium)*
+### GL-03 — Honest fallback contact and communication outcomes
 
-- **R08 — Money fields change only through guarded server actions.** TECH holds model-level
-  `update` on Job — including `priceCents`, `paidAt`, and `status` — so any tech token can
-  make a job free or "already paid" via raw GraphQL with no audit row; and `chargeOneTimeJob`
-  never checks job status server-side, so a NO_ACCESS or SCHEDULED job can be charged in full.
-  The fryer timer goes in the fryer. *(medium)*
+**Business outcome:** Customers are told what will actually happen, and staff never see a success
+message for a communication that was not delivered.
 
-### Money out and the customer's view of money
+**Why this is still a gate:** The quote fallback promises a call even when phone is optional, and
+some CRM communication actions can return a non-delivery result while the screen presents success.
 
-- **R02 — Disputes, dunning, failed-payment recovery.** `charge.dispute.created` falls through
-  to `default: break` — an unanswered dispute is auto-lost, ~$15 fee, counts toward the ratio
-  that puts merchants in monitoring programs. Failed subscription invoices discard Stripe's
-  real decline reason, email nobody, and the portal renders the debt read-only with no Pay
-  button. Meanwhile `recurring.ts:57` keeps dispatching techs to non-paying customers because
-  no plan state means "the card died." Every dollar that fails needs exactly one person told
-  and exactly one button to fix it. *(large)*
+**Required acceptance evidence:**
 
-- **R03 — A subscription dying at Stripe tells the office the same day.** The
-  `customer.subscription.deleted` handler flips the plan and returns — no email, no retention
-  queue entry, and it strands the already-queued next visit, which the Schedule pool will
-  cheerfully route as a free service call while suppressing the one Dashboard card that could
-  have caught the customer. Losing a recurring customer must never be a silent database
-  update. *(small)*
+- A quote that needs human review captures a usable preferred contact channel. If a call is
+  promised, a valid phone number and call consent are required; otherwise the promise says email.
+- The customer sees a specific response window the sales team has accepted and can meet during
+  published business hours. After-hours submissions receive a truthful next-business-window time.
+- Every send action branches on the delivery result: **sent**, **not sent—fix this now**, or
+  **queued for retry**. Only the first state can display “sent.”
+- Bounce, suppression, missing mailbox, and provider failure create an owned exception tied to the
+  lead/customer and expose an approved alternate-contact next step.
+- A test using an invalid address and a suppressed address proves that neither the customer record
+  nor the employee screen falsely records successful contact.
 
-- **R05 — Cancelling a plan resolves its queued visits, on every cancel path.** All three
-  paths (office, customer self-cancel, Stripe webhook) leave the auto-queued next visit alive;
-  reminders still fire, techs still dispatch, and the visit completes unbillable and silent —
-  the not-billing digest scans only ACTIVE plans, so the free visit triggers nothing anywhere.
-  *(small)*
+**Pass owner:** Head of Sales.
 
-- **R13 — Every charge and refund generates a customer notice.** The funnel's own emails
-  prove the pattern (payment confirmation with amount; cancel email with refund amount and
-  timing); the CRM and subscription paths — one-time charge, manual charge, monthly
-  settlement, refunds from either origin — email nothing and set no `receipt_email`. A charge
-  the customer can't recognize is a dispute; R02 makes disputes auto-lost. Wiring, not new
-  capability. *(small)*
+### GL-04 — Capacity that cannot be oversold
 
-- **R19 — Cancelling or moving a paid/scheduled visit settles the money and tells the
-  customer.** The office cancel is a bare `Job.update(CANCELED)` behind "Cancel this job?" —
-  no refund per policy, no email, while the same row shows a "paid $299 online" badge.
-  Reschedule and board-assign re-date visits silently. The rev-1 script stands: *"This visit
-  was paid $299 on 7/12. It is 15 days out — cancelling refunds $299 in full. Continue?"*
-  *(medium)*
+**Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
+cannot buy the same last unit of capacity.
 
-- **R24 — "Mark inactive" actually stops service, or is blocked while a plan is live.** The
-  red button a new hire will press when a customer says "stop my service" flips a status flag:
-  the Stripe subscription keeps charging and the recurring engine keeps queueing visits,
-  because nothing reads customer INACTIVE. *(small)*
+**Why this is still a gate:** Public availability is based on a coarse active-technician/day count,
+offers capacity even with no active technician, and only rechecks availability before payment. It
+does not reserve the slot while payment completes.
 
-### The licence: pesticide-record residuals
+**Required acceptance evidence:**
 
-The record itself is now server-enforced and immutable — these are the last four gaps between
-"much better" and "survives an MDAR inspector."
+- Sellable capacity uses the technician's actual working day, approved leave/blackouts, credential
+  validity on the service date, service duration, service territory, travel allowance, and time
+  window. Zero eligible technicians means zero sellable dates.
+- Capacity rules are the same in the public funnel and the dispatch board. A day/window cannot be
+  “available” to the customer and over capacity to Operations.
+- Selecting checkout places a short, visible capacity hold. A successful payment consumes it;
+  abandonment, failure, and expiry release it. The CEO approves the hold duration.
+- A concurrency test starts two purchases for the last slot. Exactly one may be booked; the other
+  receives a truthful alternate-date/refund outcome without manual database repair.
+- Operations can block a day, technician, territory, or window and can see why a date is or is not
+  sellable. Removing capacity immediately protects all unconsumed public slots.
+- The system prevents staffing a service outside the assigned technician's active license/scope,
+  even if the slot was quoted earlier.
 
-- **R09 — Application times are server-stamped.** `startedAt` is written by a plain client-side
-  `Job.update` with a browser-supplied timestamp (any TECH token can rewrite it pre-finalize),
-  and `applicationEndAt` is stamped at *finalize* time — a report written up the next morning
-  records the wrong end time, the same defect class just fixed for the start. Also refuse
-  finalize on a SCHEDULED job where `startedAt` is null. *(small)*
+**Pass owner:** Head of Operations.
 
-- **R10 — No record finalizes without an applicator licence number.** `licenseNumber` /
-  `licenseExpiresOn` exist in the schema and are dead columns: no form writes them, no screen
-  shows them, finalize never checks them, and the PDF silently omits the licence line when
-  null — which today is always. Needs: an office input, a finalize gate, and an expiry
-  warning. (The deploy note in `6297c0a` planned exactly this two-step; this is the second
-  step, plus the ops half in section D.) *(small)*
+### GL-05 — Exactly-once paid booking conversion
 
-- **R11 — Label facts are entered once by the office and prefilled, never recalled from
-  memory.** `Product.defaultRate` and `reEntryHours` are dead schema fields: the office
-  product form neither captures nor validates them (EPA format is checked only at finalize, on
-  site, where the tech can't fix a catalog typo), picking a product carries neither rate nor
-  REI, and **rate/dilution is uncapturable end-to-end** — the PDF's "Rate:" line is always
-  absent. The re-entry interval is currently answered from the tech's memory of the label.
-  *(medium)*
+**Business outcome:** One successful payment produces exactly one complete customer commitment—no
+duplicate plans/jobs, no paid customer without a visit, and no confirmation before the facts exist.
 
-- **R15 — Legal-record artifacts survive the retention window.** Browser roles hold unused S3
-  read+write grants on `reports/*` and `agreements/*` (a second write path that could overwrite
-  finalized PDFs — remove it or version the bucket), and OFFICE can hard-delete Customers,
-  Jobs, and Technicians that finalized records reference. *(small)*
+**Why this is still a gate:** Booking finalization performs several dependent record and document
+steps. A mid-sequence failure can be retried from the beginning, create duplicates, or mark the
+booking complete even when a required child record was not created.
 
-- **R12 — A technician's typed report survives a dead battery and a dropped connection.** The
-  entire report lives in React state; the service worker ignores cross-origin POSTs; there is
-  no draft cache, no queue, no offline banner. This is the durability gap that *manufactures*
-  compliance gaps: techs who lose work twice write reports at night, and night-written records
-  carry wrong times. *(medium)*
+**Required acceptance evidence:**
 
-### People and access
+- A successful payment reaches **Booked** only when the correct customer, job, accepted terms,
+  invoice/payment record, and—when sold—service plan all exist and agree on
+  identity, service, price, and date.
+- Retrying any finalization step resumes the same business transaction. It never creates a second
+  customer, plan, job, agreement, invoice, capacity claim, or confirmation.
+- No “you're booked,” “paid,” receipt, or internal sale notification is sent before the complete
+  booking commitment exists. Each communication is itself retry-safe.
+- Any partial failure leaves a visible **Paid—not finalized** exception with amount, customer,
+  selected date, failed step, age, and one safe recovery action. It never relies on a log search.
+- Recovery either finishes the original booking or performs an approved refund/reselection flow;
+  it cannot ask staff to recreate records by hand.
+- Failure injection proves recovery after each material step, including customer/plan/job creation,
+  accepted-terms document storage, invoice recording, and email delivery.
+- A reconciliation test confirms every successful booking payment has exactly one complete booking
+  and every complete paid booking has exactly one matching payment.
 
-- **R07 — Offboarding exists.** There is no disable-user, no group removal, no sign-out
-  anywhere in the tree. "Deactivate technician" flips a flag that hides the tech from the
-  office while their login still resolves routes, the full customer table (including billing
-  addresses and card metadata), and every report/agreement PDF via the staff bypass — and
-  their assigned future jobs render on no office surface at all. A fired employee must lose
-  access in minutes, and their jobs must surface for reassignment. *(medium)*
+**Pass owner:** CEO and Engineering lead jointly; Finance verifies the reconciliation.
 
-- **R27 — Every invite button an office employee can see works for them.** `adminCreateUser`
-  is OWNER-gated (deliberately), but "Invite to portal," "Resend invite," and the
-  new-technician invite checkbox render for all office staff and always fail server-side with
-  a raw "Not Authorized" — training staff that errors are normal, and in the technician case
-  leaving a half-created record. Gate the UI to who can actually do it, or add a narrow
-  OFFICE-safe path. *(small)*
+### GL-06 — Honest handling of processing and failed payments
 
-### Field operations and dispatch
+**Business outcome:** A customer is never told they are booked or paid while the payment can still
+fail, and Operations never dispatches an unconfirmed payment as if it were settled.
 
-- **R20 — NO_ACCESS creates office work that can actually be executed.** The honest exit now
-  exists for the tech; the office half doesn't. The email says "rebook it, charge a no-access
-  fee, or let it go," but the linked screen renders no reason, note, or photo; the door photo
-  is **unviewable through any code path in the tree** (`getDocumentUrl` rejects `jobs/` keys);
-  rebooking has no guarded control (board Assign silently erases the exception status); and
-  from the next day the job appears on no operational surface. An email is not a queue.
-  *(medium)*
-  **PARTIALLY RESOLVED (2026-07-17) — immutability + guarded rebook.** A NO_ACCESS (or CANCELED)
-  visit is now a terminal, immutable record: ASSIGN no longer flips it back to SCHEDULED or clears
-  its reason/time/note/door-photo. Rebooking is a new guarded mutation (`rebookJob`) that creates a
-  fresh UNSCHEDULED Job carrying `rebookedFromJobId` back to the original, so the evidence survives
-  and the new attempt is a distinct linked visit. The board offers a **Rebook** control (not Assign)
-  on no-access stops in the pool; the owned-work queue carries the reason/note, deadline, owner,
-  and rebook-or-disposition action until it is resolved. *Still open under R20:* the door photo
-  remains unviewable (`getDocumentUrl` rejects `jobs/` keys), so the visual-evidence half is not
-  complete yet.
+**Why this is still a gate:** A payment in `processing` can currently produce “You're booked” and
+“paid today” language even though final booking creation waits for a later success event.
 
-- **R21 — No customer reminder for a visit nobody is staffed to make.** The reminder cron
-  filters on status alone; jobs assigned to a deactivated tech, or dated with no route, still
-  email "BuzzKill is scheduled to visit tomorrow." By the evening before, every dated job is
-  on an active tech's route or the office is told. *(medium)*
+**Required acceptance evidence:**
 
-- **R22 — Job-list queries paginate.** The Schedule pool and the tech's day view each read one
-  filtered scan page (limits 500/200, filter applied post-scan, no routeId index); past that,
-  stops silently vanish from the board and the truck. The `listAll` helper exists and is used
-  by six other screens. *(small)*
+- The CEO chooses which payment methods are allowed to finalize instantly and which require a
+  **Payment processing—slot held, not yet booked** state.
+- Processing copy states what is reserved, what is not yet confirmed, when the customer will hear,
+  and what happens if payment fails. It never uses “paid” or “booked” prematurely.
+- Success finalizes the held booking once. Failure/timeout releases capacity, informs the customer,
+  and records the lead/customer outcome without creating a service commitment.
+- Operations can distinguish **processing**, **paid/finalizing**, **booked**, and **failed** without
+  interpreting Stripe terminology.
+- Tests cover delayed success, delayed failure, duplicate events, events delivered out of order,
+  and a payment that succeeds after its capacity hold expired.
 
-- **R23 — The Schedule board can't rewrite job history.** Unassign (✕) acts on any stop,
-  including COMPLETED (finalized report, billing started) and IN_PROGRESS (tech on site),
-  flipping it back to UNSCHEDULED unconfirmed — status is what billing, the recurring engine,
-  and the pesticide record all key off. *(small)*
-  **RESOLVED (2026-07-17).** `assertJobCanBeScheduled` now blocks every terminal status —
-  COMPLETED, IN_PROGRESS, NO_ACCESS, and CANCELED — so no ASSIGN/UNASSIGN/REORDER/CANCEL/
-  RESCHEDULE operation on `updateJobSchedule` can repurpose a finished record. The board mirrors
-  the guard with block-notes (`unassignBlockedNote`/`assignBlockedNote`) instead of a working ✕
-  or Assign. Server tests in `crm-docs/compliance.test.ts`; UI-note tests in
-  `apps/crm/src/lib/unassignStop.test.ts`.
-
-- **R28 — The tech knows what the business knows at the doorstep.** The tech job screen
-  renders service type, window, address, phone, and machine-generated notes; `Customer.notes`
-  (gate codes, pets, "aggressive dog") is TECH-readable in the model and never rendered, and
-  the office job form has no instructions input. A tech arriving blind is a preventable
-  NO_ACCESS or a safety incident. *(small)*
-
-### Contracts, policy, privacy — the live halves
-
-- **R17 — One cancellation policy, one source, four readers.** Live today: the published ToS
-  says 24-hour notice while the agreement template says 30 days — and clause 5 of the same
-  contract says bare "written notice." (The funnel's 3-day rule and checkout disclosure are
-  gated behind section B, but the constant is duplicated in two Lambdas already.) Ambiguity is
-  construed against the drafter; pick one policy per product line, define it once, import it
-  everywhere. *(medium)*
-
-- **R16 — Online enrollment gets online cancellation (ROSCA).** Customers enroll in recurring
-  billing via an emailed e-sign link today, and no electronic stop mechanism exists anywhere —
-  the portal's only actions are card updates; `cancelSubscription` is OWNER/FINANCE-only. The
-  FTC's click-to-cancel expectation is simple: enrolled electronically → can stop
-  electronically. *(medium)*
-
-- **R18 — The privacy policy describes only practices that exist; session replay is consented
-  or gone.** Clarity records every visitor (including lead forms where people type name,
-  phone, address) with no consent gate, while the policy promises a cookie banner that doesn't
-  exist, an unsubscribe link no email carries, and a full SMS program with zero SMS capability
-  in the tree. The cheapest compliant posture is to pull the tag until the site overhaul ships
-  its banner; at minimum, cut the false sections. This page is where paid ads send
-  Massachusetts consumers. *(small)*
+**Pass owner:** Finance lead.
 
 ---
 
-## B. Go-live blockers gated on opening the funnel
+## Customer, plan, and service lifecycle
 
-The funnel backend is built and tested; nothing links to it (`bookingApiUrl` has zero
-consumers). These must land **with or before** the public pages — they have no live victims
-today and become live the moment `/book` ships. The separate engineer who owns the public UI
-should treat this list as the integration contract, alongside
-[public-ui-handoff.md](public-ui-handoff.md).
+### GL-07 — One safe office cancel/reschedule workflow
 
-- **R01 — The public `/book`, `/quote`, and `/cancel` pages exist and every emailed URL
-  resolves.** The confirmation email already links `/cancel?token=…`, which no route serves;
-  the funnel's only customer-reachable refund path sits behind that dead link. A customer who
-  can't cancel the way their receipt says will use the bank's dispute button instead. *(large)*
-- **R29 — `/book` re-checks live availability before taking money.** Booking validates only
-  against the 24-hour-old quote snapshot; every holder of a live quote can book the same last
-  slot. Re-read the day, re-run capacity/feasibility, return "day no longer available" —
-  honoring the quoted price, not repricing. (Verification note: do **not** cut the
-  route-minutes feasibility block or the route-density modifier as rev-1 suggested — both
-  implement Jake's locked drive-time capacity/pricing decision.) *(small)*
-- **R17 (funnel half) — the checkout renders the cancellation policy above the pay button and
-  records the acknowledged version, timestamp, IP, and user-agent.** Today `/book` requires
-  `tcAccepted: true` while no response ever carries any terms — an acceptance of nothing.
-- **R59 — Zone UNKNOWN never produces a bookable price.** A Routes-API outage or expired key
-  currently reprices the whole funnel as Zone B silently; route UNKNOWN to the existing
-  callback path and alert the office. (The office-side pricing path already handles UNKNOWN
-  correctly — the gap is only in `booking-public`.) *(small)*
-- **R60 — Rodent/roach quotes carry the Zone-B adder** like general pest and wasp already do;
-  an 89-minute drive must not price like a 10-minute one. *(small)*
-- **R62 — Day-price discounts floor at cost, not at 85% of list.** A Zone B rodent quote at
-  the $199 clamp floor discounts to $169 against ~$236 of variable cost — a guaranteed loss on
-  every discounted booking of that shape. Reuse `oneTimeGrossProfitCents`, adding the missing
-  service→cost-kind mapping so the floor actually binds. *(small)*
-- **R63 — Decide the LLM market-rate engine: replace with rate-card rows, or guard it.** Jake
-  has priced rodent and roach by hand for years; hand-priced sqft-banded rows are cheaper,
-  instant, consistent, and explainable. If it stays: clamp the office override (it currently
-  bypasses the $199–$2,500 clamp entirely via a free-text money field) and fix the `tidy()`
-  wasp-band floor dip. *(medium)*
-- **Public-site truth items** (owned by the site overhaul, per
-  [public-ui-handoff.md](public-ui-handoff.md)): ~~the Customer Login links point at
-  decommissioned FieldRoutes (needs `VITE_PORTAL_URL`)~~ **fixed 2026-07-17** — both Header and
-  Footer now read a single-sourced `PORTAL_URL` (`src/lib/portal.ts`, overridable via
-  `VITE_PORTAL_URL`, defaulting to the prod CRM app `main.d5ln2hbbp9s2j.amplifyapp.com`); and the
-  office payment-request / failed-payment / open-invoice emails now link the real `/portal/billing`
-  route instead of the dead `/billing` (which redirected to portal home). Still open: four pages
-  advertise self-service that doesn't exist; statistics and licence-status claims need sourcing or
-  removal. **Console follow-up:** set `VITE_PORTAL_URL` per environment in the marketing app's
-  Amplify build env (staging → the staging CRM URL) so staging QA points at the staging portal.
+**Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
+plan, capacity, route, and customer-notification consequences in one guided action.
 
----
+**Why this is still a gate:** The office job controls change schedule state directly and do not
+provide a unified refund/credit decision, recurring-plan effect, or guaranteed customer notice.
 
-## C. Decisions only Jake can make
+**Required acceptance evidence:**
 
-No further review resolves these. Two of them block work that is otherwise ready.
+- Before confirmation, the employee sees customer, visit, amount paid/open, policy deadline,
+  calculated refund/credit/fee, plan consequence, route consequence, and exact notice to be sent.
+- The allowed choices are plain business decisions such as **Reschedule**, **Cancel and refund**,
+  **Cancel and retain approved credit**, or **Manager exception**. Staff never calculate an amount.
+- One confirmation performs all approved consequences. If any consequence fails, the screen does
+  not claim completion and the case stays in an owned exception with a safe resume action.
+- Rescheduling revalidates capacity and technician license, moves the capacity claim, updates the
+  route, and notifies the customer with old and new details.
+- Cancellation records initiator, reason, policy used, amount and disposition, timestamps, and the
+  customer communication result. Recurring-plan cancellation is never implied by canceling one
+  visit unless the employee explicitly chooses it.
+- Tests cover paid/unpaid, one-time/recurring, inside/outside policy, assigned/unassigned, refund
+  failure, notice failure, and two employees acting on the same visit.
 
-1. **R32 — Does a seasonal plan bill six months or twelve?** *(Blocking — reachable today.)*
-   The office can sell "Mosquito plan (May–Oct)" right now as an open-ended monthly
-   subscription with no end condition; the recurring engine will queue a November visit after
-   the October completion. Charging $139 in January for a winterless service is a guaranteed
-   refund demand every winter. Either answer is defensible; `ServicePlan` needs the end/season
-   condition either way.
-2. **R33 — Does a no-access fee exist, and how much?** The NO_ACCESS office email invites
-   "charge a no-access fee"; no customer document mentions one. First use is an undisclosed
-   charge on a stored card — chargeback plus MA 93A exposure. Decide, then either put it in
-   the agreement and checkout terms with an amount, or stop inviting the office to charge it.
-3. **R34 — What is the true loaded labour rate, and what is the drive convention?**
-   `LABOR_PER_HR = 42` with no burden factor (loaded pest-control labour runs 1.25–1.4× bare),
-   one drive leg per job. The 3× lead-fee test — the only automated profitability gate — runs
-   on these constants today for every priced Thumbtack lead. Name the numbers; engineering
-   documents the basis in one constants file.
-4. **HOA auto-quote threshold.** The rate card prices associations correctly and the
-   escalation email now includes the computed quote — but *every* HOA lead still escalates to
-   Jake by policy (`rateCards.ts:198-199`). Name the contract value above which Jake must
-   personally look, and everything below it quotes same-day without him. This is the
-   two-weeks-off item.
-5. **R35 — What is the add-a-service-at-the-door channel?** A tech-screen control feeding an
-   office queue, or a documented call-the-office process — Jake picks the scope. What cannot
-   stand is on-site upsell requests living in the tech's memory.
-6. **RI licensure question** (from the site handoff): do technicians hold RI applicator
-   licences, or only the company registration? The city pages currently claim the former.
+**Pass owner:** Head of Operations; Finance approves money dispositions.
 
----
+### GL-08 — Customer self-service plan cancellation
 
-## D. Console and process gates (no code, or one flag flip)
+**Business outcome:** A recurring customer can stop future service and billing online without
+calling, while seeing the exact consequence before confirming.
 
-- **R81 — Rotate the Buildium client secret. Today.** It is hardcoded in
-  `apps/web/scripts/sync-buildium.ts:23` and has been in the history of the **public** GitHub
-  repo since April. Rotation at the vendor is the only real fix; deleting the fallback line is
-  the trivial second step. This credential fronts a partner system holding HOA resident PII.
-- **R82 — Verify the Stripe webhook registrations include `charge.refunded`.** Both live and
-  test endpoints were registered 2026-07-14 with six events — before the handler gained
-  `charge.refunded`. Without it, every dashboard-issued refund counts as revenue forever.
-  Update the six-event list in [crm-setup.md](crm-setup.md) in the same pass, and register
-  the main-branch webhook when main's backend deploys (none exists yet).
-- **Complete the Stripe billing smoke test.** Per [crm-setup.md](crm-setup.md) the
-  SetupIntent → Start billing → charge → webhook-settlement path has never been exercised with
-  real keys (staging = test mode, `4242` works there). Go-live on an untested money path is
-  not go-live.
-- **Enter every technician's applicator licence number, then flip the finalize requirement
-  on** (pairs with R10 — the deploy note in `6297c0a` explicitly stages this two-step).
-- **R83 — Provision a second OWNER.** The product fully supports it (More → Invite → role
-  "Owner"). With one OWNER account, staff provisioning and any charge over $5,000 block on
-  Jake's login being reachable. Document the AWS-CLI break-glass path in crm-setup §5.
-- **Set `VITE_GOOGLE_MAPS_API_KEY` on the CRM app** (reserved to Jake) and rebuild — address
-  autocomplete is degraded until then.
-- **R80 — Stand up the sales@ lead inbox** and route the three lead notifications plus the
-  new-booking alert to `SES_LEADS_EMAIL`; money/ops alarms stay on info@. If SES is still
-  sandboxed, verify sales@ as a recipient first or lead alerts silently vanish. *(Small
-  engineering change + mailbox setup; the notification email address is currently info@ for
-  everything.)*
-- **Custom domain / `CRM_APP_URL`** when the CRM gets its real domain — it is baked into
-  agreement links, portal links, and invite emails.
+**Why this is still a gate:** The portal does not currently provide an ongoing plan-cancellation
+path even though public language promises cancellation flexibility.
 
----
+**Required acceptance evidence:**
 
-## E. Required before scale — not go-live gates
+- An authenticated customer can cancel an active plan from the portal in a short, accessible flow.
+- The confirmation preview states the effective date, final charge/refund/credit, treatment of
+  queued visits, loss of guarantee/coverage, and whether any already-paid visit remains.
+- Cancellation reason is optional for the customer and must never block cancellation. A pause or
+  save offer may be presented once but cannot obscure or delay the cancel action.
+- One confirmation stops future billing and visits, preserves required records, frees capacity,
+  updates plan/customer views, and sends a durable confirmation.
+- A failure does not show cancellation. It creates a customer-visible pending state and an urgent
+  owned exception so the customer is not billed while believing they canceled.
+- Tests cover no queued visit, queued visit, open/failed invoice, pending payment, duplicate clicks,
+  and provider/API failure.
 
-Ranked within group. Everything here was code-verified this round; none of it has a live
-victim big enough to hold the launch, and all of it compounds with customer count.
+**Pass owner:** CEO, with Finance and Operations approval.
 
-### Money visibility and growth (the CEO's screen)
+### GL-09 — Atomic customer and plan lifecycle controls
 
-- **R36 — Dashboard states contracted MRR and dollars-at-risk**, plus lifetime-paid on the
-  customer record. "Active plans with no subscription, in dollars" is the report Stripe
-  structurally cannot produce. *(small)*
-- **R51 — Operational KPIs**: jobs completed by tech, no-access rate, lead→customer
-  conversion. Lead outcomes never move automatically today (everything stays PENDING), so the
-  Thumbtack-ROI question remains unanswerable — pairs with R73. *(medium)*
-- **R73 — Attribution closes its own loop**: enum the lead source, auto-flip pricing runs to
-  WON on convert/sign/finalize, sum lead-fee spend vs won revenue by source. All schema fields
-  already exist; the fix is writes plus a group-by. *(medium)*
-- **R72 — Quotes don't rot**: "Quotes waiting" card, 2-day/7-day follow-ups on the existing
-  cron, EXPIRED/DECLINED statuses — and a reader for the agreement `viewedAt` timestamp, the
-  single best follow-up cue, currently read by nothing. *(medium)*
-- **R71 — Prices can be raised on existing customers**: re-price in place with an explicit
-  proration choice, plan record and Stripe updated together, audit row, advance notice — and
-  the agreement template needs a price-change clause (its 30-day term covers cancellation
-  only). Today the only path is cancel-and-recreate, which double-charges inside a paid month.
-  *(medium)*
-- **R52 — Month-end close**: invoice/refund registers and AR aging as files for a fixed
-  period; refunds currently restate closed months silently. *(medium)*
-- **R49 / R50 — Money actions answer "who did this" on screen.** Actor stamps are already
-  captured tamper-proof on every charge, refund, and void — and read by nothing; likewise
-  `priceOverrideReason` has zero readers, so pricing governance is a write-only text field.
-  Render them. *(small)*
+**Business outcome:** Customer status, login access, billing, and scheduled work can never disagree,
+and routine staff cannot bypass the approved lifecycle with a raw field change.
 
-### Retention and the customer's side
+**Why this is still a gate:** Customer deactivation and portal revocation are separate client
+actions; rebooking an inactive customer can leave a paid customer with disabled access; and broad
+record-update permissions can bypass guarded status, plan, pricing, or provider-linked workflows.
 
-- **R69 — Cancellation reason + pause-first retention.** One cancel action all paths route
-  through, required reason picker, pause offered first; cancel is currently a one-way door
-  whose recovery re-triggers the $99 fee decision. *(small)*
-- **R68 — Callbacks modeled.** Clause 4 of every signed agreement promises free re-treatment;
-  a covered re-visit is currently unlabeled, unlinked, and the New-job form defaults to
-  "billed separately" — charging a covered customer is the default failure mode. A zero-priced
-  CALLBACK type with an `originalJobId` link also unlocks the callback-rate quality metric.
-  *(medium)*
-- **R37 / R38 / R39 — The customer hears from the system**: a no-access visit notifies the
-  customer (today: reminder yesterday, silence today, surprise fee later — and the portal
-  hides NO_ACCESS jobs entirely); every surface carries a real phone number (two different
-  numbers exist in the tree today, neither shown to customers); phone-only customers stop
-  silently receiving nothing — a no-email customer's pesticide record is currently
-  undeliverable and nobody is told, while the tech app still says "emailed to the customer."
-  *(small/medium)*
-- **R41 / R40 — The portal is reachable and worth reaching**: provision access automatically
-  at conversion or stop asserting it in emails (the service-report email promises "your
-  BuzzKill portal" to customers who were never invited); the HOA group view gains documents
-  and amounts — the entitlement layer already authorizes it, the screens never ask. *(medium)*
-- **R42 / R48 — No dead ends in customer flows**: the sign page claims "a copy has been
-  emailed" unconditionally (return and branch on the real send flag; offer a download link);
-  the payment-request email goes only to customers who can sign in, and its link lands on the
-  billing screen (today it points at a route that doesn't exist). *(small)*
+**Required acceptance evidence:**
 
-### The technician's day
+- **Deactivate customer** is one server-owned business action covering plan billing, queued visits,
+  open balances, customer login, communications, and status. A partial failure resumes safely.
+- Rebooking/reactivating an inactive customer explicitly restores the approved access and service
+  state before confirmation, or blocks purchase with a truthful assisted-resolution path.
+- Statuses, plan price/status, Stripe identifiers, access groups, paid state, and other protected
+  lifecycle fields can change only through named business actions with validation and audit. Office
+  screens retain only safe contact/address/note edits.
+- Two employees performing conflicting lifecycle actions cannot produce mixed state; the second
+  receives the current fact and one safe next step.
+- Every transition records actor, timestamp, reason, prior state, new state, and related money/job
+  effects. Leadership can retrieve the history without engineering assistance.
+- Tests cover deactivation with active plan/queued visit/open invoice, partial provider failure,
+  rebooking an inactive customer, reactivation, and attempted direct protected-field updates.
 
-- **R43 — Prior-visit history at recurring stops** — products, areas, no-access history, and
-  the previous tech's notes; today `techNotes` is a write-only channel nobody can ever read.
-  *(medium)*
-- **R44 / R45 / R46 / R47** — "Start job" fails visibly (a silent failure currently costs the
-  legal application-start stamp); a NO_ACCESS stop stays on the day list as the tech's proof
-  of attendance instead of vanishing; a derived one-line payment expectation at the door
-  ("Paid online — collect nothing" / "Covered by their plan" / "Office bills after"); and the
-  unlinked-login empty state points at a flow that actually exists. *(all small)*
+**Pass owner:** Head of Operations; Finance and CEO approve protected fields and transition policy.
 
-### Dispatch
+### GL-10 — Guarantee, callback, and no-access lifecycle
 
-- **R55 — The dispatcher sees the week**, per-tech load across days, pool ordered
-  oldest-due-first with overdue flags — the recurring engine's design assumes "the office
-  places it on the most route-efficient nearby day," which is currently a memory task.
-  *(medium)*
-- **R56 — No dispatch without a service address** — today the first person to learn the
-  address is missing is the tech, mid-route. *(small)*
-- **R67 — Sick-day handling**: an unavailability record, orphaned stops surfaced as "needs
-  re-assignment," reminder suppression, one-action route move, and Deactivate blocked while
-  future work is assigned. (FieldRoutes had this; its absence is a regression the office will
-  hit weekly.) *(medium)*
-- **R70 — Payroll time records**, if techs are W2 hourly: clock in/out on My Day. In an hours
-  dispute the burden falls on the employer who kept no records. *(medium)*
+**Business outcome:** Every public service promise has a defined, measurable operational path, and
+a failed access visit cannot be “resolved” without actually completing the approved customer and
+money outcome.
 
-### Pricing correctness (office paths, live)
+**Why this is still a gate:** Public pages promise return service/guarantees, but the app has no
+distinct linked callback lifecycle. No-access evidence and customer status are incomplete, and the
+resolution can be closed without verifying notification, refund, or rebooking.
 
-- **R57 — Fix the HOA 101+ bracket inversion** (quarterly must never cost more than bimonthly;
-  the per-unit series says the bimonthly cell is the anomaly — likely ~$230, not $150 — check
-  the Thumbtack spec) and add the monotonicity test; crm-pricing has no test file at all.
-  *(small)*
-- **R58 — Stop quoting a $99 initial fee on mosquito plans that have none** (the fallback
-  template hardcodes it, in writing, on the guaranteed path), and remove "$15"/"$99" from the
-  price-guard whitelist — the exact literals it exists to catch. *(small)*
-- **R75 — The MA/RI licensing gate fails closed.** A lead with no extractable state currently
-  skips the gate entirely, then geocodes as "<town>, MA" — Hartford, Nashua, and Brattleboro
-  are all within the 90-minute zone check. Unresolvable state → NEEDS_INFO, never QUOTE.
-  *(small)*
+**Required acceptance evidence:**
 
-### Governance and compliance hardening
+- The CEO approves a guarantee matrix by service: eligibility, term, covered pests/conditions,
+  exclusions, customer obligations, maximum response time, charge, and approval authority. The
+  accepted customer terms contain the same matrix.
+- Customers and staff can request a callback/return service. The resulting job is visibly linked to
+  the original service and cannot accidentally be charged as a new sale.
+- Operations sees callback volume, reason, original technician/service, days to resolution, and
+  repeat-callback rate. Leadership can use it as a quality and margin signal.
+- A no-access outcome is visible to the customer, includes the approved reason and evidence, and
+  sends a truthful next step. Operations can open the evidence from the case.
+- The CEO approves the no-access financial policy. The system must not charge a fee unless that
+  exact policy was disclosed before purchase and the case meets it; the employee never decides or
+  calculates a fee ad hoc.
+- No-access resolution closes only after the chosen rebook/refund/credit/customer-notice outcome is
+  verified. It cannot be closed by typing a note that claims the work happened.
+- Tests cover guaranteed/not guaranteed, repeat callback, linked zero-price visit, no access with
+  paid/unpaid work, evidence access, refund failure, notice failure, and rebooking collision.
 
-- **R65 — The agreement body stops being a free textarea** — template-locked, versioned; today
-  any office user can rewrite binding terms freehand and send, and the server accepts
-  arbitrary `bodyText` from any caller. *(medium)*
-- **R66 — Technician data scoping**: per-customer entitlement instead of the staff bypass on
-  documents, TECH customer-read scoped to assigned work, billing/card metadata stripped, and
-  the `reports/*` TECH S3 write grant removed. Pairs with R07 — until both land, every current
-  and former tech token holds the whole book of business. *(medium)*
-- **R54 — E-sign consent evidence**: the signing POST carries the consent the PDF asserts
-  (today the checkbox dies in the browser). Verification note: signer-email verification is
-  *not* needed — token delivery to the email on file is the standard e-sign identity
-  mechanism. *(small)*
-- **R53 — CAN-SPAM readiness before the first commercial email** (the planned quote-chasers
-  qualify): postal address in the shared shell now, suppression/opt-out before the first send.
-  *(small)*
-- **R74 — Email honesty**: send first, stamp SENT second (an agreement whose email failed
-  currently reads SENT); surface the send flag on the two CustomerDetail paths that ignore it;
-  make the email log newest-first with the stored error shown and a resend button. *(small)*
-- **R78 — Escalations become a queue with an SLA**, not an inbox — and the escalation email
-  can currently fail with zero signal while the screen promises a callback. *(small)*
-  **RESOLVED (2026-07-17).** Callback promises and pricing escalations now create durable
-  owned-work rows before notification. The shared queue assigns an owner and SLA, exposes a
-  prescribed resolution action, escalates overdue rows, and retains an append-only event and
-  resolution history. Failed escalation email creates separate `EMAIL_FAILURE` work; email is
-  never the queue of record.
-- **R79 — Geofence the GPS stamp** against the geocoded service address with an accuracy
-  floor; the honest-disclaimer wording already shipped, the measurement was explicitly
-  deferred. *(medium)*
+**Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
+
+### GL-11 — Minimum complete customer/group portal
+
+**Business outcome:** A customer or property manager can complete the tasks the business directs
+them to the portal for without calling the office.
+
+**Why this is still a gate:** The group/property-manager view lacks the financial and service
+documents needed to manage properties, and the portal lacks key ongoing-service request paths.
+
+**Required acceptance evidence:**
+
+- An authorized group/property manager can retrieve service reports, agreements, receipts/invoices,
+  and amounts for the correct properties without gaining access to unrelated customers.
+- Customers can initiate the approved reschedule request, callback/guarantee request, and general
+  service help path with a visible response commitment and case/reference number.
+- Plan cancellation satisfies GL-08 from the same portal.
+- Portal actions show current status and do not disappear after submission. Failed submissions are
+  visibly pending and enter an owned operations queue.
+- The business defines what a group manager may see and do versus an individual resident. Tests
+  prove both allowed access and denial across two unrelated groups.
+- Public claims that residents can schedule in-unit service are either backed by an approved,
+  property-scoped resident flow or removed before launch.
+
+**Pass owner:** Head of Operations.
 
 ---
 
-## F. Cut list
+## Technician and operations safety
 
-- **R77 — Remove the live `/schedule/:slug` resident signup page today.** Graded CUT with
-  negative value in July; it is still routed, still submitting to lead-intake for 64 real
-  property slugs, and it bypasses pricing and HOA escalation. One route deletion.
-- **R63 — The LLM market-rate engine** is the other CUT candidate; decision framed in
-  section B.
-- **Do not cut** (verified as deliberate design this round): the drive-time capacity and
-  day-pricing machinery (Jake's locked decision), monthly billing for all plan cadences, and
-  the OWNER-gating of staff provisioning.
+### GL-12 — Dispatch-ready job packet
 
----
+**Business outcome:** A technician receives everything necessary to arrive safely, perform the
+correct service, avoid an improper collection, and explain the visit to the customer.
 
-## G. Refuted in verification — do not build
+**Why this is still a gate:** Job assignment can occur without required address/access/safety and
+service context; customer notes and prior relevant outcomes are not reliably in the field packet.
 
-Four findings from this round's perspective reviews died under adversarial verification.
-Recorded so they are not re-raised or acted on:
+**Required acceptance evidence:**
 
-1. **"Card-on-file charges lack authorization records."** Refuted: Stripe's PaymentElement
-   with the SetupIntent flow already presents and records the off-session mandate; the
-   integration is correct as built.
-2. **"The rodent add-on must scale with visit frequency."** Refuted: flat $15/mo across
-   cadences is a defensible pricing choice, not a defect. Pricing strategy belongs to Jake,
-   not the bug tracker.
-3. **"The 3× lead-fee gate must cover recurring plans."** Refuted on evidence, premise, and
-   remedy: recurring leads passing the gate is deliberate loss-leader economics; the gate
-   exists for one-time jobs.
-4. **"Technicians can write the pesticide catalog."** Stale: TECH `create` on Product was
-   removed in `6297c0a`.
+- A field job cannot be assigned or routed without a deliverable address and the launch catalog's
+  minimum service instructions, duration, credential, and preparation requirements.
+- The technician packet shows, in one place: customer/contact, address and navigation, access/gate
+  instructions, pets/children/hazards/sensitivities, service and scope, prep status, approved
+  products/constraints, payment expectation (**collect nothing**, **payment due through office**, or
+  other approved wording), and relevant prior report/no-access/callback history.
+- Office-created jobs capture job-specific instructions instead of relying on permanent customer
+  notes or a phone call. Critical safety/access facts are visibly distinguished from general notes.
+- Missing information blocks dispatch with a small checklist and the owner who must fix it. A
+  manager exception requires a reason and never bypasses address, credential, or regulated-record
+  minimums.
+- The technician can report wrong address, unsafe conditions, scope mismatch, or missing prep in
+  one tap without falsely starting/completing service. The case returns to an owned operations
+  queue and the customer receives the approved next step.
+- A first-week technician completes scripted residential, commercial/community, repeat, callback,
+  no-access, and unsafe-site scenarios without verbal coaching.
 
-Standing from July, still binding: **quarterly plans billing monthly is correct by design**
-(the "overcharging" reading inverts it, and "fixing" it would cut that revenue by two thirds);
-`adminCreateUser`'s group authorization is enforced by AppSync, not the handler.
+**Pass owner:** Head of Operations.
 
----
+### GL-13 — Technician least-privilege and assignment enforcement
 
-## Requirements register
+**Business outcome:** A technician can see and change only the customers and work legitimately
+assigned to them.
 
-| ID | Gate | Owner | Size | Requirement |
-|----|------|-------|------|-------------|
-| R01 | B | engineering | L | Public /book, /quote, /cancel pages; every emailed URL resolves |
-| R02 | A | engineering | L | Disputes handled; dunning emails with real decline reason; portal Pay/Retry; suspend after N failures |
-| R03 | A | engineering | S | Stripe-side subscription death → same-day office signal + visit cleanup |
-| R04 | A | engineering | M | Completed one-time job → charge or visible queue entry |
-| R05 | A | engineering | S | Plan cancel resolves queued visits on all three paths |
-| R06 | A | engineering | S | ACTIVE plan with no next visit → Dashboard tile + digest |
-| R07 | A | engineering | M | One-action offboarding: login dies, jobs surface for reassignment |
-| R08 | A | engineering | M | Money fields server-guarded; charge path checks job status |
-| R09 | A | engineering | S | Application start/end times server-stamped; no finalize on never-started job |
-| R10 | A | engineering | S | No pesticide record without a licence number; entry screen + expiry warning |
-| R11 | A | engineering | M | Label data (rate/dilution, REI, EPA) office-entered, validated, prefilled |
-| R12 | A | engineering | M | Report drafts survive offline: local persist, queued send, banner |
-| R13 | A | engineering | S | Every charge and refund emails the customer a notice |
-| R15 | A | engineering | S | Remove browser S3 write grants; protect records from deletion |
-| R16 | A | engineering | M | Online enrollment → online cancellation (ROSCA) |
-| R17 | A/B | engineering | M | One canonical cancellation policy, four readers; checkout renders + records acceptance |
-| R18 | A | engineering | S | Privacy policy truthful; session replay consented or removed |
-| R19 | A | engineering | M | Cancel/move of paid or scheduled visit settles money + tells customer |
-| R20 | A | engineering | M | NO_ACCESS office queue; guarded rebook; viewable door photo |
-| R21 | A | engineering | M | No reminder for unstaffed visits; gap surfaced as work |
-| R22 | A | engineering | S | Schedule pool and tech day queries paginate |
-| R23 | A | engineering | S | Board can't unassign COMPLETED/IN_PROGRESS jobs unguarded |
-| R24 | A | engineering | S | Mark-inactive stops service or is blocked while plan live |
-| R25 | A | engineering | S | Plan-creation prices get the deviation guard |
-| R26 | A | engineering | S | Office Complete confirm discloses billing start |
-| R27 | A | engineering | S | Invite buttons work for whoever sees them |
-| R28 | A | engineering | S | Customer notes reach the tech; per-job instructions input |
-| R29 | B | engineering | S | /book re-validates live availability before charging |
-| R30 | A | engineering | S | Manual quotes carry initial fee; signing always creates first visit |
-| R31 | A | engineering | M | OPEN invoices settleable; terms/PO/aging for check-paying accounts |
-| R32 | C | Jake | S | Decide: seasonal plan bills 6 or 12 months; add end condition |
-| R33 | C | Jake | S | Decide: no-access fee existence, amount, disclosure |
-| R34 | C | Jake | S | Decide: loaded labour rate + drive convention; document constants |
-| R35 | C | Jake | M | Decide: add-a-service-at-the-door channel |
-| R36 | E | engineering | S | Dashboard MRR + dollars-at-risk + lifetime-paid |
-| R37 | E | engineering | S | Customer notified when a visit doesn't happen |
-| R38 | E | engineering | S | Real contact number on every customer surface; written-notice intake |
-| R39 | E | engineering | M | Phone-only customers: acknowledge or serve; failed record delivery alerts |
-| R40 | E | engineering | M | Group portal shows documents and amounts per property |
-| R41 | E | engineering | M | Portal access auto-provisioned or emails stop asserting it |
-| R42 | E | engineering | S | Sign page claims email only when sent; offer download link |
-| R43 | E | engineering | M | Prior-visit history for techs; no write-only note fields |
-| R44 | E | engineering | S | Start-job failures visible |
-| R45 | E | engineering | S | NO_ACCESS stop stays on the tech's day list |
-| R46 | E | engineering | S | Derived payment-expectation line on tech job screen |
-| R47 | E | engineering | S | Tech login linking discoverable; empty state points at real flow |
-| R48 | E | engineering | S | Payment-request email only to portal-capable customers; link works |
-| R49 | E | engineering | S | Charge/refund/void actor rendered on invoice rows |
-| R50 | E | engineering | S | Price-deviation review list (who, how far, why) |
-| R51 | E | engineering | M | KPIs: jobs by tech, no-access rate, lead conversion |
-| R52 | E | engineering | M | Month-end registers + AR aging exports; no silent restatement |
-| R53 | E | engineering | S | CAN-SPAM: postal address now, opt-out before first commercial send |
-| R54 | E | engineering | S | E-sign consent captured on the POST, stored on the Agreement |
-| R55 | E | engineering | M | Week view: per-tech load, oldest-due-first pool, overdue flags |
-| R56 | E | engineering | S | No dispatch without a service address |
-| R57 | E | engineering | S | Fix HOA 101+ bracket inversion + monotonicity test |
-| R58 | E | engineering | S | No phantom $99 on mosquito replies; unwhitelist $15/$99 in the guard |
-| R59 | B | engineering | S | Zone UNKNOWN → callback path + office alert, never a price |
-| R60 | B | engineering | S | Rodent/roach funnel quotes carry Zone-B adder |
-| R62 | B | engineering | S | Funnel day-price discounts floor at cost |
-| R63 | B | engineering | M | Decide cut-vs-guard on LLM market-rate engine; clamp office override |
-| R65 | E | engineering | M | Agreement body template-locked and versioned |
-| R66 | E | engineering | M | Tech data scoped to assigned work; strip billing metadata |
-| R67 | E | engineering | M | Tech availability/sick-day handling with reassignment surfacing |
-| R68 | E | engineering | M | CALLBACK job type; covered re-visits labeled; callback-rate metric |
-| R69 | E | engineering | S | Cancel reason picker; pause offered first; churn tile |
-| R70 | E | engineering | M | Payroll time records (clock in/out) if W2 hourly |
-| R71 | E | engineering | M | In-place price change with notice, audit, matched displays |
-| R72 | E | engineering | M | Quote expiry/decline statuses; follow-ups; VIEWED gets a reader |
-| R73 | E | engineering | M | Source enum; auto-WON; spend-vs-won by source |
-| R74 | E | engineering | S | Send-then-stamp; surface send failures; usable email log |
-| R75 | E | engineering | S | Licensing-state gate fails closed |
-| R77 | F | engineering | S | Remove live /schedule/:slug signup page |
-| R78 | E | engineering | S | Escalation queue with SLA; no silent send failure |
-| R79 | E | engineering | M | Geofence the GPS stamp vs service address |
-| R80 | D | engineering | S | Lead + booking notifications → SES_LEADS_EMAIL (sales@) |
-| R81 | D | Jake | S | Rotate committed Buildium secret (public repo) — today |
-| R82 | D | Jake | S | Verify webhook events include charge.refunded; register main webhook |
-| R83 | D | Jake/ops | S | Provision second OWNER; document break-glass |
-| — | D | Jake/ops | S | Stripe live billing smoke test; licence numbers entered then required; Google Maps key on CRM; sales@ verified in SES; CRM_APP_URL on real domain |
+**Why this is still a gate:** The technician role can read broad customer/job data, and key field
+mutations do not consistently prove that the signed-in technician is the job's assignee. Knowing a
+record ID must never be enough to act on another technician's job.
 
-Gate key: **A** = blocker, reachable today · **B** = blocker, lands with the funnel/site
-overhaul · **C** = decision only Jake can make · **D** = console/process, no meaningful code ·
-**E** = before scale, not a gate · **F** = cut.
+**Required acceptance evidence:**
 
-*(R14, R61, R64, R76 were refuted in verification — see section G. There is no R84+.)*
+- Technician lists and searches return only the signed-in technician's assigned/current work and
+  the minimum customer data needed for it. Billing, unrelated customers, other technicians' jobs,
+  and organization-wide notes are not accessible.
+- Every field action—start, end application, draft/finalize report, add/remove photo, no access,
+  document view, and any future job mutation—server-verifies the signed-in identity against the
+  current assignment and active credential.
+- Reassignment is an explicit office action with timestamp, reason, former/new technician, route
+  effect, and audit. Access changes immediately; the former technician cannot continue a stale
+  draft without manager resolution.
+- Direct API tests prove Technician A cannot list, fetch, mutate, or obtain document links for
+  Technician B's customer/job. UI hiding alone does not pass.
+- Office/owner emergency access and temporary ride-along rules are explicitly approved and audited;
+  no shared technician logins are permitted.
+
+**Pass owner:** CEO, with Compliance and Operations verification.
+
+### GL-14 — Staff identity, linking, and offboarding
+
+**Business outcome:** Every staff login maps to one real worker and role, and a departed or
+misconfigured employee cannot retain access.
+
+**Why this is still a gate:** A technician login can be created without a linked technician record,
+and there is no complete owner workflow to review, change, or disable every staff role.
+
+**Required acceptance evidence:**
+
+- Creating a technician login atomically creates/links exactly one technician profile with required
+  active license data, or refuses with a fixable error. “Invite now, link later” is not available.
+- An owner-only staff roster shows person, email, role(s), linked profile, status, last login, and
+  pending invite. Duplicate/shared identities and unlinked users are visibly blocked.
+- Owners can change role and offboard OWNER, OFFICE, FINANCE, and TECH users. Offboarding disables
+  login/sessions, removes groups, reassigns owned work and future jobs, and preserves audit/legal
+  records in one guided action.
+- The system prevents removal of the last usable owner. At least two named owners and one tested
+  break-glass procedure exist before launch.
+- Tests cover abandoned invite, duplicate email, unlinked technician, role change, immediate
+  offboarding, offboarding with assigned future work, and attempted access using an old session.
+
+**Pass owner:** CEO.
+
+### GL-15 — Legally reliable service-report completion
+
+**Business outcome:** A finalized service report is an accurate, delivered, correctable legal
+record—not merely a PDF the UI says was sent.
+
+**Why this is still a gate:** Field staff can enter an arbitrary manual pesticide, finalization can
+infer a missing application end time, location evidence is not validated, delivery can fail while
+the UI says sent, and no append-only amendment workflow exists.
+
+**Required acceptance evidence:**
+
+- A regulated report can use only an office-approved product and label/rate from the launch
+  catalog. An unknown product requires an office/compliance approval that becomes part of the
+  catalog and audit before finalization; free-text EPA details alone cannot authorize it.
+- Server-side finalization refuses a report unless the application has both immutable server-stamped
+  start and end times, the assigned technician and current required license, all required treatment
+  fields, and all required customer/site facts. It never substitutes the finalization time.
+- The Compliance owner approves the on-site presence rule: location freshness, accuracy, distance
+  from service address, and documented exception process. Implausible/stale location blocks
+  finalization or requires a named manager exception.
+- Report completion and report delivery are separate facts. The technician/office sees **Completed,
+  delivery pending/failed** until actual delivery. Missing email or send failure creates an owned
+  delivery task with an approved alternate delivery method and proof.
+- Corrections use an append-only amendment linked to the original report, with reason, author,
+  time, changed facts, customer delivery, and original preserved. No role can overwrite the issued
+  record.
+- Operations can retrieve no-access evidence and all report evidence through authorized screens.
+- Compliance signs a rendered sample for every launch service type and tests offline draft/retry,
+  duplicate finalize, missing product, missing end, expired license, distant/stale location,
+  delivery failure, and amendment.
+
+**Pass owner:** Named Compliance owner.
 
 ---
 
-## The test that should decide go-live
+## Pricing, leadership control, and exception management
 
-Not the register — this paragraph. A CSR hired Monday takes a cancellation call Tuesday and
-reads the refund amount off the screen. A tech at a locked door taps two buttons and drives
-on, and the office can see the photo. A dispute email from Stripe lands in a queue with a
-deadline, not in spam. Jake names three numbers (season, labour, HOA threshold), takes a week
-off, and no quote waits for him. Every pesticide record carries a licence number an inspector
-can read. When those sentences are true, ship it.
+### GL-16 — Governed pricing and margin protection
+
+**Business outcome:** Neither AI nor a low-skill employee can publish a loss-making, nonsensical,
+or unapproved price.
+
+**Why this is still a gate:** Live market-rate changes have no complete hard bounds/approval trail,
+and cost floors do not cover every sellable service, recurring cadence, add-on, and property type.
+
+**Required acceptance evidence:**
+
+- Finance approves fully loaded cost and minimum gross-margin rules for every launch catalog item,
+  including labor time, drive time, material, lead cost, payment fee, callback allowance, overhead,
+  seasonality, property size, recurring cadence, and add-ons.
+- Hard minimums, maximums, sensible size/quantity progression, and input-validity rules apply before
+  any price reaches a customer. Missing/invalid inputs fall to review; they never guess or sell.
+- AI/researched rate changes cannot become live merely because they were generated. The CEO sets
+  approval thresholds; material changes require owner/finance approval and a preview of affected
+  quotes, margin, and current-vs-proposed prices.
+- Every live rate change records actor/source, reason, evidence date, prior/new value, approval, and
+  effective time; an owner can roll back safely.
+- Routine office users cannot edit live rates or protected plan prices. Emergency overrides are
+  owner-only, time-limited, reasoned, and reported.
+- A price matrix test covers minimum/maximum inputs, each service/property/cadence, missing rate,
+  outlier research, negative/zero/decimal mistakes, and price exactly at/below the margin floor.
+
+**Pass owner:** CEO and Finance lead jointly.
+
+### GL-17 — Seasonal plan and licensed-scope decisions
+
+**Business outcome:** Seasonal and specialized services bill and schedule exactly as customers were
+told, and are performed only under valid business and technician authority.
+
+**Why this is still a gate:** The business has not encoded a final mosquito/seasonal billing and
+renewal policy, while some specialized/RI service claims require explicit scope and credential
+validation.
+
+**Required acceptance evidence:**
+
+- The CEO approves for each seasonal plan: service months, number/frequency of visits, annual vs
+  in-season billing, first-year proration, renewal date/notice, off-season customer status, pause/
+  cancel/refund handling, and missed-visit treatment.
+- The system stops billing and scheduling where the approved policy says it should; it cannot leave
+  an in-season cadence or monthly charge running indefinitely by omission.
+- Compliance maps each launch service and state/territory to the required company registration,
+  supervisor/applicator credential, expiry, and prohibited scope. Wildlife trapping/removal,
+  exclusion, termite, pesticide, and restoration scopes are not treated as interchangeable.
+- Expiring/expired company or technician credentials remove affected capacity before an appointment
+  is sold and create an advance owner alert with enough time to renew/reassign.
+- Customer quote, accepted terms, schedule, invoice, and job packet all use the approved seasonal
+  and licensed scope. Tests cross season boundaries, renewal, cancellation, expired credentials,
+  and an unsupported service/state combination.
+
+**Pass owner:** CEO and Compliance owner jointly.
+
+### GL-18 — Verifiable exception resolution
+
+**Business outcome:** An operational failure stays visible until the promised real-world outcome is
+true; employees cannot make the dashboard green by writing a note.
+
+**Why this is still a gate:** Generic manual resolution can close cases whose refund, email,
+rebooking, duplicate merge, access restoration, or other corrective action has not been verified.
+
+**Required acceptance evidence:**
+
+- Each exception type has a named team/owner, severity, response deadline, customer-impact label,
+  and a small set of valid resolution actions.
+- Where the app can verify the outcome, it closes only from the verified event: refund settled,
+  message delivered/alternate contact recorded, job rebooked, payment finalized, portal access
+  restored, or duplicate decision completed.
+- Manual closure is limited to an owner/manager, requires a controlled reason plus evidence, and is
+  separately reported. A free-text “done” from routine staff is insufficient.
+- Reoccurrence reopens the same underlying issue or links the repeat; it cannot disappear because a
+  prior case was closed.
+- The queue supports clear handoff, claim, escalation, age, and overdue state. No required action is
+  owned only by a shared mailbox or a person who has been offboarded.
+- The final rehearsal deliberately causes every exception type and proves it reaches the right
+  owner, cannot falsely close, and clears automatically after the real corrective outcome.
+
+**Pass owner:** Head of Operations.
+
+### GL-19 — Launch reconciliation and command view
+
+**Business outcome:** Leadership can tell each morning whether customers, work, and money agree,
+without asking engineering to query production.
+
+**Why this is still a gate:** Existing operational views do not provide one launch reconciliation
+across the payment provider, bookings, plans, invoices/refunds, staffing, lead SLA, and required
+service records.
+
+**Required acceptance evidence:**
+
+- A daily money reconciliation proves: successful provider payments equal CRM paid invoices;
+  refunds/disputes equal CRM dispositions; net cash is explainable; and every mismatch is an owned
+  case. Finance signs the report during rehearsal.
+- A daily booking reconciliation shows paid-not-finalized, complete booking without payment,
+  duplicate customer/plan/job/payment, processing beyond SLA, and capacity/route mismatch.
+- A daily plan reconciliation shows provider subscription vs CRM plan mismatches, active plans
+  without next service, delinquent plans still scheduled, canceled plans still billing/scheduled,
+  and recurring revenue at risk.
+- A next-day operations view shows every job's staffing, credential, dispatch-readiness, customer
+  notice, payment expectation, and exception state.
+- A sales view shows leads by stage/owner/age, first-response SLA, overdue next action, source, and
+  conversion/loss. A service-quality view shows completion, report delivery, no access, callbacks,
+  repeat callbacks, and technician trends.
+- The CEO defines the launch thresholds that force pause/rollback—for example any double charge,
+  paid customer without a job, unauthorized access, unlicensed assignment, or unexplained money
+  mismatch—and names who makes the decision.
+- During the final rehearsal, the command view is run on a fixed daily schedule and all induced
+  mismatches are detected without reading logs.
+
+**Pass owner:** CEO and Finance lead jointly; Sales and Operations sign their views.
+
+---
+
+## Public trust and production readiness
+
+### GL-20 — Public promises and legal terms match operations
+
+**Business outcome:** Marketing, quote, checkout, agreement, portal, and field execution describe
+the same offer and no unsupported claim creates customer, regulatory, or brand exposure.
+
+**Why this is still a gate:** The site contains blanket exact-price/no-wait/guarantee claims,
+resident-scheduling and license/status claims that are not fully supported by the product or
+documented evidence, and service-page metadata/copy mismatches.
+
+**Required acceptance evidence:**
+
+- A named business owner inventories every claim about price certainty, speed, guarantee/free
+  returns, cancellation, license/insurance/status, response time, resident scheduling, safety,
+  ratings/rank, and performance statistics. Each has evidence, scope, source, owner, and review/
+  expiry date—or is removed.
+- “Every service,” “exact price,” “no callbacks,” and “no waiting” are limited to services and
+  circumstances that pass GL-01 and GL-04. The review fallback is disclosed before payment.
+- Guarantee, cancellation, no-access, refund/credit, recurring billing, seasonal renewal, and price
+  adjustment language is identical in marketing, checkout terms, accepted agreement, portal, and
+  employee workflows.
+- License and insurance badges reflect verified current facts rather than hard-coded “active” copy.
+  State-specific technician/company wording is approved by Compliance.
+- Resident/community scheduling claims match the actual launch portal path under GL-11 or are
+  removed.
+- Service-page titles, descriptions, structured data, and body copy name the correct service and do
+  not reuse unrelated pest claims. Unsourced rankings/statistics are removed or substantiated.
+- Legal/insurance counsel approves the final public terms, privacy notice, guarantee, cancellation,
+  recurring authorization, field-service record delivery, and effective/last-updated dates.
+- A final link/copy audit starts from every public page and verifies the actual quote, price, terms,
+  phone/email, service area, and customer outcome it promises.
+
+**Pass owner:** CEO; Compliance/legal sign the regulated and contractual statements.
+
+### GL-21 — Production accounts, integrations, and live money rehearsal
+
+**Business outcome:** Production does not depend on a staging assumption, missing mailbox, stale
+secret, or untested provider event.
+
+**Required acceptance evidence:**
+
+- The previously exposed Buildium credential is rotated at the provider, the old credential is
+  proven invalid, access logs are reviewed, and current credentials exist only in the approved
+  secret store. Removing it from source code alone does not pass.
+- Production and staging use separate, approved Stripe keys, prices, webhook secrets/endpoints, and
+  customer data. The production webhook subscribes to every event the application handles:
+  `setup_intent.succeeded`, `payment_intent.succeeded`, `payment_intent.payment_failed`,
+  `invoice.paid`, `invoice.payment_failed`, `customer.subscription.deleted`, `charge.refunded`,
+  `charge.dispute.created`, and `charge.dispute.closed`.
+- A monitored `sales@pestbuzzkill.com` mailbox and the operations/finance mailbox routes actually
+  exist, are staffed to the approved SLA, and pass send, receive, bounce, suppression, DKIM/SPF/
+  DMARC, and after-hours escalation tests.
+- Production URLs, portal links, quote/cancel links, sender identity, business phone, service area,
+  maps/routes key, AI key, scheduler, and payment return URLs are verified from real delivered
+  emails on phone and desktop—not inferred from environment names.
+- At least two named owners can access each critical provider account with MFA and recovery codes;
+  no launch dependency is controlled by one personal account.
+- Using production-equivalent provider modes and low-value authorized transactions, the team
+  rehearses: quote → capacity hold → payment → booking → portal access → first service/report →
+  recurring start → renewal → payment failure/recovery → cancel/refund → dispute → reconciliation.
+  Duplicate and out-of-order webhook delivery is included.
+- Finance documents how test transactions/refunds are identified and confirms there is no orphaned
+  live charge, subscription, customer, job, or capacity hold after rehearsal.
+
+**Pass owner:** Engineering lead and Finance lead jointly.
+
+### GL-22 — Monitoring, recovery, retention, and incident ownership
+
+**Business outcome:** A background failure is noticed before the customer reports it, and business
+records can be restored after human or provider error.
+
+**Required acceptance evidence:**
+
+- Alerts cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email
+  failures, reconciliation mismatches, capacity anomalies, document generation/storage failure,
+  and growing/overdue exception queues. Alerts reach a named primary and backup, not only logs.
+- The CEO approves severity levels and response/communication targets for double charge, paid-no-
+  job, unauthorized data exposure, unlicensed dispatch, outage, lost report, email outage, and
+  provider outage. Each has a one-page first-response playbook.
+- An idempotent replay/recovery procedure exists for failed webhooks, booking finalization,
+  scheduled billing/visit creation, emails, documents, and portal provisioning. Routine recovery
+  does not require hand-editing the database.
+- Point-in-time database recovery and versioned/retained document backup are enabled for the
+  approved legal/financial retention period. Deletion/retention policy covers customer requests
+  without deleting records the business must retain.
+- A restore drill recovers a customer, job/plan/invoice relationship, accepted agreement, service
+  report, photos, and audit history into an isolated environment; the business owner verifies the
+  records are usable, not merely present.
+- An incident drill proves who can pause public booking, prevent new dispatch, stop/reconcile
+  billing, post customer messaging, preserve evidence, and authorize restart.
+
+**Pass owner:** CEO and Engineering lead jointly; Compliance approves retention.
+
+### GL-23 — Production master data and launch-day operating model
+
+**Business outcome:** The production app contains the real facts needed to sell and serve, and every
+queue has a staffed owner from the first lead through the last payment exception.
+
+**Required acceptance evidence:**
+
+- Production contains CEO-approved service areas, catalog/rates/cost floors, durations, products and
+  label data, technician identities/licenses/expiry dates, working calendars, territories, customer
+  communication templates, policy versions, and finance/provider mappings.
+- Every production technician and staff user is a named real person with the correct role and
+  linked profile. Test/demo identities and data are absent or unmistakably isolated.
+- Sales, Operations, Finance, Compliance, and CEO exception queues have named primary/backup owners,
+  hours, response SLA, handoff rule, and vacation/offboarding coverage.
+- Operations documents the daily opening checklist, next-day dispatch review, mid-day exception
+  review, end-of-day money/work reconciliation, and after-hours customer escalation.
+- Launch support has a published command channel, issue intake, severity owner, decision log, and
+  twice-daily review. Leadership knows the pause/rollback authority and customer communication path.
+- The team completes a clean rehearsal using a copy of production configuration, then verifies all
+  test leads, bookings, charges, subscriptions, users, reports, and alerts are removed or isolated
+  before accepting real traffic.
+
+**Pass owner:** Head of Operations.
+
+### GL-24 — Low-skill usability and role certification
+
+**Business outcome:** The system makes the safe action the obvious action for a new employee and
+does not depend on tribal knowledge.
+
+**Required acceptance evidence:**
+
+- Recruit representative first-week users who did not build the product. With written role cards
+  but no live coaching, each completes the scripts below and explains what happened to the customer
+  and money.
+- Sales scripts: new lead, incomplete contact, duplicate, failed email, follow-up, booking link,
+  won, lost, and do-not-contact.
+- Operations scripts: new paid booking, processing/failed payment, schedule/reassign, missing job
+  data, customer reschedule, cancel/refund, no access, callback, inactive rebooking, and exception
+  handoff.
+- Technician scripts: today view, safety/access review, start/end, approved product, offline draft,
+  finalize/delivery failure, no access, wrong/unsafe site, callback, reassignment, and expired
+  license.
+- Finance/leadership scripts: recovery, refund/dispute, plan cancellation, daily reconciliation,
+  mismatch investigation, rate approval/rollback, staff offboarding, and launch pause decision.
+- Every irreversible confirmation uses customer/business language, states the consequence, prevents
+  duplicate clicks, and returns a receipt/reference. Error messages identify what happened, whether
+  money/customer state changed, who owns it, and the one safe next step.
+- No critical script requires memorizing a policy, copying an ID, calculating money/capacity,
+  interpreting a raw provider status, opening developer tools, or entering invented free text.
+- Pass threshold is 100% correct completion for money, access, regulated record, customer-status,
+  and dispatch-safety steps; zero false-success messages; zero unowned failures. Any miss reopens
+  the relevant requirement and requires a repeat test with a different first-week user.
+
+**Pass owner:** Head of Operations; each functional leader signs their role scripts.
+
+---
+
+## Final approval record
+
+The launch approver should use this table only after attaching the evidence named above. A verbal
+demo or “engineering says it is fixed” is insufficient.
+
+| Function | Named approver | Date | Gates accepted | Evidence location |
+|---|---|---|---|---|
+| CEO |  |  | GL-01, 05, 08, 13, 14, 16, 17, 19, 20, 22 |  |
+| Sales |  |  | GL-02, 03, 19 |  |
+| Operations |  |  | GL-04, 07, 09–12, 18, 19, 23, 24 |  |
+| Finance |  |  | GL-05–09, 16, 17, 19, 21 |  |
+| Compliance/legal |  |  | GL-01, 10, 13, 15, 17, 20, 22 |  |
+| Engineering |  |  | Failure evidence for all gates; GL-05, 21, 22 |  |
+
+**Production go-live decision:** `NO-GO / GO`
+
+**Decision owner:**
+
+**Decision date/time:**
+
+**Known exceptions accepted:** None. Any accepted scope reduction must be removed from public and
+staff access before the decision is changed to **GO**.
