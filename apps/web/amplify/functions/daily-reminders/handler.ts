@@ -19,7 +19,14 @@ import {
   defaultWorkOwner,
   openMissingContactWork,
   openOwnedWork,
+  resolveOwnedWork,
 } from "../shared/ownedWork";
+import {
+  danglingChildRecords,
+  reconcileBookings,
+  type ReconBooking,
+  type ReconInvoice,
+} from "../shared/bookingReconcile";
 
 type OwedInvoice = {
   id: string;
@@ -99,6 +106,9 @@ export const handler = async () => {
   const invoiceReminders = await remindOpenInvoices();
   const aging = await reportArAging();
   const disputes = await reportDisputeDeadlines();
+  // GL-05: prove, against the real tables and Stripe, that every succeeded
+  // booking payment has exactly one complete booking and vice versa.
+  const reconciliation = await reconcilePaidBookings();
   console.log("Reminder totals:", JSON.stringify(totals));
   return [
     ...totals,
@@ -110,6 +120,7 @@ export const handler = async () => {
     aging,
     disputes,
     overdueWork,
+    reconciliation,
   ];
 };
 
@@ -892,6 +903,340 @@ async function reportDisputeDeadlines() {
     `Dispute deadlines: ${soon.length} near, notified=${notified}`
   );
   return { disputesDueSoon: soon.length, notified };
+}
+
+/**
+ * GL-05 production reconciliation. Reads the real CRM booking and invoice
+ * tables and the set of succeeded booking PaymentIntents from Stripe, then
+ * proves the relationship in both directions:
+ *
+ *   - every succeeded booking payment has exactly one complete BOOKED booking
+ *     for the exact amount, and
+ *   - every BOOKED booking's checkpoint IDs still resolve to real child rows
+ *     (a nonblank jobId is not proof the Job exists — it is loaded and checked).
+ *
+ * Every disagreement becomes (or updates) an owned Finance case; a booking that
+ * proves whole resolves the case a failed finalization may have left open. The
+ * pure set logic lives in shared/bookingReconcile (unit-tested); this function
+ * is the scheduled IO around it, run from the daily cron.
+ */
+export async function reconcilePaidBookings() {
+  const client = await dataClient();
+
+  let succeeded: { ids: string[]; paidCentsByPi: Record<string, number> };
+  try {
+    succeeded = await fetchSucceededBookingPayments();
+  } catch (err) {
+    // A provider failure must be loud owned work, not a silent skip: a Stripe
+    // outage that made us read zero payments would otherwise look "all clear".
+    console.error("reconcilePaidBookings: could not read Stripe payments", err);
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: "recon-stripe-unavailable",
+      title: "Booking reconciliation could not read Stripe",
+      detail: `The daily paid-booking reconciliation could not list succeeded payments from Stripe: ${err instanceof Error ? err.message : String(err)}. Until it runs clean, a stuck paid booking could go unseen.`,
+      relatedId: "reconciliation",
+      resolutionAction:
+        "Check Stripe API health and the webhook/secret keys, then re-run the daily reconciliation and confirm it completes clean.",
+      ownerTeam: "FINANCE",
+    });
+    return { reconciled: false, reason: "stripe-unavailable" as const };
+  }
+
+  const bookings = await allBookingsForReconcile();
+  const invoices = await allInvoicesForReconcile();
+  const recon = reconcileBookings(
+    bookings,
+    invoices,
+    succeeded.ids,
+    succeeded.paidCentsByPi
+  );
+
+  const paidPiSet = new Set(
+    invoices
+      .filter((i) => i.status === "PAID" && i.stripePaymentIntentId?.trim())
+      .map((i) => i.stripePaymentIntentId!.trim())
+  );
+  const bookingByPi = new Map<string, ReconBooking>();
+  for (const b of bookings) {
+    const pi = b.stripePaymentIntentId?.trim();
+    if (pi) bookingByPi.set(pi, b);
+  }
+  const bookingById = new Map(bookings.map((b) => [b.id, b]));
+
+  // One owned-work item per booking, combining every reason that booking is not
+  // whole, so an amount mismatch and a dangling child do not fight over the row.
+  const issues = new Map<string, string[]>();
+  const addIssue = (bookingId: string, reason: string) => {
+    const list = issues.get(bookingId) ?? [];
+    list.push(reason);
+    issues.set(bookingId, list);
+  };
+
+  for (const m of recon.amountMismatches) {
+    addIssue(
+      m.bookingId,
+      `Stripe captured $${(m.paidCents / 100).toFixed(2)} but the booking committed to $${(m.bookedCents / 100).toFixed(2)}`
+    );
+  }
+
+  // A succeeded payment with no BOOKED booking: if a (stuck) booking still
+  // references the PI, key the case on that booking so it lines up with the one
+  // finalization opened; a PI referenced by no booking at all is a true orphan.
+  const orphanPis: string[] = [];
+  for (const { stripePaymentIntentId: pi } of recon.paymentsMissingBooking) {
+    const b = bookingByPi.get(pi);
+    if (b) {
+      addIssue(
+        b.id,
+        `payment ${pi} succeeded but the booking is ${b.status ?? "unknown"}, not BOOKED`
+      );
+    } else {
+      orphanPis.push(pi);
+    }
+  }
+
+  // Dangling / missing child records on BOOKED bookings — the load-bearing
+  // "nonblank ID is not proof" check.
+  const healthyBooked: string[] = [];
+  for (const b of bookings) {
+    if (b.status !== "BOOKED") continue;
+    const exists = await childExistenceFor(b, paidPiSet);
+    const missing = missingChildRecords(b, exists);
+    if (missing.length) {
+      addIssue(b.id, `BOOKED but missing: ${missing.join(", ")}`);
+    } else if (!issues.has(b.id)) {
+      healthyBooked.push(b.id);
+    }
+  }
+
+  let opened = 0;
+  for (const [bookingId, reasons] of issues) {
+    const b = bookingById.get(bookingId);
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: bookingId,
+      title: `Reconciliation: paid booking is not whole${b?.name ? `: ${b.name}` : ""}`,
+      detail: `Daily reconciliation found this paid booking out of agreement with Stripe or the ledger: ${reasons.join("; ")}.`,
+      customerId: b?.customerId ?? undefined,
+      relatedId: bookingId,
+      sourceUrl: b?.customerId ? `/customers/${b.customerId}` : undefined,
+      resolutionAction:
+        "Open the booking and use “Retry finalization” to complete the missing records, or refund the payment in Stripe and tell the customer.",
+      ownerTeam: "FINANCE",
+    });
+    opened++;
+  }
+
+  for (const pi of orphanPis) {
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: `recon-missing-pi:${pi}`,
+      title: "Succeeded booking payment has no booking",
+      detail: `Stripe PaymentIntent ${pi} (tagged as a booking payment) succeeded for $${((succeeded.paidCentsByPi[pi] ?? 0) / 100).toFixed(2)}, but no BookingRequest references it. Money is captured with nothing behind it.`,
+      relatedId: pi,
+      resolutionAction:
+        "Find this PaymentIntent in Stripe; recreate and finalize the booking from the receipt, or refund the charge and tell the customer.",
+      ownerTeam: "FINANCE",
+    });
+    opened++;
+  }
+
+  for (const d of recon.duplicateBookingsForPayment) {
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: `recon-dup-booking:${d.stripePaymentIntentId}`,
+      title: "One payment made two bookings",
+      detail: `Payment ${d.stripePaymentIntentId} is behind more than one BOOKED booking (${d.bookingIds.join(", ")}) — a duplicated commitment. One customer paid once but has two bookings/jobs.`,
+      relatedId: d.stripePaymentIntentId,
+      resolutionAction:
+        "Cancel the duplicate booking/job (keep one), verify no double visit is scheduled, and confirm the customer was charged once.",
+      ownerTeam: "FINANCE",
+    });
+    opened++;
+  }
+
+  for (const d of recon.duplicatePaidInvoices) {
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: `recon-dup-invoice:${d.stripePaymentIntentId}`,
+      title: "One payment recorded as two paid invoices",
+      detail: `Payment ${d.stripePaymentIntentId} backs more than one PAID invoice (${d.invoiceIds.join(", ")}) — the money is double-counted as revenue.`,
+      relatedId: d.stripePaymentIntentId,
+      resolutionAction:
+        "Void the duplicate invoice so the payment is counted once, and reconcile revenue.",
+      ownerTeam: "FINANCE",
+    });
+    opened++;
+  }
+
+  // A booking that proves whole clears any exception a failed finalization left
+  // open — reconciliation resolves, not just opens.
+  let resolved = 0;
+  for (const id of healthyBooked) {
+    const did = await resolveOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: id,
+      note: "Daily reconciliation confirmed this booking is complete: every child record exists and the payment matches the committed amount.",
+    });
+    if (did) resolved++;
+  }
+
+  const ok = issues.size === 0 && orphanPis.length === 0 && recon.ok;
+  console.log(
+    `Reconciliation: ${bookings.length} bookings, ${succeeded.ids.length} succeeded payments, ${opened} anomalies opened, ${resolved} resolved, ok=${ok}`
+  );
+  return {
+    reconciled: true as const,
+    bookings: bookings.length,
+    succeededPayments: succeeded.ids.length,
+    anomaliesOpened: opened,
+    resolved,
+    ok,
+  };
+}
+
+/** All succeeded booking-funnel PaymentIntents Stripe knows about in the recent
+ *  window, with their captured amounts. Bounded by RECONCILE_WINDOW_DAYS and a
+ *  hard page cap so a volume spike cannot run the Lambda out of time silently. */
+async function fetchSucceededBookingPayments(): Promise<{
+  ids: string[];
+  paidCentsByPi: Record<string, number>;
+}> {
+  const stripe = stripeClient();
+  const windowDays = Number(process.env.RECONCILE_WINDOW_DAYS ?? 45);
+  const gte = Math.floor((Date.now() - windowDays * 86_400_000) / 1000);
+  const ids: string[] = [];
+  const paidCentsByPi: Record<string, number> = {};
+  let startingAfter: string | undefined;
+  let pages = 0;
+  const MAX_PAGES = 100; // 100 * 100 = 10k PaymentIntents — a runaway backstop
+  for (;;) {
+    const page = await stripe.paymentIntents.list({
+      created: { gte },
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    for (const pi of page.data) {
+      if (pi.status === "succeeded" && pi.metadata?.bookingRequestId) {
+        ids.push(pi.id);
+        paidCentsByPi[pi.id] = pi.amount_received ?? 0;
+      }
+    }
+    pages++;
+    if (!page.has_more) break;
+    if (pages >= MAX_PAGES) {
+      console.error(
+        `reconcilePaidBookings: stopped paging Stripe at ${MAX_PAGES} pages — narrow RECONCILE_WINDOW_DAYS or investigate volume`
+      );
+      break;
+    }
+    startingAfter = page.data[page.data.length - 1]?.id;
+    if (!startingAfter) break;
+  }
+  return { ids, paidCentsByPi };
+}
+
+async function allBookingsForReconcile(): Promise<ReconBooking[]> {
+  const client = await dataClient();
+  const rows: ReconBooking[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.BookingRequest.list({ nextToken, limit: 200 });
+    for (const b of page.data as unknown as ReconBooking[]) {
+      rows.push({
+        id: b.id,
+        status: b.status,
+        stripePaymentIntentId: b.stripePaymentIntentId,
+        amountCents: b.amountCents,
+        customerId: b.customerId,
+        jobId: b.jobId,
+        agreementId: b.agreementId,
+        servicePlanId: b.servicePlanId,
+        recurring: b.recurring,
+        name: b.name,
+        email: b.email,
+      });
+    }
+    nextToken = page.nextToken;
+  } while (nextToken);
+  return rows;
+}
+
+async function allInvoicesForReconcile(): Promise<ReconInvoice[]> {
+  const client = await dataClient();
+  const rows: ReconInvoice[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.Invoice.list({ nextToken, limit: 200 });
+    for (const inv of page.data as unknown as ReconInvoice[]) {
+      rows.push({
+        id: inv.id,
+        status: inv.status,
+        stripePaymentIntentId: inv.stripePaymentIntentId,
+      });
+    }
+    nextToken = page.nextToken;
+  } while (nextToken);
+  return rows;
+}
+
+/**
+ * A get() on a single model, structurally. The generated V6 client type is too
+ * deep for the compiler to name across a function boundary (TS2321), so the
+ * reconciliation's existence checks go through this minimal shape — we only need
+ * to know whether a row came back.
+ */
+type ChildLookupClient = {
+  models: Record<
+    "Customer" | "Job" | "Agreement" | "ServicePlan",
+    { get: (args: { id: string }) => Promise<{ data: unknown }> }
+  >;
+};
+
+/** Load each child record a BOOKED booking's checkpoint IDs claim and report
+ *  which actually resolve — the dangling-checkpoint check GL-05 requires. */
+async function childExistenceFor(booking: ReconBooking, paidPiSet: Set<string>) {
+  const client = (await dataClient()) as unknown as ChildLookupClient;
+  const [customer, job, agreement, plan] = await Promise.all([
+    booking.customerId
+      ? client.models.Customer.get({ id: booking.customerId }).then((r) => Boolean(r.data))
+      : Promise.resolve(false),
+    booking.jobId
+      ? client.models.Job.get({ id: booking.jobId }).then((r) => Boolean(r.data))
+      : Promise.resolve(false),
+    booking.agreementId
+      ? client.models.Agreement.get({ id: booking.agreementId }).then((r) => Boolean(r.data))
+      : Promise.resolve(false),
+    booking.servicePlanId
+      ? client.models.ServicePlan.get({ id: booking.servicePlanId }).then((r) => Boolean(r.data))
+      : Promise.resolve(false),
+  ]);
+  const pi = booking.stripePaymentIntentId?.trim();
+  const paidInvoice =
+    (booking.amountCents ?? 0) <= 0 ? true : Boolean(pi && paidPiSet.has(pi));
+  return { customer, job, agreement, paidInvoice, plan };
+}
+
+/** Every child record a BOOKED booking is missing — whether the checkpoint ID
+ *  is blank (never written) or dangling (written, no longer resolves). */
+function missingChildRecords(
+  booking: ReconBooking,
+  exists: {
+    customer: boolean;
+    job: boolean;
+    agreement: boolean;
+    paidInvoice: boolean;
+    plan: boolean;
+  }
+): string[] {
+  const missing = new Set<string>();
+  if (!booking.customerId) missing.add("customer");
+  if (!booking.jobId) missing.add("job");
+  if (!booking.agreementId) missing.add("agreement");
+  if (booking.recurring && !booking.servicePlanId) missing.add("service plan");
+  for (const d of danglingChildRecords(booking, exists)) missing.add(d);
+  return [...missing];
 }
 
 /**

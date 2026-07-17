@@ -1,4 +1,4 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
@@ -35,7 +35,66 @@ export async function finalizeBooking(opts: {
   const { data: booking } = await client.models.BookingRequest.get({
     id: opts.bookingRequestId,
   });
-  if (!booking || booking.status !== "QUOTED") return; // already finalized/canceled
+
+  // A succeeded booking payment with no booking row behind it: the record was
+  // deleted or the metadata points at a ghost. Money captured, nothing to
+  // finalize — a durable Finance case, never a silent return.
+  if (!booking) {
+    console.warn(
+      `finalizeBooking: no booking ${opts.bookingRequestId} for succeeded PaymentIntent ${opts.paymentIntentId}`
+    );
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: `missing-booking:${opts.paymentIntentId}`,
+      title: "Succeeded payment has no booking record",
+      detail: `Stripe reported PaymentIntent ${opts.paymentIntentId} succeeded for $${((opts.amountReceived ?? 0) / 100).toFixed(2)}, but booking ${opts.bookingRequestId} does not exist. The money is captured with nothing to deliver.`,
+      relatedId: opts.bookingRequestId,
+      resolutionAction:
+        "Find this PaymentIntent in Stripe. If it is a real customer payment, recreate the booking from the receipt and finalize it, or refund the charge and tell the customer.",
+      ownerTeam: "FINANCE",
+    });
+    return;
+  }
+
+  // Already whole. A hard kill can land between the BOOKED write and the
+  // customer/office sends, so a redelivery does not just return — it resumes the
+  // durable communication outbox, sending only whichever message has no sent
+  // marker yet, and clears any paid-not-finalized exception a failed attempt
+  // left open.
+  if (booking.status === "BOOKED") {
+    await deliverBookingComms(booking as unknown as BookingRecord, null);
+    await resolveOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: booking.id,
+      note: "The booking is complete; a redelivery confirmed every record exists and delivered any outstanding confirmation.",
+    });
+    return;
+  }
+
+  // Any other non-QUOTED status is a paid booking that cannot enter
+  // finalization: CANCELED/EXPIRED before it ever finalized (jobId is unset —
+  // a booking that WAS finalized and later canceled is the refund flow's, not
+  // this exception's), or a PENDING/CONTACT row that should never have a
+  // payment. Either way the money succeeded, so it is a Finance case.
+  if (booking.status !== "QUOTED") {
+    if (booking.jobId) return; // finalized earlier, then canceled — not stuck-paid
+    console.warn(
+      `finalizeBooking: booking ${booking.id} is ${booking.status}, not QUOTED, for succeeded PaymentIntent ${opts.paymentIntentId}`
+    );
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: booking.id,
+      title: `Paid booking is ${String(booking.status).toLowerCase()}, never finalized: ${booking.name ?? "customer"}`,
+      detail: `A booking-funnel payment of $${((opts.amountReceived ?? 0) / 100).toFixed(2)} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), but booking ${booking.id} is ${booking.status} and was never finalized. The money is in Stripe with no service commitment behind it.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
+      resolutionAction:
+        "Confirm the charge in Stripe. Either reinstate and finalize the booking, or refund the payment and tell the customer their booking did not go through.",
+      ownerTeam: "FINANCE",
+    });
+    return;
+  }
 
   // The record is mutable and /book can be retried, so trust the money, not
   // the record: only the PaymentIntent this booking currently points at, for
@@ -70,9 +129,25 @@ export async function finalizeBooking(opts: {
     return;
   }
   if (opts.amountReceived !== booking.amountCents) {
+    // Refusing to finalize on a mismatched amount is correct — creating the
+    // records for a price the customer did not pay would be worse. But the money
+    // still moved, so it cannot exit through a log line: open a Finance case
+    // with both amounts so someone reconciles or refunds the difference.
     console.error(
       `finalizeBooking: amount mismatch for booking ${booking.id} — paid ${opts.amountReceived}, quoted ${booking.amountCents}`
     );
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: booking.id,
+      title: `Paid amount does not match the quote: ${booking.name ?? "customer"}`,
+      detail: `A booking-funnel payment succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}) on PaymentIntent ${opts.paymentIntentId}, but Stripe captured $${((opts.amountReceived ?? 0) / 100).toFixed(2)} while the booking was quoted $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)}. Finalization was refused so no records were created at the wrong price.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
+      resolutionAction:
+        "Compare the Stripe charge to the quote. If the customer was undercharged, collect the difference before finalizing; if overcharged, refund the difference. Then re-point the amount and finalize, or refund in full.",
+      ownerTeam: "FINANCE",
+    });
     return;
   }
 
@@ -260,6 +335,7 @@ async function createOrGet(
  *  deep for the compiler to compare across this boundary. */
 type BookingRecord = {
   id: string;
+  status?: string | null;
   name: string;
   email: string;
   phone?: string | null;
@@ -285,6 +361,11 @@ type BookingRecord = {
   jobId?: string | null;
   servicePlanId?: string | null;
   agreementId?: string | null;
+  // Durable communication-outbox markers (GL-05). A nonblank value means that
+  // exact message has already gone out, so a resumed finalization never resends
+  // it. Written only after a successful send.
+  confirmationSentAt?: string | null;
+  officeAlertSentAt?: string | null;
 };
 
 /** First-touch ad attribution as sanitized and stored at /quote. */
@@ -971,7 +1052,12 @@ async function finalizeClaimed(
     throw new Error("recurring plan did not persist");
   }
 
-  await client.models.BookingRequest.update({
+  // The BOOKED write is the commitment. Trust its result, not the fact that we
+  // called update: if it did not persist, the child records exist but the
+  // booking is still QUOTED, so we must NOT send a confirmation that claims
+  // completion. Throwing here opens the paid-not-finalized exception and
+  // releases the claim; the retry resumes idempotently onto the same records.
+  const { data: booked } = await client.models.BookingRequest.update({
     id: booking.id,
     status: "BOOKED",
     customerId: customer.id,
@@ -979,40 +1065,124 @@ async function finalizeClaimed(
     servicePlanId,
     agreementId: agreement.id,
   });
+  if (!booked) throw new Error("booking did not transition to BOOKED");
+  booking.status = "BOOKED";
+  booking.customerId = customer.id;
+  booking.jobId = job.id ?? booking.jobId;
+  booking.agreementId = agreement.id ?? booking.agreementId;
 
-  // 5. Communications happen only AFTER the commitment exists, and only in the
-  // pass that flips QUOTED -> BOOKED — a retry short-circuits at the top on
-  // status, so nothing is sent twice. A send failure must not un-book a booking
-  // that is already whole, so it becomes owned work (a resend path), not a throw
-  // that would roll the whole finalization back into the exception queue.
+  // 5. Communications happen only AFTER the commitment exists. Delivery is
+  // idempotent and durably marked, so a hard kill between the BOOKED write and
+  // either send is picked up on the next webhook delivery and only the unsent
+  // message goes out. A send failure never un-books a whole booking — it lands
+  // in the owned-work queue as a resend path.
+  await deliverBookingComms(booking, {
+    serviceLabel,
+    windowLabel,
+    recurringOffer: stored.recurringOffer ?? null,
+    portalInvited,
+    matchFallbackReason,
+    pdf,
+    pdfKey,
+  });
+}
+
+/**
+ * Durable communication outbox for a finalized booking (GL-05). Sends the
+ * customer confirmation and the sales alert, each gated on its own persisted
+ * sent marker so nothing is delivered twice and a resumed finalization delivers
+ * only what a prior attempt did not. Best-effort per message: a failed send is
+ * owned work with a resend action, never a throw that would un-book the booking.
+ *
+ * `ctx` carries what only the finalizing pass knows (the rendered PDF, whether a
+ * portal invite went out, whether lead-matching fell back). On the resume path
+ * (`ctx === null`, invoked from a redelivery for an already-BOOKED booking) that
+ * context is reconstructed from the persisted booking, and the agreement PDF is
+ * re-fetched from S3 so a customer who was killed before their first send still
+ * receives the agreement.
+ */
+async function deliverBookingComms(
+  booking: BookingRecord,
+  ctx: {
+    serviceLabel: string;
+    windowLabel: string;
+    recurringOffer: { frequency: string; monthlyCents: number } | null;
+    portalInvited: boolean;
+    matchFallbackReason: string | null;
+    pdf: Uint8Array;
+    pdfKey: string | undefined;
+  } | null
+): Promise<void> {
+  // Nothing left to do — both messages already went out. Cheap fast-path for
+  // the common redelivery of a fully-finalized booking.
+  if (booking.confirmationSentAt && booking.officeAlertSentAt) return;
+
   const marketingUrl = process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com";
-  try {
-    await sendEmail({
-      to: booking.email,
-      subject: `You're booked: ${booking.selectedDate} — BuzzKill Pest Control`,
-      template: "booking-confirmation",
-      customerId: customer.id,
-      relatedId: booking.id,
-      attachments: pdfKey
-        ? [
-            {
-              filename: "BuzzKill-Service-Agreement.pdf",
-              content: pdf,
-              contentType: "application/pdf",
-            },
-          ]
-        : undefined,
-      html: emailShell(
-        "Your visit is booked",
-        `<p>Hi ${booking.name},</p>
+  const customerId = booking.customerId ?? undefined;
+
+  let serviceLabel: string;
+  let windowLabel: string;
+  let recurringOffer: { frequency: string; monthlyCents: number } | null;
+  let portalInvited: boolean;
+  let matchFallbackReason: string | null;
+  let pdf: Uint8Array | null;
+  let pdfKey: string | undefined;
+  if (ctx) {
+    ({ serviceLabel, windowLabel, recurringOffer, portalInvited, matchFallbackReason, pdf, pdfKey } = ctx);
+  } else {
+    // Resume path: rebuild from the persisted booking. A redelivery cannot know
+    // whether the invite went out or whether matching fell back, so it makes no
+    // portal promise and adds no fallback note — both concerns already have
+    // their own durable owned-work items from the original pass.
+    const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
+      serviceLabel?: string;
+      recurringOffer?: { frequency: string; monthlyCents: number } | null;
+    };
+    serviceLabel = stored.serviceLabel ?? "Pest control service";
+    windowLabel =
+      WINDOW_LABEL[booking.selectedWindow ?? ""] ??
+      booking.selectedWindow?.toLowerCase() ??
+      "";
+    recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
+    portalInvited = false;
+    matchFallbackReason = null;
+    pdfKey =
+      process.env.DOCS_BUCKET && booking.customerId
+        ? `agreements/${booking.customerId}/booking-${booking.id}.pdf`
+        : undefined;
+    pdf = await loadAgreementPdf(pdfKey);
+  }
+
+  if (!booking.confirmationSentAt) {
+    let sent = false;
+    try {
+      sent = await sendEmail({
+        to: booking.email,
+        subject: `You're booked: ${booking.selectedDate} — BuzzKill Pest Control`,
+        template: "booking-confirmation",
+        customerId,
+        relatedId: booking.id,
+        attachments:
+          pdfKey && pdf
+            ? [
+                {
+                  filename: "BuzzKill-Service-Agreement.pdf",
+                  content: pdf,
+                  contentType: "application/pdf",
+                },
+              ]
+            : undefined,
+        html: emailShell(
+          "Your visit is booked",
+          `<p>Hi ${booking.name},</p>
        <p><strong>${serviceLabel}</strong><br/>
        ${booking.selectedDate} · ${windowLabel}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
        <p>Payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> is confirmed${
-         booking.recurring && stored.recurringOffer
-           ? `, and your ${stored.recurringOffer.frequency.toLowerCase()} plan ($${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+         booking.recurring && recurringOffer
+           ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
            : ""
-       }. Your service agreement is attached.</p>
+       }.${pdfKey && pdf ? " Your service agreement is attached." : ""}</p>
        <p>We'll remind you 7 days and 1 day before the visit.</p>${
          portalInvited
            ? `
@@ -1020,51 +1190,111 @@ async function finalizeClaimed(
            : ""
        }
        <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than ${CANCEL_FULL_REFUND_DAYS} days out is a full refund; ${CANCEL_FULL_REFUND_DAYS} days or less is non-refundable.</p>`
-      ),
-    });
-  } catch (err) {
-    await openOwnedWork({
-      kind: "EMAIL_FAILURE",
-      dedupeKey: `booking-confirmation:${booking.id}`,
-      title: `Booking confirmation didn't send: ${booking.name}`,
-      detail: `The booking is finalized, but the confirmation email to ${booking.email} failed: ${err instanceof Error ? err.message : String(err)}.`,
-      customerId: customer.id,
-      relatedId: booking.id,
-      sourceUrl: `/customers/${customer.id}`,
-      resolutionAction:
-        "Resend the booking confirmation (with the agreement) to the customer, then verify it arrived.",
-      ownerTeam: "OPS",
-    });
+        ),
+      });
+    } catch (err) {
+      console.error("finalizeBooking: confirmation send threw", err);
+    }
+    if (sent) {
+      await stampCommsMarker(booking, "confirmationSentAt");
+    } else {
+      // sendEmail already opened a generic EMAIL_FAILURE; add the booking-shaped
+      // one with the resend action, and leave the marker unset so the next
+      // delivery retries.
+      await openOwnedWork({
+        kind: "EMAIL_FAILURE",
+        dedupeKey: `booking-confirmation:${booking.id}`,
+        title: `Booking confirmation didn't send: ${booking.name}`,
+        detail: `The booking is finalized, but the confirmation email to ${booking.email} did not send. It will be retried on the next webhook delivery.`,
+        customerId,
+        relatedId: booking.id,
+        sourceUrl: customerId ? `/customers/${customerId}` : undefined,
+        resolutionAction:
+          "Resend the booking confirmation (with the agreement) to the customer, then verify it arrived.",
+        ownerTeam: "OPS",
+      });
+    }
   }
 
   // R80: a paid website booking is a lead landing — route it to sales@.
-  try {
-    await notifyLeads({
-      subject: `Website booking: ${booking.name} — ${booking.selectedDate}`,
-      template: "office-booking-alert",
-      heading: "New paid website booking",
-      customerId: customer.id,
-      relatedId: booking.id,
-      bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
+  if (!booking.officeAlertSentAt) {
+    let sent = false;
+    try {
+      sent = await notifyLeads({
+        subject: `Website booking: ${booking.name} — ${booking.selectedDate}`,
+        template: "office-booking-alert",
+        heading: "New paid website booking",
+        customerId,
+        relatedId: booking.id,
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
          <p>The job is on the Needs-scheduling board for route assignment.</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
          <p style="color:#666;font-size:13px;">Reason: ${matchFallbackReason}</p>`
              : ""
          }`,
-    });
+      });
+    } catch (err) {
+      console.error("finalizeBooking: sales alert send threw", err);
+    }
+    if (sent) {
+      await stampCommsMarker(booking, "officeAlertSentAt");
+    } else {
+      await openOwnedWork({
+        kind: "EMAIL_FAILURE",
+        dedupeKey: `booking-sales-alert:${booking.id}`,
+        title: `Website-booking sales alert didn't send: ${booking.name}`,
+        detail: `The booking is finalized, but the sales@ new-booking alert did not send. The job is on the Needs-scheduling board; the alert will be retried on the next webhook delivery.`,
+        customerId,
+        relatedId: booking.id,
+        sourceUrl: customerId ? `/customers/${customerId}` : undefined,
+        resolutionAction:
+          "Let sales know a new website booking landed and needs route assignment.",
+        ownerTeam: "SALES",
+      });
+    }
+  }
+}
+
+/** Persist an outbox marker the instant its send succeeds, and mirror it onto
+ *  the in-memory booking so a later marker write in the same pass sees it.
+ *  Concrete per-field patches (not a computed key) keep the generated update
+ *  input type shallow — this model file already sits at the compiler's
+ *  instantiation-depth ceiling. */
+async function stampCommsMarker(
+  booking: BookingRecord,
+  field: "confirmationSentAt" | "officeAlertSentAt"
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+  booking[field] = nowIso;
+  try {
+    const client = await dataClient();
+    await client.models.BookingRequest.update(
+      field === "confirmationSentAt"
+        ? { id: booking.id, confirmationSentAt: nowIso }
+        : { id: booking.id, officeAlertSentAt: nowIso }
+    );
   } catch (err) {
-    await openOwnedWork({
-      kind: "EMAIL_FAILURE",
-      dedupeKey: `booking-sales-alert:${booking.id}`,
-      title: `Website-booking sales alert didn't send: ${booking.name}`,
-      detail: `The booking is finalized, but the sales@ new-booking alert failed: ${err instanceof Error ? err.message : String(err)}. The job is on the Needs-scheduling board.`,
-      customerId: customer.id,
-      relatedId: booking.id,
-      sourceUrl: `/customers/${customer.id}`,
-      resolutionAction:
-        "Let sales know a new website booking landed and needs route assignment.",
-      ownerTeam: "SALES",
-    });
+    // The message went out; failing to record that is a re-send risk on the
+    // next delivery, not a lost commitment. Log and move on.
+    console.error(`finalizeBooking: could not stamp ${field} for ${booking.id}`, err);
+  }
+}
+
+/** Best-effort re-fetch of the stored agreement PDF for a resumed confirmation
+ *  send. A missing object just means the confirmation goes out without the
+ *  attachment (the agreement also lives in the customer portal). */
+async function loadAgreementPdf(pdfKey?: string): Promise<Uint8Array | null> {
+  const bucket = process.env.DOCS_BUCKET;
+  if (!bucket || !pdfKey) return null;
+  try {
+    const res = await s3.send(
+      new GetObjectCommand({ Bucket: bucket, Key: pdfKey })
+    );
+    const bytes = await res.Body?.transformToByteArray();
+    return bytes ?? null;
+  } catch (err) {
+    console.error(`finalizeBooking: could not load agreement PDF ${pdfKey}`, err);
+    return null;
   }
 }

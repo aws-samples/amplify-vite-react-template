@@ -22,6 +22,7 @@ let reports: Report[] = [];
 let technician: Record<string, unknown>;
 let customer: Record<string, unknown>;
 let routes: Record<string, unknown>[] = [];
+let catalog: Record<string, unknown>[] = [];
 const officeEmails: { subject: string; bodyHtml: string }[] = [];
 
 const fakeDataClient = {
@@ -75,6 +76,9 @@ const fakeDataClient = {
       list: async () => ({
         data: [{ id: "t1", ...technician }],
       }),
+    },
+    Product: {
+      list: async () => ({ data: catalog }),
     },
   },
 };
@@ -155,6 +159,19 @@ beforeEach(() => {
   jobs = [{ id: "j1", customerId: "c1", technicianId: "t1", status: "IN_PROGRESS", serviceType: "General pest", type: "ONE_TIME" }];
   reports = [];
   routes = [];
+  // The office-approved product log. validReport applies "Suspend PolyZone",
+  // which must be an active, label-approved catalog row to finalize.
+  catalog = [
+    {
+      id: "prod_1",
+      name: "Suspend PolyZone",
+      epaNumber: "432-1514",
+      defaultRate: "0.06%",
+      reEntryHours: 4,
+      active: true,
+      labelApproved: true,
+    },
+  ];
   officeEmails.length = 0;
 });
 
@@ -525,8 +542,17 @@ describe("the finalize gate", () => {
   });
 
   it.each(["432-1514", "432-1514-4321", "1234567-12345"])(
-    "accepts the real EPA format %s",
+    "accepts the real EPA format %s from an approved catalog product",
     async (epaNumber) => {
+      catalog.push({
+        id: `prod_${epaNumber}`,
+        name: "P",
+        epaNumber,
+        defaultRate: "1 oz / gal",
+        reEntryHours: 4,
+        active: true,
+        labelApproved: true,
+      });
       reports.push(
         validReport({
           productsUsed: JSON.stringify([
@@ -650,6 +676,59 @@ describe("the finalize gate", () => {
 
     expect(reports[0].applicationStartAt).toBe("2026-07-16T13:05:00Z");
     expect(reports[0].applicationEndAt).toBeTruthy();
+  });
+
+  it("refuses a free-text product that is not in the approved catalog", async () => {
+    // Correctly shaped — a name, a format-valid EPA number, a quantity, a rate —
+    // but invented on site. Format is not authorization.
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([
+          { name: "Garage Special", epaNumber: "999-9999", quantity: "2 oz", rate: "0.1%" },
+        ]),
+      })
+    );
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/isn't an approved product|approved product in the catalog|added to the product log/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("refuses a product whose catalog row was never label-approved", async () => {
+    catalog[0].labelApproved = false;
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/approved product|product log/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("refuses a product whose catalog row has been retired", async () => {
+    catalog[0].active = false;
+    reports.push(validReport());
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/approved product|product log/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("refuses a real EPA number recorded under the wrong product name", async () => {
+    // 432-1514 is a real approved product (Suspend PolyZone), but not under this
+    // name — a mislabeled record is still a false record.
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([
+          { name: "Something Else", epaNumber: "432-1514", quantity: "1 oz", rate: "0.06%" },
+        ]),
+      })
+    );
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/approved product|product log/i);
   });
 });
 

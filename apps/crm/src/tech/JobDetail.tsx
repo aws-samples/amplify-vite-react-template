@@ -1209,8 +1209,9 @@ function ProductRowEditor({
               onChange={(e) => onChange("rate", e.target.value)}
             />
             <p className="muted small" style={{ margin: 0 }}>
-              This product is recorded on this report only. To add it to the
-              product log for everyone, ask the office.
+              Not in the log yet, so it can't be finalized on a report. The
+              office has to review and add it to the product log first — ask
+              them, then pick it here.
             </p>
           </>
         ) : matched?.epaNumber ? (

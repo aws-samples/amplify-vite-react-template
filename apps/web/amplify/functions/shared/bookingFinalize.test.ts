@@ -28,6 +28,10 @@ const emails: { to: string; subject: string; html: string }[] = [];
 // R80: the new-booking-landed alert routes to sales@ via notifyLeads now.
 const leadAlerts: { subject: string; heading: string; bodyHtml: string; template: string }[] = [];
 let booking: Record<string, unknown>;
+// GL-05: force the QUOTED -> BOOKED write to not persist, the way a conditional
+// write or a throttled update would, so the "confirmation is never sent on an
+// unconfirmed BOOKED write" guard can be exercised.
+let bookedWriteFails = false;
 
 // GL-05: to prove finalization is idempotent, the fake persists rows keyed by
 // id and honors a deterministic-id create as conditional — a second create with
@@ -88,6 +92,11 @@ const fakeDataClient = {
       // BOOKED flip are visible to a subsequent retry — that visibility is the
       // whole point of the idempotency tests.
       update: async (patch: Row) => {
+        if (bookedWriteFails && patch.status === "BOOKED") {
+          // The write did not land: leave the booking as-is and report no row,
+          // exactly as a conditional/throttled update would.
+          return { data: null, errors: [{ message: "BOOKED write refused" }] };
+        }
         Object.assign(booking, patch);
         return { data: { ...booking } };
       },
@@ -290,6 +299,7 @@ beforeEach(() => {
   failCreate.Job = false;
   failCreate.Invoice = false;
   failCreate.Agreement = false;
+  bookedWriteFails = false;
   delete process.env.DOCS_BUCKET; // skip the S3 write
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   booking = {
@@ -704,8 +714,12 @@ describe("R41 — the portal login is part of conversion", () => {
 });
 
 describe("idempotency and payment guards survive the matching", () => {
-  it("does nothing when the booking is already finalized", async () => {
+  it("does nothing when the booking is already finalized and its outbox is drained", async () => {
     booking.status = "BOOKED";
+    // A fully finalized booking carries its durable sent markers, so a
+    // redelivery resends nothing.
+    booking.confirmationSentAt = "2026-07-17T00:00:00Z";
+    booking.officeAlertSentAt = "2026-07-17T00:00:00Z";
     seedLead();
 
     await finalize();
@@ -713,6 +727,67 @@ describe("idempotency and payment guards survive the matching", () => {
     expect(customerUpdates).toHaveLength(0);
     expect(customersCreated).toHaveLength(0);
     expect(emails).toHaveLength(0);
+  });
+
+  it("opens a Finance case for an amount that doesn't match the quote — never a silent return", async () => {
+    seedLead();
+
+    await finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_1",
+      amountReceived: 100,
+    });
+
+    expect(customerUpdates).toHaveLength(0);
+    expect(customersCreated).toHaveLength(0);
+    const item = workOpened.find(
+      (w) => w.kind === "PAID_NOT_FINALIZED" && w.dedupeKey === "b1"
+    );
+    expect(item).toBeDefined();
+    expect(item!.title).toMatch(/does not match the quote/i);
+    expect(item!.detail).toContain("$1.00"); // captured
+    expect(item!.detail).toContain("$313.00"); // quoted
+  });
+
+  it("opens a Finance case when a succeeded payment has no booking row", async () => {
+    // The webhook fired for a booking that no longer exists.
+    // @ts-expect-error deliberately drop the row
+    booking = null;
+
+    await finalizeBooking({
+      bookingRequestId: "gone",
+      paymentIntentId: "pi_ghost",
+      amountReceived: 31300,
+    });
+
+    const item = workOpened.find(
+      (w) => w.kind === "PAID_NOT_FINALIZED" && w.dedupeKey === "missing-booking:pi_ghost"
+    );
+    expect(item).toBeDefined();
+    expect(item!.detail).toContain("$313.00");
+  });
+
+  it("opens a Finance case for a paid booking that is CANCELED before it ever finalized", async () => {
+    booking.status = "CANCELED";
+    booking.jobId = undefined; // never finalized
+
+    await finalize();
+
+    const item = workOpened.find(
+      (w) => w.kind === "PAID_NOT_FINALIZED" && w.dedupeKey === "b1"
+    );
+    expect(item).toBeDefined();
+    expect(item!.title).toMatch(/canceled, never finalized/i);
+    expect(customersCreated).toHaveLength(0);
+  });
+
+  it("does NOT open a case for a booking that finalized and was only later canceled", async () => {
+    booking.status = "CANCELED";
+    booking.jobId = "job-b1"; // it did finalize; the refund flow owns the cancel
+
+    await finalize();
+
+    expect(workOpened.find((w) => w.kind === "PAID_NOT_FINALIZED")).toBeUndefined();
   });
 
   it("ignores a superseded PaymentIntent", async () => {
@@ -889,6 +964,60 @@ describe("GL-05 — finalization is idempotent and resumable under failure", () 
     failCreate.Agreement = true;
     await expect(finalize()).rejects.toThrow();
     expect(emails).toHaveLength(0);
+  });
+
+  it("never confirms when the BOOKED write itself does not persist", async () => {
+    // Every child record exists, but the status write is refused. The
+    // confirmation must not go out claiming completion, and the paid customer
+    // becomes a durable exception for the idempotent retry.
+    bookedWriteFails = true;
+    await expect(finalize()).rejects.toThrow(/BOOKED/i);
+    expect(booking.status).toBe("QUOTED");
+    expect(emails).toHaveLength(0);
+    expect(workOpened.find((w) => w.kind === "PAID_NOT_FINALIZED")).toBeDefined();
+
+    // The write recovers: the retry resumes onto the same records and confirms.
+    bookedWriteFails = false;
+    await finalize();
+    expect(booking.status).toBe("BOOKED");
+    expect(jobsCreated).toHaveLength(1);
+    expect(emails).toHaveLength(1);
+  });
+
+  it("a hard kill after BOOKED but before the confirmation is detected and resends only the unsent message", async () => {
+    // The booking is BOOKED with a job on file (so it is not treated as
+    // stuck-paid) but neither send happened — the durable markers are unset.
+    booking.status = "BOOKED";
+    booking.jobId = "job-b1";
+    booking.customerId = "cust-b1";
+    // confirmationSentAt / officeAlertSentAt intentionally unset.
+
+    await finalize();
+
+    // Both outstanding messages go out exactly once...
+    expect(emails).toHaveLength(1);
+    expect(leadAlerts).toHaveLength(1);
+    expect(booking.confirmationSentAt).toBeDefined();
+    expect(booking.officeAlertSentAt).toBeDefined();
+
+    // ...and a further redelivery resends nothing.
+    await finalize();
+    expect(emails).toHaveLength(1);
+    expect(leadAlerts).toHaveLength(1);
+  });
+
+  it("resumes only the message that was lost — a confirmation already sent is not repeated", async () => {
+    booking.status = "BOOKED";
+    booking.jobId = "job-b1";
+    booking.customerId = "cust-b1";
+    booking.confirmationSentAt = "2026-07-17T00:00:00Z"; // already delivered
+    // officeAlertSentAt unset — the kill landed between the two sends.
+
+    await finalize();
+
+    expect(emails).toHaveLength(0); // confirmation not repeated
+    expect(leadAlerts).toHaveLength(1); // only the sales alert catches up
+    expect(booking.officeAlertSentAt).toBeDefined();
   });
 
   it("office Retry re-confirms the payment and finishes the stuck booking", async () => {

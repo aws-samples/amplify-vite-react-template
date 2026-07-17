@@ -896,6 +896,49 @@ function assertReportIsARecord(
   }
 }
 
+type CatalogProduct = {
+  name?: string | null;
+  epaNumber?: string | null;
+  active?: boolean | null;
+  labelApproved?: boolean | null;
+};
+
+/**
+ * GL-15, bullet 1: a regulated report may only carry office-approved products
+ * from the launch catalog. assertReportIsARecord checks that each product row is
+ * *shaped* like a record — a name, a format-valid EPA number, a quantity, a rate
+ * — but a technician can type all of that by hand from a crawlspace, inventing a
+ * product and a plausible EPA number that no one ever reviewed against a label.
+ * Free-text is not authorization. The catalog is the control: an unknown product
+ * has to be reviewed and approved into it by the office (saveProduct, the
+ * label-approval gate) before it can appear on a legal record.
+ *
+ * Matching is by EPA number and name against an *active, label-approved* catalog
+ * row, so a real number under the wrong name, a retired/inactive product, or one
+ * that was added but never label-approved is refused here — not silently
+ * finalized onto the document a customer keeps and an inspector may read.
+ */
+function assertProductsAreApproved(
+  products: { name?: string | null; epaNumber?: string | null }[],
+  catalog: CatalogProduct[]
+): void {
+  const approved = catalog.filter((c) => c.active && c.labelApproved);
+  for (const p of products) {
+    const name = p.name?.trim() ?? "";
+    const epa = p.epaNumber?.trim() ?? "";
+    const match = approved.find(
+      (c) =>
+        (c.epaNumber?.trim() ?? "") === epa &&
+        (c.name?.trim().toLowerCase() ?? "") === name.toLowerCase()
+    );
+    if (!match) {
+      throw new Error(
+        `“${name}” (EPA ${epa || "—"}) isn't an approved product in the catalog. A product has to be reviewed and added to the product log by the office before it can go on a service report — free-text details can't authorize a pesticide record. Ask the office to add it, then pick it here.`
+      );
+    }
+  }
+}
+
 async function finalizeServiceReport(reportId: string) {
   const client = await dataClient();
   const { data: report } = await client.models.ServiceReport.get({
@@ -919,6 +962,15 @@ async function finalizeServiceReport(reportId: string) {
   // caller could finalize an empty report on any job and email it. The fryer's
   // timer belongs in the fryer.
   assertReportIsARecord(report, job);
+
+  // Every product on the record must be an office-approved catalog product, not
+  // a free-text row a technician typed on site. Inspection-only reports have no
+  // products, so this is a no-op for them.
+  const productsUsed = parseProducts(report.productsUsed);
+  if (productsUsed.length) {
+    const { data: catalog } = await client.models.Product.list({ limit: 1000 });
+    assertProductsAreApproved(productsUsed, catalog ?? []);
+  }
 
   const serviceAddress = [
     customer.serviceStreet,
@@ -955,7 +1007,7 @@ async function finalizeServiceReport(reportId: string) {
     reEntryIntervalHours: report.reEntryIntervalHours,
     inspectionOnly: report.inspectionOnly,
     servicesPerformed: report.servicesPerformed,
-    productsUsed: parseProducts(report.productsUsed),
+    productsUsed,
     targetPests: report.targetPests,
     areasTreated: report.areasTreated,
     recommendations: report.recommendations,

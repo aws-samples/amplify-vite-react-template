@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  danglingChildRecords,
   reconcileBookings,
   type ReconBooking,
   type ReconInvoice,
@@ -104,5 +105,85 @@ describe("booking/payment reconciliation", () => {
     const canceled = bookedBooking({ status: "CANCELED" });
     const r = reconcileBookings([canceled], [], []);
     expect(r.ok).toBe(true);
+  });
+
+  it("flags a BOOKED booking whose Stripe amount differs from the committed amount", () => {
+    const r = reconcileBookings(
+      [bookedBooking()],
+      [paidInvoice()],
+      ["pi_1"],
+      { pi_1: 9900 } // Stripe took $99, the booking committed to $313
+    );
+    expect(r.ok).toBe(false);
+    expect(r.amountMismatches).toEqual([
+      {
+        bookingId: "b1",
+        stripePaymentIntentId: "pi_1",
+        bookedCents: 31300,
+        paidCents: 9900,
+      },
+    ]);
+  });
+
+  it("an exact-amount match reconciles clean", () => {
+    const r = reconcileBookings([bookedBooking()], [paidInvoice()], ["pi_1"], {
+      pi_1: 31300,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.amountMismatches).toHaveLength(0);
+  });
+});
+
+describe("dangling checkpoint detection", () => {
+  const booked = (over: Partial<ReconBooking> = {}): ReconBooking => ({
+    id: "b1",
+    status: "BOOKED",
+    stripePaymentIntentId: "pi_1",
+    amountCents: 31300,
+    customerId: "cust-1",
+    jobId: "job-b1",
+    agreementId: "agr-b1",
+    ...over,
+  });
+
+  const allExist = {
+    customer: true,
+    job: true,
+    agreement: true,
+    paidInvoice: true,
+    plan: true,
+  };
+
+  it("clean when every referenced record resolves", () => {
+    expect(danglingChildRecords(booked(), allExist)).toEqual([]);
+  });
+
+  it("a nonblank jobId that no longer resolves is dangling", () => {
+    expect(
+      danglingChildRecords(booked(), { ...allExist, job: false })
+    ).toEqual(["job"]);
+  });
+
+  it("a paid booking with no surviving invoice row is dangling", () => {
+    expect(
+      danglingChildRecords(booked(), { ...allExist, paidInvoice: false })
+    ).toContain("paid invoice");
+  });
+
+  it("a recurring booking with a missing plan is dangling; a one-time one is not", () => {
+    const recurring = booked({ recurring: true, servicePlanId: "plan-b1" });
+    expect(
+      danglingChildRecords(recurring, { ...allExist, plan: false })
+    ).toEqual(["service plan"]);
+    const oneTime = booked({ recurring: false });
+    expect(
+      danglingChildRecords(oneTime, { ...allExist, plan: false })
+    ).toEqual([]);
+  });
+
+  it("a blank checkpoint id is not counted as dangling here (that is the incomplete check's job)", () => {
+    expect(
+      danglingChildRecords(booked({ jobId: null }), { ...allExist, job: false })
+    ).toEqual([]);
   });
 });
