@@ -175,6 +175,16 @@ by card, schedule)"; suites 367 web / 140 CRM):
   (the manual-quote, sign-page, e-sign-consent, and agreement-textarea surfaces no longer
   exist); **R72's quote-status half retires** with the Quote model (lead follow-ups continue
   via LeadPricingRun).
+- **Customer-status side door closed** (follow-up, same principle): the Customers screen's
+  "+ Customer" button minted an ACTIVE customer directly (Customers.tsx:177,
+  `status: "ACTIVE"`). It is now "+ Lead" and creates a LEAD — so a new customer reaches ACTIVE
+  only through a paid booking (bookingFinalize converts the lead) or a manager-approved legacy
+  migration, never from a staff add with no payment behind it. The reactivate toggle
+  (INACTIVE↔ACTIVE) is unaffected — it is gated to non-LEAD, so it restores an existing
+  customer, it does not create one. Residual: OFFICE still holds model-level Customer
+  create/update, so raw GraphQL could set ACTIVE — the structural server guarantee (a guarded
+  migration mutation, OWNER-only) is the home for the "manager-approved legacy migration" path
+  if the "may only" is ever wanted at the database level rather than the UI.
 
 **AI pricing rearchitecture, `e734ee5` + `fe85d00`** (Jake's directive, 16 July: "absolutely
 everything priced with AI — no other way is acceptable"; suites 364 web / 134 CRM):

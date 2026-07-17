@@ -82,7 +82,7 @@ export default function Customers() {
           </Button>
         ) : (
           <Button small onClick={() => setAdding(true)}>
-            + Customer
+            + Lead
           </Button>
         )
       }
@@ -113,7 +113,7 @@ export default function Customers() {
               body={
                 q
                   ? "Try a different search."
-                  : "Convert a lead or add a customer to get started."
+                  : "New customers arrive here when a lead books and pays online. Use + Lead to add a prospect to work."
               }
             />
           ) : (
@@ -158,10 +158,16 @@ export default function Customers() {
         </Card>
       )}
 
-      <Sheet open={adding} onClose={() => setAdding(false)} title="New customer">
+      {/* Staff add a LEAD, never an ACTIVE customer. ACTIVE is reached one
+          way — a paid booking on the funnel (bookingFinalize converts the
+          lead) — so the office cannot mint a customer with no payment behind
+          it. A legacy migration into ACTIVE is a manager-approved path, not
+          this button. */}
+      <Sheet open={adding} onClose={() => setAdding(false)} title="New lead">
         <CustomerForm
           initial={customerToForm()}
-          submitLabel="Add customer"
+          submitLabel="Add lead"
+          showLeadSource
           onSubmit={async (v) => {
             const created = unwrap(
               await api().models.Customer.create({
@@ -173,8 +179,9 @@ export default function Customers() {
                 serviceCity: v.serviceCity.trim() || undefined,
                 serviceState: v.serviceState.trim() || undefined,
                 serviceZip: v.serviceZip.trim() || undefined,
+                leadSource: v.leadSource.trim() || undefined,
                 notes: v.notes.trim() || undefined,
-                status: "ACTIVE",
+                status: "LEAD",
               })
             );
             setAdding(false);
