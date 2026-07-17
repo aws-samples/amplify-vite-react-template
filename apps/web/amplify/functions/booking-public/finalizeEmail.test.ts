@@ -48,9 +48,15 @@ const fakeDataClient = {
     Customer: {
       // No existing customers — every test here exercises the create path.
       list: async () => ({ data: [], nextToken: null }),
+      // Finalization now looks for a prior fresh customer (deterministic id)
+      // before creating one; nothing pre-exists here, so this returns null.
+      get: async ({ id }: { id: string }) => ({
+        data: customers.find((c) => c.id === id) ?? null,
+      }),
       create: async (input: Record<string, unknown>) => {
-        customers.push(input);
-        return { data: { id: "cust1", groupId: null, ...input } };
+        const row = { id: "cust1", groupId: null, ...input };
+        customers.push(row);
+        return { data: row };
       },
       update: async (patch: Record<string, unknown>) => ({ data: patch }),
     },

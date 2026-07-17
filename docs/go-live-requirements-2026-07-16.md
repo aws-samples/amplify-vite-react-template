@@ -105,6 +105,48 @@ booking complete even when a required child record was not created.
 
 **Pass owner:** CEO and Engineering lead jointly; Finance verifies the reconciliation.
 
+**Engineering status (2026-07-17):** the exactly-once spine landed and was adversarially reviewed
+(15-agent review; the idempotency design survived, three findings refuted, six confirmed and fixed
+or documented below). Evidence, per acceptance bullet:
+
+- *Reaches Booked only when every record exists and agrees* — **done.** `finalizeClaimed`
+  (`apps/web/amplify/functions/shared/bookingFinalize.ts`) now asserts customer, job, agreement, and
+  (paid) invoice, and (recurring) plan all exist before flipping `BOOKED`; a silent null return can
+  no longer mark a paid booking complete without its job or ledger row.
+- *Retrying resumes the same transaction, never a duplicate* — **done.** Plan/job/agreement/invoice
+  use booking-derived deterministic ids through a `createOrGet` helper; the customer id is
+  checkpointed onto `BookingRequest.customerId` the instant it exists, and the fallback fresh
+  customer also uses a deterministic id with get-before-create, so an ambiguous-email retry cannot
+  mint a duplicate. Proven by failure-injection tests that inject a failure after each material step
+  and assert the retry creates no second customer/plan/job/agreement/invoice
+  (`bookingFinalize.test.ts`).
+- *No confirmation before the commitment; each comm retry-safe* — **done for duplication.** Comms run
+  only after `BOOKED`, and the top-of-function status short-circuit makes them exactly-once; a send
+  failure becomes owned work (`EMAIL_FAILURE`), never a throw that un-books. **Residual:** a hard
+  Lambda kill in the window between the `BOOKED` write and the send loses the confirmation silently
+  (no duplicate, but no send). Detectable by the reconciliation below; a `confirmationSentAt` marker
+  is the follow-up to close it fully.
+- *Durable "Paid—not finalized" exception* — **done.** A new `PAID_NOT_FINALIZED` work kind
+  (30-min SLA, FINANCE-owned) opens on any finalize failure with amount, customer, date, failed
+  step, and a one-tap recovery; it is auto-resolved when a later attempt succeeds. A hard-killed run
+  that orphans its finalization claim is reclaimed on the next delivery (claims older than 2× the
+  30s Lambda timeout are provably dead), and a stray captured payment on a superseded PaymentIntent
+  now opens its own finance exception instead of a lone log line.
+- *Recovery finishes the original booking, no hand-recreated records* — **done.** A
+  `retryBookingFinalization` mutation (OWNER/OFFICE/FINANCE) re-confirms the Stripe payment and
+  resumes the same idempotent finalization; the CRM "Retry finalization" button drives it from the
+  queue item. Retry verifies the booking actually reached `BOOKED` before reporting success, and
+  clears a stale exception on the already-booked path.
+- *Failure injection after each material step* — **done** in `bookingFinalize.test.ts` (customer,
+  plan, job, agreement, invoice, orphaned-claim, superseded-PI, and comms paths).
+- *Reconciliation: one complete booking per payment, and vice versa* — **predicate + test done**
+  (`bookingReconcile.ts` + `.test.ts`). **Not yet wired** to a scheduled job — that runtime sweep
+  (feeding it Stripe's succeeded-PI set) is the remaining backstop for the orphaned-claim and
+  lost-confirmation residuals, and overlaps GL-19's command view.
+
+Not owner-certifiable until the reconciliation sweep is scheduled and the whole path is exercised
+end to end against a deployed backend with injected Stripe/Lambda failures.
+
 ### GL-13 — Technician least-privilege and assignment enforcement
 
 **Business outcome:** A technician can see and change only the customers and work legitimately

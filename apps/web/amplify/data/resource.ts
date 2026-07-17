@@ -89,6 +89,11 @@ export const schema = a.schema({
     "PORTAL_FAILURE",
     "PRICING_ESCALATION",
     "MISSING_CONTACT",
+    // GL-05: a booking-funnel payment succeeded but finalization could not
+    // complete every record. The money is in Stripe with no complete booking
+    // behind it — the highest-harm state the funnel can reach — so it is a
+    // durable, office-visible exception, never a log line.
+    "PAID_NOT_FINALIZED",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -1109,6 +1114,22 @@ export const schema = a.schema({
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * GL-05 recovery: re-run finalization for a paid booking that got stuck
+   * (the PAID_NOT_FINALIZED exception). It re-reads the booking's PaymentIntent
+   * from Stripe to reconfirm the money, then resumes the SAME finalization —
+   * idempotent, so it finishes the original booking without creating a second
+   * customer/plan/job/agreement/invoice. It never recreates records by hand.
+   */
+  retryBookingFinalization: a
+    .mutation()
+    .arguments({ bookingRequestId: a.string().required() })
+    .returns(a.json())
+    // FINANCE too: PAID_NOT_FINALIZED is a finance-owned exception, and this is
+    // the recovery action its queue item prescribes.
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
     .handler(a.handler.function(crmDocs)),
 
   /**

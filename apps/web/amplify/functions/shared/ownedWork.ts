@@ -10,7 +10,8 @@ export type WorkKind =
   | "PAID_VISIT_CANCELLATION"
   | "PORTAL_FAILURE"
   | "PRICING_ESCALATION"
-  | "MISSING_CONTACT";
+  | "MISSING_CONTACT"
+  | "PAID_NOT_FINALIZED";
 
 export type WorkOwnerTeam = "OPS" | "SALES" | "FINANCE";
 
@@ -24,6 +25,9 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   PORTAL_FAILURE: 4 * 60,
   PRICING_ESCALATION: 60,
   MISSING_CONTACT: 24 * 60,
+  // Money is already in Stripe with no complete booking behind it — the
+  // shortest clock in the system.
+  PAID_NOT_FINALIZED: 30,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {
@@ -176,6 +180,49 @@ export async function openOwnedWork(
   } catch (err) {
     console.error("openOwnedWork failed", input.kind, input.relatedId, err);
     return null;
+  }
+}
+
+/**
+ * Resolve an owned exception that a later success has made moot — e.g. a
+ * booking finalization that failed, opened PAID_NOT_FINALIZED, and then
+ * completed on a retry. Best-effort and idempotent: a missing or
+ * already-resolved item is a no-op, and it never throws into the caller. A
+ * system resolution still records a WorkEvent so the queue history is honest.
+ */
+export async function resolveOwnedWork(input: {
+  kind: WorkKind;
+  dedupeKey: string;
+  note: string;
+}): Promise<boolean> {
+  const id = workItemId(input.kind, input.dedupeKey);
+  const nowIso = new Date().toISOString();
+  try {
+    const client = await dataClient();
+    if (!("WorkItem" in client.models) || !("WorkEvent" in client.models)) {
+      return false;
+    }
+    const { data: existing } = await client.models.WorkItem.get({ id });
+    if (!existing || existing.status === "RESOLVED") return false;
+    const { data: updated } = await client.models.WorkItem.update({
+      id,
+      status: "RESOLVED",
+      resolvedAt: nowIso,
+      resolvedByEmail: "system@pestbuzzkill.com",
+      resolutionNote: input.note,
+    });
+    if (!updated) return false;
+    await client.models.WorkEvent.create({
+      workItemId: id,
+      eventType: "RESOLVED",
+      actorEmail: "system@pestbuzzkill.com",
+      note: input.note,
+      occurredAt: nowIso,
+    });
+    return true;
+  } catch (err) {
+    console.error("resolveOwnedWork failed", input.kind, input.dedupeKey, err);
+    return false;
   }
 }
 

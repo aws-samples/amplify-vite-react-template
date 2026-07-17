@@ -29,16 +29,70 @@ const emails: { to: string; subject: string; html: string }[] = [];
 const leadAlerts: { subject: string; heading: string; bodyHtml: string; template: string }[] = [];
 let booking: Record<string, unknown>;
 
+// GL-05: to prove finalization is idempotent, the fake persists rows keyed by
+// id and honors a deterministic-id create as conditional — a second create with
+// an id that already exists fails, exactly as DynamoDB's conditional put does.
+// This is what makes a "run finalize twice" test meaningful.
+const store = {
+  ServicePlan: new Map<string, Row>(),
+  Job: new Map<string, Row>(),
+  Invoice: new Map<string, Row>(),
+  Agreement: new Map<string, Row>(),
+  BookingFinalization: new Map<string, Row>(),
+};
+// Per-model injected failures — set true to make the next create(s) fail, the
+// way a throttled/validation-refused write would, so a retry can then succeed.
+const failCreate = {
+  ServicePlan: false,
+  Job: false,
+  Invoice: false,
+  Agreement: false,
+};
+
+function statefulModel(name: keyof typeof store, created?: Row[]) {
+  const failable = name in failCreate;
+  return {
+    create: async (input: Row) => {
+      if (failable && failCreate[name as keyof typeof failCreate]) {
+        return { data: null, errors: [{ message: `forced ${name} failure` }] };
+      }
+      const id = (input.id as string) ?? `${name}-${store[name].size + 1}`;
+      if (store[name].has(id)) {
+        // Conditional create against an existing id — a retry landing on a
+        // record a prior attempt already wrote. No duplicate row.
+        return { data: null, errors: [{ message: "ConditionalCheckFailed" }] };
+      }
+      // Amplify stamps createdAt on every row; the orphan-claim reaper reads it.
+      const row = {
+        createdAt: new Date().toISOString(),
+        ...input,
+        id,
+      } as Row;
+      store[name].set(id, row);
+      created?.push(row);
+      return { data: row };
+    },
+    get: async ({ id }: { id: string }) => ({ data: store[name].get(id) ?? null }),
+    delete: async ({ id }: { id: string }) => {
+      store[name].delete(id);
+      return { data: null };
+    },
+  };
+}
+
 const fakeDataClient = {
   models: {
     BookingRequest: {
       get: async () => ({ data: booking }),
-      update: async (patch: Row) => ({ data: patch }),
+      // Mutates the shared booking so a checkpoint (customerId) and the
+      // BOOKED flip are visible to a subsequent retry — that visibility is the
+      // whole point of the idempotency tests.
+      update: async (patch: Row) => {
+        Object.assign(booking, patch);
+        return { data: { ...booking } };
+      },
     },
-    BookingFinalization: {
-      create: async () => ({ data: { id: "b1" } }),
-      delete: async () => ({ data: null }),
-    },
+    BookingFinalization: statefulModel("BookingFinalization"),
     Customer: {
       get: async ({ id }: { id: string }) => ({
         data: existingCustomers.find((c) => c.id === id) ?? null,
@@ -48,15 +102,27 @@ const fakeDataClient = {
         return { data: existingCustomers, nextToken: null };
       },
       create: async (input: Row) => {
-        const row = { ...input, id: "cust-new" };
+        // Honor the deterministic id finalization now supplies (cust-<booking>)
+        // so a resumed run's get() finds this exact record instead of remaking.
+        const row = {
+          groupId: null,
+          ...input,
+          id: (input.id as string) ?? "cust-new",
+        } as Row;
         customersCreated.push(row);
-        return { data: { groupId: null, ...row } };
+        // Also visible to a later get() — a resumed finalization reuses this
+        // exact customer instead of creating a second one.
+        existingCustomers.push(row);
+        return { data: row };
       },
       update: async (patch: Row) => {
         customerUpdates.push(patch);
         if (customerUpdateFails && patch.status) {
           return { data: null, errors: [{ message: "update refused" }] };
         }
+        // Deliberately non-mutating (returns a merged copy): finalization reads
+        // existing.status AFTER convert to decide reactivatedWithPortal, and a
+        // convert that flipped the in-store row to ACTIVE would erase that.
         const current = existingCustomers.find((c) => c.id === patch.id);
         return { data: { groupId: null, ...current, ...patch } };
       },
@@ -79,28 +145,10 @@ const fakeDataClient = {
         return { data: pricingRuns[i] ?? patch };
       },
     },
-    ServicePlan: {
-      create: async (input: Record<string, unknown>) => {
-        plansCreated.push({ id: "plan1", ...input });
-        return { data: { id: "plan1", ...input } };
-      },
-    },
-    Job: {
-      create: async (input: Record<string, unknown>) => {
-        jobsCreated.push({ id: "job1", ...input });
-        return { data: { id: "job1", ...input } };
-      },
-    },
-    Invoice: {
-      create: async (input: Record<string, unknown>) => ({
-        data: { id: "inv1", ...input },
-      }),
-    },
-    Agreement: {
-      create: async (input: Record<string, unknown>) => ({
-        data: { id: "agr1", ...input },
-      }),
-    },
+    ServicePlan: statefulModel("ServicePlan", plansCreated),
+    Job: statefulModel("Job", jobsCreated),
+    Invoice: statefulModel("Invoice"),
+    Agreement: statefulModel("Agreement"),
   },
 };
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
@@ -125,7 +173,18 @@ vi.mock("./pdf", () => ({
   renderAgreementPdf: async () => Buffer.from("pdf"),
 }));
 vi.mock("./stripeClient", () => ({
-  stripeClient: () => ({ customers: { update: async () => ({}) } }),
+  stripeClient: () => ({
+    customers: { update: async () => ({}) },
+    paymentIntents: {
+      // The office Retry path re-reads the PaymentIntent to reconfirm the money.
+      retrieve: async (id: string) => ({
+        id,
+        status: "succeeded",
+        amount_received: 31300,
+        payment_method: "pm_1",
+      }),
+    },
+  }),
 }));
 // R41: portal provisioning is part of conversion — captured, and failable.
 const portalInvites: { customerId: string; email: string; name: string }[] = [];
@@ -139,6 +198,10 @@ vi.mock("./portalProvision", () => ({
   }) => {
     if (portalProvisionError) throw portalProvisionError;
     portalInvites.push(o);
+    // Reality (grantCustomerPortal) stamps portalUserSub on the customer, so a
+    // resumed finalization sees the login already exists and does not re-invite.
+    const c = existingCustomers.find((x) => x.id === o.customerId);
+    if (c) c.portalUserSub = "sub-1";
     return {
       sub: "sub-1",
       username: o.email,
@@ -148,15 +211,27 @@ vi.mock("./portalProvision", () => ({
     };
   },
 }));
-const workOpened: { kind: string; title: string; detail: string }[] = [];
+const workOpened: { kind: string; title: string; detail: string; dedupeKey?: string }[] = [];
+const workResolved: { kind: string; dedupeKey: string }[] = [];
 vi.mock("./ownedWork", () => ({
-  openOwnedWork: async (o: { kind: string; title: string; detail: string }) => {
+  openOwnedWork: async (o: {
+    kind: string;
+    title: string;
+    detail: string;
+    dedupeKey?: string;
+  }) => {
     workOpened.push(o);
     return "work-1";
   },
+  resolveOwnedWork: async (o: { kind: string; dedupeKey: string }) => {
+    workResolved.push(o);
+    return true;
+  },
 }));
 
-const { finalizeBooking } = await import("./bookingFinalize");
+const { finalizeBooking, retryBookingFinalization } = await import(
+  "./bookingFinalize"
+);
 
 const finalize = () =>
   finalizeBooking({
@@ -205,6 +280,16 @@ beforeEach(() => {
   portalProvisionError = null;
   portalLinkSent = true;
   workOpened.length = 0;
+  workResolved.length = 0;
+  store.ServicePlan.clear();
+  store.Job.clear();
+  store.Invoice.clear();
+  store.Agreement.clear();
+  store.BookingFinalization.clear();
+  failCreate.ServicePlan = false;
+  failCreate.Job = false;
+  failCreate.Invoice = false;
+  failCreate.Agreement = false;
   delete process.env.DOCS_BUCKET; // skip the S3 write
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   booking = {
@@ -530,7 +615,7 @@ describe("R41 — the portal login is part of conversion", () => {
 
     expect(portalInvites).toEqual([
       {
-        customerId: "cust-new",
+        customerId: "cust-b1",
         email: "dana@example.com",
         name: "Dana Whitlock",
       },
@@ -610,7 +695,7 @@ describe("R41 — the portal login is part of conversion", () => {
 
     expect(portalInvites).toEqual([
       {
-        customerId: "cust-new",
+        customerId: "cust-b1",
         email: "dana@example.com",
         name: "Dana Whitlock",
       },
@@ -653,6 +738,239 @@ describe("idempotency and payment guards survive the matching", () => {
     });
 
     expect(customerUpdates).toHaveLength(0);
+    expect(customersCreated).toHaveLength(0);
+  });
+});
+
+/**
+ * GL-05 — exactly-once paid booking conversion. The evidence the gate demands:
+ * inject a failure after each material step, prove the retry RESUMES the same
+ * booking (never a second customer/plan/job/agreement/invoice), prove the paid
+ * customer is a durable office exception in the meantime, and prove the
+ * confirmation is sent once, only after the commitment exists.
+ */
+describe("GL-05 — finalization is idempotent and resumable under failure", () => {
+  const paidInvoiceOf = () => store.Invoice.get("booking-b1");
+
+  it("a job-create failure becomes a Paid—not finalized exception, then a retry finishes the SAME booking", async () => {
+    // Step fails: the job cannot be written.
+    failCreate.Job = true;
+    await expect(finalize()).rejects.toThrow(/job/i);
+
+    // Not booked, and the paid customer is a durable, office-visible exception
+    // carrying the amount and a one-tap recovery — never a log line.
+    expect(booking.status).toBe("QUOTED");
+    const exception = workOpened.find((w) => w.kind === "PAID_NOT_FINALIZED");
+    expect(exception).toBeDefined();
+    expect(exception!.detail).toContain("$313.00");
+    expect(exception!.detail).toContain("2026-07-22");
+    const created1 = customersCreated.length;
+    expect(created1).toBe(1); // the customer was created on the first pass
+
+    // The webhook (or the office) retries. It resumes: no second customer,
+    // job, or invoice — and the booking completes.
+    failCreate.Job = false;
+    await finalize();
+
+    expect(booking.status).toBe("BOOKED");
+    expect(customersCreated).toHaveLength(1); // still one — reused, not remade
+    expect(jobsCreated).toHaveLength(1);
+    expect(paidInvoiceOf()).toBeDefined();
+    // The exception the first pass opened is resolved by the success.
+    expect(workResolved.find((w) => w.kind === "PAID_NOT_FINALIZED")).toBeDefined();
+  });
+
+  it("resumes onto the same fresh customer even if the checkpoint was lost and the email became ambiguous", async () => {
+    // A prior attempt created the fresh customer (deterministic id cust-b1) but
+    // died before the checkpoint landed, and a same-email lead now also exists —
+    // so re-matching by email is ambiguous and, without the deterministic id,
+    // would mint a SECOND fresh record.
+    existingCustomers.push({
+      id: "cust-b1",
+      email: "dana@example.com",
+      status: "ACTIVE",
+      portalUserSub: "sub-1",
+    });
+    seedLead(); // lead-1, same email → makes the match ambiguous
+    booking.customerId = undefined;
+
+    await finalize();
+
+    expect(customersCreated).toHaveLength(0); // reused cust-b1, minted nothing
+    expect(booking.customerId).toBe("cust-b1");
+    expect(booking.status).toBe("BOOKED");
+  });
+
+  it("reuses the converted lead via the checkpoint even when a retry's email match has become ambiguous", async () => {
+    seedLead(); // lead-1, dana@example.com — converted on the first pass
+    // Pass 1: convert the lead, then fail before the booking is BOOKED.
+    failCreate.Job = true;
+    await expect(finalize()).rejects.toThrow();
+    // The checkpoint recorded the resolved customer even though BOOKED never
+    // ran. (This assertion fails if the customerId checkpoint is disabled.)
+    expect(booking.customerId).toBe("lead-1");
+
+    // The email is now ambiguous — a duplicate record shares it. WITHOUT the
+    // checkpoint, the retry would re-match, hit the ambiguity, and mint a fresh
+    // duplicate beside the already-converted lead.
+    existingCustomers.push({ id: "dup-1", email: "dana@example.com", status: "LEAD" });
+
+    failCreate.Job = false;
+    await finalize();
+
+    expect(customersCreated).toHaveLength(0); // reused lead-1 — no duplicate
+    expect(booking.status).toBe("BOOKED");
+  });
+
+  it("a converted lead is not re-converted or duplicated on retry", async () => {
+    seedLead();
+    failCreate.Agreement = true;
+    await expect(finalize()).rejects.toThrow(/agreement/i);
+    expect(booking.status).toBe("QUOTED");
+
+    failCreate.Agreement = false;
+    await finalize();
+
+    expect(booking.status).toBe("BOOKED");
+    expect(customersCreated).toHaveLength(0); // the lead was converted, never duplicated
+    expect(jobsCreated).toHaveLength(1);
+    expect(store.Agreement.size).toBe(1);
+  });
+
+  it("the paid invoice is required — a booking never reaches BOOKED without its ledger row", async () => {
+    failCreate.Invoice = true;
+    await expect(finalize()).rejects.toThrow(/invoice/i);
+    expect(booking.status).toBe("QUOTED");
+
+    failCreate.Invoice = false;
+    await finalize();
+
+    expect(booking.status).toBe("BOOKED");
+    expect(paidInvoiceOf()).toMatchObject({ status: "PAID", stripePaymentIntentId: "pi_1" });
+    expect([...store.Invoice.keys()]).toEqual(["booking-b1"]); // exactly one
+  });
+
+  it("a plan booking resumes onto the same plan, not a second subscription", async () => {
+    booking.quoteJson = JSON.stringify({
+      serviceLabel: "Commercial pest control — up to 5,000 sqft",
+      recurringOffer: { frequency: "MONTHLY", monthlyCents: 14900, initialFeeCents: 19900 },
+    });
+    booking.recurring = true;
+
+    failCreate.Job = true;
+    await expect(finalize()).rejects.toThrow();
+    // The plan was created before the job step failed.
+    expect(plansCreated).toHaveLength(1);
+
+    failCreate.Job = false;
+    await finalize();
+
+    expect(booking.status).toBe("BOOKED");
+    expect(plansCreated).toHaveLength(1); // resumed onto the same plan
+    expect(store.ServicePlan.size).toBe(1);
+  });
+
+  it("a re-delivered webhook for an already-booked payment is a no-op — no second confirmation", async () => {
+    await finalize();
+    expect(booking.status).toBe("BOOKED");
+    expect(emails).toHaveLength(1);
+    const jobs1 = jobsCreated.length;
+
+    // Stripe delivers the same event again.
+    await finalize();
+
+    expect(jobsCreated).toHaveLength(jobs1); // nothing new
+    expect(customersCreated).toHaveLength(1);
+    expect(emails).toHaveLength(1); // the confirmation is sent exactly once
+  });
+
+  it("the confirmation email is sent only after the booking is BOOKED", async () => {
+    // If finalization never reaches BOOKED, no "you're booked" goes out.
+    failCreate.Agreement = true;
+    await expect(finalize()).rejects.toThrow();
+    expect(emails).toHaveLength(0);
+  });
+
+  it("office Retry re-confirms the payment and finishes the stuck booking", async () => {
+    failCreate.Agreement = true;
+    await expect(finalize()).rejects.toThrow();
+    expect(booking.status).toBe("QUOTED");
+
+    failCreate.Agreement = false;
+    const res = await retryBookingFinalization("b1");
+
+    expect(res).toEqual({ status: "FINALIZED" });
+    expect(booking.status).toBe("BOOKED");
+    expect(customersCreated).toHaveLength(1);
+    expect(jobsCreated).toHaveLength(1);
+  });
+
+  it("office Retry on an already-booked booking does nothing but clears any stale exception", async () => {
+    await finalize();
+    const jobs1 = jobsCreated.length;
+
+    const res = await retryBookingFinalization("b1");
+
+    expect(res).toEqual({ status: "ALREADY_BOOKED" });
+    expect(jobsCreated).toHaveLength(jobs1);
+    // Self-healing: a PAID_NOT_FINALIZED left OPEN by a transient resolve
+    // failure is cleared even on the already-booked path.
+    expect(workResolved.find((w) => w.kind === "PAID_NOT_FINALIZED")).toBeDefined();
+  });
+
+  it("reclaims an orphaned finalization claim (a killed run) and completes the booking", async () => {
+    // A prior run was hard-killed after claiming: an old claim row remains and
+    // the booking is still QUOTED. Without reclaiming, the booking would wedge.
+    store.BookingFinalization.set("b1", {
+      id: "b1",
+      note: "pi pi_1",
+      createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+
+    await finalize();
+
+    expect(booking.status).toBe("BOOKED");
+    expect(jobsCreated).toHaveLength(1);
+  });
+
+  it("does not steal a fresh (live) finalization claim", async () => {
+    store.BookingFinalization.set("b1", {
+      id: "b1",
+      note: "pi pi_1",
+      createdAt: new Date().toISOString(),
+    });
+
+    await finalize();
+
+    expect(booking.status).toBe("QUOTED"); // a live delivery owns it — no-op
+    expect(jobsCreated).toHaveLength(0);
+  });
+
+  it("retry reports failure — never FINALIZED — when finalization could not complete", async () => {
+    // A live claim is held, so finalizeBooking no-ops and the booking stays QUOTED.
+    store.BookingFinalization.set("b1", {
+      id: "b1",
+      note: "held",
+      createdAt: new Date().toISOString(),
+    });
+
+    await expect(retryBookingFinalization("b1")).rejects.toThrow(/still not complete/i);
+  });
+
+  it("a superseded PaymentIntent that captured money opens a stray-payment exception", async () => {
+    await finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_stale",
+      amountReceived: 31300,
+    });
+
+    const stray = workOpened.find(
+      (w) => w.kind === "PAID_NOT_FINALIZED" && w.dedupeKey === "stray-pi:pi_stale"
+    );
+    expect(stray).toBeDefined();
+    expect(stray!.detail).toContain("pi_stale");
+    // The booking itself was not touched.
+    expect(booking.status).toBe("QUOTED");
     expect(customersCreated).toHaveLength(0);
   });
 });

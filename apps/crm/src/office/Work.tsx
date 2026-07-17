@@ -37,6 +37,7 @@ const KIND_LABEL: Record<string, string> = {
   PORTAL_FAILURE: "Portal failure",
   PRICING_ESCALATION: "Pricing",
   MISSING_CONTACT: "Missing contact",
+  PAID_NOT_FINALIZED: "Paid, not finalized",
 };
 
 export default function WorkQueue() {
@@ -134,6 +135,37 @@ export default function WorkQueue() {
     [load]
   );
 
+  // GL-05: finish a paid booking whose finalization got stuck. The mutation
+  // re-confirms the Stripe payment and resumes the SAME booking (idempotent),
+  // then auto-resolves this exception on success.
+  const retryFinalization = useCallback(
+    async (item: WorkItem) => {
+      if (
+        !window.confirm(
+          "Re-confirm the Stripe payment and finish this booking? This is safe to run more than once."
+        )
+      ) {
+        return;
+      }
+      setBusyId(item.id);
+      setError(null);
+      try {
+        const res = opResult<{ status: string }>(
+          await api().mutations.retryBookingFinalization({
+            bookingRequestId: item.relatedId,
+          })
+        );
+        if (!res) throw new Error("The retry did not run");
+        await load();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not finish the booking");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
   if (!items) {
     return (
       <Page title="Owned work" back={roles.office ? "/dashboard" : "/more"}>
@@ -219,6 +251,18 @@ export default function WorkQueue() {
                     onClick={() => void rebookNoAccess(item)}
                   >
                     Rebook visit
+                  </Button>
+                ) : null}
+                {item.status === "OPEN" &&
+                item.kind === "PAID_NOT_FINALIZED" &&
+                (roles.office || roles.finance) ? (
+                  <Button
+                    small
+                    variant="subtle"
+                    loading={busyId === item.id}
+                    onClick={() => void retryFinalization(item)}
+                  >
+                    Retry finalization
                   </Button>
                 ) : null}
                 {item.status === "OPEN" ? (

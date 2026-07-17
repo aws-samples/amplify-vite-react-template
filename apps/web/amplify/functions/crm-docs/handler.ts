@@ -9,6 +9,7 @@ import {
   assertTechnicianCompliance,
   EPA_REGISTRATION_RE,
 } from "../shared/compliance";
+import { retryBookingFinalization } from "../shared/bookingFinalize";
 import { opFieldName } from "../shared/opEvent";
 import {
   callerEmail,
@@ -113,6 +114,7 @@ type Args = {
   prepInstructions?: string;
   prepConfirmed?: boolean;
   paymentExpectation?: string;
+  bookingRequestId?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -205,6 +207,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         callerSub(event.identity),
         callerEmail(event.identity)
       );
+    }
+    case "retryBookingFinalization": {
+      // Finance owns the PAID_NOT_FINALIZED exception this recovers, so finance
+      // (as well as office) must be able to run it.
+      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
+        throw new Error("Office or finance role required");
+      }
+      return retryBookingFinalization(event.arguments.bookingRequestId!);
     }
     case "updateOwnedWork": {
       if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {

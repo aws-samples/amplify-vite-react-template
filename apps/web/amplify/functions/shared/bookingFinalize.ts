@@ -2,11 +2,11 @@ import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
-import { emailShell, notifyLeads, notifyOffice, sendEmail } from "./email";
+import { emailShell, notifyLeads, sendEmail } from "./email";
 import { provisionPortalLogin } from "./portalProvision";
 import { renderAgreementPdf } from "./pdf";
 import { stripeClient } from "./stripeClient";
-import { openOwnedWork } from "./ownedWork";
+import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
 
 const s3 = new S3Client();
 
@@ -46,9 +46,27 @@ export async function finalizeBooking(opts: {
     booking.stripePaymentIntentId &&
     opts.paymentIntentId !== booking.stripePaymentIntentId
   ) {
+    // Refusing to finalize on the stale PI is correct — but the money on it was
+    // still captured, and it does not match this booking's current PaymentIntent.
+    // A re-book that repointed the booking and lost the race to cancel the old
+    // PI lands here: captured money with no booking behind it. Surface it as a
+    // durable finance exception (keyed on the stray PI so it never collides with
+    // this booking's own PAID_NOT_FINALIZED item) instead of a lone console.warn.
     console.warn(
-      `finalizeBooking: ignoring superseded PaymentIntent ${opts.paymentIntentId} for booking ${booking.id}`
+      `finalizeBooking: superseded PaymentIntent ${opts.paymentIntentId} for booking ${booking.id} — money captured on a PI the booking no longer points at`
     );
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: `stray-pi:${opts.paymentIntentId}`,
+      title: `Stray captured payment not attached to a booking: ${booking.name ?? "customer"}`,
+      detail: `Stripe captured $${((opts.amountReceived ?? 0) / 100).toFixed(2)} on PaymentIntent ${opts.paymentIntentId}, but booking ${booking.id} now points at a different PaymentIntent (${booking.stripePaymentIntentId}). The customer may have been charged twice, or paid on a PaymentIntent the booking abandoned. Verify in Stripe and refund the stray charge, or re-point and finalize the booking.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
+      resolutionAction:
+        "Open this customer and the PaymentIntent in Stripe. If the customer was double-charged, refund the stray charge. If this was their real payment, refund the duplicate and finish the booking.",
+      ownerTeam: "FINANCE",
+    });
     return;
   }
   if (opts.amountReceived !== booking.amountCents) {
@@ -60,12 +78,23 @@ export async function finalizeBooking(opts: {
 
   // Atomic claim — `create` is conditional on the id not existing, so only
   // one concurrent webhook delivery proceeds. Released on failure so a
-  // Stripe retry can pick the work back up.
+  // Stripe retry (or the office Retry button) can pick the work back up. The
+  // steps inside are individually idempotent, so "pick it up" means resume the
+  // same transaction, not start a second one.
   const { data: claim } = await client.models.BookingFinalization.create({
     id: opts.bookingRequestId,
     note: `pi ${opts.paymentIntentId}`,
   });
-  if (!claim) return; // another delivery already owns this booking
+  if (!claim) {
+    // A claim already exists. Usually a live concurrent delivery — but a run
+    // hard-killed (Lambda timeout/OOM) before its catch could delete the claim
+    // leaves an ORPHAN. Without reclaiming it, this retry would return, the
+    // handler would 200, Stripe would stop retrying, and the booking would wedge
+    // at QUOTED with money captured and nothing in any queue. The webhook Lambda
+    // times out at 30s, so a claim older than that cannot be a live holder.
+    const reclaimed = await reclaimOrphanedClaim(opts.bookingRequestId);
+    if (!reclaimed) return; // a genuinely live delivery owns it
+  }
 
   try {
     await finalizeClaimed(
@@ -73,12 +102,158 @@ export async function finalizeBooking(opts: {
       opts.paymentIntentId,
       opts.paymentMethodId ?? null
     );
+    // The booking is whole. If a prior attempt had opened the paid-not-finalized
+    // exception, this success closes it — the queue must not keep showing a
+    // problem the retry already solved.
+    await resolveOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: booking.id,
+      note: "The booking finalized on a later attempt — customer, job, agreement and invoice all exist.",
+    });
   } catch (err) {
+    // GL-05: money is in Stripe with no complete booking behind it. Before the
+    // claim is released for retry, leave a durable, office-visible exception —
+    // amount, customer, selected date, the failed step, and the one safe
+    // recovery action — so the paid customer is never invisible to a log search.
+    const step = err instanceof Error ? err.message : String(err);
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: booking.id,
+      title: `Paid booking not finalized: ${booking.name ?? "customer"}`,
+      detail: `A booking-funnel payment of $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but finalization could not complete: ${step}. The money is in Stripe; the CRM records are incomplete.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
+      resolutionAction:
+        "Use “Retry finalization” on this item — it re-confirms the Stripe payment and finishes the same booking. If it keeps failing, escalate to engineering, or refund the payment in Stripe and tell the customer.",
+      ownerTeam: "FINANCE",
+    });
     await client.models.BookingFinalization.delete({
       id: opts.bookingRequestId,
     });
     throw err;
   }
+}
+
+/**
+ * GL-05 recovery entry point: re-run finalization for a stuck paid booking. The
+ * office invokes this from the PAID_NOT_FINALIZED queue item. It re-reads the
+ * booking's PaymentIntent from Stripe to reconfirm the money moved and for how
+ * much, then resumes the SAME finalization — idempotent, so it finishes the
+ * original booking rather than duplicating it.
+ */
+export async function retryBookingFinalization(
+  bookingRequestId: string
+): Promise<{ status: string }> {
+  const client = await dataClient();
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: bookingRequestId,
+  });
+  if (!booking) throw new Error(`Booking ${bookingRequestId} not found`);
+  if (booking.status === "BOOKED") {
+    // Already whole. A prior success may have failed to close the exception
+    // (best-effort resolve during a transient DynamoDB blip), so clear it here —
+    // otherwise the item stays OPEN forever and the button appears to do nothing.
+    await resolveOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: bookingRequestId,
+      note: "Booking is already complete; the exception was cleared on retry.",
+    });
+    return { status: "ALREADY_BOOKED" };
+  }
+  if (!booking.stripePaymentIntentId) {
+    throw new Error("This booking has no PaymentIntent — nothing was paid to finalize");
+  }
+  const pi = await stripeClient().paymentIntents.retrieve(
+    booking.stripePaymentIntentId
+  );
+  if (pi.status !== "succeeded") {
+    throw new Error(
+      `The Stripe payment is ${pi.status}, not succeeded — do not finalize an unpaid booking`
+    );
+  }
+  await finalizeBooking({
+    bookingRequestId,
+    paymentIntentId: pi.id,
+    amountReceived: pi.amount_received,
+    paymentMethodId:
+      typeof pi.payment_method === "string"
+        ? pi.payment_method
+        : (pi.payment_method?.id ?? null),
+  });
+  // Confirm it actually finished. finalizeBooking is void and returns silently
+  // if a live delivery holds the claim, so re-read and never report FINALIZED
+  // on a booking that is still incomplete.
+  const { data: after } = await client.models.BookingRequest.get({
+    id: bookingRequestId,
+  });
+  if (after?.status !== "BOOKED") {
+    throw new Error(
+      "Finalization ran but the booking is still not complete — check the exception detail and try again, or escalate to engineering."
+    );
+  }
+  return { status: "FINALIZED" };
+}
+
+/** Amplify stamps createdAt on every row; a claim older than this (2x the 30s
+ *  webhook Lambda timeout) cannot belong to a still-running finalization. */
+const ORPHAN_CLAIM_MS = 60_000;
+
+/**
+ * Distinguish a live claim holder from a dead one and, if dead, steal the claim
+ * so this delivery can resume. Returns whether this caller now owns the claim.
+ */
+async function reclaimOrphanedClaim(id: string): Promise<boolean> {
+  const client = await dataClient();
+  const { data: held } = await client.models.BookingFinalization.get({ id });
+  if (!held) {
+    // Vanished between the failed create and this get (the holder finished and
+    // deleted it, or another reclaim won) — try to take it.
+    const { data } = await client.models.BookingFinalization.create({
+      id,
+      note: "reclaim",
+    });
+    return Boolean(data);
+  }
+  const createdMs = held.createdAt ? new Date(held.createdAt).getTime() : NaN;
+  if (Number.isNaN(createdMs) || Date.now() - createdMs < ORPHAN_CLAIM_MS) {
+    return false; // young claim — a live delivery still owns it
+  }
+  // Orphaned: the holder was killed before it could release. Steal it.
+  await client.models.BookingFinalization.delete({ id });
+  const { data } = await client.models.BookingFinalization.create({
+    id,
+    note: "reclaimed orphan",
+  });
+  return Boolean(data);
+}
+
+/**
+ * Create a record with a deterministic id, or return the one a prior attempt
+ * already created. This is what makes finalization resumable: on a retry, the
+ * conditional create fails because the id exists, and we read it back instead
+ * of minting a duplicate customer/plan/job/agreement/invoice.
+ */
+// Loose (non-generic) on purpose: the generated Amplify create/get result types
+// are near the compiler's instantiation-depth ceiling for this project, and a
+// generic here tips it over. The callers only need the id back.
+async function createOrGet(
+  what: string,
+  create: () => Promise<{
+    data: { id?: string | null } | null;
+    errors?: { message: string }[];
+  }>,
+  get: () => Promise<{ data: { id?: string | null } | null }>
+): Promise<{ id?: string | null }> {
+  const { data, errors } = await create();
+  if (data) return data;
+  const { data: existing } = await get();
+  if (existing) return existing;
+  throw new Error(
+    `${what} could not be created or resolved: ${
+      errors?.map((e) => e.message).join("; ") ?? "unknown error"
+    }`
+  );
 }
 
 /** Only the fields finalization reads — the generated model type is too
@@ -102,6 +277,14 @@ type BookingRecord = {
   leadCustomerId?: string | null;
   stripeCustomerId?: string | null;
   stripePaymentIntentId?: string | null;
+  // Progress checkpoints written as finalization proceeds, so a resumed run
+  // reuses the records a prior attempt already created instead of re-deriving
+  // (and possibly duplicating) them. customerId is the load-bearing one: a
+  // customer's id is not derivable from the booking, so it must be recorded.
+  customerId?: string | null;
+  jobId?: string | null;
+  servicePlanId?: string | null;
+  agreementId?: string | null;
 };
 
 /** First-touch ad attribution as sanitized and stored at /quote. */
@@ -423,7 +606,20 @@ async function finalizeClaimed(
   let hadPortalLogin = false;
   let reactivatedWithPortal = false;
   let matchFallbackReason: string | null = null;
-  try {
+  // Resume: a prior attempt already resolved (and checkpointed) the customer.
+  // Reuse exactly that record — re-running the email match could now find the
+  // fresh customer the last attempt created and, if a same-email lead also
+  // exists, mint a second one. Identity we already committed to beats matching.
+  if (booking.customerId) {
+    const { data } = await matchClient.models.Customer.get({
+      id: booking.customerId,
+    });
+    if (data) {
+      customer = { id: data.id, groupId: data.groupId };
+      hadPortalLogin = Boolean(data.portalUserSub);
+    }
+  }
+  if (!customer) try {
     // Resolution order — identity beats guessing:
     //  1. The booking link's lead reference (leadCustomerId, resolved from
     //     ?lead=<token> at /quote): convert exactly that record, even when
@@ -471,23 +667,19 @@ async function finalizeClaimed(
     );
   }
   if (!customer) {
-    let { data: created } = await client.models.Customer.create({
-      displayName: booking.name,
-      contactName: booking.name,
-      email: booking.email,
-      phone: booking.phone ?? undefined,
-      serviceStreet: booking.street ?? undefined,
-      serviceCity: booking.city ?? undefined,
-      serviceState: booking.state ?? undefined,
-      serviceZip: booking.zip ?? undefined,
-      status: "ACTIVE",
-      leadSource,
-      leadNotes,
-      stripeCustomerId: booking.stripeCustomerId ?? undefined,
-      convertedAt: new Date().toISOString(),
-    });
-    if (!created && booking.phone) {
-      ({ data: created } = await client.models.Customer.create({
+    // The fresh customer gets a deterministic id derived from the booking, and
+    // we look for it before creating. This closes the one window the checkpoint
+    // can't: if a prior attempt created this customer and died before writing
+    // BookingRequest.customerId, a retry would re-match by email — and if a
+    // same-email lead also exists, the match is ambiguous and would mint a
+    // SECOND fresh record. Keyed by the booking, the create is a no-op on retry.
+    const freshId = `cust-${booking.id}`;
+    const prior = await client.models.Customer.get({ id: freshId });
+    if (prior.data) {
+      customer = { id: prior.data.id, groupId: prior.data.groupId };
+    } else {
+      const base = {
+        id: freshId,
         displayName: booking.name,
         contactName: booking.name,
         email: booking.email,
@@ -495,15 +687,35 @@ async function finalizeClaimed(
         serviceCity: booking.city ?? undefined,
         serviceState: booking.state ?? undefined,
         serviceZip: booking.zip ?? undefined,
-        status: "ACTIVE",
+        status: "ACTIVE" as const,
         leadSource,
         leadNotes,
         stripeCustomerId: booking.stripeCustomerId ?? undefined,
         convertedAt: new Date().toISOString(),
-      }));
+      };
+      let { data: created } = await client.models.Customer.create({
+        ...base,
+        phone: booking.phone ?? undefined,
+      });
+      // A paid booking must never be bricked by a phone-format rejection: retry
+      // without the optional phone rather than fail.
+      if (!created && booking.phone) {
+        ({ data: created } = await client.models.Customer.create(base));
+      }
+      if (!created) throw new Error("finalizeBooking: customer create failed");
+      customer = { id: created.id, groupId: created.groupId };
     }
-    if (!created) throw new Error("finalizeBooking: customer create failed");
-    customer = { id: created.id, groupId: created.groupId };
+  }
+  // Checkpoint the customer id the instant it exists. From here on, any failure
+  // and retry resumes onto THIS customer — never a second one. Essential for the
+  // convert path: without it, a retry whose email match has since become
+  // ambiguous would create a fresh duplicate beside the already-converted lead.
+  if (booking.customerId !== customer.id) {
+    await client.models.BookingRequest.update({
+      id: booking.id,
+      customerId: customer.id,
+    });
+    booking.customerId = customer.id;
   }
   const accessGroups = customerAccessGroups(customer.id, customer.groupId);
   await client.models.Customer.update({ id: customer.id, accessGroups });
@@ -598,96 +810,91 @@ async function finalizeClaimed(
   // R73: the booking is the outcome of this customer's pricing runs.
   await markPricingRunsWon(matchClient, customer.id);
 
-  // 2. Plan (recurring) — billing starts after the first visit completes.
-  let servicePlanId: string | undefined;
+  // 2. Plan (recurring) — billing starts after the first visit completes. A
+  // deterministic id makes the create idempotent: a retry resumes onto the same
+  // plan instead of standing up a second subscription for one booking.
+  let plan: { id?: string | null } | null = null;
   if (booking.recurring && stored.recurringOffer) {
-    const { data: plan } = await client.models.ServicePlan.create({
-      customerId: customer.id,
-      planName: serviceLabel.replace(/ — .*$/, "") + " plan",
-      priceCents: stored.recurringOffer.monthlyCents,
-      serviceFrequency: stored.recurringOffer.frequency as
-        | "MONTHLY"
-        | "BIMONTHLY"
-        | "QUARTERLY",
-      status: "ACTIVE",
-      startDate: booking.selectedDate ?? undefined,
-      notes: "Booked online via the website funnel",
-      accessGroups,
-    });
-    servicePlanId = plan?.id;
+    const offer = stored.recurringOffer;
+    const planId = `plan-${booking.id}`;
+    plan = await createOrGet(
+      "service plan",
+      () =>
+        client.models.ServicePlan.create({
+          id: planId,
+          customerId: customer.id,
+          planName: serviceLabel.replace(/ — .*$/, "") + " plan",
+          priceCents: offer.monthlyCents,
+          serviceFrequency: offer.frequency as
+            | "MONTHLY"
+            | "BIMONTHLY"
+            | "QUARTERLY",
+          status: "ACTIVE",
+          startDate: booking.selectedDate ?? undefined,
+          notes: "Booked online via the website funnel",
+          accessGroups,
+        }),
+      () => client.models.ServicePlan.get({ id: planId })
+    );
   }
+  const servicePlanId = plan?.id ?? undefined;
 
-  // 3. The scheduled first job — already paid. paidAt/paidPaymentIntentId ride
-  // in this same create so that "this job is already paid" is true the instant
-  // the job exists, and stays true even if the Invoice write below fails.
+  // 3. The scheduled first job — already paid, deterministic id (idempotent
+  // resume). paidAt/paidPaymentIntentId ride in the same create so "already
+  // paid" is true the instant the job exists.
   const paidAtIso = new Date().toISOString();
-  const { data: job } = await client.models.Job.create({
-    customerId: customer.id,
-    servicePlanId,
-    type: booking.recurring ? "RECURRING" : "ONE_TIME",
-    serviceType: serviceLabel,
-    scheduledDate: booking.selectedDate ?? undefined,
-    timeWindow: windowLabel,
-    priceCents: booking.amountCents ?? undefined,
-    status: "SCHEDULED",
-    paidAt: booking.amountCents ? paidAtIso : undefined,
-    paidPaymentIntentId: booking.amountCents ? paymentIntentId : undefined,
-    notes: `Website booking ${booking.id}. Paid up front (${paymentIntentId}).`,
-    accessGroups,
-  });
-
-  // 3b. The money already moved at checkout, so the ledger records it here.
-  // Without this row every dollar the funnel takes is invisible to the
-  // Dashboard and cannot be reconciled against Stripe.
-  //
-  // The id is derived from the booking so this is idempotent: if anything
-  // downstream throws, the webhook retries and this create is a no-op rather
-  // than a second invoice for the same money.
-  //
-  // Deliberately does not throw. The finalization claim is released on any
-  // error (see finalizeBooking), and none of the creates above are idempotent —
-  // so throwing here would have Stripe retry and duplicate the customer, plan
-  // and job. Job.paidAt (set atomically above) is what actually prevents the
-  // double charge; this row is the ledger. A missing one under-reports revenue
-  // and is recoverable by hand; a duplicate customer is not.
-  if (job?.id && booking.amountCents) {
-    const { data: paidInvoice, errors: invoiceErrors } =
-      await client.models.Invoice.create({
-        id: `booking-${booking.id}`,
+  const jobId = `job-${booking.id}`;
+  const job = await createOrGet(
+    "job",
+    () =>
+      client.models.Job.create({
+        id: jobId,
         customerId: customer.id,
-        jobId: job.id,
         servicePlanId,
-        description: `${serviceLabel} — paid online at booking`,
-        amountCents: booking.amountCents,
-        status: "PAID",
-        method: "CARD",
-        stripePaymentIntentId: paymentIntentId,
-        issuedAt: paidAtIso,
-        paidAt: paidAtIso,
+        type: booking.recurring ? "RECURRING" : "ONE_TIME",
+        serviceType: serviceLabel,
+        scheduledDate: booking.selectedDate ?? undefined,
+        timeWindow: windowLabel,
+        priceCents: booking.amountCents ?? undefined,
+        status: "SCHEDULED",
+        paidAt: booking.amountCents ? paidAtIso : undefined,
+        paidPaymentIntentId: booking.amountCents ? paymentIntentId : undefined,
+        notes: `Website booking ${booking.id}. Paid up front (${paymentIntentId}).`,
         accessGroups,
-      });
-    if (!paidInvoice) {
-      const detail =
-        invoiceErrors?.map((e) => e.message).join("; ") ?? "unknown error";
-      console.error(
-        `finalizeBooking: PAID invoice not recorded for booking ${booking.id} (${paymentIntentId}) — money collected, ledger row missing`,
-        invoiceErrors
-      );
-      // Not throwing is deliberate (see above). Not telling anyone is not: this
-      // customer's money exists only in Stripe, and no screen in the CRM will
-      // ever show it. Somebody has to key it in by hand.
-      await notifyOffice({
-        subject: `ACTION REQUIRED — payment taken but not recorded: ${booking.name}`,
-        heading: "A paid booking is missing from the ledger",
-        template: "ops-invoice-write-failed",
-        customerId: customer.id,
-        relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> paid <strong>$${(booking.amountCents / 100).toFixed(2)}</strong> for ${serviceLabel} and the charge succeeded, but the invoice could not be written to the CRM.</p>
-           <p>The booking, customer and job all exist — only the invoice is missing, so this customer's payment will not appear in the Dashboard or reconcile against Stripe until someone records it.</p>
-           <p><strong>Record an invoice against this customer by hand for $${(booking.amountCents / 100).toFixed(2)}, marked paid.</strong> Do not charge the card again — it has already been charged.</p>
-           <p style="color:#666;font-size:13px;">Stripe payment: ${paymentIntentId}<br/>Booking: ${booking.id}<br/>Error: ${detail}</p>`,
-      });
-    }
+      }),
+    () => client.models.Job.get({ id: jobId })
+  );
+
+  // 3b. The money moved at checkout, so the ledger records it here — a PAID
+  // invoice, id derived from the booking. It is REQUIRED now: because every
+  // record above is idempotent, a failed invoice write can throw and be retried
+  // without duplicating anything, so a booking never reaches BOOKED with its
+  // payment missing from the ledger. (It used to be best-effort precisely
+  // because a throw would have duplicated the then-non-idempotent
+  // customer/plan/job — that constraint is gone.)
+  let invoice: { id?: string | null } | null = null;
+  if (booking.amountCents) {
+    const invoiceId = `booking-${booking.id}`;
+    const amountCents = booking.amountCents;
+    invoice = await createOrGet(
+      "paid invoice",
+      () =>
+        client.models.Invoice.create({
+          id: invoiceId,
+          customerId: customer.id,
+          jobId: job.id ?? undefined,
+          servicePlanId,
+          description: `${serviceLabel} — paid online at booking`,
+          amountCents,
+          status: "PAID",
+          method: "CARD",
+          stripePaymentIntentId: paymentIntentId,
+          issuedAt: paidAtIso,
+          paidAt: paidAtIso,
+          accessGroups,
+        }),
+      () => client.models.Invoice.get({ id: invoiceId })
+    );
   }
 
   // 4. T&C acceptance becomes the signed agreement + PDF on file.
@@ -730,48 +937,74 @@ async function finalizeClaimed(
       })
     );
   }
-  const { data: agreement } = await client.models.Agreement.create({
-    customerId: customer.id,
-    title: "BuzzKill Service Agreement — Online Booking",
-    bodyText,
-    status: "SIGNED",
-    signedAt: signedAtIso,
-    signerName: booking.name,
-    signerEmail: booking.email,
-    sentAt: signedAtIso,
-    pdfKey,
-    accessGroups,
-  });
+  const agreementId = `agr-${booking.id}`;
+  const agreement = await createOrGet(
+    "agreement",
+    () =>
+      client.models.Agreement.create({
+        id: agreementId,
+        customerId: customer.id,
+        title: "BuzzKill Service Agreement — Online Booking",
+        bodyText,
+        status: "SIGNED",
+        signedAt: signedAtIso,
+        signerName: booking.name,
+        signerEmail: booking.email,
+        sentAt: signedAtIso,
+        pdfKey,
+        accessGroups,
+      }),
+    () => client.models.Agreement.get({ id: agreementId })
+  );
+
+  // GL-05: the booking reaches BOOKED only when every required record exists.
+  // Asserting here — rather than trusting the creates — means a silent null
+  // return can never mark a paid booking complete with a missing job,
+  // agreement, or ledger row. A thrown assertion opens the paid-not-finalized
+  // exception and releases the claim for an idempotent retry.
+  if (!job.id) throw new Error("job did not persist");
+  if (!agreement.id) throw new Error("agreement did not persist");
+  if (booking.amountCents && !invoice?.id) {
+    throw new Error("paid invoice did not persist");
+  }
+  if (booking.recurring && stored.recurringOffer && !servicePlanId) {
+    throw new Error("recurring plan did not persist");
+  }
 
   await client.models.BookingRequest.update({
     id: booking.id,
     status: "BOOKED",
     customerId: customer.id,
-    jobId: job?.id,
+    jobId: job.id,
     servicePlanId,
-    agreementId: agreement?.id,
+    agreementId: agreement.id,
   });
 
-  // 5. Confirmation email with the agreement attached + cancel link.
+  // 5. Communications happen only AFTER the commitment exists, and only in the
+  // pass that flips QUOTED -> BOOKED — a retry short-circuits at the top on
+  // status, so nothing is sent twice. A send failure must not un-book a booking
+  // that is already whole, so it becomes owned work (a resend path), not a throw
+  // that would roll the whole finalization back into the exception queue.
   const marketingUrl = process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com";
-  await sendEmail({
-    to: booking.email,
-    subject: `You're booked: ${booking.selectedDate} — BuzzKill Pest Control`,
-    template: "booking-confirmation",
-    customerId: customer.id,
-    relatedId: booking.id,
-    attachments: pdfKey
-      ? [
-          {
-            filename: "BuzzKill-Service-Agreement.pdf",
-            content: pdf,
-            contentType: "application/pdf",
-          },
-        ]
-      : undefined,
-    html: emailShell(
-      "Your visit is booked",
-      `<p>Hi ${booking.name},</p>
+  try {
+    await sendEmail({
+      to: booking.email,
+      subject: `You're booked: ${booking.selectedDate} — BuzzKill Pest Control`,
+      template: "booking-confirmation",
+      customerId: customer.id,
+      relatedId: booking.id,
+      attachments: pdfKey
+        ? [
+            {
+              filename: "BuzzKill-Service-Agreement.pdf",
+              content: pdf,
+              contentType: "application/pdf",
+            },
+          ]
+        : undefined,
+      html: emailShell(
+        "Your visit is booked",
+        `<p>Hi ${booking.name},</p>
        <p><strong>${serviceLabel}</strong><br/>
        ${booking.selectedDate} · ${windowLabel}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
@@ -787,22 +1020,51 @@ async function finalizeClaimed(
            : ""
        }
        <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than ${CANCEL_FULL_REFUND_DAYS} days out is a full refund; ${CANCEL_FULL_REFUND_DAYS} days or less is non-refundable.</p>`
-    ),
-  });
+      ),
+    });
+  } catch (err) {
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `booking-confirmation:${booking.id}`,
+      title: `Booking confirmation didn't send: ${booking.name}`,
+      detail: `The booking is finalized, but the confirmation email to ${booking.email} failed: ${err instanceof Error ? err.message : String(err)}.`,
+      customerId: customer.id,
+      relatedId: booking.id,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Resend the booking confirmation (with the agreement) to the customer, then verify it arrived.",
+      ownerTeam: "OPS",
+    });
+  }
 
   // R80: a paid website booking is a lead landing — route it to sales@.
-  await notifyLeads({
-    subject: `Website booking: ${booking.name} — ${booking.selectedDate}`,
-    template: "office-booking-alert",
-    heading: "New paid website booking",
-    customerId: customer.id,
-    relatedId: booking.id,
-    bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
+  try {
+    await notifyLeads({
+      subject: `Website booking: ${booking.name} — ${booking.selectedDate}`,
+      template: "office-booking-alert",
+      heading: "New paid website booking",
+      customerId: customer.id,
+      relatedId: booking.id,
+      bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
          <p>The job is on the Needs-scheduling board for route assignment.</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
          <p style="color:#666;font-size:13px;">Reason: ${matchFallbackReason}</p>`
              : ""
          }`,
-  });
+    });
+  } catch (err) {
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `booking-sales-alert:${booking.id}`,
+      title: `Website-booking sales alert didn't send: ${booking.name}`,
+      detail: `The booking is finalized, but the sales@ new-booking alert failed: ${err instanceof Error ? err.message : String(err)}. The job is on the Needs-scheduling board.`,
+      customerId: customer.id,
+      relatedId: booking.id,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Let sales know a new website booking landed and needs route assignment.",
+      ownerTeam: "SALES",
+    });
+  }
 }

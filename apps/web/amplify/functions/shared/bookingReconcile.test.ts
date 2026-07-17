@@ -1,0 +1,108 @@
+import { describe, expect, it } from "vitest";
+import {
+  reconcileBookings,
+  type ReconBooking,
+  type ReconInvoice,
+} from "./bookingReconcile";
+
+/**
+ * GL-05 bullet 7: every successful booking payment has exactly one complete
+ * booking, and every complete paid booking has exactly one matching payment.
+ * These are the reconciliation assertions a launch runs against the real
+ * tables; here they run against fixtures.
+ */
+
+const bookedBooking = (over: Partial<ReconBooking> = {}): ReconBooking => ({
+  id: "b1",
+  status: "BOOKED",
+  stripePaymentIntentId: "pi_1",
+  amountCents: 31300,
+  customerId: "cust-1",
+  jobId: "job-b1",
+  agreementId: "agr-b1",
+  ...over,
+});
+
+const paidInvoice = (over: Partial<ReconInvoice> = {}): ReconInvoice => ({
+  id: "booking-b1",
+  status: "PAID",
+  stripePaymentIntentId: "pi_1",
+  ...over,
+});
+
+describe("booking/payment reconciliation", () => {
+  it("a healthy set reconciles clean", () => {
+    const r = reconcileBookings([bookedBooking()], [paidInvoice()], ["pi_1"]);
+    expect(r.ok).toBe(true);
+    expect(r.paymentsMissingBooking).toHaveLength(0);
+    expect(r.duplicateBookingsForPayment).toHaveLength(0);
+    expect(r.incompleteBookedBookings).toHaveLength(0);
+    expect(r.duplicatePaidInvoices).toHaveLength(0);
+  });
+
+  it("flags a succeeded payment with no complete booking (the stuck-paid case)", () => {
+    // The payment succeeded but the booking is still QUOTED — finalization
+    // never completed. This is exactly what PAID_NOT_FINALIZED covers.
+    const stuck = bookedBooking({ status: "QUOTED", jobId: null, agreementId: null });
+    const r = reconcileBookings([stuck], [], ["pi_1"]);
+    expect(r.ok).toBe(false);
+    expect(r.paymentsMissingBooking).toEqual([{ stripePaymentIntentId: "pi_1" }]);
+  });
+
+  it("flags two complete bookings for one payment (a duplicated commitment)", () => {
+    const r = reconcileBookings(
+      [bookedBooking({ id: "b1" }), bookedBooking({ id: "b2" })],
+      [paidInvoice()],
+      ["pi_1"]
+    );
+    expect(r.ok).toBe(false);
+    expect(r.duplicateBookingsForPayment).toEqual([
+      { stripePaymentIntentId: "pi_1", bookingIds: ["b1", "b2"] },
+    ]);
+  });
+
+  it("flags a BOOKED booking whose paid invoice is missing from the ledger", () => {
+    const r = reconcileBookings([bookedBooking()], [], ["pi_1"]);
+    expect(r.ok).toBe(false);
+    expect(r.incompleteBookedBookings).toEqual([
+      { bookingId: "b1", reason: "BOOKED but missing: paid invoice" },
+    ]);
+  });
+
+  it("flags a BOOKED booking missing its child records", () => {
+    const r = reconcileBookings(
+      [bookedBooking({ jobId: null, agreementId: null })],
+      [paidInvoice()],
+      ["pi_1"]
+    );
+    expect(r.ok).toBe(false);
+    expect(r.incompleteBookedBookings[0].reason).toContain("job");
+    expect(r.incompleteBookedBookings[0].reason).toContain("agreement");
+  });
+
+  it("flags one payment backing two paid invoices (double-counted money)", () => {
+    const r = reconcileBookings(
+      [bookedBooking()],
+      [paidInvoice({ id: "booking-b1" }), paidInvoice({ id: "dup-inv" })],
+      ["pi_1"]
+    );
+    expect(r.ok).toBe(false);
+    expect(r.duplicatePaidInvoices).toEqual([
+      { stripePaymentIntentId: "pi_1", invoiceIds: ["booking-b1", "dup-inv"] },
+    ]);
+  });
+
+  it("a zero-amount booking needs no invoice to be complete", () => {
+    const free = bookedBooking({ amountCents: 0, stripePaymentIntentId: null });
+    const r = reconcileBookings([free], [], []);
+    expect(r.ok).toBe(true);
+  });
+
+  it("a canceled booking with a PaymentIntent is not treated as stuck", () => {
+    // Payment never succeeded (abandoned/expired), so it is not in the
+    // succeeded set — and a CANCELED booking is a resolved outcome.
+    const canceled = bookedBooking({ status: "CANCELED" });
+    const r = reconcileBookings([canceled], [], []);
+    expect(r.ok).toBe(true);
+  });
+});
