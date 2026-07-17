@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { dataClient } from "./dataClient";
@@ -173,6 +172,175 @@ function attributionNotes(attribution: Attribution | null): string | undefined {
   return lines.length ? lines.join("\n") : undefined;
 }
 
+/** Only the fields conversion touches on an existing customer. */
+type ExistingCustomer = {
+  id: string;
+  status?: string | null;
+  email?: string | null;
+  contactName?: string | null;
+  phone?: string | null;
+  serviceStreet?: string | null;
+  serviceCity?: string | null;
+  serviceState?: string | null;
+  serviceZip?: string | null;
+  leadSource?: string | null;
+  leadNotes?: string | null;
+  stripeCustomerId?: string | null;
+  convertedAt?: string | null;
+  groupId?: string | null;
+};
+
+/**
+ * The slice of the data client the conversion helpers touch, structurally.
+ * The generated client type is too deep for the compiler to name across
+ * this boundary (same reason BookingRecord exists) — call sites cast
+ * through unknown.
+ */
+type FinalizeDataClient = {
+  models: {
+    Customer: {
+      list: (args: object) => Promise<{
+        data: ExistingCustomer[];
+        nextToken?: string | null;
+      }>;
+      update: (args: object) => Promise<{
+        data: { id: string; groupId?: string | null } | null;
+      }>;
+    };
+    LeadPricingRun: {
+      list: (args: object) => Promise<{
+        data: { id: string; outcome?: string | null }[];
+        nextToken?: string | null;
+      }>;
+      update: (args: object) => Promise<unknown>;
+    };
+  };
+};
+
+/**
+ * The customer this booking's email already belongs to, if any. A lead the
+ * office priced (Thumbtack paste, funnel CONTACT) and then sent to the funnel
+ * is the same person who now paid — creating a second record would strand
+ * the lead history on a row nobody looks at again.
+ *
+ * Case-insensitive compare; Customer has no email index, so this is a
+ * paginated list scan (fine at this scale — the office's whole book fits in
+ * a few pages).
+ */
+async function findCustomerByEmail(
+  client: FinalizeDataClient,
+  email: string
+): Promise<ExistingCustomer | null> {
+  const target = email.trim().toLowerCase();
+  if (!target) return null;
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.Customer.list({ nextToken, limit: 200 });
+    const hit = page.data.find(
+      (c) => (c.email ?? "").trim().toLowerCase() === target
+    );
+    if (hit) return hit;
+    nextToken = page.nextToken;
+  } while (nextToken);
+  return null;
+}
+
+/**
+ * Convert the matched customer instead of duplicating them: status ACTIVE,
+ * contact/address gaps filled from the booking (never overwriting what the
+ * office already knows), the booking appended to the lead notes, and the
+ * original leadSource preserved — the funnel label only lands when the
+ * record never had a source.
+ *
+ * Throws on a failed write; the caller treats that as a match failure and
+ * falls back to creating a fresh customer, because a paid finalization must
+ * never be bricked by the merge.
+ */
+async function convertExistingCustomer(
+  client: FinalizeDataClient,
+  existing: ExistingCustomer,
+  booking: BookingRecord,
+  funnel: { leadSource: string; leadNotes?: string }
+): Promise<{ id: string; groupId?: string | null }> {
+  const fillIfMissing = (
+    current: string | null | undefined,
+    value: string | null | undefined
+  ) => (!current?.trim() && value?.trim() ? value : undefined);
+
+  const bookingLine = `Booked online via the website funnel (booking ${booking.id}).`;
+  const leadNotes = [existing.leadNotes, bookingLine, funnel.leadNotes]
+    .filter((v): v is string => Boolean(v?.trim()))
+    .join("\n");
+
+  const patch = {
+    id: existing.id,
+    status: "ACTIVE" as const,
+    convertedAt: existing.convertedAt ?? new Date().toISOString(),
+    leadNotes,
+    leadSource: fillIfMissing(existing.leadSource, funnel.leadSource),
+    contactName: fillIfMissing(existing.contactName, booking.name),
+    phone: fillIfMissing(existing.phone, booking.phone),
+    serviceStreet: fillIfMissing(existing.serviceStreet, booking.street),
+    serviceCity: fillIfMissing(existing.serviceCity, booking.city),
+    serviceState: fillIfMissing(existing.serviceState, booking.state),
+    serviceZip: fillIfMissing(existing.serviceZip, booking.zip),
+    stripeCustomerId: fillIfMissing(
+      existing.stripeCustomerId,
+      booking.stripeCustomerId
+    ),
+  };
+  let { data: updated } = await client.models.Customer.update(patch);
+  if (!updated && patch.phone) {
+    // Same rule as the create path: a paid booking must never be bricked by
+    // a phone-format rejection — retry the merge without it.
+    ({ data: updated } = await client.models.Customer.update({
+      ...patch,
+      phone: undefined,
+    }));
+  }
+  if (!updated) {
+    throw new Error(
+      `finalizeBooking: could not convert existing customer ${existing.id}`
+    );
+  }
+  return { id: updated.id, groupId: updated.groupId };
+}
+
+/**
+ * R73's auto-WON: the paid funnel booking is this lead's outcome, so every
+ * PENDING pricing run linked to the customer flips to WON. Best-effort — a
+ * reporting write must never break a paid finalization.
+ */
+async function markPricingRunsWon(
+  client: FinalizeDataClient,
+  customerId: string
+): Promise<void> {
+  try {
+    let nextToken: string | null | undefined;
+    do {
+      const page = await client.models.LeadPricingRun.list({
+        filter: { customerId: { eq: customerId } },
+        nextToken,
+        limit: 200,
+      });
+      for (const run of page.data) {
+        if (run.outcome === "PENDING") {
+          await client.models.LeadPricingRun.update({
+            id: run.id,
+            outcome: "WON",
+          });
+        }
+      }
+      nextToken = page.nextToken;
+    } while (nextToken);
+  } catch (err) {
+    console.error(
+      `finalizeBooking: could not flip pricing runs to WON for customer ${customerId}`,
+      err
+    );
+  }
+}
+
 async function finalizeClaimed(
   booking: BookingRecord,
   paymentIntentId: string,
@@ -207,9 +375,16 @@ async function finalizeClaimed(
     booking.selectedWindow?.toLowerCase() ??
     "";
 
-  // 1. Customer (ACTIVE — they've paid). Contact details are validated at
-  // /quote, but a paid booking must never be bricked by a format rejection:
-  // retry without the optional phone rather than fail.
+  // 1. Customer (ACTIVE — they've paid). A lead already in the CRM with this
+  // email (Thumbtack paste, funnel CONTACT) CONVERTS instead of duplicating:
+  // the booking is that lead's win, and its pricing history should say so.
+  // Matching is best-effort — any failure in it falls back to creating a
+  // fresh customer (flagged in the office alert), because nothing about the
+  // merge may brick a finalization the customer already paid for.
+  //
+  // Contact details are validated at /quote, but a paid booking must never
+  // be bricked by a format rejection: retry without the optional phone
+  // rather than fail.
   //
   // The lead source and notes carry the first-touch ad attribution captured
   // at /quote, so a website booking is trackable to its campaign just like a
@@ -217,26 +392,30 @@ async function finalizeClaimed(
   const attribution = parseAttribution(booking.attribution);
   const leadSource = bookingSourceLabel(attribution);
   const leadNotes = attributionNotes(attribution);
-  let { data: customer } = await client.models.Customer.create({
-    displayName: booking.name,
-    contactName: booking.name,
-    email: booking.email,
-    phone: booking.phone ?? undefined,
-    serviceStreet: booking.street ?? undefined,
-    serviceCity: booking.city ?? undefined,
-    serviceState: booking.state ?? undefined,
-    serviceZip: booking.zip ?? undefined,
-    status: "ACTIVE",
-    leadSource,
-    leadNotes,
-    stripeCustomerId: booking.stripeCustomerId ?? undefined,
-    convertedAt: new Date().toISOString(),
-  });
-  if (!customer && booking.phone) {
-    ({ data: customer } = await client.models.Customer.create({
+  const matchClient = client as unknown as FinalizeDataClient;
+  let customer: { id: string; groupId?: string | null } | null = null;
+  let matchFallbackReason: string | null = null;
+  try {
+    const existing = await findCustomerByEmail(matchClient, booking.email);
+    if (existing) {
+      customer = await convertExistingCustomer(matchClient, existing, booking, {
+        leadSource,
+        leadNotes,
+      });
+    }
+  } catch (err) {
+    matchFallbackReason = err instanceof Error ? err.message : String(err);
+    console.error(
+      "finalizeBooking: lead matching failed — falling back to a fresh customer",
+      err
+    );
+  }
+  if (!customer) {
+    let { data: created } = await client.models.Customer.create({
       displayName: booking.name,
       contactName: booking.name,
       email: booking.email,
+      phone: booking.phone ?? undefined,
       serviceStreet: booking.street ?? undefined,
       serviceCity: booking.city ?? undefined,
       serviceState: booking.state ?? undefined,
@@ -246,11 +425,31 @@ async function finalizeClaimed(
       leadNotes,
       stripeCustomerId: booking.stripeCustomerId ?? undefined,
       convertedAt: new Date().toISOString(),
-    }));
+    });
+    if (!created && booking.phone) {
+      ({ data: created } = await client.models.Customer.create({
+        displayName: booking.name,
+        contactName: booking.name,
+        email: booking.email,
+        serviceStreet: booking.street ?? undefined,
+        serviceCity: booking.city ?? undefined,
+        serviceState: booking.state ?? undefined,
+        serviceZip: booking.zip ?? undefined,
+        status: "ACTIVE",
+        leadSource,
+        leadNotes,
+        stripeCustomerId: booking.stripeCustomerId ?? undefined,
+        convertedAt: new Date().toISOString(),
+      }));
+    }
+    if (!created) throw new Error("finalizeBooking: customer create failed");
+    customer = { id: created.id, groupId: created.groupId };
   }
-  if (!customer) throw new Error("finalizeBooking: customer create failed");
   const accessGroups = customerAccessGroups(customer.id, customer.groupId);
   await client.models.Customer.update({ id: customer.id, accessGroups });
+
+  // R73: the booking is the outcome of this customer's pricing runs.
+  await markPricingRunsWon(matchClient, customer.id);
 
   // 2. Plan (recurring) — billing starts after the first visit completes.
   let servicePlanId: string | undefined;
@@ -389,7 +588,6 @@ async function finalizeClaimed(
     title: "BuzzKill Service Agreement — Online Booking",
     bodyText,
     status: "SIGNED",
-    signToken: randomUUID(),
     signedAt: signedAtIso,
     signerName: booking.name,
     signerEmail: booking.email,
@@ -451,7 +649,12 @@ async function finalizeClaimed(
       html: emailShell(
         "New paid website booking",
         `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
-         <p>The job is on the Needs-scheduling board for route assignment.</p>`
+         <p>The job is on the Needs-scheduling board for route assignment.</p>${
+           matchFallbackReason
+             ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
+         <p style="color:#666;font-size:13px;">Reason: ${matchFallbackReason}</p>`
+             : ""
+         }`
       ),
     });
   }

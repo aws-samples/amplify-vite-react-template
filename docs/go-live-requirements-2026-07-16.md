@@ -92,6 +92,31 @@ deploy so the stale built Clarity tag can't ship.
   app's hosting env; Turnstile (`TURNSTILE_SECRET` + widget) before ad spend if bot volume
   appears; production Stripe webhook registration (R82) before the funnel opens on main.
 
+**One conversion road** (Jake's directive, 17 July: the office-sold quote → e-sign → convert
+branch "can be removed from the code. We should always force the other route (day picked, pays
+by card, schedule)"; suites 367 web / 140 CRM):
+
+- **The office-sold conversion path is gone**: Quote model, `quotePlan`, agreement authoring/
+  sending/voiding, the e-sign flow (SignPage + the agreement-public Lambda, deleted entirely),
+  QuoteSheet, and the convert-lead / + Plan sheets. Every lead converts one way — the funnel:
+  day picked, terms accepted, paid by card, webhook schedules. The Agreement model survives
+  only as the booking's terms-acceptance record (read-only PDFs).
+- **The funnel now converts existing leads instead of duplicating them**: bookingFinalize
+  matches by email (case-insensitive, paginated), flips the lead ACTIVE, fills only blank
+  fields, preserves the original leadSource, and appends the booking + attribution to the lead
+  notes; a matching failure falls back to create with a merge-by-hand ops flag — a paid
+  finalization can never fail on bookkeeping. PENDING LeadPricingRuns flip to WON on
+  conversion (**R73's auto-WON write lands** for the funnel channel).
+- **The lead's page has one affordance**: "Email the booking link" (new `booking-link` email
+  kind → MARKETING_URL/quote) plus the URL rendered for a phone CSR to read aloud; job/plan
+  creation renders only for ACTIVE customers. Thumbtack replies now end at the funnel link —
+  no more scheduling-by-reply promises.
+- **Requirements closed or retired by structure**: **R25 closed** (browser ServicePlan.create
+  removed — no path types a price into a subscription); **R30, R42, R54, R65 retired as moot**
+  (the manual-quote, sign-page, e-sign-consent, and agreement-textarea surfaces no longer
+  exist); **R72's quote-status half retires** with the Quote model (lead follow-ups continue
+  via LeadPricingRun).
+
 **AI pricing rearchitecture, `e734ee5` + `fe85d00`** (Jake's directive, 16 July: "absolutely
 everything priced with AI — no other way is acceptable"; suites 364 web / 134 CRM):
 

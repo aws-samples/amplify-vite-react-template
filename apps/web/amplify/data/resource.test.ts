@@ -52,8 +52,23 @@ describe("custom operations vs generated model operations", () => {
   }
 
   it("still sees the schema (regex rot guard)", () => {
-    expect(models).toContain("Quote");
-    expect(customOps).toContain("quotePlan");
+    expect(models).toContain("Customer");
+    expect(customOps).toContain("priceLead");
+  });
+
+  it("the office-sold conversion branch stays dead", () => {
+    // The Quote model and the e-sign mutations were removed with the whole
+    // office-sold path — the funnel is the only conversion. If any of these
+    // come back, the lead lifecycle has forked again.
+    expect(models).not.toContain("Quote");
+    for (const op of [
+      "quotePlan",
+      "authorAgreement",
+      "sendAgreement",
+      "voidAgreement",
+    ]) {
+      expect(customOps).not.toContain(op);
+    }
   });
 
   it("no custom operation redeclares a generated one", () => {

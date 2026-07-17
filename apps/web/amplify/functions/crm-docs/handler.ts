@@ -3,7 +3,6 @@ import type { AppSyncResolverEvent } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
-import { hoaBandFor } from "../shared/marketRate";
 import { opFieldName } from "../shared/opEvent";
 import {
   callerGroups,
@@ -30,6 +29,9 @@ const BUCKET = () => {
 };
 const CRM_URL = () =>
   process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com";
+/** The public booking funnel — the only path a lead converts down. */
+const FUNNEL_URL = () =>
+  `${process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com"}/quote`;
 
 /** productsUsed is an AWSJSON field — may arrive as a JSON string. */
 function parseProducts(raw: unknown): ReportProduct[] {
@@ -42,28 +44,13 @@ function parseProducts(raw: unknown): ReportProduct[] {
 }
 
 type Args = {
-  agreementId?: string;
   reportId?: string;
   jobId?: string;
-  amountCents?: number;
-  description?: string;
   key?: string;
   customerId?: string;
   kind?: string;
   note?: string;
   contentType?: string;
-  title?: string;
-  bodyText?: string;
-  quoteId?: string;
-  imageKeys?: (string | null)[];
-  planName?: string;
-  serviceFrequency?: string;
-  priceCents?: number;
-  listPriceCents?: number;
-  initialFeeCents?: number;
-  priceOverrideReason?: string;
-  units?: number;
-  notes?: string;
   reason?: string;
   photoKey?: string;
   servicesPerformed?: string;
@@ -81,50 +68,8 @@ type Args = {
   photoKeys?: (string | null)[];
 };
 
-/** Verified Cognito identity — never anything the browser supplied. */
-function actorOf(event: AppSyncResolverEvent<Args>) {
-  const identity = event.identity as { claims?: Record<string, unknown> } | null;
-  const email = identity?.claims?.email;
-  return {
-    sub: callerSub(event.identity),
-    email: typeof email === "string" ? email : null,
-  };
-}
-
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
   switch (opFieldName(event)) {
-    case "sendAgreement": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
-      return sendAgreement(event.arguments.agreementId!);
-    }
-    case "quotePlan": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
-      return createQuote(actorOf(event), {
-        customerId: event.arguments.customerId!,
-        planName: event.arguments.planName!,
-        serviceFrequency: event.arguments.serviceFrequency!,
-        priceCents: event.arguments.priceCents!,
-        listPriceCents: event.arguments.listPriceCents!,
-        initialFeeCents: event.arguments.initialFeeCents,
-        priceOverrideReason: event.arguments.priceOverrideReason,
-        units: event.arguments.units,
-        notes: event.arguments.notes,
-      });
-    }
-    case "authorAgreement": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
-      return createAgreement({
-        customerId: event.arguments.customerId!,
-        title: event.arguments.title ?? "",
-        bodyText: event.arguments.bodyText ?? "",
-        quoteId: event.arguments.quoteId,
-        imageKeys: event.arguments.imageKeys,
-      });
-    }
-    case "voidAgreement": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
-      return voidAgreement(event.arguments.agreementId!);
-    }
     case "saveServiceReportDraft": {
       if (!isStaff(callerGroups(event.identity))) {
         throw new Error("Staff role required");
@@ -223,7 +168,8 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
   }
 };
 
-/** Office-initiated transactional emails (payment request, portal reminder). */
+/** Office-initiated transactional emails (payment request, portal reminder,
+ *  booking link — the lead's one conversion path). */
 async function sendCustomerEmail(
   customerId: string,
   kind: string,
@@ -257,6 +203,19 @@ async function sendCustomerEmail(
       <p>Your BuzzKill portal has your upcoming visits, service reports, agreements, and billing in one place.</p>
       ${noteHtml}
       <p style="margin:20px 0;"><a href="${CRM_URL()}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open my portal</a></p>`;
+  } else if (kind === "booking-link") {
+    // The lead's one conversion path: the public funnel. Honest about what
+    // happens there — price in seconds, pick a day, pay to book — and about
+    // the fallback (a specialist calls when the funnel can't price it).
+    const funnelUrl = FUNNEL_URL();
+    subject = "Get your exact price and book your BuzzKill visit online";
+    heading = "Your price and your day, in about a minute";
+    body = `${hi}
+      <p>You can see your exact price in seconds, pick the day that works for you, and pay online to lock in your visit — no paperwork, no back-and-forth.</p>
+      ${noteHtml}
+      <p style="margin:20px 0;"><a href="${funnelUrl}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Get my price &amp; book my visit</a></p>
+      <p>If our online quote can't price your property, it will say so and a specialist will call you to sort it out.</p>
+      <p style="color:#666;font-size:13px;">Or paste this link into your browser: ${funnelUrl}</p>`;
   } else {
     throw new Error(`Unknown email kind: ${kind}`);
   }
@@ -269,282 +228,6 @@ async function sendCustomerEmail(
     html: emailShell(heading, body),
   });
   return { sent, to: customer.email };
-}
-
-const QUOTE_FREQUENCIES = ["MONTHLY", "BIMONTHLY", "QUARTERLY"] as const;
-type QuoteFrequency = (typeof QUOTE_FREQUENCIES)[number];
-
-/** A MarketRate row that is still serving: active and either pinned (an
- *  office edit never expires) or within its research shelf life. */
-function rateRowIsLive(row: {
-  active: boolean;
-  pinned?: boolean | null;
-  expiresAt?: string | null;
-}): boolean {
-  return (
-    row.active &&
-    (Boolean(row.pinned) ||
-      !row.expiresAt ||
-      new Date(row.expiresAt).getTime() > Date.now())
-  );
-}
-
-/**
- * Quote a customer a recurring plan, with the typed price checked against the
- * live AI market-rate sheet.
- *
- * The pricing architecture is the best thing in this codebase — the AI
- * researches the rates, one cached sheet per service + area, and nobody
- * prices from memory. None of that survives a text box beside it that nothing
- * compares to anything. A typo of 4 for 45 created a $4/mo plan that billed
- * forever and no screen ever mentioned it.
- *
- * `listPriceCents` is the sheet rate the office screen displayed. The server
- * re-reads the live sheets for the customer's area (including an office-
- * edited, pinned row — the office's numbers ARE the sheet) and refuses a
- * listPriceCents that no live sheet carries: a stale screen must not become
- * the deviation-guard baseline. A priceCents that differs from the verified
- * list price needs a reason, recorded with the person who set it.
- */
-async function createQuote(
-  actor: { sub: string | null; email: string | null },
-  args: {
-    customerId: string;
-    planName: string;
-    serviceFrequency: string;
-    priceCents: number;
-    listPriceCents: number;
-    initialFeeCents?: number | null;
-    priceOverrideReason?: string | null;
-    units?: number | null;
-    notes?: string | null;
-  }
-) {
-  const planName = args.planName.trim();
-  if (!planName) throw new Error("A quote needs a plan name");
-  const frequency = args.serviceFrequency as QuoteFrequency;
-  if (!QUOTE_FREQUENCIES.includes(frequency)) {
-    throw new Error(
-      `Unknown service frequency ${args.serviceFrequency} — expected MONTHLY, BIMONTHLY, or QUARTERLY`
-    );
-  }
-  if (!Number.isInteger(args.priceCents) || args.priceCents <= 0) {
-    throw new Error("Enter a valid monthly price");
-  }
-  if (!Number.isInteger(args.listPriceCents) || args.listPriceCents <= 0) {
-    throw new Error(
-      "The quote is missing its AI sheet rate — reload the customer so the screen shows the live rate, then quote again"
-    );
-  }
-
-  const client = await dataClient();
-  const { data: customer } = await client.models.Customer.get({
-    id: args.customerId,
-  });
-  if (!customer) throw new Error(`Customer ${args.customerId} not found`);
-  if (!customer.serviceCity?.trim() || !customer.serviceState?.trim()) {
-    throw new Error(
-      "This customer has no service city/state on file — the AI rate is cached per area, so add the service address before quoting"
-    );
-  }
-
-  // Re-read the live sheets for the customer's area and verify the screen's
-  // rate against them. Never trust the browser's number: the sheet may have
-  // re-researched or been office-edited since the screen loaded.
-  const areaKey = `${customer.serviceCity.trim().toLowerCase().replace(/\s+/g, "-")}-${customer.serviceState.trim().toLowerCase()}`;
-  const { data: rateRows } = await client.models.MarketRate.list({
-    filter: { areaKey: { eq: areaKey } },
-    limit: 500,
-  });
-  const liveMonthlies = new Set<number>();
-  for (const row of rateRows) {
-    if (!rateRowIsLive(row)) continue;
-    try {
-      const sheet = JSON.parse(String(row.ratesJson ?? "null")) as {
-        plans?: Record<string, { monthlyCents?: number }>;
-        hoaPerUnitMonthly?: Record<string, Record<string, number>>;
-      } | null;
-      const monthly = sheet?.plans?.[frequency]?.monthlyCents;
-      if (typeof monthly === "number") liveMonthlies.add(monthly);
-      // HOA sheets are per-unit: with a unit count, the quoted monthly is
-      // per-unit × units for the unit-count band.
-      if (
-        sheet?.hoaPerUnitMonthly &&
-        typeof args.units === "number" &&
-        args.units > 0
-      ) {
-        const perUnit = sheet.hoaPerUnitMonthly[hoaBandFor(args.units)]?.[frequency];
-        if (typeof perUnit === "number") {
-          liveMonthlies.add(perUnit * args.units);
-        }
-      }
-    } catch {
-      /* corrupt ratesJson — that row can't vouch for any price */
-    }
-  }
-  if (liveMonthlies.size === 0) {
-    throw new Error(
-      `No live AI rate sheet covers ${customer.serviceCity.trim()}, ${customer.serviceState.trim().toUpperCase()} — use "Price a lead" so the engine researches and caches the rate first`
-    );
-  }
-  if (!liveMonthlies.has(args.listPriceCents)) {
-    throw new Error(
-      `The AI sheet rate has moved since this screen loaded — no live sheet for ${customer.serviceCity.trim()} lists $${(args.listPriceCents / 100).toFixed(2)}/mo for the ${frequency.toLowerCase()} plan. Reload the customer and quote from the current rate.`
-    );
-  }
-
-  const override = (args.priceOverrideReason ?? "").trim();
-  if (args.priceCents !== args.listPriceCents && !override) {
-    const listed = (args.listPriceCents / 100).toFixed(2);
-    const typed = (args.priceCents / 100).toFixed(2);
-    throw new Error(
-      `${planName} lists at $${listed}/mo and this quote is $${typed}/mo. Say why before it goes out — the price is recorded with your name on it.`
-    );
-  }
-
-  const { data: quote, errors } = await client.models.Quote.create({
-    customerId: args.customerId,
-    planName,
-    priceCents: args.priceCents,
-    initialFeeCents: args.initialFeeCents ?? undefined,
-    serviceFrequency: frequency,
-    status: "DRAFT",
-    notes: args.notes ?? undefined,
-    quotedAt: new Date().toISOString(),
-    listPriceCents: args.listPriceCents,
-    priceOverrideReason: override || undefined,
-    quotedBy: actor.sub ?? undefined,
-    quotedByEmail: actor.email ?? undefined,
-    accessGroups: customerAccessGroups(args.customerId, customer.groupId),
-  });
-  if (!quote) {
-    throw new Error(
-      `Could not create the quote: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
-    );
-  }
-  return {
-    quoteId: quote.id,
-    priceCents: quote.priceCents,
-    listPriceCents: args.listPriceCents,
-    overridden: args.priceCents !== args.listPriceCents,
-  };
-}
-
-/**
- * Author an agreement. Always DRAFT, never signed.
- *
- * This exists so that no browser can write a signature. While OFFICE held
- * create/update on the Agreement model, an office user could set signedAt,
- * signerName, signerEmail and signerIp directly and produce a contract
- * indistinguishable from one the customer actually signed. There is no argument
- * here to pass one: the only signature this system will accept comes from
- * agreement-public, behind the customer's token.
- */
-async function createAgreement(args: {
-  customerId: string;
-  title: string;
-  bodyText: string;
-  quoteId?: string | null;
-  imageKeys?: (string | null)[] | null;
-}) {
-  const title = args.title.trim();
-  const bodyText = args.bodyText.trim();
-  if (!title) throw new Error("An agreement needs a title");
-  if (!bodyText) throw new Error("An agreement needs a body");
-
-  const client = await dataClient();
-  const { data: customer } = await client.models.Customer.get({
-    id: args.customerId,
-  });
-  if (!customer) throw new Error(`Customer ${args.customerId} not found`);
-
-  const { data: agreement, errors } = await client.models.Agreement.create({
-    customerId: args.customerId,
-    quoteId: args.quoteId ?? undefined,
-    title,
-    bodyText,
-    status: "DRAFT",
-    imageKeys: (args.imageKeys ?? []).filter(
-      (k): k is string => typeof k === "string"
-    ),
-    accessGroups: customerAccessGroups(args.customerId, customer.groupId),
-  });
-  if (!agreement) {
-    throw new Error(
-      `Could not create the agreement: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
-    );
-  }
-  return { agreementId: agreement.id, status: agreement.status };
-}
-
-/** Withdraw an unsigned agreement. A signed one is evidence and stays. */
-async function voidAgreement(agreementId: string) {
-  const client = await dataClient();
-  const { data: agreement } = await client.models.Agreement.get({
-    id: agreementId,
-  });
-  if (!agreement) throw new Error(`Agreement ${agreementId} not found`);
-  if (agreement.status === "SIGNED") {
-    throw new Error(
-      "This agreement has been signed — it is the record of what the customer agreed to and cannot be voided. Cancel the plan instead."
-    );
-  }
-  if (agreement.status === "VOID") {
-    return { agreementId, status: "VOID", alreadyVoid: true };
-  }
-  const { data: updated, errors } = await client.models.Agreement.update({
-    id: agreementId,
-    status: "VOID",
-  });
-  if (!updated) {
-    throw new Error(
-      `Could not void the agreement: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
-    );
-  }
-  return { agreementId, status: "VOID", alreadyVoid: false };
-}
-
-async function sendAgreement(agreementId: string) {
-  const client = await dataClient();
-  const { data: agreement } = await client.models.Agreement.get({
-    id: agreementId,
-  });
-  if (!agreement) throw new Error(`Agreement ${agreementId} not found`);
-  if (agreement.status === "SIGNED") {
-    throw new Error("Agreement is already signed");
-  }
-  const { data: customer } = await client.models.Customer.get({
-    id: agreement.customerId,
-  });
-  if (!customer?.email) {
-    throw new Error("Customer has no email address on file");
-  }
-
-  const signToken = agreement.signToken ?? randomBytes(24).toString("hex");
-  await client.models.Agreement.update({
-    id: agreementId,
-    signToken,
-    status: "SENT",
-    sentAt: new Date().toISOString(),
-  });
-
-  const link = `${CRM_URL()}/sign/${signToken}`;
-  const emailed = await sendEmail({
-    to: customer.email,
-    subject: `Your BuzzKill service agreement: ${agreement.title}`,
-    template: "agreement-link",
-    customerId: customer.id,
-    relatedId: agreementId,
-    html: emailShell(
-      "Your service agreement is ready to sign",
-      `<p>Hi ${customer.contactName ?? customer.displayName},</p>
-       <p>Please review and electronically sign your service agreement, <strong>${agreement.title}</strong>.</p>
-       <p style="margin:20px 0;"><a href="${link}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Review &amp; sign</a></p>
-       <p style="color:#666;font-size:13px;">This link is unique to you — please don't forward it. Once signed, you'll receive a copy for your records.</p>`
-    ),
-  });
-
-  return { sent: emailed, to: customer.email, link };
 }
 
 /** A format-valid EPA registration number, e.g. 432-1234 or 432-1234-4321. */

@@ -9,15 +9,11 @@ import {
   type CustomerGroup,
   type Invoice,
   type Job,
-  type Quote,
   type ServicePlan,
   type ServiceReport,
 } from "../lib/api";
 import { customerAccessGroups } from "../lib/accessGroups";
-import {
-  DEFAULT_AGREEMENT_BODY,
-  fillAgreementTemplate,
-} from "../lib/agreementTemplate";
+import { bookingFunnelSpoken, bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { amountInWords } from "../lib/amountWords";
 import { planCadence } from "../lib/planCadence";
@@ -42,9 +38,7 @@ import {
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import DocButton from "../components/DocButton";
-import QuoteSheet from "../components/QuoteSheet";
 import PriceLeadSheet from "../components/PriceLeadSheet";
-import { PlanPricingFields, usePlanPricing } from "../components/PlanPricing";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
 
@@ -58,7 +52,6 @@ export default function CustomerDetail() {
   const [agreements, setAgreements] = useState<Agreement[]>([]);
   const [reports, setReports] = useState<ServiceReport[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [quotes, setQuotes] = useState<Quote[]>([]);
   const [groups, setGroups] = useState<CustomerGroup[]>([]);
   const [rescheduling, setRescheduling] = useState<Job | null>(null);
   const [pm, setPm] = useState<{ hasPaymentMethod: boolean; label: string | null } | null>(null);
@@ -69,16 +62,12 @@ export default function CustomerDetail() {
   const [sheet, setSheet] = useState<
     | null
     | "edit"
-    | "convert"
-    | "plan"
     | "job"
-    | "agreement"
     | "collect"
     | "charge"
     | "record"
     | "portal"
     | "group"
-    | "quote"
     | "price"
   >(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -99,14 +88,13 @@ export default function CustomerDetail() {
       }
       setCustomer(c);
       const filter = { customerId: { eq: id } };
-      const [pl, jb, ag, rp, inv, gr, qt] = await Promise.all([
+      const [pl, jb, ag, rp, inv, gr] = await Promise.all([
         api().models.ServicePlan.list({ filter, limit: 200 }),
         api().models.Job.list({ filter, limit: 500 }),
         api().models.Agreement.list({ filter, limit: 200 }),
         api().models.ServiceReport.list({ filter, limit: 500 }),
         api().models.Invoice.list({ filter, limit: 500 }),
         api().models.CustomerGroup.list({ limit: 500 }),
-        api().models.Quote.list({ filter, limit: 200 }),
       ]);
       setPlans(unwrap(pl));
       setJobs(
@@ -122,11 +110,6 @@ export default function CustomerDetail() {
         )
       );
       setGroups(unwrap(gr));
-      setQuotes(
-        unwrap(qt).sort((a, b) =>
-          (b.quotedAt ?? "").localeCompare(a.quotedAt ?? "")
-        )
-      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load customer");
     }
@@ -271,14 +254,57 @@ export default function CustomerDetail() {
       </Card>
 
       {isLead && roles.office ? (
-        <Card title="Convert this lead">
+        <Card
+          title="Convert this lead"
+          actions={
+            <Button small variant="subtle" onClick={() => setSheet("price")}>
+              ⚡ Price a lead
+            </Button>
+          }
+        >
+          {/* One road: the lead books themselves online. They pick a day,
+              accept the terms, and pay by card — the booking creates the
+              plan, the agreement, and the first visit, and this page fills
+              in on its own. There is deliberately no office-side convert
+              button: a conversion without a payment can't exist. */}
           <p className="muted small" style={{ marginBottom: 10 }}>
-            A customer needs an active service plan or a scheduled one-time
-            job. Converting will set one up and activate the account.
+            Leads convert themselves at the online booking page: price in
+            seconds, pick a day, pay by card to book. If the funnel can't
+            price their property, it has a specialist call them. Once they
+            book, the plan, agreement, and first visit appear here.
           </p>
-          <Button block onClick={() => setSheet("convert")}>
-            Convert to customer
+          <Button
+            block
+            loading={busyAction === "bookinglink"}
+            disabled={!customer.email}
+            onClick={() =>
+              void run(
+                "bookinglink",
+                async () =>
+                  unwrap(
+                    await api().mutations.sendCustomerEmail({
+                      customerId: customer.id,
+                      kind: "booking-link",
+                    })
+                  ),
+                `Booking link emailed to ${customer.email}`
+              )
+            }
+          >
+            Email the booking link
           </Button>
+          {!customer.email ? (
+            <p className="muted small" style={{ marginTop: 8 }}>
+              No email on this lead, so there is nothing to send it to — add
+              one, or read the address below out over the phone.
+            </p>
+          ) : null}
+          <p className="muted small" style={{ marginTop: 8 }}>
+            On the phone? Read it out:{" "}
+            <a href={bookingFunnelUrl()} target="_blank" rel="noreferrer">
+              <strong>{bookingFunnelSpoken()}</strong>
+            </a>
+          </p>
         </Card>
       ) : null}
 
@@ -424,73 +450,16 @@ export default function CustomerDetail() {
         </Card>
       ) : null}
 
-      {roles.office && (quotes.length > 0 || isLead) ? (
-        <Card
-          title="Quotes"
-          actions={
-            <>
-              {isLead ? (
-                <Button small variant="subtle" onClick={() => setSheet("price")}>
-                  ⚡ AI price
-                </Button>
-              ) : null}
-              <Button small variant="ghost" onClick={() => setSheet("quote")}>
-                + Quote
-              </Button>
-            </>
-          }
-        >
-          {quotes.length === 0 ? (
-            <p className="muted small">
-              No quotes yet — quote a plan and the agreement goes out for
-              signature. Signing converts the lead automatically.
-            </p>
-          ) : (
-            quotes.map((q) => (
-              <ListRow
-                key={q.id}
-                title={q.planName}
-                subtitle={`${money(q.priceCents)}/mo · quoted ${fmtDate(q.quotedAt, true)}${q.notes ? ` · ${q.notes}` : ""}`}
-                meta={
-                  <>
-                    <StatusBadge status={q.status} />
-                    {q.status === "DRAFT" || q.status === "SENT" ? (
-                      <Button
-                        small
-                        variant="ghost"
-                        loading={busyAction === `voidquote-${q.id}`}
-                        onClick={() => {
-                          if (!window.confirm("Void this quote? The signing link in any sent agreement stays usable unless you void the agreement too.")) return;
-                          void run(`voidquote-${q.id}`, async () =>
-                            unwrap(
-                              await api().models.Quote.update({ id: q.id, status: "VOID" })
-                            )
-                          );
-                        }}
-                      >
-                        Void
-                      </Button>
-                    ) : null}
-                  </>
-                }
-              />
-            ))
-          )}
-        </Card>
-      ) : null}
-
-      <Card
-        title="Service plans"
-        actions={
-          roles.office ? (
-            <Button small variant="ghost" onClick={() => setSheet("plan")}>
-              + Plan
-            </Button>
-          ) : undefined
-        }
-      >
+      {/* Plans are born in one place only: the online booking's payment
+          webhook. No "+ Plan" here — a hand-typed price can never enter a
+          subscription, because there is no path for one. */}
+      <Card title="Service plans">
         {plans.length === 0 ? (
-          <p className="muted small">No service plans.</p>
+          <p className="muted small">
+            {isLead
+              ? "No service plans — the plan is created when the lead books and pays online."
+              : "No service plans."}
+          </p>
         ) : (
           plans.map((p) => (
             <ListRow
@@ -596,17 +565,20 @@ export default function CustomerDetail() {
         )}
       </Card>
 
+      {/* Job creation is for ACTIVE customers only. A lead with an
+          office-created job would be a payment-less conversion side door —
+          leads get a job when they book and pay online, not before. */}
       <Card
         title="Jobs"
         actions={
-          roles.office ? (
+          roles.office && customer.status === "ACTIVE" ? (
             <Button small variant="ghost" onClick={() => setSheet("job")}>
               + Job
             </Button>
           ) : undefined
         }
       >
-        {activePlan && !upcomingJob && roles.office ? (
+        {activePlan && !upcomingJob && roles.office && customer.status === "ACTIVE" ? (
           <div className="row-split" style={{ marginBottom: 8 }}>
             <p className="muted small" style={{ margin: 0 }}>
               Plan is active but nothing is on the schedule.
@@ -617,7 +589,11 @@ export default function CustomerDetail() {
           </div>
         ) : null}
         {jobs.length === 0 ? (
-          <p className="muted small">No jobs yet.</p>
+          <p className="muted small">
+            {isLead
+              ? "No jobs — the first visit is scheduled when the lead books and pays online."
+              : "No jobs yet."}
+          </p>
         ) : (
           (() => {
             const renderJob = (j: Job) => {
@@ -794,17 +770,16 @@ export default function CustomerDetail() {
         )}
       </Card>
 
+      {/* Read-only: the agreement is written by the online booking when the
+          customer accepts the terms and pays. Nothing is authored, sent, or
+          voided from here — this card is the record, not a workflow. */}
       {roles.office ? (
-        <Card
-          title="Agreements"
-          actions={
-            <Button small variant="ghost" onClick={() => setSheet("agreement")}>
-              + Agreement
-            </Button>
-          }
-        >
+        <Card title="Agreements">
           {agreements.length === 0 ? (
-            <p className="muted small">No agreements yet.</p>
+            <p className="muted small">
+              No agreements yet — the terms the customer accepts at online
+              booking are recorded here.
+            </p>
           ) : (
             agreements.map((a) => (
               <ListRow
@@ -812,90 +787,13 @@ export default function CustomerDetail() {
                 title={a.title}
                 subtitle={
                   a.signedAt
-                    ? `Signed by ${a.signerName} · ${fmtDateTime(a.signedAt)}`
-                    : a.sentAt
-                      ? `Sent ${fmtDateTime(a.sentAt)}`
-                      : "Draft"
+                    ? `Accepted by ${a.signerName} · ${fmtDateTime(a.signedAt)}`
+                    : undefined
                 }
                 meta={
                   <>
                     <StatusBadge status={a.status} />
-                    {a.signToken && a.status !== "SIGNED" && a.status !== "VOID" ? (
-                      <Button
-                        small
-                        variant="ghost"
-                        onClick={() => {
-                          navigator.clipboard
-                            .writeText(`${window.location.origin}/sign/${a.signToken}`)
-                            .then(() => {
-                              setNotice("Signing link copied — paste it anywhere");
-                              window.setTimeout(() => setNotice(null), 6000);
-                            })
-                            .catch(() => setError("Couldn't copy — long-press the Send button link instead"));
-                        }}
-                      >
-                        Copy link
-                      </Button>
-                    ) : null}
-                    {/* A signed agreement is the record of what the customer
-                        agreed to, and the server refuses to void one. Offering
-                        the button anyway meant a dialog that promised an
-                        outcome and an error on OK — which teaches operators
-                        that errors are normal. Say what to do instead. */}
-                    {a.status === "SIGNED" ? (
-                      <span className="muted small">signed — cancel the plan to end it</span>
-                    ) : a.status !== "VOID" ? (
-                      <Button
-                        small
-                        variant="ghost"
-                        loading={busyAction === `voidagr-${a.id}`}
-                        onClick={() => {
-                          if (
-                            !window.confirm(
-                              "Void this agreement? Its signing link stops working."
-                            )
-                          ) {
-                            return;
-                          }
-                          void run(
-                            `voidagr-${a.id}`,
-                            async () =>
-                              unwrap(
-                                await api().mutations.voidAgreement({
-                                  agreementId: a.id,
-                                })
-                              ),
-                            "Agreement voided"
-                          );
-                        }}
-                      >
-                        Void
-                      </Button>
-                    ) : null}
-                    {a.pdfKey ? (
-                      <DocButton docKey={a.pdfKey} />
-                    ) : a.status !== "SIGNED" ? (
-                      <Button
-                        small
-                        variant="subtle"
-                        disabled={!customer.email}
-                        loading={busyAction === `send-${a.id}`}
-                        onClick={() =>
-                          void run(
-                            `send-${a.id}`,
-                            async () =>
-                              unwrap(
-                                await api().mutations.sendAgreement({
-                                  agreementId: a.id,
-                                })
-                              ),
-                            `Agreement emailed to ${customer.email} for signing`
-                          )
-                        }
-                      >
-                        {a.status === "DRAFT" ? "Send" : "Resend"}
-                      </Button>
-                    ) : null}
+                    {a.pdfKey ? <DocButton docKey={a.pdfKey} /> : null}
                   </>
                 }
               />
@@ -1063,64 +961,8 @@ export default function CustomerDetail() {
         />
       </Sheet>
 
-      <Sheet open={sheet === "convert"} onClose={() => setSheet(null)} title="Convert lead">
-        <ConvertLead
-          customer={customer}
-          accessGroups={accessGroups}
-          onDone={async () => {
-            setSheet(null);
-            await load();
-          }}
-        />
-      </Sheet>
-
-      <Sheet open={sheet === "plan"} onClose={() => setSheet(null)} title="New service plan">
-        {isLead ? (
-          <p className="muted small" style={{ marginBottom: 10 }}>
-            This is still a lead — creating a plan will convert them to an
-            active customer.
-          </p>
-        ) : null}
-        <PlanForm
-          customer={customer}
-          onSubmit={async (v) => {
-            unwrap(
-              await api().models.ServicePlan.create({
-                customerId: customer.id,
-                planName: v.planName,
-                priceCents: v.priceCents,
-                serviceFrequency: v.serviceFrequency,
-                status: "ACTIVE",
-                accessGroups,
-              })
-            );
-            if (isLead) {
-              unwrap(
-                await api().models.Customer.update({
-                  id: customer.id,
-                  status: "ACTIVE",
-                  convertedAt: new Date().toISOString(),
-                })
-              );
-            }
-            setSheet(null);
-            await load();
-          }}
-        />
-      </Sheet>
-
-      <Sheet open={sheet === "quote"} onClose={() => setSheet(null)} title="Quote a plan">
-        <QuoteSheet
-          customer={customer}
-          onDone={async () => {
-            setSheet(null);
-            await load();
-          }}
-        />
-      </Sheet>
-
       <Sheet open={sheet === "price"} onClose={() => setSheet(null)} title="AI price this lead">
-        <PriceLeadSheet customer={customer} onQuoteCreated={load} />
+        <PriceLeadSheet customer={customer} />
       </Sheet>
 
       <Sheet
@@ -1156,30 +998,6 @@ export default function CustomerDetail() {
                 accessGroups,
               })
             );
-            setSheet(null);
-            await load();
-          }}
-        />
-      </Sheet>
-
-      <Sheet open={sheet === "agreement"} onClose={() => setSheet(null)} title="New agreement">
-        <AgreementForm
-          customer={customer}
-          onSubmit={async (title, bodyText, sendNow) => {
-            const created = opResult<{ agreementId?: string }>(
-              await api().mutations.authorAgreement({
-                customerId: customer.id,
-                title,
-                bodyText,
-              })
-            );
-            if (sendNow && created?.agreementId) {
-              unwrap(
-                await api().mutations.sendAgreement({
-                  agreementId: created.agreementId,
-                })
-              );
-            }
             setSheet(null);
             await load();
           }}
@@ -1671,81 +1489,6 @@ function RecordPaymentSheet({
 
 /* ---------- Sub-forms ---------- */
 
-function PlanForm({
-  customer,
-  onSubmit,
-}: {
-  customer: Customer;
-  onSubmit: (v: {
-    planName: string;
-    priceCents: number;
-    serviceFrequency: "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
-  }) => Promise<void>;
-}) {
-  const pricing = usePlanPricing(customer);
-  const [price, setPrice] = useState("");
-  const [touched, setTouched] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // The cached AI rate is the anchor; the field stays free-editable (this
-  // creates a plan directly, no quote — the office is the override here).
-  const listCents = pricing.prefill?.monthlyCents ?? null;
-  useEffect(() => {
-    if (!touched) setPrice(listCents != null ? (listCents / 100).toString() : "");
-  }, [listCents, touched]);
-
-  return (
-    <div className="form-grid">
-      <PlanPricingFields p={pricing} />
-      <Field
-        label="Monthly price ($)"
-        hint={
-          listCents != null
-            ? "Prefilled from the cached AI market rate — adjust if needed"
-            : "No cached AI rate to prefill — this is a hand price"
-        }
-      >
-        <input
-          inputMode="decimal"
-          value={price}
-          onChange={(e) => {
-            setTouched(true);
-            setPrice(e.target.value.replace(/[^\d.]/g, ""));
-          }}
-        />
-      </Field>
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          const cents = Math.round(parseFloat(price) * 100);
-          if (!Number.isFinite(cents) || cents <= 0) {
-            setError("Enter a valid monthly price");
-            return;
-          }
-          setBusy(true);
-          onSubmit({
-            planName: pricing.planName,
-            priceCents: cents,
-            serviceFrequency: pricing.frequency,
-          }).catch((err) => {
-            setError(err.message ?? "Could not create plan");
-            setBusy(false);
-          });
-        }}
-      >
-        Create plan
-      </Button>
-      <p className="muted small">
-        Billing starts only when you tap “Start billing” (requires a payment
-        method on file).
-      </p>
-    </div>
-  );
-}
-
 function RescheduleForm({
   job,
   onDone,
@@ -1883,146 +1626,6 @@ function JobForm({
       >
         Create job
       </Button>
-    </div>
-  );
-}
-
-function AgreementForm({
-  customer,
-  onSubmit,
-}: {
-  customer: Customer;
-  onSubmit: (title: string, bodyText: string, sendNow: boolean) => Promise<void>;
-}) {
-  const [title, setTitle] = useState("Pest Control Service Agreement");
-  const [bodyText, setBodyText] = useState(
-    fillAgreementTemplate(DEFAULT_AGREEMENT_BODY, {
-      customerName: customer.displayName,
-      planName: "pest control",
-      price: "the quoted price",
-      frequency: "as scheduled",
-      address: [
-        customer.serviceStreet,
-        customer.serviceCity,
-        customer.serviceState,
-        customer.serviceZip,
-      ]
-        .filter(Boolean)
-        .join(", ") || "the Customer's service address",
-    })
-  );
-  const [busy, setBusy] = useState<null | "draft" | "send">(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const go = (sendNow: boolean) => {
-    if (!title.trim() || !bodyText.trim()) {
-      setError("Title and agreement text are required");
-      return;
-    }
-    if (sendNow && !customer.email) {
-      setError("Customer needs an email address to receive the signing link");
-      return;
-    }
-    setBusy(sendNow ? "send" : "draft");
-    onSubmit(title.trim(), bodyText, sendNow).catch((err) => {
-      setError(err.message ?? "Could not save agreement");
-      setBusy(null);
-    });
-  };
-
-  return (
-    <div className="form-grid">
-      <Field label="Title">
-        <input value={title} onChange={(e) => setTitle(e.target.value)} />
-      </Field>
-      <Field label="Agreement text">
-        <textarea rows={12} value={bodyText} onChange={(e) => setBodyText(e.target.value)} />
-      </Field>
-      <ErrorNote error={error} />
-      <div className="form-row-2">
-        <Button variant="ghost" loading={busy === "draft"} onClick={() => go(false)}>
-          Save draft
-        </Button>
-        <Button loading={busy === "send"} onClick={() => go(true)}>
-          Save &amp; send
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function ConvertLead({
-  customer,
-  accessGroups,
-  onDone,
-}: {
-  customer: Customer;
-  accessGroups: string[];
-  onDone: () => Promise<void>;
-}) {
-  const [mode, setMode] = useState<"PLAN" | "ONE_TIME">("PLAN");
-
-  const activate = async () => {
-    unwrap(
-      await api().models.Customer.update({
-        id: customer.id,
-        status: "ACTIVE",
-        convertedAt: new Date().toISOString(),
-      })
-    );
-    await onDone();
-  };
-
-  return (
-    <div className="form-grid">
-      <SegControl
-        options={[
-          { value: "PLAN" as const, label: "Service plan" },
-          { value: "ONE_TIME" as const, label: "One-time job" },
-        ]}
-        value={mode}
-        onChange={setMode}
-      />
-      {mode === "PLAN" ? (
-        <PlanForm
-          customer={customer}
-          onSubmit={async (v) => {
-            unwrap(
-              await api().models.ServicePlan.create({
-                customerId: customer.id,
-                planName: v.planName,
-                priceCents: v.priceCents,
-                serviceFrequency: v.serviceFrequency,
-                status: "ACTIVE",
-                accessGroups,
-              })
-            );
-            await activate();
-          }}
-        />
-      ) : (
-        <JobForm
-          plans={[]}
-          onSubmit={async (v) => {
-            if (!v.scheduledDate) {
-              throw new Error("A one-time job needs a scheduled date to convert the lead");
-            }
-            unwrap(
-              await api().models.Job.create({
-                customerId: customer.id,
-                type: "ONE_TIME",
-                serviceType: v.serviceType,
-                priceCents: v.priceCents ?? undefined,
-                status: "SCHEDULED",
-                scheduledDate: v.scheduledDate,
-                timeWindow: v.timeWindow || undefined,
-                accessGroups,
-              })
-            );
-            await activate();
-          }}
-        />
-      )}
     </div>
   );
 }

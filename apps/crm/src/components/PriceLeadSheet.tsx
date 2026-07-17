@@ -3,17 +3,9 @@ import {
   api,
   jsonField,
   opResult,
-  unwrap,
   type Customer,
   type LeadPricingRun,
 } from "../lib/api";
-import {
-  DEFAULT_AGREEMENT_BODY,
-  DEFAULT_AGREEMENT_TITLE,
-  FREQUENCY_LABEL,
-  fillAgreementTemplate,
-} from "../lib/agreementTemplate";
-import { customerAccessGroups } from "../lib/accessGroups";
 import { money } from "../lib/format";
 import { Badge, Button, ErrorNote, Field } from "../ui/kit";
 
@@ -29,26 +21,24 @@ type Extracted = {
 /**
  * AI lead pricing: paste the Thumbtack lead (or attach a screenshot), enter
  * the lead fee, and get QUOTE / PASS / ESCALATE with the exact rate-card
- * breakdown and a paste-ready reply. One tap turns a QUOTE into a sent
- * agreement via the existing quote flow.
+ * breakdown and a paste-ready reply. The reply is the whole next step — it
+ * answers "what will it cost" and points the lead at the online booking
+ * funnel, where they pick a day and pay by card to convert themselves.
  */
 export default function PriceLeadSheet({
   customer,
-  onQuoteCreated,
 }: {
   customer?: Customer | null;
-  onQuoteCreated?: () => Promise<void> | void;
 }) {
   const [inputText, setInputText] = useState("");
   const [leadFee, setLeadFee] = useState("");
   const [noFee, setNoFee] = useState(false);
   const [screenshotKey, setScreenshotKey] = useState<string | null>(null);
   const [screenshotName, setScreenshotName] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | "upload" | "price" | "quote">(null);
+  const [busy, setBusy] = useState<null | "upload" | "price">(null);
   const [error, setError] = useState<string | null>(null);
   const [run, setRun] = useState<LeadPricingRun | null>(null);
   const [copied, setCopied] = useState(false);
-  const [quoteSent, setQuoteSent] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -140,7 +130,6 @@ export default function PriceLeadSheet({
     setBusy("price");
     setError(null);
     setRun(null);
-    setQuoteSent(false);
     try {
       const res = await api().mutations.priceLead({
         inputText: inputText.trim() || undefined,
@@ -166,101 +155,6 @@ export default function PriceLeadSheet({
       setTimeout(() => setCopied(false), 2000);
     } catch {
       setError("Couldn't copy — select the text manually");
-    }
-  };
-
-  /** Turn a QUOTE run into a Quote + sent agreement on this lead. */
-  const createQuote = async () => {
-    if (busy) return;
-    if (!run || !customer || run.monthlyPriceCents == null) return;
-    setBusy("quote");
-    setError(null);
-    try {
-      const accessGroups = customerAccessGroups(customer.id, customer.groupId);
-      // The engine persisted the priced frequency — never infer from strings.
-      const freq = (run.frequency ?? "QUARTERLY") as
-        | "MONTHLY"
-        | "BIMONTHLY"
-        | "QUARTERLY";
-      const planName = run.service ?? "General pest protection";
-
-      // DRAFT first; flips to SENT only after the signing email goes out.
-      // A direct model create, NOT quotePlan: that mutation's deviation
-      // guard vouches for raw sheet monthlies, and this price is the
-      // engine's own output (sheet + deterministic zone overlay) — already
-      // checked, logged on the LeadPricingRun, and never typed by a human.
-      // listPriceCents = priceCents records that nothing deviated.
-      const quote = unwrap(
-        await api().models.Quote.create({
-          customerId: customer.id,
-          planName,
-          priceCents: run.monthlyPriceCents,
-          listPriceCents: run.monthlyPriceCents,
-          initialFeeCents: run.initialFeeCents ?? undefined,
-          serviceFrequency: freq,
-          status: "DRAFT",
-          notes: `AI-priced (zone ${run.zone ?? "?"})`,
-          quotedAt: new Date().toISOString(),
-          accessGroups,
-        })
-      );
-      if (!quote) throw new Error("Could not create the quote");
-
-      const address = [
-        customer.serviceStreet,
-        customer.serviceCity,
-        customer.serviceState,
-        customer.serviceZip,
-      ]
-        .filter(Boolean)
-        .join(", ");
-      let bodyText = fillAgreementTemplate(DEFAULT_AGREEMENT_BODY, {
-        customerName: customer.displayName,
-        planName,
-        price: money(run.monthlyPriceCents),
-        frequency: FREQUENCY_LABEL[freq] ?? "as scheduled",
-        address: address || "the Customer's service address",
-      });
-      if (run.initialFeeCents != null) {
-        bodyText += `\n\nINITIAL SERVICE VISIT. The first service visit is billed once at ${money(run.initialFeeCents)} and includes the full inspection, interior flush-out, exterior barrier treatment, and web/nest removal.`;
-      }
-      const agreement = opResult<{ agreementId?: string }>(
-        await api().mutations.authorAgreement({
-          customerId: customer.id,
-          quoteId: quote.id,
-          title: DEFAULT_AGREEMENT_TITLE,
-          bodyText,
-        })
-      );
-      if (!agreement?.agreementId) {
-        throw new Error("Could not create the agreement");
-      }
-      const sendResult = opResult<{ sent: boolean; link?: string }>(
-        await api().mutations.sendAgreement({ agreementId: agreement.agreementId })
-      );
-      if (!sendResult?.sent) {
-        throw new Error(
-          sendResult?.link
-            ? `The signing email failed to send — share this link manually: ${sendResult.link}`
-            : "The signing email failed to send — check the customer's email and resend from the Agreements card."
-        );
-      }
-      unwrap(
-        await api().models.Quote.update({ id: quote.id, status: "SENT" })
-      );
-      unwrap(
-        await api().models.LeadPricingRun.update({
-          id: run.id,
-          quoteId: quote.id,
-          outcome: "SENT",
-        })
-      );
-      setQuoteSent(true);
-      await onQuoteCreated?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create the quote");
-    } finally {
-      setBusy(null);
     }
   };
 
@@ -433,25 +327,11 @@ export default function PriceLeadSheet({
                 <Button small variant="subtle" onClick={() => void copyReply()}>
                   {copied ? "✓ Copied" : "Copy reply"}
                 </Button>
-                {run.decision === "QUOTE" &&
-                customer &&
-                run.monthlyPriceCents != null &&
-                !quoteSent ? (
-                  <Button
-                    small
-                    loading={busy === "quote"}
-                    disabled={!customer.email}
-                    onClick={() => void createQuote()}
-                  >
-                    Create quote &amp; send agreement
-                  </Button>
-                ) : quoteSent ? (
-                  <Badge tone="ok">agreement sent</Badge>
-                ) : null}
               </div>
-              {run.decision === "QUOTE" && customer && !customer.email ? (
+              {run.decision === "QUOTE" ? (
                 <p className="muted small" style={{ marginTop: 6 }}>
-                  Add an email to the lead to send the agreement.
+                  The reply sends them to the online booking funnel — they pick
+                  a day and pay by card there, which is what converts the lead.
                 </p>
               ) : null}
             </div>

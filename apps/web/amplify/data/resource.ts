@@ -3,7 +3,6 @@ import { crmAdmin } from "../functions/crm-admin/resource";
 import { crmBilling } from "../functions/crm-billing/resource";
 import { stripeWebhook } from "../functions/stripe-webhook/resource";
 import { crmDocs } from "../functions/crm-docs/resource";
-import { agreementPublic } from "../functions/agreement-public/resource";
 import { dailyReminders } from "../functions/daily-reminders/resource";
 import { postAuth } from "../functions/post-auth/resource";
 import { crmPricing } from "../functions/crm-pricing/resource";
@@ -24,16 +23,17 @@ import { leadIntake } from "../functions/lead-intake/resource";
  *     function, which is what makes "a user in a group can view the other
  *     customers in the same group" work as row-level read access.
  *
- * Leads are Customers with status LEAD — converting a lead is a status flip
- * plus the conversion requirements (active subscription or scheduled
- * one-time job), which keeps the full history on one record.
+ * Leads are Customers with status LEAD. There is exactly one conversion
+ * path: the customer books themselves through the public funnel (/quote —
+ * day picked, terms accepted, paid by card), and the Stripe webhook's
+ * finalization converts the lead record. No office-side conversion exists —
+ * no quotes, no e-sign, no hand-created plans.
  */
 // Exported for resource.test.ts, which checks that no custom operation
 // redeclares a mutation/query the model transformer generates.
 export const schema = a.schema({
   CustomerStatus: a.enum(["LEAD", "ACTIVE", "INACTIVE"]),
   ServicePlanStatus: a.enum(["ACTIVE", "PAUSED", "CANCELED"]),
-  QuoteStatus: a.enum(["DRAFT", "SENT", "CONVERTED", "VOID"]),
   PricingDecision: a.enum(["QUOTE", "PASS", "ESCALATE", "NEEDS_INFO"]),
   PricingOutcome: a.enum(["PENDING", "SENT", "WON", "LOST", "PASSED"]),
   ServiceFrequency: a.enum(["MONTHLY", "BIMONTHLY", "QUARTERLY"]),
@@ -125,7 +125,6 @@ export const schema = a.schema({
       agreements: a.hasMany("Agreement", "customerId"),
       serviceReports: a.hasMany("ServiceReport", "customerId"),
       invoices: a.hasMany("Invoice", "customerId"),
-      quotes: a.hasMany("Quote", "customerId"),
       pricingRuns: a.hasMany("LeadPricingRun", "customerId"),
     })
     .secondaryIndexes((index) => [
@@ -158,47 +157,12 @@ export const schema = a.schema({
       jobs: a.hasMany("Job", "servicePlanId"),
       invoices: a.hasMany("Invoice", "servicePlanId"),
     })
+    // No browser create: plans are born only at booking finalization
+    // (shared/bookingFinalize), where the price is whatever the customer
+    // actually paid at checkout. That closes R25 structurally — a hand-typed
+    // price cannot enter a subscription because no screen can create one.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["TECH"]).to(["read"]),
-      allow.groupsDefinedIn("accessGroups").to(["read"]),
-    ]),
-
-  /**
-   * A stored quote for a lead: an AI-sheet-priced plan (with optional,
-   * reasoned price override) plus the agreement sent for signature. Signing
-   * the agreement converts the quote — lead becomes an ACTIVE customer with
-   * a ServicePlan created from the quote (billing still starts explicitly
-   * once a payment method is on file). Plan templates are retired: the plan
-   * catalog IS the AI market-rate sheet, and agreement bodies come from the
-   * CRM's code template.
-   */
-  Quote: a
-    .model({
-      customerId: a.id().required(),
-      customer: a.belongsTo("Customer", "customerId"),
-      planName: a.string().required(),
-      priceCents: a.integer().required(),
-      initialFeeCents: a.integer(),
-      serviceFrequency: a.ref("ServiceFrequency").required(),
-      status: a.ref("QuoteStatus").required(),
-      notes: a.string(),
-      servicePlanId: a.id(),
-      quotedAt: a.datetime(),
-      convertedAt: a.datetime(),
-      // What the live AI market-rate sheet said this costs, verified against
-      // the cached sheet at quote time. A quote whose priceCents differs from
-      // it was priced by a human, and priceOverrideReason says why. Kept so
-      // the deviation is answerable later even if the sheet re-researches.
-      listPriceCents: a.integer(),
-      priceOverrideReason: a.string(),
-      quotedBy: a.string(),
-      quotedByEmail: a.string(),
-      accessGroups: a.string().array(),
-      agreements: a.hasMany("Agreement", "quoteId"),
-    })
-    .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["read", "update", "delete"]),
       allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
@@ -347,7 +311,6 @@ export const schema = a.schema({
       replyText: a.string(),
       reason: a.string(), // pass/escalate/needs-info reason
       modelPriceMismatch: a.boolean(),
-      quoteId: a.id(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
@@ -461,38 +424,36 @@ export const schema = a.schema({
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
+  /**
+   * The booking agreement: the terms-acceptance record bookingFinalize writes
+   * when a funnel checkout completes (SIGNED, with the acceptance recorded as
+   * the electronic signature). The office and the portal view the stored PDF
+   * read-only. The office e-sign flow (author → send → customer signs a
+   * token link) is gone — the funnel is the only conversion path.
+   */
   Agreement: a
     .model({
       customerId: a.id().required(),
       customer: a.belongsTo("Customer", "customerId"),
-      quoteId: a.id(),
-      quote: a.belongsTo("Quote", "quoteId"),
       title: a.string().required(),
       bodyText: a.string().required(),
       status: a.ref("AgreementStatus").required(),
-      signToken: a.string(),
       sentAt: a.datetime(),
-      viewedAt: a.datetime(),
       signedAt: a.datetime(),
       signerName: a.string(),
       signerEmail: a.email(),
-      signerIp: a.string(),
-      signerUserAgent: a.string(),
       pdfKey: a.string(),
-      imageKeys: a.string().array(),
       accessGroups: a.string().array(),
     })
-    .secondaryIndexes((index) => [index("signToken")])
     // Read-only for every human role, for the same reason as Invoice and one
-    // more: signedAt, signerName, signerEmail, signerIp and signerUserAgent are
-    // the evidence that a customer agreed to a contract. While OFFICE held
-    // create/update on this model, an office user could write those fields
-    // directly and produce a signed agreement indistinguishable from a real
-    // one — a forged contract, from a browser, with no record of who did it.
+    // more: signedAt, signerName and signerEmail are the evidence that a
+    // customer agreed to a contract. If any browser role held create/update
+    // on this model, that user could write those fields directly and produce
+    // a signed agreement indistinguishable from a real one — a forged
+    // contract, from a browser, with no record of who did it.
     //
-    // Only agreement-public (the token-gated e-sign endpoint) writes a
-    // signature now. Staff author and void agreements through createAgreement /
-    // voidAgreement, which have no signature arguments to pass.
+    // Only bookingFinalize (inside the Stripe webhook, behind a real payment)
+    // writes one now.
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
@@ -929,80 +890,6 @@ export const schema = a.schema({
     .handler(a.handler.function(crmDocs)),
 
   /**
-   * Quote a customer a recurring plan at the AI market-rate sheet's price.
-   *
-   * A mutation because the price has to be checked against something, and a
-   * check in the browser is not a check. The AI pricing engine exists so
-   * nobody prices from memory; a free-text box beside it that nothing
-   * compares to the sheet is a hole straight through that. listPriceCents is
-   * the sheet rate the office screen displayed — the server re-reads the
-   * live sheets for the customer's area (an office-edited, pinned row
-   * counts) and refuses a rate no live sheet carries. A priceCents that
-   * differs from the verified list price needs a reason, recorded on the
-   * quote with the person who set it.
-   *
-   * Not named createQuote: the Quote model already generates a
-   * createQuote mutation, and a custom operation may not redeclare it —
-   * the schema fails to synthesize (deploy 41).
-   */
-  quotePlan: a
-    .mutation()
-    .arguments({
-      customerId: a.string().required(),
-      planName: a.string().required(),
-      /** MONTHLY | BIMONTHLY | QUARTERLY. */
-      serviceFrequency: a.string().required(),
-      priceCents: a.integer().required(),
-      /** The live AI sheet rate the office screen displayed. */
-      listPriceCents: a.integer().required(),
-      initialFeeCents: a.integer(),
-      /** Required when priceCents differs from the sheet's list price. */
-      priceOverrideReason: a.string(),
-      /** HOA quotes: unit count — the sheet rate is per-unit, so the guard
-       *  needs it to verify listPriceCents = per-unit × units. */
-      units: a.integer(),
-      notes: a.string(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
-    .handler(a.handler.function(crmDocs)),
-
-  /**
-   * Author an agreement for a customer. A mutation rather than a client-side
-   * create for one reason: this cannot be handed a signature. Status is always
-   * DRAFT and the signature fields are never arguments, so no browser can
-   * produce a signed contract.
-   */
-  authorAgreement: a
-    .mutation()
-    .arguments({
-      customerId: a.string().required(),
-      title: a.string().required(),
-      bodyText: a.string().required(),
-      quoteId: a.string(),
-      imageKeys: a.string().array(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
-    .handler(a.handler.function(crmDocs)),
-
-  /** Withdraw an unsigned agreement. A signed one is evidence and stays. */
-  voidAgreement: a
-    .mutation()
-    .arguments({ agreementId: a.string().required() })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
-    .handler(a.handler.function(crmDocs)),
-
-  /** Email a lead/customer their secure e-sign link for an agreement. */
-  sendAgreement: a
-    .mutation()
-    .arguments({ agreementId: a.string().required() })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
-    .handler(a.handler.function(crmDocs)),
-
-  /**
    * The technician pressed Start. A mutation because startedAt is the
    * application's start time on the pesticide record: it used to be a plain
    * client-side Job.update with a browser-supplied timestamp, which any TECH
@@ -1103,7 +990,8 @@ export const schema = a.schema({
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH", "CUSTOMER"])])
     .handler(a.handler.function(crmDocs)),
 
-  /** Office-initiated transactional emails: payment-request, portal-reminder. */
+  /** Office-initiated transactional emails: payment-request, portal-reminder,
+   *  booking-link (the lead's one conversion path — the public funnel). */
   sendCustomerEmail: a
     .mutation()
     .arguments({
@@ -1119,7 +1007,6 @@ export const schema = a.schema({
   allow.resource(crmBilling),
   allow.resource(stripeWebhook),
   allow.resource(crmDocs),
-  allow.resource(agreementPublic),
   allow.resource(dailyReminders),
   allow.resource(postAuth),
   allow.resource(crmPricing),

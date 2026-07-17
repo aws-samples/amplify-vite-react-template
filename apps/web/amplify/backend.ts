@@ -14,7 +14,6 @@ import { crmAdmin } from "./functions/crm-admin/resource";
 import { crmBilling } from "./functions/crm-billing/resource";
 import { stripeWebhook } from "./functions/stripe-webhook/resource";
 import { crmDocs } from "./functions/crm-docs/resource";
-import { agreementPublic } from "./functions/agreement-public/resource";
 import { dailyReminders } from "./functions/daily-reminders/resource";
 import {
   createChallenge,
@@ -32,7 +31,6 @@ const backend = defineBackend({
   crmBilling,
   stripeWebhook,
   crmDocs,
-  agreementPublic,
   dailyReminders,
   createChallenge,
   verifyChallenge,
@@ -88,26 +86,6 @@ const stripeWebhookUrl = backend.stripeWebhook.resources.lambda.addFunctionUrl({
   invokeMode: InvokeMode.BUFFERED,
 });
 
-// Public e-sign API for the CRM's /sign/<token> page. Unauthenticated by
-// design (leads sign before they have logins); access is gated by the
-// unguessable per-agreement token, plus CORS to the CRM origins.
-const crmOrigins = [
-  "https://staging.d5ln2hbbp9s2j.amplifyapp.com",
-  "https://main.d5ln2hbbp9s2j.amplifyapp.com",
-  "http://localhost:5174",
-];
-const agreementPublicUrl =
-  backend.agreementPublic.resources.lambda.addFunctionUrl({
-    authType: FunctionUrlAuthType.NONE,
-    invokeMode: InvokeMode.BUFFERED,
-    cors: {
-      allowedOrigins: crmOrigins,
-      allowedMethods: [HttpMethod.GET, HttpMethod.POST],
-      allowedHeaders: ["Content-Type"],
-      maxAge: Duration.seconds(86400),
-    },
-  });
-
 // Documents bucket + SES wiring for the functions that produce PDFs and
 // send mail. Grants are explicit CDK (rather than storage/access rules) so
 // each function gets exactly what it needs.
@@ -126,7 +104,6 @@ const crmUrlEnv =
 
 for (const fn of [
   backend.crmDocs,
-  backend.agreementPublic,
   backend.dailyReminders,
   backend.crmAdmin,
   // The verify trigger emails the magic sign-in link (the request leg is
@@ -150,11 +127,8 @@ for (const fn of [
   );
 }
 docsBucket.grantReadWrite(backend.crmDocs.resources.lambda);
-docsBucket.grantWrite(backend.agreementPublic.resources.lambda);
-docsBucket.grantRead(backend.agreementPublic.resources.lambda);
 docsBucket.grantReadWrite(backend.crmPricing.resources.lambda);
 backend.crmDocs.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
-backend.agreementPublic.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 backend.crmPricing.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 docsBucket.grantWrite(backend.bookingPublic.resources.lambda);
 backend.bookingPublic.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
@@ -173,20 +147,18 @@ backend.crmPricing.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
 backend.bookingPublic.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.bookingPublic.addEnvironment("AMPLIFY_BRANCH", branch);
-// finalizeBooking() runs inside the webhook Lambda — it builds the
-// customer's cancel link, so it needs the same marketing URL.
-backend.stripeWebhook.addEnvironment(
-  "MARKETING_URL",
+// The marketing-site origin, branch-derived so main never links staging.
+// stripe-webhook builds the customer's cancel link from it; crm-docs and
+// crm-pricing build the funnel booking link (MARKETING_URL + "/quote") — the
+// only conversion path a lead is ever sent down.
+const marketingUrl =
   branch === "main"
     ? "https://www.pestbuzzkill.com"
-    : "https://staging.d26qpsjewk0bee.amplifyapp.com"
-);
-backend.bookingPublic.addEnvironment(
-  "MARKETING_URL",
-  branch === "main"
-    ? "https://www.pestbuzzkill.com"
-    : "https://staging.d26qpsjewk0bee.amplifyapp.com"
-);
+    : "https://staging.d26qpsjewk0bee.amplifyapp.com";
+backend.stripeWebhook.addEnvironment("MARKETING_URL", marketingUrl);
+backend.bookingPublic.addEnvironment("MARKETING_URL", marketingUrl);
+backend.crmDocs.addEnvironment("MARKETING_URL", marketingUrl);
+backend.crmPricing.addEnvironment("MARKETING_URL", marketingUrl);
 backend.bookingPublic.addEnvironment(
   "BOOKING_CORS_ORIGINS",
   branch === "main"
@@ -239,7 +211,6 @@ backend.addOutput({
   custom: {
     leadIntakeUrl: leadIntakeUrl.url,
     stripeWebhookUrl: stripeWebhookUrl.url,
-    agreementPublicUrl: agreementPublicUrl.url,
     bookingApiUrl: bookingApiUrl.url,
   },
 });

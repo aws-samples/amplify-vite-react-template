@@ -12,6 +12,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "apps/crm", "run", "dev", "--", "--host"],
       "port": 5174
+    },
+    {
+      "name": "merge-preview",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/private/tmp/claude-501/-Users-jake-Repos-BuzzKill/9e28f3a4-abc5-4892-8a05-741f932560b4/scratchpad/merge-wt/apps/web", "run", "dev", "--", "--host", "--port", "5199"],
+      "port": 5199
     }
   ]
 }

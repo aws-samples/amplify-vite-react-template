@@ -30,7 +30,6 @@ import PortalHome from "./portal/Home";
 import PortalDocs from "./portal/Docs";
 import PortalBilling from "./portal/Billing";
 import PortalGroup from "./portal/Group";
-import SignPage from "./sign/SignPage";
 import Welcome from "./pages/Welcome";
 
 export default function App({ backendReady }: { backendReady: boolean }) {
@@ -47,8 +46,6 @@ export default function App({ backendReady }: { backendReady: boolean }) {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Public e-sign page — leads sign before they have a login. */}
-        <Route path="/sign/:token" element={<SignPage />} />
         {/* Magic-link landing page — completes sign-in from the email link. */}
         <Route path="/welcome" element={<Welcome />} />
         <Route path="/*" element={<AuthedApp />} />

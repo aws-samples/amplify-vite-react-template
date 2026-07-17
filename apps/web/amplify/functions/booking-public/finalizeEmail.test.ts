@@ -44,10 +44,16 @@ const fakeDataClient = {
       delete: async () => ({ data: null }),
     },
     Customer: {
+      // No existing customers — every test here exercises the create path.
+      list: async () => ({ data: [], nextToken: null }),
       create: async (input: Record<string, unknown>) => {
         customers.push(input);
         return { data: { id: "cust1", groupId: null, ...input } };
       },
+      update: async (patch: Record<string, unknown>) => ({ data: patch }),
+    },
+    LeadPricingRun: {
+      list: async () => ({ data: [], nextToken: null }),
       update: async (patch: Record<string, unknown>) => ({ data: patch }),
     },
     ServicePlan: {

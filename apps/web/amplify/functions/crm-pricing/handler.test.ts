@@ -88,6 +88,8 @@ const { handler, replyUsesOnlyAllowedAmounts, templateReply } = await import(
   "./handler"
 );
 
+const FUNNEL = "https://staging.d26qpsjewk0bee.amplifyapp.com/quote";
+
 const priceLead = async (args: Record<string, unknown>) =>
   (await handler({
     arguments: args,
@@ -152,6 +154,7 @@ beforeEach(() => {
   };
   process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
   process.env.GOOGLE_ROUTES_API_KEY = "test-routes-key";
+  process.env.MARKETING_URL = "https://staging.d26qpsjewk0bee.amplifyapp.com";
 });
 
 describe("the licensing gate fails closed (R75)", () => {
@@ -435,5 +438,58 @@ describe("templateReply", () => {
     const reply = templateReply({ ...facts, pest: "ants", initial: "$124" });
 
     expect(reply).toContain("$124 initial service");
+  });
+
+  it("every branch's next step is the funnel — no scheduling-by-reply", () => {
+    const replies = [
+      templateReply(facts), // monthly, no initial
+      templateReply({ ...facts, pest: "ants", initial: "$124" }), // monthly + initial
+      templateReply({
+        ...facts,
+        monthly: null,
+        oneTime: "$319",
+        frequency: "ONE_TIME" as const,
+      }), // one-time
+    ];
+
+    for (const reply of replies) {
+      expect(reply).toContain(FUNNEL);
+      expect(reply).toContain("book online");
+      // The old promise to have "our technician out as early as Thursday" —
+      // nothing on this side of the funnel schedules anything.
+      expect(reply).not.toMatch(/technician out|Thursday|sign|agreement/i);
+    }
+  });
+
+  it("the funnel URL does not trip the amount guard (R58)", () => {
+    const reply = templateReply({ ...facts, pest: "ants", initial: "$124" });
+
+    expect(replyUsesOnlyAllowedAmounts(reply, ["$169", "$124"])).toBe(true);
+  });
+});
+
+describe("the composed reply's next step is the funnel too", () => {
+  it("hands the composer the exact funnel URL and forbids reply-scheduling", async () => {
+    await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    // Second model call is reply composition (no output_config).
+    const compose = messagesCreate.mock.calls.find(
+      ([args]) => !(args as { output_config?: unknown }).output_config
+    );
+    expect(compose).toBeDefined();
+    const prompt = String(
+      (compose![0] as { messages: [{ content: string }] }).messages[0].content
+    );
+    expect(prompt).toContain(FUNNEL);
+    expect(prompt).toMatch(/NEVER promise to schedule by reply/i);
+    expect(prompt).not.toMatch(/scheduling day/i);
+  });
+
+  it("the deterministic fallback reply carries the funnel link", async () => {
+    composedReply = "This will run you $500 flat."; // bogus amount → template
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(String(run.replyText)).toContain(FUNNEL);
   });
 });

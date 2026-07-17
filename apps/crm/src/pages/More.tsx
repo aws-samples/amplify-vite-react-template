@@ -110,7 +110,7 @@ export default function More() {
  * grants. OWNER is a superset and never needs pairing with OFFICE/FINANCE.
  */
 const ROLE_CHOICES = {
-  OFFICE: { label: "Office staff — leads, quotes, scheduling", groups: ["OFFICE"] },
+  OFFICE: { label: "Office staff — leads, pricing, scheduling", groups: ["OFFICE"] },
   FINANCE: { label: "Finance — charges, refunds, invoices", groups: ["FINANCE"] },
   OFFICE_FINANCE: { label: "Office + finance", groups: ["OFFICE", "FINANCE"] },
   TECH: { label: "Technician", groups: ["TECH"] },

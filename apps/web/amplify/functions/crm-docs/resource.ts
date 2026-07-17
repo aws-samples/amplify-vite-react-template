@@ -3,8 +3,6 @@ import { defineFunction, secret } from "@aws-amplify/backend";
 /**
  * Document operations behind userPool-authorized custom ops:
  *
- *   sendAgreement          — generate a sign token, mark SENT, email the
- *                            lead/customer their secure signing link
  *   finalizeServiceReport  — render the technician's report (with the
  *                            geolocation stamp) to PDF, store it under the
  *                            customer record, mark the job COMPLETED, and
@@ -12,8 +10,12 @@ import { defineFunction, secret } from "@aws-amplify/backend";
  *   getDocumentUrl         — entitlement-checked, short-lived presigned URL
  *                            for report/agreement PDFs (office, tech, the
  *                            customer, or customer-group members)
+ *   sendCustomerEmail      — office-initiated transactional emails, including
+ *                            the booking-link email that sends a lead to the
+ *                            public funnel (their only conversion path)
  *
- * S3 + SES permissions and the DOCS_BUCKET env come from backend.ts.
+ * S3 + SES permissions and the DOCS_BUCKET + MARKETING_URL envs come from
+ * backend.ts.
  *
  * STRIPE_SECRET_KEY is needed because completing the first visit of a recurring
  * plan is what starts its subscription — the rule Jake locked. Before that,
