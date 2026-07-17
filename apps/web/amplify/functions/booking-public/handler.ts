@@ -7,6 +7,7 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
+import { BOOKING_LINK_TOKEN_RE } from "../shared/bookingLink";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
 import { openOwnedWork } from "../shared/ownedWork";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
@@ -135,6 +136,10 @@ type QuoteInput = {
   botToken?: string;
   /** First-touch ad attribution from the site — untrusted, sanitized below. */
   attribution?: unknown;
+  /** The booking link's lead identity (?lead=<token>) — untrusted, resolved
+   *  server-side against Customer.bookingLinkToken and stored as
+   *  leadCustomerId so finalization converts exactly that lead. */
+  leadToken?: unknown;
 };
 
 /** The only attribution keys the funnel stores (mirrors lead-intake). */
@@ -530,6 +535,31 @@ async function triggerPricingRefresh(rateKey: string): Promise<void> {
   }
 }
 
+/**
+ * The customer id a booking link's ?lead=<token> names, or null. Untrusted
+ * input: shape-checked before any table hit, resolved via the
+ * bookingLinkToken index, refused when it somehow matches more than one
+ * record, and never allowed to fail the quote — lead identity is an
+ * upgrade over email matching, not a gate.
+ */
+async function resolveLeadToken(
+  client: Awaited<ReturnType<typeof dataClient>>,
+  raw: unknown
+): Promise<string | null> {
+  if (typeof raw !== "string" || !BOOKING_LINK_TOKEN_RE.test(raw)) return null;
+  try {
+    const { data } =
+      await client.models.Customer.listCustomerByBookingLinkToken(
+        { bookingLinkToken: raw },
+        { limit: 2 }
+      );
+    return data.length === 1 ? data[0].id : null;
+  } catch (err) {
+    console.error("resolveLeadToken: lookup failed — quoting without identity", err);
+    return null;
+  }
+}
+
 async function quote(
   input: QuoteInput,
   sourceIp: string,
@@ -618,6 +648,11 @@ async function quote(
   // creates, so finalization can derive the customer's lead source. Malformed
   // input sanitizes to null and the quote proceeds without it.
   const attribution = sanitizeAttribution(input.attribution);
+  // The booking link's lead identity, resolved to a customer id server-side.
+  // Untrusted input: shape-checked, looked up by index, silently dropped when
+  // it doesn't resolve — a stale or mangled token must never block a quote,
+  // and the response never confirms whether it matched anything.
+  const leadCustomerId = await resolveLeadToken(client, input.leadToken);
 
   const makeBooking = async (fields: Record<string, unknown>) => {
     const base = {
@@ -642,6 +677,7 @@ async function quote(
         comments: input.comments?.slice(0, 2000) || undefined,
         recurringPreference: input.recurringPreference ?? undefined,
         attribution: attribution ? JSON.stringify(attribution) : undefined,
+        leadCustomerId: leadCustomerId ?? undefined,
         ...fields,
     };
     const { data: booking, errors: gqlErrors } = resume
@@ -1182,7 +1218,7 @@ function summaryFor(
 
 // CANCEL_FULL_REFUND_DAYS lives in ../shared/bookingTerms — the single
 // source shared with the checkout terms and the finalize email (R17).
-const SUPPORT_PHONE = "(401) 526-0323";
+const SUPPORT_PHONE = "(508) 258-9294";
 
 async function cancel(body: Record<string, unknown>) {
   const token = String(body.token ?? "");

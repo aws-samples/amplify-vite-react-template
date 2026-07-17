@@ -99,6 +99,7 @@ type BookingRecord = {
   recurring?: boolean | null;
   amountCents?: number | null;
   cancelToken?: string | null;
+  leadCustomerId?: string | null;
   stripeCustomerId?: string | null;
   stripePaymentIntentId?: string | null;
 };
@@ -202,6 +203,9 @@ type ExistingCustomer = {
 type FinalizeDataClient = {
   models: {
     Customer: {
+      get: (args: { id: string }) => Promise<{
+        data: ExistingCustomer | null;
+      }>;
       list: (args: object) => Promise<{
         data: ExistingCustomer[];
         nextToken?: string | null;
@@ -221,31 +225,35 @@ type FinalizeDataClient = {
 };
 
 /**
- * The customer this booking's email already belongs to, if any. A lead the
- * office priced (Thumbtack paste, funnel CONTACT) and then sent to the funnel
- * is the same person who now paid — creating a second record would strand
- * the lead history on a row nobody looks at again.
+ * Every customer this booking's email could belong to. A lead the office
+ * priced (Thumbtack paste, funnel CONTACT) and then sent to the funnel is
+ * the same person who now paid — creating a second record would strand the
+ * lead history on a row nobody looks at again. But email alone is a guess:
+ * ONE match converts; more than one is ambiguity the caller must not
+ * resolve by picking arbitrarily.
  *
  * Case-insensitive compare; Customer has no email index, so this is a
  * paginated list scan (fine at this scale — the office's whole book fits in
  * a few pages).
  */
-async function findCustomerByEmail(
+async function findCustomersByEmail(
   client: FinalizeDataClient,
   email: string
-): Promise<ExistingCustomer | null> {
+): Promise<ExistingCustomer[]> {
   const target = email.trim().toLowerCase();
-  if (!target) return null;
+  if (!target) return [];
+  const hits: ExistingCustomer[] = [];
   let nextToken: string | null | undefined;
   do {
     const page = await client.models.Customer.list({ nextToken, limit: 200 });
-    const hit = page.data.find(
-      (c) => (c.email ?? "").trim().toLowerCase() === target
+    hits.push(
+      ...page.data.filter(
+        (c) => (c.email ?? "").trim().toLowerCase() === target
+      )
     );
-    if (hit) return hit;
     nextToken = page.nextToken;
   } while (nextToken);
-  return null;
+  return hits;
 }
 
 /**
@@ -271,7 +279,22 @@ async function convertExistingCustomer(
   ) => (!current?.trim() && value?.trim() ? value : undefined);
 
   const bookingLine = `Booked online via the website funnel (booking ${booking.id}).`;
-  const leadNotes = [existing.leadNotes, bookingLine, funnel.leadNotes]
+  // A lead-identified booking may be paid with a different email (spouse,
+  // work inbox, typo at checkout). The office record's email wins — this
+  // function never writes email — but the difference is worth a written
+  // trace, because it explains why the portal invite went where it did.
+  const checkoutEmail = booking.email.trim().toLowerCase();
+  const recordEmail = (existing.email ?? "").trim().toLowerCase();
+  const emailMismatchLine =
+    recordEmail && checkoutEmail && recordEmail !== checkoutEmail
+      ? `Checkout email ${booking.email} differs from the email on this record (${existing.email}).`
+      : undefined;
+  const leadNotes = [
+    existing.leadNotes,
+    bookingLine,
+    emailMismatchLine,
+    funnel.leadNotes,
+  ]
     .filter((v): v is string => Boolean(v?.trim()))
     .join("\n");
 
@@ -401,7 +424,36 @@ async function finalizeClaimed(
   let reactivatedWithPortal = false;
   let matchFallbackReason: string | null = null;
   try {
-    const existing = await findCustomerByEmail(matchClient, booking.email);
+    // Resolution order — identity beats guessing:
+    //  1. The booking link's lead reference (leadCustomerId, resolved from
+    //     ?lead=<token> at /quote): convert exactly that record, even when
+    //     the checkout email differs — that difference is precisely what
+    //     email matching gets wrong.
+    //  2. No reference → email match, but only when it is UNAMBIGUOUS
+    //     (exactly one record). Several records sharing the email means
+    //     duplicates or different people on one inbox; converting an
+    //     arbitrary one corrupts a record. Create fresh and hand the merge
+    //     to a human instead.
+    let existing: ExistingCustomer | null = null;
+    if (booking.leadCustomerId) {
+      const { data } = await matchClient.models.Customer.get({
+        id: booking.leadCustomerId,
+      });
+      existing = data;
+      if (!existing) {
+        matchFallbackReason = `the booking link's lead reference (${booking.leadCustomerId}) no longer resolves to a customer record`;
+      }
+    }
+    if (!existing && !matchFallbackReason) {
+      const matches = await findCustomersByEmail(matchClient, booking.email);
+      if (matches.length === 1) {
+        existing = matches[0];
+      } else if (matches.length > 1) {
+        matchFallbackReason = `${matches.length} customer records share the email ${booking.email} (${matches
+          .map((m) => m.id)
+          .join(", ")}) — a fresh record was created rather than converting an arbitrary one`;
+      }
+    }
     if (existing) {
       customer = await convertExistingCustomer(matchClient, existing, booking, {
         leadSource,

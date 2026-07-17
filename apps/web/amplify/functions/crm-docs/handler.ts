@@ -18,6 +18,7 @@ import {
   isStaff,
 } from "../shared/authz";
 import { cusGroup, customerAccessGroups, grpGroup } from "../shared/dynamicGroups";
+import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
   nextVisitDate,
@@ -375,7 +376,7 @@ async function sendCustomerEmail(
     body = `${hi}
       <p>Before your first BuzzKill service visit, please add a payment method (card or bank account) to your account.</p>
       ${noteHtml}
-      <p style="margin:20px 0;"><a href="${CRM_URL()}/billing" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Add payment method</a></p>
+      <p style="margin:20px 0;"><a href="${CRM_URL()}/portal/billing" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Add payment method</a></p>
       <p style="color:#666;font-size:13px;">Sign in with your BuzzKill account. Payment details are stored securely with Stripe — we never see your card or account number.</p>`;
   } else if (kind === "portal-reminder") {
     subject = "Your BuzzKill customer portal";
@@ -388,7 +389,16 @@ async function sendCustomerEmail(
     // The lead's one conversion path: the public funnel. Honest about what
     // happens there — price in seconds, pick a day, pay to book — and about
     // the fallback (a specialist calls when the funnel can't price it).
-    const funnelUrl = FUNNEL_URL();
+    //
+    // The link carries this lead's identity (?lead=<token>) so the paid
+    // booking converts exactly this record — not whatever email matching
+    // guesses. Minted on first send; a mint failure still sends the bare
+    // link (email matching remains the fallback).
+    const token = await ensureBookingLinkToken(client, {
+      id: customer.id,
+      bookingLinkToken: customer.bookingLinkToken,
+    });
+    const funnelUrl = bookingLinkUrl(FUNNEL_URL(), token);
     subject = "Get your exact price and book your BuzzKill visit online";
     heading = "Your price and your day, in about a minute";
     body = `${hi}

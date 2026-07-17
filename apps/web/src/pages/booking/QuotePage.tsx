@@ -6,6 +6,7 @@ import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
 import {
   checkQuoteStatus,
   requestQuote,
+  saveLeadToken,
   type ContactQuote,
   type PendingQuote,
   type PricedQuote,
@@ -137,6 +138,23 @@ export default function QuotePage() {
   // A refresh, an emailed resume link, or a round trip to /book must not lose
   // either the pending request or the finished quote.
   useEffect(() => {
+    // An office-sent booking link carries the lead's CRM identity
+    // (?lead=<token>) so the paid booking converts exactly that lead. Stash
+    // it for the session and strip it from the address bar — like the resume
+    // token below, capability tokens don't belong in history or referrers.
+    const search = new URLSearchParams(window.location.search);
+    const leadToken = search.get("lead");
+    if (leadToken !== null) {
+      if (leadToken) saveLeadToken(window.sessionStorage, leadToken);
+      search.delete("lead");
+      const qs = search.toString();
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`
+      );
+    }
+
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
     const request = hash.get("request");
     const token = hash.get("token");

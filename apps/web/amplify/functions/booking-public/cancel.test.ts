@@ -325,7 +325,7 @@ describe("cancellation failure", () => {
     const res = await call({ token: "tok", confirm: true });
 
     expect(res.status).toBe(503);
-    expect(res.body.error).toContain("(401) 526-0323");
+    expect(res.body.error).toContain("(508) 258-9294");
     expect(res.body.error).not.toMatch(/try again/i);
   });
 

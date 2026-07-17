@@ -40,6 +40,9 @@ const fakeDataClient = {
       delete: async () => ({ data: null }),
     },
     Customer: {
+      get: async ({ id }: { id: string }) => ({
+        data: existingCustomers.find((c) => c.id === id) ?? null,
+      }),
       list: async () => {
         if (customerListError) throw customerListError;
         return { data: existingCustomers, nextToken: null };
@@ -457,6 +460,67 @@ describe("new booking shapes finalize into the right records", () => {
       priceCents: 31300,
       paidPaymentIntentId: "pi_1",
     });
+  });
+});
+
+describe("the booking link's lead identity converts exactly that lead", () => {
+  it("converts the referenced record even when the checkout email differs", async () => {
+    // The lead's record carries the office's email; the customer paid with
+    // another inbox — exactly the case email matching cannot solve.
+    seedLead({ id: "lead-2", email: "office-records@example.com" });
+    booking.leadCustomerId = "lead-2";
+
+    await finalize();
+
+    expect(customersCreated).toHaveLength(0);
+    const convert = customerUpdates.find((u) => u.status === "ACTIVE");
+    expect(convert).toMatchObject({ id: "lead-2", status: "ACTIVE" });
+    expect(String(convert!.leadNotes)).toContain(
+      "Checkout email dana@example.com differs"
+    );
+  });
+
+  it("the lead reference beats an email match to a different record", async () => {
+    // Two people share the inbox: the booking's email matches lead-1, but
+    // the link was sent to lead-2. Identity wins over the guess.
+    seedLead(); // lead-1, dana@example.com
+    seedLead({ id: "lead-2", email: "office-records@example.com" });
+    booking.leadCustomerId = "lead-2";
+
+    await finalize();
+
+    expect(customersCreated).toHaveLength(0);
+    expect(
+      customerUpdates.find((u) => u.status === "ACTIVE")
+    ).toMatchObject({ id: "lead-2" });
+  });
+
+  it("a dangling lead reference creates fresh and hands the mystery to a human", async () => {
+    seedLead(); // same-email lead exists, but the reference is what we trust
+    booking.leadCustomerId = "ghost-1";
+
+    await finalize();
+
+    // No guessing: the same-email lead is NOT converted.
+    expect(customerUpdates.find((u) => u.status === "ACTIVE")).toBeUndefined();
+    expect(customersCreated).toHaveLength(1);
+    const work = workOpened.find((w) => w.kind === "DUPLICATE_LEAD");
+    expect(work).toBeDefined();
+    expect(work!.detail).toContain("no longer resolves");
+  });
+
+  it("several records sharing the checkout email means a fresh record and owned work, not an arbitrary conversion", async () => {
+    seedLead(); // lead-1, dana@example.com
+    seedLead({ id: "lead-9", email: "dana@example.com" });
+
+    await finalize();
+
+    expect(customerUpdates.find((u) => u.status === "ACTIVE")).toBeUndefined();
+    expect(customersCreated).toHaveLength(1);
+    const work = workOpened.find((w) => w.kind === "DUPLICATE_LEAD");
+    expect(work).toBeDefined();
+    expect(work!.detail).toContain("lead-1");
+    expect(work!.detail).toContain("lead-9");
   });
 });
 

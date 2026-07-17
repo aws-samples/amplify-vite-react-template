@@ -44,6 +44,34 @@ can do. That is a launch checklist, not a crisis list.
 **One item is urgent independent of go-live: R81. The Buildium client secret is committed to a
 public GitHub repo.** Rotate it today.
 
+**Lead conversion is unambiguous — booking links carry the lead's identity** (Jake's
+directive, 17 July: "Matching a paid booking by email alone can convert the wrong duplicate,
+merge unrelated people sharing an email, or create a second customer when the checkout email
+differs"; suites 766 web / 188 CRM, adversarially verified — no defect found):
+
+- **Every booking link now names its lead.** An unguessable token (`Customer.bookingLinkToken`,
+  192-bit, indexed, resolved only server-side) is minted lazily wherever a link is produced —
+  the booking-link email, the AI Thumbtack replies, and the CRM lead page's copyable link —
+  and carried as `?lead=<token>` on the funnel URL. The funnel stashes it for the session,
+  strips it from the address bar (capability tokens don't belong in history or referrers, and
+  the stash expires after 24 h so a reused office tab can't convert a stale lead), and
+  `/quote` resolves it to `BookingRequest.leadCustomerId` — silently, so a stale token never
+  blocks a quote and the response is not a probing oracle.
+- **Finalization's resolution order is identity, then unambiguity, then a human**: a
+  lead-referenced booking converts exactly that record — even when the checkout email differs
+  (the difference is written into the lead notes); with no reference, an email match converts
+  only when exactly ONE record matches; a dangling reference or several records sharing the
+  checkout email creates a fresh customer and opens DUPLICATE_LEAD owned work naming the
+  candidates, instead of converting an arbitrary one. The portal-provisioning skip and the
+  INACTIVE-reactivation signal from the R41 work ride the same path unchanged.
+- **The verifier confirmed the riskiest spot holds**: a resumed PENDING quote (the async
+  pricing path re-updates the booking without a token) cannot clear a stored lead identity —
+  pinned by test against the same serialization semantics attribution already relies on.
+- Rides along, adopted from the parallel site pass: the funnel's support number unified to
+  (508) 258-9294 (the stale test assertion updated with it).
+- Residual: the phone-read URL stays bare by design (nobody dictates a token), so phone-typed
+  visits still land on the email-match path — now safe against ambiguity by construction.
+
 **Portal access is part of conversion — R41 closed** (Jake's directive, 17 July: "Provision the
 portal as part of conversion — paid customers are not automatically invited, yet reports,
 receipts, and payment-recovery messages direct customers to the portal"; suites 561 web /

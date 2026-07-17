@@ -11,6 +11,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { callerIsOffice } from "../shared/authz";
+import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { notifyLeads } from "../shared/email";
 import { openOwnedWork } from "../shared/ownedWork";
 import {
@@ -423,6 +424,7 @@ async function composeReply(
     oneTimeAsked: boolean;
     rodentAddon: boolean;
     pivotedFromOneTime: string | null;
+    funnelUrl: string;
   }
 ): Promise<string | null> {
   const allowedAmounts = [facts.monthly, facts.initial, facts.oneTime, facts.fallbackPlan, facts.pivotedFromOneTime]
@@ -438,7 +440,7 @@ ${facts.oneTime ? `- One-time price: ${facts.oneTime} flat (30-day guarantee)` :
 ${facts.fallbackPlan ? `- Value fallback: ${facts.fallbackPlan}` : ""}
 ${facts.rodentAddon ? "- The plan price INCLUDES the rodent program (exterior bait stations, monitored and refilled every visit) — say so." : ""}
 ${facts.pivotedFromOneTime ? `- The lead asked for a one-time (${facts.pivotedFromOneTime}); position the plan as the better value: the ${facts.initial ?? "initial-visit"} first visit costs less than the one-time, and they're covered year-round. You MAY mention the one-time price ${facts.pivotedFromOneTime} for comparison.` : facts.oneTimeAsked ? "- The lead asked for a one-time; pitch the plan as the smarter option per the conversion script, then give the one-time price." : "- Plan-first framing: covered year-round, free re-treatments between visits, licensed & insured in MA & RI."}
-- End with the next step: book online at ${FUNNEL_URL()} — they confirm their exact price, pick their day, and pay to lock it in. Use that exact URL. NEVER promise to schedule by reply or to email paperwork.
+- End with the next step: book online at ${facts.funnelUrl} — they confirm their exact price, pick their day, and pay to lock it in. Use that exact URL. NEVER promise to schedule by reply or to email paperwork.
 ${facts.assumptions.length ? `- Work these assumptions in naturally: ${facts.assumptions.join("; ")}` : ""}
 
 Tone: warm, direct, no fluff. Output ONLY the reply text.`;
@@ -483,13 +485,16 @@ export function templateReply(facts: {
   oneTime: string | null;
   frequency: Frequency;
   assumptions: string[];
+  funnelUrl?: string;
 }): string {
   const where = facts.town ? ` in ${facts.town}` : "";
   const assumed = facts.assumptions.length ? ` (${facts.assumptions[0]})` : "";
   // The one next step, every branch: the funnel. "We can have our technician
   // out Thursday" was a promise to schedule by reply, and nothing on this
-  // side of the funnel schedules anything.
-  const bookOnline = `You can confirm your exact price, pick your day, and book online in about a minute at ${FUNNEL_URL()}.`;
+  // side of the funnel schedules anything. The URL carries the lead's
+  // identity when the caller resolved one (funnelUrl), so the booking it
+  // produces converts exactly this lead.
+  const bookOnline = `You can confirm your exact price, pick your day, and book online in about a minute at ${facts.funnelUrl ?? FUNNEL_URL()}.`;
   if (facts.monthly && facts.initial) {
     return `For ${facts.pest}${where}, our ${freqLabel(facts.frequency)} plan is ${facts.monthly}/mo with a ${facts.initial} initial service — that first visit is the deep one: full inspection, interior treatment, and an exterior barrier${assumed}. After that you're covered year-round, and any re-treatment between visits is free. We're licensed and insured in MA & RI. ${bookOnline}`;
   }
@@ -1111,6 +1116,28 @@ async function priceLead(args: Args) {
     fallbackPlanStr = `mosquito-only at ${money(m.monthlyCents!)}/mo`;
   }
 
+  // The reply's booking link carries the lead's identity when we know who
+  // they are (R-lead-identity): the paid booking it produces then converts
+  // exactly this record instead of email-guessing. Best-effort — a resolve
+  // or mint failure still replies with the bare funnel URL.
+  let funnelUrl = FUNNEL_URL();
+  if (args.customerId) {
+    try {
+      const { data: leadCustomer } = await client.models.Customer.get({
+        id: args.customerId,
+      });
+      if (leadCustomer) {
+        const token = await ensureBookingLinkToken(client, leadCustomer);
+        funnelUrl = bookingLinkUrl(FUNNEL_URL(), token);
+      }
+    } catch (err) {
+      console.error(
+        `priceLead: could not resolve booking-link token for ${args.customerId}`,
+        err
+      );
+    }
+  }
+
   // Keep the second model call inside the AppSync window; the deterministic
   // template is always a valid reply.
   const timeLeft = Date.now() - startedAt < 15_000;
@@ -1130,6 +1157,7 @@ async function priceLead(args: Args) {
             extracted.rodentInterest && extracted.propertyType === "residential",
           pivotedFromOneTime:
             pivotedFromOneTimeCents != null ? money(pivotedFromOneTimeCents) : null,
+          funnelUrl,
         })
       : null) ??
     templateReply({
@@ -1140,6 +1168,7 @@ async function priceLead(args: Args) {
       oneTime: oneTimeStr,
       frequency: priced.frequency,
       assumptions,
+      funnelUrl,
     });
 
   const decision = escalateReasons.length ? "ESCALATE" : "QUOTE";

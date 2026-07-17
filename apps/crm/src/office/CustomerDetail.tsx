@@ -341,7 +341,19 @@ export default function CustomerDetail() {
           ) : null}
           <p className="muted small" style={{ marginTop: 8 }}>
             On the phone? Read it out:{" "}
-            <a href={bookingFunnelUrl()} target="_blank" rel="noreferrer">
+            {/* The href carries this lead's identity token when one has been
+                minted (first email send mints it), so a link copied from
+                here converts THIS lead exactly. The spoken form stays bare —
+                nobody dictates a token — and falls back to email matching. */}
+            <a
+              href={
+                customer.bookingLinkToken
+                  ? `${bookingFunnelUrl()}?lead=${customer.bookingLinkToken}`
+                  : bookingFunnelUrl()
+              }
+              target="_blank"
+              rel="noreferrer"
+            >
               <strong>{bookingFunnelSpoken()}</strong>
             </a>
           </p>

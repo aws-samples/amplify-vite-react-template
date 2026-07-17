@@ -11,10 +11,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 let customer: Record<string, unknown> | null;
+let customerUpdateFails = false;
+const customerUpdates: Record<string, unknown>[] = [];
 const fakeDataClient = {
   models: {
     Customer: {
       get: async () => ({ data: customer }),
+      update: async (patch: Record<string, unknown>) => {
+        if (customerUpdateFails) return { data: null };
+        customerUpdates.push(patch);
+        if (customer) Object.assign(customer, patch);
+        return { data: customer };
+      },
     },
   },
 };
@@ -71,6 +79,8 @@ const send = (kind: string, note?: string, groups: string[] = ["OFFICE"]) =>
 
 beforeEach(() => {
   sentEmails.length = 0;
+  customerUpdateFails = false;
+  customerUpdates.length = 0;
   customer = {
     id: "c1",
     displayName: "Dana Whitlock",
@@ -81,19 +91,47 @@ beforeEach(() => {
 });
 
 describe("sendCustomerEmail kind booking-link", () => {
-  it("emails the funnel CTA at MARKETING_URL + /quote", async () => {
+  it("emails the funnel CTA carrying this lead's identity token", async () => {
     const res = (await send("booking-link")) as { sent: boolean; to: string };
 
     expect(res).toEqual({ sent: true, to: "dana@example.com" });
     const [email] = sentEmails;
     expect(email.to).toBe("dana@example.com");
-    expect(email.html).toContain(
-      'href="https://staging.d26qpsjewk0bee.amplifyapp.com/quote"'
+    // The link names the lead (?lead=<token>) so the paid booking converts
+    // exactly this record instead of email-guessing.
+    expect(email.html).toMatch(
+      /href="https:\/\/staging\.d26qpsjewk0bee\.amplifyapp\.com\/quote\?lead=[A-Za-z0-9_-]{16,}"/
     );
     // A phone CSR reads the link out loud — it appears as plain text too.
-    expect(email.html).toContain(
-      "Or paste this link into your browser: https://staging.d26qpsjewk0bee.amplifyapp.com/quote"
+    expect(email.html).toMatch(
+      /Or paste this link into your browser: https:\/\/staging\.d26qpsjewk0bee\.amplifyapp\.com\/quote\?lead=/
     );
+    // First send mints the token onto the record.
+    expect(customerUpdates).toHaveLength(1);
+    expect(String(customerUpdates[0].bookingLinkToken)).toMatch(
+      /^[A-Za-z0-9_-]{16,}$/
+    );
+  });
+
+  it("reuses the already-minted token on a resend", async () => {
+    customer!.bookingLinkToken = "tok-already-minted-0123";
+
+    await send("booking-link");
+
+    expect(sentEmails[0].html).toContain("/quote?lead=tok-already-minted-0123");
+    expect(customerUpdates).toHaveLength(0);
+  });
+
+  it("a mint failure still sends the bare link — email matching stays the fallback", async () => {
+    customerUpdateFails = true;
+
+    const res = (await send("booking-link")) as { sent: boolean };
+
+    expect(res.sent).toBe(true);
+    expect(sentEmails[0].html).toContain(
+      'href="https://staging.d26qpsjewk0bee.amplifyapp.com/quote"'
+    );
+    expect(sentEmails[0].html).not.toContain("?lead=");
   });
 
   it("is honest about what happens: price, pick a day, pay — specialist calls if not", async () => {
@@ -131,7 +169,7 @@ describe("sendCustomerEmail kind booking-link", () => {
 
     await send("booking-link");
 
-    expect(sentEmails[0].html).toContain("https://www.pestbuzzkill.com/quote");
+    expect(sentEmails[0].html).toContain("https://www.pestbuzzkill.com/quote?lead=");
   });
 
   it("still refuses an unknown kind", async () => {

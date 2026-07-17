@@ -59,7 +59,14 @@ const fakeDataClient = {
       }),
       update: async (input: Record<string, unknown> & { id: string }) => {
         const row = bookings.find((b) => b.id === input.id);
-        if (row) Object.assign(row, input);
+        // Mirror production transport: the GraphQL body is JSON.stringify'd,
+        // which DROPS undefined keys — an update with { field: undefined }
+        // leaves the stored attribute untouched, never clears it.
+        if (row) {
+          for (const [k, v] of Object.entries(input)) {
+            if (v !== undefined) row[k] = v;
+          }
+        }
         return { data: row ?? null };
       },
     },
@@ -73,9 +80,23 @@ const fakeDataClient = {
       list: async () => ({ data: [{ id: "t1", active: true }] }),
     },
     Job: { listJobByScheduledDate: async () => ({ data: stopsEveryDay }) },
-    Customer: { get: async () => ({ data: null }) },
+    Customer: {
+      get: async () => ({ data: null }),
+      listCustomerByBookingLinkToken: async ({
+        bookingLinkToken,
+      }: {
+        bookingLinkToken: string;
+      }) => {
+        leadLookups.push(bookingLinkToken);
+        const hit = customersByLinkToken[bookingLinkToken];
+        return { data: hit ? (Array.isArray(hit) ? hit : [hit]) : [] };
+      },
+    },
   },
 };
+let customersByLinkToken: Record<string, { id: string } | { id: string }[]> =
+  {};
+const leadLookups: string[] = [];
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
 // R80: the two quote-path lead alerts (ops-booking-contact, ops-booking-rate-
@@ -220,6 +241,8 @@ beforeEach(() => {
   bookings.length = 0;
   pricingRuns.length = 0;
   leadEmails.length = 0;
+  customersByLinkToken = {};
+  leadLookups.length = 0;
   marketRateCalls.length = 0;
   enqueueCalls.length = 0;
   pricingInvokes.length = 0;
@@ -926,5 +949,88 @@ describe("first-touch attribution rides on the booking", () => {
     });
 
     expect(storedAttribution()).toEqual({ source: "google", term: "12345" });
+  });
+});
+
+describe("the booking link's lead identity rides on the booking", () => {
+  it("resolves a valid ?lead token to the lead's customer id", async () => {
+    customersByLinkToken["tok-lead-abc123def456"] = { id: "lead-77" };
+
+    const { status } = await postQuote({
+      ...rodentInput,
+      leadToken: "tok-lead-abc123def456",
+    });
+
+    expect(status).toBe(200);
+    expect(bookings[0].leadCustomerId).toBe("lead-77");
+  });
+
+  it("silently drops a token that resolves to nothing — identity is an upgrade, not a gate", async () => {
+    const { status, body } = await postQuote({
+      ...rodentInput,
+      leadToken: "tok-unknown-0123456789",
+    });
+
+    expect(status).toBe(200);
+    expect(bookings[0].leadCustomerId).toBeUndefined();
+    // The response never confirms whether the token matched anything.
+    expect(JSON.stringify(body)).not.toContain("lead");
+  });
+
+  it("rejects junk-shaped tokens before any lookup", async () => {
+    const { status } = await postQuote({
+      ...rodentInput,
+      leadToken: "<script>x</script>",
+    });
+
+    expect(status).toBe(200);
+    expect(bookings[0].leadCustomerId).toBeUndefined();
+    // The shape gate runs BEFORE the table — junk never costs a query.
+    expect(leadLookups).toHaveLength(0);
+  });
+
+  it("refuses a token that somehow matches more than one record", async () => {
+    customersByLinkToken["tok-shared-0123456789"] = [
+      { id: "lead-a" },
+      { id: "lead-b" },
+    ];
+
+    const { status } = await postQuote({
+      ...rodentInput,
+      leadToken: "tok-shared-0123456789",
+    });
+
+    expect(status).toBe(200);
+    expect(bookings[0].leadCustomerId).toBeUndefined();
+  });
+
+  it("a resumed PENDING quote keeps the lead identity from the original submission", async () => {
+    customersByLinkToken["tok-lead-abc123def456"] = { id: "lead-77" };
+    marketRateResult = null;
+    const pending = await postQuote({
+      ...rodentInput,
+      leadToken: "tok-lead-abc123def456",
+    });
+    expect(pending.body.decision).toBe("PENDING");
+    expect(bookings[0].leadCustomerId).toBe("lead-77");
+
+    // The status poll resumes WITHOUT a leadToken; the update it writes must
+    // not clear the stored identity.
+    marketRateResult = {
+      priceCents: 19900,
+      sheet: { oneTimeCents: 19900 },
+      basis: "research completed",
+      cached: true,
+    };
+    const ready = await postQuoteStatus({
+      bookingId: pending.body.bookingId,
+      statusToken: pending.body.statusToken,
+    });
+
+    expect(ready.body.decision).toBe("PRICED");
+    expect(bookings[0]).toMatchObject({
+      status: "QUOTED",
+      leadCustomerId: "lead-77",
+    });
   });
 });

@@ -646,6 +646,16 @@ describe("templateReply", () => {
 
     expect(replyUsesOnlyAllowedAmounts(reply, ["$169", "$124"])).toBe(true);
   });
+
+  it("carries the lead's tokenized funnel URL when the caller resolved one", () => {
+    const tokenized = `${FUNNEL}?lead=tok-abc123def4567890`;
+
+    const reply = templateReply({ ...facts, funnelUrl: tokenized });
+
+    expect(reply).toContain(tokenized);
+    // And the token cannot trip the amount guard — no digits read as money.
+    expect(replyUsesOnlyAllowedAmounts(reply, ["$169"])).toBe(true);
+  });
 });
 
 describe("the composed reply's next step is the funnel too", () => {

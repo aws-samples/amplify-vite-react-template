@@ -148,6 +148,12 @@ export const schema = a.schema({
       portalUserSub: a.string(),
       portalInvitedAt: a.datetime(),
       portalLastLoginAt: a.datetime(),
+      // The unguessable capability carried by this lead's booking link
+      // (?lead=<token> on the funnel URL). A paid booking that arrives with
+      // it converts THIS record — exactly — instead of guessing by email,
+      // which can pick the wrong duplicate or merge people who share an
+      // address. Minted lazily wherever a booking link is produced.
+      bookingLinkToken: a.string(),
       accessGroups: a.string().array(),
       servicePlans: a.hasMany("ServicePlan", "customerId"),
       jobs: a.hasMany("Job", "customerId"),
@@ -159,6 +165,7 @@ export const schema = a.schema({
     .secondaryIndexes((index) => [
       index("status").sortKeys(["displayName"]),
       index("portalUserSub"),
+      index("bookingLinkToken"),
     ])
     // No browser delete: finalized service reports and signed agreements
     // reference this row, and a legal record whose customer can be
@@ -259,6 +266,10 @@ export const schema = a.schema({
       stripeCustomerId: a.string(),
       stripePaymentIntentId: a.string(),
       cancelToken: a.string(),
+      // The CRM lead this quote/booking originated from, resolved server-side
+      // from the booking link's ?lead=<token> at /quote. Finalization converts
+      // exactly this record; customerId (below) is the converted RESULT.
+      leadCustomerId: a.id(),
       customerId: a.id(),
       jobId: a.id(),
       servicePlanId: a.id(),

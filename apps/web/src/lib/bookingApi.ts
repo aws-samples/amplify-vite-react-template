@@ -83,6 +83,13 @@ export type QuoteRequest = {
    * customer created at booking keeps their lead source.
    */
   attribution?: Attribution;
+  /**
+   * The lead identity carried by an office-sent booking link (?lead=<token>
+   * on the funnel URL). Optional and best-effort like attribution — the
+   * server resolves it silently so the paid booking converts exactly the
+   * CRM lead the link was sent to, instead of guessing by email.
+   */
+  leadToken?: string;
 };
 
 export type QuoteDay = {
@@ -227,17 +234,71 @@ async function post<T>(path: string, payload: unknown): Promise<ApiResult<T>> {
   return { ok: false, status: resp.status, body: (body ?? {}) as ApiErrorBody };
 }
 
+// ── Lead identity from the booking link ──────────────────────────────
+
+const LEAD_TOKEN_KEY = "buzzkill.bookingLeadToken.v1";
+const LEAD_TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/;
+/** Matches quote validity: a lead identity older than the longest-lived
+ *  quote is more likely a stale office tab (a CSR who opened one lead's
+ *  link, then reused the tab for a different caller) than the same person
+ *  still shopping — and a stale identity converts the wrong record. */
+const LEAD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Stash the ?lead=<token> a booking link carried, for the session. Like the
+ * quote-resume token, it is capability-shaped and gets stripped from the
+ * address bar by the caller after capture. Storage-disabled browsers just
+ * fall back to email matching at finalization.
+ */
+export function saveLeadToken(storage: Storage, token: string): boolean {
+  if (!LEAD_TOKEN_RE.test(token)) return false;
+  try {
+    storage.setItem(
+      LEAD_TOKEN_KEY,
+      JSON.stringify({ token, at: Date.now() })
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readLeadToken(
+  storage: Storage | undefined = typeof window === "undefined"
+    ? undefined
+    : window.sessionStorage
+): string | null {
+  try {
+    const raw = storage?.getItem(LEAD_TOKEN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { token?: unknown; at?: unknown };
+    const token = typeof parsed.token === "string" ? parsed.token : null;
+    const at = typeof parsed.at === "number" ? parsed.at : 0;
+    if (!token || !LEAD_TOKEN_RE.test(token) || Date.now() - at > LEAD_TOKEN_TTL_MS) {
+      storage?.removeItem(LEAD_TOKEN_KEY);
+      return null;
+    }
+    return token;
+  } catch {
+    return null;
+  }
+}
+
 // ── Callers ──────────────────────────────────────────────────────────
 
 export function requestQuote(input: QuoteRequest): Promise<ApiResult<QuoteResponse>> {
-  // First-touch attribution rides along when we have it, so the customer
-  // created at booking keeps their lead source. Omitted entirely when the
-  // session has none (direct visits, storage-disabled browsers).
+  // First-touch attribution and the booking link's lead identity ride along
+  // when the session has them, so the customer created at booking keeps
+  // their lead source and the booking converts the exact CRM lead the link
+  // was sent to. Both omitted entirely when absent (direct visits,
+  // storage-disabled browsers).
   const attribution = readAttribution();
-  return post<QuoteResponse>(
-    "/quote",
-    attribution ? { ...input, attribution } : input,
-  );
+  const leadToken = readLeadToken();
+  return post<QuoteResponse>("/quote", {
+    ...input,
+    ...(attribution ? { attribution } : {}),
+    ...(leadToken ? { leadToken } : {}),
+  });
 }
 
 /** Poll a previously accepted cold-cache quote without resubmitting PII. */
