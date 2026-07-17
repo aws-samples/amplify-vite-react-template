@@ -66,6 +66,12 @@ export const auth = defineAuth({
     // action→IAM map — and global sign-out has no granular action of its own, so
     // it can ONLY come from this bundle. No extra grant is added: manageUsers is
     // the grant that authorizes the offboarding calls.
+    // listUsersInGroup is granted on top of the bundles above: the GL-14 staff
+    // roster (staffRoster) and the last-owner guard (offboardStaff /
+    // changeStaffRoles) enumerate a group's members, and ListUsersInGroup is
+    // NOT part of manageUsers or manageGroupMembership — those cover Admin*Get
+    // and add/remove, but not listing a group. Without this grant the roster is
+    // blank and the last-owner check cannot count the owners it protects.
     allow
       .resource(crmAdmin)
       .to([
@@ -73,6 +79,7 @@ export const auth = defineAuth({
         "manageGroups",
         "manageGroupMembership",
         "setUserPassword",
+        "listUsersInGroup",
       ]),
     // Only verify writes user attributes now: it mints the link token on the
     // REQUEST_LINK answer and burns it on redemption. create issues the

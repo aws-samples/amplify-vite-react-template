@@ -2,6 +2,10 @@ import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
 import { notifyOffice } from "./email";
 import { cancelPlanBilling } from "./subscription";
+import {
+  recordCustomerLifecycleEvent,
+  type LifecycleActor,
+} from "./lifecycleLog";
 
 /**
  * Customer deactivation — the server-enforced version of the office "Mark
@@ -56,13 +60,15 @@ export type DeactivateCustomerResult = {
 
 export async function deactivateCustomer(
   stripe: Stripe,
-  customerId: string
+  customerId: string,
+  actor?: LifecycleActor | null
 ): Promise<DeactivateCustomerResult> {
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({
     id: customerId,
   });
   if (!customer) throw new Error(`Customer ${customerId} not found`);
+  const priorStatus = customer.status;
 
   // a. Stop the money first. cancelPlanBilling cancels the Stripe subscription
   //    AND resolves that plan's queued visits; it throws only when the Stripe
@@ -126,6 +132,22 @@ export async function deactivateCustomer(
   // d. INACTIVE last, once the money and the work are resolved.
   await client.models.Customer.update({ id: customerId, status: "INACTIVE" });
 
+  // e. Record the transition for leadership (GL-09). Only when it was a real
+  //    state change — an idempotent re-run on an already-INACTIVE customer
+  //    re-asserts the flag but is not a new transition and must not double-log.
+  if (priorStatus !== "INACTIVE") {
+    await recordCustomerLifecycleEvent({
+      customerId,
+      action: "DEACTIVATE",
+      actor,
+      priorStatus,
+      newStatus: "INACTIVE",
+      effects: `${plansCanceled} plan(s) billing stopped, ${visitsResolved} queued visit(s) resolved, ${jobsCanceled} upcoming visit(s) canceled. Outstanding balance ${formatCents(
+        outstandingBalanceCents
+      )} REPORTED, not charged. Portal login ended separately.`,
+    });
+  }
+
   return {
     plansCanceled,
     visitsResolved,
@@ -135,6 +157,14 @@ export async function deactivateCustomer(
     status: "INACTIVE",
     partial: false,
   };
+}
+
+/** Cents → a plain dollar string for the audit summary. */
+function formatCents(cents: number): string {
+  return `$${(cents / 100).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 /** Every ACTIVE ServicePlan for a customer, paged fully. */

@@ -281,21 +281,42 @@ and routine staff cannot bypass the approved lifecycle with a raw field change.
 actions; rebooking an inactive customer can leave a paid customer with disabled access; and broad
 record-update permissions can bypass guarded status, plan, pricing, or provider-linked workflows.
 
+**What now closes it:** Raw `Customer.update` and `ServicePlan.update`/`delete` are removed from every
+browser role (data/resource.ts) — the office keeps its safe contact/address/note edits through the new
+`updateCustomerContact` mutation, which can touch only those fields, and the protected lifecycle fields
+(status, Stripe ids, payment-method label, portalUserSub, accessGroups, groupId, plan price/status,
+delinquency, paid state) can now move only through named Lambda actions. Reactivation is folded into one
+server action, `reactivateCustomer`, that restores the portal login *before* it publishes ACTIVE, so a
+paying customer is never left ACTIVE with a dead login. Every deactivation and reactivation now appends
+an immutable row to a new `CustomerLifecycleEvent` ledger (actor, timestamp, prior→new status, and the
+money/job/access effects), browser-readable by OWNER/OFFICE/FINANCE.
+
 **Required acceptance evidence:**
 
-- **Deactivate customer** is one server-owned business action covering plan billing, queued visits,
-  open balances, customer login, communications, and status. A partial failure resumes safely.
-- Rebooking/reactivating an inactive customer explicitly restores the approved access and service
-  state before confirmation, or blocks purchase with a truthful assisted-resolution path.
-- Statuses, plan price/status, Stripe identifiers, access groups, paid state, and other protected
-  lifecycle fields can change only through named business actions with validation and audit. Office
-  screens retain only safe contact/address/note edits.
-- Two employees performing conflicting lifecycle actions cannot produce mixed state; the second
-  receives the current fact and one safe next step.
-- Every transition records actor, timestamp, reason, prior state, new state, and related money/job
-  effects. Leadership can retrieve the history without engineering assistance.
-- Tests cover deactivation with active plan/queued visit/open invoice, partial provider failure,
-  rebooking an inactive customer, reactivation, and attempted direct protected-field updates.
+- ✅ **Deactivate customer** is one server-owned business action covering plan billing, queued visits,
+  open balances, customer login, communications, and status; a partial failure leaves the customer
+  ACTIVE (never a hidden live charge) and pages the office. The money/work/status half is one resumable
+  action; the login half is a chained guarded mutation whose failure becomes owned work. *(shared/
+  `deactivation.ts`, crm-admin `revokePortalAccess`, `deactivation.test.ts`; the ledger write is new.)*
+- ✅ Reactivating an inactive customer explicitly restores the approved access state **before** the
+  status is confirmed, in one server action; canceled plans stay canceled (re-subscribe via a new
+  booking). *(crm-admin `reactivateCustomer`, `reactivation.test.ts`.)*
+- ✅ Statuses, plan price/status, Stripe identifiers, access groups, paid state, and other protected
+  lifecycle fields can change only through named business actions; office screens retain only safe
+  contact/address/note edits. Enforced structurally — no browser mutation exists to write them.
+  *(data/resource.ts Customer/ServicePlan auth, `updateCustomerContact`.)*
+- ⚠️ Two employees performing the **same** lifecycle action cannot produce mixed state: deactivate is
+  idempotent, and a reactivation of an already-ACTIVE customer reports the current fact and writes no
+  second transition. **Residual:** there is no DB-level optimistic lock across *different* actions, so a
+  truly interleaved deactivate-vs-reactivate is not yet conditional-write guarded.
+- ⚠️ Every transition records actor, timestamp, prior state, new state, and the money/job/access effects
+  in the append-only `CustomerLifecycleEvent` ledger, readable by leadership roles via the data API.
+  *(shared/`lifecycleLog.ts`.)* **Residuals:** the actions don't yet prompt for a free-text reason, and a
+  dedicated CRM history screen is a follow-up (the rows are readable but not yet surfaced in a view).
+- ⚠️ Tests cover deactivation with active plan/queued visit/open invoice, partial provider failure,
+  reactivation (fresh, idempotent, no-login, missing customer), and that the safe edit can never write a
+  protected field. *(`deactivation.test.ts`, `reactivation.test.ts`.)* **Residual:** a public-funnel
+  "inactive customer rebooks online" end-to-end case is not covered here.
 
 **Pass owner:** Head of Operations; Finance and CEO approve protected fields and transition policy.
 
@@ -388,22 +409,38 @@ provide a unified refund/credit decision, recurring-plan effect, or guaranteed c
 **Business outcome:** Every staff login maps to one real worker and role, and a departed or
 misconfigured employee cannot retain access.
 
-**Why this is still a gate:** A technician login can be created without a linked technician record,
-and there is no complete owner workflow to review, change, or disable every staff role.
+**Why this was a gate, and what this commit closes:** Staff identity is now server-enforced end to
+end. `adminCreateUser` refuses a TECH login unless it is atomically bound to exactly one Technician
+record with a present, current applicator licence — "invite now, link later" is gone, one technician
+maps to one login, and a record already linked to another login is refused. A new owner-only staff
+roster (`staffRoster`) joins Cognito to the technician records and surfaces person, email, role(s),
+status, pending invite, and — for technicians — the linked profile and its licence, flagging unlinked
+or lapsed technicians. Owners can change any role set (`changeStaffRoles`) and offboard any staff
+role (`offboardStaff`), which disables the login, globally signs out live sessions, removes every
+staff and dynamic group, returns a linked technician's future jobs to the scheduling pool, and pages
+the office — in one action, preserving the Technician row and finalized reports (audit/legal records
+are never deleted). The last usable owner cannot be demoted or offboarded.
 
 **Required acceptance evidence:**
 
-- Creating a technician login atomically creates/links exactly one technician profile with required
+- ✅ Creating a technician login atomically creates/links exactly one technician profile with required
   active license data, or refuses with a fixable error. “Invite now, link later” is not available.
-- An owner-only staff roster shows person, email, role(s), linked profile, status, last login, and
-  pending invite. Duplicate/shared identities and unlinked users are visibly blocked.
-- Owners can change role and offboard OWNER, OFFICE, FINANCE, and TECH users. Offboarding disables
+  *(crm-admin `adminCreateUser`; the CRM invite form requires the technician pick.)*
+- ⚠️ An owner-only staff roster shows person, email, role(s), linked profile, status, and pending
+  invite, and blocks duplicate/shared identities and unlinked users (shared identity is refused at
+  creation; unlinked technicians are flagged in the roster). **Residual:** last-login is not yet
+  populated — Cognito does not record last sign-in and no staff-profile store stamps it, so that
+  column is deferred to a follow-up.
+- ✅ Owners can change role and offboard OWNER, OFFICE, FINANCE, and TECH users. Offboarding disables
   login/sessions, removes groups, reassigns owned work and future jobs, and preserves audit/legal
   records in one guided action.
-- The system prevents removal of the last usable owner. At least two named owners and one tested
-  break-glass procedure exist before launch.
-- Tests cover abandoned invite, duplicate email, unlinked technician, role change, immediate
-  offboarding, offboarding with assigned future work, and attempted access using an old session.
+- ⚠️ The system prevents removal of the last usable owner (enforced in `assertOwnerRemains`).
+  **Residual (operational):** naming at least two owners and running one tested break-glass drill is a
+  pre-launch operating step, not code.
+- ✅ Tests cover abandoned invite (roster pending-invite flag), duplicate/shared email, unlinked
+  technician, role change, immediate offboarding, offboarding with assigned future work, and
+  attempted access using an old session (global sign-out). *(crm-admin `offboarding.test.ts`,
+  shared `staffRoles.test.ts`.)*
 
 **Pass owner:** CEO.
 

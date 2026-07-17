@@ -154,7 +154,11 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       // Cancels subscriptions = money authority, so FINANCE/OWNER, mirroring
       // cancelSubscription.
       assertFinance(event.identity);
-      return sharedDeactivateCustomer(stripeClient(), event.arguments.customerId!);
+      return sharedDeactivateCustomer(
+        stripeClient(),
+        event.arguments.customerId!,
+        actorOf(event)
+      );
     }
     case "pausePlan": {
       assertFinance(event.identity);

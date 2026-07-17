@@ -111,6 +111,14 @@ vi.mock("./subscription", () => ({
   cancelPlanBilling: (stripe: unknown, id: string) => cancelPlanBilling(stripe, id),
 }));
 
+const recordCustomerLifecycleEvent = vi.fn(async () => {});
+vi.mock("./lifecycleLog", () => ({
+  recordCustomerLifecycleEvent: (...a: unknown[]) =>
+    (recordCustomerLifecycleEvent as unknown as (...x: unknown[]) => Promise<void>)(
+      ...a
+    ),
+}));
+
 const { deactivateCustomer } = await import("./deactivation");
 
 /** A Stripe stub that would record a charge if one were ever attempted. */
@@ -127,6 +135,7 @@ beforeEach(() => {
   events = [];
   notifyOffice.mockClear();
   paymentIntentsCreate.mockClear();
+  recordCustomerLifecycleEvent.mockClear();
   cancelPlanBilling.mockClear();
   cancelPlanBilling.mockImplementation(async (_s: unknown, servicePlanId: string) => {
     events.push(`cancelPlan:${servicePlanId}`);
@@ -261,6 +270,16 @@ describe("deactivateCustomer", () => {
     expect(events.indexOf("cancelPlan:p1")).toBeLessThan(
       events.indexOf("customer:INACTIVE")
     );
+    // The transition is recorded for leadership: actor, prior → new status, and
+    // the money/job effects (GL-09).
+    expect(recordCustomerLifecycleEvent).toHaveBeenCalledOnce();
+    const [entry] = recordCustomerLifecycleEvent.mock.calls[0] as unknown as [
+      { action: string; priorStatus: string; newStatus: string; effects: string },
+    ];
+    expect(entry.action).toBe("DEACTIVATE");
+    expect(entry.priorStatus).toBe("ACTIVE");
+    expect(entry.newStatus).toBe("INACTIVE");
+    expect(entry.effects).toMatch(/not charged/i);
   });
 
   it("does NOT flip INACTIVE and pages the office when a plan's cancel fails", async () => {
@@ -279,6 +298,8 @@ describe("deactivateCustomer", () => {
     expect(res.status).toBe("ACTIVE");
     expect(customers.get("c1")!.status).toBe("ACTIVE");
     expect(events).not.toContain("customer:INACTIVE");
+    // No transition happened, so nothing is written to the lifecycle ledger.
+    expect(recordCustomerLifecycleEvent).not.toHaveBeenCalled();
     // The schedule sweep is skipped too — we don't half-deactivate.
     expect(res.jobsCanceled).toBe(0);
     expect(notifyOffice).toHaveBeenCalledOnce();
@@ -300,6 +321,9 @@ describe("deactivateCustomer", () => {
     expect(res.plansCanceled).toBe(0);
     expect(res.jobsCanceled).toBe(0);
     expect(customers.get("c1")!.status).toBe("INACTIVE");
+    // Already INACTIVE: the re-run re-asserts the flag but records no second
+    // transition — the ledger is transitions, not idempotent no-ops.
+    expect(recordCustomerLifecycleEvent).not.toHaveBeenCalled();
   });
 
   it("throws on a missing customer rather than reporting a deactivation it did not do", async () => {

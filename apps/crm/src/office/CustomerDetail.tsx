@@ -1171,17 +1171,13 @@ export default function CustomerDetail() {
               void run(
                 "reactivate",
                 async () => {
+                  // One server action (GL-09): restores the portal login first,
+                  // then flips status to ACTIVE, then records the transition, so
+                  // the customer is never left ACTIVE with a dead login. Canceled
+                  // plans stay canceled — a reactivated customer re-subscribes
+                  // through a new booking.
                   unwrap(
-                    await api().models.Customer.update({
-                      id: customer.id,
-                      status: "ACTIVE",
-                    })
-                  );
-                  // Re-enable the portal login (idempotent, no-op if none). The
-                  // canceled plans stay canceled — a reactivated customer
-                  // re-subscribes through a new booking.
-                  unwrap(
-                    await api().mutations.restorePortalAccess({
+                    await api().mutations.reactivateCustomer({
                       customerId: customer.id,
                     })
                   );
@@ -1207,9 +1203,12 @@ export default function CustomerDetail() {
           submitLabel="Save changes"
           showLeadSource={isLead}
           onSubmit={async (v) => {
+            // Safe contact/address/note edit only (GL-09) — raw Customer.update
+            // is closed to the browser, so protected lifecycle fields (status,
+            // Stripe ids, access groups, paid state) can't be changed from here.
             unwrap(
-              await api().models.Customer.update({
-                id: customer.id,
+              await api().mutations.updateCustomerContact({
+                customerId: customer.id,
                 displayName: v.displayName.trim(),
                 contactName: v.contactName.trim() || null,
                 email: v.email.trim() || null,

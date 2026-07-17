@@ -183,8 +183,18 @@ export const schema = a.schema({
     // reference this row, and a legal record whose customer can be
     // hard-deleted from a browser does not survive its retention window.
     // INACTIVE is how a customer leaves.
+    //
+    // No browser UPDATE either (GL-09). This row carries the protected
+    // lifecycle fields — status, stripeCustomerId, the payment-method label,
+    // portalUserSub, accessGroups, groupId, convertedAt — and a raw
+    // Customer.update from an OFFICE token could flip any of them, bypassing the
+    // guarded workflows that own them: deactivate/reactivate (status + access),
+    // setCustomerGroup (accessGroups + Cognito), the booking funnel and billing
+    // Lambdas (Stripe ids, paid state). The office keeps its safe edits —
+    // contact name, email, phone, address, notes — through updateCustomerContact,
+    // which can touch only those fields. create stays so a lead can be added.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
       allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
@@ -228,8 +238,17 @@ export const schema = a.schema({
     // (shared/bookingFinalize), where the price is whatever the customer
     // actually paid at checkout. That closes R25 structurally — a hand-typed
     // price cannot enter a subscription because no screen can create one.
+    //
+    // No browser update or delete either (GL-09). priceCents, status,
+    // stripeSubscriptionId, delinquent and canceledAt are guarded lifecycle and
+    // provider-linked fields: a raw ServicePlan.update from an OFFICE token could
+    // re-price a live subscription, un-cancel a plan, or clear a delinquency flag
+    // out from under the recurring engine. Every legitimate plan write already
+    // flows through a Lambda (startSubscription/cancelSubscription, pause/resume,
+    // the dunning cron, the Stripe webhook), which authenticate as IAM and are
+    // unaffected. No screen writes a plan directly.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read", "update", "delete"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
@@ -916,6 +935,40 @@ export const schema = a.schema({
     ]),
 
   /**
+   * The customer lifecycle audit trail (GL-09). One immutable row per
+   * deactivation/reactivation — who did it, when, why, the status it moved
+   * from and to, and a human-readable summary of the money/job/access effects.
+   *
+   * Browser-read-only for OWNER/OFFICE/FINANCE so leadership can retrieve the
+   * history without engineering, and written only by a Lambda (shared/
+   * lifecycleLog) authenticating as IAM. Like Invoice and WorkEvent, closing
+   * every human write is the point: an audit trail the audited party can edit
+   * is not one. No delete — the ledger is append-only.
+   *
+   * action is a string, not an enum ref, on purpose: it keeps this model flat
+   * (no added enum type) against a schema already near TypeScript's inference
+   * depth ceiling. Values today: DEACTIVATE | REACTIVATE.
+   */
+  CustomerLifecycleEvent: a
+    .model({
+      customerId: a.id().required(),
+      action: a.string().required(),
+      actorSub: a.string(),
+      actorEmail: a.string().required(),
+      reason: a.string(),
+      priorStatus: a.string(),
+      newStatus: a.string(),
+      effects: a.string(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [
+      index("customerId").sortKeys(["occurredAt"]),
+    ])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+    ]),
+
+  /**
    * Provision a Cognito login for staff (roles OWNER/OFFICE/FINANCE/TECH —
    * combinations are simply multiple roles) or a customer (roles
    * ["CUSTOMER"] + customerId). Optionally links a Technician record via
@@ -1005,6 +1058,52 @@ export const schema = a.schema({
     .handler(a.handler.function(crmAdmin)),
 
   /**
+   * Reactivate a deactivated customer as ONE server action (GL-09): restore the
+   * portal login first, then flip status to ACTIVE, then record the transition.
+   * Access is restored before status is published, so a reactivated (paying)
+   * customer is never left ACTIVE with a dead login. Idempotent and
+   * concurrency-safe — an already-ACTIVE customer heals access and reports the
+   * current fact. FINANCE/OWNER, matching deactivateCustomer.
+   */
+  reactivateCustomer: a
+    .mutation()
+    .arguments({ customerId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * The office's safe customer edit (GL-09). With raw Customer.update closed to
+   * the browser, this is the only screen-driven write to a Customer, and it can
+   * touch only contact name, email, phone, service/billing address, lead source
+   * and notes — never status, Stripe ids, the payment-method label,
+   * portalUserSub, accessGroups, groupId or paid state, which are named-action
+   * only. OWNER/OFFICE.
+   */
+  updateCustomerContact: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      displayName: a.string().required(),
+      contactName: a.string(),
+      email: a.string(),
+      phone: a.string(),
+      serviceStreet: a.string(),
+      serviceCity: a.string(),
+      serviceState: a.string(),
+      serviceZip: a.string(),
+      billingStreet: a.string(),
+      billingCity: a.string(),
+      billingState: a.string(),
+      billingZip: a.string(),
+      leadSource: a.string(),
+      notes: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
    * Offboard a technician for real: return their future assigned jobs to the
    * scheduling pool for reassignment (route/tech cleared, back to UNSCHEDULED),
    * disable and globally sign out their Cognito login, flip active → false, and
@@ -1018,6 +1117,52 @@ export const schema = a.schema({
   deactivateTechnician: a
     .mutation()
     .arguments({ technicianId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-14 — the owner-only staff roster. Every staff login with person, email,
+   * role(s), status, pending invite, and (for technicians) the linked profile
+   * and its licence state, joined from Cognito + Technician records so unlinked
+   * or shared identities are visible rather than hidden. Read-only.
+   *
+   * OWNER-only: the roster exposes who can sign in and with what authority — the
+   * same bar that provisions and ends staff logins reviews them.
+   */
+  staffRoster: a
+    .query()
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-14 — set a staff login's role set to exactly `roles`. Adds/removes staff
+   * groups, leaving CUSTOMER and dynamic memberships alone. Granting TECH needs
+   * an already-linked, active, currently-licensed technician; it will not strip
+   * OWNER from the last usable owner; an empty role set is refused (offboard
+   * instead). OWNER-only.
+   */
+  changeStaffRoles: a
+    .mutation()
+    .arguments({
+      email: a.string().required(),
+      roles: a.string().required().array().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-14 — offboard any staff member in one guided action: disable + global
+   * sign-out (old sessions die now), remove every staff/dynamic group, return a
+   * linked technician's future jobs to the pool and flip them inactive, and
+   * page the office. Audit/legal records (Technician row, finalized reports) are
+   * preserved, never deleted. Will not offboard the last usable owner. OWNER-only.
+   */
+  offboardStaff: a
+    .mutation()
+    .arguments({ email: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),

@@ -372,6 +372,56 @@ export function updateMarketRate(fields: {
   return api().models.MarketRate.update(fields as UpdateInput);
 }
 
+/**
+ * GL-14 — the owner-only staff roster and its two management actions. The
+ * roster and its mutations are Lambda-backed (crm-admin) and OWNER-only
+ * server-side; the CRM cannot touch Cognito directly, so it goes through these.
+ */
+export type StaffRosterRow = {
+  username: string;
+  sub: string | null;
+  email: string;
+  name: string | null;
+  enabled: boolean;
+  status: string | null;
+  pendingInvite: boolean;
+  roles: string[];
+  linkedTechnicianId: string | null;
+  technicianActive: boolean | null;
+  licenseValid: boolean | null;
+  licenseExpiresOn: string | null;
+  unlinkedTech: boolean;
+};
+
+export function staffRoster(): OpResult {
+  return (
+    api().queries as unknown as { staffRoster: () => OpResult }
+  ).staffRoster();
+}
+
+/** Set a staff login's role set to exactly `roles`. Server enforces the
+ *  last-owner and technician-linkage rules. */
+export function changeStaffRoles(input: {
+  email: string;
+  roles: string[];
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      changeStaffRoles: (i: typeof input) => OpResult;
+    }
+  ).changeStaffRoles(input);
+}
+
+/** Offboard a staff member: disable + sign out, remove groups, reassign a
+ *  linked technician's future work. Server refuses the last usable owner. */
+export function offboardStaff(input: { email: string }): OpResult {
+  return (
+    api().mutations as unknown as {
+      offboardStaff: (i: typeof input) => OpResult;
+    }
+  ).offboardStaff(input);
+}
+
 /** Parse an AWSJSON field that may arrive as a string. */
 export function jsonField<T>(raw: unknown): T | null {
   if (raw == null) return null;

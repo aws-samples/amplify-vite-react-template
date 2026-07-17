@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { confirmResetPassword, resetPassword, signOut } from "aws-amplify/auth";
-import { api, unwrap, type Technician } from "../lib/api";
+import { api, unwrap } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
 import {
@@ -18,7 +18,6 @@ import {
 export default function More() {
   const roles = useRoles();
   const navigate = useNavigate();
-  const [staffSheet, setStaffSheet] = useState(false);
   const [emailLogSheet, setEmailLogSheet] = useState(false);
   const [passwordSheet, setPasswordSheet] = useState(false);
 
@@ -65,19 +64,19 @@ export default function More() {
             subtitle="Every AI-researched base price — review, override, pin"
             onClick={() => navigate("/market-rates")}
           />
-          {/* adminCreateUser is OWNER-only server-side — invites are what keep
-              the role split real. Non-owners get the honest line, not a row
-              that errors on tap. */}
+          {/* Staff management (roster, roles, invites, offboarding) is OWNER-only
+              server-side — it is what keeps the role split real. Non-owners get
+              the honest line, not a row that errors on tap. */}
           {roles.owner ? (
             <ListRow
-              title="Invite a staff member"
-              subtitle="Owner, office, finance, technician, or a combination"
-              onClick={() => setStaffSheet(true)}
+              title="Staff"
+              subtitle="Roster, roles, invites, and offboarding"
+              onClick={() => navigate("/staff")}
             />
           ) : (
             <ListRow
-              title="Invite a staff member"
-              subtitle="Ask the owner — staff invites are owner-only"
+              title="Staff"
+              subtitle="Ask the owner — staff management is owner-only"
             />
           )}
           <ListRow
@@ -92,9 +91,6 @@ export default function More() {
         Sign out
       </Button>
 
-      <Sheet open={staffSheet} onClose={() => setStaffSheet(false)} title="Invite staff">
-        <StaffInvite onDone={() => setStaffSheet(false)} />
-      </Sheet>
       <Sheet open={emailLogSheet} onClose={() => setEmailLogSheet(false)} title="Email log">
         <EmailLogList />
       </Sheet>
@@ -102,121 +98,6 @@ export default function More() {
         <SetPassword email={roles.email ?? ""} onDone={() => setPasswordSheet(false)} />
       </Sheet>
     </Page>
-  );
-}
-
-/**
- * Roles are additive in Cognito, so each option maps to the group list it
- * grants. OWNER is a superset and never needs pairing with OFFICE/FINANCE.
- */
-const ROLE_CHOICES = {
-  OFFICE: { label: "Office staff — leads, pricing, scheduling", groups: ["OFFICE"] },
-  FINANCE: { label: "Finance — charges, refunds, invoices", groups: ["FINANCE"] },
-  OFFICE_FINANCE: { label: "Office + finance", groups: ["OFFICE", "FINANCE"] },
-  TECH: { label: "Technician", groups: ["TECH"] },
-  BOTH: { label: "Office + technician", groups: ["OFFICE", "TECH"] },
-  OWNER: {
-    label: "Owner — everything, incl. approvals and invites",
-    groups: ["OWNER"],
-  },
-} satisfies Record<string, { label: string; groups: string[] }>;
-
-type RoleChoice = keyof typeof ROLE_CHOICES;
-
-function StaffInvite({ onDone }: { onDone: () => void }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState<RoleChoice>("OFFICE");
-  const [techs, setTechs] = useState<Technician[]>([]);
-  const [technicianId, setTechnicianId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
-
-  const linksTechnician = ROLE_CHOICES[role].groups.includes("TECH");
-
-  useEffect(() => {
-    if (!linksTechnician) return;
-    api()
-      .models.Technician.list({ limit: 200 })
-      .then((res) => setTechs(unwrap(res).filter((t) => !t.userSub)))
-      .catch(() => undefined);
-  }, [linksTechnician]);
-
-  if (done) {
-    return (
-      <div className="form-grid">
-        <p>
-          Invite sent — they'll get an email with a sign-in link that logs
-          them straight in. No passwords to juggle.
-        </p>
-        <Button block onClick={onDone}>
-          Done
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="form-grid">
-      <Field label="Name">
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-      </Field>
-      <Field label="Email">
-        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-      </Field>
-      <Field label="Role">
-        <select value={role} onChange={(e) => setRole(e.target.value as RoleChoice)}>
-          {Object.entries(ROLE_CHOICES).map(([k, v]) => (
-            <option key={k} value={k}>
-              {v.label}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {linksTechnician && techs.length > 0 ? (
-        <Field label="Link to technician record" hint="So their daily route shows up under My Day">
-          <select value={technicianId} onChange={(e) => setTechnicianId(e.target.value)}>
-            <option value="">Don't link</option>
-            {techs.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      ) : null}
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        disabled={!name.trim() || !/^\S+@\S+\.\S+$/.test(email.trim())}
-        onClick={() => {
-          if (!name.trim() || !email.trim()) {
-            setError("Name and email are required");
-            return;
-          }
-          setBusy(true);
-          api()
-            .mutations.adminCreateUser({
-              email: email.trim(),
-              name: name.trim(),
-              roles: [...ROLE_CHOICES[role].groups],
-              technicianId: technicianId || undefined,
-            })
-            .then((res) => {
-              if (res.errors?.length) throw new Error(res.errors[0].message);
-              setDone(true);
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not send invite");
-              setBusy(false);
-            });
-        }}
-      >
-        Send invite
-      </Button>
-    </div>
   );
 }
 
