@@ -20,6 +20,7 @@ type Report = Record<string, unknown> & { id: string; status: string };
 let jobs: Job[] = [];
 let reports: Report[] = [];
 let technician: Record<string, unknown>;
+let customer: Record<string, unknown>;
 let routes: Record<string, unknown>[] = [];
 const officeEmails: { subject: string; bodyHtml: string }[] = [];
 
@@ -64,7 +65,7 @@ const fakeDataClient = {
     },
     Customer: {
       get: async ({ id }: { id: string }) => ({
-        data: { id, displayName: "Dana Whitlock", groupId: null },
+        data: { id, ...customer },
       }),
     },
     Technician: {
@@ -143,6 +144,14 @@ beforeEach(() => {
     licenseNumber: "MA-12345",
     licenseExpiresOn: "2027-07-16",
   };
+  customer = {
+    displayName: "Dana Whitlock",
+    groupId: null,
+    serviceStreet: "18 Cedar Ln",
+    serviceCity: "Providence",
+    serviceState: "RI",
+    serviceZip: "02906",
+  };
   jobs = [{ id: "j1", customerId: "c1", technicianId: "t1", status: "IN_PROGRESS", serviceType: "General pest", type: "ONE_TIME" }];
   reports = [];
   routes = [];
@@ -194,6 +203,141 @@ describe("regulated assignment", () => {
       technicianId: "t1",
       routeId: "r1",
     });
+  });
+
+  it("refuses to route a job whose customer has no deliverable address (GL-12)", async () => {
+    jobs[0].status = "UNSCHEDULED";
+    customer.serviceStreet = null;
+    customer.serviceZip = "";
+    routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
+
+    await expect(
+      call(
+        "updateJobSchedule",
+        {
+          jobId: "j1",
+          operation: "ASSIGN",
+          technicianId: "t1",
+          routeId: "r1",
+          routeOrder: 1,
+          scheduledDate: "2026-07-20",
+        },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/deliverable service address.*street.*ZIP/is);
+    // Never dispatched: the stop stays in the unscheduled pool, unrouted.
+    expect(jobs[0].status).toBe("UNSCHEDULED");
+    expect(jobs[0].routeId).toBeUndefined();
+  });
+
+  it("blocks the address before the technician credential, so the office sees the packet gap", async () => {
+    // Both are wrong: no address AND an expired license. The address minimum is
+    // named first because it is the one the office fixes on the customer record.
+    jobs[0].status = "UNSCHEDULED";
+    customer.serviceState = "";
+    technician.licenseExpiresOn = "2020-01-01";
+    routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
+
+    await expect(
+      call(
+        "updateJobSchedule",
+        {
+          jobId: "j1",
+          operation: "ASSIGN",
+          technicianId: "t1",
+          routeId: "r1",
+          routeOrder: 1,
+          scheduledDate: "2026-07-20",
+        },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/deliverable service address/i);
+  });
+});
+
+describe("dispatch packet capture (GL-12)", () => {
+  it("refuses to create a scheduled job when the address is not deliverable", async () => {
+    customer.serviceZip = null;
+
+    await expect(
+      call(
+        "createOfficeJob",
+        {
+          customerId: "c1",
+          serviceType: "General pest",
+          scheduledDate: "2026-07-25",
+        },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/can't be dispatched yet.*ZIP/is);
+  });
+
+  it("captures job-specific access, safety, prep and payment facts on create", async () => {
+    const res = (await call(
+      "createOfficeJob",
+      {
+        customerId: "c1",
+        serviceType: "General pest",
+        accessInstructions: "Gate code 4417, park on the street",
+        hazardNotes: "Large dog in the back yard; toddler on site",
+        prepInstructions: "Clear under the kitchen sink",
+        prepConfirmed: true,
+        paymentExpectation: "COLLECT_NOTHING",
+      },
+      ["OFFICE"]
+    )) as { jobId: string };
+
+    const created = jobs.find((j) => j.id === res.jobId)!;
+    expect(created).toMatchObject({
+      accessInstructions: "Gate code 4417, park on the street",
+      hazardNotes: "Large dog in the back yard; toddler on site",
+      prepInstructions: "Clear under the kitchen sink",
+      prepConfirmed: true,
+      paymentExpectation: "COLLECT_NOTHING",
+    });
+  });
+
+  it("normalizes an unapproved payment posture to the safe office default", async () => {
+    const res = (await call(
+      "createOfficeJob",
+      {
+        customerId: "c1",
+        serviceType: "General pest",
+        paymentExpectation: "COLLECT_ON_SITE",
+      },
+      ["OFFICE"]
+    )) as { jobId: string };
+
+    const created = jobs.find((j) => j.id === res.jobId)!;
+    // Not stored as the invented posture; absent reads as DUE_THROUGH_OFFICE.
+    expect(created.paymentExpectation).toBeUndefined();
+  });
+
+  it("edits the packet on an existing job through the guarded mutation", async () => {
+    jobs[0].status = "SCHEDULED";
+
+    await call(
+      "updateJobPacket",
+      {
+        jobId: "j1",
+        hazardNotes: "Wasp-allergic occupant",
+        paymentExpectation: "DUE_THROUGH_OFFICE",
+      },
+      ["OFFICE"]
+    );
+
+    expect(jobs[0]).toMatchObject({
+      hazardNotes: "Wasp-allergic occupant",
+      paymentExpectation: "DUE_THROUGH_OFFICE",
+    });
+  });
+
+  it("will not edit the packet of a closed visit — it is part of the record", async () => {
+    jobs[0].status = "COMPLETED";
+
+    await expect(
+      call("updateJobPacket", { jobId: "j1", hazardNotes: "too late" }, ["OFFICE"])
+    ).rejects.toThrow(/closed|record/i);
   });
 });
 

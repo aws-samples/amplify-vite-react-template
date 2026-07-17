@@ -395,6 +395,41 @@ service context; customer notes and prior relevant outcomes are not reliably in 
 
 **Pass owner:** Head of Operations.
 
+**Engineering status (2026-07-17):** the dispatch-packet backbone landed; the gate is not yet
+owner-certifiable end to end. Evidence, per acceptance bullet:
+
+- *Cannot assign/route without a deliverable address* — **done.** `assertDeliverableAddress`
+  (`apps/web/amplify/functions/shared/compliance.ts`) is enforced in `updateJobSchedule` ASSIGN and
+  in `createOfficeJob` when a job is created already scheduled
+  (`apps/web/amplify/functions/crm-docs/handler.ts`). The technician *credential* minimum was
+  already enforced (`assertTechnicianCompliance`). The *launch-catalog* per-service minimums
+  (duration, prep, required instructions) are **not** enforced — no service catalog model exists
+  yet; `serviceType` is still a free string. **Remaining.**
+- *Packet shows everything in one place, safety distinguished* — **done** for contact, address +
+  navigation, access/entry, hazards/safety (rendered as a distinct red safety block), service +
+  scope, prep status, payment expectation, and prior no-access/canceled/completed history
+  (`apps/crm/src/tech/JobDetail.tsx`). Pre-scoped *approved products/constraints* are still chosen
+  at report time rather than shown on the packet. **Partial.**
+- *Office captures job-specific instructions, not permanent notes; safety distinguished* — **done.**
+  New job-specific Job fields (`accessInstructions`, `hazardNotes`, `prepInstructions`,
+  `prepConfirmed`, `paymentExpectation`) captured at create and via the guarded `updateJobPacket`
+  mutation; office UI in `apps/crm/src/office/CustomerDetail.tsx` (New job + Packet sheet).
+- *Missing info blocks dispatch with a checklist and owner; minimums never bypassed* — **done for the
+  hard minimums:** the address/credential block is a plain-language message that names the office as
+  the owner who fixes it, and there is no override path, so address and credential minimums cannot be
+  bypassed. A *manager soft-exception (with reason)* for non-minimum packet gaps is **not** built.
+  **Partial.**
+- *One-tap wrong-address/unsafe/scope/missing-prep → owned queue + customer next step* — wrong
+  address and unsafe conditions are already one-tap via the no-access exit (`NoAccessCard` →
+  `reportNoAccess` → owned NO_ACCESS work item). *Scope mismatch* and *missing prep* are not yet
+  distinct one-tap reasons. **Partial (pre-existing).**
+- *First-week technician certification* — an operations rehearsal, not code (overlaps GL-24).
+  **Owner-run, remaining.**
+
+Verification: `apps/web` typecheck + full unit suite green (596 tests, incl. 6 new GL-12 cases in
+`crm-docs/compliance.test.ts`); `apps/crm` typecheck + build green. Not yet exercised end to end
+against a deployed backend.
+
 ### GL-13 — Technician least-privilege and assignment enforcement
 
 **Business outcome:** A technician can see and change only the customers and work legitimately

@@ -71,6 +71,13 @@ export const schema = a.schema({
     "REFUNDED",
   ]),
   PaymentMethodKind: a.enum(["CARD", "BANK"]),
+  // GL-12: the one thing the technician must be told about money at the door.
+  // COLLECT_NOTHING — website booking already charged, or a plan visit; the tech
+  // takes no payment. DUE_THROUGH_OFFICE — the office bills afterward; the tech
+  // still collects nothing on site. There is deliberately no "collect on site"
+  // member: BuzzKill does not take card or cash in the field, and a free-text
+  // instruction is exactly the improper-collection risk this gate closes.
+  PaymentExpectation: a.enum(["COLLECT_NOTHING", "DUE_THROUGH_OFFICE"]),
   EmailStatus: a.enum(["SENT", "FAILED"]),
   WorkKind: a.enum([
     "NO_ACCESS",
@@ -513,6 +520,31 @@ export const schema = a.schema({
       // to it so the history reads as a chain, not a reused row.
       rebookedFromJobId: a.id(),
       notes: a.string(),
+      // GL-12 dispatch packet: job-specific facts captured when the office
+      // schedules this visit, so a technician is never sent on a permanent
+      // customer note or a remembered phone call. All optional at the model
+      // level — the deliverable-address minimum is enforced at dispatch time
+      // (createOfficeJob/updateJobSchedule), not by a required column that would
+      // block saving an early draft.
+      //
+      // How to get in: gate code, lockbox, parking, which door. Job-specific,
+      // because it changes per visit (a one-time key, a today-only gate code).
+      accessInstructions: a.string(),
+      // The safety facts that must survive the drive: dogs, small children,
+      // chemical sensitivities, wasp-allergy occupant, structural hazards. Kept
+      // in its own field precisely so the packet can show it distinctly from
+      // general notes — a hazard buried in prose is a hazard nobody read.
+      hazardNotes: a.string(),
+      // What the customer was told to do before the visit (clear under the sink,
+      // crate the dog, vacate two hours). prepConfirmed is the office's record
+      // that it was actually communicated/agreed, so the tech knows whether to
+      // expect a ready site or a conversation.
+      prepInstructions: a.string(),
+      prepConfirmed: a.boolean(),
+      // What the tech tells the customer about money at the door. Absent reads
+      // as DUE_THROUGH_OFFICE in the packet — the office bills; never collect in
+      // the field. See PaymentExpectation.
+      paymentExpectation: a.ref("PaymentExpectation"),
       accessGroups: a.string().array(),
       serviceReports: a.hasMany("ServiceReport", "jobId"),
       invoices: a.hasMany("Invoice", "jobId"),
@@ -1013,6 +1045,33 @@ export const schema = a.schema({
       priceCents: a.integer(),
       scheduledDate: a.date(),
       timeWindow: a.string(),
+      // GL-12 dispatch packet, captured at scheduling time.
+      accessInstructions: a.string(),
+      hazardNotes: a.string(),
+      prepInstructions: a.string(),
+      prepConfirmed: a.boolean(),
+      paymentExpectation: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * GL-12: edit the dispatch packet on an existing job — the office fixes
+   * missing access/safety/prep/payment facts named by the readiness checklist
+   * before the job can be dispatched. Packet-only: it can never touch schedule,
+   * assignment, completion, or pesticide-record timestamps (updateJobSchedule
+   * and the guarded field mutations own those).
+   */
+  updateJobPacket: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      accessInstructions: a.string(),
+      hazardNotes: a.string(),
+      prepInstructions: a.string(),
+      prepConfirmed: a.boolean(),
+      paymentExpectation: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])

@@ -98,6 +98,7 @@ export default function CustomerDetail() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [groups, setGroups] = useState<CustomerGroup[]>([]);
   const [rescheduling, setRescheduling] = useState<Job | null>(null);
+  const [packeting, setPacketing] = useState<Job | null>(null);
   const [pm, setPm] = useState<{ hasPaymentMethod: boolean; label: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -662,6 +663,13 @@ export default function CustomerDetail() {
               const reschedulable =
                 roles.office &&
                 (j.status === "SCHEDULED" || j.status === "UNSCHEDULED");
+              // GL-12: the dispatch packet is editable while the visit is live
+              // (not yet a closed record). Same statuses the server allows.
+              const packetEditable =
+                roles.office &&
+                (j.status === "SCHEDULED" ||
+                  j.status === "UNSCHEDULED" ||
+                  j.status === "IN_PROGRESS");
               return (
                 <ListRow
                   key={j.id}
@@ -791,6 +799,15 @@ export default function CustomerDetail() {
                             ✕
                           </Button>
                         </>
+                      ) : null}
+                      {packetEditable ? (
+                        <Button
+                          small
+                          variant="ghost"
+                          onClick={() => setPacketing(j)}
+                        >
+                          Packet
+                        </Button>
                       ) : null}
                     </>
                   }
@@ -1231,6 +1248,22 @@ export default function CustomerDetail() {
         ) : null}
       </Sheet>
 
+      <Sheet
+        open={packeting !== null}
+        onClose={() => setPacketing(null)}
+        title="Dispatch packet"
+      >
+        {packeting ? (
+          <JobPacketForm
+            job={packeting}
+            onDone={async () => {
+              setPacketing(null);
+              await load();
+            }}
+          />
+        ) : null}
+      </Sheet>
+
       <Sheet open={sheet === "job"} onClose={() => setSheet(null)} title="New job">
         <JobForm
           plans={plans}
@@ -1243,6 +1276,13 @@ export default function CustomerDetail() {
                 priceCents: v.priceCents ?? undefined,
                 scheduledDate: v.scheduledDate || undefined,
                 timeWindow: v.timeWindow || undefined,
+                accessInstructions: v.packet.accessInstructions.trim() || undefined,
+                hazardNotes: v.packet.hazardNotes.trim() || undefined,
+                prepInstructions: v.packet.prepInstructions.trim() || undefined,
+                prepConfirmed: v.packet.prepInstructions.trim()
+                  ? v.packet.prepConfirmed
+                  : undefined,
+                paymentExpectation: v.packet.paymentExpectation || undefined,
               })
             );
             setSheet(null);
@@ -1933,6 +1973,81 @@ function RescheduleForm({
   );
 }
 
+/** The dispatch-packet fields an office user captures per job (GL-12). */
+type PacketValues = {
+  accessInstructions: string;
+  hazardNotes: string;
+  prepInstructions: string;
+  prepConfirmed: boolean;
+  paymentExpectation: "" | "COLLECT_NOTHING" | "DUE_THROUGH_OFFICE";
+};
+
+/** The packet inputs, shared by the New-job form and the Edit-packet sheet. */
+function PacketFields({
+  value,
+  onChange,
+}: {
+  value: PacketValues;
+  onChange: (v: PacketValues) => void;
+}) {
+  const set = (patch: Partial<PacketValues>) => onChange({ ...value, ...patch });
+  return (
+    <>
+      <Field label="Getting in" hint="Gate code, lockbox, parking, which door — for this visit">
+        <input
+          value={value.accessInstructions}
+          onChange={(e) => set({ accessInstructions: e.target.value })}
+        />
+      </Field>
+      <Field
+        label="Safety"
+        hint="Dogs, small children, allergies, hazards — shown to the tech in red"
+      >
+        <input
+          value={value.hazardNotes}
+          onChange={(e) => set({ hazardNotes: e.target.value })}
+        />
+      </Field>
+      <Field label="Prep the customer must do">
+        <input
+          value={value.prepInstructions}
+          onChange={(e) => set({ prepInstructions: e.target.value })}
+        />
+      </Field>
+      {value.prepInstructions.trim() ? (
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={value.prepConfirmed}
+            onChange={(e) => set({ prepConfirmed: e.target.checked })}
+          />
+          Prep confirmed with the customer
+        </label>
+      ) : null}
+      <Field label="Payment at the door" hint="BuzzKill never collects in the field">
+        <select
+          value={value.paymentExpectation}
+          onChange={(e) =>
+            set({ paymentExpectation: e.target.value as PacketValues["paymentExpectation"] })
+          }
+        >
+          <option value="">Office bills afterward (default)</option>
+          <option value="COLLECT_NOTHING">Already paid — collect nothing</option>
+          <option value="DUE_THROUGH_OFFICE">Payment due through the office</option>
+        </select>
+      </Field>
+    </>
+  );
+}
+
+const emptyPacket: PacketValues = {
+  accessInstructions: "",
+  hazardNotes: "",
+  prepInstructions: "",
+  prepConfirmed: false,
+  paymentExpectation: "",
+};
+
 function JobForm({
   plans,
   onSubmit,
@@ -1944,6 +2059,7 @@ function JobForm({
     scheduledDate: string;
     timeWindow: string;
     servicePlanId: string;
+    packet: PacketValues;
   }) => Promise<void>;
 }) {
   const [serviceType, setServiceType] = useState("General Pest Treatment");
@@ -1951,6 +2067,7 @@ function JobForm({
   const [scheduledDate, setScheduledDate] = useState("");
   const [timeWindow, setTimeWindow] = useState("");
   const [planId, setPlanId] = useState("");
+  const [packet, setPacket] = useState<PacketValues>(emptyPacket);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activePlans = plans.filter((p) => p.status === "ACTIVE");
@@ -1983,6 +2100,7 @@ function JobForm({
       <Field label="Time window">
         <TimeWindowField value={timeWindow} onChange={setTimeWindow} />
       </Field>
+      <PacketFields value={packet} onChange={setPacket} />
       <ErrorNote error={error} />
       <Button
         block
@@ -2004,6 +2122,7 @@ function JobForm({
             scheduledDate,
             timeWindow: timeWindow.trim(),
             servicePlanId: planId,
+            packet,
           }).catch((err) => {
             setError(err.message ?? "Could not create job");
             setBusy(false);
@@ -2011,6 +2130,66 @@ function JobForm({
         }}
       >
         Create job
+      </Button>
+    </div>
+  );
+}
+
+/** GL-12: edit the dispatch packet on an existing job via updateJobPacket. */
+function JobPacketForm({
+  job,
+  onDone,
+}: {
+  job: Job;
+  onDone: () => Promise<void>;
+}) {
+  const [packet, setPacket] = useState<PacketValues>({
+    accessInstructions: job.accessInstructions ?? "",
+    hazardNotes: job.hazardNotes ?? "",
+    prepInstructions: job.prepInstructions ?? "",
+    prepConfirmed: job.prepConfirmed ?? false,
+    paymentExpectation:
+      job.paymentExpectation === "COLLECT_NOTHING" ||
+      job.paymentExpectation === "DUE_THROUGH_OFFICE"
+        ? job.paymentExpectation
+        : "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="form-grid">
+      <PacketFields value={packet} onChange={setPacket} />
+      <ErrorNote error={error} />
+      <Button
+        block
+        loading={busy}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          void (async () => {
+            try {
+              opResult(
+                await api().mutations.updateJobPacket({
+                  jobId: job.id,
+                  accessInstructions: packet.accessInstructions.trim() || undefined,
+                  hazardNotes: packet.hazardNotes.trim() || undefined,
+                  prepInstructions: packet.prepInstructions.trim() || undefined,
+                  prepConfirmed: packet.prepInstructions.trim()
+                    ? packet.prepConfirmed
+                    : undefined,
+                  paymentExpectation: packet.paymentExpectation || undefined,
+                })
+              );
+              await onDone();
+            } catch (err) {
+              setError(err instanceof Error ? err.message : "Could not save the packet");
+              setBusy(false);
+            }
+          })();
+        }}
+      >
+        Save packet
       </Button>
     </div>
   );

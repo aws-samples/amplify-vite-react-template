@@ -103,6 +103,7 @@ export default function TechJob() {
   const [report, setReport] = useState<ServiceReport | null>(null);
   const [techRecord, setTechRecord] = useState<Technician | null>(null);
   const [catalog, setCatalog] = useState<CatalogProduct[]>([]);
+  const [priorVisits, setPriorVisits] = useState<Job[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -114,7 +115,7 @@ export default function TechJob() {
         return;
       }
       setJob(j);
-      const [c, reps, techs, prods] = await Promise.all([
+      const [c, reps, techs, prods, hist] = await Promise.all([
         api().models.Customer.get({ id: j.customerId }),
         api().models.ServiceReport.listServiceReportByJobId({ jobId }),
         api().models.Technician.list({ limit: 200 }),
@@ -128,8 +129,37 @@ export default function TechJob() {
             return [];
           }
         })(),
+        // GL-12: the prior relevant outcomes for this address — the last few
+        // visits that didn't happen (no-access, canceled) or did (completed).
+        // Best-effort: history context must never block the working screen.
+        (async (): Promise<Job[]> => {
+          try {
+            return unwrap(
+              await api().models.Job.list({
+                filter: { customerId: { eq: j.customerId } },
+                limit: 200,
+              })
+            );
+          } catch {
+            return [];
+          }
+        })(),
       ]);
       setCustomer(unwrap(c));
+      setPriorVisits(
+        hist
+          .filter(
+            (h) =>
+              h.id !== j.id &&
+              (h.status === "NO_ACCESS" ||
+                h.status === "CANCELED" ||
+                h.status === "COMPLETED")
+          )
+          .sort((a, b) =>
+            (b.scheduledDate ?? "0").localeCompare(a.scheduledDate ?? "0")
+          )
+          .slice(0, 4)
+      );
       setReport(unwrap(reps)[0] ?? null);
       setCatalog(
         prods
@@ -213,12 +243,30 @@ export default function TechJob() {
     <Page title={customer.displayName} back="/tech">
       {offlineBanner}
       <ErrorNote error={error} />
+      {/* GL-12 dispatch packet: everything needed to arrive safely, do the
+          right service, and say the right thing about money — in one place. */}
       <Card>
         <div className="row-split" style={{ marginBottom: 8 }}>
           <strong>{job.serviceType}</strong>
           <StatusBadge status={job.status} />
         </div>
+        {job.hazardNotes ? (
+          <div
+            role="alert"
+            style={{
+              border: "1px solid var(--danger, #c0392b)",
+              borderRadius: 8,
+              padding: "8px 10px",
+              marginBottom: 10,
+            }}
+          >
+            <Badge tone="danger">safety</Badge>
+            <p style={{ margin: "6px 0 0", fontWeight: 600 }}>{job.hazardNotes}</p>
+          </div>
+        ) : null}
         <dl className="kv">
+          <dt>Contact</dt>
+          <dd>{customer.contactName?.trim() || customer.displayName}</dd>
           <dt>Date</dt>
           <dd>{fmtDate(job.scheduledDate, true)}{job.timeWindow ? ` · ${job.timeWindow}` : ""}</dd>
           <dt>Address</dt>
@@ -240,6 +288,31 @@ export default function TechJob() {
           <dd>
             {customer.phone ? <a href={`tel:${customer.phone}`} style={{ color: "var(--brand)" }}>{customer.phone}</a> : "—"}
           </dd>
+          {job.accessInstructions ? (
+            <>
+              <dt>Getting in</dt>
+              <dd>{job.accessInstructions}</dd>
+            </>
+          ) : null}
+          {job.description ? (
+            <>
+              <dt>Scope</dt>
+              <dd>{job.description}</dd>
+            </>
+          ) : null}
+          {job.prepInstructions ? (
+            <>
+              <dt>Prep</dt>
+              <dd>
+                {job.prepInstructions}{" "}
+                <Badge tone={job.prepConfirmed ? "ok" : "warn"}>
+                  {job.prepConfirmed ? "confirmed" : "not confirmed"}
+                </Badge>
+              </dd>
+            </>
+          ) : null}
+          <dt>Payment</dt>
+          <dd>{paymentExpectationLabel(job)}</dd>
           {job.notes ? (
             <>
               <dt>Notes</dt>
@@ -248,6 +321,24 @@ export default function TechJob() {
           ) : null}
         </dl>
       </Card>
+
+      {priorVisits.length ? (
+        <Card title="Before this visit">
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+            {priorVisits.map((v) => (
+              <li key={v.id}>
+                <StatusBadge status={v.status} />{" "}
+                <span className="muted small">
+                  {fmtDate(v.scheduledDate, true)} · {v.serviceType}
+                  {v.status === "NO_ACCESS" && v.noAccessReason
+                    ? ` — ${NO_ACCESS_LABEL[v.noAccessReason] ?? "couldn't access"}`
+                    : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
 
       {job.status === "NO_ACCESS" ? (
         <Card>
@@ -321,6 +412,18 @@ export default function TechJob() {
       ) : null}
     </Page>
   );
+}
+
+/**
+ * GL-12: the one line the technician says about money at the door. A blank or
+ * unknown value reads as "office bills" — never as "collect on site", because
+ * the field never takes payment.
+ */
+function paymentExpectationLabel(job: Job): string {
+  if (job.paidAt) return "Already paid — collect nothing";
+  return job.paymentExpectation === "COLLECT_NOTHING"
+    ? "Collect nothing"
+    : "Collect nothing — office bills afterward";
 }
 
 const NO_ACCESS_LABEL: Record<string, string> = {

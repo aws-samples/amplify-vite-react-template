@@ -4,6 +4,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
 import {
+  assertDeliverableAddress,
   assertProductCanBeSaved,
   assertTechnicianCompliance,
   EPA_REGISTRATION_RE,
@@ -103,6 +104,11 @@ type Args = {
   otherRouteOrder?: number;
   workItemId?: string;
   action?: string;
+  accessInstructions?: string;
+  hazardNotes?: string;
+  prepInstructions?: string;
+  prepConfirmed?: boolean;
+  paymentExpectation?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -191,6 +197,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "updateJobSchedule": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       return updateJobSchedule(event.arguments);
+    }
+    case "updateJobPacket": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return updateJobPacket(event.arguments);
     }
     case "rebookJob": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
@@ -451,6 +461,30 @@ async function saveProduct(args: Args) {
   return { productId: result.data.id };
 }
 
+/** GL-12: only the two approved technician-facing payment postures. Anything
+ *  else (blank, a stray string) resolves to DUE_THROUGH_OFFICE — the safe
+ *  default that still means "collect nothing in the field". */
+function normalizePaymentExpectation(
+  value: string | null | undefined
+): "COLLECT_NOTHING" | "DUE_THROUGH_OFFICE" | undefined {
+  const v = value?.trim().toUpperCase();
+  if (v === "COLLECT_NOTHING") return "COLLECT_NOTHING";
+  if (v === "DUE_THROUGH_OFFICE") return "DUE_THROUGH_OFFICE";
+  return undefined;
+}
+
+/** The job-specific dispatch-packet fields, normalized from raw mutation args. */
+function packetFields(args: Args) {
+  return {
+    accessInstructions: args.accessInstructions?.trim() || undefined,
+    hazardNotes: args.hazardNotes?.trim() || undefined,
+    prepInstructions: args.prepInstructions?.trim() || undefined,
+    prepConfirmed:
+      typeof args.prepConfirmed === "boolean" ? args.prepConfirmed : undefined,
+    paymentExpectation: normalizePaymentExpectation(args.paymentExpectation),
+  };
+}
+
 /** Jobs created by the office always start unassigned. */
 async function createOfficeJob(args: Args) {
   const customerId = args.customerId?.trim() ?? "";
@@ -461,6 +495,12 @@ async function createOfficeJob(args: Args) {
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({ id: customerId });
   if (!customer) throw new Error(`Customer ${customerId} not found`);
+  // A job created with a service date is already dispatch-bound — it lands
+  // SCHEDULED and shows up on the board to be routed. Hold it to the same
+  // deliverable-address minimum as assignment, so the gap can never be created
+  // in the first place. A date-less job (scheduled later) is allowed through;
+  // updateJobSchedule enforces the address before it can reach a technician.
+  if (args.scheduledDate) assertDeliverableAddress(customer);
   if (args.servicePlanId) {
     const { data: plan } = await client.models.ServicePlan.get({
       id: args.servicePlanId,
@@ -479,6 +519,7 @@ async function createOfficeJob(args: Args) {
     status: args.scheduledDate ? "SCHEDULED" : "UNSCHEDULED",
     scheduledDate: args.scheduledDate || undefined,
     timeWindow: args.timeWindow?.trim() || undefined,
+    ...packetFields(args),
     accessGroups: customerAccessGroups(customerId, customer.groupId),
   });
   if (!created) {
@@ -524,10 +565,17 @@ async function updateJobSchedule(args: Args) {
     if (!args.technicianId || !args.routeId || !args.scheduledDate) {
       throw new Error("Assignment requires a technician, route, and service date");
     }
-    const [{ data: technician }, { data: route }] = await Promise.all([
-      client.models.Technician.get({ id: args.technicianId }),
-      client.models.Route.get({ id: args.routeId }),
-    ]);
+    const [{ data: technician }, { data: route }, { data: customer }] =
+      await Promise.all([
+        client.models.Technician.get({ id: args.technicianId }),
+        client.models.Route.get({ id: args.routeId }),
+        client.models.Customer.get({ id: job.customerId }),
+      ]);
+    // GL-12: the job cannot be routed to a technician without a deliverable
+    // address. Checked before the technician's own credential so the office
+    // sees every blocker, and never bypassable — there is no override branch.
+    if (!customer) throw new Error(`Customer ${job.customerId} no longer exists`);
+    assertDeliverableAddress(customer);
     if (!technician) throw new Error(`Technician ${args.technicianId} not found`);
     assertTechnicianCompliance(technician, {
       requireActive: true,
@@ -614,6 +662,44 @@ async function updateJobSchedule(args: Args) {
   }
 
   throw new Error(`Unknown scheduling operation: ${args.operation ?? ""}`);
+}
+
+/**
+ * GL-12: write the dispatch packet on an existing job. Deliberately narrow —
+ * it only ever touches the four packet fields, never schedule, assignment, or
+ * any completion/pesticide-record timestamp. A finalized visit's packet is
+ * history, so a completed or terminal job is not editable here.
+ */
+async function updateJobPacket(args: Args) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: args.jobId! });
+  if (!job) throw new Error(`Job ${args.jobId} not found`);
+  if (
+    job.status === "COMPLETED" ||
+    job.status === "NO_ACCESS" ||
+    job.status === "CANCELED"
+  ) {
+    throw new Error(
+      "This visit is closed — its packet is part of the record and cannot be edited"
+    );
+  }
+  const packet = packetFields(args);
+  const { data, errors } = await client.models.Job.update({
+    id: job.id,
+    // Explicit nulls so clearing a field actually clears it: an office user who
+    // deletes a stale hazard note must not have the old one silently retained.
+    accessInstructions: packet.accessInstructions ?? null,
+    hazardNotes: packet.hazardNotes ?? null,
+    prepInstructions: packet.prepInstructions ?? null,
+    prepConfirmed: packet.prepConfirmed ?? null,
+    paymentExpectation: packet.paymentExpectation ?? null,
+  });
+  if (!data) {
+    throw new Error(
+      errors?.map((e) => e.message).join("; ") || "Could not update the job packet"
+    );
+  }
+  return { jobId: data.id };
 }
 
 /**

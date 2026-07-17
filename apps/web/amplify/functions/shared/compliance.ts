@@ -94,3 +94,38 @@ export function assertProductCanBeSaved(product: ProductCompliance): void {
     throw new Error(`${name} needs a valid label re-entry rule before activation`);
   }
 }
+
+type DispatchAddress = {
+  displayName?: string | null;
+  serviceStreet?: string | null;
+  serviceCity?: string | null;
+  serviceState?: string | null;
+  serviceZip?: string | null;
+};
+
+/**
+ * GL-12: a field job cannot be assigned or routed without a deliverable service
+ * address. A technician sent to a blank or half-address wastes a route slot and,
+ * for a regulated pesticide application, produces a record with no location. The
+ * office owns the fix, so the message is a checklist that names exactly what to
+ * add and where — never a bare "invalid input". This minimum is not overridable:
+ * there is no dispatch path that skips it.
+ */
+export function assertDeliverableAddress(customer: DispatchAddress): void {
+  const who = customer.displayName?.trim() || "this customer";
+  const missing = [
+    ["street", customer.serviceStreet],
+    ["city", customer.serviceCity],
+    ["state", customer.serviceState],
+    ["ZIP", customer.serviceZip],
+  ]
+    .filter(([, value]) => !value?.toString().trim())
+    .map(([label]) => label);
+  if (missing.length) {
+    throw new Error(
+      `This job can't be dispatched yet — ${who} is missing a deliverable service address (${missing.join(
+        ", "
+      )}). The office fixes this on the customer's record before assigning a technician.`
+    );
+  }
+}
