@@ -128,6 +128,68 @@ export function payInvoice(input: { invoiceId: string }): OpResult {
   ).payInvoice(input);
 }
 
+/** GL-08 — the honest consequences of canceling a plan, computed server-side
+ *  for the portal's confirmation. Read-only; a CUSTOMER may preview only their
+ *  own plan (enforced server-side against the plan's customer). */
+export type PlanCancellationPreview = {
+  servicePlanId: string;
+  planName: string;
+  priceCents: number;
+  serviceFrequency: string;
+  status: string;
+  alreadyResolved: boolean;
+  cancellationPending: boolean;
+  effectiveDate: string;
+  finalCharge: { amountCents: number; description: string };
+  refundOrCredit: { amountCents: number; description: string };
+  queuedVisits: {
+    jobId: string;
+    scheduledDate: string | null;
+    disposition: "STOPS" | "REMAINS";
+    reason: string;
+  }[];
+  visitsStopping: number;
+  paidVisitRemains: boolean;
+  outstandingBalanceCents: number;
+  coverageEnding: string;
+  saveOfferAvailable: boolean;
+};
+
+export function previewPlanCancellation(input: {
+  servicePlanId: string;
+}): OpResult {
+  return (
+    api().queries as unknown as {
+      previewPlanCancellation: (i: typeof input) => OpResult;
+    }
+  ).previewPlanCancellation(input);
+}
+
+/** GL-08 — the customer's own confirmed cancel. The reason is optional and
+ *  never blocks. A Stripe outage returns status PENDING (not an error) so the
+ *  portal shows a truthful in-progress state instead of a false "canceled". */
+export type CustomerCancelOutcome =
+  | {
+      status: "CANCELED";
+      alreadyCanceled: boolean;
+      visitsStopped: number;
+      visitsRemaining: number;
+      confirmationEmailed: boolean;
+      message: string;
+    }
+  | { status: "PENDING"; message: string; requestedAt: string };
+
+export function cancelPlanByCustomer(input: {
+  servicePlanId: string;
+  reason?: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      cancelPlanByCustomer: (i: typeof input) => OpResult;
+    }
+  ).cancelPlanByCustomer(input);
+}
+
 /**
  * Claim ownership of a recovery item ("Assign to me") — sets ownerSub/
  * ownerEmail from the caller's identity on an Invoice or Dispute (R78).

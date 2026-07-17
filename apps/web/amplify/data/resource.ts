@@ -188,6 +188,16 @@ export const schema = a.schema({
       stripeSubscriptionId: a.string(),
       startDate: a.date(),
       canceledAt: a.datetime(),
+      // GL-08 customer self-cancellation. A cancel the customer confirmed but
+      // that could NOT be completed at Stripe (an outage) must never read as
+      // done: the plan stays ACTIVE and billing is still live, but these carry
+      // "you asked us to cancel and we're finishing it by hand" so the portal
+      // shows a truthful pending state instead of a false "canceled". Cleared
+      // when the cancellation actually completes. cancellationReason is the
+      // customer's optional, never-required note.
+      cancellationPending: a.boolean(),
+      cancellationRequestedAt: a.datetime(),
+      cancellationReason: a.string(),
       // Delinquency suspension: set when a plan's subscription invoice has
       // failed every dunning retry and the customer has stopped paying. It is
       // NOT a cancellation — the plan stays ACTIVE with its subscription id, so
@@ -1215,6 +1225,49 @@ export const schema = a.schema({
   payInvoice: a
     .mutation()
     .arguments({ invoiceId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [
+      allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),
+    ])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * GL-08 — the honest consequences of canceling a plan, computed server-side
+   * so the portal's confirmation shows exactly what will happen before the
+   * customer commits: the effective date, whether any refund/credit is owed,
+   * how many queued visits stop, whether an already-paid visit remains, and the
+   * ongoing coverage that ends. Read-only; it moves nothing.
+   *
+   * A CUSTOMER may preview only their OWN plan — the handler enforces that with
+   * assertCanActForCustomer against the plan's customerId, so one customer can
+   * never probe another's plan.
+   */
+  previewPlanCancellation: a
+    .query()
+    .arguments({ servicePlanId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [
+      allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),
+    ])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * GL-08 — customer self-service plan cancellation. One confirmation stops
+   * future billing and visits, frees capacity, and sends a durable confirmation
+   * email. The optional reason is never required and never blocks the cancel.
+   *
+   * A CUSTOMER may cancel only their OWN plan (handler-enforced via
+   * assertCanActForCustomer against the plan's customerId). If Stripe cannot be
+   * reached the plan is NOT shown as canceled: it enters a customer-visible
+   * pending state and opens an urgent owned exception, so a customer is never
+   * told they canceled while their card keeps being charged.
+   */
+  cancelPlanByCustomer: a
+    .mutation()
+    .arguments({
+      servicePlanId: a.string().required(),
+      reason: a.string(),
+    })
     .returns(a.json())
     .authorization((allow) => [
       allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),

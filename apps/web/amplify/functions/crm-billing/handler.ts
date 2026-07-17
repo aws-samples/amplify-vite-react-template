@@ -25,6 +25,10 @@ import {
   getDefaultPaymentMethod as sharedGetDefaultPaymentMethod,
   startPlanBilling,
 } from "../shared/subscription";
+import {
+  buildCancellationPreview,
+  cancelPlanForCustomer,
+} from "../shared/planCancellation";
 import { deactivateCustomer as sharedDeactivateCustomer } from "../shared/deactivation";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 
@@ -73,6 +77,30 @@ const actorStamp = (a: Actor) => ({
   createdBy: a.sub ?? undefined,
   createdByEmail: a.email ?? undefined,
 });
+
+/**
+ * Authorize a plan-scoped customer action (GL-08 preview/cancel). The customer
+ * sends only a servicePlanId, so we resolve the plan's owner and check against
+ * it with the same dynamic-group rule as the invoice paths — a portal user may
+ * act only on their own plan; OFFICE/OWNER always may. The not-authorized error
+ * is identical whether the plan is missing or someone else's, so a customer
+ * cannot use this to discover another customer's plan ids.
+ */
+async function assertCanActForPlan(
+  identity: AppSyncIdentity | undefined | null,
+  servicePlanId: string
+): Promise<void> {
+  const client = await dataClient();
+  const { data: plan } = await client.models.ServicePlan.get({
+    id: servicePlanId,
+  });
+  if (!plan) throw new Error("Not authorized for this plan");
+  try {
+    assertCanActForCustomer(identity, plan.customerId);
+  } catch {
+    throw new Error("Not authorized for this plan");
+  }
+}
 
 /**
  * What a BuzzKill job can plausibly cost, with room above the rate card's own
@@ -191,6 +219,16 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "payInvoice": {
       return payInvoice(actorOf(event), event.identity, event.arguments.invoiceId!);
+    }
+    case "previewPlanCancellation": {
+      await assertCanActForPlan(event.identity, event.arguments.servicePlanId!);
+      return buildCancellationPreview(event.arguments.servicePlanId!);
+    }
+    case "cancelPlanByCustomer": {
+      await assertCanActForPlan(event.identity, event.arguments.servicePlanId!);
+      return cancelPlanForCustomer(stripeClient(), event.arguments.servicePlanId!, {
+        reason: event.arguments.reason ?? null,
+      });
     }
     case "assignRecoveryOwner": {
       // OWNER/FINANCE/OFFICE — chasing money is office work even though moving

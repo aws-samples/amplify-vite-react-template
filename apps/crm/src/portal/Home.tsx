@@ -1,9 +1,20 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, unwrap, type Customer, type Job, type ServicePlan } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
 import { planCadence } from "../lib/planCadence";
-import { Card, EmptyState, ErrorNote, ListRow, Page, Spinner, StatusBadge } from "../ui/kit";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorNote,
+  ListRow,
+  Page,
+  Spinner,
+  StatusBadge,
+} from "../ui/kit";
+import CancelPlanSheet from "../components/CancelPlanSheet";
 import { loadMyCustomers } from "./portalData";
 
 export default function PortalHome() {
@@ -11,7 +22,20 @@ export default function PortalHome() {
   const [customers, setCustomers] = useState<Customer[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [plans, setPlans] = useState<ServicePlan[]>([]);
+  const [cancelPlanId, setCancelPlanId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const loadPlans = useCallback(async (mine: Customer[]) => {
+    const planLists = await Promise.all(
+      mine.map((c) =>
+        api().models.ServicePlan.list({
+          filter: { customerId: { eq: c.id } },
+          limit: 50,
+        })
+      )
+    );
+    setPlans(planLists.flatMap((r) => unwrap(r)));
+  }, []);
 
   useEffect(() => {
     if (roles.loading) return;
@@ -28,20 +52,12 @@ export default function PortalHome() {
           )
         );
         setJobs(jobLists.flatMap((r) => unwrap(r)));
-        const planLists = await Promise.all(
-          mine.map((c) =>
-            api().models.ServicePlan.list({
-              filter: { customerId: { eq: c.id } },
-              limit: 50,
-            })
-          )
-        );
-        setPlans(planLists.flatMap((r) => unwrap(r)));
+        await loadPlans(mine);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load");
       }
     })();
-  }, [roles]);
+  }, [roles, loadPlans]);
 
   if (!customers) {
     return (
@@ -81,8 +97,35 @@ export default function PortalHome() {
                 <ListRow
                   key={p.id}
                   title={p.planName}
-                  subtitle={planCadence(p.priceCents, p.serviceFrequency)}
-                  meta={<StatusBadge status={p.status} />}
+                  subtitle={
+                    <>
+                      {planCadence(p.priceCents, p.serviceFrequency)}
+                      {p.cancellationPending ? (
+                        <span className="nested-line">
+                          Cancellation in progress — we're finishing it and will
+                          email you. You won't be charged again.
+                        </span>
+                      ) : null}
+                    </>
+                  }
+                  meta={
+                    <>
+                      {p.cancellationPending ? (
+                        <Badge tone="warn">canceling</Badge>
+                      ) : (
+                        <StatusBadge status={p.status} />
+                      )}
+                      {p.cancellationPending ? null : (
+                        <Button
+                          small
+                          variant="subtle"
+                          onClick={() => setCancelPlanId(p.id)}
+                        >
+                          Cancel plan
+                        </Button>
+                      )}
+                    </>
+                  }
                 />
               ))}
             </Card>
@@ -119,6 +162,17 @@ export default function PortalHome() {
           </Card>
         </>
       )}
+
+      {cancelPlanId ? (
+        <CancelPlanSheet
+          servicePlanId={cancelPlanId}
+          open
+          onClose={() => setCancelPlanId(null)}
+          onCanceled={() => {
+            if (customers) void loadPlans(customers);
+          }}
+        />
+      ) : null}
     </Page>
   );
 }

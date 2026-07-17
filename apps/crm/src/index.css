@@ -869,6 +869,40 @@ textarea {
   margin: 0 0 4px;
 }
 
+/* GL-08 plan-cancellation sheet */
+.info-note {
+  background: var(--info-soft);
+  color: var(--info-ink);
+  border: 1px solid color-mix(in srgb, var(--info-ink) 22%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+}
+.warn-note {
+  background: var(--warn-soft);
+  color: var(--warn-ink);
+  border: 1px solid color-mix(in srgb, var(--warn-ink) 22%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+}
+.info-note p,
+.warn-note p {
+  margin: 0 0 8px;
+}
+.info-note p:last-child,
+.warn-note p:last-child {
+  margin-bottom: 0;
+}
+.cancel-consequences {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 7px;
+  font-size: 14px;
+  color: var(--ink);
+}
+
 .form-row-3 {
   display: grid;
   grid-template-columns: 2fr 64px 1fr;
