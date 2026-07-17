@@ -2,18 +2,25 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   api,
+  dueDateForTerms,
   opResult,
+  recordOfflinePayment,
+  sendInvoicePaymentLink,
+  settleInvoice,
   unwrap,
   type Agreement,
   type Customer,
   type CustomerGroup,
   type Invoice,
+  type InvoiceTerms,
   type Job,
   type ServicePlan,
   type ServiceReport,
 } from "../lib/api";
 import { bookingFunnelSpoken, bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
+import { daysPastDue } from "../lib/aging";
+import { dunningStateLabel, isOverdue } from "../lib/recovery";
 import { amountInWords } from "../lib/amountWords";
 import { planCadence } from "../lib/planCadence";
 import {
@@ -96,6 +103,7 @@ export default function CustomerDetail() {
   const [notice, setNotice] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [refunding, setRefunding] = useState<Invoice | null>(null);
+  const [settling, setSettling] = useState<Invoice | null>(null);
   const [sheet, setSheet] = useState<
     | null
     | "edit"
@@ -878,6 +886,15 @@ export default function CustomerDetail() {
               // have existed gets voided. There is no third option and no delete.
               const canVoid =
                 roles.finance && (inv.status === "OPEN" || inv.status === "FAILED");
+              // Recovery: an OPEN/FAILED invoice is a bill still owed. Finance
+              // can settle it (mark an offline payment, or charge the card);
+              // office can email the customer a link to pay it.
+              const owed = inv.status === "OPEN" || inv.status === "FAILED";
+              const today = todayEastern();
+              const overdue = isOverdue(inv, today);
+              const daysLate = daysPastDue(inv, today);
+              const canSettle = roles.finance && owed;
+              const canSendLink = roles.office && owed && Boolean(customer.email);
               return (
                 <ListRow
                   key={inv.id}
@@ -887,6 +904,20 @@ export default function CustomerDetail() {
                       {`${inv.description} · ${fmtDate(inv.issuedAt, true)}`}
                       {source ? (
                         <span className="nested-line">for {source}</span>
+                      ) : null}
+                      {owed && inv.dueDate ? (
+                        <span className="nested-line">
+                          {overdue
+                            ? `Due ${fmtDate(inv.dueDate, true)} · ${daysLate} day${daysLate === 1 ? "" : "s"} overdue`
+                            : `Due ${fmtDate(inv.dueDate, true)}`}
+                          {inv.poNumber ? ` · PO ${inv.poNumber}` : ""}
+                        </span>
+                      ) : null}
+                      {inv.status === "FAILED" ? (
+                        <span className="nested-line">
+                          {dunningStateLabel(inv, today)}
+                          {inv.failureReason ? ` — ${inv.failureReason}` : ""}
+                        </span>
                       ) : null}
                       {refundedCents > 0 ? (
                         <span className="nested-line">
@@ -903,7 +934,81 @@ export default function CustomerDetail() {
                   }
                   meta={
                     <>
+                      {overdue ? <Badge tone="danger">overdue</Badge> : null}
                       <StatusBadge status={inv.status} />
+                      {canSettle ? (
+                        <Button
+                          small
+                          variant="subtle"
+                          onClick={() => setSettling(inv)}
+                        >
+                          Mark paid
+                        </Button>
+                      ) : null}
+                      {canSettle && pm?.hasPaymentMethod ? (
+                        <Button
+                          small
+                          variant="ghost"
+                          loading={busyAction === `settle-${inv.id}`}
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                `Charge ${customer.displayName} ${money(inv.amountCents)} on ${pm?.label ?? "the card on file"} to settle this invoice?\n\n${amountInWords(inv.amountCents)}.\n\nThis takes the money now. It can be refunded, but not undone.`
+                              )
+                            ) {
+                              return;
+                            }
+                            void run(
+                              `settle-${inv.id}`,
+                              async () => {
+                                const res = opResult<{
+                                  status?: string;
+                                  failureReason?: string;
+                                }>(
+                                  await settleInvoice({
+                                    invoiceId: inv.id,
+                                    method: "CARD",
+                                  })
+                                );
+                                // A decline comes back as FAILED, not thrown —
+                                // don't let it read as a settled invoice.
+                                if (res?.status === "FAILED") {
+                                  throw new Error(
+                                    res?.failureReason
+                                      ? `The card was declined — ${res.failureReason}. The invoice is still unpaid.`
+                                      : "The card was declined. The invoice is still unpaid."
+                                  );
+                                }
+                              },
+                              `Charged ${money(inv.amountCents)} — invoice settled`
+                            );
+                          }}
+                        >
+                          Charge card
+                        </Button>
+                      ) : null}
+                      {canSendLink ? (
+                        <Button
+                          small
+                          variant="ghost"
+                          loading={busyAction === `link-${inv.id}`}
+                          onClick={() =>
+                            void run(
+                              `link-${inv.id}`,
+                              async () =>
+                                unwrap(
+                                  await sendInvoicePaymentLink({
+                                    customerId: customer.id,
+                                    invoiceId: inv.id,
+                                  })
+                                ),
+                              `Payment link emailed to ${customer.email}`
+                            )
+                          }
+                        >
+                          Send link
+                        </Button>
+                      ) : null}
                       {canRefund ? (
                         <Button
                           small
@@ -1174,6 +1279,25 @@ export default function CustomerDetail() {
             customer={customer}
             onDone={async (msg) => {
               setRefunding(null);
+              setNotice(msg);
+              window.setTimeout(() => setNotice(null), 6000);
+              await load();
+            }}
+          />
+        ) : null}
+      </Sheet>
+
+      <Sheet
+        open={Boolean(settling)}
+        onClose={() => setSettling(null)}
+        title="Mark invoice paid"
+      >
+        {settling ? (
+          <SettleInvoiceSheet
+            invoice={settling}
+            customer={customer}
+            onDone={async (msg) => {
+              setSettling(null);
               setNotice(msg);
               window.setTimeout(() => setNotice(null), 6000);
               await load();
@@ -1533,29 +1657,37 @@ function RecordPaymentSheet({
     "CHEQUE"
   );
   const [status, setStatus] = useState<"PAID" | "OPEN">("PAID");
+  const [terms, setTerms] = useState<InvoiceTerms>("DUE_ON_RECEIPT");
+  const [poNumber, setPoNumber] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const cents = Math.round(parseFloat(amount) * 100);
   const validAmount = Number.isFinite(cents) && cents > 0;
+  // The server sets the due date from the terms; mirror it here so the office
+  // sees, before saving, exactly when the customer's clock runs out.
+  const dueDate = dueDateForTerms(terms, todayEastern());
 
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
       unwrap(
-        await api().mutations.recordOfflinePayment({
+        await recordOfflinePayment({
           customerId: customer.id,
           amountCents: cents,
           description: description.trim(),
           status,
           method: status === "PAID" ? method : undefined,
+          terms: status === "OPEN" ? terms : undefined,
+          poNumber:
+            status === "OPEN" && poNumber.trim() ? poNumber.trim() : undefined,
         })
       );
       await onDone(
         status === "PAID"
           ? `Recorded ${money(cents)} received by ${method.toLowerCase()}`
-          : `Raised a ${money(cents)} invoice`
+          : `Raised a ${money(cents)} invoice — due ${fmtDate(dueDate, true)}`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not record the payment");
@@ -1596,7 +1728,32 @@ function RecordPaymentSheet({
             <option value="OTHER">Other</option>
           </select>
         </Field>
-      ) : null}
+      ) : (
+        <>
+          {/* Terms set the due date the invoice ages against — the check-paying
+              HOA/commercial segment works on Net 15/30, not due-on-receipt. */}
+          <Field
+            label="Payment terms"
+            hint={`Due ${fmtDate(dueDate, true)}`}
+          >
+            <select
+              value={terms}
+              onChange={(e) => setTerms(e.target.value as InvoiceTerms)}
+            >
+              <option value="DUE_ON_RECEIPT">Due on receipt</option>
+              <option value="NET_15">Net 15</option>
+              <option value="NET_30">Net 30</option>
+            </select>
+          </Field>
+          <Field label="PO number" hint="Optional — for customers who pay against a purchase order">
+            <input
+              value={poNumber}
+              onChange={(e) => setPoNumber(e.target.value)}
+              placeholder="e.g. 4500123987"
+            />
+          </Field>
+        </>
+      )}
       <Field label="What is this for?" hint="Shows on the invoice and their history">
         <input
           value={description}
@@ -1612,6 +1769,94 @@ function RecordPaymentSheet({
         onClick={() => void submit()}
       >
         {status === "PAID" ? `Record ${validAmount ? money(cents) : "payment"} received` : "Raise invoice"}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Settle an existing OPEN or FAILED invoice by recording that money arrived
+ * outside the card — cash, a cheque, a bank transfer. This is the R31 gap the
+ * old recordOfflinePayment could not close: it only ever created a new row, so
+ * a cheque against an outstanding invoice left two records and a wrong balance.
+ * Goes through settleInvoice(OFFLINE), which stamps the actor and closes the
+ * existing invoice to PAID.
+ */
+function SettleInvoiceSheet({
+  invoice,
+  customer,
+  onDone,
+}: {
+  invoice: Invoice;
+  customer: Customer;
+  onDone: (message: string) => Promise<void>;
+}) {
+  const [method, setMethod] = useState<"CASH" | "CHEQUE" | "BANK" | "OTHER">(
+    "CHEQUE"
+  );
+  const [reference, setReference] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const note = [
+        `Received by ${method.toLowerCase()}`,
+        reference.trim(),
+      ]
+        .filter(Boolean)
+        .join(" — ");
+      unwrap(
+        await settleInvoice({
+          invoiceId: invoice.id,
+          method: "OFFLINE",
+          note,
+        })
+      );
+      await onDone(
+        `Marked ${money(invoice.amountCents)} paid — received by ${method.toLowerCase()}`
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not settle this invoice"
+      );
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="form-grid">
+      <p className="muted small" style={{ margin: 0 }}>
+        {invoice.description} · {money(invoice.amountCents)}. Records that{" "}
+        {customer.displayName} paid this outside the card — no money is charged.
+        Your name is recorded against it.
+      </p>
+      <Field label="How did it arrive?">
+        <select
+          value={method}
+          onChange={(e) => setMethod(e.target.value as typeof method)}
+        >
+          <option value="CHEQUE">Cheque</option>
+          <option value="CASH">Cash</option>
+          <option value="BANK">Bank transfer</option>
+          <option value="OTHER">Other</option>
+        </select>
+      </Field>
+      <Field
+        label="Reference"
+        hint="Optional — cheque number, transfer id, anything to reconcile against"
+      >
+        <input
+          value={reference}
+          onChange={(e) => setReference(e.target.value)}
+          placeholder="Cheque #1042"
+        />
+      </Field>
+      <ErrorNote error={error} />
+      <Button block loading={busy} onClick={() => void submit()}>
+        Mark {money(invoice.amountCents)} paid
       </Button>
     </div>
   );

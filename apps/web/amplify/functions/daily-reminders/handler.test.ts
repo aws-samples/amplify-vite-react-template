@@ -82,6 +82,15 @@ const fakeDataClient = {
     },
     Invoice: {
       list: async () => ({ data: invoiceRows, nextToken: null }),
+      // Recovery lifecycle: the aging/dunning passes read the status index.
+      // These existing tests don't exercise recovery, so return nothing owed.
+      listInvoiceByStatusAndIssuedAt: async () => ({
+        data: [],
+        nextToken: null,
+      }),
+    },
+    Dispute: {
+      listDisputeByStatus: async () => ({ data: [], nextToken: null }),
     },
     Route: {
       get: async ({ id }: { id: string }) => ({

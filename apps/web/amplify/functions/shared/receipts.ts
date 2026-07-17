@@ -18,6 +18,18 @@ import { emailShell, notifyOffice, sendEmail } from "./email";
 
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
+/** The portal billing page a customer pays / updates their card on. */
+export const portalBillingUrl = () =>
+  `${process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com"}/billing`;
+
+const prettyDate = (isoDate: string) =>
+  new Date(`${isoDate.slice(0, 10)}T12:00:00Z`).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -81,6 +93,92 @@ export async function sendChargeReceipt(opts: {
     });
   } catch (err) {
     console.error("sendChargeReceipt failed", opts.customerId, err);
+    return false;
+  }
+}
+
+/**
+ * Notice that a charge failed — the customer-facing half of dunning. States
+ * the amount, the real decline reason, and a link to the portal billing page
+ * to fix it. Returns false (never throws) when the customer has no email, so
+ * the caller can page the office instead.
+ */
+export async function sendPaymentFailedNotice(opts: {
+  customerId: string;
+  amountCents: number;
+  description?: string | null;
+  reason: string;
+  invoiceId?: string | null;
+}): Promise<boolean> {
+  try {
+    const { email, greetingName } = await customerContact(opts.customerId);
+    if (!email) return false;
+    return await sendEmail({
+      to: email,
+      subject: `Payment failed: ${money(opts.amountCents)} — action needed`,
+      template: "payment-failed",
+      customerId: opts.customerId,
+      relatedId: opts.invoiceId ?? undefined,
+      html: emailShell(
+        "We couldn't process your payment",
+        `<p>Hi ${escapeHtml(greetingName)},</p>
+         <p>We tried to charge <strong>${money(opts.amountCents)}</strong>${
+           opts.description ? ` for ${escapeHtml(opts.description)}` : ""
+         } but it didn't go through.</p>
+         <p><strong>What happened:</strong> ${escapeHtml(opts.reason)}</p>
+         <p>The quickest fix is to update your payment method and pay online:</p>
+         <p style="margin:20px 0;"><a href="${portalBillingUrl()}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Update payment &amp; pay now</a></p>
+         <p style="color:#666;font-size:13px;">We'll automatically try again over the next few days. Questions? Just reply to this email or give us a call.</p>`
+      ),
+    });
+  } catch (err) {
+    console.error("sendPaymentFailedNotice failed", opts.customerId, err);
+    return false;
+  }
+}
+
+/**
+ * An open-invoice reminder — due soon (a few days before dueDate) or overdue
+ * (past it), each with the pay link. The customer-facing half of AR follow-up.
+ */
+export async function sendInvoiceReminder(opts: {
+  customerId: string;
+  amountCents: number;
+  description?: string | null;
+  dueDate?: string | null;
+  overdue: boolean;
+  invoiceId?: string | null;
+}): Promise<boolean> {
+  try {
+    const { email, greetingName } = await customerContact(opts.customerId);
+    if (!email) return false;
+    const due = opts.dueDate ? prettyDate(opts.dueDate) : null;
+    const heading = opts.overdue ? "Your invoice is overdue" : "Invoice due soon";
+    const line = opts.overdue
+      ? `<p>Our records show <strong>${money(opts.amountCents)}</strong>${
+          opts.description ? ` for ${escapeHtml(opts.description)}` : ""
+        } is now overdue${due ? ` (it was due ${due})` : ""}.</p>`
+      : `<p>This is a friendly reminder that <strong>${money(opts.amountCents)}</strong>${
+          opts.description ? ` for ${escapeHtml(opts.description)}` : ""
+        }${due ? ` is due on <strong>${due}</strong>` : " is coming due"}.</p>`;
+    return await sendEmail({
+      to: email,
+      subject: opts.overdue
+        ? `Overdue: ${money(opts.amountCents)} — BuzzKill Pest Control`
+        : `Reminder: ${money(opts.amountCents)} due soon — BuzzKill Pest Control`,
+      template: opts.overdue ? "invoice-overdue" : "invoice-due-soon",
+      customerId: opts.customerId,
+      relatedId: opts.invoiceId ?? undefined,
+      html: emailShell(
+        heading,
+        `<p>Hi ${escapeHtml(greetingName)},</p>
+         ${line}
+         <p style="margin:20px 0;"><a href="${portalBillingUrl()}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Pay online</a></p>
+         <p style="color:#666;font-size:13px;">Already paid? Thank you — please ignore this. Questions? Just reply to this email.</p>`
+      ),
+    });
+  } catch (err) {
+    console.error("sendInvoiceReminder failed", opts.customerId, err);
     return false;
   }
 }

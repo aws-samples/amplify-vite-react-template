@@ -9,7 +9,15 @@ import { customerAccessGroups } from "../shared/dynamicGroups";
 import { finalizeBooking } from "../shared/bookingFinalize";
 import { applyRefundToInvoice } from "../shared/refund";
 import { notifyOffice } from "../shared/email";
-import { escapeHtml, sendChargeReceipt } from "../shared/receipts";
+import {
+  escapeHtml,
+  sendChargeReceipt,
+  sendPaymentFailedNotice,
+} from "../shared/receipts";
+import {
+  clearPlanDelinquency,
+  nextDunningAtIso,
+} from "../shared/recovery";
 import {
   cancelQueuedPlanVisits,
   type QueuedVisitsResolution,
@@ -80,6 +88,12 @@ export const handler = async (
         break;
       case "customer.subscription.deleted":
         await onSubscriptionDeleted(stripeEvent.data.object);
+        break;
+      case "charge.dispute.created":
+        await onDisputeCreated(stripeEvent.data.object);
+        break;
+      case "charge.dispute.closed":
+        await onDisputeClosed(stripeEvent.data.object);
         break;
       default:
         break; // Unhandled event types are acknowledged and ignored.
@@ -191,63 +205,168 @@ async function onSubscriptionInvoice(
             stripeInvoice.created) * 1000
         ).toISOString()
       : undefined;
+  const reason =
+    status === "FAILED" ? invoiceDeclineReason(stripeInvoice) : undefined;
+  const nowIso = new Date().toISOString();
+  // A subscription invoice's retries belong to Stripe (its smart retries hit
+  // the same card on its own schedule), so we do NOT arm our own dunning
+  // cadence here — doing so would double-charge. We record the real decline
+  // reason and, below, suspend the plan from dispatch immediately.
+  const failedFields = reason ? { failureReason: reason } : {};
+
+  type Row = { id: string; amountCents: number; description?: string | null };
+  let row: Row | null = null;
+  let transitioned = false;
 
   if (existing[0]) {
-    if (existing[0].status !== status) {
-      await client.models.Invoice.update({
-        id: existing[0].id,
-        status,
-        ...(paidAt ? { paidAt, failureReason: null } : {}),
-        ...(status === "FAILED"
-          ? { failureReason: "Subscription payment failed" }
-          : {}),
+    // Already in this state: a replayed webhook. Do nothing so it never
+    // re-emails or re-schedules dunning.
+    if (existing[0].status === status) return;
+    transitioned = true;
+    await client.models.Invoice.update({
+      id: existing[0].id,
+      status,
+      ...(paidAt
+        ? { paidAt, failureReason: null, nextDunningAt: null }
+        : {}),
+      ...failedFields,
+    });
+    row = {
+      id: existing[0].id,
+      amountCents: existing[0].amountCents,
+      description: existing[0].description,
+    };
+    if (status === "PAID" && existing[0].amountCents > 0) {
+      await sendChargeReceipt({
+        customerId: crmCustomerId,
+        amountCents: existing[0].amountCents,
+        description: existing[0].description ?? "Subscription payment",
+        invoiceId: existing[0].id,
       });
-      if (status === "PAID" && existing[0].amountCents > 0) {
-        await sendChargeReceipt({
-          customerId: crmCustomerId,
-          amountCents: existing[0].amountCents,
-          description: existing[0].description ?? "Subscription payment",
-          invoiceId: existing[0].id,
-        });
-      }
     }
-    return;
-  }
-
-  const { data: customer } = await client.models.Customer.get({
-    id: crmCustomerId,
-  });
-  const { data: sub } = await client.models.ServicePlan.get({
-    id: crmServicePlanId,
-  });
-  const description = `${sub?.planName ?? "Subscription"} — ${new Date(
-    stripeInvoice.created * 1000
-  ).toLocaleDateString("en-US", { month: "long", year: "numeric" })}`;
-  const { data: created } = await client.models.Invoice.create({
-    customerId: crmCustomerId,
-    servicePlanId: crmServicePlanId,
-    description,
-    amountCents: stripeInvoice.amount_due,
-    status,
-    stripeInvoiceId: stripeInvoice.id,
-    issuedAt: new Date(stripeInvoice.created * 1000).toISOString(),
-    ...(paidAt ? { paidAt } : {}),
-    ...(status === "FAILED"
-      ? { failureReason: "Subscription payment failed" }
-      : {}),
-    accessGroups: customerAccessGroups(crmCustomerId, customer?.groupId),
-  });
-  // The monthly settlement is a real charge on a real card — it gets the same
-  // receipt as any other. The existing-invoice path above only emails on a
-  // status *change*, so a replayed webhook cannot send this twice.
-  if (status === "PAID" && stripeInvoice.amount_due > 0) {
-    await sendChargeReceipt({
+  } else {
+    const { data: customer } = await client.models.Customer.get({
+      id: crmCustomerId,
+    });
+    const { data: sub } = await client.models.ServicePlan.get({
+      id: crmServicePlanId,
+    });
+    const description = `${sub?.planName ?? "Subscription"} — ${new Date(
+      stripeInvoice.created * 1000
+    ).toLocaleDateString("en-US", { month: "long", year: "numeric" })}`;
+    const { data: created } = await client.models.Invoice.create({
       customerId: crmCustomerId,
+      servicePlanId: crmServicePlanId,
+      description,
+      amountCents: stripeInvoice.amount_due,
+      status,
+      stripeInvoiceId: stripeInvoice.id,
+      issuedAt: new Date(stripeInvoice.created * 1000).toISOString(),
+      ...(paidAt ? { paidAt } : {}),
+      ...failedFields,
+      accessGroups: customerAccessGroups(crmCustomerId, customer?.groupId),
+    });
+    transitioned = true;
+    row = {
+      id: created?.id ?? "",
       amountCents: stripeInvoice.amount_due,
       description,
-      invoiceId: created?.id,
+    };
+    // The monthly settlement is a real charge on a real card — it gets the same
+    // receipt as any other. The existing-invoice path above only emails on a
+    // status *change*, so a replayed webhook cannot send this twice.
+    if (status === "PAID" && stripeInvoice.amount_due > 0) {
+      await sendChargeReceipt({
+        customerId: crmCustomerId,
+        amountCents: stripeInvoice.amount_due,
+        description,
+        invoiceId: created?.id,
+      });
+    }
+  }
+
+  if (!transitioned || !row) return;
+  if (status === "PAID") {
+    // The customer is current again — lift any delinquency suspension so the
+    // recurring engine resumes dispatching visits.
+    await clearPlanDelinquency(crmServicePlanId);
+  } else {
+    await onSubscriptionInvoiceFailed({
+      invoiceId: row.id,
+      customerId: crmCustomerId,
+      servicePlanId: crmServicePlanId,
+      amountCents: row.amountCents,
+      description: row.description ?? "Subscription payment",
+      reason: reason ?? "The payment was declined",
     });
   }
+}
+
+/** Best-effort real decline reason off a failed Stripe invoice. */
+function invoiceDeclineReason(inv: Stripe.Invoice): string {
+  const anyInv = inv as unknown as {
+    last_finalization_error?: { message?: string };
+    payment_intent?: { last_payment_error?: { message?: string } };
+    charge?: { failure_message?: string };
+  };
+  return (
+    anyInv.last_finalization_error?.message ||
+    anyInv.payment_intent?.last_payment_error?.message ||
+    anyInv.charge?.failure_message ||
+    "The card payment was declined"
+  );
+}
+
+/**
+ * A subscription charge failed: tell the customer (amount + real reason + a pay
+ * link) and page the office. The dunning schedule is already stamped on the
+ * invoice by the caller; the daily cron drives the retries from here.
+ */
+async function onSubscriptionInvoiceFailed(opts: {
+  invoiceId: string;
+  customerId: string;
+  servicePlanId: string;
+  amountCents: number;
+  description: string;
+  reason: string;
+}) {
+  const client = await dataClient();
+  // The card died: suspend the plan from dispatch NOW, not after a cadence.
+  // recurring.ts skips a delinquent plan, so no tech is routed to a customer
+  // whose subscription isn't paying. Stripe keeps retrying the card; a
+  // successful retry fires invoice.paid, which clears the delinquency.
+  await client.models.ServicePlan.update({
+    id: opts.servicePlanId,
+    delinquent: true,
+    delinquentSince: new Date().toISOString(),
+  });
+
+  const customerReached = await sendPaymentFailedNotice({
+    customerId: opts.customerId,
+    amountCents: opts.amountCents,
+    description: opts.description,
+    reason: opts.reason,
+    invoiceId: opts.invoiceId,
+  });
+
+  const { data: customer } = await client.models.Customer.get({
+    id: opts.customerId,
+  });
+  const name = customer?.displayName ?? opts.customerId;
+  await notifyOffice({
+    subject: `Payment failed — ${name}: $${(opts.amountCents / 100).toFixed(2)}`,
+    heading: "A subscription payment failed",
+    template: "ops-invoice-payment-failed",
+    customerId: opts.customerId,
+    relatedId: opts.invoiceId,
+    bodyHtml: `<p><strong>${escapeHtml(name)}</strong>'s payment of <strong>$${(opts.amountCents / 100).toFixed(2)}</strong> for ${escapeHtml(opts.description)} failed.</p>
+       <p><strong>Reason:</strong> ${escapeHtml(opts.reason)}</p>
+       <p>${
+         customerReached
+           ? "The customer has been emailed a link to update their card and pay."
+           : "<strong>The customer has no email on file</strong> — reach out another way."
+       } The plan is suspended from dispatch until it pays, so no further visits go out; Stripe automatically retries the card, and a successful retry resumes the plan.</p>`,
+  });
 }
 
 /**
@@ -360,5 +479,143 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     bodyHtml: `<p><strong>${escapeHtml(customerName)}</strong>'s <strong>${escapeHtml(sub.planName ?? "plan")}</strong> (${monthly} — about ${perYear}) stopped billing at Stripe. This did not come from the CRM: it was canceled from the Stripe dashboard, or by Stripe itself after repeated failed payments.</p>
        ${visitLines.join("\n       ")}
        <p><strong>Call ${escapeHtml(customerName)} today.</strong> If this is a mistake, collect a payment method and start a new plan. If they meant to leave, this is the retention call — either way, losing a recurring customer should never be a silent database update.</p>`,
+  });
+}
+
+/** Stripe dashboard URL for a dispute — BuzzKill responds to evidence there. */
+const disputeDashboardUrl = (id: string) =>
+  `https://dashboard.stripe.com/disputes/${id}`;
+
+/** id off a Stripe field that may be a string id or an expanded object. */
+function idOf(
+  v: string | { id?: string } | null | undefined
+): string | undefined {
+  if (!v) return undefined;
+  return typeof v === "string" ? v : v.id;
+}
+
+/**
+ * A card chargeback opened (R02). Money has already been pulled back out of the
+ * account and there is a hard deadline to respond — miss it and the dispute is
+ * lost by default. Create the Dispute row (linked to the customer/invoice via
+ * the charge's payment_intent) and page the office with the amount, the
+ * deadline, and a Stripe-dashboard link. BuzzKill builds no evidence editor —
+ * the office responds in Stripe.
+ *
+ * Replay-safe: deduped by stripeDisputeId.
+ */
+async function onDisputeCreated(dispute: Stripe.Dispute) {
+  const client = await dataClient();
+  const { data: dupes } =
+    await client.models.Dispute.listDisputeByStripeDisputeId({
+      stripeDisputeId: dispute.id,
+    });
+  if (dupes[0]) return; // already recorded — replayed webhook
+
+  const piId = idOf(dispute.payment_intent);
+  let customerId: string | undefined;
+  let invoiceId: string | undefined;
+  let groupId: string | null | undefined;
+  if (piId) {
+    const { data: matches } =
+      await client.models.Invoice.listInvoiceByStripePaymentIntentId({
+        stripePaymentIntentId: piId,
+      });
+    const invoice = matches[0];
+    if (invoice) {
+      invoiceId = invoice.id;
+      customerId = invoice.customerId;
+      const { data: customer } = await client.models.Customer.get({
+        id: invoice.customerId,
+      });
+      groupId = customer?.groupId;
+    }
+  }
+
+  const evidenceDueBy = dispute.evidence_details?.due_by
+    ? new Date(dispute.evidence_details.due_by * 1000).toISOString()
+    : undefined;
+  const openedAt = dispute.created
+    ? new Date(dispute.created * 1000).toISOString()
+    : new Date().toISOString();
+
+  await client.models.Dispute.create({
+    stripeDisputeId: dispute.id,
+    customerId,
+    invoiceId,
+    amountCents: dispute.amount,
+    reason: dispute.reason ?? undefined,
+    status: "NEEDS_RESPONSE",
+    evidenceDueBy,
+    openedAt,
+    ...(customerId
+      ? { accessGroups: customerAccessGroups(customerId, groupId) }
+      : {}),
+  });
+
+  const { data: customer } = customerId
+    ? await client.models.Customer.get({ id: customerId })
+    : { data: null };
+  const name = customer?.displayName ?? "an unknown customer";
+  const deadline = evidenceDueBy
+    ? new Date(evidenceDueBy).toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        timeZone: "UTC",
+      })
+    : "unknown — check Stripe";
+  await notifyOffice({
+    subject: `ACTION REQUIRED — card dispute opened: ${name} ($${(dispute.amount / 100).toFixed(2)})`,
+    heading: "A card dispute was opened",
+    template: "ops-dispute-opened",
+    customerId,
+    relatedId: dispute.id,
+    bodyHtml: `<p>A customer (<strong>${escapeHtml(name)}</strong>) has disputed a charge of <strong>$${(dispute.amount / 100).toFixed(2)}</strong>${dispute.reason ? ` — reason given: <em>${escapeHtml(dispute.reason)}</em>` : ""}.</p>
+       <p><strong>Evidence is due by ${escapeHtml(deadline)}.</strong> Miss that deadline and the dispute is lost by default and the money is gone.</p>
+       <p>Respond in the Stripe dashboard — BuzzKill does not build an evidence editor:</p>
+       <p style="margin:20px 0;"><a href="${disputeDashboardUrl(dispute.id)}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open the dispute in Stripe</a></p>`,
+  });
+}
+
+/**
+ * A dispute closed (R02): set the outcome (WON/LOST) and closedAt. Replay-safe —
+ * a dispute already in its terminal state is a no-op. If the created event was
+ * somehow missed we still record the closure so the outcome is never lost.
+ */
+async function onDisputeClosed(dispute: Stripe.Dispute) {
+  const client = await dataClient();
+  const status: "WON" | "LOST" = dispute.status === "won" ? "WON" : "LOST";
+  const closedAt = new Date().toISOString();
+
+  const { data: rows } = await client.models.Dispute.listDisputeByStripeDisputeId(
+    { stripeDisputeId: dispute.id }
+  );
+  const existing = rows[0];
+  if (existing) {
+    if (existing.status === status) return; // already closed this way — replay
+    await client.models.Dispute.update({ id: existing.id, status, closedAt });
+  } else {
+    // The created event never landed — record the closure anyway rather than
+    // lose the outcome.
+    await client.models.Dispute.create({
+      stripeDisputeId: dispute.id,
+      amountCents: dispute.amount,
+      reason: dispute.reason ?? undefined,
+      status,
+      closedAt,
+      openedAt: dispute.created
+        ? new Date(dispute.created * 1000).toISOString()
+        : undefined,
+    });
+  }
+
+  await notifyOffice({
+    subject: `Card dispute ${status === "WON" ? "won" : "lost"} ($${(dispute.amount / 100).toFixed(2)})`,
+    heading: `A card dispute was ${status === "WON" ? "won" : "lost"}`,
+    template: "ops-dispute-closed",
+    relatedId: dispute.id,
+    bodyHtml: `<p>The <strong>$${(dispute.amount / 100).toFixed(2)}</strong> dispute has closed: <strong>${status === "WON" ? "won — the funds stay with BuzzKill" : "lost — the funds have gone back to the customer"}</strong>.</p>
+       <p><a href="${disputeDashboardUrl(dispute.id)}">View it in Stripe</a></p>`,
   });
 }

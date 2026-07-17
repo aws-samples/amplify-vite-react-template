@@ -56,6 +56,18 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     });
     if (!plan || plan.status !== "ACTIVE") return;
 
+    // Delinquency gate: a plan whose billing has died — every dunning retry on a
+    // failed subscription invoice exhausted — is suspended, not canceled. Do not
+    // queue its next visit, or the recurring engine keeps dispatching a
+    // technician to a customer who has stopped paying. A subsequent invoice.paid
+    // clears the flag (shared/recovery clearPlanDelinquency) and service resumes.
+    if (plan.delinquent) {
+      console.log(
+        `Skipping next-visit queue for plan ${job.servicePlanId}: plan is delinquent (billing suspended)`
+      );
+      return;
+    }
+
     const interval = FREQUENCY_DAYS[plan.serviceFrequency];
     if (!interval) return;
 

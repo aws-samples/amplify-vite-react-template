@@ -143,6 +143,9 @@ backend.stripeWebhook.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 backend.stripeWebhook.resources.lambda.addToRolePolicy(sesPolicy);
 backend.stripeWebhook.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
 backend.stripeWebhook.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com");
+// The dunning "your payment failed" email links the customer to the portal
+// billing page (CRM_APP_URL + /billing) to update their card and pay.
+backend.stripeWebhook.addEnvironment("CRM_APP_URL", crmUrlEnv);
 
 // R80: lead-pipeline alerts route to the sales inbox, not the ops inbox. Set
 // SES_LEADS_EMAIL only on the functions that send a lead email — leadIntake

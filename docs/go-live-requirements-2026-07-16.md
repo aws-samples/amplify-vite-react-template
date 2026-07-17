@@ -221,6 +221,38 @@ by card, schedule)"; suites 367 web / 140 CRM):
     OWNER still hold model-level Customer/Technician update, so raw GraphQL could bare-flip status
     outside the mutation. The structural close (drop model update, route all status writes through
     guarded mutations) is the shared follow-up.
+- **Money-out recovery lifecycle — R02 + R31 + R52 + R78** (Jake's directive, 17 July: open
+  invoices and failed payments get "due dates, customer payment links, settlement against an
+  existing invoice, retry cadence, reminders, aging, dispute deadlines, and ownership"; suites
+  534 web / 185 CRM, adversarially verified per layer):
+  - **Settlement + due dates (R31):** `settleInvoice` (OWNER/FINANCE) marks an existing OPEN/
+    FAILED invoice PAID — OFFLINE (cash/cheque/transfer, actor + note) or CARD — refusing a
+    VOID/DRAFT/already-PAID row and an offline settle while a card/bank charge is in flight.
+    `recordOfflinePayment` raises an invoice-for-later with terms (Due-on-receipt/Net-15/Net-30 →
+    due date) and a PO. The check-paying HOA/commercial segment finally has a settle path.
+  - **Customer payment links:** the portal gives every OPEN/FAILED invoice a "Pay $X now" button
+    (`payInvoice`, charging the customer's own saved card, authorized against the invoice's own
+    customerId so A can't pay or probe B's); a decline reads as FAILED, never a false "paid".
+  - **Disputes + deadlines (R02):** `charge.dispute.created` (was `default:break`) creates a
+    read-only Dispute row with Stripe's evidence deadline, links customer/invoice, dedupes by
+    dispute id, and pages the office ACTION-REQUIRED with the deadline + dashboard link; `.closed`
+    records WON/LOST; the Dashboard shows a disputes queue. **Ops: register the two dispute events
+    on the Stripe webhook endpoint.**
+  - **Dunning + suspension (R02):** a failed subscription payment stores the real decline reason,
+    emails the customer the amount + reason + pay link, pages the office, and **suspends the plan
+    from dispatch immediately** (recurring.ts skips a delinquent plan — the dispatch-to-non-payer
+    leak is closed); a successful Stripe retry (`invoice.paid`) lifts it. Subscription retries are
+    left to Stripe; our cron's card-retry cadence runs only on standalone invoices — a deliberate
+    fix for a double-charge/desync bug the verifier caught (our cron + Stripe both charging the
+    same card, our success never settling the Stripe invoice).
+  - **Reminders + aging (R52):** due-soon (T-3) and overdue customer reminders with the pay link,
+    an office AR-aging digest and Dashboard summary (current/1-30/31-60/61-90/90+, identical
+    buckets both sides), and dispute-deadline alerts.
+  - **Ownership (R78):** `assignRecoveryOwner` stamps the caller ("Assign to me"); the Dashboard
+    "Recovery queue" sorts most-urgent-first with SLA + owner.
+  - Follow-ups: standalone one-time invoices have the cron retry machinery but it isn't armed in
+    production (recovery there is reminder + pay-button driven); the emailed link is the portal
+    page, not a per-invoice deep link.
 
 **AI pricing rearchitecture, `e734ee5` + `fe85d00`** (Jake's directive, 16 July: "absolutely
 everything priced with AI — no other way is acceptable"; suites 364 web / 134 CRM):

@@ -4,13 +4,21 @@ import { opFieldName } from "../shared/opEvent";
 import {
   assertCanActForCustomer,
   assertFinance,
+  callerIsFinance,
   callerIsOwner,
   callerSub,
 } from "../shared/authz";
+import type { AppSyncIdentity } from "aws-lambda";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { notifyOffice } from "../shared/email";
 import { sendChargeReceipt } from "../shared/receipts";
 import { refundInvoice } from "../shared/refund";
+import {
+  clearPlanDelinquency,
+  dueDateForTerms,
+  normalizeTerms,
+  settleInvoiceOnCard,
+} from "../shared/recovery";
 import {
   cancelPlanBilling,
   ensureStripeCustomer as sharedEnsureStripeCustomer,
@@ -31,6 +39,11 @@ type Args = {
   reason?: string;
   status?: string;
   method?: string;
+  terms?: string;
+  poNumber?: string;
+  note?: string;
+  kind?: string;
+  id?: string;
 };
 
 // The shared helpers take an injected Stripe client because booking-public
@@ -163,7 +176,31 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         status: event.arguments.status ?? "PAID",
         method: event.arguments.method,
         jobId: event.arguments.jobId,
+        terms: event.arguments.terms,
+        poNumber: event.arguments.poNumber,
       });
+    }
+    case "settleInvoice": {
+      assertFinance(event.identity);
+      return settleInvoice(
+        actorOf(event),
+        event.arguments.invoiceId!,
+        event.arguments.method ?? "",
+        event.arguments.note
+      );
+    }
+    case "payInvoice": {
+      return payInvoice(actorOf(event), event.identity, event.arguments.invoiceId!);
+    }
+    case "assignRecoveryOwner": {
+      // OWNER/FINANCE/OFFICE — chasing money is office work even though moving
+      // it is finance work. The mutation-level authz already excludes everyone
+      // else; no money moves here.
+      return assignRecoveryOwner(
+        actorOf(event),
+        event.arguments.kind ?? "",
+        event.arguments.id!
+      );
     }
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);
@@ -604,6 +641,8 @@ async function recordOfflinePayment(
     status: string;
     method?: string | null;
     jobId?: string | null;
+    terms?: string | null;
+    poNumber?: string | null;
   }
 ) {
   if (!Number.isInteger(args.amountCents) || args.amountCents <= 0) {
@@ -623,6 +662,10 @@ async function recordOfflinePayment(
 
   const method = (args.method ?? "").trim().toUpperCase();
   const nowIso = new Date().toISOString();
+  // An invoice-for-later gets a due date so it can age; money already in hand
+  // has nothing to fall due. terms/poNumber only make sense on the OPEN path.
+  const isOpen = args.status === "OPEN";
+  const poNumber = args.poNumber?.trim().slice(0, 60) || undefined;
   const { data: invoice, errors } = await client.models.Invoice.create({
     customerId: args.customerId,
     jobId: args.jobId ?? undefined,
@@ -632,6 +675,13 @@ async function recordOfflinePayment(
     method: method === "BANK" ? "BANK" : undefined,
     issuedAt: nowIso,
     ...(args.status === "PAID" ? { paidAt: nowIso } : {}),
+    ...(isOpen
+      ? {
+          terms: normalizeTerms(args.terms),
+          dueDate: dueDateForTerms(args.terms, nowIso),
+          ...(poNumber ? { poNumber } : {}),
+        }
+      : {}),
     ...actorStamp(actor),
     accessGroups: customerAccessGroups(args.customerId, customer.groupId),
   });
@@ -641,4 +691,163 @@ async function recordOfflinePayment(
     );
   }
   return { invoiceId: invoice.id, status: invoice.status };
+}
+
+/**
+ * Settle an existing OPEN/FAILED invoice when payment arrives (R31).
+ *
+ *   OFFLINE — cash, cheque, or transfer landed. Marks it PAID with the actor
+ *     and an optional reference note. No money moves; this is bookkeeping.
+ *   CARD — charges the customer's saved card off-session and settles on
+ *     success (shared settleInvoiceOnCard, which also sends the receipt).
+ *
+ * Idempotent on an already-PAID invoice; refuses anything not OPEN/FAILED.
+ */
+async function settleInvoice(
+  actor: Actor,
+  invoiceId: string,
+  method: string,
+  note?: string | null
+) {
+  const kind = method.trim().toUpperCase();
+  if (kind === "CARD") {
+    return settleInvoiceOnCard(stripeClient(), {
+      invoiceId,
+      actor: { sub: actor.sub, email: actor.email },
+      note,
+      attemptTag: "settle",
+    });
+  }
+  if (kind !== "OFFLINE") {
+    throw new Error(`Unsupported settlement method: ${method}`);
+  }
+
+  const client = await dataClient();
+  const { data: invoice } = await client.models.Invoice.get({ id: invoiceId });
+  if (!invoice) throw new Error(`Invoice ${invoiceId} not found`);
+  if (invoice.status === "PAID" || invoice.status === "REFUNDED") {
+    return { invoiceId, status: String(invoice.status), alreadyPaid: true };
+  }
+  if (invoice.status !== "OPEN" && invoice.status !== "FAILED") {
+    throw new Error(
+      `This invoice is ${String(invoice.status).toLowerCase()} — only an open or failed invoice can be settled`
+    );
+  }
+  // Refuse an offline settle while a card/bank charge is still in flight on
+  // this invoice — the same hazard voidInvoice guards. Recording cash now
+  // marks it PAID, then the debit lands too and the customer is charged twice
+  // with no ledger trace.
+  if (invoice.stripePaymentIntentId) {
+    const intent = await stripeClient().paymentIntents.retrieve(
+      invoice.stripePaymentIntentId
+    );
+    if (intent.status === "processing" || intent.status === "succeeded") {
+      throw new Error(
+        "A card or bank payment is already in flight on this invoice — wait for it to settle or fail before recording an offline payment, or you will collect twice."
+      );
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const cleanNote = note?.trim().slice(0, 300) || undefined;
+  const { data: updated, errors } = await client.models.Invoice.update({
+    id: invoiceId,
+    status: "PAID",
+    paidAt: nowIso,
+    failureReason: null,
+    // Recovery is over for this row.
+    nextDunningAt: null,
+    lastDunningAt: nowIso,
+    settledBy: actor.sub ?? undefined,
+    settledByEmail: actor.email ?? undefined,
+    ...(cleanNote ? { settleNote: cleanNote } : {}),
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not settle the invoice: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  // A subscription invoice paid by hand un-suspends the plan.
+  await clearPlanDelinquency(invoice.servicePlanId);
+  return { invoiceId, status: "PAID", alreadyPaid: false };
+}
+
+/**
+ * The customer-facing pay button, also usable by OWNER/FINANCE (R31). Charges
+ * the acting customer's saved card for their OPEN/FAILED invoice.
+ *
+ * A CUSTOMER may pay only their OWN invoice: we load the invoice first, then
+ * authorize against ITS customerId with assertCanActForCustomer, so customer A
+ * cannot pay — or even probe the existence of — customer B's invoice. OWNER and
+ * FINANCE (callerIsFinance) may pay for anyone.
+ */
+async function payInvoice(
+  actor: Actor,
+  identity: AppSyncIdentity | undefined | null,
+  invoiceId: string
+) {
+  const client = await dataClient();
+  const { data: invoice } = await client.models.Invoice.get({ id: invoiceId });
+  // Same not-authorized error whether the invoice is missing or someone else's,
+  // so a customer can't use this to discover another customer's invoice ids.
+  if (!invoice) {
+    if (!callerIsFinance(identity)) {
+      throw new Error("Not authorized for this invoice");
+    }
+    throw new Error(`Invoice ${invoiceId} not found`);
+  }
+  if (!callerIsFinance(identity)) {
+    try {
+      assertCanActForCustomer(identity, invoice.customerId);
+    } catch {
+      throw new Error("Not authorized for this invoice");
+    }
+  }
+
+  return settleInvoiceOnCard(stripeClient(), {
+    invoiceId,
+    actor: { sub: actor.sub, email: actor.email },
+    attemptTag: "pay",
+  });
+}
+
+/**
+ * Take ownership of a recovery item (R78) — "Assign to me". Stamps
+ * ownerSub/ownerEmail from the caller's own verified identity, never the
+ * request, on an Invoice or a Dispute, so every open item has exactly one owner.
+ */
+async function assignRecoveryOwner(actor: Actor, kind: string, id: string) {
+  const which = kind.trim().toUpperCase();
+  const client = await dataClient();
+  if (which === "INVOICE") {
+    const { data: invoice } = await client.models.Invoice.get({ id });
+    if (!invoice) throw new Error(`Invoice ${id} not found`);
+    const { data: updated, errors } = await client.models.Invoice.update({
+      id,
+      ownerSub: actor.sub ?? undefined,
+      ownerEmail: actor.email ?? undefined,
+    });
+    if (!updated) {
+      throw new Error(
+        `Could not assign the owner: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+      );
+    }
+    return { kind: "INVOICE", id, ownerSub: actor.sub, ownerEmail: actor.email };
+  }
+  if (which === "DISPUTE") {
+    const { data: dispute } = await client.models.Dispute.get({ id });
+    if (!dispute) throw new Error(`Dispute ${id} not found`);
+    const { data: updated, errors } = await client.models.Dispute.update({
+      id,
+      ownerSub: actor.sub ?? undefined,
+      ownerEmail: actor.email ?? undefined,
+    });
+    if (!updated) {
+      throw new Error(
+        `Could not assign the owner: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+      );
+    }
+    return { kind: "DISPUTE", id, ownerSub: actor.sub, ownerEmail: actor.email };
+  }
+  throw new Error(`Unknown recovery item kind: ${kind}`);
 }

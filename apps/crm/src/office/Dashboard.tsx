@@ -2,8 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
+  assignRecoveryOwner,
   listAll,
+  listDisputes,
   type Customer,
+  type Dispute,
   type Invoice,
   type Job,
   type ServicePlan,
@@ -11,6 +14,18 @@ import {
 import { fmtDate, money, todayEastern } from "../lib/format";
 import { revenueTotals } from "../lib/revenue";
 import { plansWithoutNextVisit, unchargedOneTimeJobs } from "../lib/workQueues";
+import {
+  AGING_BUCKET_LABEL,
+  AGING_BUCKETS,
+  agingSummary,
+  type AgingBucket,
+} from "../lib/aging";
+import {
+  buildRecoveryQueue,
+  daysUntilEvidenceDue,
+  type RecoveryItem,
+} from "../lib/recovery";
+import { useRoles } from "../lib/auth";
 import {
   Badge,
   Button,
@@ -22,7 +37,7 @@ import {
   SegControl,
   Spinner,
   Stat,
-  StatusBadge,
+  type BadgeTone,
 } from "../ui/kit";
 
 type Period = "MONTH" | "LAST_MONTH" | "ALL";
@@ -39,25 +54,30 @@ function inPeriod(iso: string | null | undefined, period: Period): boolean {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const roles = useRoles();
   const [period, setPeriod] = useState<Period>("MONTH");
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [plans, setPlans] = useState<ServicePlan[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [disputes, setDisputes] = useState<Dispute[]>([]);
+  const [assigningId, setAssigningId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [inv, cus, pl, jb] = await Promise.all([
+      const [inv, cus, pl, jb, dp] = await Promise.all([
         listAll((t) => api().models.Invoice.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.Customer.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.ServicePlan.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.Job.list({ limit: 1000, nextToken: t })),
+        listAll((t) => listDisputes({ limit: 1000, nextToken: t })),
       ]);
       setInvoices(inv);
       setCustomers(cus);
       setPlans(pl);
       setJobs(jb);
+      setDisputes(dp);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load dashboard");
     }
@@ -66,6 +86,24 @@ export default function Dashboard() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Claim a recovery item ("Assign to me") — the server stamps the owner from
+  // the caller's identity, so after it lands a reload shows this user's email.
+  const assign = useCallback(
+    async (kind: "INVOICE" | "DISPUTE", id: string) => {
+      setAssigningId(id);
+      setError(null);
+      try {
+        await assignRecoveryOwner({ kind, id });
+        await load();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not assign owner");
+      } finally {
+        setAssigningId(null);
+      }
+    },
+    [load]
+  );
 
   if (!invoices) {
     return (
@@ -100,11 +138,18 @@ export default function Dashboard() {
     refundedCents: refunded,
   } = revenueTotals(inRange);
 
-  const outstanding = invoices
-    .filter((i) => i.status === "OPEN" || i.status === "FAILED")
-    .sort((a, b) => (a.issuedAt ?? "").localeCompare(b.issuedAt ?? ""));
-
   const today = todayEastern();
+
+  // Money-out recovery. Aging buckets the outstanding receivable (OPEN/FAILED)
+  // by how overdue it is; the recovery queue is every overdue/failed invoice
+  // and open dispute, most-urgent first, each with its SLA and owner. Both use
+  // the shared helpers whose bucket boundaries match the backend's
+  // shared/recovery.ts to the day.
+  const aging = agingSummary(invoices, today);
+  const recoveryQueue = buildRecoveryQueue(invoices, disputes, today);
+  const openDisputes = disputes.filter(
+    (d) => d.status === "NEEDS_RESPONSE" || d.status === "UNDER_REVIEW"
+  );
   const activePlanCustomers = new Set(
     plans.filter((p) => p.status === "ACTIVE").map((p) => p.customerId)
   );
@@ -190,22 +235,132 @@ export default function Dashboard() {
         />
       </div>
 
-      {outstanding.length > 0 ? (
-        <Card title={`Outstanding invoices (${outstanding.length})`}>
-          {outstanding.slice(0, 10).map((i) => (
+      {aging.count > 0 ? (
+        <Card title={`Accounts receivable — ${money(aging.totalCents)} outstanding`}>
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            {aging.count} unpaid invoice{aging.count === 1 ? "" : "s"}, by how far
+            past due. Money in the older buckets is the money most likely to
+            never arrive.
+          </p>
+          <div className="stat-grid">
+            {AGING_BUCKETS.map((b) => (
+              <Stat
+                key={b}
+                label={`${AGING_BUCKET_LABEL[b]}${
+                  aging.buckets[b].count ? ` · ${aging.buckets[b].count}` : ""
+                }`}
+                value={money(aging.buckets[b].totalCents)}
+                tone={
+                  aging.buckets[b].totalCents > 0 && b !== "current"
+                    ? bucketTone(b)
+                    : undefined
+                }
+              />
+            ))}
+          </div>
+        </Card>
+      ) : null}
+
+      {recoveryQueue.length > 0 ? (
+        <Card title={`Recovery queue (${recoveryQueue.length})`}>
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            Every overdue invoice, failed charge in dunning, and open dispute —
+            most urgent first. Assign each to one owner so no item is everyone's
+            job and therefore no one's.
+          </p>
+          {recoveryQueue.slice(0, 15).map((item) => (
             <ListRow
-              key={i.id}
-              title={customerById.get(i.customerId)?.displayName ?? "Unknown"}
-              subtitle={`${i.description} · ${fmtDate(i.issuedAt, true)}`}
-              meta={
+              key={`${item.refType}-${item.id}`}
+              title={customerById.get(item.customerId)?.displayName ?? "Unknown"}
+              subtitle={
                 <>
-                  <strong>{money(i.amountCents)}</strong>
-                  <StatusBadge status={i.status} />
+                  {`${RECOVERY_KIND_LABEL[item.kind]} · ${item.slaLabel}`}
+                  <span className="nested-line">
+                    {ownerText(item.ownerSub, item.ownerEmail, roles.sub)}
+                  </span>
                 </>
               }
-              onClick={() => navigate(`/customers/${i.customerId}`)}
+              meta={
+                <>
+                  <strong>{money(item.amountCents)}</strong>
+                  <Badge tone={item.urgent ? "danger" : "warn"}>
+                    {RECOVERY_KIND_TAG[item.kind]}
+                  </Badge>
+                  <AssignButton
+                    kind={item.refType === "dispute" ? "DISPUTE" : "INVOICE"}
+                    id={item.id}
+                    ownerSub={item.ownerSub}
+                    mySub={roles.sub}
+                    busy={assigningId === item.id}
+                    onAssign={assign}
+                  />
+                </>
+              }
+              onClick={() => navigate(`/customers/${item.customerId}`)}
             />
           ))}
+        </Card>
+      ) : null}
+
+      {openDisputes.length > 0 ? (
+        <Card title={`Card disputes (${openDisputes.length})`}>
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            Chargebacks with an evidence deadline. Miss the deadline and the
+            dispute is lost by default — respond in Stripe, then assign an owner
+            here so someone is on the hook for it.
+          </p>
+          {openDisputes.map((d) => {
+            const days = daysUntilEvidenceDue(d, today);
+            const urgent = days === null || days <= 3;
+            const cust = d.customerId
+              ? customerById.get(d.customerId)
+              : undefined;
+            return (
+              <ListRow
+                key={d.id}
+                title={cust?.displayName ?? "Unknown customer"}
+                subtitle={
+                  <>
+                    {`${d.reason ?? "Disputed charge"} · ${deadlineText(days)}`}
+                    <span className="nested-line">
+                      {ownerText(d.ownerSub, d.ownerEmail, roles.sub)}
+                    </span>
+                  </>
+                }
+                meta={
+                  <>
+                    <strong>{money(d.amountCents)}</strong>
+                    <Badge tone={urgent ? "danger" : "warn"}>
+                      {(d.status ?? "").replace(/_/g, " ").toLowerCase() ||
+                        "dispute"}
+                    </Badge>
+                    <a
+                      href={`https://dashboard.stripe.com/disputes/${d.stripeDisputeId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ color: "var(--brand)" }}
+                    >
+                      Stripe
+                    </a>
+                    <AssignButton
+                      kind="DISPUTE"
+                      id={d.id}
+                      ownerSub={d.ownerSub ?? null}
+                      mySub={roles.sub}
+                      busy={assigningId === d.id}
+                      onAssign={assign}
+                    />
+                  </>
+                }
+                onClick={
+                  d.customerId
+                    ? () => navigate(`/customers/${d.customerId}`)
+                    : undefined
+                }
+              />
+            );
+          })}
         </Card>
       ) : null}
 
@@ -288,16 +443,101 @@ export default function Dashboard() {
         </Card>
       ) : null}
 
-      {outstanding.length === 0 &&
+      {aging.count === 0 &&
+      recoveryQueue.length === 0 &&
+      openDisputes.length === 0 &&
       needsAttention.length === 0 &&
       notBilling.length === 0 &&
       uncharged.length === 0 &&
       noNextVisit.length === 0 ? (
         <EmptyState
           title="All caught up"
-          body="No outstanding invoices, every completed job is charged, every serviced plan is billing, every active plan has a next visit, and every active customer has a plan or upcoming job."
+          body="Nothing outstanding to recover, no open disputes, every completed job is charged, every serviced plan is billing, every active plan has a next visit, and every active customer has a plan or upcoming job."
         />
       ) : null}
     </Page>
+  );
+}
+
+/** Older receivable is louder: the money least likely to ever arrive. */
+function bucketTone(b: AgingBucket): BadgeTone {
+  switch (b) {
+    case "61-90":
+    case "90+":
+      return "danger";
+    case "31-60":
+    case "1-30":
+      return "warn";
+    default:
+      return "info";
+  }
+}
+
+const RECOVERY_KIND_LABEL: Record<RecoveryItem["kind"], string> = {
+  OVERDUE: "Overdue invoice",
+  FAILED: "Failed payment",
+  DISPUTE: "Card dispute",
+};
+
+const RECOVERY_KIND_TAG: Record<RecoveryItem["kind"], string> = {
+  OVERDUE: "overdue",
+  FAILED: "failed",
+  DISPUTE: "dispute",
+};
+
+/** How the owner of a recovery item reads: you, a teammate, or nobody yet. */
+function ownerText(
+  ownerSub: string | null | undefined,
+  ownerEmail: string | null | undefined,
+  mySub: string
+): string {
+  if (ownerSub && ownerSub === mySub) return "Owner: you";
+  if (ownerEmail) return `Owner: ${ownerEmail}`;
+  return "Unassigned";
+}
+
+/** A dispute deadline said in days, urgent when the clock is nearly out. */
+function deadlineText(days: number | null): string {
+  if (days === null) return "deadline unknown — respond ASAP";
+  if (days < 0) return `${-days} day${days === -1 ? "" : "s"} past deadline`;
+  if (days === 0) return "evidence due today";
+  return `${days} day${days === 1 ? "" : "s"} to respond`;
+}
+
+/**
+ * "Assign to me" for a recovery item — or a static "you" badge when the caller
+ * already owns it. stopPropagation so claiming an item never also opens the
+ * customer under it.
+ */
+function AssignButton({
+  kind,
+  id,
+  ownerSub,
+  mySub,
+  busy,
+  onAssign,
+}: {
+  kind: "INVOICE" | "DISPUTE";
+  id: string;
+  ownerSub: string | null;
+  mySub: string;
+  busy: boolean;
+  onAssign: (kind: "INVOICE" | "DISPUTE", id: string) => Promise<void>;
+}) {
+  if (ownerSub && ownerSub === mySub) {
+    return <Badge tone="ok">you</Badge>;
+  }
+  return (
+    <Button
+      small
+      variant="subtle"
+      loading={busy}
+      onClick={(e) => {
+        e.stopPropagation();
+        void onAssign(kind, id);
+      }}
+    >
+      {ownerSub ? "Take over" : "Assign to me"}
+    </Button>
   );
 }

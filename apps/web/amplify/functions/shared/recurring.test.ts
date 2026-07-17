@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * left. This is the belt to deactivation's braces.
  */
 
-type Plan = { id: string; customerId: string; status: string; serviceFrequency: string; planName: string };
+type Plan = { id: string; customerId: string; status: string; serviceFrequency: string; planName: string; delinquent?: boolean };
 type Customer = { id: string; status: string; groupId?: string | null };
 
 const plans = new Map<string, Plan>();
@@ -75,5 +75,23 @@ describe("scheduleNextRecurringVisit — INACTIVE customer guard", () => {
     await scheduleNextRecurringVisit(completedJob);
 
     expect(created).toHaveLength(1);
+  });
+});
+
+describe("scheduleNextRecurringVisit — delinquency gate", () => {
+  it("does not queue the next visit when the plan is delinquent (billing suspended)", async () => {
+    customers.set("c1", { id: "c1", status: "ACTIVE" });
+    plans.set("p1", {
+      id: "p1",
+      customerId: "c1",
+      status: "ACTIVE",
+      serviceFrequency: "QUARTERLY",
+      planName: "Residential quarterly",
+      delinquent: true,
+    });
+
+    await scheduleNextRecurringVisit(completedJob);
+
+    expect(created).toHaveLength(0);
   });
 });

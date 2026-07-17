@@ -72,6 +72,14 @@ export const schema = a.schema({
   ]),
   PaymentMethodKind: a.enum(["CARD", "BANK"]),
   EmailStatus: a.enum(["SENT", "FAILED"]),
+  // A card dispute's lifecycle at Stripe. NEEDS_RESPONSE is the one with a
+  // clock on it (evidenceDueBy); WON/LOST are terminal.
+  DisputeStatus: a.enum([
+    "NEEDS_RESPONSE",
+    "UNDER_REVIEW",
+    "WON",
+    "LOST",
+  ]),
 
   CustomerGroup: a
     .model({
@@ -153,6 +161,15 @@ export const schema = a.schema({
       stripeSubscriptionId: a.string(),
       startDate: a.date(),
       canceledAt: a.datetime(),
+      // Delinquency suspension: set when a plan's subscription invoice has
+      // failed every dunning retry and the customer has stopped paying. It is
+      // NOT a cancellation — the plan stays ACTIVE with its subscription id, so
+      // office reporting still shows it — but the recurring engine refuses to
+      // queue the next visit while it is true (recurring.ts), so BuzzKill stops
+      // dispatching technicians to a non-paying customer. A later invoice.paid
+      // on the subscription clears it and service resumes.
+      delinquent: a.boolean(),
+      delinquentSince: a.datetime(),
       notes: a.string(),
       accessGroups: a.string().array(),
       jobs: a.hasMany("Job", "servicePlanId"),
@@ -620,6 +637,33 @@ export const schema = a.schema({
       issuedAt: a.datetime(),
       paidAt: a.datetime(),
       failureReason: a.string(),
+      // Recovery lifecycle for open/overdue money. dueDate is when payment is
+      // expected — aging is computed from it, falling back to issuedAt when a
+      // row predates due dates. terms names the payment window the office chose
+      // (DUE_ON_RECEIPT | NET_15 | NET_30); poNumber is the customer's PO if
+      // they gave one.
+      dueDate: a.date(),
+      terms: a.string(),
+      poNumber: a.string(),
+      // Dunning schedule for a FAILED charge. dunningAttempts counts the retries
+      // this system has made against the saved card; nextDunningAt is when the
+      // daily cron next re-attempts it; lastDunningAt is when it last did.
+      dunningAttempts: a.integer(),
+      nextDunningAt: a.datetime(),
+      lastDunningAt: a.datetime(),
+      // Recovery ownership: the one person on the hook for collecting this. Set
+      // by assignRecoveryOwner from the caller's identity ("Assign to me"), so
+      // every open/overdue/failed item in the recovery queue has exactly one
+      // owner and none fall between people.
+      ownerSub: a.string(),
+      ownerEmail: a.string(),
+      // Who settled an OPEN/FAILED invoice and how, when payment finally
+      // arrived (settleInvoice / payInvoice). settleNote carries the offline
+      // reference — cheque number, transfer memo. Stamped server-side, never
+      // from the browser, same as createdBy.
+      settledBy: a.string(),
+      settledByEmail: a.string(),
+      settleNote: a.string(),
       // Refunds. Cumulative, because an invoice can be refunded more than once
       // in parts. status flips to REFUNDED only when the whole amount is back;
       // until then the invoice stays PAID with a non-zero refundedAmountCents,
@@ -663,6 +707,46 @@ export const schema = a.schema({
     //
     // Delete is gone too. An invoice is withdrawn with VOID, which leaves the
     // row, the reason and the actor behind.
+    .authorization((allow) => [
+      allow.groups(["OWNER", "FINANCE", "OFFICE"]).to(["read"]),
+      allow.groupsDefinedIn("accessGroups").to(["read"]),
+    ]),
+
+  /**
+   * A card chargeback opened at Stripe. This is money already taken back out of
+   * the account with a clock attached — evidenceDueBy is the hard deadline to
+   * respond, and a missed one loses the dispute by default. BuzzKill does not
+   * build an evidence editor: the office responds in the Stripe dashboard. This
+   * row exists so a dispute cannot open silently — it drives the ACTION-REQUIRED
+   * office email, the recovery queue's dispute SLA, and the deadline alerts.
+   *
+   * Browser-read-only, exactly like Invoice: every write is a Lambda. The
+   * webhook creates and closes disputes (charge.dispute.created / .closed) and
+   * assignRecoveryOwner stamps the owner. No human role can forge one — a
+   * fabricated "WON" dispute is a fabricated financial outcome.
+   */
+  Dispute: a
+    .model({
+      stripeDisputeId: a.string().required(),
+      customerId: a.id(),
+      invoiceId: a.id(),
+      amountCents: a.integer().required(),
+      reason: a.string(),
+      status: a.ref("DisputeStatus").required(),
+      // The Stripe deadline to submit evidence. The whole reason this row alerts
+      // loudly — miss it and the dispute is lost by default.
+      evidenceDueBy: a.datetime(),
+      openedAt: a.datetime(),
+      closedAt: a.datetime(),
+      // Recovery ownership, same as Invoice — one person owns the response.
+      ownerSub: a.string(),
+      ownerEmail: a.string(),
+      accessGroups: a.string().array(),
+    })
+    .secondaryIndexes((index) => [
+      index("stripeDisputeId"),
+      index("status"),
+    ])
     .authorization((allow) => [
       allow.groups(["OWNER", "FINANCE", "OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
@@ -977,9 +1061,76 @@ export const schema = a.schema({
       /** How it arrived: CASH | CHEQUE | BANK | OTHER. Recorded in the notes. */
       method: a.string(),
       jobId: a.string(),
+      /** Payment window for the OPEN (invoice-for-later) path — sets dueDate:
+       *  DUE_ON_RECEIPT | NET_15 | NET_30. Ignored for PAID. */
+      terms: a.string(),
+      /** The customer's purchase-order number, if they gave one. */
+      poNumber: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Settle an existing OPEN or FAILED invoice when payment finally arrives.
+   *
+   *   method OFFLINE — cash, cheque, or transfer landed. Marks the invoice PAID
+   *     with the actor and an optional reference note. Moves no money.
+   *   method CARD — charges the customer's saved card off-session for the
+   *     invoice amount and settles it to PAID on success, with a receipt.
+   *
+   * Idempotent on an already-PAID invoice; refuses anything that is not OPEN or
+   * FAILED (a VOID/REFUNDED/DRAFT invoice is not a bill awaiting payment). This
+   * is the "the money came in — close the invoice" action the old
+   * recordOfflinePayment could not do: it only ever created a new row.
+   */
+  settleInvoice: a
+    .mutation()
+    .arguments({
+      invoiceId: a.string().required(),
+      /** OFFLINE (cash/cheque/transfer, no Stripe) or CARD (charge saved card). */
+      method: a.string().required(),
+      note: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * The customer-facing pay button (also usable by OWNER/FINANCE for a
+   * customer). Charges the acting customer's saved card for an OPEN or FAILED
+   * invoice and settles it, with a receipt on success and an honest failure
+   * otherwise (no card on file, or a decline).
+   *
+   * A CUSTOMER may pay only their OWN invoice — the handler enforces that with
+   * assertCanActForCustomer against the invoice's customerId, so customer A can
+   * never pay (and thereby probe) customer B's invoice.
+   */
+  payInvoice: a
+    .mutation()
+    .arguments({ invoiceId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [
+      allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),
+    ])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * Take ownership of a recovery item — an Invoice or a Dispute — so every
+   * open/overdue/failed thing has exactly one person on the hook for it.
+   * "Assign to me": stamps ownerSub/ownerEmail from the caller's own identity,
+   * never from the request. OFFICE can own too — chasing money is office work
+   * even though moving it is finance work.
+   */
+  assignRecoveryOwner: a
+    .mutation()
+    .arguments({
+      /** INVOICE or DISPUTE. */
+      kind: a.string().required(),
+      id: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "FINANCE", "OFFICE"])])
     .handler(a.handler.function(crmBilling)),
 
   /**

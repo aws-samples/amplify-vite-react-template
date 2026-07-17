@@ -9,7 +9,8 @@ import { defineFunction, secret } from "@aws-amplify/backend";
  * in the Stripe dashboard with events:
  *   setup_intent.succeeded, payment_intent.succeeded,
  *   payment_intent.payment_failed, invoice.paid, invoice.payment_failed,
- *   customer.subscription.deleted
+ *   customer.subscription.deleted, charge.refunded,
+ *   charge.dispute.created, charge.dispute.closed
  * then set the signing secret:
  *   npx ampx sandbox secret set STRIPE_WEBHOOK_SECRET   # local
  *   Amplify Console → App settings → Secrets            # deployed branches
