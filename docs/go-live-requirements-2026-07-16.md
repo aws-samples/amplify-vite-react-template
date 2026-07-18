@@ -41,6 +41,22 @@ Go-live requires all of the following:
 Within each tier, gates are ordered from highest expected business impact to lowest. Priority changes
 implementation order, not launch status: **P0, P1, and P2 are all go-live blockers.**
 
+## Opus 4.8 on Ultracode likelihood
+
+These are judgment-based planning estimates, not benchmark results. Each percentage estimates the
+likelihood that Opus 4.8 on Ultracode could close the **entire remaining gate** with repository access
+and normal development credentials. The estimate includes implementation and integration work, but
+counts business-policy decisions, legal or compliance approval, production-account access, vendor
+action, and physical operating setup as dependencies the agent cannot complete alone.
+
+- **Very high (85–95%):** Predominantly bounded code, interface, or data work.
+- **High (70–84%):** Substantial code work with manageable integration or business dependencies.
+- **Medium (45–69%):** Code is feasible, but major policy, provider, data, or operating inputs are
+  required.
+- **Low (20–44%):** Closure depends mostly on leadership, legal/compliance, production providers, or
+  operating setup.
+- **Very low (below 20%):** Predominantly non-software work.
+
 ## Systemic issues behind several gates
 
 - **X1 — Customer and visit-change history can still disappear.** `CustomerLifecycleEvent` and
@@ -53,32 +69,32 @@ implementation order, not launch status: **P0, P1, and P2 are all go-live blocke
 
 ## Gate register
 
-| Priority | ID | Remaining gate | Accountable business owner | Impact if missed |
-|---|---|---|---|---|
-| P0 | GL-14 | Finish durable staff-access changes and offboarding | CEO | Partial or legacy access changes leave live privilege, stranded work, or missing history |
-| P0 | GL-13 | Finish technician session, route, and historical-data boundaries | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access |
-| P0 | GL-15 | Finish regulated-report durability and compliance sign-off | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer |
-| P0 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Work billed out of season or performed outside legal authority |
-| P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched |
-| P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money |
-| P0 | GL-09 | Make customer lifecycle transitions atomic and auditable | Head of Operations | Deactivation leaves a live portal login, or status disagrees with billing |
-| P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | Customer told billing stopped while the subscription is still live |
-| P0 | GL-07 | Finish durable office cancel/reschedule | Head of Operations | A canceled visit still charges, promised credit vanishes, or concurrent changes conflict |
-| P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it |
-| P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer told "booked/paid" while the payment can still fail |
-| P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI or an employee publishes a loss-making or nonsensical price |
-| P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented |
-| P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims |
-| P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money |
-| P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | A background failure stays silent, or records cannot be restored |
-| P1 | GL-18 | Verifiable exception resolution | Head of Operations | Dashboard turns green while the customer problem remains |
-| P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning |
-| P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | A public promise becomes uncontrolled free work or a dispute |
-| P1 | GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | Revenue leaks through unowned, unstaged, or duplicate leads |
-| P1 | GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer waits on a call that was promised but never owned |
-| P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Reschedule, callback, and help requests fall back to phone calls |
-| P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner |
-| P2 | GL-24 | Low-skill, failure-resistant workflows | Head of Operations | Launch still depends on tribal knowledge |
+| Priority | ID | Remaining gate | Accountable business owner | Impact if missed | Opus 4.8 / Ultracode likelihood |
+|---|---|---|---|---|---|
+| P0 | GL-14 | Finish durable staff-access changes and offboarding | CEO | Partial or legacy access changes leave live privilege, stranded work, or missing history | **78% — High** |
+| P0 | GL-13 | Finish technician session, route, and historical-data boundaries | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **68% — Medium** |
+| P0 | GL-15 | Finish regulated-report durability and compliance sign-off | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **58% — Medium** |
+| P0 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Work billed out of season or performed outside legal authority | **32% — Low** |
+| P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched | **62% — Medium** |
+| P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **72% — High** |
+| P0 | GL-09 | Make customer lifecycle transitions atomic and auditable | Head of Operations | Deactivation leaves a live portal login, or status disagrees with billing | **76% — High** |
+| P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | Customer told billing stopped while the subscription is still live | **82% — High** |
+| P0 | GL-07 | Finish durable office cancel/reschedule | Head of Operations | A canceled visit still charges, promised credit vanishes, or concurrent changes conflict | **74% — High** |
+| P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **57% — Medium** |
+| P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer told "booked/paid" while the payment can still fail | **86% — Very high** |
+| P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI or an employee publishes a loss-making or nonsensical price | **38% — Low** |
+| P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented | **30% — Low** |
+| P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
+| P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money | **28% — Low** |
+| P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **48% — Medium** |
+| P1 | GL-18 | Verifiable exception resolution | Head of Operations | Dashboard turns green while the customer problem remains | **88% — Very high** |
+| P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning | **70% — High** |
+| P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **60% — Medium** |
+| P1 | GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | Revenue leaks through unowned, unstaged, or duplicate leads | **80% — High** |
+| P1 | GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer waits on a call that was promised but never owned | **87% — Very high** |
+| P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **74% — High** |
+| P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner | **24% — Low** |
+| P2 | GL-24 | Low-skill, failure-resistant workflows | Head of Operations | Launch still depends on tribal knowledge | **72% — High** |
 
 ---
 
@@ -574,20 +590,28 @@ can be restored after human or provider error.
 **Business outcome:** An operational failure stays visible until the promised real-world outcome is true;
 employees cannot make the dashboard green by writing a note.
 
+**Why this is still a gate:** Engineering closed the enforcement (X2). `updateOwnedWork` no longer
+resolves an exception from a free-text note: a verifiable case closes only from an outcome the server
+re-checks against live data — a technician actually assigned, a refund/void/cancel settled, an email on
+file, a visit rebooked, or a booking finalized — and any close without a verifiable outcome is an
+OWNER-only manual override that requires a controlled reason and an evidence note, is stamped
+`resolvedManualOverride`, records a distinct `MANUAL_OVERRIDE` ledger event, and is separately filterable
+in the queue. Every exception type is now triaged in one shared registry — severity
+(Critical/High/Routine), a plain customer-impact line, its owning team, its SLA, and a small controlled
+set of resolution actions and override reasons — which drives the office queue with no free-text close.
+Offboarding now returns a departing person's OPEN claims to the shared team inbox with a `RELEASED`
+event, so no required action stays owned by someone who has left. What remains is business approval of
+the policy the control enforces — the encoded values are provisional until the Head of Operations signs
+them.
+
 **Remaining requirements:**
 
-- **Any routine OFFICE user can close any exception with a free-text note (X2).** The resolve path requires
-  only a non-empty note and is open to routine staff, including money and no-access cases whose outcome
-  was never verified. Where the app can verify the outcome, it must close only from the verified event
-  (refund settled, message delivered or alternate contact recorded, job rebooked, payment finalized,
-  portal access restored, duplicate decision completed). Manual closure must be limited to an
-  owner/manager, require a controlled reason plus evidence, and be separately reported.
-- **Exceptions have no severity, customer-impact label, or controlled set of valid resolution actions** —
-  each type carries only a deadline, an owner team, and one free-text action. Each type needs a named
-  team/owner, severity, response deadline, customer-impact label, and a small set of valid resolution
-  actions.
-- Until claimed, a required action is owned by a shared team inbox; no required action may be owned only
-  by a shared mailbox or a person who has been offboarded.
+- The Head of Operations approves, per exception type, the encoded severity, customer-impact wording,
+  response deadline, controlled resolution actions, and override reasons — and confirms OWNER is the
+  intended "owner/manager" tier for a manual override (there is no separate MANAGER role today).
+- The shared team inboxes each type routes to (Operations/Sales/Finance) are the real, staffed
+  destinations named in GL-23, so an unclaimed or released action is owned by a monitored inbox, not an
+  unwatched mailbox.
 
 **Pass owner:** Head of Operations.
 
