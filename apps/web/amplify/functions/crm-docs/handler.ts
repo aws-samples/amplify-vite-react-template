@@ -806,6 +806,95 @@ async function resolveRebookedNoAccessWork(
  * is the whole point: the technician's app must ask for these before it lets
  * them send, and the server must not take its word for it.
  */
+/**
+ * A GPS reading captured this far outside the real application window is treated
+ * as stale — it belongs to a different visit, not this one. Measured against the
+ * server-stamped window, never against finalize time, so a report legitimately
+ * written up the next morning still validates against yesterday's capture. This
+ * is a sanity bound on "same visit", not the Compliance precision policy.
+ */
+const GEO_CAPTURE_GRACE_MS = 2 * 60 * 60 * 1000;
+/**
+ * Beyond this radius a fix is cell-tower triangulation, not an on-site GPS lock —
+ * it cannot prove presence at an address at all. This is an implausibility
+ * ceiling, deliberately loose; the actual required precision is a Compliance
+ * decision layered on top of it.
+ */
+const GEO_IMPLAUSIBLE_ACCURACY_M = 2000;
+
+/**
+ * Location is the report's proof that the technician was physically at the
+ * address. Until now finalize only checked that a latitude and longitude were
+ * present — a reading with no timestamp, no accuracy, an impossible coordinate,
+ * a cell-tower-grade radius, or a capture from a different day all passed as
+ * "proof". This validates the reading as evidence: it exists, it is a real point
+ * on earth, it carries a plausible accuracy, and it was taken during the visit.
+ *
+ * What it deliberately does NOT do: enforce a precise accuracy threshold or a
+ * maximum distance from the service address (that needs the address geocoded and
+ * a Compliance-approved radius), or run the named-manager exception process.
+ * Those are the on-site-presence policy the Compliance owner still has to set.
+ */
+function assertLocationIsPresence(
+  report: {
+    geoLat?: number | null;
+    geoLng?: number | null;
+    geoAccuracyM?: number | null;
+    geoCapturedAt?: string | null;
+  },
+  job: { startedAt?: string | null; applicationEndAt?: string | null }
+) {
+  if (report.geoLat == null || report.geoLng == null) {
+    throw new Error("Capture the location on site before sending the report");
+  }
+  if (
+    !Number.isFinite(report.geoLat) ||
+    !Number.isFinite(report.geoLng) ||
+    Math.abs(report.geoLat) > 90 ||
+    Math.abs(report.geoLng) > 180 ||
+    (report.geoLat === 0 && report.geoLng === 0)
+  ) {
+    throw new Error(
+      "The captured location isn't a real point on the map — capture it again on site"
+    );
+  }
+  if (report.geoCapturedAt == null || report.geoAccuracyM == null) {
+    throw new Error(
+      "Re-capture the location on site — this reading is missing its time or its accuracy, so it can't stand as proof you were there"
+    );
+  }
+  if (!Number.isFinite(report.geoAccuracyM) || report.geoAccuracyM <= 0) {
+    throw new Error(
+      "The location reading has no real accuracy — capture it again on site"
+    );
+  }
+  if (report.geoAccuracyM > GEO_IMPLAUSIBLE_ACCURACY_M) {
+    throw new Error(
+      `The location is only accurate to about ${Math.round(
+        report.geoAccuracyM
+      )} m — too imprecise to prove on-site presence. Step outside for a clearer GPS fix and re-capture.`
+    );
+  }
+  const capturedMs = Date.parse(report.geoCapturedAt);
+  if (Number.isNaN(capturedMs)) {
+    throw new Error(
+      "The location reading's timestamp is unreadable — capture it again on site"
+    );
+  }
+  const startMs = Date.parse(job.startedAt ?? "");
+  const endMs = Date.parse(job.applicationEndAt ?? "");
+  if (
+    !Number.isNaN(startMs) &&
+    !Number.isNaN(endMs) &&
+    (capturedMs < startMs - GEO_CAPTURE_GRACE_MS ||
+      capturedMs > endMs + GEO_CAPTURE_GRACE_MS)
+  ) {
+    throw new Error(
+      "The location was captured outside the time you were on site — re-capture it during the visit so the record proves you were there"
+    );
+  }
+}
+
 function assertReportIsARecord(
   report: {
     inspectionOnly?: boolean | null;
@@ -814,6 +903,8 @@ function assertReportIsARecord(
     reEntryIntervalHours?: number | null;
     geoLat?: number | null;
     geoLng?: number | null;
+    geoAccuracyM?: number | null;
+    geoCapturedAt?: string | null;
   },
   job: {
     status: string | null;
@@ -848,9 +939,7 @@ function assertReportIsARecord(
   if (!report.servicesPerformed?.trim()) {
     throw new Error("Say what was done before sending the report");
   }
-  if (report.geoLat == null || report.geoLng == null) {
-    throw new Error("Capture the location on site before sending the report");
-  }
+  assertLocationIsPresence(report, job);
 
   const products = parseProducts(report.productsUsed);
 

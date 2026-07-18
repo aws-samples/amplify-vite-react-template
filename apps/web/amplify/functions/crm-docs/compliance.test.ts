@@ -161,6 +161,9 @@ const validReport = (over: Partial<Report> = {}): Report => ({
   reEntryIntervalHours: 4,
   geoLat: 41.82,
   geoLng: -71.41,
+  geoAccuracyM: 12,
+  // Inside the finalize-gate job window (13:05–14:10 on 2026-07-16).
+  geoCapturedAt: "2026-07-16T13:30:00Z",
   ...over,
 });
 
@@ -644,6 +647,49 @@ describe("the finalize gate", () => {
     await expect(
       call("finalizeServiceReport", { reportId: "rep_1" })
     ).rejects.toThrow(/capture the location/i);
+  });
+
+  it("refuses an impossible coordinate — 0,0 is not an address", async () => {
+    reports.push(validReport({ geoLat: 0, geoLng: 0 }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/real point on the map/i);
+  });
+
+  it("refuses a location with no capture time or accuracy — it isn't proof", async () => {
+    reports.push(validReport({ geoCapturedAt: null }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/proof you were there|time or its accuracy/i);
+  });
+
+  it("refuses an implausibly imprecise location — a cell-tower fix isn't presence", async () => {
+    reports.push(validReport({ geoAccuracyM: 5000 }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/too imprecise/i);
+  });
+
+  it("refuses a location captured on a different day — stale for this visit", async () => {
+    // Valid reading, but from yesterday: it cannot prove presence at today's visit.
+    reports.push(validReport({ geoCapturedAt: "2026-07-15T13:30:00Z" }));
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/outside the time you were on site/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("accepts a location captured just before Start, within the grace", async () => {
+    // 12:45 is 20 min before the 13:05 start — the tech captured GPS on arrival.
+    reports.push(validReport({ geoCapturedAt: "2026-07-16T12:45:00Z" }));
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
   });
 
   it("refuses without saying what was done", async () => {
