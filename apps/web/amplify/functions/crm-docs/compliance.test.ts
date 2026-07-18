@@ -23,6 +23,7 @@ let technician: Record<string, unknown>;
 let customer: Record<string, unknown>;
 let routes: Record<string, unknown>[] = [];
 let catalog: Record<string, unknown>[] = [];
+let workItems: Record<string, unknown>[] = [];
 const officeEmails: { subject: string; bodyHtml: string }[] = [];
 
 const fakeDataClient = {
@@ -80,12 +81,35 @@ const fakeDataClient = {
     Product: {
       list: async () => ({ data: catalog }),
     },
+    WorkItem: {
+      get: async ({ id }: { id: string }) => ({
+        data: workItems.find((w) => w.id === id) ?? null,
+        errors: undefined,
+      }),
+      create: async (input: Record<string, unknown>) => {
+        const w = { ...input };
+        workItems.push(w);
+        return { data: w, errors: undefined };
+      },
+      update: async (patch: Record<string, unknown>) => {
+        const i = workItems.findIndex((w) => w.id === patch.id);
+        if (i < 0) return { data: null, errors: [{ message: "not found" }] };
+        workItems[i] = { ...workItems[i], ...patch };
+        return { data: workItems[i], errors: undefined };
+      },
+    },
+    WorkEvent: {
+      create: async (input: Record<string, unknown>) => ({
+        data: { id: `evt_${input.workItemId}`, ...input },
+        errors: undefined,
+      }),
+    },
   },
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
-  sendEmail: async () => true,
+  sendEmail: vi.fn(async () => true),
   notifyOffice: async (o: { subject: string; bodyHtml: string }) => {
     officeEmails.push(o);
     return true;
@@ -109,6 +133,7 @@ vi.mock("@aws-sdk/s3-request-presigner", () => ({
 }));
 
 const { handler } = await import("./handler");
+const { sendEmail } = await import("../shared/email");
 
 const call = (
   field: string,
@@ -150,6 +175,7 @@ beforeEach(() => {
   };
   customer = {
     displayName: "Dana Whitlock",
+    email: "dana@example.com",
     groupId: null,
     serviceStreet: "18 Cedar Ln",
     serviceCity: "Providence",
@@ -172,7 +198,10 @@ beforeEach(() => {
       labelApproved: true,
     },
   ];
+  workItems = [];
   officeEmails.length = 0;
+  vi.mocked(sendEmail).mockReset();
+  vi.mocked(sendEmail).mockResolvedValue(true);
 });
 
 describe("regulated assignment", () => {
@@ -729,6 +758,68 @@ describe("the finalize gate", () => {
     await expect(
       call("finalizeServiceReport", { reportId: "rep_1" })
     ).rejects.toThrow(/approved product|product log/i);
+  });
+
+  describe("completion and delivery are separate facts", () => {
+    it("records the report as delivered when the email reaches the customer", async () => {
+      reports.push(validReport());
+
+      const res = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
+        deliveryStatus: string;
+      };
+
+      expect(res.deliveryStatus).toBe("DELIVERED");
+      expect(reports[0].deliveryStatus).toBe("DELIVERED");
+      expect(reports[0].emailedAt).toBeTruthy();
+      expect(reports[0].status).toBe("FINALIZED");
+    });
+
+    it("completes the report but marks delivery failed when the send bounces", async () => {
+      vi.mocked(sendEmail).mockResolvedValueOnce(false);
+      reports.push(validReport());
+
+      const res = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
+        deliveryStatus: string;
+      };
+
+      // The record stands — the job was done — but no one may read it as sent.
+      expect(res.deliveryStatus).toBe("FAILED");
+      expect(reports[0].deliveryStatus).toBe("FAILED");
+      expect(reports[0].emailedAt).toBeUndefined();
+      expect(reports[0].status).toBe("FINALIZED");
+      expect(jobs[0].status).toBe("COMPLETED");
+    });
+
+    it("marks delivery NO_EMAIL and opens an owned delivery task when nothing is on file", async () => {
+      customer.email = null;
+      reports.push(validReport());
+
+      const res = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
+        deliveryStatus: string;
+      };
+
+      expect(res.deliveryStatus).toBe("NO_EMAIL");
+      expect(reports[0].deliveryStatus).toBe("NO_EMAIL");
+      // The record is still complete — completion does not wait on delivery.
+      expect(reports[0].status).toBe("FINALIZED");
+      expect(jobs[0].status).toBe("COMPLETED");
+      // The undelivered record is owned work, not a silent gap.
+      const task = workItems.find(
+        (w) => w.kind === "MISSING_CONTACT" && w.relatedId === "rep_1"
+      );
+      expect(task).toBeTruthy();
+      expect(String(task!.resolutionAction)).toMatch(/deliver|re-send|alternate/i);
+    });
+
+    it("does not send, so does not claim delivery, when there is no email", async () => {
+      customer.email = null;
+      reports.push(validReport());
+
+      await call("finalizeServiceReport", { reportId: "rep_1" });
+
+      expect(sendEmail).not.toHaveBeenCalled();
+      expect(reports[0].emailedAt).toBeUndefined();
+    });
   });
 });
 

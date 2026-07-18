@@ -174,6 +174,28 @@ export function StatusBadge({ status }: { status?: string | null }) {
   );
 }
 
+/**
+ * A finalized report's delivery state — separate from completion. A report can
+ * be complete and still not have reached the customer, so this never says
+ * "sent" unless it was. `emailedAt` covers reports finalized before
+ * deliveryStatus existed: a stamped time means it was delivered.
+ */
+export function DeliveryBadge({
+  status,
+  emailedAt,
+}: {
+  status?: string | null;
+  emailedAt?: string | null;
+}) {
+  const resolved = status ?? (emailedAt ? "DELIVERED" : null);
+  if (resolved === "DELIVERED") return <Badge tone="ok">sent to customer</Badge>;
+  if (resolved === "FAILED")
+    return <Badge tone="danger">delivery failed — office notified</Badge>;
+  if (resolved === "NO_EMAIL")
+    return <Badge tone="warn">no email on file — office will deliver</Badge>;
+  return null;
+}
+
 export function ListRow({
   title,
   subtitle,

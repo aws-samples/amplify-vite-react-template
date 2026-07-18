@@ -32,6 +32,7 @@ import {
   Badge,
   Button,
   Card,
+  DeliveryBadge,
   ErrorNote,
   SuccessNote,
   Field,
@@ -884,7 +885,15 @@ export default function CustomerDetail() {
               key={r.id}
               title={fmtDate(r.serviceDate, true)}
               subtitle={r.servicesPerformed ?? undefined}
-              meta={r.pdfKey ? <DocButton docKey={r.pdfKey} /> : undefined}
+              meta={
+                <>
+                  <DeliveryBadge
+                    status={r.deliveryStatus}
+                    emailedAt={r.emailedAt}
+                  />
+                  {r.pdfKey ? <DocButton docKey={r.pdfKey} /> : null}
+                </>
+              }
             />
           ))
         )}

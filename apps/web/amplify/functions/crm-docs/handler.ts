@@ -1076,12 +1076,40 @@ async function finalizeServiceReport(reportId: string) {
     });
   }
 
+  // Completion and delivery are separate facts. The report is a finalized legal
+  // record regardless of whether it reached the customer — but "we finished the
+  // job" must never be read as "the customer has their copy". A send that failed
+  // already opened EMAIL_FAILURE work inside sendEmail; a customer with no email
+  // on file would otherwise leave no trace at all, so it opens its own delivery
+  // task here. Either way the report carries an honest deliveryStatus the office
+  // and technician can see, and an undelivered record is owned work, not a gap.
+  const deliveryStatus: "DELIVERED" | "FAILED" | "NO_EMAIL" = emailed
+    ? "DELIVERED"
+    : customer.email
+      ? "FAILED"
+      : "NO_EMAIL";
+  if (deliveryStatus === "NO_EMAIL") {
+    await openOwnedWork({
+      kind: "MISSING_CONTACT",
+      dedupeKey: `service-report-delivery:${reportId}`,
+      title: `Service report undelivered — no email on file: ${customer.displayName}`,
+      detail: `${customer.displayName}'s ${job.serviceType} service report is finalized and is the pesticide record, but there is no email address on file to deliver their copy to.`,
+      customerId: customer.id,
+      relatedId: reportId,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Add and verify the customer's email and re-send the report, or deliver the copy by an approved alternate method (mail or hand-off) and record how it was delivered.",
+      ownerTeam: "OPS",
+    });
+  }
+
   await client.models.ServiceReport.update({
     id: reportId,
     status: "FINALIZED",
     pdfKey,
     applicationStartAt: applicationStartIso,
     applicationEndAt: applicationEndIso,
+    deliveryStatus,
     ...(emailed ? { emailedAt: new Date().toISOString() } : {}),
   });
   const completedAt = new Date().toISOString();
@@ -1093,7 +1121,7 @@ async function finalizeServiceReport(reportId: string) {
   await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });
 
-  return { pdfKey, emailed, alreadyFinalized: false };
+  return { pdfKey, emailed, deliveryStatus, alreadyFinalized: false };
 }
 
 /**

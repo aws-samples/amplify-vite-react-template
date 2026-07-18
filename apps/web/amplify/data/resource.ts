@@ -62,6 +62,12 @@ export const schema = a.schema({
   RouteStatus: a.enum(["PLANNED", "IN_PROGRESS", "COMPLETE"]),
   AgreementStatus: a.enum(["DRAFT", "SENT", "VIEWED", "SIGNED", "VOID"]),
   ReportStatus: a.enum(["DRAFT", "FINALIZED"]),
+  // Delivery is a separate fact from completion. A finalized report is the legal
+  // pesticide record whether or not it reached the customer; this tracks whether
+  // the customer actually received their copy. FAILED (the send bounced) and
+  // NO_EMAIL (nothing on file to send to) each own a delivery task until a human
+  // gets the record to the customer and records how.
+  ReportDelivery: a.enum(["DELIVERED", "FAILED", "NO_EMAIL"]),
   InvoiceStatus: a.enum([
     "DRAFT",
     "OPEN",
@@ -710,6 +716,9 @@ export const schema = a.schema({
       pdfKey: a.string(),
       photoKeys: a.string().array(),
       emailedAt: a.datetime(),
+      /** Whether the customer actually received their copy — separate from the
+       *  report being finalized. Unset on a draft; set at finalize. */
+      deliveryStatus: a.ref("ReportDelivery"),
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [index("jobId")])

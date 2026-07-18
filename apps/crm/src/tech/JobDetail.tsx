@@ -23,6 +23,7 @@ import {
   Badge,
   Button,
   Card,
+  DeliveryBadge,
   ErrorNote,
   Field,
   Page,
@@ -396,7 +397,11 @@ export default function TechJob() {
       {report?.status === "FINALIZED" ? (
         <Card title="Service report">
           <div className="row-split">
-            <Badge tone="ok">completed &amp; sent</Badge>
+            <Badge tone="ok">completed</Badge>
+            <DeliveryBadge
+              status={report.deliveryStatus}
+              emailedAt={report.emailedAt}
+            />
             {report.pdfKey ? <DocButton docKey={report.pdfKey} /> : null}
           </div>
           <ReportPhotos report={report} readOnly onChanged={load} />
