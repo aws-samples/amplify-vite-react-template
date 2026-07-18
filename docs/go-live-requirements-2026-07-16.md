@@ -58,7 +58,10 @@ several gates at the same time.
   the exception queue's own events are ever displayed. "Leadership can prove who changed what, and
   export it, without engineering" is therefore unmet everywhere it is promised (GL-14, GL-09, GL-15,
   GL-07). Worse, these same ledger writes are **best-effort**: the code logs and swallows a failed write,
-  so the one record that proves a sensitive action can silently not exist.
+  so the one record that proves a sensitive action can silently not exist. *(Update: the `StaffAccessEvent`
+  side is now closed under GL-14 — its write is a required durable outcome that opens a security case on
+  failure, and an owner-only Access history screen searches and exports it. `CustomerLifecycleEvent` and
+  `VisitChangeEvent` remain best-effort and unsurfaced.)*
 
 - **X2 — Any office user can close any exception by typing a note.** The exception-resolution path
   accepts a single free-text note from routine OFFICE staff and closes the case, including money and
@@ -110,35 +113,38 @@ partial result if they do not converge. Technician and login records are linked 
 Future jobs are unassigned with a per-job check, and a downstream failure opens an owned Operations case
 instead of a false "done." The immutable `StaffAccessEvent` ledger model exists and is read-only.
 
-**What remains the gate:**
+**Closed since last review (commit `50e04b4`, verified against the tree):**
 
-- **A demotion does not end the person's sessions.** Removing a role only changes group membership; the
-  old token keeps the removed role until it expires. Removing privilege must invalidate existing
-  sessions the same way offboarding does — an old token and a freshly issued token are both refused
-  immediately after a demotion, and the operator is not told access ended until the provider's enabled
-  state and effective groups are read back.
-- **The offboarding sequence is not fail-safe.** The disable-the-login step currently removes groups
-  *before* disabling, so a failure early in that step can leave the person enabled with a changed role
-  set. Disable and sign-out must happen first; a timeout or provider error at any step must leave a
-  durable owned **security** case with one idempotent resume action, not an enabled or ambiguously
-  privileged person.
-- **There is no durable request behind the change.** Every role reduction and offboarding must start
-  from a written request holding actor, target, prior and requested roles, an **approved reason
-  (controlled list, not optional free text)**, timestamp, and an idempotency/version key. Blank or
-  unexplained access changes are refused. Concurrency control must prevent two simultaneous changes — or
-  two owners each removing the other — from both passing a stale check; at least one usable owner and
-  recovery path must always remain.
-- **Success is not read back.** Offboarding reports the login disabled and the technician inactive
-  without confirming either persisted. **Complete** must mean the expected jobs are unassigned, the
-  technician is verified inactive, no job is left on an abandoned route, and each in-progress visit is in
-  owned Operations review.
-- **The audit ledger is best-effort and invisible (see X1).** Its write result is ignored, so the record
-  can silently fail to exist, and no business screen can search or export it. The event and any
-  partial-result case must be **required durable outcomes**; leadership must be able to search and export
-  the immutable history from an authorized screen without engineering.
-- Production has at least two named usable owners with MFA and separate recovery access, and a
-  break-glass procedure that lets either owner recover access and offboard the other without engineering
-  or a shared login.
+- **A demotion now ends the person's sessions.** `changeStaffRoles` globally signs the login out whenever
+  any role is removed, so an old token cannot keep the removed role, and it reads the effective groups
+  back from Cognito and reports `sessionsInvalidated` — the operator is told the real end state, not the
+  requested one.
+- **Offboarding is fail-safe and correctly ordered.** `killLogin` now disables and globally signs out
+  **first**, then removes groups, so the moment those two land the person cannot act even if a later
+  step fails. Any step failing opens a durable owned **STAFF_SECURITY** case (30-minute clock) with one
+  idempotent resume — re-run — and rethrows, so success is never reported over a half-revoked login.
+- **Every change starts from a durable, controlled request.** A role reduction and an offboarding each
+  require an **approved reason from a fixed list** (`STAFF_ROLE_CHANGE_REASONS` / `STAFF_OFFBOARD_REASONS`;
+  `OTHER` demands a note) — blank or free-typed reasons are refused before anything is touched — and carry
+  an **idempotency key** that dedupes a replay to a no-op returning the recorded outcome. The row records
+  actor, target, prior and requested roles, the verified new roles, the reason code, and the key. A
+  post-change concurrency net re-counts all usable owners; if a race (two owners removing each other) would
+  zero them out, the last change is rolled back and refused, so a recovery path always remains.
+- **Success is read back, not assumed.** Offboarding confirms the login is disabled (re-read) and the
+  technician is verified inactive before it reports **COMPLETE**; jobs are unassigned by the per-job sweep,
+  and each in-progress visit is placed in an owned Operations review. A read-back that cannot confirm the
+  disable opens a security case and downgrades the result to PARTIAL.
+- **The audit ledger is a required durable outcome, and it is visible (X1).** `recordStaffAccessEvent`
+  returns whether the row was written; a miss opens a STAFF_SECURITY case demanding reconstruction and
+  downgrades the action to PARTIAL, so the proof of a sensitive change cannot silently not exist. An
+  owner-only **Access history** screen in the CRM searches and exports (CSV) the immutable
+  `StaffAccessEvent` history without engineering.
+
+**What remains the gate — operational proof only:**
+
+- Production has at least two named usable owners with MFA and separate recovery access, and a witnessed
+  break-glass drill in which either owner recovers access and offboards the other without engineering or a
+  shared login.
 
 **Pass owner:** CEO, with Operations verifying reassigned work.
 
