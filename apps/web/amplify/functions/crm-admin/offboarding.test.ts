@@ -90,6 +90,13 @@ vi.mock("@aws-sdk/client-cognito-identity-provider", () => {
           }
           return {};
         }
+        if (c.__type === "Disable" || c.__type === "Enable") {
+          // Reflect the enabled state in the pool so a later read-back
+          // (readLoginEnabled) sees the real state, exactly as Cognito would.
+          const u = pool.get(username);
+          if (u) u.enabled = c.__type === "Enable";
+          return {};
+        }
         if (c.__type === "GetUser") {
           const u = pool.get(username);
           if (!u) {
@@ -182,6 +189,9 @@ const workItems = new Map<string, Record<string, unknown>>();
 /** Force the technician-deactivation write to fail, so a test can drive the
  *  fail-safe "access removed, downstream owned by a case" (PARTIAL) path. */
 let technicianUpdateThrows = false;
+/** Force the audit-ledger write to fail, so a test can drive the durable-ledger
+ *  "security case + PARTIAL" path. */
+let staffEventCreateThrows = false;
 
 const fakeDataClient = {
   models: {
@@ -218,9 +228,17 @@ const fakeDataClient = {
     },
     StaffAccessEvent: {
       create: async (row: Record<string, unknown>) => {
+        if (staffEventCreateThrows) throw new Error("ledger write failed (injected)");
         staffAccessEvents.push(row);
         return { data: row };
       },
+      listStaffAccessEventByIdempotencyKey: async ({
+        idempotencyKey,
+      }: {
+        idempotencyKey: string;
+      }) => ({
+        data: staffAccessEvents.filter((r) => r.idempotencyKey === idempotencyKey),
+      }),
     },
     WorkItem: {
       get: async ({ id }: { id: string }) => ({ data: workItems.get(id) ?? null }),
@@ -252,10 +270,19 @@ vi.mock("../shared/email", () => ({
 
 const { handler } = await import("./handler");
 
-const call = (field: string, args: Record<string, unknown>) =>
-  (handler as unknown as (e: unknown) => Promise<unknown>)({
+const call = (field: string, args: Record<string, unknown>) => {
+  // GL-14 requires a controlled reason on staff-access changes. Default one in
+  // for the many tests that aren't about the reason itself, so they still reach
+  // the behavior they assert; tests that check the reason pass their own.
+  const needsReason =
+    (field === "changeStaffRoles" || field === "offboardStaff") &&
+    args.reasonCode === undefined;
+  const arguments_ = needsReason
+    ? { ...args, reasonCode: field === "offboardStaff" ? "ROLE_ENDED" : "REASSIGNMENT" }
+    : args;
+  return (handler as unknown as (e: unknown) => Promise<unknown>)({
     info: { fieldName: field },
-    arguments: args,
+    arguments: arguments_,
     identity: {
       sub: "owner-1",
       groups: ["OWNER"],
@@ -263,6 +290,7 @@ const call = (field: string, args: Record<string, unknown>) =>
       claims: { email: "owner@x.com" },
     },
   });
+};
 
 const sentTypes = () => sends.map((s) => s.type);
 
@@ -280,6 +308,7 @@ beforeEach(() => {
   staffAccessEvents.length = 0;
   workItems.clear();
   technicianUpdateThrows = false;
+  staffEventCreateThrows = false;
   notifyOffice.mockClear();
   sendEmail.mockClear();
 });
@@ -674,6 +703,206 @@ describe("offboardStaff (GL-14)", () => {
     expect(String(staffCase!.resolutionAction)).toMatch(/re-run offboard/i);
     // And the ledger records the partial outcome.
     expect(staffAccessEvents[0]).toMatchObject({ action: "OFFBOARD", outcome: "PARTIAL" });
+  });
+});
+
+describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back", () => {
+  it("refuses a role change with no controlled reason, and OTHER without a note", async () => {
+    pool.set("dana@x.com", {
+      username: "dana@x.com",
+      sub: "sub-dana",
+      email: "dana@x.com",
+      groups: ["OFFICE"],
+    });
+    await expect(
+      call("changeStaffRoles", {
+        email: "dana@x.com",
+        roles: ["OFFICE", "FINANCE"],
+        reasonCode: "",
+      })
+    ).rejects.toThrow(/reason is required/i);
+    await expect(
+      call("changeStaffRoles", {
+        email: "dana@x.com",
+        roles: ["OFFICE", "FINANCE"],
+        reasonCode: "OTHER",
+      })
+    ).rejects.toThrow(/needs a short written note/i);
+    // Nothing was changed on either refusal.
+    expect(sentTypes()).not.toContain("AddToGroup");
+  });
+
+  it("refuses an unknown reason code", async () => {
+    pool.set("dana@x.com", {
+      username: "dana@x.com",
+      sub: "sub-dana",
+      email: "dana@x.com",
+      groups: ["OFFICE"],
+    });
+    await expect(
+      call("changeStaffRoles", {
+        email: "dana@x.com",
+        roles: ["FINANCE"],
+        reasonCode: "BECAUSE",
+      })
+    ).rejects.toThrow(/isn't a valid reason/i);
+  });
+
+  it("ends the person's sessions on a demotion (removing a role signs them out)", async () => {
+    pool.set("dana@x.com", {
+      username: "dana@x.com",
+      sub: "sub-dana",
+      email: "dana@x.com",
+      groups: ["OFFICE", "FINANCE"],
+    });
+    const res = (await call("changeStaffRoles", {
+      email: "dana@x.com",
+      roles: ["OFFICE"],
+      reasonCode: "REDUCE_ACCESS",
+    })) as { sessionsInvalidated: boolean; removed: string[] };
+    expect(res.removed).toEqual(["FINANCE"]);
+    expect(res.sessionsInvalidated).toBe(true);
+    expect(sentTypes()).toContain("SignOut");
+    expect(staffAccessEvents[0]).toMatchObject({
+      action: "CHANGE_ROLES",
+      reasonCode: "REDUCE_ACCESS",
+    });
+  });
+
+  it("does NOT sign out when a change only adds a role", async () => {
+    pool.set("dana@x.com", {
+      username: "dana@x.com",
+      sub: "sub-dana",
+      email: "dana@x.com",
+      groups: ["OFFICE"],
+    });
+    const res = (await call("changeStaffRoles", {
+      email: "dana@x.com",
+      roles: ["OFFICE", "FINANCE"],
+      reasonCode: "PROMOTION",
+    })) as { sessionsInvalidated: boolean };
+    expect(res.sessionsInvalidated).toBe(false);
+    expect(sentTypes()).not.toContain("SignOut");
+  });
+
+  it("offboarding disables and signs out BEFORE removing any group", async () => {
+    pool.set("finance@x.com", {
+      username: "finance@x.com",
+      sub: "sub-fin",
+      email: "finance@x.com",
+      groups: ["FINANCE", "OFFICE"],
+    });
+    await call("offboardStaff", { email: "finance@x.com", reasonCode: "DEPARTURE_VOLUNTARY" });
+    const disableAt = timeline.indexOf("Disable");
+    const signOutAt = timeline.indexOf("SignOut");
+    const firstRemove = timeline.indexOf("RemoveFromGroup");
+    expect(disableAt).toBeGreaterThanOrEqual(0);
+    expect(signOutAt).toBeGreaterThan(disableAt);
+    // Access is cut before the role set is even touched.
+    expect(firstRemove).toBeGreaterThan(signOutAt);
+  });
+
+  it("confirms the login disabled and the technician inactive before reporting COMPLETE", async () => {
+    pool.set("marcus@buzzkill.com", {
+      username: "marcus@buzzkill.com",
+      sub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      groups: ["TECH"],
+    });
+    technicians.set("t1", {
+      id: "t1",
+      name: "Marcus",
+      active: true,
+      userSub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      licenseNumber: "APP-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+    const res = (await call("offboardStaff", {
+      email: "marcus@buzzkill.com",
+      reasonCode: "SECURITY",
+    })) as { outcome: string; loginDisabled: boolean; technicianConfirmedInactive: boolean };
+    expect(res.loginDisabled).toBe(true);
+    expect(res.technicianConfirmedInactive).toBe(true);
+    expect(res.outcome).toBe("COMPLETE");
+  });
+
+  it("puts each in-progress visit in an owned Operations review", async () => {
+    pool.set("marcus@buzzkill.com", {
+      username: "marcus@buzzkill.com",
+      sub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      groups: ["TECH"],
+    });
+    technicians.set("t1", {
+      id: "t1",
+      name: "Marcus",
+      active: true,
+      userSub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      licenseNumber: "APP-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+    jobs.set("live", {
+      id: "live",
+      technicianId: "t1",
+      status: "IN_PROGRESS",
+      scheduledDate: "2026-07-18",
+    });
+    const res = (await call("offboardStaff", {
+      email: "marcus@buzzkill.com",
+      reasonCode: "ROLE_ENDED",
+    })) as { inProgressCount: number };
+    expect(res.inProgressCount).toBe(1);
+    const review = [...workItems.values()].find((w) =>
+      String(w.title).match(/in-progress visit left/i)
+    );
+    expect(review).toBeDefined();
+  });
+
+  it("is idempotent by key — a replay returns the recorded outcome without a second disable", async () => {
+    pool.set("finance@x.com", {
+      username: "finance@x.com",
+      sub: "sub-fin",
+      email: "finance@x.com",
+      groups: ["FINANCE"],
+    });
+    await call("offboardStaff", {
+      email: "finance@x.com",
+      reasonCode: "DEPARTURE_VOLUNTARY",
+      idempotencyKey: "req-1",
+    });
+    sends.length = 0;
+    const res = (await call("offboardStaff", {
+      email: "finance@x.com",
+      reasonCode: "DEPARTURE_VOLUNTARY",
+      idempotencyKey: "req-1",
+    })) as { deduped: boolean };
+    expect(res.deduped).toBe(true);
+    // No Cognito action on the replay.
+    expect(sentTypes()).not.toContain("Disable");
+    // Only one ledger row exists for the key.
+    expect(staffAccessEvents.filter((e) => e.idempotencyKey === "req-1")).toHaveLength(1);
+  });
+
+  it("opens a security case and reports PARTIAL when the audit row cannot be written", async () => {
+    pool.set("finance@x.com", {
+      username: "finance@x.com",
+      sub: "sub-fin",
+      email: "finance@x.com",
+      groups: ["FINANCE"],
+    });
+    staffEventCreateThrows = true;
+    const res = (await call("offboardStaff", {
+      email: "finance@x.com",
+      reasonCode: "DEPARTURE_VOLUNTARY",
+    })) as { ledgerRecorded: boolean; outcome: string };
+    expect(res.ledgerRecorded).toBe(false);
+    expect(res.outcome).toBe("PARTIAL");
+    const securityCase = [...workItems.values()].find(
+      (w) => w.kind === "STAFF_SECURITY"
+    );
+    expect(securityCase).toBeDefined();
   });
 });
 

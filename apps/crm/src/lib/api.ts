@@ -583,13 +583,33 @@ export function staffRoster(): OpResult {
   ).staffRoster();
 }
 
-/** Set a staff login's role set to exactly `roles`. Server enforces the
- *  last-owner and technician-linkage rules, reads the effective roles back, and
- *  records the reasoned change in the staff-access ledger. */
+/** The controlled reason codes for a staff-access change (GL-14) — mirrors the
+ *  server's STAFF_ROLE_CHANGE_REASONS / STAFF_OFFBOARD_REASONS. OTHER needs a
+ *  note. */
+export const STAFF_ROLE_CHANGE_REASONS = [
+  "PROMOTION",
+  "REASSIGNMENT",
+  "REDUCE_ACCESS",
+  "CORRECTION",
+  "OTHER",
+] as const;
+export const STAFF_OFFBOARD_REASONS = [
+  "DEPARTURE_VOLUNTARY",
+  "DEPARTURE_INVOLUNTARY",
+  "ROLE_ENDED",
+  "SECURITY",
+  "OTHER",
+] as const;
+
+/** Set a staff login's role set to exactly `roles`. A controlled reasonCode is
+ *  required; an idempotencyKey makes a retry safe. Server ends sessions on a
+ *  demotion, reads the effective roles back, and records the durable ledger row. */
 export function changeStaffRoles(input: {
   email: string;
   roles: string[];
+  reasonCode: string;
   reason?: string;
+  idempotencyKey?: string;
 }): OpResult {
   return (
     api().mutations as unknown as {
@@ -598,19 +618,50 @@ export function changeStaffRoles(input: {
   ).changeStaffRoles(input);
 }
 
-/** Offboard a staff member: disable + sign out, remove groups, reassign a
- *  linked technician's future work. Server refuses the last usable owner,
- *  opens an owned case on any partial result, and records the departure in the
- *  staff-access ledger. */
+/** Offboard a staff member: disable + sign out first, remove groups, reassign a
+ *  linked technician's future work. Requires a controlled reasonCode; an
+ *  idempotencyKey makes a retry safe. Server refuses the last usable owner,
+ *  reads back that the login is disabled and the technician inactive, opens an
+ *  owned case on any partial result, and records the durable ledger row. */
 export function offboardStaff(input: {
   email: string;
+  reasonCode: string;
   reason?: string;
+  idempotencyKey?: string;
 }): OpResult {
   return (
     api().mutations as unknown as {
       offboardStaff: (i: typeof input) => OpResult;
     }
   ).offboardStaff(input);
+}
+
+/** The immutable staff-access ledger row (GL-14), read directly from the model
+ *  (OWNER-readable) for the Access History screen. */
+export type StaffAccessEvent = Schema["StaffAccessEvent"]["type"];
+
+/** List staff-access ledger rows for the owner-only history screen. Tolerates
+ *  the model being absent before the backend wave lands. */
+export function listStaffAccessEvents(args?: {
+  limit?: number;
+  nextToken?: string;
+}): Promise<{
+  data: StaffAccessEvent[];
+  nextToken?: string | null;
+  errors?: { message: string }[];
+}> {
+  const models = api().models as unknown as {
+    StaffAccessEvent?: {
+      list: (a?: typeof args) => Promise<{
+        data: StaffAccessEvent[];
+        nextToken?: string | null;
+        errors?: { message: string }[];
+      }>;
+    };
+  };
+  if (!models.StaffAccessEvent)
+    return Promise.resolve({ data: [], nextToken: null });
+  return models.StaffAccessEvent.list(args);
 }
 
 /** Parse an AWSJSON field that may arrive as a string. */

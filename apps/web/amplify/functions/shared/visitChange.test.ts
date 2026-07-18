@@ -80,20 +80,29 @@ const fakeDataClient = {
 };
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const sendEmail = vi.fn(async () => true);
+const sendEmail = vi.fn(async (opts: unknown) => {
+  void opts;
+  return true;
+});
 vi.mock("./email", () => ({
-  sendEmail: (opts: unknown) => sendEmail(opts as never),
+  sendEmail: (opts: unknown) => sendEmail(opts),
   emailShell: (heading: string, body: string) => `${heading}\n${body}`,
 }));
 
-const openOwnedWork = vi.fn(async () => "wk_1");
+const openOwnedWork = vi.fn(async (opts: unknown) => {
+  void opts;
+  return "wk_1";
+});
 vi.mock("./ownedWork", () => ({
-  openOwnedWork: (opts: unknown) => openOwnedWork(opts as never),
+  openOwnedWork: (opts: unknown) => openOwnedWork(opts),
 }));
 
-const sendRefundNotice = vi.fn(async () => true);
+const sendRefundNotice = vi.fn(async (opts: unknown) => {
+  void opts;
+  return true;
+});
 vi.mock("./receipts", () => ({
-  sendRefundNotice: (opts: unknown) => sendRefundNotice(opts as never),
+  sendRefundNotice: (opts: unknown) => sendRefundNotice(opts),
 }));
 
 const refundsCreate = vi.fn(async () => ({ id: "re_1" }));

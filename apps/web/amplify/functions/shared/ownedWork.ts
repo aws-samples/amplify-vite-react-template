@@ -13,7 +13,8 @@ export type WorkKind =
   | "MISSING_CONTACT"
   | "PAID_NOT_FINALIZED"
   | "LOCATION_REVIEW"
-  | "STAFF_OFFBOARD";
+  | "STAFF_OFFBOARD"
+  | "STAFF_SECURITY";
 
 export type WorkOwnerTeam = "OPS" | "SALES" | "FINANCE";
 
@@ -39,6 +40,11 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // already locked out (fail-safe), so the clock is operational, not the
   // security-critical shortest one — the resume action is to re-run offboard.
   STAFF_OFFBOARD: 4 * 60,
+  // A staff access change (demotion/offboard) whose access-removal step failed
+  // partway, or whose audit record could not be written — a person may be left
+  // enabled or ambiguously privileged, or a sensitive action left unproven. The
+  // security-critical clock: shortest of the staff kinds.
+  STAFF_SECURITY: 30,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

@@ -132,6 +132,11 @@ export const schema = a.schema({
     // technician) did not complete. Access is already gone — the resume action
     // is a safe re-run of Offboard.
     "STAFF_OFFBOARD",
+    // GL-14: a staff access change whose access-removal step failed partway, or
+    // whose immutable audit record could not be written — the person may be left
+    // enabled/ambiguously privileged, or a sensitive change left unproven. A
+    // security case with one idempotent resume.
+    "STAFF_SECURITY",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -1109,15 +1114,26 @@ export const schema = a.schema({
       action: a.string().required(),
       actorSub: a.string(),
       actorEmail: a.string().required(),
+      /** The controlled reason code (STAFF_ROLE_CHANGE_REASONS /
+       *  STAFF_OFFBOARD_REASONS) — the approved "why", not free text. */
+      reasonCode: a.string(),
       reason: a.string(),
       priorRoles: a.string(),
+      /** What the actor asked for, alongside newRoles (what actually took) —
+       *  together the written request and its verified result. */
+      requestedRoles: a.string(),
       newRoles: a.string(),
+      /** Caller-supplied idempotency/version key. A repeat with the same key is
+       *  a no-op that returns the recorded outcome, so a double-submit or retry
+       *  cannot apply a second change. */
+      idempotencyKey: a.string(),
       effects: a.string(),
       outcome: a.string().required(),
       occurredAt: a.datetime().required(),
     })
     .secondaryIndexes((index) => [
       index("subjectEmail").sortKeys(["occurredAt"]),
+      index("idempotencyKey"),
     ])
     .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
@@ -1341,7 +1357,9 @@ export const schema = a.schema({
     .arguments({
       email: a.string().required(),
       roles: a.string().required().array().required(),
+      reasonCode: a.string().required(),
       reason: a.string(),
+      idempotencyKey: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
@@ -1356,7 +1374,12 @@ export const schema = a.schema({
    */
   offboardStaff: a
     .mutation()
-    .arguments({ email: a.string().required(), reason: a.string() })
+    .arguments({
+      email: a.string().required(),
+      reasonCode: a.string().required(),
+      reason: a.string(),
+      idempotencyKey: a.string(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),

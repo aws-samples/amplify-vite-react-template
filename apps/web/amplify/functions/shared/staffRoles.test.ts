@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertOwnerRemains,
+  assertReasonCode,
   assertValidRoleSet,
   isStaffRole,
   normalizeRoles,
@@ -69,5 +70,38 @@ describe("assertOwnerRemains", () => {
         targetKeepsOwner: false,
       })
     ).toThrow(/last active owner/);
+  });
+});
+
+describe("assertReasonCode (GL-14)", () => {
+  it("accepts a valid code for the action and returns it normalized", () => {
+    expect(assertReasonCode("CHANGE_ROLES", "promotion", null)).toBe("PROMOTION");
+    expect(assertReasonCode("OFFBOARD", "ROLE_ENDED", null)).toBe("ROLE_ENDED");
+  });
+
+  it("refuses a blank reason", () => {
+    expect(() => assertReasonCode("CHANGE_ROLES", "", null)).toThrow(
+      /reason is required/i
+    );
+    expect(() => assertReasonCode("OFFBOARD", null, null)).toThrow(
+      /reason is required/i
+    );
+  });
+
+  it("refuses a code that isn't on the action's list", () => {
+    // A valid offboard reason is not a valid role-change reason.
+    expect(() => assertReasonCode("CHANGE_ROLES", "SECURITY", null)).toThrow(
+      /isn't a valid reason/i
+    );
+    expect(() => assertReasonCode("OFFBOARD", "PROMOTION", null)).toThrow(
+      /isn't a valid reason/i
+    );
+  });
+
+  it("requires a note when the reason is OTHER", () => {
+    expect(() => assertReasonCode("CHANGE_ROLES", "OTHER", "  ")).toThrow(
+      /needs a short written note/i
+    );
+    expect(assertReasonCode("CHANGE_ROLES", "OTHER", "special case")).toBe("OTHER");
   });
 });

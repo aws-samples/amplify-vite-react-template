@@ -47,6 +47,69 @@ export function assertValidRoleSet(roles: string[]): void {
 }
 
 /**
+ * GL-14 — the controlled reasons a role change or offboarding may cite. A staff
+ * access change must carry an approved reason from a fixed list, never optional
+ * free text: "why did this person's access change" has to be answerable the same
+ * way every time, and a blank or invented reason is exactly what the audit is
+ * there to prevent. OTHER exists as an escape hatch but demands a written note,
+ * so it is never a way to skip the explanation.
+ */
+export const STAFF_ROLE_CHANGE_REASONS = [
+  "PROMOTION",
+  "REASSIGNMENT",
+  "REDUCE_ACCESS",
+  "CORRECTION",
+  "OTHER",
+] as const;
+
+export const STAFF_OFFBOARD_REASONS = [
+  "DEPARTURE_VOLUNTARY",
+  "DEPARTURE_INVOLUNTARY",
+  "ROLE_ENDED",
+  "SECURITY",
+  "OTHER",
+] as const;
+
+export type StaffAccessAction = "CHANGE_ROLES" | "OFFBOARD";
+
+function reasonsFor(action: StaffAccessAction): readonly string[] {
+  return action === "OFFBOARD"
+    ? STAFF_OFFBOARD_REASONS
+    : STAFF_ROLE_CHANGE_REASONS;
+}
+
+/**
+ * Validate the controlled reason for a staff-access change. Returns the
+ * normalized reason code. Throws a fixable error if the code is missing, not on
+ * the action's list, or is OTHER without an accompanying note — so a blank or
+ * unexplained access change is refused before anything is touched.
+ */
+export function assertReasonCode(
+  action: StaffAccessAction,
+  reasonCode: string | null | undefined,
+  note: string | null | undefined
+): string {
+  const code = (reasonCode ?? "").trim().toUpperCase();
+  const allowed = reasonsFor(action);
+  if (!code) {
+    throw new Error(
+      `A reason is required. Choose one of: ${allowed.join(", ")}.`
+    );
+  }
+  if (!allowed.includes(code)) {
+    throw new Error(
+      `"${reasonCode}" isn't a valid reason for this action. Choose one of: ${allowed.join(", ")}.`
+    );
+  }
+  if (code === "OTHER" && !(note ?? "").trim()) {
+    throw new Error(
+      "Choosing 'Other' needs a short written note saying why."
+    );
+  }
+  return code;
+}
+
+/**
  * The system must never be left without a usable owner — an owner is the only
  * role that can invite staff, approve charges, and change roles, so losing the
  * last one locks the business out of its own administration. A login counts as

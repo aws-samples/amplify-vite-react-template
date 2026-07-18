@@ -2,10 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   changeStaffRoles,
+  listStaffAccessEvents,
   offboardStaff,
   opResult,
   staffRoster,
   unwrap,
+  STAFF_OFFBOARD_REASONS,
+  STAFF_ROLE_CHANGE_REASONS,
+  type StaffAccessEvent,
   type StaffRosterRow,
   type Technician,
 } from "../lib/api";
@@ -68,12 +72,28 @@ function choiceForRoles(roles: string[]): RoleChoice {
   return "OFFICE";
 }
 
+/** Human-friendly label for a controlled reason code (DEPARTURE_VOLUNTARY →
+ *  "Departure voluntary"). */
+function reasonLabel(code: string): string {
+  const s = code.replace(/_/g, " ").toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** A per-action idempotency/version key so a double-submit or retry cannot apply
+ *  a second change (the server dedupes on it). */
+function newIdempotencyKey(): string {
+  const c = globalThis.crypto;
+  if (c && "randomUUID" in c) return c.randomUUID();
+  return `k-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+}
+
 export default function Staff() {
   const roles = useRoles();
   const [rows, setRows] = useState<StaffRosterRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inviting, setInviting] = useState(false);
   const [selected, setSelected] = useState<StaffRosterRow | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -106,9 +126,14 @@ export default function Staff() {
       title="Staff"
       back="/more"
       actions={
-        <Button small variant="ghost" onClick={() => setInviting(true)}>
-          + Invite
-        </Button>
+        <span style={{ display: "inline-flex", gap: 6 }}>
+          <Button small variant="ghost" onClick={() => setHistoryOpen(true)}>
+            Access history
+          </Button>
+          <Button small variant="ghost" onClick={() => setInviting(true)}>
+            + Invite
+          </Button>
+        </span>
       }
     >
       <ErrorNote error={error} />
@@ -173,7 +198,147 @@ export default function Staff() {
           />
         ) : null}
       </Sheet>
+
+      <Sheet
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        title="Staff access history"
+      >
+        {historyOpen ? <AccessHistory /> : null}
+      </Sheet>
     </Page>
+  );
+}
+
+/**
+ * GL-14 (X1) — the owner-only, searchable, exportable staff-access history.
+ *
+ * The immutable StaffAccessEvent ledger is read straight from the model (which
+ * grants OWNER read), so leadership can prove who changed access, why, and what
+ * happened — and export it — without engineering. Read-only; no row here can be
+ * edited or deleted.
+ */
+function AccessHistory() {
+  const [events, setEvents] = useState<StaffAccessEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    listStaffAccessEvents({ limit: 500 })
+      .then((res) => {
+        if (res.errors?.length) throw new Error(res.errors[0].message);
+        const rows = [...res.data].sort((a, b) =>
+          String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
+        );
+        setEvents(rows);
+      })
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : "Could not load the history")
+      );
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const filtered = (events ?? []).filter((e) =>
+    !q
+      ? true
+      : [
+          e.subjectEmail,
+          e.actorEmail,
+          e.action,
+          e.reasonCode,
+          e.reason,
+          e.effects,
+          e.outcome,
+        ]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))
+  );
+
+  const exportCsv = () => {
+    const cols: (keyof StaffAccessEvent)[] = [
+      "occurredAt",
+      "action",
+      "subjectEmail",
+      "actorEmail",
+      "reasonCode",
+      "reason",
+      "priorRoles",
+      "requestedRoles",
+      "newRoles",
+      "outcome",
+      "effects",
+    ];
+    const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const lines = [
+      cols.join(","),
+      ...filtered.map((e) => cols.map((c) => esc(e[c])).join(",")),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `staff-access-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="form-grid">
+      <ErrorNote error={error} />
+      <Field label="Search">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="person, actor, reason, action…"
+        />
+      </Field>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span className="muted small">
+          {events === null ? "Loading…" : `${filtered.length} record${filtered.length === 1 ? "" : "s"}`}
+        </span>
+        <Button
+          small
+          variant="ghost"
+          disabled={!filtered.length}
+          onClick={exportCsv}
+        >
+          Export CSV
+        </Button>
+      </div>
+      {events === null ? (
+        <Spinner label="Loading access history…" />
+      ) : filtered.length === 0 ? (
+        <EmptyState title="No matching records" body="Staff access changes appear here as they happen." />
+      ) : (
+        <Card>
+          {filtered.map((e) => (
+            <ListRow
+              key={e.id}
+              title={
+                <span>
+                  {e.action === "OFFBOARD" ? "Offboarded" : "Role change"}{" "}
+                  <strong>{e.subjectEmail}</strong>{" "}
+                  {e.outcome === "PARTIAL" ? <Badge tone="warn">partial</Badge> : null}
+                </span>
+              }
+              subtitle={
+                <span>
+                  {e.reasonCode ? reasonLabel(e.reasonCode) : "—"}
+                  {e.reason ? ` · ${e.reason}` : ""}
+                  {" · by "}
+                  {e.actorEmail}
+                </span>
+              }
+              meta={
+                <span className="muted small">
+                  {e.occurredAt ? fmtDateTime(e.occurredAt) : ""}
+                </span>
+              }
+            />
+          ))}
+        </Card>
+      )}
+    </div>
   );
 }
 
@@ -201,31 +366,46 @@ function StaffActions({
 }) {
   const me = useRoles();
   const [choice, setChoice] = useState<RoleChoice>(choiceForRoles(row.roles));
-  const [reason, setReason] = useState("");
+  const [roleReason, setRoleReason] = useState<string>(STAFF_ROLE_CHANGE_REASONS[0]);
+  const [offboardReason, setOffboardReason] = useState<string>(
+    STAFF_OFFBOARD_REASONS[0]
+  );
+  const [note, setNote] = useState("");
   const [busy, setBusy] = useState<null | "role" | "offboard">(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmOffboard, setConfirmOffboard] = useState(false);
   const isSelf = me.email?.toLowerCase() === row.email.toLowerCase();
 
   const saveRole = async () => {
+    if (roleReason === "OTHER" && !note.trim()) {
+      setError("Choosing 'Other' needs a short note saying why.");
+      return;
+    }
     setBusy("role");
     setError(null);
     try {
       const res = await changeStaffRoles({
         email: row.email,
         roles: [...ROLE_CHOICES[choice].groups],
-        reason: reason.trim() || undefined,
+        reasonCode: roleReason,
+        reason: note.trim() || undefined,
+        idempotencyKey: newIdempotencyKey(),
       });
       if (res.errors?.length) throw new Error(res.errors[0].message);
       // The server reads the effective roles back from Cognito and reports
       // whether they converged on the request — surface a mismatch rather than
       // a false success, so a group change that didn't take isn't hidden.
-      const data = opResult<{ converged?: boolean; effectiveRoles?: string[] }>(res);
+      const data = opResult<{ converged?: boolean; effectiveRoles?: string[]; outcome?: string }>(res);
       if (data && data.converged === false) {
         throw new Error(
           `The role change didn't fully take — the login is now ${
             (data.effectiveRoles ?? []).join(", ") || "no roles"
           }. Try again; it will converge on the requested set.`
+        );
+      }
+      if (data && data.outcome === "PARTIAL") {
+        throw new Error(
+          "The role changed, but its audit record couldn't be written — a security task was opened. Check the access history."
         );
       }
       await onDone();
@@ -236,21 +416,27 @@ function StaffActions({
   };
 
   const doOffboard = async () => {
+    if (offboardReason === "OTHER" && !note.trim()) {
+      setError("Choosing 'Other' needs a short note saying why.");
+      return;
+    }
     setBusy("offboard");
     setError(null);
     try {
       const res = await offboardStaff({
         email: row.email,
-        reason: reason.trim() || undefined,
+        reasonCode: offboardReason,
+        reason: note.trim() || undefined,
+        idempotencyKey: newIdempotencyKey(),
       });
       if (res.errors?.length) throw new Error(res.errors[0].message);
       // A PARTIAL outcome means access was removed but a downstream effect
-      // (reassignment) is now owned by an OPS case — report that truthfully
-      // instead of a clean success.
+      // (reassignment, the read-back, or the audit write) is now owned by a
+      // case — report that truthfully instead of a clean success.
       const data = opResult<{ outcome?: string }>(res);
       if (data && data.outcome === "PARTIAL") {
         throw new Error(
-          "Access was removed, but returning their future jobs to the pool didn't finish — an operations case was opened. Re-run Offboard to complete the reassignment."
+          "Access was removed, but not every step could be confirmed — an owned case was opened. Re-run Offboard to finish it (it's safe to repeat)."
         );
       }
       await onDone();
@@ -320,15 +506,26 @@ function StaffActions({
         </select>
       </Field>
       <Field
-        label="Reason"
-        hint="Recorded in the staff-access ledger with your name and the time — used for both a role change and offboarding."
+        label="Reason for the role change"
+        hint="A controlled reason is recorded in the staff-access ledger with your name and the time."
       >
-        <input
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="e.g. promoted to office lead, or left the company"
-        />
+        <select value={roleReason} onChange={(e) => setRoleReason(e.target.value)}>
+          {STAFF_ROLE_CHANGE_REASONS.map((r) => (
+            <option key={r} value={r}>
+              {reasonLabel(r)}
+            </option>
+          ))}
+        </select>
       </Field>
+      {roleReason === "OTHER" || offboardReason === "OTHER" ? (
+        <Field label="Note" hint="Required when the reason is 'Other'.">
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Say why in a few words"
+          />
+        </Field>
+      ) : null}
       <Button
         block
         loading={busy === "role"}
@@ -354,6 +551,27 @@ function StaffActions({
               removes all roles, and returns any technician's future jobs to the
               scheduling pool. Their history and records are kept.
             </p>
+            <Field label="Reason for offboarding">
+              <select
+                value={offboardReason}
+                onChange={(e) => setOffboardReason(e.target.value)}
+              >
+                {STAFF_OFFBOARD_REASONS.map((r) => (
+                  <option key={r} value={r}>
+                    {reasonLabel(r)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {offboardReason === "OTHER" ? (
+              <Field label="Note" hint="Required when the reason is 'Other'.">
+                <input
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Say why in a few words"
+                />
+              </Field>
+            ) : null}
             <Button block loading={busy === "offboard"} onClick={() => void doOffboard()}>
               Yes, offboard now
             </Button>

@@ -35,11 +35,14 @@ import {
 import { callerEmail, callerSub } from "../shared/authz";
 import { recordCustomerLifecycleEvent } from "../shared/lifecycleLog";
 import {
+  findStaffAccessEventByKey,
   recordStaffAccessEvent,
   type StaffAccessActor,
+  type StaffAccessEventInput,
 } from "../shared/staffAccessLog";
 import {
   assertOwnerRemains,
+  assertReasonCode,
   assertValidRoleSet,
   isStaffRole,
   normalizeRoles,
@@ -78,8 +81,19 @@ type SaveTechnicianArgs = {
   licenseExpiresOn?: string | null;
 };
 
-type ChangeStaffRolesArgs = { email: string; roles: string[]; reason?: string | null };
-type OffboardStaffArgs = { email: string; reason?: string | null };
+type ChangeStaffRolesArgs = {
+  email: string;
+  roles: string[];
+  reasonCode?: string | null;
+  reason?: string | null;
+  idempotencyKey?: string | null;
+};
+type OffboardStaffArgs = {
+  email: string;
+  reasonCode?: string | null;
+  reason?: string | null;
+  idempotencyKey?: string | null;
+};
 
 /** The office's safe customer edits (GL-09): contact, address, notes only —
  *  never a protected lifecycle field. */
@@ -178,13 +192,11 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
       });
-    case "offboardStaff": {
-      const args = event.arguments as OffboardStaffArgs;
-      return offboardStaff(args.email, args.reason ?? null, {
+    case "offboardStaff":
+      return offboardStaff(event.arguments as OffboardStaffArgs, {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
       });
-    }
     case "staffRoster":
       return staffRoster();
     default:
@@ -251,43 +263,94 @@ async function removeFromGroup(username: string, groupName: string) {
 }
 
 /**
- * End a login now: remove it from the named groups, disable the account, and
- * globally sign it out. Disable stops any new sign-in; the global sign-out
- * revokes the tokens already issued, so an open session dies in minutes rather
- * than lingering until its access token expires. Idempotent — Cognito treats
- * disabling an already-disabled user and signing out an already-signed-out one
- * as no-ops, and we only remove the groups we found the user in.
+ * Open the durable security case for an access-removal that failed partway
+ * (GL-14). One idempotent resume action — re-run the same operation — so a
+ * timeout or provider error never leaves an enabled or ambiguously privileged
+ * person with only a log line behind it.
+ */
+async function openAccessSecurityCase(opts: {
+  subjectLabel: string;
+  relatedId: string;
+  detail: string;
+  resolutionAction: string;
+}) {
+  await openOwnedWork({
+    kind: "STAFF_SECURITY",
+    dedupeKey: `staff-security:${opts.relatedId}`,
+    title: `Access removal did not finish: ${opts.subjectLabel}`,
+    detail: opts.detail,
+    relatedId: opts.relatedId,
+    sourceUrl: "/staff",
+    resolutionAction: opts.resolutionAction,
+    ownerTeam: "OPS",
+  });
+}
+
+/**
+ * End a login now: disable the account, globally sign it out, THEN remove it
+ * from the named groups. The order is the security guarantee (GL-14): disabling
+ * stops any new sign-in and the global sign-out revokes tokens already issued,
+ * so the moment those two land the person cannot act — even if a later group
+ * removal fails. Doing it the other way round (groups first) meant a failure in
+ * the middle could leave the person still enabled with a changed role set. If
+ * ANY step throws, a durable STAFF_SECURITY case is opened with an idempotent
+ * resume (re-run) and the error is rethrown, so the caller never reports success
+ * over a half-revoked login. Idempotent — Cognito treats disabling an
+ * already-disabled user and signing out an already-signed-out one as no-ops, and
+ * we only remove the groups we find the user in.
  *
  * The IAM for AdminDisableUser and AdminUserGlobalSignOut rides on the
  * `manageUsers` grant crm-admin already holds (auth/resource.ts) — there is no
  * granular grant for global sign-out; it exists only inside that bundle.
  */
-async function killLogin(username: string, removePrefixes: string[]) {
-  const { Groups } = await cognito.send(
-    new AdminListGroupsForUserCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username,
-    })
-  );
-  const toRemove = (Groups ?? [])
-    .map((g) => g.GroupName!)
-    .filter((g) => removePrefixes.some((p) => g === p || g.startsWith(p)));
-  for (const g of toRemove) {
-    await removeFromGroup(username, g);
+async function killLogin(
+  username: string,
+  removePrefixes: string[],
+  caseContext?: { subjectLabel: string; relatedId: string }
+): Promise<string[]> {
+  try {
+    // 1. Disable first — stop any new sign-in.
+    await cognito.send(
+      new AdminDisableUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+      })
+    );
+    // 2. Then kill live sessions — revoke tokens already issued.
+    await cognito.send(
+      new AdminUserGlobalSignOutCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+      })
+    );
+    // 3. Only now strip the groups. Access is already gone; this tidies the
+    //    role set. A failure here still leaves a disabled, signed-out login.
+    const { Groups } = await cognito.send(
+      new AdminListGroupsForUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+      })
+    );
+    const toRemove = (Groups ?? [])
+      .map((g) => g.GroupName!)
+      .filter((g) => removePrefixes.some((p) => g === p || g.startsWith(p)));
+    for (const g of toRemove) {
+      await removeFromGroup(username, g);
+    }
+    return toRemove;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (caseContext) {
+      await openAccessSecurityCase({
+        subjectLabel: caseContext.subjectLabel,
+        relatedId: caseContext.relatedId,
+        detail: `Disabling/signing-out/removing groups for ${caseContext.subjectLabel} failed partway: ${detail}. The login may still be enabled or partially privileged.`,
+        resolutionAction:
+          "Re-run the same access removal — every step is idempotent, so a re-run safely finishes it — then confirm the login is disabled and its groups are gone.",
+      }).catch(() => undefined);
+    }
+    throw err;
   }
-  await cognito.send(
-    new AdminDisableUserCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username,
-    })
-  );
-  await cognito.send(
-    new AdminUserGlobalSignOutCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username,
-    })
-  );
-  return toRemove;
 }
 
 async function adminCreateUser(args: AdminCreateUserArgs) {
@@ -957,6 +1020,72 @@ async function countOtherUsableOwners(exceptUsername: string): Promise<number> {
   return count;
 }
 
+/** Count ALL logins enabled and in the OWNER group right now — the post-change
+ *  safety net that catches a concurrency race two point-in-time checks miss (two
+ *  owners each offboarding the other, both passing the pre-check). */
+async function countAllUsableOwners(): Promise<number> {
+  let count = 0;
+  let token: string | undefined;
+  do {
+    const res = await cognito.send(
+      new ListUsersInGroupCommand({
+        UserPoolId: USER_POOL_ID,
+        GroupName: "OWNER",
+        Limit: 60,
+        NextToken: token,
+      })
+    );
+    for (const u of res.Users ?? []) {
+      if (u.Enabled ?? true) count++;
+    }
+    token = res.NextToken;
+  } while (token);
+  return count;
+}
+
+/** Globally sign a login out — revoke every token already issued so a demotion
+ *  takes effect on the next request, not whenever the old access token expires. */
+async function globalSignOut(username: string): Promise<void> {
+  await cognito.send(
+    new AdminUserGlobalSignOutCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: username,
+    })
+  );
+}
+
+/** Re-read a login's enabled state straight from Cognito — used to confirm a
+ *  disable actually persisted before an action reports itself complete. */
+async function readLoginEnabled(username: string): Promise<boolean> {
+  const user = await cognito.send(
+    new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: username })
+  );
+  return user.Enabled ?? true;
+}
+
+/**
+ * Record the staff-access event as a REQUIRED durable outcome (GL-14 / X1). If
+ * the immutable row cannot be written, the change still happened — so rather than
+ * lose the proof, open a STAFF_SECURITY case demanding the record be
+ * reconstructed, and tell the caller so it reports PARTIAL, never a clean success
+ * over a missing audit row. Returns whether the row was durably written.
+ */
+async function recordStaffAccessEventDurable(
+  input: StaffAccessEventInput
+): Promise<boolean> {
+  const written = await recordStaffAccessEvent(input);
+  if (!written) {
+    await openAccessSecurityCase({
+      subjectLabel: input.subjectEmail,
+      relatedId: `audit:${input.subjectEmail}:${input.idempotencyKey ?? input.action}`,
+      detail: `A ${input.action} on ${input.subjectEmail} was applied but its immutable staff-access audit row could not be written. The action stands; the proof of it does not.`,
+      resolutionAction:
+        "Reconstruct the staff-access ledger entry from this case's details (actor, reason, prior/new roles, effects) so the history is complete and provable.",
+    }).catch(() => undefined);
+  }
+  return written;
+}
+
 /**
  * Change a staff login's role set to exactly `roles`. Adds the missing staff
  * groups and removes the ones no longer wanted, leaving CUSTOMER and dynamic
@@ -982,6 +1111,24 @@ async function changeStaffRoles(
   args: ChangeStaffRolesArgs,
   actor: StaffAccessActor
 ) {
+  // Every change starts from an approved, controlled reason — never blank or
+  // free-typed. Refused before anything is touched.
+  const reasonCode = assertReasonCode("CHANGE_ROLES", args.reasonCode, args.reason);
+
+  // Idempotency: a replay with the same key is a no-op that returns the recorded
+  // outcome, so a double-submit cannot apply a second change.
+  if (args.idempotencyKey) {
+    const prior = await findStaffAccessEventByKey(args.idempotencyKey);
+    if (prior) {
+      return {
+        email: args.email.trim().toLowerCase(),
+        deduped: true,
+        outcome: prior.outcome,
+        effects: prior.effects,
+      };
+    }
+  }
+
   const roles = normalizeRoles(args.roles);
   assertValidRoleSet(roles);
   const want = staffRolesIn(roles);
@@ -994,7 +1141,8 @@ async function changeStaffRoles(
   const target = await loadStaffLogin(args.email);
   const have = target.roles;
 
-  if (have.includes("OWNER") && !want.includes("OWNER")) {
+  const removingOwner = have.includes("OWNER") && !want.includes("OWNER");
+  if (removingOwner) {
     assertOwnerRemains({
       targetLabel: target.email,
       otherUsableOwners: await countOtherUsableOwners(target.username),
@@ -1022,6 +1170,27 @@ async function changeStaffRoles(
   for (const r of toAdd) await addToGroup(target.username, r);
   for (const r of toRemove) await removeFromGroup(target.username, r);
 
+  // A demotion must END the person's sessions, not just change group membership
+  // — otherwise an old token keeps the removed role until it expires. Any role
+  // removal globally signs the login out so the reduced access takes effect on
+  // the next request.
+  let sessionsInvalidated = false;
+  if (toRemove.length > 0) {
+    await globalSignOut(target.username);
+    sessionsInvalidated = true;
+  }
+
+  // Concurrency safety net: if this removed OWNER, re-count ALL usable owners
+  // now (not just at the stale pre-check). Two owners each demoting the other
+  // can both pass the point-in-time check; if the pool is now empty, put OWNER
+  // back on this target and refuse, so a recovery path always remains.
+  if (removingOwner && (await countAllUsableOwners()) === 0) {
+    await addToGroup(target.username, "OWNER");
+    throw new Error(
+      `That change would leave BuzzKill with no usable owner (another owner change landed at the same time). ${target.email} keeps the owner role — promote a second owner, then retry.`
+    );
+  }
+
   // Read the end state back from Cognito rather than trusting the request: this
   // is what the screen shows before reporting success, and what the ledger
   // records. If it does not match `want`, a group op did not take and the caller
@@ -1030,17 +1199,20 @@ async function changeStaffRoles(
   const converged =
     effective.length === want.length && want.every((r) => effective.includes(r));
 
-  await recordStaffAccessEvent({
+  const ledgerRecorded = await recordStaffAccessEventDurable({
     subjectEmail: target.email,
     subjectSub: target.sub,
     action: "CHANGE_ROLES",
     actor,
+    reasonCode,
     reason: args.reason ?? null,
     priorRoles: have,
+    requestedRoles: want,
     newRoles: effective,
+    idempotencyKey: args.idempotencyKey ?? null,
     effects: `Added ${toAdd.join(", ") || "none"}; removed ${
       toRemove.join(", ") || "none"
-    }.${converged ? "" : ` Effective roles did not converge on the request (${want.join(", ")}) — a group change did not take.`}`,
+    }.${sessionsInvalidated ? " Sessions signed out." : ""}${converged ? "" : ` Effective roles did not converge on the request (${want.join(", ")}) — a group change did not take.`}`,
     outcome: converged ? "COMPLETE" : "PARTIAL",
   });
 
@@ -1049,6 +1221,9 @@ async function changeStaffRoles(
     roles: want,
     effectiveRoles: effective,
     converged,
+    sessionsInvalidated,
+    ledgerRecorded,
+    outcome: converged && ledgerRecorded ? "COMPLETE" : "PARTIAL",
     added: toAdd,
     removed: toRemove,
   };
@@ -1079,11 +1254,24 @@ async function changeStaffRoles(
  * the disabled login and finds no future work.
  */
 async function offboardStaff(
-  email: string,
-  reason: string | null,
+  args: OffboardStaffArgs,
   actor: StaffAccessActor
 ) {
-  const target = await loadStaffLogin(email);
+  const reasonCode = assertReasonCode("OFFBOARD", args.reasonCode, args.reason);
+
+  if (args.idempotencyKey) {
+    const prior = await findStaffAccessEventByKey(args.idempotencyKey);
+    if (prior) {
+      return {
+        email: args.email.trim().toLowerCase(),
+        deduped: true,
+        outcome: prior.outcome,
+        effects: prior.effects,
+      };
+    }
+  }
+
+  const target = await loadStaffLogin(args.email);
   const client = await dataClient();
   const { data: techs } =
     await client.models.Technician.listTechnicianByUserSub({
@@ -1097,7 +1285,8 @@ async function offboardStaff(
     );
   }
 
-  if (target.roles.includes("OWNER")) {
+  const offboardingOwner = target.roles.includes("OWNER");
+  if (offboardingOwner) {
     assertOwnerRemains({
       targetLabel: target.email,
       otherUsableOwners: await countOtherUsableOwners(target.username),
@@ -1105,16 +1294,31 @@ async function offboardStaff(
     });
   }
 
-  // 1. Revoke access first and confirm — a throw here fails the whole action.
-  const groupsRemoved = await killLogin(target.username, [
-    "OWNER",
-    "OFFICE",
-    "FINANCE",
-    "TECH",
-    "cus-",
-    "grp-",
-  ]);
+  // 1. Revoke access first: disable + global sign-out, THEN drop groups. A
+  //    failure at any step opens a durable STAFF_SECURITY case and throws, so
+  //    this never reports success over a half-revoked login.
+  const groupsRemoved = await killLogin(
+    target.username,
+    ["OWNER", "OFFICE", "FINANCE", "TECH", "cus-", "grp-"],
+    { subjectLabel: target.email, relatedId: target.sub }
+  );
   const rolesRemoved = groupsRemoved.filter(isStaffRole);
+
+  // Concurrency safety net: if this offboarded an owner and the pool is now
+  // empty (a second owner change landed at the same moment), roll this back —
+  // re-enable and restore OWNER — and refuse, so a recovery path always remains.
+  if (offboardingOwner && (await countAllUsableOwners()) === 0) {
+    await cognito.send(
+      new AdminEnableUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: target.username,
+      })
+    );
+    await addToGroup(target.username, "OWNER");
+    throw new Error(
+      `Offboarding ${target.email} would leave BuzzKill with no usable owner (another owner change landed at the same time). Their access has been restored — promote a second owner, then retry.`
+    );
+  }
 
   // 2. Downstream effects — fail-safe, because access is already gone.
   let jobsUnassigned = 0;
@@ -1133,8 +1337,6 @@ async function offboardStaff(
     }
   }
 
-  const outcome = downstreamError ? "PARTIAL" : "COMPLETE";
-
   if (downstreamError) {
     await openOwnedWork({
       kind: "STAFF_OFFBOARD",
@@ -1149,28 +1351,84 @@ async function offboardStaff(
     });
   }
 
-  await recordStaffAccessEvent({
+  // 3. Read the result back — "complete" means verified, not assumed (GL-14).
+  //    Confirm the login is disabled and, for a technician, that the record
+  //    actually persisted inactive.
+  let loginConfirmedDisabled = false;
+  try {
+    loginConfirmedDisabled = !(await readLoginEnabled(target.username));
+  } catch {
+    loginConfirmedDisabled = false;
+  }
+  let technicianConfirmedInactive = !tech;
+  if (tech) {
+    const { data: verify } = await client.models.Technician.get({ id: tech.id });
+    technicianConfirmedInactive = verify?.active === false;
+  }
+
+  // Each in-progress visit is a real-world action mid-flight — put it in owned
+  // Operations review rather than only naming it in an email, so nothing a
+  // departing technician was doing is left unwatched.
+  for (const v of inProgress) {
+    await openOwnedWork({
+      kind: "STAFF_OFFBOARD",
+      dedupeKey: `offboard-inprogress:${v.id}`,
+      title: `In-progress visit left by an offboarded technician: ${tech?.name ?? target.email}`,
+      detail: `${tech?.name ?? target.email} was offboarded while visit ${v.id}${v.scheduledDate ? ` (${v.scheduledDate})` : ""} was in progress. It was left in place, not yanked out from under them.`,
+      relatedId: v.id,
+      sourceUrl: "/schedule",
+      resolutionAction:
+        "Check whether the visit was actually finished. If it was, complete/close it; if not, reassign or reschedule it and tell the customer.",
+      ownerTeam: "OPS",
+    });
+  }
+
+  const outcome =
+    downstreamError ||
+    !loginConfirmedDisabled ||
+    !technicianConfirmedInactive
+      ? "PARTIAL"
+      : "COMPLETE";
+
+  // If the login could not be confirmed disabled, that is a security gap, not a
+  // mere partial — own it explicitly.
+  if (!loginConfirmedDisabled) {
+    await openAccessSecurityCase({
+      subjectLabel: target.email,
+      relatedId: target.sub,
+      detail: `${target.email} was offboarded but a read-back could not confirm the login is disabled. It may still be enabled.`,
+      resolutionAction:
+        "Re-run Offboard (idempotent), then confirm in Cognito that the login is disabled and signed out.",
+    });
+  }
+
+  const ledgerRecorded = await recordStaffAccessEventDurable({
     subjectEmail: target.email,
     subjectSub: target.sub,
     action: "OFFBOARD",
     actor,
-    reason,
+    reasonCode,
+    reason: args.reason ?? null,
     priorRoles: target.roles,
+    requestedRoles: [],
     newRoles: [],
+    idempotencyKey: args.idempotencyKey ?? null,
     effects: [
-      "Login disabled and globally signed out.",
+      loginConfirmedDisabled
+        ? "Login disabled and globally signed out (confirmed)."
+        : "Login disable NOT confirmed — security case opened.",
       `Roles removed: ${rolesRemoved.join(", ") || "none"}.`,
       tech
-        ? technicianDeactivated
-          ? `Technician ${tech.name} deactivated; ${jobsUnassigned} future job${
+        ? technicianConfirmedInactive
+          ? `Technician ${tech.name} verified inactive; ${jobsUnassigned} future job${
               jobsUnassigned === 1 ? "" : "s"
             } returned to the scheduling pool.`
-          : `Technician ${tech.name} reassignment/deactivation failed — owned OPS case opened for a safe re-run.`
+          : `Technician ${tech.name} reassignment/deactivation incomplete — owned OPS case opened.`
         : "No linked technician.",
       inProgress.length
         ? `${inProgress.length} in-progress visit${
             inProgress.length === 1 ? "" : "s"
-          } left in place.`
+          } put in owned Operations review.`
         : "",
     ]
       .filter(Boolean)
@@ -1181,7 +1439,7 @@ async function offboardStaff(
   await notifyOffboard({
     name: tech?.name ?? target.email,
     relatedId: tech?.id ?? target.sub,
-    loginDisabled: true,
+    loginDisabled: loginConfirmedDisabled,
     rolesEnded: rolesRemoved,
     jobsUnassigned,
     inProgress,
@@ -1189,11 +1447,14 @@ async function offboardStaff(
 
   return {
     email: target.email,
-    loginDisabled: true,
+    loginDisabled: loginConfirmedDisabled,
     rolesRemoved,
     technicianDeactivated,
+    technicianConfirmedInactive,
     jobsUnassigned,
-    outcome,
+    inProgressCount: inProgress.length,
+    ledgerRecorded,
+    outcome: ledgerRecorded ? outcome : "PARTIAL",
   };
 }
 
