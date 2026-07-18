@@ -2,17 +2,18 @@
 
 **Business review date:** 18 July 2026
 
-**Latest implementation review:** 5 commits after `18138bc`, from `0709bc5` through `143b254`
+**Latest commit review:** 3 commits after `143b254`, from `a83657e` through `b39e80d`; newest
+implementation commit `bb7bcc3`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The two implementation commits
-reviewed here affect GL-07 and GL-14; both gates have been reduced to their remaining production
-failure, control, and business-approval requirements. The other gates remain because these commits
-did not close them. An omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The latest implementation commit affects GL-18 and the
+offboarding portion of GL-14. Closed work has been removed; those gates contain only the false-outcome,
+authority, recovery, and business-policy gaps that remain. The other gates remain because the new
+commits did not close them. An omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -63,9 +64,10 @@ action, and physical operating setup as dependencies the agent cannot complete a
   `VisitChangeEvent` writes are best-effort and neither history is available on a business screen.
   Sensitive customer, money, and schedule changes can therefore be applied without durable,
   business-readable history.
-- **X2 — Routine office users can close exceptions without verifying the outcome.** A free-text note
-  can close money, access, and customer-impact cases even when the refund, delivery, rebooking, or
-  restoration has not occurred.
+- **X2 — An exception can still turn green before the business obligation is fulfilled.** A canceled
+  visit can count as money settled while a paid charge remains; adding an email can count as delivering
+  the missed notice; any technician ID can count as safe staffing; and materially different paid-booking
+  problems are offered the same retry action even when no booking exists to retry.
 
 ## Gate register
 
@@ -80,6 +82,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-09 | Make customer lifecycle transitions atomic and auditable | Head of Operations | Deactivation leaves a live portal login, or status disagrees with billing | **76% — High** |
 | P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | Customer told billing stopped while the subscription is still live | **82% — High** |
 | P0 | GL-07 | Finish durable office cancel/reschedule | Head of Operations | A canceled visit still charges, promised credit vanishes, or concurrent changes conflict | **74% — High** |
+| P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **68% — Medium** |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **57% — Medium** |
 | P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer told "booked/paid" while the payment can still fail | **86% — Very high** |
 | P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI or an employee publishes a loss-making or nonsensical price | **38% — Low** |
@@ -87,14 +90,12 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
 | P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money | **28% — Low** |
 | P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **48% — Medium** |
-| P1 | GL-18 | Verifiable exception resolution | Head of Operations | Dashboard turns green while the customer problem remains | **88% — Very high** |
 | P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning | **70% — High** |
 | P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **60% — Medium** |
 | P1 | GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | Revenue leaks through unowned, unstaged, or duplicate leads | **80% — High** |
 | P1 | GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer waits on a call that was promised but never owned | **87% — Very high** |
 | P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **74% — High** |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner | **24% — Low** |
-| P2 | GL-24 | Low-skill, failure-resistant workflows | Head of Operations | Launch still depends on tribal knowledge | **72% — High** |
 
 ---
 
@@ -113,7 +114,9 @@ session. The separate Schedule-board **Deactivate technician** action still bypa
 workflow, controlled reason, audit, security ownership, and readback. Future-job updates accept a null
 write without failing, required Operations/security cases are best-effort, and the Access History
 screen searches/exports only its first 500 rows. Last-owner protection still relies on a post-change
-rollback rather than one serialized provider-safe decision.
+rollback rather than one serialized provider-safe decision. Returning a departing employee's claimed
+exceptions to the team inbox is also best-effort: a failed reassignment or missing history can be
+suppressed while offboarding still reports completion.
 
 **Remaining requirements:**
 
@@ -129,9 +132,10 @@ rollback rather than one serialized provider-safe decision.
 - Owner changes are serialized so concurrent demotion/offboarding cannot require a fallible rollback
   to preserve access. At least one usable owner remains technically, and production has two named
   owners with MFA and separate recovery access.
-- Every affected job, route, technician, in-progress review, security case, and audit write is checked
-  and read back. **Complete** means all future jobs are unassigned, the technician is inactive, and
-  every in-progress visit has a durable Operations disposition.
+- Every affected job, route, technician, claimed exception, in-progress review, security case, and audit
+  write is checked and read back. **Complete** means all future jobs are unassigned, the technician is
+  inactive, every claimed exception is back in its staffed team inbox with history, and every in-progress
+  visit has a durable Operations disposition. A failed release is visible, owned, and safely resumable.
 - Access History pages, searches, and exports the entire immutable ledger—not only the first 500
   records—and makes partial/recovery state visible without engineering assistance.
 
@@ -280,8 +284,6 @@ steps.
   against the truncated set, able to return "ok" and auto-resolve healthy cases. A truncated, expired,
   or timed-out run must create an owned Finance/Engineering failure and leave prior state visible — it
   cannot report green or auto-resolve.
-- **Paid-not-finalized cases can still be closed by a note (see X2).** They must close only after the
-  system verifies a complete commitment or a settled refund plus customer notice.
 
 **Pass owner:** CEO and Engineering lead jointly; Finance owns reconciliation and recovery approval.
 
@@ -388,6 +390,55 @@ reading the prior outcome.
   **Sent/Complete** result. Canceling one visit never silently cancels its recurring plan.
 
 **Pass owner:** Head of Operations; Finance approves money and credit dispositions.
+
+### GL-18 — Finish truthful, usable exception resolution
+
+**Business outcome:** A case turns green only after the exact customer, money, access, or operating
+obligation is true, while a routine employee can complete ordinary recovery work without CEO-level
+authority or an invented workaround.
+
+**Why this is still a gate:** A paid-cancellation case currently counts a canceled visit as money
+settled even when a paid invoice has not been refunded, voided, or converted to a real credit. A
+missing-contact case closes when an email address merely exists, not when the missed notice is
+delivered. An unstaffed visit closes for any technician ID without proving that person is active,
+qualified, available, and valid for the service. All paid-booking exceptions show the same retry action
+even though some represent an orphan payment, duplicate record, provider outage, or amount mismatch
+that cannot be fixed by retrying a booking. Eight of the thirteen exception types have no verified
+normal completion path, so callbacks, delivery failures, duplicate leads, portal failures, pricing
+decisions, location reviews, and staff-access recovery can be closed only as an OWNER manual override.
+That turns routine work into an executive bottleneck and treats a normal completion as an exception to
+policy. Claim and close actions also have no single-winner control, so two employees can act on the same
+case.
+
+**Remaining requirements:**
+
+- A paid-cancellation case remains open until the full amount owed has one durable disposition: provider-
+  confirmed refund, successfully voided unpaid invoice, or posted customer credit. Canceling the visit
+  alone never proves the money is settled; partial refunds and multiple invoices reconcile to the exact
+  amount owed.
+- A missing-contact or delivery case remains open until the specific missed notice is delivered or an
+  approved alternate-contact outcome is recorded. Merely adding an address does not satisfy a promise to
+  send a confirmation, report, amendment, cancellation notice, or other customer document.
+- An unstaffed case closes only when the assignment passes the same launch-approved dispatch rule used
+  everywhere else: active technician, valid license/scope, working availability, territory/capacity, and
+  a scheduled route disposition. An ID in the technician field is not proof that the visit can occur.
+- Each paid-booking exception shows only an action that fits its actual cause and records the resulting
+  money and booking state. Orphan payments, duplicate payments/records, amount mismatches, and provider
+  outages must not offer a misleading **Retry finalization** action.
+- For every exception type, the Head of Operations approves the normal resolution event a routine role
+  may complete and what system or business evidence proves it. Ordinary callback, delivery, merge,
+  portal-recovery, pricing, and staff-recovery outcomes use bounded actions; a manual override is reserved
+  for a genuine exception to the approved path, not the standard way work is finished.
+- The CEO approves which role may override each exception class. Finance separately approves money-case
+  authority. Every override has a controlled reason, meaningful evidence, and an accountable review path;
+  the policy shown to employees is the same policy enforced when they act.
+- Claiming, resolving, reopening, and releasing a case has one winner. Concurrent employees cannot both
+  own or complete the same customer or money action, and a failed history write cannot erase a later
+  ownership change. The real staffed inboxes, primary/backup owners, SLAs, and handoffs are established in
+  GL-23.
+
+**Pass owner:** Head of Operations; Finance approves money outcomes and the CEO approves override
+authority.
 
 ### GL-04 — Capacity that cannot be oversold
 
@@ -585,36 +636,6 @@ can be restored after human or provider error.
 
 ## Priority 1 — High revenue and operating reliability
 
-### GL-18 — Verifiable exception resolution
-
-**Business outcome:** An operational failure stays visible until the promised real-world outcome is true;
-employees cannot make the dashboard green by writing a note.
-
-**Why this is still a gate:** Engineering closed the enforcement (X2). `updateOwnedWork` no longer
-resolves an exception from a free-text note: a verifiable case closes only from an outcome the server
-re-checks against live data — a technician actually assigned, a refund/void/cancel settled, an email on
-file, a visit rebooked, or a booking finalized — and any close without a verifiable outcome is an
-OWNER-only manual override that requires a controlled reason and an evidence note, is stamped
-`resolvedManualOverride`, records a distinct `MANUAL_OVERRIDE` ledger event, and is separately filterable
-in the queue. Every exception type is now triaged in one shared registry — severity
-(Critical/High/Routine), a plain customer-impact line, its owning team, its SLA, and a small controlled
-set of resolution actions and override reasons — which drives the office queue with no free-text close.
-Offboarding now returns a departing person's OPEN claims to the shared team inbox with a `RELEASED`
-event, so no required action stays owned by someone who has left. What remains is business approval of
-the policy the control enforces — the encoded values are provisional until the Head of Operations signs
-them.
-
-**Remaining requirements:**
-
-- The Head of Operations approves, per exception type, the encoded severity, customer-impact wording,
-  response deadline, controlled resolution actions, and override reasons — and confirms OWNER is the
-  intended "owner/manager" tier for a manual override (there is no separate MANAGER role today).
-- The shared team inboxes each type routes to (Operations/Sales/Finance) are the real, staffed
-  destinations named in GL-23, so an unclaimed or released action is owned by a monitored inbox, not an
-  unwatched mailbox.
-
-**Pass owner:** Head of Operations.
-
 ### GL-19 — Launch reconciliation and command view
 
 **Business outcome:** Leadership can tell each morning whether customers, work, and money agree, without
@@ -654,9 +675,11 @@ outcome.
 - **The no-access fee policy is not enforced by disclosure.** No fee is charged today (safe by omission),
   but the approved policy must be encoded so a fee is charged only when that exact policy was disclosed
   before purchase and the case meets it — the employee never decides or calculates a fee.
-- No-access and callback resolution close only after the chosen rebook/refund/credit/notice outcome is
-  verified — not by a typed note (X2). Operations sees callback volume, reason, original
-  technician/service, days to resolution, and repeat-callback rate as a quality and margin signal.
+- No-access and callback cases need bounded normal outcomes for rebook, refund, credit, notice, reached,
+  and approved unreachable attempts. Today only a rebook has a verified normal close; the other outcomes
+  require an OWNER override rather than a routine service-recovery action (X2). Operations sees callback
+  volume, reason, original technician/service, days to resolution, and repeat-callback rate as a quality
+  and margin signal.
 
 **Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
 
@@ -753,24 +776,6 @@ has a staffed owner from the first lead through the last payment exception.
 
 **Pass owner:** Head of Operations.
 
-### GL-24 — Low-skill, failure-resistant workflows
-
-**Business outcome:** The system makes the safe action the obvious action for a new employee and does not
-depend on tribal knowledge.
-
-**Remaining requirements:**
-
-- Every irreversible confirmation uses customer/business language, states the consequence, prevents
-  duplicate clicks, and returns a receipt/reference. Error messages identify what happened, whether
-  money/customer state changed, who owns it, and the one safe next step. (Duplicate-click prevention and
-  plain-language confirmation across the full CRM UI were not exhaustively verified and must be signed off.)
-- No critical workflow requires memorizing a policy, copying an ID, calculating money or capacity,
-  interpreting a raw provider status, opening developer tools, or entering invented free text. In
-  particular, the free-text exception close (X2) and the two-step deactivation (GL-09) are the current
-  violations of this rule.
-
-**Pass owner:** Head of Operations; each functional leader approves their workflows.
-
 ---
 
 ## Final approval record
@@ -779,10 +784,10 @@ The launch approver should use this table only after every named owner approves 
 
 | Function | Named approver | Date | Gates accepted | Approval record |
 |---|---|---|---|---|
-| CEO |  |  | GL-01, 05, 08, 13, 14, 16, 17, 19, 20, 22 |  |
+| CEO |  |  | GL-01, 05, 08, 13, 14, 16–20, 22 |  |
 | Sales |  |  | GL-02, 03, 19 |  |
-| Operations |  |  | GL-04, 07, 09–15, 18, 19, 23, 24 |  |
-| Finance |  |  | GL-05–09, 16, 17, 19, 21 |  |
+| Operations |  |  | GL-04, 07, 09–15, 18, 19, 23 |  |
+| Finance |  |  | GL-05–09, 16–19, 21 |  |
 | Compliance/legal |  |  | GL-01, 10, 13, 15, 17, 20, 22 |  |
 | Engineering |  |  | GL-05, 21, 22 |  |
 
