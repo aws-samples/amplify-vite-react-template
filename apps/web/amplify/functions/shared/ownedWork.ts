@@ -11,7 +11,8 @@ export type WorkKind =
   | "PORTAL_FAILURE"
   | "PRICING_ESCALATION"
   | "MISSING_CONTACT"
-  | "PAID_NOT_FINALIZED";
+  | "PAID_NOT_FINALIZED"
+  | "LOCATION_REVIEW";
 
 export type WorkOwnerTeam = "OPS" | "SALES" | "FINANCE";
 
@@ -28,6 +29,10 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // Money is already in Stripe with no complete booking behind it — the
   // shortest clock in the system.
   PAID_NOT_FINALIZED: 30,
+  // A finalized report whose GPS looked imprecise or far from the address. The
+  // record already stands — this is an after-the-fact presence review, never a
+  // block — so it carries a routine clock.
+  LOCATION_REVIEW: 24 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

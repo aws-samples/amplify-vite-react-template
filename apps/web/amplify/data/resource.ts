@@ -100,6 +100,10 @@ export const schema = a.schema({
     // behind it — the highest-harm state the funnel can reach — so it is a
     // durable, office-visible exception, never a log line.
     "PAID_NOT_FINALIZED",
+    // GL-15: a finalized report whose captured GPS was imprecise or far from the
+    // service address. An after-the-fact on-site-presence review — the record is
+    // never blocked and never waits on a manager.
+    "LOCATION_REVIEW",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([

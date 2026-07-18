@@ -25,6 +25,7 @@ import {
   technicianServesCustomer,
 } from "../shared/jobAssignment";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
+import { drivingDistanceMetersFromPoint } from "../shared/driveTime";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
   nextVisitDate,
@@ -832,25 +833,29 @@ async function resolveRebookedNoAccessWork(
  */
 const GEO_CAPTURE_GRACE_MS = 2 * 60 * 60 * 1000;
 /**
- * Beyond this radius a fix is cell-tower triangulation, not an on-site GPS lock —
- * it cannot prove presence at an address at all. This is an implausibility
- * ceiling, deliberately loose; the actual required precision is a Compliance
- * decision layered on top of it.
+ * A clean outdoor GPS lock reads to within ~5–20 m; against a building or under
+ * cover, ~30–65 m; indoors it degrades to wifi/cell fallback (hundreds of m or
+ * more). A fix worse than this isn't proof of standing at an address — but it
+ * does NOT block the technician: it flags the finalized report for an after-the-
+ * fact on-site-presence review. Tunable by the Compliance owner.
  */
-const GEO_IMPLAUSIBLE_ACCURACY_M = 2000;
+const GEO_REVIEW_ACCURACY_M = 100;
+/**
+ * How far the captured point may be from the service address before the report
+ * is flagged for review. One mile is deliberately generous — it absorbs road-vs-
+ * straight-line inflation and never penalizes rural areas where a tech parks
+ * down the road. Also non-blocking; also the Compliance owner's to tune.
+ */
+const GEO_REVIEW_DISTANCE_M = 1609;
 
 /**
- * Location is the report's proof that the technician was physically at the
- * address. Until now finalize only checked that a latitude and longitude were
- * present — a reading with no timestamp, no accuracy, an impossible coordinate,
- * a cell-tower-grade radius, or a capture from a different day all passed as
- * "proof". This validates the reading as evidence: it exists, it is a real point
- * on earth, it carries a plausible accuracy, and it was taken during the visit.
- *
- * What it deliberately does NOT do: enforce a precise accuracy threshold or a
- * maximum distance from the service address (that needs the address geocoded and
- * a Compliance-approved radius), or run the named-manager exception process.
- * Those are the on-site-presence policy the Compliance owner still has to set.
+ * The blocking half of the location rule: is there a real reading at all? A
+ * report with no coordinate, an impossible point, no timestamp, no accuracy, or
+ * a capture from outside the visit window has no usable evidence, and every one
+ * of those is fixed by tapping "capture" again on site — so it is safe to
+ * refuse. What is NOT refused here is an imprecise or far-from-address fix: a
+ * technician in a basement or a dead-zone cannot GPS their way out of it, so
+ * those are handled by flagLocationForReview as owned work, never a block.
  */
 function assertLocationIsPresence(
   report: {
@@ -885,13 +890,6 @@ function assertLocationIsPresence(
       "The location reading has no real accuracy — capture it again on site"
     );
   }
-  if (report.geoAccuracyM > GEO_IMPLAUSIBLE_ACCURACY_M) {
-    throw new Error(
-      `The location is only accurate to about ${Math.round(
-        report.geoAccuracyM
-      )} m — too imprecise to prove on-site presence. Step outside for a clearer GPS fix and re-capture.`
-    );
-  }
   const capturedMs = Date.parse(report.geoCapturedAt);
   if (Number.isNaN(capturedMs)) {
     throw new Error(
@@ -909,6 +907,73 @@ function assertLocationIsPresence(
     throw new Error(
       "The location was captured outside the time you were on site — re-capture it during the visit so the record proves you were there"
     );
+  }
+}
+
+/**
+ * The non-blocking half of the on-site-presence rule. The report is already
+ * finalized; this only asks, after the fact, "does the captured GPS look like
+ * the technician was actually at the address?" — an imprecise fix, or one that
+ * routes more than a mile from the service address. Either raises an owned OPS
+ * review task; neither blocks the technician and neither waits on a manager.
+ *
+ * Best-effort by construction: no service address, no routing key, or an
+ * un-routable address (rural, new construction) all mean "can't tell", which is
+ * silence, not a flag. It never throws into finalize — a review that could not
+ * run must not undo a completed record.
+ */
+async function flagLocationForReview(input: {
+  reportId: string;
+  customerId: string;
+  customerName: string;
+  serviceType: string;
+  serviceAddress: string;
+  geoLat: number;
+  geoLng: number;
+  geoAccuracyM: number;
+}): Promise<void> {
+  try {
+    const reasons: string[] = [];
+    if (input.geoAccuracyM > GEO_REVIEW_ACCURACY_M) {
+      reasons.push(
+        `the GPS fix was only accurate to about ${Math.round(input.geoAccuracyM)} m`
+      );
+    }
+
+    const apiKey = process.env.GOOGLE_ROUTES_API_KEY;
+    if (apiKey && input.serviceAddress) {
+      const meters = await drivingDistanceMetersFromPoint(
+        apiKey,
+        { lat: input.geoLat, lng: input.geoLng },
+        input.serviceAddress
+      );
+      // null = couldn't route (no coverage/geocode). Treat as unknown, not far.
+      if (meters != null && meters > GEO_REVIEW_DISTANCE_M) {
+        reasons.push(
+          `the captured location is about ${(meters / 1609).toFixed(1)} mi from the service address`
+        );
+      }
+    }
+
+    if (!reasons.length) return;
+    await openOwnedWork({
+      kind: "LOCATION_REVIEW",
+      dedupeKey: `service-report-location:${input.reportId}`,
+      title: `On-site location needs a look: ${input.customerName}`,
+      detail: `${input.customerName}'s ${input.serviceType} service report is finalized, but its on-site location may not confirm presence — ${reasons.join(
+        " and "
+      )}. The record stands; this is a check, not a hold.`,
+      customerId: input.customerId,
+      relatedId: input.reportId,
+      sourceUrl: `/customers/${input.customerId}`,
+      resolutionAction:
+        "Confirm the technician was on site (job-site photos, notes, customer contact). If confirmed, resolve. If not, issue a corrected report or open the discrepancy with the technician.",
+      ownerTeam: "OPS",
+    });
+  } catch (err) {
+    // A presence review is a safety net, never a gate. If it cannot run, the
+    // finalized record still stands.
+    console.error("flagLocationForReview failed", input.reportId, err);
   }
 }
 
@@ -1226,6 +1291,21 @@ async function finalizeServiceReport(reportId: string) {
   });
   await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });
+
+  // After the record stands, look at whether its GPS actually places the
+  // technician at the address. assertLocationIsPresence has already guaranteed a
+  // real, in-window reading, so these are non-null. This never blocks and never
+  // throws — an imprecise or far fix becomes an OPS review task, not a hold.
+  await flagLocationForReview({
+    reportId,
+    customerId: customer.id,
+    customerName: customer.displayName,
+    serviceType: job.serviceType,
+    serviceAddress,
+    geoLat: report.geoLat!,
+    geoLng: report.geoLng!,
+    geoAccuracyM: report.geoAccuracyM!,
+  });
 
   return { pdfKey, emailed, deliveryStatus, alreadyFinalized: false };
 }

@@ -143,6 +143,9 @@ vi.mock("../shared/pdf", () => ({
   renderServiceReportPdf: async () => new Uint8Array([1]),
   renderAmendmentPdf: async () => new Uint8Array([2]),
 }));
+vi.mock("../shared/driveTime", () => ({
+  drivingDistanceMetersFromPoint: vi.fn(async () => null),
+}));
 vi.mock("@aws-sdk/client-s3", () => ({
   S3Client: class { async send() { return {}; } },
   PutObjectCommand: class {},
@@ -154,6 +157,7 @@ vi.mock("@aws-sdk/s3-request-presigner", () => ({
 
 const { handler } = await import("./handler");
 const { sendEmail } = await import("../shared/email");
+const { drivingDistanceMetersFromPoint } = await import("../shared/driveTime");
 
 const call = (
   field: string,
@@ -226,6 +230,10 @@ beforeEach(() => {
   officeEmails.length = 0;
   vi.mocked(sendEmail).mockReset();
   vi.mocked(sendEmail).mockResolvedValue(true);
+  // On-site-presence distance check is off unless a test opts in with a key.
+  delete process.env.GOOGLE_ROUTES_API_KEY;
+  vi.mocked(drivingDistanceMetersFromPoint).mockReset();
+  vi.mocked(drivingDistanceMetersFromPoint).mockResolvedValue(null);
 });
 
 describe("regulated assignment", () => {
@@ -686,12 +694,64 @@ describe("the finalize gate", () => {
     ).rejects.toThrow(/proof you were there|time or its accuracy/i);
   });
 
-  it("refuses an implausibly imprecise location — a cell-tower fix isn't presence", async () => {
+  it("flags an imprecise location for review but never blocks the technician", async () => {
+    // A technician in a basement can't GPS their way to a better fix, so this
+    // completes — and raises an OPS review task instead of a wall.
     reports.push(validReport({ geoAccuracyM: 5000 }));
 
-    await expect(
-      call("finalizeServiceReport", { reportId: "rep_1" })
-    ).rejects.toThrow(/too imprecise/i);
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
+    const review = workItems.find(
+      (w) => w.kind === "LOCATION_REVIEW" && w.relatedId === "rep_1"
+    );
+    expect(review).toBeTruthy();
+    expect(String(review!.detail)).toMatch(/accurate to about 5000 m/i);
+  });
+
+  it("does not flag a precise, on-site location", async () => {
+    reports.push(validReport({ geoAccuracyM: 12 }));
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
+    expect(workItems.some((w) => w.kind === "LOCATION_REVIEW")).toBe(false);
+  });
+
+  it("flags a location far from the service address for review, non-blocking", async () => {
+    process.env.GOOGLE_ROUTES_API_KEY = "test-key";
+    vi.mocked(drivingDistanceMetersFromPoint).mockResolvedValueOnce(4800); // ~3 mi
+    reports.push(validReport());
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
+    const review = workItems.find(
+      (w) => w.kind === "LOCATION_REVIEW" && w.relatedId === "rep_1"
+    );
+    expect(review).toBeTruthy();
+    expect(String(review!.detail)).toMatch(/from the service address/i);
+  });
+
+  it("never flags when the address can't be routed — unknown is not far", async () => {
+    process.env.GOOGLE_ROUTES_API_KEY = "test-key";
+    vi.mocked(drivingDistanceMetersFromPoint).mockResolvedValueOnce(null);
+    reports.push(validReport());
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
+    expect(workItems.some((w) => w.kind === "LOCATION_REVIEW")).toBe(false);
+  });
+
+  it("a location within a mile of the address is not flagged", async () => {
+    process.env.GOOGLE_ROUTES_API_KEY = "test-key";
+    vi.mocked(drivingDistanceMetersFromPoint).mockResolvedValueOnce(800); // ~0.5 mi
+    reports.push(validReport());
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(workItems.some((w) => w.kind === "LOCATION_REVIEW")).toBe(false);
   });
 
   it("refuses a location captured on a different day — stale for this visit", async () => {

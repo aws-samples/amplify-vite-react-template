@@ -38,6 +38,7 @@ const KIND_LABEL: Record<string, string> = {
   PRICING_ESCALATION: "Pricing",
   MISSING_CONTACT: "Missing contact",
   PAID_NOT_FINALIZED: "Paid, not finalized",
+  LOCATION_REVIEW: "Location review",
 };
 
 export default function WorkQueue() {

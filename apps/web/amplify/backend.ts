@@ -215,6 +215,10 @@ for (const key of ["ANTHROPIC_API_KEY", "GOOGLE_ROUTES_API_KEY"] as const) {
     // day matrix) but has no business holding the research key.
     if (key === "GOOGLE_ROUTES_API_KEY") {
       backend.bookingPublic.addEnvironment(key, v);
+      // GL-15: report finalize uses Routes to measure the captured GPS against
+      // the service address (on-site-presence review). Best-effort — its
+      // absence never blocks a technician's report.
+      backend.crmDocs.addEnvironment(key, v);
     }
     if (key === "ANTHROPIC_API_KEY") {
       backend.pricingRefresh.addEnvironment(key, v);
@@ -250,6 +254,16 @@ backend.bookingPublic.resources.lambda.addToRolePolicy(
       `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/STRIPE_SECRET_KEY`,
       `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/GOOGLE_ROUTES_API_KEY`,
       `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/STRIPE_SECRET_KEY`,
+    ],
+  })
+);
+// SSM fallback for crm-docs' on-site-presence distance check (GL-15).
+backend.crmDocs.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/shared/${appId}/GOOGLE_ROUTES_API_KEY`,
+      `arn:aws:ssm:us-east-1:*:parameter/amplify/${appId}/${branch}/GOOGLE_ROUTES_API_KEY`,
     ],
   })
 );

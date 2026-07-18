@@ -42,6 +42,49 @@ export async function driveMinutesBetween(
 }
 
 /**
+ * Road distance in meters from a GPS point to an address, in a single Routes
+ * call. Used for GL-15's on-site-presence check: the technician's captured
+ * coordinate against the customer's service address, with no separate geocoder
+ * (Routes accepts a latLng origin and an address destination). Drive distance is
+ * always ≥ straight-line, so a small value reliably means "on the property".
+ * Returns null when the key is missing, the address won't route, or the call
+ * fails — the caller must treat null as "unknown", never as "far".
+ */
+export async function drivingDistanceMetersFromPoint(
+  apiKey: string,
+  origin: { lat: number; lng: number },
+  destinationAddress: string
+): Promise<number | null> {
+  try {
+    const res = await fetch(ROUTES_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": "routes.distanceMeters",
+      },
+      body: JSON.stringify({
+        origin: {
+          location: {
+            latLng: { latitude: origin.lat, longitude: origin.lng },
+          },
+        },
+        destination: { address: destinationAddress },
+        travelMode: "DRIVE",
+      }),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      routes?: { distanceMeters?: number }[];
+    };
+    const meters = json.routes?.[0]?.distanceMeters;
+    return typeof meters === "number" && Number.isFinite(meters) ? meters : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Drive minutes from one origin address to many destinations in a single
  * computeRouteMatrix call. Returns minutes per destination index; null for
  * unroutable entries. Destinations are capped at 50 per Routes API limits.
