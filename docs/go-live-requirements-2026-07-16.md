@@ -2,19 +2,20 @@
 
 **Business review date:** 18 July 2026
 
-**Latest commit review:** 2 commits after `9e11c71`, from `404e80f` through `700164a`; newest
-implementation commit `404e80f`
+**Latest commit review:** 2 commits after `700164a`, from `0712289` through `0e8d95b`; newest
+implementation commit `0712289`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commit affects GL-14 and the
-lead/exception handoff and monitoring portions of GL-02, GL-18, and GL-22. Completed Schedule-entry
-unification, full Access History paging, and basic detection of failed lead/work releases have been
-removed. Those gates now contain only the pre-command, partial-role, reassignment readback, concurrency,
-handoff-history, operator-outcome, alerting, and production-ownership gaps that remain. The other gates
+implementation detail, and proof-only tasks. The latest implementation commit affects GL-09 and the
+lifecycle-recovery, reconciliation, and monitoring portions of GL-18, GL-19, and GL-22. Completed
+server-owned deactivation, protected existing-record update restrictions, controlled reason entry,
+status readback, basic lifecycle history, and in-flight transition serialization have been removed.
+Those gates now contain only the durable-resume, truthful-outcome, retained-work, customer-notice,
+complete-history, verified-recovery, reconciliation, and alerting gaps that remain. The other gates
 remain because the new commits did not close them. An omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
@@ -63,17 +64,19 @@ action, and physical operating setup as dependencies the agent cannot complete a
 ## Systemic issues behind several gates
 
 - **X1 — Customer, lead, exception, and visit-change history can still disappear.**
-  `CustomerLifecycleEvent`, `LeadActivity`, `WorkEvent`, and `VisitChangeEvent` writes can be best-effort
-  or occur after the business change. Customer/visit history has no business screen; the lead screen
-  silently substitutes an empty list on failure and shows only its first 100 rows. Sensitive customer,
-  sales, ownership, money, and schedule changes can therefore be applied without durable, complete
+  `CustomerLifecycleEvent`, `LeadActivity`, `WorkEvent`, and `VisitChangeEvent` writes can still occur
+  after the business change or fail without a durably confirmed fallback. The lifecycle screen ignores
+  read errors and shows only its first 100 rows; the lead screen likewise substitutes an empty list on
+  failure and stops at 100; visit-change history has no business screen. Sensitive customer, sales,
+  ownership, money, and schedule changes can therefore be applied without durable, complete,
   business-readable history.
 - **X2 — An exception can still turn green before the business obligation is fulfilled.** A canceled
   visit can count as money settled while a paid charge remains; adding an email can count as delivering
   the missed notice; any technician ID can count as safe staffing; plan-cancellation recovery is offered
   portal-sign-in closure reasons; a lead-follow-up can close even when its activity/state write failed;
-  and materially different paid-booking problems are offered the same retry action even when no booking
-  exists to retry.
+  materially different paid-booking problems are offered the same retry action even when no booking
+  exists to retry; and lifecycle recovery can be closed for fixing only the portal or audit while status,
+  billing, scheduled work, notice, or another transition effect is still wrong.
 - **X3 — Customer communication is still best-effort after provider acceptance.** An accepted email can
   lose its log and provider ID; transient failures have no actual retry; delivery-event processing can
   acknowledge and discard a failed update; and the business record that originated the message is not
@@ -93,7 +96,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Work billed out of season or performed outside legal authority | **32% — Low** |
 | P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched | **62% — Medium** |
 | P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **72% — High** |
-| P0 | GL-09 | Make customer lifecycle transitions atomic and auditable | Head of Operations | Deactivation leaves a live portal login, or status disagrees with billing | **76% — High** |
+| P0 | GL-09 | Finish failure-safe customer lifecycle transitions | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **66% — Medium** |
 | P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | A cancel stalls, a later charge is not refunded, or the customer receives a false outcome | **76% — High** |
 | P0 | GL-07 | Finish durable office cancel/reschedule | Head of Operations | A canceled visit still charges, promised credit vanishes, or concurrent changes conflict | **74% — High** |
 | P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **68% — Medium** |
@@ -313,58 +316,63 @@ steps.
 
 **Pass owner:** CEO and Engineering lead jointly; Finance owns reconciliation and recovery approval.
 
-### GL-09 — Make customer lifecycle transitions atomic and auditable
+### GL-09 — Finish failure-safe customer lifecycle transitions
 
 **Business outcome:** Customer status, billing, access, scheduled work, and customer communication never
 disagree, and an employee always sees the real outcome of deactivation or reactivation.
 
+**Why this is still a gate:** The transition claim is a temporary lock, not a durable command. It records
+no step progress and is deleted after a handled partial result or thrown error; a process stop can leave
+provider effects with no recovery case, while a failed claim deletion can block every later transition
+indefinitely. Deactivation can stop some plans before a later plan fails, or lose a job/status write,
+then leave the record **ACTIVE** without a durable description of the mixed state. Reactivation can
+partially enable portal access before failing and file that as a generic portal case while the customer
+remains **INACTIVE**.
+
+The employee outcome is also not yet truthful. The reactivation screen announces success for an
+in-progress, partial, or unaudited server result; deactivation likewise announces success when its audit
+is missing. Paid or in-progress one-time visits are skipped without an owned decision, and the preview
+can say there are no visits to stop while one remains. Lifecycle history stops at 100 rows and hides a
+read failure. No transition sends and tracks the final customer notice, and every reason currently runs
+the same cancellation behavior even though nonpayment, a duplicate record, a move, a sale, and a normal
+service end can require different balance, record, access, and communication outcomes.
+
 **Remaining requirements:**
 
-- **"Deactivate customer" is still two actions chained in the browser.** The screen calls the money/work
-  deactivation, then separately calls revoke-portal-access. If the browser dies or the second call fails,
-  the customer is **Inactive with a live portal login**. Deactivation must be one server action that
-  coordinates plan billing, queued and paid visits, open balances, portal access, customer notice, and
-  final status, so the employee never has to remember a second step. (Reactivation is already unified;
-  deactivation must match.)
-- **There is no durable step state across the money↔access split**, so a failure between the two steps is
-  neither owned nor resumable. Each transition needs durable step state and a safe resume action that
-  names exactly what changed, what is still live, who owns it, and whether the customer can still be
-  charged or served.
-- **No controlled reason is required** — deactivation takes no reason at all. Every transition must
-  require a controlled reason and record actor, time, prior/new state, provider results, affected
-  plans/jobs/balance/access, communication outcome, and final disposition.
-- **Status writes are not read back, and the audit write is best-effort (see X1).** A status update can
-  fail while the screen reports Active/Inactive, and a lost audit write is swallowed. Every status,
-  access, plan, job, and audit write must be verified before success; a failed audit write creates
-  blocking owned recovery.
-- **No version/conditional control**, so interleaved deactivate/reactivate requests can still produce
-  mixed state. Duplicate requests must return the same transition and outcome.
-- Leadership can see the complete transition history on a business screen (**see X1**).
-
-**Engineering status — closed (Opus 4.8, commit `0712289`):** Deactivation is now ONE server action,
-matching the already-unified reactivation. The `deactivateCustomer` mutation moved from crm-billing to
-crm-admin (which holds the Cognito pool credentials); crm-admin gained Stripe access via
-`secret("STRIPE_SECRET_KEY")` for the plan-cancel half. The shared engine runs a fixed order —
-money → queued/one-time visits → **portal login revoked** → status INACTIVE (last) — so an INACTIVE
-customer can never keep a live login, and the CRM's second `revokePortalAccess` call is gone.
-- *Durable/resumable:* a portal-revoke failure (billing stopped, login still live) or a status write that
-  does not read back leaves the customer **ACTIVE** and opens a `LIFECYCLE_RECOVERY` owned case naming what
-  changed, what is still live, who owns it, whether they can be charged/served, and that re-running is
-  safe. An idempotent re-run heals portal drift.
-- *Controlled reason:* both transitions now require a reason from a controlled list (OTHER needs a note),
-  validated before anything is touched and recorded with the transition; reason pickers added to both CRM
-  sheets.
-- *Read-back + blocking audit:* the status flip is read back before success; a lost `CustomerLifecycleEvent`
-  write opens blocking `LIFECYCLE_RECOVERY` recovery instead of being swallowed (X1), and the result reports
-  whether the audit row landed.
-- *Concurrency:* a single-winner `CustomerLifecycleClaim` (id = customerId), taken by both deactivate and
-  reactivate, serializes interleaved requests; the loser returns the current state rather than driving a
-  second, mixed-state transition.
-- *Leadership screen:* the customer page shows a lifecycle-history card (action, prior→new, reason, actor,
-  effects, time) read from `CustomerLifecycleEvent`.
-Full amplify (847) and CRM (188) test suites pass; `tsc -p amplify` and CRM `tsc` clean. Remaining to
-verify at go-live: the crm-admin `STRIPE_SECRET_KEY` binding and the new model/mutation resolvers must be
-confirmed against the deployed staging backend.
+- Persist one lifecycle command **before** any billing, schedule, access, status, audit, or message change.
+  It retains request identity, actor, controlled reason, prior/requested state, every affected plan/job/
+  balance/access record, step progress, provider references, retry count, and final outcome. A worker
+  resumes it after timeout or process loss; stale claims are reclaimed or escalated; and a transition is
+  not released as terminal until it is complete or a confirmed recovery owner holds every unfinished
+  obligation. Duplicate and opposite requests return the same persisted progress or follow a defined,
+  serialized reversal—never a fresh interpretation of a partially changed customer.
+- Define one business state machine for clean and partial deactivation/reactivation. The displayed state
+  must distinguish **Active**, **Inactive**, and **Transition needs recovery** when billing, access,
+  schedule, or status disagree. A stopped plan plus ACTIVE status, or enabled login plus INACTIVE status,
+  cannot be treated as an ordinary active/inactive customer; the next employee sees one safe resume or
+  reverse action and what the customer can currently access, owe, buy, or receive.
+- The transition inventory and resulting disposition cover every provider subscription, CRM plan,
+  outstanding invoice, queued one-time/plan visit, paid visit, in-progress visit, route assignment, portal
+  login/group, and related customer/group access. Each write is read back. A paid or in-progress visit has
+  a specific honor/refund/cancel/finish decision with a staffed owner and deadline; a failed schedule read
+  or write cannot be skipped, counted as complete, or hidden by the final status.
+- The employee confirmation is calculated from the server's current inventory and explicitly states what
+  will stop, what will remain, money already paid, money still owed, customer access, and the final notice.
+  The completion screen uses the persisted result and can say **Complete**, **Already complete**, **Still
+  in progress**, or **Needs recovery**; it never announces reactivation/deactivation when `partial`,
+  `inProgress`, or `audited: false`, and it does not claim a recovery case exists until that case is
+  durably confirmed.
+- Every transition produces a tracked customer notice with the approved effective date, plan/service and
+  visit disposition, balance/refund/credit next step, portal implication, and contact path. Leadership
+  approves the behavior and authority for each reason—especially nonpayment, duplicate, moved/property
+  sold, service ended, deactivated in error, and payment resolved—including whether to collect, write off,
+  merge, retain documents, restore access, or require a new booking. The same policy drives the employee
+  preview, provider actions, customer wording, and final record.
+- The immutable lifecycle record and its recovery are completion requirements, not best-effort aftermath.
+  Each missing transition has its own durable recovery identity; failure to create either the event or its
+  case cannot return clean success. Operations and leadership can page, search, and export the complete
+  history, see read failures, and reconcile actor, reason, provider effects, schedule, access, status,
+  customer notice, and any recovery disposition (**GL-18**, **GL-19**, and **X1**).
 
 **Pass owner:** Head of Operations; Finance and CEO approve protected fields, transition policy, and
 recovery policy.
@@ -410,6 +418,39 @@ whose labels, actions, and close evidence do not match the obligation.
   outstanding balances, prepaid and in-progress visits, post-request charges/refunds, save offers, and
   the pending resolution commitment (currently **usually within one business day**). Preview, accepted
   terms, portal, employee recovery, reconciliation, and customer notices all enforce the same policy.
+
+**Engineering status — closed (Opus 4.8, commit `42f375d`):** Plan cancellation is now a durable,
+self-resuming, truthful command end to end.
+- *R1 — durable command + automatic resume:* `PlanCancellationClaim` was promoted from a bare lock to a
+  command (`stage`, `customerId`, `ownerTeam`, `nextAttemptAt`, `attemptCount`, `lastError`,
+  `recoveryWorkItemId`). A failed attempt now KEEPS the command (records the error + a next-attempt time)
+  instead of deleting it; the loser branch reclaims an orphaned command; `resumePlanCancellation` drives a
+  held command to a terminal outcome; and a new `reconcilePlanCancellations()` sweep in the daily
+  reconcile resumes every unfinished command. A one-shot cancel mutation is never redelivered, so this
+  sweep is the only thing that re-drives a stuck cancel — the customer is never asked to retry, and an
+  accepted request can no longer sit Pending forever.
+- *R2 — refund promise, Finance-approved (business decision 2026-07-18):* the subscription webhook now
+  detects a charge posting on/after the accepted cancellation time, suppresses the normal receipt, sends a
+  truthful "charged in error — we're refunding it" notice, and opens/updates the FINANCE recovery case
+  marking the refund owed. A person approves each refund via the existing invoice refund (no automatic
+  money movement); the verified close will not let the case close until it is settled.
+- *R3 — every surface state-derived:* the confirmation email is generated from the real visit resolution
+  (conditional "stopped"; a failed removal is named as ours-to-clear, never "prepaid"; every remaining
+  visit enumerated); the portal plan-list drops the false "you won't be charged again"; the staff plan row
+  shows a "canceling" badge. The one policy source is `shared/planCancellationPolicy.ts`.
+- *R4 — purpose-built recovery:* a dedicated `PLAN_CANCELLATION_RECOVERY` WorkKind (FINANCE, CRITICAL)
+  with a `resumePlanCancellation` action and a `PLAN_CANCELLATION_SETTLED` verifier that refuses to close
+  until billing is inactive, the plan is canceled, every cancelable visit is off the schedule, no charge
+  is in flight, and every late charge is refunded — one shared `planCancellationSettled()` check gates the
+  verified close and the auto-resolve, so generic case types are no longer used.
+- *R5 — one policy:* the launch VALUES live in one typed module the preview, pending, success, email,
+  portal, and recovery all consume, so they cannot drift.
+Full amplify (864) and CRM (188) tests pass; `tsc -p amplify` and CRM `tsc` clean. **Residuals needing a
+human:** the launch-policy VALUES (effective time, current-period charge, outstanding-balance stance,
+prepaid disposition, save-offer terms, the "one business day" SLA) still need CEO/Finance/Operations
+sign-off — they are centralized and enforced but their VALUES are business promises; and the resume sweep,
+webhook detector, and refund idempotency should be validated against real Stripe in staging (a live
+post-cancellation charge) before launch.
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
 
@@ -470,10 +511,12 @@ even though some represent an orphan payment, duplicate record, provider outage,
 that cannot be fixed by retrying a booking. Plan-cancellation failure is filed as **Portal failure**,
 whose employee label and close choices are about repairing sign-in, while an unpaid visit stranded by a
 plan cancel is filed as **Paid cancellation**, whose instructions are about settling money. The
-plan-level schedule-read failure is not linked to a job that its normal verifier can inspect. Nine of
-the fourteen exception types have no verified normal completion path. The new lead-follow-up type is one:
-it can be manually closed as **contacted**, **booking sent**, **lost**, or **do-not-contact** without
-verifying the corresponding lead fact, and the automatic path can resolve it after a swallowed activity
+plan-level schedule-read failure is not linked to a job that its normal verifier can inspect. Lifecycle
+recovery can be closed as soon as the portal or missing audit row is handled without proving that status,
+billing, every visit, notice, and the other transition effects agree. Ten of the fifteen exception types
+have no verified normal completion path. The lead-follow-up type is one: it can be manually closed as
+**contacted**, **booking sent**, **lost**, or **do-not-contact** without verifying the corresponding lead
+fact, and the automatic path can resolve it after a swallowed activity
 or state-write failure. Callbacks, delivery failures, duplicate leads, portal failures, pricing decisions,
 location reviews, and staff-access recovery likewise depend on an OWNER manual override. For email
 failures, the instruction says to correct, unsuppress, and resend, but the case provides no bounded action
@@ -502,6 +545,11 @@ also have no single-winner control, so two employees can act on the same case.
   obligation: provider/CRM stop and post-request refunds for Finance; schedule disposition and final
   customer contact for Operations. An unpaid stranded visit is not presented as a refund case, and a
   plan-level schedule-read failure remains closable only after the schedule has actually been checked.
+- A lifecycle-recovery case stays open until the intended transition is verified across provider billing,
+  CRM plans and status, all paid/unpaid/in-progress visits and routes, portal login/groups, outstanding
+  balance disposition, customer notice, and immutable audit. Portal-only or audit-only closure cannot
+  turn a mixed customer green; each missing transition remains separately visible and recoverable
+  (**GL-09**).
 - A lead-follow-up case closes only after the matching durable lead fact exists: recorded attempt and its
   actual outcome, confirmed booking-link send, controlled lost decision, do-not-contact decision, or paid
   conversion. Closing today's task must also leave the next approved action and due time visible; a free-
@@ -739,11 +787,12 @@ can be restored after human or provider error.
   it does not page an operator. There are no CloudWatch alarms or business-impact metric thresholds, so a
   silent Lambda crash, scheduled job that never fired, or run of email-send failures would page no one.
   Alerts must cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email
-  failures, stale plan-cancellation commands/claims, cancellation promises nearing or missing deadline,
-  a lead sweep that stopped partway or missed its promised first-response window, access/offboarding
-  partial outcomes or missing recovery cases, reconciliation mismatches, capacity anomalies, document
-  generation/storage failure, and growing/overdue exception queues, and reach a named primary and backup.
-  A subtask that catches its own failure and returns success is not a healthy scheduled run.
+  failures, stale plan-cancellation or lifecycle commands/claims, cancellation/lifecycle promises nearing
+  or missing deadline, mixed customer status/billing/access/schedule state, a lead sweep that stopped
+  partway or missed its promised first-response window, access/offboarding partial outcomes or missing
+  recovery cases, reconciliation mismatches, capacity anomalies, document generation/storage failure,
+  and growing/overdue exception queues, and reach a named primary and backup. A subtask that catches its
+  own failure and returns success is not a healthy scheduled run.
 - **A failed email-delivery event can be permanently acknowledged.** The event consumer catches malformed
   messages and database/work-queue failures and then returns success; there is no retained failure queue
   or operator alert. Every provider event must be retried until its email state, suppression decision, and
@@ -783,6 +832,11 @@ asking engineering to query production.
   delinquent-still-scheduled, active-plan-without-next-service, stale cancellation commands/claims,
   pending cancellations past promise, post-request charges/refunds, stranded visits, and missing final
   notices must appear in one owned reconciliation view.
+- **No customer-lifecycle reconciliation** — leadership cannot see stale lifecycle claims/commands,
+  partial transitions, ACTIVE customers whose billing or access was stopped, INACTIVE customers with live
+  access or scheduled/paid work, missing transition audits/notices, or recovery cases that closed while
+  those facts still disagree. Each mismatch needs one accountable owner, age, customer impact, and safe
+  next action.
 - **The new Sales board is an operating list, not yet a leadership command view.** It groups leads by
   derived stage and flags overdue rows, but does not show the actual next action/due time or provide
   first-response performance, attempt-vs-reached, qualification, conversion/loss, duplicate/contact-data
