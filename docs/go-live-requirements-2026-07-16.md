@@ -1,17 +1,18 @@
 # BuzzKill — remaining go-live requirements
 
-**Business review date:** 17 July 2026
+**Business review date:** 18 July 2026
 
-**Latest implementation review:** commits `108ea58` and `2949dd5`
+**Latest implementation review:** 16 commits after `108ea58`, from `8e5cf41` through `945320b`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
-This is a **delta-only** document. It intentionally excludes capabilities that are already working
-in the reviewed draft. The current two latest commits were verified against their code and tests;
-only their unclosed residuals remain in GL-05 and GL-13. An omitted item is not a request to rebuild
-it.
+This is a **delta-only** document. It excludes capabilities and acceptance items already achieved in
+the reviewed build. The four gates changed by the new commits—GL-05, GL-09, GL-14, and GL-15—have
+been reduced to their remaining failure, control, and business-approval requirements. The other
+gates remain because the reviewed commits did not close them. An omitted item is not a request to
+rebuild it.
 
 The standard is the “McDonald's test”: a week-one employee must be able to do the right thing
 without remembering policy, performing mental math, interpreting system internals, or inventing
@@ -34,126 +35,58 @@ Go-live requires all of the following:
 ## Priority model
 
 - **P0 — Critical:** Close first. Failure can create unauthorized access or charges, invalid
-  regulated records, direct financial loss, or a customer commitment the business cannot honor.
+  regulated records, unsafe/unlicensed work, direct financial loss, or a customer commitment the
+  business cannot honor.
 - **P1 — High:** Close after P0. Failure creates predictable revenue leakage, service breakdown,
   repeat work, or customer escalation.
 - **P2 — Launch proof:** Close after the product gates. These prove that real data, people,
   procedures, and first-week users can operate the release safely.
 
-Priority changes implementation order, not launch status: **P0, P1, and P2 are all go-live
-blockers.**
+Within each tier, gates are ordered from highest expected business impact to lowest. Priority changes
+implementation order, not launch status: **P0, P1, and P2 are all go-live blockers.**
 
 ## Gate register
 
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed |
 |---|---|---|---|---|
-| P0 | GL-05 | Finish paid-booking reconciliation and communication durability | CEO + Engineering lead | Succeeded payment can remain invisible or customer confirmation can be lost |
-| P0 | GL-13 | Finish technician read scope and audited override | CEO | Customer-data exposure persists outside the guarded field actions |
-| P0 | GL-15 | Legally reliable service-report completion | Compliance owner | Invalid or undelivered regulated record |
-| P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Sell work the company cannot staff or legally perform |
-| P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI/employee can publish loss-making or nonsensical prices |
-| P0 | GL-09 | Atomic customer and plan lifecycle controls | Head of Operations | Billing, access, service, and status disagree |
+| P0 | GL-13 | Complete technician least-privilege and audited field overrides | CEO | Unauthorized customer-data exposure or regulated action |
+| P0 | GL-14 | Make staff role changes and offboarding failure-safe | CEO | Departed or mis-privileged staff retain access after a partial action |
+| P0 | GL-15 | Complete failure-safe regulated report issuance | Compliance owner | Invalid, duplicate, or mis-authored legal record reaches a customer |
+| P0 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Work is billed out of season or performed outside legal authority |
+| P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | Unsafe or unperformable visit is dispatched |
+| P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | Money, commitment, or confirmation can disagree or duplicate |
+| P0 | GL-09 | Make customer lifecycle transitions atomic and auditable | Head of Operations | Billing, access, service, and status disagree |
 | P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | Customer believes billing stopped when it may continue |
-| P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer promise made before money is settled |
-| P0 | GL-07 | One safe office cancel/reschedule workflow | Head of Operations | Incorrect refund, route, plan, or customer notice |
-| P0 | GL-14 | Staff identity, linking, and offboarding | CEO | Departed/unlinked staff retain access or work |
-| P0 | GL-01 | One truthful, complete service catalog | CEO | Unsupported service sold; downstream rules have no owner |
+| P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Sell work the company cannot staff or legally perform |
+| P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer promise is made before money is settled |
+| P0 | GL-07 | One safe office cancel/reschedule workflow | Head of Operations | Refund, route, plan, or customer notice is wrong |
+| P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI or employee publishes loss-making or nonsensical prices |
+| P0 | GL-01 | One truthful, complete service catalog | CEO | Unsupported service is sold and downstream rules have no owner |
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure |
-| P0 | GL-21 | Production accounts, integrations, and live money rehearsal | Engineering lead + Finance lead | Staging assumptions or secrets fail with real customers/money |
+| P0 | GL-21 | Production accounts, integrations, and live money rehearsal | Engineering lead + Finance lead | Staging assumptions or secrets fail with real customers or money |
 | P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | Critical failure stays silent or records cannot be restored |
+| P1 | GL-18 | Verifiable exception resolution | Head of Operations | Dashboard turns green while the customer problem remains |
+| P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot detect revenue, work, or customer mismatches |
+| P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | Public promise becomes uncontrolled free work or a dispute |
 | P1 | GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | Revenue leaks through unowned or stale leads |
 | P1 | GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer waits on a contact that did not happen |
-| P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | Public promise becomes uncontrolled free work or customer dispute |
-| P1 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | Unsafe, unperformable, or inefficient field visit |
-| P1 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Wrong billing season or work outside licensed scope |
-| P1 | GL-18 | Verifiable exception resolution | Head of Operations | Dashboard turns green while customer problem remains |
-| P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot detect revenue/work/customer mismatches |
 | P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Property/customer requests and records fall back to calls |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs with wrong facts or no queue owner |
 | P2 | GL-24 | Low-skill usability and role certification | Head of Operations | Launch still depends on tribal knowledge |
 
 ---
 
-## Priority 0 — Critical money, security, compliance, and customer commitments
+## Priority 0 — Critical money, security, compliance, safety, and customer commitments
 
-### GL-05 — Finish paid-booking reconciliation and communication durability
-
-**Business outcome:** Every succeeded booking payment is either one complete, confirmed customer
-commitment or one visible refund/recovery case, including when execution stops between technical
-steps.
-
-**Why this is still a gate after commit `108ea58`:** Record creation is now resumable and
-duplicate-safe, but several paid states can still be invisible or overstated. A missing/non-quoted
-booking or amount mismatch returns before owned work is opened; the final **Booked** write is not
-checked before confirmation is sent; communications have no durable sent marker; and the new
-reconciliation predicate is not scheduled and does not yet prove the Stripe-to-booking relationship
-in both directions against the actual child records.
-
-**Required acceptance evidence:**
-
-- Every succeeded booking PaymentIntent that cannot enter finalization—missing booking, canceled or
-  expired booking, superseded intent, missing stored intent, or amount mismatch—creates a durable
-  Finance-owned case with customer, amount, reason, and an approved **finish or refund** action. No
-  succeeded payment may exit through only a log or silent return.
-- The transition to **Booked** is checked and confirmed before customer or internal confirmation.
-  If that write fails after the child records exist, retry resumes the same booking and no message
-  claims completion.
-- Customer confirmation and the internal booking alert have durable delivery/outbox state. A hard
-  kill after **Booked** but before/after either send is detected and retried without duplicate
-  commitments or untracked duplicate messages.
-- A scheduled production reconciliation reads Stripe succeeded payments and the actual CRM customer,
-  booking, job, plan when applicable, agreement, and paid invoice records. It proves both directions:
-  each succeeded payment has exactly one complete booking, and each paid booked commitment has one
-  succeeded payment for the exact amount.
-- Reconciliation opens, updates, and resolves owned cases automatically for missing, duplicate, or
-  contradictory records. It also detects dangling checkpoint IDs rather than treating a nonblank ID
-  as proof that the child record still exists.
-- The recovery action either completes the original deterministic records or records an approved
-  refund and customer notice. Routine staff cannot manually resolve a paid-not-finalized case while
-  the payment remains unmatched.
-- Failure injection covers the early guard states, failed **Booked** write, hard termination while a
-  claim is held, termination on both sides of each communication, reconciliation input/provider
-  failure, duplicate/out-of-order webhooks, and deployed end-to-end recovery with real Stripe test
-  events.
-
-**Engineering status (implemented this commit):**
-
-- No succeeded booking payment exits `finalizeBooking` through a log or silent return anymore.
-  Missing booking, a `CANCELED`/`EXPIRED` booking that never finalized, a superseded PaymentIntent,
-  and an amount mismatch each open a durable Finance-owned `PAID_NOT_FINALIZED` case with the
-  customer, amount, reason, and a **finish or refund** action (`shared/bookingFinalize.ts`).
-- The **Booked** write is checked before any confirmation is sent: if the status write does not
-  persist, finalization throws (opening the exception, releasing the claim for an idempotent retry)
-  and no message claims completion.
-- Customer confirmation and the internal booking alert now carry durable outbox markers
-  (`BookingRequest.confirmationSentAt` / `officeAlertSentAt`). A hard kill after **Booked** but
-  before or between the two sends is picked up on the next webhook delivery, which resends only the
-  message whose marker is unset — never a duplicate commitment or duplicate message.
-- A scheduled production reconciliation runs in the daily cron (`daily-reminders`): it reads
-  Stripe's succeeded booking PaymentIntents and the real booking/invoice tables and proves both
-  directions — each succeeded payment has exactly one complete booking for the exact amount, and each
-  BOOKED booking's checkpoint IDs still resolve to real child rows (a nonblank `jobId` is loaded and
-  checked, not trusted). It opens owned cases for missing/duplicate/contradictory records and for a
-  Stripe read failure, and resolves the case on a booking that proves whole
-  (`shared/bookingReconcile.ts`, `daily-reminders/handler.ts`).
-- Failure-injection unit tests cover the guard states, the failed **Booked** write, a kill on each
-  side of the two sends, and reconciliation anomalies plus provider failure.
-
-**Still required for the owners' sign-off (not code):** the deployed end-to-end recovery rehearsal
-with real Stripe test events, and Finance's review of the first production reconciliation output.
-
-**Pass owner:** CEO and Engineering lead jointly; Finance signs the production reconciliation.
-
-### GL-13 — Finish technician read scope and audited override
+### GL-13 — Complete technician least-privilege and audited field overrides
 
 **Business outcome:** A technician can see only the minimum customer and work data needed for an
 authorized assignment, while office emergency access is explicit and accountable.
 
-**Why this is still a gate after commit `2949dd5`:** Field mutations now verify the signed-in
-assignee, but the underlying models still let the TECH role read broad customer, job, plan, report,
-group, route, and technician data. Document access is granted when the technician has any historical
-job for the customer, not only a legitimate current assignment or approved lookback. Office/owner
-bypass and reassignment also lack the required reasoned audit.
+**Why this is still a gate:** The TECH role can read broad customer, job, plan, report, group, route,
+and technician data. Document access is granted when the technician has any historical job for the
+customer, not only a legitimate current assignment or approved lookback. Office/owner bypass and
+reassignment also lack the required reasoned audit.
 
 **Required acceptance evidence:**
 
@@ -181,156 +114,225 @@ bypass and reassignment also lack the required reasoned audit.
 
 **Pass owner:** CEO, with Compliance and Operations verification.
 
-### GL-15 — Legally reliable service-report completion
+### GL-14 — Make staff role changes and offboarding failure-safe
 
-**Business outcome:** A finalized service report is an accurate, delivered, correctable legal
-record—not merely a PDF the UI says was sent.
+**Business outcome:** A role change or departure cannot leave a person with unintended access, and
+leadership can prove who changed access, why, and what work was reassigned.
 
-**Closed by commits `b9d75df`, `af289df`, `5eff5ac`, `608239e`, `8fdeb02`, and `922eac0`** (Compliance
-owner to sign the acceptance evidence): Finalization no longer infers the application window—it refuses
-any report whose job lacks a server-stamped Start and End, so the record's times are the real on-site
-times. It also refuses any product that is not an active, label-approved catalog row (matched by EPA
-number and name), so an arbitrary manual pesticide can no longer reach a finalized record—an unknown
-product must be reviewed into the catalog by the office first. Completion and delivery are separate
-facts: every finalized report carries a deliveryStatus (delivered, failed, or no-email), a missing
-address or a bounce opens an owned delivery task instead of passing silently, and the office and
-technician screens show the real delivery state rather than an unconditional "sent". Location is
-validated as evidence of presence: an impossible coordinate, a reading with no timestamp or accuracy, or
-a capture from outside the server-stamped application window all block finalization. Corrections are
-append-only amendments: a finalized report is never overwritten, and an office-issued
-ServiceReportAmendment links to the original carrying the reason, author, time, and changed facts,
-renders its own document, and is delivered to the customer with the original preserved. The
-on-site-presence rule is settled per the CEO's direction: a technician is never blocked and there is no
-manager-exception gate—an imprecise GPS fix (worse than ~100 m) or one that routes more than a mile from
-the service address raises an owned LOCATION_REVIEW task after the record stands, and the distance check
-(existing Google Routes key, no new geocoder) is silent where routing is unavailable, so it never limits
-rural or dead-zone areas. Both thresholds are tunable constants the Compliance owner can adjust.
+**Why this is still a gate:** Multi-role changes are applied group by group, and technician
+work/profile changes can occur before login revocation. A mid-action failure can leave requested and
+effective roles different without a durable recovery case. Role changes and offboarding also lack a
+reasoned, immutable staff-access history, and the production break-glass operating proof has not been
+completed.
 
 **Required acceptance evidence:**
 
-- A regulated report can use only an office-approved product and label/rate from the launch
-  catalog. An unknown product requires an office/compliance approval that becomes part of the
-  catalog and audit before finalization; free-text EPA details alone cannot authorize it.
-- Server-side finalization refuses a report unless the application has both immutable server-stamped
-  start and end times, the assigned technician and current required license, all required treatment
-  fields, and all required customer/site facts. It never substitutes the finalization time.
-- The Compliance owner approves the on-site presence rule: location freshness, accuracy, distance
-  from service address, and documented exception process. Implausible/stale location blocks
-  finalization or requires a named manager exception.
-- Report completion and report delivery are separate facts. The technician/office sees **Completed,
-  delivery pending/failed** until actual delivery. Missing email or send failure creates an owned
-  delivery task with an approved alternate delivery method and proof.
-- Corrections use an append-only amendment linked to the original report, with reason, author,
-  time, changed facts, customer delivery, and original preserved. No role can overwrite the issued
-  record.
-- Operations can retrieve no-access evidence and all report evidence through authorized screens.
-- Compliance signs a rendered sample for every launch service type and tests offline draft/retry,
-  duplicate finalize, missing product, missing end, expired license, distant/stale location,
-  delivery failure, and amendment.
+- Role changes and offboarding start from a durable request with actor, approved reason, prior roles,
+  requested roles, target person, and timestamp. The screen shows effective provider roles—not merely
+  the requested result—before reporting success.
+- Removing access is fail-safe and resumable. Login disable/global sign-out is confirmed before the
+  action can appear complete; technician deactivation, future-job reassignment, route effects, and
+  in-progress work are then verified. Any partial result creates an owned security/operations case
+  with one safe resume action.
+- Adding/removing several roles cannot silently stop halfway. Retry converges on the approved role
+  set, and unexpected extra staff or dynamic groups are detected rather than ignored.
+- An immutable staff-access ledger records actor, reason, prior/new effective roles, login/session
+  result, linked technician state, reassigned jobs, in-progress exceptions, timestamps, and final
+  outcome. Offboarded people remain visible in history even after they leave the active roster.
+- Direct authorization tests prove an old session and fresh token cannot read or act after
+  offboarding; failure injection covers each provider-group, sign-out, profile, reassignment, alert,
+  and audit step, plus concurrent role changes.
+- Production has at least two named usable owners with MFA/recovery access. A witnessed break-glass
+  drill proves one owner can recover access and offboard the other without engineering or a shared
+  login.
 
-**Pass owner:** Named Compliance owner.
+**Pass owner:** CEO, with Operations verifying reassigned work and Engineering providing direct
+access/failure evidence.
 
-### GL-04 — Capacity that cannot be oversold
+### GL-15 — Complete failure-safe regulated report issuance
 
-**Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
-cannot buy the same last unit of capacity.
+**Business outcome:** Every issued service report and correction is an accurate, durable,
+correctly authored legal record with a truthful customer-delivery state.
 
-**Why this is still a gate:** Public availability is based on a coarse active-technician/day count,
-offers capacity even with no active technician, and only rechecks availability before payment. It
-does not reserve the slot while payment completes.
-
-**Required acceptance evidence:**
-
-- Sellable capacity uses the technician's actual working day, approved leave/blackouts, credential
-  validity on the service date, service duration, service territory, travel allowance, and time
-  window. Zero eligible technicians means zero sellable dates.
-- Capacity rules are the same in the public funnel and the dispatch board. A day/window cannot be
-  “available” to the customer and over capacity to Operations.
-- Selecting checkout places a short, visible capacity hold. A successful payment consumes it;
-  abandonment, failure, and expiry release it. The CEO approves the hold duration.
-- A concurrency test starts two purchases for the last slot. Exactly one may be booked; the other
-  receives a truthful alternate-date/refund outcome without manual database repair.
-- Operations can block a day, technician, territory, or window and can see why a date is or is not
-  sellable. Removing capacity immediately protects all unconsumed public slots.
-- The system prevents staffing a service outside the assigned technician's active license/scope,
-  even if the slot was quoted earlier.
-
-**Pass owner:** Head of Operations.
-
-### GL-16 — Governed pricing and margin protection
-
-**Business outcome:** Neither AI nor a low-skill employee can publish a loss-making, nonsensical,
-or unapproved price.
-
-**Why this is still a gate:** Live market-rate changes have no complete hard bounds/approval trail,
-and cost floors do not cover every sellable service, recurring cadence, add-on, and property type.
+**Why this is still a gate:** An approved product can carry a technician-entered rate/dilution that
+is not validated to the approved label. The customer email is sent before report and job completion
+writes are verified, so a failed write can leave a delivered “complete” report attached to a draft
+and a retry can send it again. Amendment creation, document storage, delivery, and final metadata are
+not one resumable issuance, and the rendered amendment can name the original technician rather than
+the staff member who issued the correction. A required location-review task is best-effort and can
+disappear if its write fails.
 
 **Required acceptance evidence:**
 
-- Finance approves fully loaded cost and minimum gross-margin rules for every launch catalog item,
-  including labor time, drive time, material, lead cost, payment fee, callback allowance, overhead,
-  seasonality, property size, recurring cadence, and add-ons.
-- Hard minimums, maximums, sensible size/quantity progression, and input-validity rules apply before
-  any price reaches a customer. Missing/invalid inputs fall to review; they never guess or sell.
-- AI/researched rate changes cannot become live merely because they were generated. The CEO sets
-  approval thresholds; material changes require owner/finance approval and a preview of affected
-  quotes, margin, and current-vs-proposed prices.
-- Every live rate change records actor/source, reason, evidence date, prior/new value, approval, and
-  effective time; an owner can roll back safely.
-- Routine office users cannot edit live rates or protected plan prices. Emergency overrides are
-  owner-only, time-limited, reasoned, and reported.
-- A price matrix test covers minimum/maximum inputs, each service/property/cadence, missing rate,
-  outlier research, negative/zero/decimal mistakes, and price exactly at/below the margin floor.
+- Every applied product uses an active Compliance-approved catalog identity and an allowed
+  label/service combination. Quantity, concentration, rate/dilution, target site/pest, and re-entry
+  interval are selected or validated against the approved label; plausible free text cannot
+  authorize an application record.
+- Report issuance is deterministic and resumable across PDF generation/storage, report finalization,
+  job completion, billing/next-visit effects, customer delivery, and review creation. Every required
+  write is checked, and retry returns the same report without a duplicate document, email, invoice,
+  or next visit.
+- No customer message says the visit/report is complete until the durable report and job state
+  support that statement. Delivery uses durable outbox/provider evidence and distinguishes
+  **Delivered**, **Pending**, **Failed**, **No email**, and approved alternate delivery with proof.
+- The CEO's non-blocking field rule is preserved: a technician is not stranded for imprecise or
+  distant GPS. However, every reading that exceeds the approved threshold must create durable owned
+  review; a failed route/review write cannot silently erase the obligation. Compliance approves the
+  capture-window grace, accuracy/distance thresholds, evidence, SLA, and resolution policy.
+- Amendments are append-only, deterministic on the correction request, and resumable through render,
+  store, deliver, and metadata steps. The record and PDF identify the actual signed-in issuer,
+  preserve the original, require reason and changed facts, and cannot create duplicate or orphaned
+  amendments after retry.
+- Operations can retrieve the original, all amendments, delivery evidence, photos, no-access
+  evidence, and review history through authorized screens without engineering assistance.
+- Compliance signs a rendered original and amendment for every launch service type. Failure tests
+  cover invalid label rate, write failure before/after delivery, hard termination at every issuance
+  step, duplicate/concurrent finalize and amendment, missing/failed email, missing document, stale/
+  distant/imprecise location, review-write failure, expired/reassigned technician, and offline draft
+  recovery.
 
-**Pass owner:** CEO and Finance lead jointly.
+**Pass owner:** Named Compliance owner; Operations signs delivery/retrieval and Engineering signs
+failure-recovery evidence.
 
-### GL-09 — Atomic customer and plan lifecycle controls
+### GL-17 — Seasonal plan and licensed-scope decisions
 
-**Business outcome:** Customer status, login access, billing, and scheduled work can never disagree,
-and routine staff cannot bypass the approved lifecycle with a raw field change.
+**Business outcome:** Seasonal and specialized services bill and schedule exactly as customers were
+told, and are performed only under valid business and technician authority.
 
-**Why this is still a gate:** Customer deactivation and portal revocation are separate client
-actions; rebooking an inactive customer can leave a paid customer with disabled access; and broad
-record-update permissions can bypass guarded status, plan, pricing, or provider-linked workflows.
-
-**What now closes it:** Raw `Customer.update` and `ServicePlan.update`/`delete` are removed from every
-browser role (data/resource.ts) — the office keeps its safe contact/address/note edits through the new
-`updateCustomerContact` mutation, which can touch only those fields, and the protected lifecycle fields
-(status, Stripe ids, payment-method label, portalUserSub, accessGroups, groupId, plan price/status,
-delinquency, paid state) can now move only through named Lambda actions. Reactivation is folded into one
-server action, `reactivateCustomer`, that restores the portal login *before* it publishes ACTIVE, so a
-paying customer is never left ACTIVE with a dead login. Every deactivation and reactivation now appends
-an immutable row to a new `CustomerLifecycleEvent` ledger (actor, timestamp, prior→new status, and the
-money/job/access effects), browser-readable by OWNER/OFFICE/FINANCE.
+**Why this is still a gate:** The business has not encoded a final mosquito/seasonal billing and
+renewal policy, while some specialized/RI service claims require explicit scope and credential
+validation.
 
 **Required acceptance evidence:**
 
-- ✅ **Deactivate customer** is one server-owned business action covering plan billing, queued visits,
-  open balances, customer login, communications, and status; a partial failure leaves the customer
-  ACTIVE (never a hidden live charge) and pages the office. The money/work/status half is one resumable
-  action; the login half is a chained guarded mutation whose failure becomes owned work. *(shared/
-  `deactivation.ts`, crm-admin `revokePortalAccess`, `deactivation.test.ts`; the ledger write is new.)*
-- ✅ Reactivating an inactive customer explicitly restores the approved access state **before** the
-  status is confirmed, in one server action; canceled plans stay canceled (re-subscribe via a new
-  booking). *(crm-admin `reactivateCustomer`, `reactivation.test.ts`.)*
-- ✅ Statuses, plan price/status, Stripe identifiers, access groups, paid state, and other protected
-  lifecycle fields can change only through named business actions; office screens retain only safe
-  contact/address/note edits. Enforced structurally — no browser mutation exists to write them.
-  *(data/resource.ts Customer/ServicePlan auth, `updateCustomerContact`.)*
-- ⚠️ Two employees performing the **same** lifecycle action cannot produce mixed state: deactivate is
-  idempotent, and a reactivation of an already-ACTIVE customer reports the current fact and writes no
-  second transition. **Residual:** there is no DB-level optimistic lock across *different* actions, so a
-  truly interleaved deactivate-vs-reactivate is not yet conditional-write guarded.
-- ⚠️ Every transition records actor, timestamp, prior state, new state, and the money/job/access effects
-  in the append-only `CustomerLifecycleEvent` ledger, readable by leadership roles via the data API.
-  *(shared/`lifecycleLog.ts`.)* **Residuals:** the actions don't yet prompt for a free-text reason, and a
-  dedicated CRM history screen is a follow-up (the rows are readable but not yet surfaced in a view).
-- ⚠️ Tests cover deactivation with active plan/queued visit/open invoice, partial provider failure,
-  reactivation (fresh, idempotent, no-login, missing customer), and that the safe edit can never write a
-  protected field. *(`deactivation.test.ts`, `reactivation.test.ts`.)* **Residual:** a public-funnel
-  "inactive customer rebooks online" end-to-end case is not covered here.
+- The CEO approves for each seasonal plan: service months, number/frequency of visits, annual vs
+  in-season billing, first-year proration, renewal date/notice, off-season customer status, pause/
+  cancel/refund handling, and missed-visit treatment.
+- The system stops billing and scheduling where the approved policy says it should; it cannot leave
+  an in-season cadence or monthly charge running indefinitely by omission.
+- Compliance maps each launch service and state/territory to the required company registration,
+  supervisor/applicator credential, expiry, and prohibited scope. Wildlife trapping/removal,
+  exclusion, termite, pesticide, and restoration scopes are not treated as interchangeable.
+- Expiring/expired company or technician credentials remove affected capacity before an appointment
+  is sold and create an advance owner alert with enough time to renew/reassign.
+- Customer quote, accepted terms, schedule, invoice, and job packet all use the approved seasonal
+  and licensed scope. Tests cross season boundaries, renewal, cancellation, expired credentials,
+  and an unsupported service/state combination.
 
-**Pass owner:** Head of Operations; Finance and CEO approve protected fields and transition policy.
+**Pass owner:** CEO and Compliance owner jointly.
+
+### GL-12 — Finish service-specific dispatch readiness
+
+**Business outcome:** A technician is dispatched only with the service-specific facts and approved
+scope needed to complete the visit safely, and can exit an unperformable visit without inventing a
+workaround.
+
+**Why this is still a gate after commit `940a4b9`:** Readiness is still based on free-text service
+data; the address is not proven valid/in service area; products, constraints, and prior treatment
+findings are absent; and scope mismatch or missing prep has no dedicated field outcome. Packet
+changes after assignment/start also have no technician acknowledgement or versioned safety trail.
+
+**Required acceptance evidence:**
+
+- Before assignment, the approved GL-01 catalog enforces the selected service's valid in-area
+  address, duration, scope, required prep/confirmation, required instructions, credential, and
+  approved product/constraint minimums. Nonblank placeholders do not count as a valid address or
+  complete packet.
+- The field packet includes the service's approved product/scope constraints and relevant prior
+  treatment findings/callback lineage—not only the status of earlier visits.
+- **Scope does not match** and **required prep missing** are dedicated one-tap field outcomes. They
+  do not falsely start/complete service, create an owned operations case, preserve capacity/money
+  facts, and send the approved customer next step.
+- Any safety/access/scope/prep change after assignment is versioned and brought to the assigned
+  technician's attention. After service starts, material changes require an audited manager action
+  and technician acknowledgement.
+- Tests cover each retained service type, invalid/out-of-area address, missing service minimum,
+  product/scope restriction, packet edit after assignment/start, scope mismatch, missing prep, and
+  retry of the resulting office/customer actions.
+
+**Pass owner:** Head of Operations, with Compliance sign-off.
+
+### GL-05 — Complete paid-booking delivery and reconciliation controls
+
+**Business outcome:** Every succeeded booking payment is either one complete, correctly communicated
+customer commitment or one visible, verified refund/recovery case—even when execution stops between
+steps.
+
+**Why this is still a gate:** A message can be accepted by the email provider and execution can stop
+before the sent marker is durably stored, causing an untracked duplicate on retry. A marker write can
+also fail without changing the reported outcome. Reconciliation does not reliably prove that every
+paid booking has a succeeded Stripe payment or that every child record belongs to the same customer,
+service, amount, and booking. A capped or partial provider scan can finish without an owned
+incomplete-run result, and staff can manually close a paid exception with a note while money and
+records still disagree.
+
+**Required acceptance evidence:**
+
+- Customer confirmation and the internal booking alert use a provider-supported idempotency key or
+  equivalent durable outbox state that covers the ambiguous **sent but not marked** window. Retry
+  cannot create an untracked duplicate, and a failed marker write is visible owned work rather than
+  success.
+- A confirmation is shown as delivered only from durable provider evidence. Missing email, bounce,
+  suppression, provider timeout, and alternate delivery each have a truthful status, owner, deadline,
+  and retry/proof path.
+- Reconciliation proves both directions for the full approved accounting window: every succeeded
+  Stripe booking payment has exactly one complete commitment, and every paid **Booked** commitment
+  has exactly one succeeded Stripe payment and one paid invoice for the exact amount.
+- Reconciliation validates relationships, not merely record existence: customer, job, plan when
+  applicable, agreement, invoice, service, date, and amount all belong to the same booking. A
+  dangling or cross-linked record is an exception.
+- A truncated page scan, expired lookback, provider read error, table read error, or timed-out run
+  cannot report green or auto-resolve cases. It creates an owned Finance/Engineering failure and the
+  prior unresolved state remains visible.
+- **Paid—not finalized** and reconciliation cases close only after the system verifies a complete
+  commitment or a settled refund plus customer notice. Routine staff cannot close an unmatched-money
+  case by typing a note.
+- A deployed production-equivalent rehearsal uses real Stripe test events and forced stops before
+  and after every material write and send, including provider-accepted email before marker storage,
+  duplicate/out-of-order webhooks, partial reconciliation input, and recovery/refund. Finance signs
+  the clean output and every induced exception.
+
+**Pass owner:** CEO and Engineering lead jointly; Finance signs the reconciliation and recovery
+evidence.
+
+### GL-09 — Make customer lifecycle transitions atomic and auditable
+
+**Business outcome:** Customer status, billing, access, scheduled work, and customer communication
+never disagree, and an employee always sees the real outcome of deactivation or reactivation.
+
+**Why this is still a gate:** Deactivation requires separate money/work and portal-access actions
+from the employee screen. Canceling several plans can partially succeed and leave a mixed customer
+state. Final status writes and audit writes are not all verified; reactivation can restore access and
+then report **Active** even if the status write did not persist. Opposing concurrent actions have no
+durable transition claim, reasons are not required, and the history is not available as a complete
+business view.
+
+**Required acceptance evidence:**
+
+- **Deactivate customer** is one named business action that durably records the customer's
+  instruction, then coordinates plan billing, queued and paid visits, open balances, portal access,
+  customer notice, and final status. The employee never has to remember a second action.
+- **Reactivate customer** is one named action that restores only the approved access/service state.
+  Canceled subscriptions stay canceled unless a separate, explicitly accepted sale creates a new
+  plan.
+- Each transition has durable step state and a safe resume action. If one of several provider or CRM
+  steps succeeds and a later step fails, the screen names exactly what changed, what remains live,
+  who owns it, and whether the customer may still be charged or served. It never returns a false
+  **Inactive** or **Active** result.
+- Every status, access, plan, job, and audit write is checked before success is returned. A failed
+  audit write creates blocking owned recovery; leadership history cannot silently lose a transition.
+- Conditional transition/version control prevents interleaved deactivate/reactivate requests from
+  producing mixed state. Duplicate requests return the same transition and outcome.
+- Every transition requires a controlled reason and records actor, time, prior/new state, provider
+  results, affected plans/jobs/balance/access, communication outcome, exceptions, and final
+  disposition in a leadership-visible history.
+- Failure tests cover partial cancellation across multiple plans, provider success plus CRM failure,
+  status-write failure, access-write failure, audit-write failure, notice failure, opposing
+  concurrent actions, duplicate requests, and an inactive customer rebooking through the public
+  funnel.
+
+**Pass owner:** Head of Operations; Finance and CEO approve protected fields, transition policy, and
+the failure/recovery evidence.
 
 ### GL-08 — Finish failure-safe customer plan cancellation
 
@@ -366,6 +368,33 @@ and the response says a confirmation was emailed even when delivery failed or no
   confirmation, and an attempted cancellation of another customer's plan.
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
+
+### GL-04 — Capacity that cannot be oversold
+
+**Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
+cannot buy the same last unit of capacity.
+
+**Why this is still a gate:** Public availability is based on a coarse active-technician/day count,
+offers capacity even with no active technician, and only rechecks availability before payment. It
+does not reserve the slot while payment completes.
+
+**Required acceptance evidence:**
+
+- Sellable capacity uses the technician's actual working day, approved leave/blackouts, credential
+  validity on the service date, service duration, service territory, travel allowance, and time
+  window. Zero eligible technicians means zero sellable dates.
+- Capacity rules are the same in the public funnel and the dispatch board. A day/window cannot be
+  “available” to the customer and over capacity to Operations.
+- Selecting checkout places a short, visible capacity hold. A successful payment consumes it;
+  abandonment, failure, and expiry release it. The CEO approves the hold duration.
+- A concurrency test starts two purchases for the last slot. Exactly one may be booked; the other
+  receives a truthful alternate-date/refund outcome without manual database repair.
+- Operations can block a day, technician, territory, or window and can see why a date is or is not
+  sellable. Removing capacity immediately protects all unconsumed public slots.
+- The system prevents staffing a service outside the assigned technician's active license/scope,
+  even if the slot was quoted earlier.
+
+**Pass owner:** Head of Operations.
 
 ### GL-06 — Honest handling of processing and failed payments
 
@@ -416,45 +445,32 @@ provide a unified refund/credit decision, recurring-plan effect, or guaranteed c
 
 **Pass owner:** Head of Operations; Finance approves money dispositions.
 
-### GL-14 — Staff identity, linking, and offboarding
+### GL-16 — Governed pricing and margin protection
 
-**Business outcome:** Every staff login maps to one real worker and role, and a departed or
-misconfigured employee cannot retain access.
+**Business outcome:** Neither AI nor a low-skill employee can publish a loss-making, nonsensical,
+or unapproved price.
 
-**Why this was a gate, and what this commit closes:** Staff identity is now server-enforced end to
-end. `adminCreateUser` refuses a TECH login unless it is atomically bound to exactly one Technician
-record with a present, current applicator licence — "invite now, link later" is gone, one technician
-maps to one login, and a record already linked to another login is refused. A new owner-only staff
-roster (`staffRoster`) joins Cognito to the technician records and surfaces person, email, role(s),
-status, pending invite, and — for technicians — the linked profile and its licence, flagging unlinked
-or lapsed technicians. Owners can change any role set (`changeStaffRoles`) and offboard any staff
-role (`offboardStaff`), which disables the login, globally signs out live sessions, removes every
-staff and dynamic group, returns a linked technician's future jobs to the scheduling pool, and pages
-the office — in one action, preserving the Technician row and finalized reports (audit/legal records
-are never deleted). The last usable owner cannot be demoted or offboarded.
+**Why this is still a gate:** Live market-rate changes have no complete hard bounds/approval trail,
+and cost floors do not cover every sellable service, recurring cadence, add-on, and property type.
 
 **Required acceptance evidence:**
 
-- ✅ Creating a technician login atomically creates/links exactly one technician profile with required
-  active license data, or refuses with a fixable error. “Invite now, link later” is not available.
-  *(crm-admin `adminCreateUser`; the CRM invite form requires the technician pick.)*
-- ✅ An owner-only staff roster shows person, email, role(s), linked profile, status, last login, and
-  pending invite, and blocks duplicate/shared identities and unlinked users (shared identity is
-  refused at creation; unlinked technicians are flagged in the roster). Cognito records no native
-  last-login, so the post-auth trigger stamps `custom:lastLoginAt` on every sign-in and the roster
-  reads it — one uniform source across every staff role, "never signed in" for an unaccepted invite.
-- ✅ Owners can change role and offboard OWNER, OFFICE, FINANCE, and TECH users. Offboarding disables
-  login/sessions, removes groups, reassigns owned work and future jobs, and preserves audit/legal
-  records in one guided action.
-- ⚠️ The system prevents removal of the last usable owner (enforced in `assertOwnerRemains`).
-  **Residual (operational):** naming at least two owners and running one tested break-glass drill is a
-  pre-launch operating step, not code.
-- ✅ Tests cover abandoned invite (roster pending-invite flag), duplicate/shared email, unlinked
-  technician, role change, immediate offboarding, offboarding with assigned future work, and
-  attempted access using an old session (global sign-out). *(crm-admin `offboarding.test.ts`,
-  shared `staffRoles.test.ts`.)*
+- Finance approves fully loaded cost and minimum gross-margin rules for every launch catalog item,
+  including labor time, drive time, material, lead cost, payment fee, callback allowance, overhead,
+  seasonality, property size, recurring cadence, and add-ons.
+- Hard minimums, maximums, sensible size/quantity progression, and input-validity rules apply before
+  any price reaches a customer. Missing/invalid inputs fall to review; they never guess or sell.
+- AI/researched rate changes cannot become live merely because they were generated. The CEO sets
+  approval thresholds; material changes require owner/finance approval and a preview of affected
+  quotes, margin, and current-vs-proposed prices.
+- Every live rate change records actor/source, reason, evidence date, prior/new value, approval, and
+  effective time; an owner can roll back safely.
+- Routine office users cannot edit live rates or protected plan prices. Emergency overrides are
+  owner-only, time-limited, reasoned, and reported.
+- A price matrix test covers minimum/maximum inputs, each service/property/cadence, missing rate,
+  outlier research, negative/zero/decimal mistakes, and price exactly at/below the margin floor.
 
-**Pass owner:** CEO.
+**Pass owner:** CEO and Finance lead jointly.
 
 ### GL-01 — One truthful, complete service catalog
 
@@ -582,151 +598,6 @@ records can be restored after human or provider error.
 
 ## Priority 1 — High revenue and operating reliability
 
-### GL-02 — A lead lifecycle in which no lead can disappear
-
-**Business outcome:** Every lead always has an accountable person, a next action, and an auditable
-outcome until it becomes a customer or is deliberately closed.
-
-**Why this is still a gate:** A lead can currently be saved with insufficient contact information,
-has no assigned owner or follow-up deadline, and has no complete stage/lost lifecycle. Duplicate
-people can also be created before the safe paid-conversion path is reached.
-
-**Required acceptance evidence:**
-
-- The business approves a small, unambiguous pipeline: at minimum **New**, **Attempting contact**,
-  **Qualified**, **Booking sent**, **Booked/Won**, **Lost**, and **Do not contact**.
-- Every open lead has an owner, created time, last-touch time, next action, and due time. Missing or
-  overdue actions appear in an owner and manager queue; they are not found by browsing a list.
-- A lead cannot be saved without a usable contact route. If incomplete third-party data must be
-  accepted, the save creates a clearly owned “obtain contact information” exception automatically.
-- Email/phone normalization and duplicate detection run before creation. A week-one employee gets
-  a simple **Use existing**, **Create separate**, or **Ask manager** decision with enough context;
-  the system never silently merges people.
-- Every call, email, text, and booking-link attempt records time, channel, actor, and actual outcome.
-  A failed delivery does not count as a successful touch.
-- Lost leads require a controlled reason. Do-not-contact immediately suppresses non-essential sales
-  outreach and records who made the decision.
-- The CEO sets response and follow-up SLAs by lead source. The launch rehearsal proves a new lead,
-  failed contact, overdue follow-up, duplicate, booking, and lost lead all land in the correct queue.
-- The CEO explicitly decides how phone-only and non-card customers are handled. If they are not a
-  supported launch segment, staff receive a truthful close reason instead of a dead-end conversion
-  path. If they are supported, the approved path retains the same pricing, terms, identity, and
-  audit controls as self-service booking.
-
-**Pass owner:** Head of Sales.
-
-### GL-03 — Honest fallback contact and communication outcomes
-
-**Business outcome:** Customers are told what will actually happen, and staff never see a success
-message for a communication that was not delivered.
-
-**Why this is still a gate:** The quote fallback promises a call even when phone is optional, and
-some CRM communication actions can return a non-delivery result while the screen presents success.
-
-**Required acceptance evidence:**
-
-- A quote that needs human review captures a usable preferred contact channel. If a call is
-  promised, a valid phone number and call consent are required; otherwise the promise says email.
-- The customer sees a specific response window the sales team has accepted and can meet during
-  published business hours. After-hours submissions receive a truthful next-business-window time.
-- Every send action branches on the delivery result: **sent**, **not sent—fix this now**, or
-  **queued for retry**. Only the first state can display “sent.”
-- Bounce, suppression, missing mailbox, and provider failure create an owned exception tied to the
-  lead/customer and expose an approved alternate-contact next step.
-- A test using an invalid address and a suppressed address proves that neither the customer record
-  nor the employee screen falsely records successful contact.
-
-**Pass owner:** Head of Sales.
-
-### GL-10 — Guarantee, callback, and no-access lifecycle
-
-**Business outcome:** Every public service promise has a defined, measurable operational path, and
-a failed access visit cannot be “resolved” without actually completing the approved customer and
-money outcome.
-
-**Why this is still a gate:** Public pages promise return service/guarantees, but the app has no
-distinct linked callback lifecycle. No-access evidence and customer status are incomplete, and the
-resolution can be closed without verifying notification, refund, or rebooking.
-
-**Required acceptance evidence:**
-
-- The CEO approves a guarantee matrix by service: eligibility, term, covered pests/conditions,
-  exclusions, customer obligations, maximum response time, charge, and approval authority. The
-  accepted customer terms contain the same matrix.
-- Customers and staff can request a callback/return service. The resulting job is visibly linked to
-  the original service and cannot accidentally be charged as a new sale.
-- Operations sees callback volume, reason, original technician/service, days to resolution, and
-  repeat-callback rate. Leadership can use it as a quality and margin signal.
-- A no-access outcome is visible to the customer, includes the approved reason and evidence, and
-  sends a truthful next step. Operations can open the evidence from the case.
-- The CEO approves the no-access financial policy. The system must not charge a fee unless that
-  exact policy was disclosed before purchase and the case meets it; the employee never decides or
-  calculates a fee ad hoc.
-- No-access resolution closes only after the chosen rebook/refund/credit/customer-notice outcome is
-  verified. It cannot be closed by typing a note that claims the work happened.
-- Tests cover guaranteed/not guaranteed, repeat callback, linked zero-price visit, no access with
-  paid/unpaid work, evidence access, refund failure, notice failure, and rebooking collision.
-
-**Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
-
-### GL-12 — Finish service-specific dispatch readiness
-
-**Business outcome:** A technician is dispatched only with the service-specific facts and approved
-scope needed to complete the visit safely, and can exit an unperformable visit without inventing a
-workaround.
-
-**Why this is still a gate after commit `940a4b9`:** Readiness is still based on free-text service
-data; the address is not proven valid/in service area; products, constraints, and prior treatment
-findings are absent; and scope mismatch or missing prep has no dedicated field outcome. Packet
-changes after assignment/start also have no technician acknowledgement or versioned safety trail.
-
-**Required acceptance evidence:**
-
-- Before assignment, the approved GL-01 catalog enforces the selected service's valid in-area
-  address, duration, scope, required prep/confirmation, required instructions, credential, and
-  approved product/constraint minimums. Nonblank placeholders do not count as a valid address or
-  complete packet.
-- The field packet includes the service's approved product/scope constraints and relevant prior
-  treatment findings/callback lineage—not only the status of earlier visits.
-- **Scope does not match** and **required prep missing** are dedicated one-tap field outcomes. They
-  do not falsely start/complete service, create an owned operations case, preserve capacity/money
-  facts, and send the approved customer next step.
-- Any safety/access/scope/prep change after assignment is versioned and brought to the assigned
-  technician's attention. After service starts, material changes require an audited manager action
-  and technician acknowledgement.
-- Tests cover each retained service type, invalid/out-of-area address, missing service minimum,
-  product/scope restriction, packet edit after assignment/start, scope mismatch, missing prep, and
-  retry of the resulting office/customer actions.
-
-**Pass owner:** Head of Operations, with Compliance sign-off.
-
-### GL-17 — Seasonal plan and licensed-scope decisions
-
-**Business outcome:** Seasonal and specialized services bill and schedule exactly as customers were
-told, and are performed only under valid business and technician authority.
-
-**Why this is still a gate:** The business has not encoded a final mosquito/seasonal billing and
-renewal policy, while some specialized/RI service claims require explicit scope and credential
-validation.
-
-**Required acceptance evidence:**
-
-- The CEO approves for each seasonal plan: service months, number/frequency of visits, annual vs
-  in-season billing, first-year proration, renewal date/notice, off-season customer status, pause/
-  cancel/refund handling, and missed-visit treatment.
-- The system stops billing and scheduling where the approved policy says it should; it cannot leave
-  an in-season cadence or monthly charge running indefinitely by omission.
-- Compliance maps each launch service and state/territory to the required company registration,
-  supervisor/applicator credential, expiry, and prohibited scope. Wildlife trapping/removal,
-  exclusion, termite, pesticide, and restoration scopes are not treated as interchangeable.
-- Expiring/expired company or technician credentials remove affected capacity before an appointment
-  is sold and create an advance owner alert with enough time to renew/reassign.
-- Customer quote, accepted terms, schedule, invoice, and job packet all use the approved seasonal
-  and licensed scope. Tests cross season boundaries, renewal, cancellation, expired credentials,
-  and an unsupported service/state combination.
-
-**Pass owner:** CEO and Compliance owner jointly.
-
 ### GL-18 — Verifiable exception resolution
 
 **Business outcome:** An operational failure stays visible until the promised real-world outcome is
@@ -784,6 +655,93 @@ service records.
   mismatches are detected without reading logs.
 
 **Pass owner:** CEO and Finance lead jointly; Sales and Operations sign their views.
+
+### GL-10 — Guarantee, callback, and no-access lifecycle
+
+**Business outcome:** Every public service promise has a defined, measurable operational path, and
+a failed access visit cannot be “resolved” without actually completing the approved customer and
+money outcome.
+
+**Why this is still a gate:** Public pages promise return service/guarantees, but the app has no
+distinct linked callback lifecycle. No-access evidence and customer status are incomplete, and the
+resolution can be closed without verifying notification, refund, or rebooking.
+
+**Required acceptance evidence:**
+
+- The CEO approves a guarantee matrix by service: eligibility, term, covered pests/conditions,
+  exclusions, customer obligations, maximum response time, charge, and approval authority. The
+  accepted customer terms contain the same matrix.
+- Customers and staff can request a callback/return service. The resulting job is visibly linked to
+  the original service and cannot accidentally be charged as a new sale.
+- Operations sees callback volume, reason, original technician/service, days to resolution, and
+  repeat-callback rate. Leadership can use it as a quality and margin signal.
+- A no-access outcome is visible to the customer, includes the approved reason and evidence, and
+  sends a truthful next step. Operations can open the evidence from the case.
+- The CEO approves the no-access financial policy. The system must not charge a fee unless that
+  exact policy was disclosed before purchase and the case meets it; the employee never decides or
+  calculates a fee ad hoc.
+- No-access resolution closes only after the chosen rebook/refund/credit/customer-notice outcome is
+  verified. It cannot be closed by typing a note that claims the work happened.
+- Tests cover guaranteed/not guaranteed, repeat callback, linked zero-price visit, no access with
+  paid/unpaid work, evidence access, refund failure, notice failure, and rebooking collision.
+
+**Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
+
+### GL-02 — A lead lifecycle in which no lead can disappear
+
+**Business outcome:** Every lead always has an accountable person, a next action, and an auditable
+outcome until it becomes a customer or is deliberately closed.
+
+**Why this is still a gate:** A lead can currently be saved with insufficient contact information,
+has no assigned owner or follow-up deadline, and has no complete stage/lost lifecycle. Duplicate
+people can also be created before the safe paid-conversion path is reached.
+
+**Required acceptance evidence:**
+
+- The business approves a small, unambiguous pipeline: at minimum **New**, **Attempting contact**,
+  **Qualified**, **Booking sent**, **Booked/Won**, **Lost**, and **Do not contact**.
+- Every open lead has an owner, created time, last-touch time, next action, and due time. Missing or
+  overdue actions appear in an owner and manager queue; they are not found by browsing a list.
+- A lead cannot be saved without a usable contact route. If incomplete third-party data must be
+  accepted, the save creates a clearly owned “obtain contact information” exception automatically.
+- Email/phone normalization and duplicate detection run before creation. A week-one employee gets
+  a simple **Use existing**, **Create separate**, or **Ask manager** decision with enough context;
+  the system never silently merges people.
+- Every call, email, text, and booking-link attempt records time, channel, actor, and actual outcome.
+  A failed delivery does not count as a successful touch.
+- Lost leads require a controlled reason. Do-not-contact immediately suppresses non-essential sales
+  outreach and records who made the decision.
+- The CEO sets response and follow-up SLAs by lead source. The launch rehearsal proves a new lead,
+  failed contact, overdue follow-up, duplicate, booking, and lost lead all land in the correct queue.
+- The CEO explicitly decides how phone-only and non-card customers are handled. If they are not a
+  supported launch segment, staff receive a truthful close reason instead of a dead-end conversion
+  path. If they are supported, the approved path retains the same pricing, terms, identity, and
+  audit controls as self-service booking.
+
+**Pass owner:** Head of Sales.
+
+### GL-03 — Honest fallback contact and communication outcomes
+
+**Business outcome:** Customers are told what will actually happen, and staff never see a success
+message for a communication that was not delivered.
+
+**Why this is still a gate:** The quote fallback promises a call even when phone is optional, and
+some CRM communication actions can return a non-delivery result while the screen presents success.
+
+**Required acceptance evidence:**
+
+- A quote that needs human review captures a usable preferred contact channel. If a call is
+  promised, a valid phone number and call consent are required; otherwise the promise says email.
+- The customer sees a specific response window the sales team has accepted and can meet during
+  published business hours. After-hours submissions receive a truthful next-business-window time.
+- Every send action branches on the delivery result: **sent**, **not sent—fix this now**, or
+  **queued for retry**. Only the first state can display “sent.”
+- Bounce, suppression, missing mailbox, and provider failure create an owned exception tied to the
+  lead/customer and expose an approved alternate-contact next step.
+- A test using an invalid address and a suppressed address proves that neither the customer record
+  nor the employee screen falsely records successful contact.
+
+**Pass owner:** Head of Sales.
 
 ### GL-11 — Minimum complete customer/group portal
 
@@ -878,7 +836,7 @@ demo or “engineering says it is fixed” is insufficient.
 |---|---|---|---|---|
 | CEO |  |  | GL-01, 05, 08, 13, 14, 16, 17, 19, 20, 22 |  |
 | Sales |  |  | GL-02, 03, 19 |  |
-| Operations |  |  | GL-04, 07, 09–12, 18, 19, 23, 24 |  |
+| Operations |  |  | GL-04, 07, 09–15, 18, 19, 23, 24 |  |
 | Finance |  |  | GL-05–09, 16, 17, 19, 21 |  |
 | Compliance/legal |  |  | GL-01, 10, 13, 15, 17, 20, 22 |  |
 | Engineering |  |  | Failure evidence for all gates; GL-05, 21, 22 |  |
