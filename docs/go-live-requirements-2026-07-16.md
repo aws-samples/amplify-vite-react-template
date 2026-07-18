@@ -2,20 +2,20 @@
 
 **Business review date:** 18 July 2026
 
-**Latest commit review:** 2 commits after `16f16d6`, from `5007ca2` through `9e11c71`; newest
-implementation commit `5007ca2`
+**Latest commit review:** 2 commits after `9e11c71`, from `404e80f` through `700164a`; newest
+implementation commit `404e80f`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commit affects GL-02 and the
-lead-ownership, consent, exception, command-view, and monitoring portions of GL-03, GL-14, GL-18, GL-19,
-and GL-22. Completed basic pipeline, controlled-lost-reason, lead-board, touch-ledger, and overdue-work
-scaffolding has been removed. Those gates now contain only the bypass, timing, durability, identity,
-suppression, recovery, management-view, and business-policy gaps that remain. The other gates remain
-because the new commits did not close them. An omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The latest implementation commit affects GL-14 and the
+lead/exception handoff and monitoring portions of GL-02, GL-18, and GL-22. Completed Schedule-entry
+unification, full Access History paging, and basic detection of failed lead/work releases have been
+removed. Those gates now contain only the pre-command, partial-role, reassignment readback, concurrency,
+handoff-history, operator-outcome, alerting, and production-ownership gaps that remain. The other gates
+remain because the new commits did not close them. An omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -62,11 +62,12 @@ action, and physical operating setup as dependencies the agent cannot complete a
 
 ## Systemic issues behind several gates
 
-- **X1 — Customer, lead, and visit-change history can still disappear.** `CustomerLifecycleEvent`,
-  `LeadActivity`, and `VisitChangeEvent` writes are best-effort. The first and third have no business
-  screen; the lead screen silently substitutes an empty list on failure and shows only its first 100
-  rows. Sensitive customer, sales, money, and schedule changes can therefore be applied without durable,
-  complete business-readable history.
+- **X1 — Customer, lead, exception, and visit-change history can still disappear.**
+  `CustomerLifecycleEvent`, `LeadActivity`, `WorkEvent`, and `VisitChangeEvent` writes can be best-effort
+  or occur after the business change. Customer/visit history has no business screen; the lead screen
+  silently substitutes an empty list on failure and shows only its first 100 rows. Sensitive customer,
+  sales, ownership, money, and schedule changes can therefore be applied without durable, complete
+  business-readable history.
 - **X2 — An exception can still turn green before the business obligation is fulfilled.** A canceled
   visit can count as money settled while a paid charge remains; adding an email can count as delivering
   the missed notice; any technician ID can count as safe staffing; plan-cancellation recovery is offered
@@ -86,7 +87,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed | Opus 4.8 / Ultracode likelihood |
 |---|---|---|---|---|---|
-| P0 | GL-14 | Finish durable staff-access changes and offboarding | CEO | Partial or legacy access changes leave live privilege, stranded work, or missing history | **78% — High** |
+| P0 | GL-14 | Finish durable staff-access changes and offboarding | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **64% — Medium** |
 | P0 | GL-13 | Finish technician session, route, and historical-data boundaries | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **68% — Medium** |
 | P0 | GL-15 | Finish regulated-report durability and compliance sign-off | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **58% — Medium** |
 | P0 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Work billed out of season or performed outside legal authority | **32% — Low** |
@@ -119,30 +120,41 @@ action, and physical operating setup as dependencies the agent cannot complete a
 **Business outcome:** A role change or departure cannot leave a person with unintended access, and
 leadership can retrieve the complete record of who changed access, why, and what work was reassigned.
 
-**Why this is still a gate:** Several hand-over and unification gaps closed; two durability items and a
-production-ownership item remain. Closed this pass: the separate Schedule-board **Deactivate technician**
-action no longer bypasses the workflow — a technician with a login is routed through the one hardened
-offboard (controlled reason, immutable ledger, a security case on a failed kill, read-back, and the
-work/lead release), and a login-less technician's deactivation is still recorded and reasoned in the
-ledger. The offboard now hands a departing person's **open leads** back to the Sales team queue (owner
-cleared, recorded in the activity ledger) so no later stale-lead sweep routes revenue work to someone who
-has left, and **returning their claimed exceptions is no longer best-effort**: a partial release is
-counted, keeps offboarding out of COMPLETE, and opens an owned, idempotently-resumable case. Access
-History now pages the **entire** immutable ledger, not only its first 500 rows.
+**Why this is still a gate:** The idempotency/audit record is still created only after access and work
+changes, so concurrent submissions with the same key can both proceed and a process stop can leave an
+unrecorded partial change. A failed add/remove/sign-out during a role change throws before the final
+readback, ledger, or security case, leaving the effective role set and session state unowned. Last-owner
+protection still depends on a fallible rollback after access was removed.
+
+Downstream handoff is also not yet completion-safe. A failed future-job update is ignored, so a visit can
+remain assigned to an inactive technician while the result counts only successful updates. The no-login
+Schedule path does not validate its reason or confirm the technician write before recording **Complete**,
+and its screen does not inspect or explain a partial outcome. Work and lead ownership are changed before
+their history writes and without a condition that the departing person still owns the record; a history
+failure cannot be repaired by rerunning after ownership already moved, and a concurrent new assignment
+can be overwritten. Opening the recovery case is itself not confirmed before the flow depends on it.
 
 **Remaining requirements:**
 
 - Create and conditionally claim one durable access-change command before any provider or work change.
   The server requires a unique idempotency/version key, stores actor, target, controlled reason, prior
-  and requested roles, and resumes the same command after timeout, retry, or concurrent submission. (The
-  idempotency/audit row is still written only after the changes; the atomic pre-claim is not built yet.)
+  and requested roles, and resumes the same command after timeout, retry, or concurrent submission. A
+  duplicate request returns the same persisted progress/outcome rather than starting another change.
 - A role reduction cannot leave a combined role set or an old privileged session after any failed
   add, remove, or sign-out step. Every partial state has a durably confirmed security owner and one
-  safe resume action; the UI never claims a case exists when its write failed.
+  safe resume action; the UI never claims a case exists when its write failed, and completion is read back
+  from the provider and the durable command.
+- Every job, route, technician, in-progress visit, lead, claimed exception, owner change, and history
+  entry is conditionally changed and read back. **Complete** means no future job remains on an inactive
+  technician; every in-progress visit has a durable disposition; every lead and exception is in a staffed
+  team/active-person queue with matching history; and no offboarding handoff overwrote a newer assignment.
+  Any failed item is counted individually and remains safely resumable even if its owner already moved.
+- Both Staff and Schedule entrances require the same controlled reason and show the persisted
+  **Complete/Partial** outcome plus one next step. Login-less technician deactivation cannot report
+  complete until the technician, jobs, in-progress work, ledger, and any recovery case are confirmed.
 - Owner changes are serialized so concurrent demotion/offboarding cannot require a fallible rollback
   to preserve access. At least one usable owner remains technically, and production has two named
-  owners with MFA and separate recovery access. (The two-named-owners-with-MFA setup is an ops/people
-  task, not code.)
+  owners with MFA and separate recovery access.
 
 **Pass owner:** CEO, with Operations and Sales verifying reassigned work.
 
@@ -329,6 +341,31 @@ disagree, and an employee always sees the real outcome of deactivation or reacti
   mixed state. Duplicate requests must return the same transition and outcome.
 - Leadership can see the complete transition history on a business screen (**see X1**).
 
+**Engineering status — closed (Opus 4.8, commit `0712289`):** Deactivation is now ONE server action,
+matching the already-unified reactivation. The `deactivateCustomer` mutation moved from crm-billing to
+crm-admin (which holds the Cognito pool credentials); crm-admin gained Stripe access via
+`secret("STRIPE_SECRET_KEY")` for the plan-cancel half. The shared engine runs a fixed order —
+money → queued/one-time visits → **portal login revoked** → status INACTIVE (last) — so an INACTIVE
+customer can never keep a live login, and the CRM's second `revokePortalAccess` call is gone.
+- *Durable/resumable:* a portal-revoke failure (billing stopped, login still live) or a status write that
+  does not read back leaves the customer **ACTIVE** and opens a `LIFECYCLE_RECOVERY` owned case naming what
+  changed, what is still live, who owns it, whether they can be charged/served, and that re-running is
+  safe. An idempotent re-run heals portal drift.
+- *Controlled reason:* both transitions now require a reason from a controlled list (OTHER needs a note),
+  validated before anything is touched and recorded with the transition; reason pickers added to both CRM
+  sheets.
+- *Read-back + blocking audit:* the status flip is read back before success; a lost `CustomerLifecycleEvent`
+  write opens blocking `LIFECYCLE_RECOVERY` recovery instead of being swallowed (X1), and the result reports
+  whether the audit row landed.
+- *Concurrency:* a single-winner `CustomerLifecycleClaim` (id = customerId), taken by both deactivate and
+  reactivate, serializes interleaved requests; the loser returns the current state rather than driving a
+  second, mixed-state transition.
+- *Leadership screen:* the customer page shows a lifecycle-history card (action, prior→new, reason, actor,
+  effects, time) read from `CustomerLifecycleEvent`.
+Full amplify (847) and CRM (188) test suites pass; `tsc -p amplify` and CRM `tsc` clean. Remaining to
+verify at go-live: the crm-admin `STRIPE_SECRET_KEY` binding and the new model/mutation resolvers must be
+confirmed against the deployed staging backend.
+
 **Pass owner:** Head of Operations; Finance and CEO approve protected fields, transition policy, and
 recovery policy.
 
@@ -477,9 +514,10 @@ also have no single-winner control, so two employees can act on the same case.
   authority. Every override has a controlled reason, meaningful evidence, and an accountable review path;
   the policy shown to employees is the same policy enforced when they act.
 - Claiming, resolving, reopening, and releasing a case has one winner. Concurrent employees cannot both
-  own or complete the same customer or money action, and a failed history write cannot erase a later
-  ownership change. The real staffed inboxes, primary/backup owners, SLAs, and handoffs are established in
-  GL-23.
+  own or complete the same customer or money action; offboarding cannot overwrite a newer claim; and the
+  ownership change plus immutable history are one recoverable outcome rather than a release that succeeds
+  before its history fails. The real staffed inboxes, primary/backup owners, SLAs, and handoffs are
+  established in GL-23.
 
 **Pass owner:** Head of Operations; Finance approves money outcomes and the CEO approves override
 authority.
@@ -702,10 +740,10 @@ can be restored after human or provider error.
   silent Lambda crash, scheduled job that never fired, or run of email-send failures would page no one.
   Alerts must cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email
   failures, stale plan-cancellation commands/claims, cancellation promises nearing or missing deadline,
-  a lead sweep that stopped partway or missed its promised first-response window, reconciliation
-  mismatches, capacity anomalies, document generation/storage failure, and growing/overdue exception
-  queues, and reach a named primary and backup. A subtask that catches its own failure and returns success
-  is not a healthy scheduled run.
+  a lead sweep that stopped partway or missed its promised first-response window, access/offboarding
+  partial outcomes or missing recovery cases, reconciliation mismatches, capacity anomalies, document
+  generation/storage failure, and growing/overdue exception queues, and reach a named primary and backup.
+  A subtask that catches its own failure and returns success is not a healthy scheduled run.
 - **A failed email-delivery event can be permanently acknowledged.** The event consumer catches malformed
   messages and database/work-queue failures and then returns success; there is no retained failure queue
   or operator alert. Every provider event must be retried until its email state, suppression decision, and
@@ -872,8 +910,9 @@ customer and leave the original lead open.
 - The current action, due time, owner, age, and urgency are visible and sorted before a lead becomes late.
   Enforcement runs often enough to meet the approved first-response promise, isolates one failed lead
   from the rest of the queue, alerts on a missed/partial sweep, and escalates to a manager at the actual
-  deadline—not a day later. Reassignment/offboarding transfers both the lead and all current/future work
-  to a verified active owner (**GL-14**).
+  deadline—not a day later. Reassignment/offboarding conditionally transfers the lead and its current
+  follow-up together, verifies the staffed destination and history, and cannot overwrite an assignment
+  made after the handoff began (**GL-14**).
 - The Head of Sales approves unambiguous stage and outcome definitions. An attempted call is not labeled
   **Contacted**, provider acceptance is not customer delivery, and the workflow distinguishes attempted,
   reached, qualified/unqualified, booking sent, won, lost, and do-not-contact to the extent Sales needs.
