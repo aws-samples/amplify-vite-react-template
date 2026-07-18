@@ -102,8 +102,9 @@ export default function PortalHome() {
                       {planCadence(p.priceCents, p.serviceFrequency)}
                       {p.cancellationPending ? (
                         <span className="nested-line">
-                          Cancellation in progress — we're finishing it and will
-                          email you. You won't be charged again.
+                          Cancellation in progress — your plan stays active until
+                          we finish it, so if a charge posts in the meantime we'll
+                          refund it. We'll email your confirmation when it's done.
                         </span>
                       ) : null}
                     </>

@@ -13,11 +13,13 @@ import {
   escapeHtml,
   sendChargeReceipt,
   sendPaymentFailedNotice,
+  sendPostCancellationChargeNotice,
 } from "../shared/receipts";
 import {
   clearPlanDelinquency,
   nextDunningAtIso,
 } from "../shared/recovery";
+import { openOwnedWork } from "../shared/ownedWork";
 import {
   cancelQueuedPlanVisits,
   type QueuedVisitsResolution,
@@ -337,14 +339,6 @@ async function onSubscriptionInvoice(
       amountCents: existing[0].amountCents,
       description: existing[0].description,
     };
-    if (status === "PAID" && existing[0].amountCents > 0) {
-      await sendChargeReceipt({
-        customerId: crmCustomerId,
-        amountCents: existing[0].amountCents,
-        description: existing[0].description ?? "Subscription payment",
-        invoiceId: existing[0].id,
-      });
-    }
   } else {
     const { data: customer } = await client.models.Customer.get({
       id: crmCustomerId,
@@ -373,21 +367,22 @@ async function onSubscriptionInvoice(
       amountCents: stripeInvoice.amount_due,
       description,
     };
-    // The monthly settlement is a real charge on a real card — it gets the same
-    // receipt as any other. The existing-invoice path above only emails on a
-    // status *change*, so a replayed webhook cannot send this twice.
-    if (status === "PAID" && stripeInvoice.amount_due > 0) {
-      await sendChargeReceipt({
-        customerId: crmCustomerId,
-        amountCents: stripeInvoice.amount_due,
-        description,
-        invoiceId: created?.id,
-      });
-    }
   }
 
   if (!transitioned || !row) return;
   if (status === "PAID") {
+    // The monthly settlement is a real charge on a real card. Normally the
+    // customer gets a receipt — but a charge that posted after they cancelled is
+    // handled truthfully instead (GL-08 R2). Only fires on a status *change*, so
+    // a replayed webhook can never send twice.
+    await onPaidSubscriptionCharge({
+      customerId: crmCustomerId,
+      servicePlanId: crmServicePlanId,
+      invoiceId: row.id,
+      amountCents: row.amountCents,
+      description: row.description ?? "Subscription payment",
+      chargeCreatedUnix: stripeInvoice.created,
+    });
     // The customer is current again — lift any delinquency suspension so the
     // recurring engine resumes dispatching visits.
     await clearPlanDelinquency(crmServicePlanId);
@@ -401,6 +396,64 @@ async function onSubscriptionInvoice(
       reason: reason ?? "The payment was declined",
     });
   }
+}
+
+/**
+ * A subscription charge settled. Normally the customer gets a receipt — but
+ * GL-08 R2: if it posted on/after the customer's accepted cancellation time, it
+ * is a charge that should not have happened. We do NOT send a "you were charged"
+ * receipt; we tell the truth that we're refunding it and open (or re-open, via
+ * the shared servicePlanId dedupe key) the Finance-owned PLAN_CANCELLATION_
+ * RECOVERY case marking the refund owed. Per the 2026-07-18 business decision the
+ * refund itself is a Finance-approved action, not an automatic money movement,
+ * so this stages it for a person rather than issuing it here.
+ */
+async function onPaidSubscriptionCharge(opts: {
+  customerId: string;
+  servicePlanId: string;
+  invoiceId: string;
+  amountCents: number;
+  description: string;
+  chargeCreatedUnix: number;
+}) {
+  if (opts.amountCents <= 0) return;
+  const client = await dataClient();
+  const { data: plan } = await client.models.ServicePlan.get({
+    id: opts.servicePlanId,
+  });
+  const requestedAt = plan?.cancellationRequestedAt;
+  const postCancellation =
+    Boolean(requestedAt) &&
+    opts.chargeCreatedUnix * 1000 >= new Date(requestedAt as string).getTime();
+
+  if (!postCancellation) {
+    await sendChargeReceipt({
+      customerId: opts.customerId,
+      amountCents: opts.amountCents,
+      description: opts.description,
+      invoiceId: opts.invoiceId,
+    });
+    return;
+  }
+
+  const amountUsd = `$${(opts.amountCents / 100).toFixed(2)}`;
+  await sendPostCancellationChargeNotice({
+    customerId: opts.customerId,
+    amountCents: opts.amountCents,
+    invoiceId: opts.invoiceId,
+  });
+  await openOwnedWork({
+    kind: "PLAN_CANCELLATION_RECOVERY",
+    dedupeKey: opts.servicePlanId,
+    title: `Refund a charge that posted after cancellation: ${plan?.planName ?? opts.servicePlanId}`,
+    detail: `${amountUsd} was charged on this plan after the customer's cancellation was accepted (${requestedAt}). Refund invoice ${opts.invoiceId} in full — the customer has been told we're refunding it — and make sure the subscription is actually cancelled so no further charge posts.`,
+    customerId: opts.customerId,
+    relatedId: opts.servicePlanId,
+    sourceUrl: `/customers/${opts.customerId}`,
+    resolutionAction:
+      "Refund this invoice in full from the customer's billing page, then resume the cancellation. This case can't close until the plan is canceled, every visit is cleared, and this refund is settled.",
+    ownerTeam: "FINANCE",
+  });
 }
 
 /** Best-effort real decline reason off a failed Stripe invoice. */

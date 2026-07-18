@@ -1,6 +1,7 @@
 import { dataClient } from "../shared/dataClient";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import { stripeClient } from "../shared/stripeClient";
+import { resumePlanCancellation } from "../shared/planCancellation";
 import {
   sendInvoiceReminder,
   sendPaymentFailedNotice,
@@ -114,6 +115,9 @@ export const handler = async () => {
   // GL-05: prove, against the real tables and Stripe, that every succeeded
   // booking payment has exactly one complete booking and vice versa.
   const reconciliation = await reconcilePaidBookings();
+  // GL-08: resume every plan cancellation a prior attempt could not finish, so
+  // an accepted cancel can never sit Pending forever with billing still live.
+  const cancellations = await reconcilePlanCancellations();
   // GL-02: no lead may silently go cold — surface every open lead whose next
   // action is overdue as an owned follow-up, routed to its owner or the team.
   const staleLeads = await reportStaleLeads();
@@ -129,9 +133,72 @@ export const handler = async () => {
     disputes,
     overdueWork,
     reconciliation,
+    cancellations,
     staleLeads,
   ];
 };
+
+/**
+ * GL-08 R1 — the reconcile sweep that guarantees no accepted plan cancellation
+ * can strand. Every open PlanCancellationClaim is a durable command a prior
+ * attempt did not carry to a terminal outcome; this resumes each idempotently,
+ * respecting its next-attempt time and the auto-retry cap. A plan already
+ * canceled is cleaned up inside resumePlanCancellation; a still-failing one
+ * keeps its FINANCE PLAN_CANCELLATION_RECOVERY case and is left to a human once
+ * the cap is hit. A customer cancel is a one-shot AppSync mutation nobody
+ * redelivers, so this sweep is the ONLY thing that re-drives a stuck cancel.
+ */
+export async function reconcilePlanCancellations() {
+  const client = await dataClient();
+  // A Lambda container briefly straddling a schema deploy (or a unit-test fake)
+  // may not have the model yet — never let that fail the whole reminder run.
+  if (!("PlanCancellationClaim" in client.models)) {
+    return {
+      task: "reconcile-plan-cancellations" as const,
+      open: 0,
+      completed: 0,
+      stillPending: 0,
+      failed: 0,
+    };
+  }
+  const stripe = stripeClient();
+  const ids: string[] = [];
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.PlanCancellationClaim.list({
+      limit: 200,
+      nextToken: token,
+    });
+    for (const cmd of page.data) ids.push(cmd.id);
+    token = page.nextToken;
+  } while (token);
+
+  let completed = 0;
+  let stillPending = 0;
+  let failed = 0;
+  for (const id of ids) {
+    try {
+      const outcome = await resumePlanCancellation(stripe, id, { auto: true });
+      if (outcome.status === "CANCELED") completed++;
+      else stillPending++;
+    } catch (err) {
+      failed++;
+      console.error(`reconcilePlanCancellations: could not resume ${id}`, err);
+    }
+  }
+  if (stillPending > 0 || failed > 0) {
+    console.warn(
+      `reconcilePlanCancellations: ${completed} completed, ${stillPending} still pending, ${failed} errored of ${ids.length} open command(s)`
+    );
+  }
+  return {
+    task: "reconcile-plan-cancellations" as const,
+    open: ids.length,
+    completed,
+    stillPending,
+    failed,
+  };
+}
 
 /**
  * GL-02 stale-lead sweep. Scans every open lead, and for each whose next action

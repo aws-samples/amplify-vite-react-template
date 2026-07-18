@@ -34,7 +34,8 @@ export type WorkKind =
   | "STAFF_OFFBOARD"
   | "STAFF_SECURITY"
   | "LEAD_FOLLOWUP"
-  | "LIFECYCLE_RECOVERY";
+  | "LIFECYCLE_RECOVERY"
+  | "PLAN_CANCELLATION_RECOVERY";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -47,7 +48,8 @@ export type WorkSeverity = "CRITICAL" | "HIGH" | "ROUTINE";
 export type VerifierId =
   | "CUSTOMER_HAS_EMAIL"
   | "JOB_STAFFED"
-  | "VISIT_MONEY_SETTLED";
+  | "VISIT_MONEY_SETTLED"
+  | "PLAN_CANCELLATION_SETTLED";
 
 /**
  * A close the app can *confirm*. Running it re-checks the real-world fact
@@ -313,6 +315,37 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "RERAN_TRANSITION_COMPLETE", label: "Re-ran the transition — complete" },
       { code: "PORTAL_CONFIRMED_ENDED", label: "Portal login confirmed ended" },
       { code: "AUDIT_ROW_RECONSTRUCTED", label: "Reconstructed the audit record" },
+      OTHER,
+    ],
+  },
+  PLAN_CANCELLATION_RECOVERY: {
+    severity: "CRITICAL",
+    // Money is at risk: billing may still be live, a charge may have posted after
+    // the customer cancelled, and the customer was told their cancellation is
+    // being finished. Until it is truly settled the customer's money and our
+    // word are both exposed.
+    customerImpact:
+      "A customer's plan cancellation didn't fully finish — billing, a queued visit, a late-charge refund, or their final confirmation may still be outstanding.",
+    ownerTeam: "FINANCE",
+    // The safe resume: re-run the idempotent cancellation. The button does the
+    // work; the verified close below re-checks the world before it can close.
+    externalAction: {
+      mutation: "resumePlanCancellation",
+      label: "Resume cancellation",
+    },
+    verified: [
+      {
+        id: "CANCELLATION_SETTLED",
+        label: "Confirm the cancellation is fully settled",
+        verifier: "PLAN_CANCELLATION_SETTLED",
+      },
+    ],
+    // Owner-only overrides for the genuinely-handled-offline cases; the forced
+    // close is stamped and reviewable exactly like every other manual override.
+    manualReasons: [
+      { code: "SETTLED_OFFLINE", label: "Fully settled with the customer offline" },
+      { code: "REFUNDED_ELSEWHERE", label: "Late charge refunded another way" },
+      { code: "NO_REFUND_OWED", label: "Reviewed — no refund was owed" },
       OTHER,
     ],
   },

@@ -47,6 +47,10 @@ import {
 import { stripeClient } from "../shared/stripeClient";
 import { startPlanBilling } from "../shared/subscription";
 import {
+  planCancellationSettled,
+  resumePlanCancellation,
+} from "../shared/planCancellation";
+import {
   openMissingContactWork,
   openOwnedWork,
   workItemId,
@@ -252,6 +256,19 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       }
       return retryBookingFinalization(event.arguments.bookingRequestId!);
     }
+    case "resumePlanCancellation": {
+      // GL-08: the safe re-run the PLAN_CANCELLATION_RECOVERY case prescribes.
+      // Finance owns cancellation recovery; office may also run it. auto:false —
+      // a person pressing the button drives immediately (no attempt-cap pacing).
+      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
+        throw new Error("Office or finance role required");
+      }
+      return resumePlanCancellation(
+        stripeClient(),
+        event.arguments.servicePlanId!,
+        { auto: false }
+      );
+    }
     case "updateOwnedWork": {
       if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
         throw new Error("Office or finance role required");
@@ -361,6 +378,14 @@ async function runWorkVerifier(
         message:
           "Refund the payment, void the open invoice, or cancel the visit in the billing tools first — then confirm the money is settled.",
       };
+    }
+    case "PLAN_CANCELLATION_SETTLED": {
+      // GL-08 R4: the same settlement check the auto-resolve uses, so the case
+      // can't close until billing is inactive, the plan is canceled, every
+      // cancelable visit is off the schedule, no charge is in flight, and every
+      // charge that posted after the accepted cancellation is refunded.
+      const result = await planCancellationSettled(item.relatedId);
+      return { ok: result.settled, message: result.reason };
     }
     default:
       return { ok: false, message: "This exception has no automatic check." };

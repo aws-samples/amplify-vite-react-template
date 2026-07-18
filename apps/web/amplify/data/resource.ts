@@ -159,6 +159,19 @@ export const schema = a.schema({
     // lead is genuinely worked (a logged touch, a booking link, lost, DNC, or
     // conversion). The mechanism that guarantees no lead silently disappears.
     "LEAD_FOLLOWUP",
+    // GL-09: a customer deactivation/reactivation left access, billing, or the
+    // audit record in a mixed state, or a lost audit write must be reconstructed.
+    // A critical recovery case whose resume is a safe re-run of the idempotent
+    // transition.
+    "LIFECYCLE_RECOVERY",
+    // GL-08: a customer plan cancellation could not complete every step (billing
+    // stop, schedule clear, refund of any late charge, customer notice), or a
+    // charge posted after the accepted cancellation. A purpose-built FINANCE case
+    // whose verified close refuses until billing is inactive, the plan is
+    // canceled, every visit is dispositioned, every owed refund is settled, and
+    // the customer has the final outcome. Its resume action is a safe re-run of
+    // the idempotent cancellation.
+    "PLAN_CANCELLATION_RECOVERY",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -498,8 +511,25 @@ export const schema = a.schema({
     .model({
       note: a.string(),
       requestedAt: a.datetime(),
+      // GL-08 R1: promoted from a bare lock to a durable COMMAND that owns the
+      // request from the first confirmed click to a terminal outcome. The
+      // reconcile sweep (daily-reminders) keys resume off these: `stage` is the
+      // last step known-done (REQUESTED | STRIPE_CANCELED | COMPLETE | FAILED),
+      // `nextAttemptAt`/`attemptCount` pace automatic retries, `lastError` is the
+      // visible reason, and `recoveryWorkItemId` is the owned case that is the
+      // customer-visible safe resume path. Kept flat (validated strings, no new
+      // enum) against a schema near TypeScript's inference-depth ceiling.
+      customerId: a.id(),
+      stage: a.string(),
+      ownerTeam: a.string(),
+      nextAttemptAt: a.datetime(),
+      attemptCount: a.integer(),
+      lastError: a.string(),
+      recoveryWorkItemId: a.string(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
+    ]),
 
   /**
    * GL-09 — the single-winner lock that serializes a customer's lifecycle
@@ -1763,6 +1793,19 @@ export const schema = a.schema({
     .returns(a.json())
     // FINANCE too: PAID_NOT_FINALIZED is a finance-owned exception, and this is
     // the recovery action its queue item prescribes.
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * GL-08: resume a stuck plan cancellation. The safe re-run action the
+   * PLAN_CANCELLATION_RECOVERY case prescribes and the same entry the reconcile
+   * sweep calls internally — idempotent (a plan already CANCELED just clears its
+   * flag and resolves the case). FINANCE, matching the case's owner team.
+   */
+  resumePlanCancellation: a
+    .mutation()
+    .arguments({ servicePlanId: a.string().required() })
+    .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
     .handler(a.handler.function(crmDocs)),
 

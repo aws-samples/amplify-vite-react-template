@@ -230,6 +230,38 @@ export default function WorkQueue() {
     [load]
   );
 
+  // GL-08: resume a stuck plan cancellation. Idempotent — re-runs the cancel,
+  // refunds/visits included — and auto-resolves this case once fully settled.
+  const resumeCancellation = useCallback(
+    async (item: WorkItem) => {
+      if (
+        !window.confirm(
+          "Resume this customer's plan cancellation? This re-runs the cancel and is safe to run more than once."
+        )
+      ) {
+        return;
+      }
+      setBusyId(item.id);
+      setError(null);
+      try {
+        const res = opResult<{ status: string }>(
+          await api().mutations.resumePlanCancellation({
+            servicePlanId: item.relatedId,
+          })
+        );
+        if (!res) throw new Error("The resume did not run");
+        await load();
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Could not resume the cancellation"
+        );
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
   if (!items) {
     return (
       <Page title="Owned work" back={roles.office ? "/dashboard" : "/more"}>
@@ -361,6 +393,18 @@ export default function WorkQueue() {
                     variant="subtle"
                     loading={busyId === item.id}
                     onClick={() => void retryFinalization(item)}
+                  >
+                    {policy.externalAction.label}
+                  </Button>
+                ) : null}
+                {item.status === "OPEN" &&
+                policy?.externalAction?.mutation === "resumePlanCancellation" &&
+                (roles.office || roles.finance) ? (
+                  <Button
+                    small
+                    variant="subtle"
+                    loading={busyId === item.id}
+                    onClick={() => void resumeCancellation(item)}
                   >
                     {policy.externalAction.label}
                   </Button>

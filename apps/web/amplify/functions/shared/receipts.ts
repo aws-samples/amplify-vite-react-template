@@ -106,6 +106,54 @@ export async function sendChargeReceipt(opts: {
 }
 
 /**
+ * GL-08 R2: a subscription charge posted AFTER the customer's cancellation was
+ * accepted. We do NOT send the normal "payment received" receipt — that would
+ * tell them they were charged with no mention that it's coming back. This tells
+ * the truth: the charge shouldn't have happened and we're refunding it. The
+ * refund itself is a Finance-approved action tracked on the plan-cancellation
+ * recovery case; this only informs the customer. Returns false (never throws)
+ * when there is no email, so the caller can page the office instead.
+ */
+export async function sendPostCancellationChargeNotice(opts: {
+  customerId: string;
+  amountCents: number;
+  invoiceId?: string | null;
+}): Promise<boolean> {
+  try {
+    const { email, greetingName, displayName } = await customerContact(
+      opts.customerId
+    );
+    if (!email) {
+      await notifyOffice({
+        subject: `Charged after cancellation — no email to notify: ${displayName}`,
+        heading: "A charge posted after a cancellation, and the customer has no email",
+        template: "ops-post-cancel-charge-no-email",
+        customerId: opts.customerId,
+        relatedId: opts.invoiceId ?? undefined,
+        bodyHtml: `<p><strong>${escapeHtml(displayName)}</strong> was charged <strong>${money(opts.amountCents)}</strong> after they had already cancelled, and there is no email on file to tell them it's being refunded. Refund it and reach them another way.</p>`,
+      });
+      return false;
+    }
+    return await sendEmail({
+      to: email,
+      subject: "We're refunding a charge — BuzzKill Pest Control",
+      template: "post-cancellation-refund",
+      customerId: opts.customerId,
+      relatedId: opts.invoiceId ?? undefined,
+      html: emailShell(
+        "A charge posted after your cancellation — we're refunding it",
+        `<p>Hi ${escapeHtml(greetingName)},</p>
+         <p>A payment of <strong>${money(opts.amountCents)}</strong> went through after you'd already cancelled your plan. That shouldn't have happened, and <strong>we're refunding it in full</strong>.</p>
+         <p>You don't need to do anything — the refund goes back to your original payment method. If you have any questions, just reply to this email or give us a call.</p>`
+      ),
+    });
+  } catch (err) {
+    console.error("sendPostCancellationChargeNotice failed", opts.customerId, err);
+    return false;
+  }
+}
+
+/**
  * Notice that a charge failed — the customer-facing half of dunning. States
  * the amount, the real decline reason, and a link to the portal billing page
  * to fix it. Returns false (never throws) when the customer has no email, so

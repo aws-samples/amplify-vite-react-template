@@ -227,6 +227,28 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  PLAN_CANCELLATION_RECOVERY: {
+    label: "Plan cancellation recovery",
+    severity: "CRITICAL",
+    customerImpact:
+      "A customer's plan cancellation didn't fully finish — billing, a queued visit, a late-charge refund, or their final confirmation may still be outstanding.",
+    externalAction: {
+      mutation: "resumePlanCancellation",
+      label: "Resume cancellation",
+    },
+    verified: [
+      {
+        id: "CANCELLATION_SETTLED",
+        label: "Confirm the cancellation is fully settled",
+      },
+    ],
+    manualReasons: [
+      { code: "SETTLED_OFFLINE", label: "Fully settled with the customer offline" },
+      { code: "REFUNDED_ELSEWHERE", label: "Late charge refunded another way" },
+      { code: "NO_REFUND_OWED", label: "Reviewed — no refund was owed" },
+      OTHER,
+    ],
+  },
 };
 
 export function workPolicy(kind: string | null | undefined): CrmWorkPolicy | null {

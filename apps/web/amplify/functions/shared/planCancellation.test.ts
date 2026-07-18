@@ -59,19 +59,31 @@ const fakeDataClient = {
         return { data: plans.get(patch.id) };
       },
     },
-    // Atomic claim: create fails (returns null) if the id already exists — the
-    // single-winner guard the wrapper relies on for concurrent clicks (R5).
+    // Atomic durable command: create fails (returns null) if the id already
+    // exists — the single-winner guard (R5). Amplify stamps createdAt, so the
+    // fake does too, which the orphan-reclaim age check relies on.
     PlanCancellationClaim: {
       create: async (input: { id: string } & Record<string, unknown>) => {
         if (claims.has(input.id)) return { data: null };
-        claims.set(input.id, input);
-        return { data: input };
+        claims.set(input.id, {
+          createdAt: new Date().toISOString(),
+          ...input,
+        });
+        return { data: claims.get(input.id) };
+      },
+      get: async ({ id }: { id: string }) => ({ data: claims.get(id) ?? null }),
+      update: async (patch: { id: string } & Record<string, unknown>) => {
+        const row = claims.get(patch.id) ?? { id: patch.id };
+        Object.assign(row, patch);
+        claims.set(patch.id, row);
+        return { data: row };
       },
       delete: async ({ id }: { id: string }) => {
         const existed = claims.get(id) ?? null;
         claims.delete(id);
         return { data: existed };
       },
+      list: async () => ({ data: [...claims.values()], nextToken: null }),
     },
     Job: {
       listJobByServicePlanId: async ({
@@ -125,9 +137,12 @@ vi.mock("./email", () => ({
 }));
 
 const openOwnedWork = vi.fn(async () => "work-1");
+const resolveOwnedWork = vi.fn(async () => true);
 vi.mock("./ownedWork", () => ({
   openOwnedWork: (...a: unknown[]) =>
     (openOwnedWork as unknown as (...x: unknown[]) => Promise<string | null>)(...a),
+  resolveOwnedWork: (...a: unknown[]) =>
+    (resolveOwnedWork as unknown as (...x: unknown[]) => Promise<boolean>)(...a),
 }));
 
 // The Stripe engine is exercised by subscription.test.ts. Here we control its
@@ -138,9 +153,12 @@ vi.mock("./subscription", () => ({
     (cancelPlanBilling as unknown as (...x: unknown[]) => unknown)(...a),
 }));
 
-const { buildCancellationPreview, cancelPlanForCustomer } = await import(
-  "./planCancellation"
-);
+const {
+  buildCancellationPreview,
+  cancelPlanForCustomer,
+  resumePlanCancellation,
+  planCancellationSettled,
+} = await import("./planCancellation");
 
 const stripe = {} as Stripe;
 
@@ -162,6 +180,7 @@ beforeEach(() => {
   notifyOffice.mockClear();
   sendEmail.mockClear();
   openOwnedWork.mockClear();
+  resolveOwnedWork.mockClear();
   cancelPlanBilling.mockReset();
   cancelPlanBilling.mockResolvedValue({
     stripeSubscriptionCanceled: true,
@@ -295,7 +314,9 @@ describe("cancelPlanForCustomer — success", () => {
     if (out.status !== "CANCELED") throw new Error("unreachable");
     expect(out.visitsRemaining).toBe(1);
     const firstCall = sendEmail.mock.calls[0] as unknown as [{ html: string }];
-    expect(firstCall[0].html).toContain("2026-08-01");
+    // The email enumerates the kept-paid visit by its (humanized) date.
+    expect(firstCall[0].html).toContain("August 1, 2026");
+    expect(firstCall[0].html).toMatch(/keep it or refund it/i);
   });
 
   it("no email on file: opens MISSING_CONTACT work instead of a silent gap", async () => {
@@ -324,7 +345,7 @@ describe("cancelPlanForCustomer — duplicate clicks", () => {
 });
 
 describe("cancelPlanForCustomer — provider/API failure", () => {
-  it("does not show canceled: sets a pending flag, opens urgent owned work, pages the office", async () => {
+  it("does not show canceled: keeps the durable command, opens the FINANCE recovery case, pages the office", async () => {
     cancelPlanBilling.mockRejectedValue(new Error("Stripe is down"));
     const out = await cancelPlanForCustomer(stripe, "p1", { reason: "Too pricey" });
 
@@ -341,30 +362,51 @@ describe("cancelPlanForCustomer — provider/API failure", () => {
     expect(plans.get("p1")?.cancellationPending).toBe(true);
     expect(plans.get("p1")?.cancellationReason).toBe("Too pricey");
 
+    // R4: a purpose-built cancellation-recovery case (never generic PORTAL_FAILURE).
     expect(openOwnedWork).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "PORTAL_FAILURE",
+        kind: "PLAN_CANCELLATION_RECOVERY",
         ownerTeam: "FINANCE",
-        dedupeKey: "plan-cancel:p1",
+        dedupeKey: "p1",
       })
     );
     expect(notifyOffice).toHaveBeenCalledOnce();
     // No false confirmation email on a failed cancel.
     expect(sendEmail).not.toHaveBeenCalled();
-    // The claim is released so a retry (or the office recovery) can resume.
-    expect(claims.has("p1")).toBe(false);
+    // R1: the command is NOT deleted — it is the durable anchor the sweep resumes,
+    // stamped with the error, an attempt count, and a next-attempt time.
+    expect(claims.has("p1")).toBe(true);
+    const cmd = claims.get("p1")!;
+    expect(cmd.lastError).toMatch(/stripe is down/i);
+    expect(cmd.attemptCount).toBe(1);
+    expect(cmd.nextAttemptAt).toBeTruthy();
+    expect(cmd.recoveryWorkItemId).toBe("work-1");
   });
 });
 
 describe("cancelPlanForCustomer — GL-08 durability & honesty", () => {
-  it("a concurrent click that loses the claim returns PENDING, not a second cancel", async () => {
-    // Simulate a live in-flight cancel already holding the claim.
-    claims.set("p1", { id: "p1" });
+  it("a concurrent click that loses the claim to a LIVE attempt returns PENDING, not a second cancel", async () => {
+    // A live in-flight cancel holds a fresh claim (created just now).
+    claims.set("p1", { id: "p1", createdAt: new Date().toISOString() });
     const out = await cancelPlanForCustomer(stripe, "p1", {});
     expect(out.status).toBe("PENDING");
     // No second Stripe cancel and no second confirmation email fired.
     expect(cancelPlanBilling).not.toHaveBeenCalled();
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("reclaims an ORPHANED command (a dead prior attempt) and finishes the cancel", async () => {
+    // A stale claim left by a process that died mid-cancel — old enough to steal.
+    claims.set("p1", {
+      id: "p1",
+      createdAt: new Date(Date.now() - 60 * 60_000).toISOString(),
+      attemptCount: 1,
+    });
+    const out = await cancelPlanForCustomer(stripe, "p1", {});
+    // The customer's own retry finishes it rather than wedging on the stale claim.
+    expect(out.status).toBe("CANCELED");
+    expect(cancelPlanBilling).toHaveBeenCalledOnce();
+    expect(claims.has("p1")).toBe(false);
   });
 
   it("clears the claim on success so the plan is not wedged", async () => {
@@ -394,5 +436,110 @@ describe("cancelPlanForCustomer — GL-08 durability & honesty", () => {
     if (out.status !== "CANCELED") throw new Error("unreachable");
     expect(out.confirmationEmailed).toBe(false);
     expect(out.message).not.toMatch(/emailed/i);
+  });
+});
+
+describe("resumePlanCancellation (GL-08 R1)", () => {
+  it("drives a stuck command to completion — the customer never has to retry", async () => {
+    // A command left behind by a failed attempt; the plan is still ACTIVE.
+    claims.set("p1", {
+      id: "p1",
+      createdAt: new Date().toISOString(),
+      stage: "FAILED",
+      attemptCount: 1,
+      customerId: "c1",
+    });
+    const out = await resumePlanCancellation(stripe, "p1", { auto: true });
+    expect(out.status).toBe("CANCELED");
+    expect(cancelPlanBilling).toHaveBeenCalledOnce();
+    // The command is deleted once terminal.
+    expect(claims.has("p1")).toBe(false);
+  });
+
+  it("auto-resume respects the next-attempt time (paces itself)", async () => {
+    claims.set("p1", {
+      id: "p1",
+      createdAt: new Date().toISOString(),
+      stage: "FAILED",
+      attemptCount: 1,
+      nextAttemptAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+    });
+    const out = await resumePlanCancellation(stripe, "p1", { auto: true });
+    expect(out.status).toBe("PENDING");
+    // Not yet due — no Stripe cancel this pass.
+    expect(cancelPlanBilling).not.toHaveBeenCalled();
+  });
+
+  it("an already-canceled plan is cleaned up and the case resolved when settled", async () => {
+    plans.set("p1", {
+      ...plans.get("p1")!,
+      status: "CANCELED",
+      cancellationPending: true,
+    });
+    claims.set("p1", { id: "p1", createdAt: new Date().toISOString() });
+    const out = await resumePlanCancellation(stripe, "p1", { auto: true });
+    expect(out.status).toBe("CANCELED");
+    expect(plans.get("p1")?.cancellationPending).toBe(false);
+    expect(cancelPlanBilling).not.toHaveBeenCalled();
+    expect(claims.has("p1")).toBe(false);
+    expect(resolveOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "PLAN_CANCELLATION_RECOVERY" })
+    );
+  });
+});
+
+describe("planCancellationSettled (GL-08 R4 verifier / auto-resolve gate)", () => {
+  it("is not settled while the plan is still active", async () => {
+    const s = await planCancellationSettled("p1");
+    expect(s.settled).toBe(false);
+    expect(s.reason).toMatch(/isn't canceled yet/i);
+  });
+
+  it("is not settled while a cancelable visit is still on the schedule", async () => {
+    plans.set("p1", { ...plans.get("p1")!, status: "CANCELED" });
+    jobs.set("j1", { id: "j1", servicePlanId: "p1", status: "SCHEDULED" });
+    const s = await planCancellationSettled("p1");
+    expect(s.settled).toBe(false);
+    expect(s.reason).toMatch(/come off the schedule/i);
+  });
+
+  it("is not settled while a charge posted after the request is unrefunded", async () => {
+    plans.set("p1", {
+      ...plans.get("p1")!,
+      status: "CANCELED",
+      cancellationRequestedAt: "2026-07-01T00:00:00Z",
+    });
+    invoices.set("i1", {
+      id: "i1",
+      servicePlanId: "p1",
+      customerId: "c1",
+      amountCents: 4500,
+      status: "PAID",
+      issuedAt: "2026-07-05T00:00:00Z",
+      refundedAmountCents: 0,
+    } as never);
+    const s = await planCancellationSettled("p1");
+    expect(s.settled).toBe(false);
+    expect(s.reason).toMatch(/refund it first/i);
+  });
+
+  it("is settled when canceled, cleared, no live charge, and any late charge refunded", async () => {
+    plans.set("p1", {
+      ...plans.get("p1")!,
+      status: "CANCELED",
+      cancellationPending: false,
+      cancellationRequestedAt: "2026-07-01T00:00:00Z",
+    });
+    invoices.set("i1", {
+      id: "i1",
+      servicePlanId: "p1",
+      customerId: "c1",
+      amountCents: 4500,
+      status: "REFUNDED",
+      issuedAt: "2026-07-05T00:00:00Z",
+      refundedAmountCents: 4500,
+    } as never);
+    const s = await planCancellationSettled("p1");
+    expect(s.settled).toBe(true);
   });
 });

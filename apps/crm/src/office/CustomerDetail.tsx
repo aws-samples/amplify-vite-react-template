@@ -571,7 +571,11 @@ export default function CustomerDetail() {
               subtitle={planCadence(p.priceCents, p.serviceFrequency)}
               meta={
                 <>
-                  <StatusBadge status={p.status} />
+                  {p.cancellationPending ? (
+                    <Badge tone="warn">canceling</Badge>
+                  ) : (
+                    <StatusBadge status={p.status} />
+                  )}
                   {roles.finance && p.status === "ACTIVE" ? (
                     <>
                       {p.stripeSubscriptionId ? (

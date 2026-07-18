@@ -39,6 +39,13 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // already overdue, so the item itself carries a routine one-day clock to be
   // picked up. Business-tunable.
   LEAD_FOLLOWUP: 24 * 60,
+  // GL-09: a customer deactivation/reactivation left access, billing, or the
+  // audit record in a mixed state. Money/access is exposed, so a prompt clock.
+  LIFECYCLE_RECOVERY: 60,
+  // GL-08: a plan cancellation didn't fully finish, or a charge posted after the
+  // customer cancelled. Billing may be live and money is owed back — a prompt,
+  // money-critical clock (Finance-owned).
+  PLAN_CANCELLATION_RECOVERY: 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {
