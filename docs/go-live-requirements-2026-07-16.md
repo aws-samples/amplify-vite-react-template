@@ -83,23 +83,28 @@ implementation order, not launch status: **P0, P1, and P2 are all go-live blocke
 **Business outcome:** A technician can see only the minimum customer and work data needed for an
 authorized assignment, while office emergency access is explicit and accountable.
 
-**Why this is still a gate (narrowed by commits `2949dd5` and `b439ad6`):** Two of the exposures are
-now closed. Field-action mutations and document links are assignment-scoped: a technician can start,
-end, report on, finalize, or pull photos/documents only for a job currently assigned to their own
-active, unexpired-licence record — evaluated fresh on every call, so a reassignment takes effect on
-the next action — and document links are limited to a customer they actually serve (`2949dd5`).
-Field-level exposure is closed at AppSync: the TECH blanket model read no longer surfaces a customer's
-billing address, Stripe ids and payment-method label, lead source/notes, org-wide notes, portal
-internals, or booking token; a plan's price and subscription id; or another applicator's licence
-number — each carries field auth that omits TECH, and ServicePlan and CustomerGroup drop TECH read
-entirely (`b439ad6`). **What remains the gate:** per-record *row*-scoping is still missing — knowing a
-customer, job, route, report, or technician ID still lets a technician fetch, list, subscribe to, or
-paginate another worker's rows through the model API (the fields on each row are now minimized, the set
-of rows returned is not). Route create/read/update is not restricted to the caller's own work.
-Reassignment/deactivation does not yet invalidate cached/offline access on the next operation, nor
-record actor, reason, and route effect. The office/owner break-glass override still lacks the reasoned,
-reviewed audit and the prohibition on silent impersonation, and the Operations/Compliance-approved
-historical-lookback bound on document access (beyond the current assignment) is unspecified.
+**Why this is still a gate (narrowed by commits `2949dd5`, `b439ad6`, and `fb98587`):** The technician
+data exposures are now closed. Field-action mutations and document links are assignment-scoped: a
+technician can start, end, report on, finalize, or pull photos/documents only for a job currently
+assigned to their own active, unexpired-licence record — evaluated fresh on every call — and document
+links are limited to a customer they actually serve (`2949dd5`). Field exposure is closed at AppSync:
+the model read no longer surfaces a customer's billing address, Stripe ids and payment-method label,
+lead source/notes, org-wide notes, portal internals, or booking token; a plan's price and subscription
+id; or another applicator's licence number (`b439ad6`). And row exposure is closed: TECH now holds *no*
+model read on Customer, Job, Route, Technician, ServiceReport, or amendments, so a known id can no
+longer fetch, list, subscribe to, or paginate another worker's rows. The field app reads only through
+two server-scoped queries — `technicianDay` (the signed-in technician's own route and stops; office may
+target any technician) and `technicianJob` (one job only if the caller is its current assignee, or
+office) — which minimize the customer to visit fields and drop the job's money fields, and refuse a job
+that is not the caller's with the same opaque error as a missing one, so a reassignment removes the
+former assignee's read on the very next call. Route create/update is off the TECH grant entirely (the
+office owns routing), and the office customer view is no longer reachable by a technician (`fb98587`).
+**What remains the gate:** reassignment/deactivation must record actor, reason, former/new technician,
+effective time, route effect, and stale-draft disposition, and actively invalidate any cached/offline
+copy on the device (server reads and actions are already refused on the next operation, but the audit
+and client-cache invalidation are not built). The office/owner break-glass override still lacks the
+reasoned, reviewed audit and the prohibition on silent impersonation. And the Operations/Compliance-
+approved historical-lookback bound on document access (beyond the current assignment) is unspecified.
 
 **Required acceptance evidence:**
 
