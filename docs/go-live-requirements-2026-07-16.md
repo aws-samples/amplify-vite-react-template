@@ -2,18 +2,19 @@
 
 **Business review date:** 18 July 2026
 
-**Latest commit review:** 3 commits after `143b254`, from `a83657e` through `b39e80d`; newest
-implementation commit `bb7bcc3`
+**Latest commit review:** 3 commits after `b39e80d`, from `be8f5b9` through `e5d585f`; newest
+implementation commit `c7de163`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commit affects GL-18 and the
-offboarding portion of GL-14. Closed work has been removed; those gates contain only the false-outcome,
-authority, recovery, and business-policy gaps that remain. The other gates remain because the new
-commits did not close them. An omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The latest implementation commit affects GL-03 and the
+email-delivery portions of GL-05, GL-15, GL-18, GL-21, and GL-22. Closed work has been removed; those
+gates contain only the promise durability, truthful terminal state, recovery, production-account, and
+business-policy gaps that remain. The other gates remain because the new commits did not close them. An
+omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -68,6 +69,10 @@ action, and physical operating setup as dependencies the agent cannot complete a
   visit can count as money settled while a paid charge remains; adding an email can count as delivering
   the missed notice; any technician ID can count as safe staffing; and materially different paid-booking
   problems are offered the same retry action even when no booking exists to retry.
+- **X3 — Customer communication is still best-effort after provider acceptance.** An accepted email can
+  lose its log and provider ID; transient failures have no actual retry; delivery-event processing can
+  acknowledge and discard a failed update; and the business record that originated the message is not
+  brought back out of “sent” when the later outcome is a bounce or complaint.
 
 ## Gate register
 
@@ -93,7 +98,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning | **70% — High** |
 | P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **60% — Medium** |
 | P1 | GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | Revenue leaks through unowned, unstaged, or duplicate leads | **80% — High** |
-| P1 | GL-03 | Honest fallback contact and communication outcomes | Head of Sales | Customer waits on a call that was promised but never owned | **87% — Very high** |
+| P1 | GL-03 | Finish durable fallback promises and email recovery | Head of Sales + Head of Operations | A promised follow-up disappears, or an undelivered message remains falsely complete | **68% — Medium** |
 | P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **74% — High** |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner | **24% — Low** |
 
@@ -191,11 +196,12 @@ authored legal record with a truthful, non-duplicating customer-delivery state.
   provider idempotency key, so a crash between provider acceptance and the marker write causes a
   duplicate on retry. Delivery must use a provider idempotency key or an equivalent outbox that covers
   the **accepted-but-marker-not-stored** window, and every marker write must be verified.
-- **"Delivered" only means the provider accepted the message.** The delivery state is limited to
-  Delivered / Failed / No-email, and is set the instant the provider accepts — there is no
-  Pending, Bounced, or Suppressed state and no handler for provider bounce/complaint events. Delivery
-  must distinguish Pending, Delivered, Bounced/suppressed, Failed, No-email, and approved alternate
-  delivery with proof; provider acceptance alone cannot display "sent to customer."
+- **The legal record still calls provider acceptance “delivered.”** The general email log can later
+  receive a bounce or complaint, but the service report/amendment stamps `emailedAt` and its own delivery
+  status when the provider first accepts the send; the later outcome does not correct that legal record.
+  One linked state must distinguish pending, mailbox-provider delivery, bounced/complained/suppressed,
+  failed, no-email, and approved alternate delivery. A later failure reopens the report-delivery
+  obligation and cannot leave the report screen claiming the customer received it (**see X3**).
 - **Label validation is a single string match.** It compares one recorded rate string to one catalog
   default and skips entirely when that default is blank; quantity and re-entry are only checked non-blank.
   The catalog must encode every allowed product/service/site/pest combination, quantity or concentration
@@ -273,9 +279,11 @@ steps.
   the customer confirmation on retry. And a *failed* marker write is only logged, not turned into owned
   work — so "sent but not recorded" is invisible. Delivery must use a provider idempotency key (or
   equivalent outbox) covering that window, and a failed marker write must be visible owned work.
-- **Confirmation is shown as delivered on provider acceptance only.** There is no bounce, suppression,
-  timeout, or alternate-delivery state (same root cause as GL-15). Each must carry a truthful status,
-  owner, deadline, and retry/proof path.
+- **The booking still treats provider acceptance as confirmation delivered.** A later bounce/complaint is
+  visible only in the general email log and does not correct the booking's communication marker or the
+  finalization outcome. The booking must remain linked to the exact send through pending, mailbox-provider
+  delivery, bounce/complaint/suppression, failed/unknown, and approved alternate delivery; every non-
+  delivered outcome has an owner, deadline, and safe resend/alternate-contact path (**see X3**).
 - **Reconciliation checks existence and amount, not full ownership.** It confirms a child record resolves
   and a paid invoice for the payment exists, but does not verify the customer, job, plan, agreement,
   service, and date all belong to the *same* booking. A cross-linked (wrong-owner) child would not be
@@ -406,9 +414,10 @@ even though some represent an orphan payment, duplicate record, provider outage,
 that cannot be fixed by retrying a booking. Eight of the thirteen exception types have no verified
 normal completion path, so callbacks, delivery failures, duplicate leads, portal failures, pricing
 decisions, location reviews, and staff-access recovery can be closed only as an OWNER manual override.
-That turns routine work into an executive bottleneck and treats a normal completion as an exception to
-policy. Claim and close actions also have no single-winner control, so two employees can act on the same
-case.
+For email failures, the instruction says to correct, unsuppress, and resend, but the case provides no
+bounded action to do those things or identify every message the customer missed. That turns routine work
+into an executive bottleneck and treats a normal completion as an exception to policy. Claim and close
+actions also have no single-winner control, so two employees can act on the same case.
 
 **Remaining requirements:**
 
@@ -416,9 +425,11 @@ case.
   confirmed refund, successfully voided unpaid invoice, or posted customer credit. Canceling the visit
   alone never proves the money is settled; partial refunds and multiple invoices reconcile to the exact
   amount owed.
-- A missing-contact or delivery case remains open until the specific missed notice is delivered or an
-  approved alternate-contact outcome is recorded. Merely adding an address does not satisfy a promise to
-  send a confirmation, report, amendment, cancellation notice, or other customer document.
+- A missing-contact or delivery case lists every affected message and remains open until each specific
+  notice is delivered or has an approved alternate-contact outcome. A permitted business role can correct
+  the address, release suppression when consent and address validity support it, resend the exact message,
+  and see the new terminal result without developer tools. Merely adding an address does not satisfy a
+  promise to send a confirmation, report, amendment, cancellation notice, or other customer document.
 - An unstaffed case closes only when the assignment passes the same launch-approved dispatch rule used
   everywhere else: active technician, valid license/scope, working availability, territory/capacity, and
   a scheduled route disposition. An ID in the technician field is not proof that the visit can occur.
@@ -474,20 +485,30 @@ cannot buy the same last unit of capacity.
 **Business outcome:** A customer is never told they are booked or paid while the payment can still fail,
 and Operations never dispatches an unconfirmed payment as if it were settled.
 
+**Why this is still a gate:** Engineering closed the truthfulness. The checkout success screen no longer
+reuses the "You're booked" / "paid today" copy for a still-processing payment: a processing state now
+reads "Your slot is held", shows the amount as "processing" (not "paid today"), and states plainly that
+nothing is confirmed, no charge has been made, when the customer will hear, and what happens if the
+payment fails. A repeat booking attempt on a processing intent is told the payment is still processing
+and not to pay again, never "already paid — check your email". The booking lifecycle now carries the
+honest states behind that: a new `payment_intent.processing` webhook marks the booking **PROCESSING** (the
+slot is held, but no job/agreement/confirmation is created), a success finalizes it to **BOOKED** once
+(the finalizer now accepts a PROCESSING booking, so a cleared bank debit is not treated as stuck-paid),
+and a **payment_intent.payment_failed** on a funnel booking marks it **PAYMENT_FAILED**, emails the
+customer once (retry-safe) that no charge was made and the slot is still open, and creates no commitment.
+Those four plain states (PROCESSING / paid-finalizing / BOOKED / PAYMENT_FAILED) are what Operations
+sees, with no provider terminology to interpret.
+
 **Remaining requirements:**
 
-- **The customer UI announces "You're booked" and "paid today" on a still-processing payment.** The
-  success screen renders those headings for both succeeded and processing states, softening only the
-  smaller text. And a repeat booking attempt on a processing intent tells the customer it is "already
-  paid — check your email," though no confirmation email has been or will be sent yet. Processing copy
-  must state what is reserved, what is not yet confirmed, when the customer will hear, and what happens if
-  payment fails — never "paid" or "booked" prematurely.
-- The CEO chooses which payment methods finalize instantly and which require a **Payment
-  processing — slot held, not yet booked** state. Success finalizes the held booking once; failure or
-  timeout releases capacity (ties to GL-04's hold), informs the customer, and records the outcome without
-  creating a commitment.
-- Operations can distinguish **processing**, **paid/finalizing**, **booked**, and **failed** without
-  interpreting provider terminology.
+- **CEO / Finance payment-method policy.** The funnel uses Stripe automatic payment methods; the app now
+  handles instant (card → BOOKED) and held (async → PROCESSING) methods honestly, but the CEO decides
+  which methods to enable for launch (e.g. cards-only avoids the processing path entirely). This is a
+  Stripe-dashboard decision, plus registering the new `payment_intent.processing` event on the production
+  webhook (GL-21).
+- **Capacity release on failure/timeout ties to GL-04's hold**, which does not exist yet: today a
+  processing/failed payment simply never creates a booking, so nothing is falsely committed, but there is
+  no reserved slot to release. When GL-04's capacity hold lands, a PAYMENT_FAILED/timeout must release it.
 
 **Pass owner:** Finance lead.
 
@@ -598,7 +619,11 @@ or unconfigured provider event.
 - The **production** Stripe webhook endpoint is confirmed subscribed to all nine events above, and
   production and staging use separate approved keys, prices, webhook secrets, and customer data.
 - A monitored `sales@pestbuzzkill.com` mailbox plus the operations/finance routes exist, are staffed to
-  the approved SLA, and correctly handle sending, receipt, bounce, suppression, and DKIM/SPF/DMARC.
+  the approved SLA, and own incoming replies, failed messages, alternate contact, and vacation coverage.
+- Production SES is enabled for the required launch volume; the approved sending domain/identity has
+  DKIM, SPF, and DMARC in force; and the deployed configuration set, event destination, permissions, and
+  suppression policy apply to every production sender. Staging cannot send as production or alter the
+  production suppression list.
 - Delivered customer communications use the approved production URLs, portal and quote/cancel links,
   sender identity, phone, service area, maps key, AI key, scheduler, and payment return URLs on supported
   phone and desktop devices.
@@ -614,12 +639,17 @@ can be restored after human or provider error.
 
 **Remaining requirements:**
 
-- **There is no infrastructure alerting at all.** The backend defines no CloudWatch alarms, no SNS topics,
-  and no metric filters; every "alert" today is an application email to a shared inbox. A silent Lambda
-  crash, a scheduled job that never fired, or a run of email-send failures would page no one. Alerts must
-  cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email failures,
-  reconciliation mismatches, capacity anomalies, document generation/storage failure, and growing/overdue
-  exception queues, and reach a named primary and backup.
+- **There is still no actionable infrastructure alerting.** The new SES topic transports delivery events;
+  it does not page an operator. There are no CloudWatch alarms or business-impact metric thresholds, so a
+  silent Lambda crash, scheduled job that never fired, or run of email-send failures would page no one.
+  Alerts must cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email
+  failures, reconciliation mismatches, capacity anomalies, document generation/storage failure, and
+  growing/overdue exception queues, and reach a named primary and backup.
+- **A failed email-delivery event can be permanently acknowledged.** The event consumer catches malformed
+  messages and database/work-queue failures and then returns success; there is no retained failure queue
+  or operator alert. Every provider event must be retried until its email state, suppression decision, and
+  owned recovery action are durably recorded, or be held in a visible dead-letter queue with a named owner.
+  Duplicate or out-of-order events cannot move a bounced/complained message back to delivered (**see X3**).
 - **There is no point-in-time recovery and no document backup/versioning configured.** Point-in-time
   database recovery and versioned/retained document backup must be enabled for the approved
   legal/financial retention period, and recovery must restore the complete customer/job/plan/invoice
@@ -711,33 +741,59 @@ until it becomes a customer or is deliberately closed.
 
 **Pass owner:** Head of Sales.
 
-### GL-03 — Honest fallback contact and communication outcomes
+### GL-03 — Finish durable fallback promises and email recovery
 
-**Business outcome:** Customers are told what will actually happen, and staff never see a success message
-for a communication that was not delivered.
+**Business outcome:** Every promised follow-up becomes one durable, owned Sales action with a deadline the
+team can meet, and every customer message reaches a truthful terminal outcome that a routine employee can
+recover without engineering.
 
-**Why this is still a gate:** Engineering closed both halves. The quote review fallback now promises a
-channel it can keep: a call only when the lead gave a valid phone AND ticked call consent, otherwise an
-email (the funnel always captures a valid email), and the timing is truthful, "within the hour" only in
-business hours (Mon–Fri 8am–6pm ET) and a real next-window time ("first thing tomorrow morning", "on
-Monday morning") after hours, with the exception deadline moved to match. On the delivery side, every
-send now branches on a real result: it is stamped with an SES configuration set and its provider message
-id, records SENT / QUEUED (a transient throttle, never a silent drop) / SUPPRESSED / FAILED, and a
-permanent failure opens owned EMAIL_FAILURE work. A new ses-events function consumes SES bounce,
-complaint, and delivery notifications: it flips the message to DELIVERED or BOUNCED/COMPLAINED,
-suppresses a dead or complaining address so nothing is re-sent to it, and opens an owned exception with
-an approved alternate-contact next step, so a message the provider accepted and then bounced no longer
-reads "sent" forever. The office email log shows the true delivery state, not just provider acceptance.
+**Why this is still a gate:** The fallback response is returned even when creation of its owned action
+silently fails, and there is no sweep that rebuilds a missing action from a CONTACT booking. The fixed
+Monday–Friday calendar has no holidays, closures, or coverage exceptions, and a request at 5:59 p.m. is
+still promised “within the hour” even though the encoded workday ends at 6:00 p.m. Other customer copy
+still says an unpriceable booking will receive a call regardless of the lead's recorded choice. The
+checkbox grants “call or text” permission, while the flow records only one boolean and uses only calls;
+it does not retain the exact consent wording/version as a business record.
+
+An accepted email can still have no durable log or provider ID because that write is best-effort. A
+transient send failure is labeled **Queued** but nothing is actually queued to retry; a transient bounce
+is ignored and remains **Sent**, and an accepted message with no later event has no timeout or owner.
+Delivery-event processing can discard failures (**GL-22**), duplicate/out-of-order events have no terminal
+state guard, and the customer magic-link sender bypasses the log, configuration set, suppression, and
+recovery path entirely. Bounce/complaint work also loses the original message/related-record ownership,
+routes every case to Operations, and offers no business-operable correction, suppression-release, or
+resend action.
 
 **Remaining requirements:**
 
-- The SES account must actually publish these events: the sending identity/domain is verified for
-  DKIM/SPF/DMARC and the configuration set's SNS event destination is enabled in the production SES
-  account. The code path is complete and inert until that production step lands (owned by GL-21).
-- The Head of Sales confirms the business hours encoded (Mon–Fri 8am–6pm ET), the call-consent wording,
-  and the approved alternate-contact next step for a suppressed/bounced lead.
+- A customer-facing fallback promise and its owned action are one durable commitment. The promise is not
+  returned unless the action exists with the correct Sales owner, source record, channel, due time, and
+  wording; a recurring sweep finds and repairs any CONTACT booking missing that action.
+- The Head of Sales approves an operating calendar with holidays, planned closures, emergency closure,
+  timezone, and the latest time at which a full response window can still be promised. The deadline never
+  falls after staffed coverage, and all public pages, booking-link messages, scripts, and employee copy use
+  the same channel and timing rule.
+- Compliance approves channel-specific consent and withdrawal language. The record retains the wording/
+  policy version, time, source, and channels authorized; it does not claim text consent when no approved
+  text workflow exists. A phone number without the applicable consent never creates a call promise.
+- Every send has a durable attempt/outbox record before provider submission, one retry identity, the
+  originating customer/lead/business record, owner team, message purpose, and provider ID. Provider
+  acceptance cannot become an untracked message when the next write fails, and a retry cannot duplicate a
+  message the provider already accepted.
+- **Queued** means a retry is actually scheduled with bounded backoff, expiry, and escalation. Permanent
+  failure, transient bounce/delay, complaint, suppression, and a provider-accepted message that never
+  reaches a terminal event all become truthful, timed states with owned recovery; none remains **Sent**
+  indefinitely.
+- Every production sender—including customer sign-in links—uses the same tracking, delivery-event,
+  suppression, and recovery contract. Later bounce/complaint state corrects the originating booking,
+  report, notice, or access outcome rather than living only in a general email log.
+- The recovery case stays with the original team and lists every missed message. An authorized routine
+  employee can correct contact data, record alternate delivery, release a suppression only under the
+  approved consent policy, resend the exact message, and see the terminal result. Exception closure is
+  governed by GL-18; durable event retry/dead-letter ownership by GL-22; production SES state by GL-21.
 
-**Pass owner:** Head of Sales.
+**Pass owner:** Head of Sales; Head of Operations approves delivery recovery and Compliance approves
+consent.
 
 ### GL-11 — Minimum complete customer/group portal
 
@@ -794,9 +850,9 @@ The launch approver should use this table only after every named owner approves 
 |---|---|---|---|---|
 | CEO |  |  | GL-01, 05, 08, 13, 14, 16–20, 22 |  |
 | Sales |  |  | GL-02, 03, 19 |  |
-| Operations |  |  | GL-04, 07, 09–15, 18, 19, 23 |  |
+| Operations |  |  | GL-03, 04, 07, 09–15, 18, 19, 23 |  |
 | Finance |  |  | GL-05–09, 16–19, 21 |  |
-| Compliance/legal |  |  | GL-01, 10, 13, 15, 17, 20, 22 |  |
+| Compliance/legal |  |  | GL-01, 03, 10, 13, 15, 17, 20, 22 |  |
 | Engineering |  |  | GL-05, 21, 22 |  |
 
 **Production go-live decision:** `NO-GO / GO`
