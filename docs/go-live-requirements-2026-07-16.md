@@ -2,19 +2,19 @@
 
 **Business review date:** 18 July 2026
 
-**Latest commit review:** 3 commits after `b39e80d`, from `be8f5b9` through `e5d585f`; newest
-implementation commit `c7de163`
+**Latest commit review:** 2 commits after `e5d585f`, from `3f437c9` through `8d98df4`; newest
+implementation commit `3f437c9`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commit affects GL-03 and the
-email-delivery portions of GL-05, GL-15, GL-18, GL-21, and GL-22. Closed work has been removed; those
-gates contain only the promise durability, truthful terminal state, recovery, production-account, and
-business-policy gaps that remain. The other gates remain because the new commits did not close them. An
-omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The latest implementation commit affects GL-06 and the
+payment/capacity portions of GL-04, GL-05, GL-19, and GL-21. Closed copy and state-label work has been
+removed; those gates contain only the nonexistent hold, premature success, unsafe event transition,
+timeout/recovery, production-account, and business-policy gaps that remain. The other gates remain
+because the new commits did not close them. An omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -73,6 +73,10 @@ action, and physical operating setup as dependencies the agent cannot complete a
   lose its log and provider ID; transient failures have no actual retry; delivery-event processing can
   acknowledge and discard a failed update; and the business record that originated the message is not
   brought back out of “sent” when the later outcome is a bounce or complaint.
+- **X4 — Payment status and capacity can still tell different stories.** A processing payment is called a
+  held slot even though availability does not reserve or count it; a succeeded payment is called booked
+  before the server confirms finalization; and concurrent webhook events can overwrite a later state
+  because their transitions are not single-winner decisions.
 
 ## Gate register
 
@@ -89,7 +93,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-07 | Finish durable office cancel/reschedule | Head of Operations | A canceled visit still charges, promised credit vanishes, or concurrent changes conflict | **74% — High** |
 | P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **68% — Medium** |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **57% — Medium** |
-| P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer told "booked/paid" while the payment can still fail | **86% — Very high** |
+| P0 | GL-06 | Finish honest, race-safe processing and failed payments | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **55% — Medium** |
 | P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI or an employee publishes a loss-making or nonsensical price | **38% — Low** |
 | P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented | **30% — Low** |
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
@@ -274,6 +278,12 @@ steps.
 
 **Remaining requirements:**
 
+- **The checkout calls a succeeded payment “booked” before the booking exists.** The browser switches to
+  **You're booked** from Stripe's payment status without waiting for the server to confirm the customer,
+  job, agreement, invoice, and booking transition. A succeeded payment must show a truthful
+  **Payment received — finalizing** state until the complete commitment is read back. Finalization failure
+  or delay shows the owned recovery/refund state and one safe next step; reload and redirect return to the
+  same durable outcome rather than relying on browser memory.
 - **The confirmation email itself can still duplicate.** The marker prevents re-*booking*, but the send
   has no provider idempotency key, so a crash between provider acceptance and the marker write re-sends
   the customer confirmation on retry. And a *failed* marker write is only logged, not turned into owned
@@ -331,29 +341,26 @@ recovery policy.
 **Business outcome:** A customer's online cancellation is a durable instruction, and every customer
 message matches the actual billing, plan, schedule, and delivery state.
 
+**Why this is still a gate:** Engineering closed the durability and the truthfulness, following the same
+durable-command pattern as GL-05/GL-07. A customer cancel now takes a single-winner claim
+(`PlanCancellationClaim`, id = plan id) BEFORE any Stripe call, so two simultaneous confirm clicks cannot
+both drive a cancel — the loser reports the truthful in-flight state instead of firing a second cancel
+and a second confirmation. The instruction is recorded durably (the claim, plus `cancellationPending`)
+BEFORE the provider is touched, so a crash between the Stripe cancel and the CRM transition leaves a
+visible, recoverable state, not a lost instruction. The plan is reported **Canceled** only after both the
+Stripe stop AND the CRM transition are confirmed written (`cancelPlanBilling` now read-backs the record
+and throws if it did not flip, so a provider-success + CRM-write-failure returns PENDING and resumes,
+not a false "canceled"). The pending copy no longer promises "you won't be charged again" while billing
+is live: it states the plan is still active, that any charge that posts will be refunded, and when the
+customer will hear. The success message says "recurring visits have stopped" only when every cancelable
+visit actually came off, and "we've emailed you" only when the confirmation truly sent; a failed
+visit-removal is now durable owned work (one item per stranded visit), not just an office email.
+
 **Remaining requirements:**
 
-- **The pending screen still promises "you won't be charged again" while the subscription is live.** On a
-  provider failure — where billing is explicitly still active — the customer message tells them they will
-  not be charged again, with no enforceable automatic stop or refund behind it (the fix is a manual
-  owned task). While the subscription is still active, the portal must state the truthful pending status,
-  resolution time, and what happens if a charge posts.
-- **"Recurring visits stopped" is claimed even when visits remain**, and a failed visit-removal is only an
-  office email, not owned work. The screen may say visits stopped only when every cancelable visit was
-  actually removed; any failed schedule write creates durable owned work and a truthful outstanding-visit
-  disposition.
-- **The CRM plan write is not confirmed.** After the provider succeeds, the plan is marked canceled with
-  no error check or read-back, so a provider-success + CRM-write-failure reports the plan canceled while
-  the plan row may remain active. **Canceled** must appear only after the provider stop and the CRM
-  transition are both confirmed written; a CRM failure resumes the same cancellation.
-- **The instruction is only recorded on the failure path.** The pending flag and owned case are written
-  inside the catch, so a crash after the provider cancels but before any CRM write loses the instruction
-  entirely. The request must be durably recorded before or with the provider attempt.
-- **Concurrent (not just sequential) clicks are unprotected** — there is no conditional/version guard;
-  two simultaneous requests both read Active and both proceed. Duplicate or concurrent clicks must return
-  the same request and outcome.
-- "Confirmation emailed" language must appear only when delivery succeeded (the honest flag exists; the
-  success prose does not yet always respect it).
+- Finance/Operations confirm the pending-state **resolution-time** commitment shown to the customer
+  (encoded as "usually within one business day") and the wording of the refund promise if a charge posts
+  before the cancel completes.
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
 
@@ -460,10 +467,13 @@ cannot buy the same last unit of capacity.
 
 - **No slot is ever reserved.** There is no capacity-hold concept in the system; two concurrent bookings
   for the last slot both pass the check because capacity is derived from existing jobs and nothing is
-  written to claim the slot. Selecting checkout must place a short, visible hold that a successful payment
-  consumes and that abandonment, failure, and expiry release; concurrent purchases for the last slot must
-  yield exactly one booking and a truthful alternate-date/refund outcome for the other, with no manual
-  database repair. The CEO approves the hold duration.
+  written to claim the slot. A **PROCESSING** booking is also excluded from availability even though the
+  customer is told “Your slot is held,” so another customer can buy the last capacity before the async
+  payment settles; the later success then creates an oversold job. Selecting checkout must place a real,
+  expiring hold that availability counts, that only its payment can consume, and that abandonment,
+  failure, and expiry release. Concurrent or async purchases for the last slot yield exactly one booking
+  and a truthful alternate-date/refund outcome for the other, with no manual database repair. The CEO
+  approves hold duration by permitted payment method.
 - **Capacity is a coarse technician-per-day count that offers slots even with zero technicians.** It
   multiplies active-technician count by a fixed stops-per-tech and floors that count at one, so a day with
   **no** active technician still offers capacity. Sellable capacity must use each technician's actual
@@ -480,37 +490,57 @@ cannot buy the same last unit of capacity.
 
 **Pass owner:** Head of Operations.
 
-### GL-06 — Honest handling of processing and failed payments
+### GL-06 — Finish honest, race-safe processing and failed payments
 
-**Business outcome:** A customer is never told they are booked or paid while the payment can still fail,
-and Operations never dispatches an unconfirmed payment as if it were settled.
+**Business outcome:** The customer and office always see the same payment, capacity, and booking state;
+an async payment cannot create a double payment, a nonexistent hold, an oversold visit, or an obligation
+that waits forever.
 
-**Why this is still a gate:** Engineering closed the truthfulness. The checkout success screen no longer
-reuses the "You're booked" / "paid today" copy for a still-processing payment: a processing state now
-reads "Your slot is held", shows the amount as "processing" (not "paid today"), and states plainly that
-nothing is confirmed, no charge has been made, when the customer will hear, and what happens if the
-payment fails. A repeat booking attempt on a processing intent is told the payment is still processing
-and not to pay again, never "already paid — check your email". The booking lifecycle now carries the
-honest states behind that: a new `payment_intent.processing` webhook marks the booking **PROCESSING** (the
-slot is held, but no job/agreement/confirmation is created), a success finalizes it to **BOOKED** once
-(the finalizer now accepts a PROCESSING booking, so a cleared bank debit is not treated as stuck-paid),
-and a **payment_intent.payment_failed** on a funnel booking marks it **PAYMENT_FAILED**, emails the
-customer once (retry-safe) that no charge was made and the slot is still open, and creates no commitment.
-Those four plain states (PROCESSING / paid-finalizing / BOOKED / PAYMENT_FAILED) are what Operations
-sees, with no provider terminology to interpret.
+**Why this is still a gate:** A processing customer is told **Your slot is held**, but no capacity record
+is created and availability does not count the PROCESSING booking. The customer is also told no charge was
+made, which is not an approved method-specific description of every pending bank or wallet transaction.
+The repeat-booking endpoint rejects any persisted status other than QUOTED before it reaches its
+“still processing—do not pay again” branch, so a returning processing customer can instead receive
+**Quote not found** and be offered a fresh payment path.
+
+Processing, failed, and successful webhook handlers read a status and then write without a conditional
+transition. Concurrent events can therefore both read QUOTED and let a late processing/failure update
+overwrite a BOOKED success; failed writes are not checked before the event is acknowledged. There is no
+processing start/expiry, stale-processing sweep, provider reconciliation, owned timeout case, or office
+screen for these states. The failed-payment email is marked only after provider acceptance with an
+unchecked write, so replay can duplicate it and a failed delivery follows the unresolved X3 path.
 
 **Remaining requirements:**
 
-- **CEO / Finance payment-method policy.** The funnel uses Stripe automatic payment methods; the app now
-  handles instant (card → BOOKED) and held (async → PROCESSING) methods honestly, but the CEO decides
-  which methods to enable for launch (e.g. cards-only avoids the processing path entirely). This is a
-  Stripe-dashboard decision, plus registering the new `payment_intent.processing` event on the production
-  webhook (GL-21).
-- **Capacity release on failure/timeout ties to GL-04's hold**, which does not exist yet: today a
-  processing/failed payment simply never creates a booking, so nothing is falsely committed, but there is
-  no reserved slot to release. When GL-04's capacity hold lands, a PAYMENT_FAILED/timeout must release it.
+- The CEO and Finance approve the launch payment methods. If launch is cards-only, async methods are
+  disabled in the provider and removed from customer/staff promises. If async methods remain, every rule
+  below is required and the accepted terms disclose the pending-payment, capacity, cancellation, and
+  refund behavior for each method.
+- **Held** is displayed only after a real capacity hold is durably read back. The hold is counted by all
+  availability and dispatch decisions, belongs to one payment attempt, has an approved expiry, and is
+  consumed, released, or converted exactly once. A payment that succeeds after its hold is lost receives
+  an approved alternate date or automatic refund; it never silently oversells the day (**GL-04**).
+- Payment and booking transitions use one approved, conditional state machine. Processing, success,
+  failure, cancellation, expiry, and retry events apply only to the current payment attempt and allowed
+  prior state; duplicate, concurrent, stale, or out-of-order events cannot regress BOOKED or overwrite a
+  later business decision. Every rejected or failed transition remains visible and owned.
+- PROCESSING has a durable start time, customer promise, next check, expiry, and owner. Reconciliation
+  re-reads the provider until success/failure, finds missing webhook events, and raises an owned case before
+  the promise expires. A timeout follows one CEO/Finance-approved cancel, extend, alternate-date, or refund
+  outcome and sends one durable notice.
+- Returning, refreshing, or retrying customers retrieve the durable state: processing means **do not pay
+  again**, succeeded-but-incomplete means **payment received—finalizing**, booked means the full commitment
+  exists, and failed means no booking plus the approved retry path. No state falls through to **Quote not
+  found** or invites another payment without first proving the prior attempt is terminal (**GL-05**).
+- Customer copy describes funds truthfully for the enabled method—authorized, pending, settled, failed,
+  reversed, or refunded—and never promises an available slot after the system releases it. Finance
+  approves this language and the timing of customer notices.
+- Operations has a plain-language view of every processing/failed attempt showing customer, amount,
+  method, selected slot/hold, age, provider state, notice state, owner, and one safe next action. The
+  leadership aging/reconciliation view is completed in GL-19, production webhook setup in GL-21, and
+  durable notification handling in GL-03.
 
-**Pass owner:** Finance lead.
+**Pass owner:** CEO and Finance lead jointly; Head of Operations approves the recovery workflow.
 
 ### GL-16 — Governed pricing and margin protection
 
@@ -616,8 +646,10 @@ or unconfigured provider event.
 - The previously exposed Buildium credential is rotated and revoked **at the provider**, its access logs
   reviewed, and current credentials exist only in the approved secret store. Removing it from code does
   not pass.
-- The **production** Stripe webhook endpoint is confirmed subscribed to all nine events above, and
-  production and staging use separate approved keys, prices, webhook secrets, and customer data.
+- The **production** Stripe webhook endpoint is subscribed to all ten launch events, including
+  `payment_intent.processing` and `payment_intent.payment_failed`; production and staging use separate
+  approved keys, prices, webhook secrets, and customer data. Stripe automatic payment methods exactly
+  match the CEO/Finance GL-06 decision—no unapproved async method can appear at checkout.
 - A monitored `sales@pestbuzzkill.com` mailbox plus the operations/finance routes exist, are staffed to
   the approved SLA, and own incoming replies, failed messages, alternate contact, and vacation coverage.
 - Production SES is enabled for the required launch volume; the approved sending domain/identity has
@@ -676,6 +708,10 @@ asking engineering to query production.
 - **No daily money reconciliation** proving successful provider payments equal CRM paid invoices with net
   cash explainable and every mismatch an owned, Finance-signed case (today only *booking* payment intents
   are matched, not the full charge/invoice/refund ledger).
+- **No processing-payment aging view.** Leadership cannot see attempts still processing, their selected
+  capacity/hold, how long they have waited, whether the provider and CRM agree, whether the customer was
+  notified, or which attempts exceeded the approved GL-06 promise. Stale, failed, late-succeeded, and
+  customer-retried attempts must reconcile without an engineering query.
 - **No plan reconciliation** — provider subscription vs CRM plan mismatches, canceled-still-billing,
   delinquent-still-scheduled, and active-plan-without-next-service as a reconciliation report.
 - **No dedicated sales view** (leads by stage/owner/age, first-response SLA, overdue next action, source,
@@ -848,9 +884,9 @@ The launch approver should use this table only after every named owner approves 
 
 | Function | Named approver | Date | Gates accepted | Approval record |
 |---|---|---|---|---|
-| CEO |  |  | GL-01, 05, 08, 13, 14, 16–20, 22 |  |
+| CEO |  |  | GL-01, 05, 06, 08, 13, 14, 16–20, 22 |  |
 | Sales |  |  | GL-02, 03, 19 |  |
-| Operations |  |  | GL-03, 04, 07, 09–15, 18, 19, 23 |  |
+| Operations |  |  | GL-03, 04, 06, 07, 09–15, 18, 19, 23 |  |
 | Finance |  |  | GL-05–09, 16–19, 21 |  |
 | Compliance/legal |  |  | GL-01, 03, 10, 13, 15, 17, 20, 22 |  |
 | Engineering |  |  | GL-05, 21, 22 |  |
