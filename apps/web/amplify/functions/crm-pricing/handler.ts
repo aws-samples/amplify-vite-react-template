@@ -328,8 +328,11 @@ const PASS_SCRIPTS: Record<string, string> = {
 export const AI_RATE_QUEUED_REASON =
   "AI rate queued — re-price this lead in an hour";
 
+// GL-03: no promise of a channel/timing we can't guarantee here (this reply
+// has no phone/consent context). The owner follows up; the funnel's own
+// fallback owns the truthful call-vs-email promise.
 const CUSTOM_QUOTE_SCRIPT =
-  "Thanks for reaching out! This one needs a custom quote from our owner — he'll call you today to walk through the details and get you an exact price.";
+  "Thanks for reaching out! This one needs a custom quote from our owner, who will follow up to walk through the details and get you an exact price.";
 
 /**
  * A recurring GP plan from the researched sheet, with the deterministic

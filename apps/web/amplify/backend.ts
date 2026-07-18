@@ -5,7 +5,13 @@ import {
   HttpMethod,
   InvokeMode,
 } from "aws-cdk-lib/aws-lambda";
-import { PolicyStatement } from "aws-cdk-lib/aws-iam";
+import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import { Topic } from "aws-cdk-lib/aws-sns";
+import { LambdaSubscription } from "aws-cdk-lib/aws-sns-subscriptions";
+import {
+  CfnConfigurationSet,
+  CfnConfigurationSetEventDestination,
+} from "aws-cdk-lib/aws-ses";
 import { auth } from "./auth/resource";
 import { data } from "./data/resource";
 import { storage } from "./storage/resource";
@@ -22,6 +28,7 @@ import {
 import { crmPricing } from "./functions/crm-pricing/resource";
 import { bookingPublic } from "./functions/booking-public/resource";
 import { pricingRefresh } from "./functions/pricing-refresh/resource";
+import { sesEvents } from "./functions/ses-events/resource";
 
 const backend = defineBackend({
   auth,
@@ -38,6 +45,7 @@ const backend = defineBackend({
   crmPricing,
   bookingPublic,
   pricingRefresh,
+  sesEvents,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
@@ -267,6 +275,55 @@ backend.crmDocs.resources.lambda.addToRolePolicy(
     ],
   })
 );
+
+// GL-03: SES delivery-event pipeline. A configuration set publishes bounce,
+// complaint, and delivery events to an SNS topic; the ses-events function turns
+// them into truthful delivery state — it marks the EmailLog, suppresses a dead
+// address, and opens owned EMAIL_FAILURE work with an alternate-contact next
+// step. Every sender stamps its sends with this configuration set so the events
+// flow. (The SES account still has to enable the sending identity to publish
+// these events — DKIM/SPF/DMARC verification — which is the remaining GL-21
+// production step; the code path is complete and inert until then.)
+const sesConfigurationSetName = `buzzkill-email-${branch}`;
+const emailEventsStack = backend.sesEvents.resources.lambda.stack;
+const sesEventsTopic = new Topic(emailEventsStack, "SesEventsTopic");
+sesEventsTopic.grantPublish(new ServicePrincipal("ses.amazonaws.com"));
+sesEventsTopic.addSubscription(
+  new LambdaSubscription(backend.sesEvents.resources.lambda)
+);
+const sesConfigSet = new CfnConfigurationSet(
+  emailEventsStack,
+  "BuzzKillEmailConfigSet",
+  { name: sesConfigurationSetName }
+);
+const sesEventDestination = new CfnConfigurationSetEventDestination(
+  emailEventsStack,
+  "BuzzKillEmailEventDestination",
+  {
+    configurationSetName: sesConfigurationSetName,
+    eventDestination: {
+      enabled: true,
+      name: "sns-delivery-events",
+      matchingEventTypes: ["bounce", "complaint", "delivery"],
+      snsDestination: { topicArn: sesEventsTopic.topicArn },
+    },
+  }
+);
+sesEventDestination.addDependency(sesConfigSet);
+for (const fn of [
+  backend.crmDocs,
+  backend.dailyReminders,
+  backend.crmAdmin,
+  backend.verifyChallenge,
+  backend.crmPricing,
+  backend.bookingPublic,
+  backend.leadIntake,
+  backend.crmBilling,
+  backend.pricingRefresh,
+  backend.stripeWebhook,
+]) {
+  fn.addEnvironment("SES_CONFIGURATION_SET", sesConfigurationSetName);
+}
 
 // Public booking-funnel API for the marketing site.
 const bookingApiUrl = backend.bookingPublic.resources.lambda.addFunctionUrl({

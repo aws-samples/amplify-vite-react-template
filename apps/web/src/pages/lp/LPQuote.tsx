@@ -6,7 +6,8 @@
  * - The old on-page calculator is gone — the /quote funnel returns live
  *   priced days and takes payment, so ad traffic goes straight there
  * - Every service and property type prices instantly; only the rare
- *   unpriceable case is captured for a specialist call within the hour
+ *   unpriceable case is captured for a specialist follow-up, by phone if the
+ *   lead consented to a call and left a number, otherwise by email (GL-03)
  */
 import { Link } from "react-router-dom";
 import SEO from "../../components/SEO";

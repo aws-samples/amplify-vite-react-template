@@ -28,12 +28,22 @@ vi.mock("@aws-sdk/client-ses", () => ({
 const emailLogs: Record<string, unknown>[] = [];
 const workRows: (Record<string, unknown> & { id: string })[] = [];
 const workHistory: Record<string, unknown>[] = [];
+const suppressedRows: Record<string, Record<string, unknown>> = {};
 vi.mock("./dataClient", () => ({
   dataClient: async () => ({
     models: {
       EmailLog: {
         create: async (input: Record<string, unknown>) => {
           emailLogs.push(input);
+          return { data: input };
+        },
+      },
+      SuppressedEmail: {
+        get: async ({ email }: { email: string }) => ({
+          data: suppressedRows[email] ?? null,
+        }),
+        create: async (input: Record<string, unknown>) => {
+          suppressedRows[input.email as string] = input;
           return { data: input };
         },
       },
@@ -61,15 +71,21 @@ vi.mock("./dataClient", () => ({
   }),
 }));
 
-const { notifyLeads, notifyOffice } = await import("./email");
+const { notifyLeads, notifyOffice, sendEmail } = await import("./email");
+
+/** The most recent SES command input (RawMessage + any ConfigurationSetName). */
+const lastCommandInput = (): Record<string, unknown> | undefined => {
+  const call = sesSend.mock.calls.at(-1) as unknown[] | undefined;
+  return call ? (call[0] as { input: Record<string, unknown> }).input : undefined;
+};
 
 /** The `To:` header of the most recent raw SES send. */
 const lastTo = (): string | undefined => {
-  const call = sesSend.mock.calls.at(-1) as unknown[] | undefined;
-  if (!call) return undefined;
-  const input = (call[0] as { input: { RawMessage: { Data: Uint8Array } } })
-    .input;
-  const raw = Buffer.from(input.RawMessage.Data).toString("utf8");
+  const input = lastCommandInput();
+  if (!input) return undefined;
+  const raw = Buffer.from(
+    (input.RawMessage as { Data: Uint8Array }).Data
+  ).toString("utf8");
   return /^To:\s*(.+?)\s*$/m.exec(raw)?.[1];
 };
 
@@ -82,11 +98,14 @@ const alert = {
 
 beforeEach(() => {
   sesSend.mockClear();
+  sesSend.mockResolvedValue({ MessageId: "ses-default" });
   emailLogs.length = 0;
   workRows.length = 0;
   workHistory.length = 0;
+  for (const k of Object.keys(suppressedRows)) delete suppressedRows[k];
   delete process.env.SES_LEADS_EMAIL;
   delete process.env.SES_NOTIFY_EMAIL;
+  delete process.env.SES_CONFIGURATION_SET;
 });
 
 afterEach(() => {
@@ -183,5 +202,88 @@ describe("notifyOffice still routes ops alarms to the ops inbox (R80 anti-regres
       ownerEmail: "info@pestbuzzkill.com",
     });
     expect(workHistory[0]).toMatchObject({ eventType: "OPENED" });
+  });
+});
+
+describe("GL-03 delivery pipeline", () => {
+  beforeEach(() => {
+    process.env.SES_FROM_EMAIL = "info@pestbuzzkill.com";
+    process.env.SES_NOTIFY_EMAIL = "info@pestbuzzkill.com";
+  });
+
+  it("records the SES message id and marks the send SENT", async () => {
+    sesSend.mockResolvedValueOnce({ MessageId: "ses-123" });
+
+    const ok = await sendEmail({
+      to: "dana@example.com",
+      subject: "Your receipt",
+      html: "<p>hi</p>",
+      template: "receipt",
+    });
+
+    expect(ok).toBe(true);
+    expect(emailLogs[0]).toMatchObject({
+      messageId: "ses-123",
+      deliveryStatus: "SENT",
+      status: "SENT",
+    });
+  });
+
+  it("stamps the configuration set so bounce/complaint events flow", async () => {
+    process.env.SES_CONFIGURATION_SET = "buzzkill-email-staging";
+
+    await sendEmail({
+      to: "dana@example.com",
+      subject: "s",
+      html: "<p>x</p>",
+      template: "t",
+    });
+
+    expect(lastCommandInput()?.ConfigurationSetName).toBe("buzzkill-email-staging");
+  });
+
+  it("refuses to send to a suppressed address and owns the miss", async () => {
+    suppressedRows["dana@example.com"] = {
+      email: "dana@example.com",
+      reason: "prior hard bounce",
+    };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ok = await sendEmail({
+      to: "dana@example.com",
+      subject: "Your receipt",
+      html: "<p>hi</p>",
+      template: "receipt",
+      customerId: "cus-1",
+    });
+
+    expect(ok).toBe(false);
+    expect(sesSend).not.toHaveBeenCalled();
+    expect(emailLogs[0]).toMatchObject({
+      deliveryStatus: "SUPPRESSED",
+      status: "FAILED",
+    });
+    expect(workRows[0]).toMatchObject({ kind: "EMAIL_FAILURE" });
+  });
+
+  it("marks a transient throttle QUEUED, never a silent drop", async () => {
+    const err = new Error("Maximum sending rate exceeded");
+    err.name = "Throttling";
+    sesSend.mockRejectedValueOnce(err);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ok = await sendEmail({
+      to: "dana@example.com",
+      subject: "s",
+      html: "<p>x</p>",
+      template: "t",
+    });
+
+    expect(ok).toBe(false);
+    expect(emailLogs[0]).toMatchObject({
+      deliveryStatus: "QUEUED",
+      status: "FAILED",
+    });
+    expect(workRows[0]).toMatchObject({ kind: "EMAIL_FAILURE" });
   });
 });

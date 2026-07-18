@@ -79,6 +79,7 @@ type Fields = {
   name: string;
   email: string;
   phone: string;
+  callConsent: boolean;
   service: string;
   propertyKind: PropertyKind;
   street: string;
@@ -97,6 +98,7 @@ const EMPTY_FIELDS: Fields = {
   name: "",
   email: "",
   phone: "",
+  callConsent: false,
   service: "GENERAL_PEST",
   propertyKind: "RESIDENTIAL",
   street: "",
@@ -317,6 +319,7 @@ export default function QuotePage() {
       name: fields.name.trim(),
       email: fields.email.trim(),
       phone: fields.phone.trim() || undefined,
+      callConsent: fields.callConsent,
       service: fields.service as ServiceCode,
       propertyKind: fields.propertyKind,
       address: {
@@ -853,6 +856,33 @@ export default function QuotePage() {
                     {fieldError("phone")}
                   </div>
                 </div>
+                <div className="bk-field">
+                  <label
+                    htmlFor="bq-call-consent"
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "flex-start",
+                      fontWeight: 400,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      id="bq-call-consent"
+                      type="checkbox"
+                      checked={fields.callConsent}
+                      onChange={(e) =>
+                        setFields((f) => ({ ...f, callConsent: e.target.checked }))
+                      }
+                      style={{ marginTop: 3 }}
+                    />
+                    <span>
+                      You can call or text me about my quote. If we can&rsquo;t
+                      price your address on the spot, this lets us reach you by
+                      phone; otherwise we&rsquo;ll email you.
+                    </span>
+                  </label>
+                </div>
 
                 <h3 className="bk-form-step__title">Where is the property?</h3>
 
@@ -951,8 +981,8 @@ export default function QuotePage() {
                 <p style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
                   We only use these details to price and schedule your service.
                   In the rare case we can&rsquo;t price your address on the
-                  spot, we&rsquo;ll call you about this request within the
-                  hour.
+                  spot, we&rsquo;ll follow up about this request, by phone if
+                  you asked us to call, otherwise by email.
                 </p>
               </div>
             </form>

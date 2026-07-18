@@ -67,6 +67,9 @@ export type QuoteRequest = {
   name: string;
   email: string;
   phone?: string;
+  /** The lead agreed to be called/texted about the quote (gates the call
+   *  fallback — without it, a review quote promises an email, not a call). */
+  callConsent?: boolean;
   service: ServiceCode;
   propertyKind?: PropertyKind;
   address: { street: string; city: string; state: string; zip?: string };

@@ -10,6 +10,7 @@ import { dataClient } from "../shared/dataClient";
 import { BOOKING_LINK_TOKEN_RE } from "../shared/bookingLink";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
 import { openOwnedWork } from "../shared/ownedWork";
+import { contactDueAt, nextContactPhrase } from "../shared/businessHours";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
   zoneFromMinutes,
@@ -126,6 +127,8 @@ type QuoteInput = {
   name?: string;
   email?: string;
   phone?: string;
+  /** The lead ticked "you may call/text me about my quote". */
+  callConsent?: boolean;
   address?: { street?: string; city?: string; state?: string; zip?: string };
   units?: number;
   service?: string;
@@ -699,36 +702,56 @@ async function quote(
     return booking;
   };
 
+  // GL-03: a review fallback must promise a channel it can actually keep. A call
+  // is promised only when the lead gave a valid phone AND consent to be called;
+  // otherwise the promise is an email (the funnel always has a valid email). The
+  // timing is truthful too: "within the hour" during business hours, and a real
+  // next-window time ("first thing tomorrow morning") after hours.
+  const canCall = Boolean(phone) && input.callConsent === true;
   const contact = async (
-    message: string,
+    situation: string,
+    goal = "",
     extra: Record<string, unknown> = {},
     opsNote = ""
   ) => {
+    const now = new Date();
+    const timing = nextContactPhrase(now);
+    const goalClause = goal ? ` ${goal}` : "";
+    const promise = canCall
+      ? `a specialist will call you ${timing}${goalClause}`
+      : `we'll email you at ${email} ${timing}${goalClause}`;
+    const message = `${situation}, so ${promise}.`;
+    const channelWord = canCall ? "call" : "email";
+
     const booking = await makeBooking({
       status: "CONTACT",
+      callConsent: input.callConsent === true,
       quoteJson: JSON.stringify({ contactMessage: message }),
       ...extra,
     });
     await openOwnedWork({
       kind: "CALLBACK_PROMISE",
       dedupeKey: booking.id,
-      title: `Website callback promised: ${name}`,
-      detail: `${name} was promised a call within one hour about ${service.toLowerCase().replace("_", " ")} at ${address}. ${opsNote.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`.trim(),
+      title: `Website ${channelWord} promised: ${name}`,
+      detail: `${name} was promised a ${channelWord} ${timing} about ${service.toLowerCase().replace("_", " ")} at ${address}. ${opsNote.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`.trim(),
       relatedId: booking.id,
       sourceUrl: "/work",
-      resolutionAction:
-        "Call the lead within the promised hour, record the outcome, and send the correct booking or referral next step.",
+      dueAt: contactDueAt(now).toISOString(),
+      resolutionAction: canCall
+        ? "Call the lead by the promised time, record the outcome, and send the correct booking or referral next step."
+        : "Email the lead their options by the promised time, record the outcome, and send the correct booking or referral next step.",
       ownerTeam: "SALES",
     });
     await notifyLeads({
-      subject: "Website lead needs a call",
-      heading: "Website lead needs a call",
+      subject: `Website lead needs ${canCall ? "a call" : "an email"}`,
+      heading: `Website lead needs ${canCall ? "a call" : "an email"}`,
       template: "ops-booking-contact",
       relatedId: booking.id,
       bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}.</p>
+       <p>Promised to be reached by <strong>${escapeHtml(channelWord)}</strong> ${escapeHtml(timing)}.${canCall ? "" : " No phone/consent on file, so this is an email follow-up."}</p>
        ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
        ${attribution?.source ? `<p>Lead source: utm:${escapeHtml(attribution.source)}${attribution.campaign ? ` · campaign:${escapeHtml(attribution.campaign)}` : ""}</p>` : ""}
-       <p>Booking request ${booking.id} — call within the hour per the website promise.</p>
+       <p>Booking request ${booking.id}.</p>
        ${opsNote}`,
     });
     return { bookingId: booking.id, decision: "CONTACT", message };
@@ -752,7 +775,8 @@ async function quote(
       : zoneFromMinutes(minutes);
   if (zone === "OUT") {
     return contact(
-      "You're a bit outside our standard service area — a specialist will call within the hour to see what we can do.",
+      "You're a bit outside our standard service area",
+      "to see what we can do",
       { zone, driveMinutes: minutes ?? undefined }
     );
   }
@@ -761,7 +785,8 @@ async function quote(
     // silently reprice the whole funnel as Zone B; route the lead to the
     // callback path instead and tell the office why.
     return contact(
-      "We just need to double-check your address against our service area — a specialist will call you within the hour with your exact price.",
+      "We just need to double-check your address against our service area",
+      "with your exact price",
       { zone },
       `<p style="color:#b91c1c;"><strong>Drive-time zone lookup failed for this address</strong>${
         routesKey
@@ -968,7 +993,8 @@ async function quote(
   });
   if (days.length === 0) {
     return contact(
-      "We're fully booked this month — a specialist will call within the hour to find you the first opening."
+      "We're fully booked this month",
+      "to find you the first opening"
     );
   }
   if (planOnly) {

@@ -280,10 +280,27 @@ describe("zone UNKNOWN never prices (R59)", () => {
     await postQuote(rodentInput);
 
     expect(leadEmails).toHaveLength(1);
-    expect(leadEmails[0].subject).toBe("Website lead needs a call");
+    // GL-03: this lead gave no phone/consent, so the truthful fallback is an
+    // email, not a call — and the office alert says so.
+    expect(leadEmails[0].subject).toBe("Website lead needs an email");
     expect(leadEmails[0].bodyHtml).toContain("Drive-time zone lookup failed");
     // R80: the contact alert is a lead alert — it routes to sales@.
     expect(leadEmails[0].template).toBe("ops-booking-contact");
+  });
+
+  it("promises a call only when the lead gave a phone and consent (GL-03)", async () => {
+    hqMinutes = null; // zone UNKNOWN → fallback
+
+    const res = await postQuote({
+      ...rodentInput,
+      phone: "(413) 555-0123",
+      callConsent: true,
+    });
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.message).toMatch(/call you/i);
+    expect(leadEmails[0].subject).toBe("Website lead needs a call");
+    expect(bookings[0]).toMatchObject({ status: "CONTACT", callConsent: true });
   });
 });
 

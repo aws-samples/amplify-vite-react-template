@@ -195,9 +195,36 @@ function SetPassword({ email, onDone }: { email: string; onDone: () => void }) {
   );
 }
 
+// GL-03: the true delivery state, not just "did the provider accept it". A
+// message SES accepted and then bounced reads BOUNCED here, never "sent".
+const DELIVERY_META: Record<string, { tone: "ok" | "warn" | "danger" | "info"; label: string }> = {
+  DELIVERED: { tone: "ok", label: "delivered" },
+  SENT: { tone: "info", label: "sent, not yet confirmed" },
+  QUEUED: { tone: "warn", label: "queued for retry" },
+  BOUNCED: { tone: "danger", label: "bounced" },
+  COMPLAINED: { tone: "danger", label: "spam complaint" },
+  SUPPRESSED: { tone: "danger", label: "blocked (suppressed)" },
+  FAILED: { tone: "danger", label: "failed" },
+};
+
+function deliveryBadge(deliveryStatus: string | null, status: string | null) {
+  // Fall back to the coarse accept/reject status for rows predating delivery
+  // tracking.
+  const key = deliveryStatus ?? (status === "SENT" ? "SENT" : "FAILED");
+  const meta = DELIVERY_META[key] ?? { tone: "info" as const, label: key.toLowerCase() };
+  return <Badge tone={meta.tone}>{meta.label}</Badge>;
+}
+
 function EmailLogList() {
   const [rows, setRows] = useState<
-    { id: string; toEmail: string; subject: string; status: string | null; sentAt: string }[] | null
+    {
+      id: string;
+      toEmail: string;
+      subject: string;
+      status: string | null;
+      deliveryStatus: string | null;
+      sentAt: string;
+    }[] | null
   >(null);
 
   useEffect(() => {
@@ -220,7 +247,7 @@ function EmailLogList() {
           key={r.id}
           title={r.subject}
           subtitle={`${r.toEmail} · ${fmtDateTime(r.sentAt)}`}
-          meta={<Badge tone={r.status === "SENT" ? "ok" : "danger"}>{r.status?.toLowerCase()}</Badge>}
+          meta={deliveryBadge(r.deliveryStatus, r.status)}
         />
       ))}
     </div>

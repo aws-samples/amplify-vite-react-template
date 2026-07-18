@@ -80,9 +80,32 @@ export async function sendEmail(opts: {
   ownerTeam?: WorkOwnerTeam;
 }): Promise<boolean> {
   const from = process.env.SES_FROM_EMAIL ?? "info@pestbuzzkill.com";
+  const toKey = opts.to.trim().toLowerCase();
+
+  // GL-03: never send to an address a bounce or complaint already killed. The
+  // send is recorded SUPPRESSED and handed to an owned exception, so a message
+  // to a dead address is a visible task, not a silent no-op.
+  if (await isSuppressed(toKey)) {
+    await recordEmailLog(opts, {
+      status: "FAILED",
+      deliveryStatus: "SUPPRESSED",
+      error: "Address is suppressed after a previous bounce or complaint.",
+    });
+    await openEmailFailureWork(opts, {
+      title: `Blocked email to a suppressed address: ${opts.to}`,
+      detail: `The ${opts.template} email was NOT sent: ${opts.to} is suppressed after a previous bounce or complaint. Nothing left our system.`,
+      resolutionAction:
+        "Get a working email or another way to reach them, deliver the message, and record how. Lift the suppression only if the address is confirmed good.",
+    });
+    return false;
+  }
+
+  const configurationSet = process.env.SES_CONFIGURATION_SET;
   let error: string | undefined;
+  let transient = false;
+  let messageId: string | undefined;
   try {
-    await ses.send(
+    const res = await ses.send(
       new SendRawEmailCommand({
         RawMessage: {
           Data: Buffer.from(
@@ -95,13 +118,80 @@ export async function sendEmail(opts: {
             })
           ),
         },
+        // Publishes bounce/complaint/delivery events to the SNS topic the
+        // ses-events function listens on. Omitted (no events) if unconfigured.
+        ...(configurationSet ? { ConfigurationSetName: configurationSet } : {}),
       })
     );
+    messageId = res.MessageId;
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
+    transient = isTransientSesError(err);
     console.error("SES send failed", opts.template, error);
   }
 
+  // GL-03: three honest outcomes, not a boolean. SENT — the provider accepted
+  // it. QUEUED — a transient throttle held it; it must be resent, not lost.
+  // FAILED — a permanent synchronous failure.
+  const deliveryStatus = !error ? "SENT" : transient ? "QUEUED" : "FAILED";
+  await recordEmailLog(opts, {
+    status: error ? "FAILED" : "SENT",
+    deliveryStatus,
+    error,
+    messageId,
+  });
+
+  // A send that did not leave is owned work — nothing stays silently unsent.
+  if (error) {
+    await openEmailFailureWork(opts, {
+      title: transient
+        ? `Email held by a provider throttle: ${opts.subject}`
+        : `Email failed: ${opts.subject}`,
+      detail: transient
+        ? `The ${opts.template} email to ${opts.to} was held by a temporary provider throttle and has NOT been delivered. It must be resent. ${error}`
+        : `The ${opts.template} email to ${opts.to} failed: ${error}`,
+      resolutionAction:
+        "Correct the address or delivery problem, resend the message, and record how delivery was confirmed.",
+    });
+  }
+
+  return !error;
+}
+
+/** Whether a hard bounce or complaint has taken this address out of service. */
+async function isSuppressed(email: string): Promise<boolean> {
+  if (!email) return false;
+  try {
+    const client = await dataClient();
+    if (!("SuppressedEmail" in client.models)) return false;
+    const { data } = await client.models.SuppressedEmail.get({ email });
+    return Boolean(data);
+  } catch (err) {
+    // Fail open: a suppression-check outage must not stop all mail. A truly
+    // bad address will bounce again and re-suppress.
+    console.error("suppression check failed", email, err);
+    return false;
+  }
+}
+
+/** SES SDK errors that mean "try again", not "this will never work". */
+function isTransientSesError(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name ?? "";
+  const message = err instanceof Error ? err.message : String(err);
+  return /throttl|toomanyrequests|serviceunavailable|timeout|rate exceeded|\b(429|503)\b/i.test(
+    `${name} ${message}`
+  );
+}
+
+async function recordEmailLog(
+  opts: { to: string; subject: string; template: string; customerId?: string | null; relatedId?: string },
+  fields: {
+    status: "SENT" | "FAILED";
+    deliveryStatus: "SENT" | "QUEUED" | "FAILED" | "SUPPRESSED";
+    error?: string;
+    messageId?: string;
+  }
+): Promise<void> {
   try {
     const client = await dataClient();
     await client.models.EmailLog.create({
@@ -109,31 +199,39 @@ export async function sendEmail(opts: {
       toEmail: opts.to,
       subject: opts.subject,
       template: opts.template,
-      status: error ? "FAILED" : "SENT",
-      error,
+      status: fields.status,
+      deliveryStatus: fields.deliveryStatus,
+      error: fields.error,
+      messageId: fields.messageId,
       relatedId: opts.relatedId,
       sentAt: new Date().toISOString(),
     });
   } catch (logErr) {
     console.error("EmailLog write failed", logErr);
   }
+}
 
-  if (error) {
-    await openOwnedWork({
-      kind: "EMAIL_FAILURE",
-      dedupeKey: `${opts.template}:${opts.relatedId ?? opts.to}:${opts.to}`,
-      title: `Email failed: ${opts.subject}`,
-      detail: `The ${opts.template} email to ${opts.to} failed: ${error}`,
-      customerId: opts.customerId,
-      relatedId: opts.relatedId ?? opts.to,
-      sourceUrl: opts.customerId ? `/customers/${opts.customerId}` : "/more",
-      resolutionAction:
-        "Correct the address or delivery problem, resend the message, and record how delivery was confirmed.",
-      ownerTeam: opts.ownerTeam ?? "OPS",
-    });
-  }
-
-  return !error;
+async function openEmailFailureWork(
+  opts: {
+    to: string;
+    template: string;
+    customerId?: string | null;
+    relatedId?: string;
+    ownerTeam?: WorkOwnerTeam;
+  },
+  work: { title: string; detail: string; resolutionAction: string }
+): Promise<void> {
+  await openOwnedWork({
+    kind: "EMAIL_FAILURE",
+    dedupeKey: `${opts.template}:${opts.relatedId ?? opts.to}:${opts.to}`,
+    title: work.title,
+    detail: work.detail,
+    customerId: opts.customerId,
+    relatedId: opts.relatedId ?? opts.to,
+    sourceUrl: opts.customerId ? `/customers/${opts.customerId}` : "/more",
+    resolutionAction: work.resolutionAction,
+    ownerTeam: opts.ownerTeam ?? "OPS",
+  });
 }
 
 /**

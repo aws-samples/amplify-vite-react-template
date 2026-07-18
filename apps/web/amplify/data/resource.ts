@@ -9,6 +9,7 @@ import { crmPricing } from "../functions/crm-pricing/resource";
 import { bookingPublic } from "../functions/booking-public/resource";
 import { leadIntake } from "../functions/lead-intake/resource";
 import { pricingRefresh } from "../functions/pricing-refresh/resource";
+import { sesEvents } from "../functions/ses-events/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -108,6 +109,21 @@ export const schema = a.schema({
   // instruction is exactly the improper-collection risk this gate closes.
   PaymentExpectation: a.enum(["COLLECT_NOTHING", "DUE_THROUGH_OFFICE"]),
   EmailStatus: a.enum(["SENT", "FAILED"]),
+  // GL-03: the true delivery lifecycle, beyond the synchronous accept/reject of
+  // EmailStatus. QUEUED — a transient provider throttle held the send for retry.
+  // SENT — the provider accepted it (not yet proof of delivery). DELIVERED — the
+  // provider confirmed it reached the mailbox. BOUNCED / COMPLAINED — it came
+  // back or was marked spam (address suppressed). SUPPRESSED — we refused to
+  // send to a known-bad address. FAILED — a permanent synchronous failure.
+  EmailDelivery: a.enum([
+    "QUEUED",
+    "SENT",
+    "DELIVERED",
+    "BOUNCED",
+    "COMPLAINED",
+    "SUPPRESSED",
+    "FAILED",
+  ]),
   WorkKind: a.enum([
     "NO_ACCESS",
     "EMAIL_FAILURE",
@@ -352,6 +368,10 @@ export const schema = a.schema({
       name: a.string().required(),
       email: a.string().required(),
       phone: a.string(),
+      // GL-03: the lead ticked "you may call/text me". A call is only promised
+      // when this is true AND a valid phone is present; otherwise the fallback
+      // promise is an email.
+      callConsent: a.boolean(),
       street: a.string(),
       city: a.string(),
       state: a.string(),
@@ -996,10 +1016,37 @@ export const schema = a.schema({
       error: a.string(),
       relatedId: a.string(),
       sentAt: a.datetime().required(),
+      // GL-03: the SES provider message id, so an async bounce/complaint/delivery
+      // event can be matched back to the exact send it belongs to.
+      messageId: a.string(),
+      // GL-03: the true delivery state (see EmailDelivery). The ses-events
+      // function advances this as the provider reports back; a send starts SENT
+      // (or QUEUED/SUPPRESSED/FAILED) and only reaches DELIVERED on proof.
+      deliveryStatus: a.ref("EmailDelivery"),
     })
+    .secondaryIndexes((index) => [index("messageId")])
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
     ]),
+
+  /**
+   * GL-03 — an email address we must stop sending to because it hard-bounced or
+   * filed a spam complaint. `email` is the id, so a pre-send check is a single
+   * get. Written by the ses-events function (IAM); browser-readable so the
+   * office can see and, when the customer supplies a corrected address, act on
+   * the owned EMAIL_FAILURE case behind it. No delete from the browser — a
+   * suppression is lifted deliberately, not by routine staff.
+   */
+  SuppressedEmail: a
+    .model({
+      email: a.string().required(),
+      reason: a.string().required(),
+      source: a.string(),
+      relatedId: a.string(),
+      suppressedAt: a.datetime().required(),
+    })
+    .identifier(["email"])
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
 
   /**
    * Durable exception work. Alerts may accompany these rows, but the row is
@@ -2115,6 +2162,7 @@ export const schema = a.schema({
   allow.resource(bookingPublic),
   allow.resource(leadIntake),
   allow.resource(pricingRefresh),
+  allow.resource(sesEvents),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;
