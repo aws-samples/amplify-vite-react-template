@@ -26,6 +26,9 @@ let catalog: Record<string, unknown>[] = [];
 let workItems: Record<string, unknown>[] = [];
 let amendments: Record<string, unknown>[] = [];
 const officeEmails: { subject: string; bodyHtml: string }[] = [];
+/** Captures the opts each renderAmendmentPdf call receives, so a test can assert
+ *  what the rendered document says (e.g. who it names as the issuer). */
+const amendmentPdfCalls: Record<string, unknown>[] = [];
 
 const fakeDataClient = {
   models: {
@@ -83,6 +86,10 @@ const fakeDataClient = {
       list: async () => ({ data: catalog }),
     },
     ServiceReportAmendment: {
+      get: async ({ id }: { id: string }) => ({
+        data: amendments.find((a) => a.id === id) ?? null,
+        errors: undefined,
+      }),
       create: async (input: Record<string, unknown>) => {
         const a = { id: `amd_${amendments.length + 1}`, ...input } as Record<
           string,
@@ -141,16 +148,34 @@ vi.mock("../shared/recurring", () => ({
 }));
 vi.mock("../shared/pdf", () => ({
   renderServiceReportPdf: async () => new Uint8Array([1]),
-  renderAmendmentPdf: async () => new Uint8Array([2]),
+  renderAmendmentPdf: async (opts: Record<string, unknown>) => {
+    amendmentPdfCalls.push(opts);
+    return new Uint8Array([2]);
+  },
 }));
 vi.mock("../shared/driveTime", () => ({
   drivingDistanceMetersFromPoint: vi.fn(async () => null),
 }));
-vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: class { async send() { return {}; } },
-  PutObjectCommand: class {},
-  GetObjectCommand: class {},
-}));
+vi.mock("@aws-sdk/client-s3", () => {
+  class PutObjectCommand {}
+  class GetObjectCommand {}
+  return {
+    // A GetObject returns a stored PDF body, so a resumed delivery can re-fetch
+    // the finalized report to attach; a PutObject just acknowledges.
+    S3Client: class {
+      async send(cmd: unknown) {
+        if (cmd instanceof GetObjectCommand) {
+          return {
+            Body: { transformToByteArray: async () => new Uint8Array([9]) },
+          };
+        }
+        return {};
+      }
+    },
+    PutObjectCommand,
+    GetObjectCommand,
+  };
+});
 vi.mock("@aws-sdk/s3-request-presigner", () => ({
   getSignedUrl: async () => "https://s3.example/put",
 }));
@@ -162,12 +187,17 @@ const { drivingDistanceMetersFromPoint } = await import("../shared/driveTime");
 const call = (
   field: string,
   args: Record<string, unknown>,
-  groups: string[] = ["TECH"]
+  groups: string[] = ["TECH"],
+  claims: Record<string, unknown> = {}
 ) =>
   (handler as unknown as (e: never) => Promise<unknown>)({
     info: { fieldName: field },
     arguments: args,
-    identity: { sub: "sub-tech", groups, claims: { email: "marco@x.com" } },
+    identity: {
+      sub: "sub-tech",
+      groups,
+      claims: { email: "marco@x.com", ...claims },
+    },
   } as never);
 
 /** A report that satisfies every rule, so each test can break exactly one. */
@@ -228,6 +258,7 @@ beforeEach(() => {
   workItems = [];
   amendments = [];
   officeEmails.length = 0;
+  amendmentPdfCalls.length = 0;
   vi.mocked(sendEmail).mockReset();
   vi.mocked(sendEmail).mockResolvedValue(true);
   // On-site-presence distance check is off unless a test opts in with a key.
@@ -887,6 +918,37 @@ describe("the finalize gate", () => {
     ).rejects.toThrow(/approved product|product log/i);
   });
 
+  it("refuses a rate that isn't the approved label rate — free text can't authorize a strength", async () => {
+    // Suspend PolyZone is approved at 0.06% (catalog defaultRate). A technician
+    // typing 0.5% is applying a different strength than the label allows.
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([
+          { name: "Suspend PolyZone", epaNumber: "432-1514", quantity: "1.5 oz", rate: "0.5%" },
+        ]),
+      })
+    );
+
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/approved label rate|label rate/i);
+    expect(reports[0].status).toBe("DRAFT");
+  });
+
+  it("accepts the approved label rate regardless of spacing or case", async () => {
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([
+          { name: "Suspend PolyZone", epaNumber: "432-1514", quantity: "1.5 oz", rate: " 0.06 % " },
+        ]),
+      })
+    );
+
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+
+    expect(reports[0].status).toBe("FINALIZED");
+  });
+
   describe("completion and delivery are separate facts", () => {
     it("records the report as delivered when the email reaches the customer", async () => {
       reports.push(validReport());
@@ -946,6 +1008,62 @@ describe("the finalize gate", () => {
 
       expect(sendEmail).not.toHaveBeenCalled();
       expect(reports[0].emailedAt).toBeUndefined();
+    });
+
+    it("never tells the customer 'complete' before the record is durable", async () => {
+      // The email must go out only after the report is FINALIZED and the job
+      // COMPLETED — never ahead of the record that backs the claim.
+      let statusAtSend: unknown;
+      let jobStatusAtSend: unknown;
+      vi.mocked(sendEmail).mockImplementationOnce(async () => {
+        statusAtSend = reports[0].status;
+        jobStatusAtSend = jobs[0].status;
+        return true;
+      });
+      reports.push(validReport());
+
+      await call("finalizeServiceReport", { reportId: "rep_1" });
+
+      expect(statusAtSend).toBe("FINALIZED");
+      expect(jobStatusAtSend).toBe("COMPLETED");
+    });
+
+    it("is resumable: a retried finalize returns the same record and never re-sends", async () => {
+      reports.push(validReport());
+
+      await call("finalizeServiceReport", { reportId: "rep_1" });
+      const again = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
+        alreadyFinalized: boolean;
+        deliveryStatus: string;
+      };
+
+      expect(again.alreadyFinalized).toBe(true);
+      expect(again.deliveryStatus).toBe("DELIVERED");
+      // The customer is emailed exactly once across both attempts.
+      expect(sendEmail).toHaveBeenCalledTimes(1);
+      expect(reports).toHaveLength(1);
+    });
+
+    it("resumes delivery on a retry after a bounced send, without a second completion", async () => {
+      vi.mocked(sendEmail).mockResolvedValueOnce(false);
+      reports.push(validReport());
+
+      // First attempt: the record stands, the send fails, no marker is written.
+      await call("finalizeServiceReport", { reportId: "rep_1" });
+      expect(reports[0].status).toBe("FINALIZED");
+      expect(reports[0].deliveryStatus).toBe("FAILED");
+      expect(reports[0].emailedAt).toBeUndefined();
+
+      const completedAtAfterFirst = jobs[0].completedAt;
+
+      // Retry: delivery resumes and succeeds; completion is not redone.
+      const retry = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
+        deliveryStatus: string;
+      };
+      expect(retry.deliveryStatus).toBe("DELIVERED");
+      expect(reports[0].emailedAt).toBeTruthy();
+      expect(jobs[0].completedAt).toBe(completedAtAfterFirst);
+      expect(sendEmail).toHaveBeenCalledTimes(2);
     });
   });
 });
@@ -1207,6 +1325,83 @@ describe("issued reports are corrected by append-only amendments", () => {
       (w) => w.kind === "MISSING_CONTACT" && w.relatedId === res.amendmentId
     );
     expect(task).toBeTruthy();
+  });
+
+  it("names the signed-in issuer on the document, not the original technician", async () => {
+    reports.push(finalizedReport());
+
+    await call(
+      "amendServiceReport",
+      { reportId: "rep_1", reason: "Correcting the areas", changes: CHANGES },
+      ["OFFICE"],
+      { name: "Priya Okafor", email: "priya@x.com" }
+    );
+
+    expect(amendmentPdfCalls).toHaveLength(1);
+    // technician.name is "Marco Reyes" — the correction was issued by Priya.
+    expect(amendmentPdfCalls[0].authorName).toBe("Priya Okafor");
+    expect(amendmentPdfCalls[0].authorName).not.toBe("Marco Reyes");
+    expect(amendments[0].authorEmail).toBe("priya@x.com");
+  });
+
+  it("falls back to the issuer's email when the token carries no name — still never the technician", async () => {
+    reports.push(finalizedReport());
+
+    await call(
+      "amendServiceReport",
+      { reportId: "rep_1", reason: "Correcting the areas", changes: CHANGES },
+      ["OFFICE"]
+    );
+
+    // No name claim on the token, so the document names the issuer by email —
+    // "marco@x.com" (the office login), never the technician's "Marco Reyes".
+    expect(amendmentPdfCalls[0].authorName).toBe("marco@x.com");
+  });
+
+  it("is resumable: a retried correction lands on the same amendment, never a duplicate or a second send", async () => {
+    reports.push(finalizedReport());
+    const args = {
+      reportId: "rep_1",
+      reason: "Missed two treated areas",
+      changes: CHANGES,
+    };
+
+    const first = (await call("amendServiceReport", args, ["OFFICE"])) as {
+      amendmentId: string;
+    };
+    const again = (await call("amendServiceReport", args, ["OFFICE"])) as {
+      amendmentId: string;
+      alreadyIssued: boolean;
+    };
+
+    expect(amendments).toHaveLength(1);
+    expect(again.amendmentId).toBe(first.amendmentId);
+    expect(again.alreadyIssued).toBe(true);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes delivery of an amendment after a bounced send, without a duplicate row", async () => {
+    reports.push(finalizedReport());
+    const args = {
+      reportId: "rep_1",
+      reason: "Correcting the rate",
+      changes: CHANGES,
+    };
+    vi.mocked(sendEmail).mockResolvedValueOnce(false);
+
+    const first = (await call("amendServiceReport", args, ["OFFICE"])) as {
+      deliveryStatus: string;
+    };
+    expect(first.deliveryStatus).toBe("FAILED");
+
+    const retry = (await call("amendServiceReport", args, ["OFFICE"])) as {
+      deliveryStatus: string;
+    };
+
+    expect(retry.deliveryStatus).toBe("DELIVERED");
+    expect(amendments).toHaveLength(1);
+    expect(amendments[0].emailedAt).toBeTruthy();
+    expect(sendEmail).toHaveBeenCalledTimes(2);
   });
 });
 

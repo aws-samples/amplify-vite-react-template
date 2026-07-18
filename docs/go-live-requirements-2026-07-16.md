@@ -172,13 +172,22 @@ access/failure evidence.
 **Business outcome:** Every issued service report and correction is an accurate, durable,
 correctly authored legal record with a truthful customer-delivery state.
 
-**Why this is still a gate:** An approved product can carry a technician-entered rate/dilution that
-is not validated to the approved label. The customer email is sent before report and job completion
-writes are verified, so a failed write can leave a delivered “complete” report attached to a draft
-and a retry can send it again. Amendment creation, document storage, delivery, and final metadata are
-not one resumable issuance, and the rendered amendment can name the original technician rather than
-the staff member who issued the correction. A required location-review task is best-effort and can
-disappear if its write fails.
+**Why this is still a gate:** The engineering failure paths are now closed (see below); what remains
+is Compliance's own review — signing a rendered original and amendment for every launch service type,
+and approving the capture-window grace, accuracy/distance thresholds, evidence, SLA, and resolution
+policy — plus the end-to-end failure-test rehearsal. The gate cannot be marked Passed on code alone.
+
+Closed by `crm-docs/handler.ts` (with failure tests in `crm-docs/compliance.test.ts`): (1) an applied
+product's rate/dilution is now validated against the approved catalog label rate at finalize —
+plausible free text can no longer authorize a strength the label does not allow; (2) finalization is
+a resumable, checkpointed sequence — the report and job are made durable *before* the customer is
+told anything, and delivery is gated on a durable `emailedAt` outbox marker, so a failed write can no
+longer leave a delivered “complete” message attached to a draft and a retry cannot re-send; (3)
+amendment issuance is deterministic on the correction request (a content-derived id), so a retry
+resumes onto the same append-only row with no duplicate or orphaned document, and the rendered
+amendment now names the actual signed-in issuer (token `name`/email), never the original technician;
+(4) a warranted on-site-presence review that fails its durable write no longer vanishes silently — it
+escalates to the office through a separate channel while still never blocking the technician.
 
 **Required acceptance evidence:**
 

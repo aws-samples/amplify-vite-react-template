@@ -36,6 +36,28 @@ export function callerEmail(
 }
 
 /**
+ * The signed-in staff member's display name, from the token's `name` claim
+ * (staff logins set a Cognito `name` attribute — see portalProvision.ensureLogin).
+ * Used where a record has to name the actual human who took an action — e.g. the
+ * issuer printed on a service-report amendment — rather than a guessed name.
+ * Null when the token carries no usable name; callers fall back to the email.
+ */
+export function callerName(
+  identity: AppSyncIdentity | undefined | null
+): string | null {
+  const cognito = cognitoIdentity(identity);
+  const name = cognito?.claims?.name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  const given = cognito?.claims?.given_name;
+  const family = cognito?.claims?.family_name;
+  const composed = [given, family]
+    .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    .join(" ")
+    .trim();
+  return composed || null;
+}
+
+/**
  * OWNER is a superset of every staff role, so an owner never needs a second
  * login to do office or finance work.
  */
