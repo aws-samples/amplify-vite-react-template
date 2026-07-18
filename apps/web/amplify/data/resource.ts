@@ -30,6 +30,29 @@ import { pricingRefresh } from "../functions/pricing-refresh/resource";
  * finalization converts the lead record. No office-side conversion exists —
  * no quotes, no e-sign, no hand-created plans.
  */
+// GL-13 field-level least-privilege. A field carrying this rule is readable by
+// the office (OWNER/OFFICE) and the portal customer (the accessGroups dynamic
+// group) exactly as the model already allows, but NOT by TECH — even though the
+// model grants TECH a blanket read. AppSync nulls the field for a TECH token on
+// every path: get, list, subscription, and pagination alike. `create` is kept
+// so nothing the office writes at Customer.create is lost. The `allow` type is
+// taken from the field builder's own authorization callback, so this needs no
+// (unexported) internal type import.
+type FieldAllow = Parameters<
+  Parameters<ReturnType<typeof a.string>["authorization"]>[0]
+>[0];
+const fieldNoTech = (allow: FieldAllow) => [
+  allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
+  allow.groupsDefinedIn("accessGroups").to(["read"]),
+];
+
+// Same intent for a Technician's licence number and expiry: another
+// applicator's credential PII, office-only. The Technician model has no portal
+// (accessGroups) reader, so office read is the whole rule.
+const fieldOfficeOnly = (allow: FieldAllow) => [
+  allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+];
+
 // Exported for resource.test.ts, which checks that no custom operation
 // redeclares a mutation/query the model transformer generates.
 export const schema = a.schema({
@@ -133,9 +156,12 @@ export const schema = a.schema({
       accessGroups: a.string().array(),
       customers: a.hasMany("Customer", "groupId"),
     })
+    // GL-13: a CustomerGroup carries organization-wide contacts and notes for a
+    // whole management company — data a technician has no need for, and the
+    // tech app never reads. TECH's blanket read is dropped entirely; office
+    // curates the group, the portal (accessGroups) sees its own.
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -149,34 +175,43 @@ export const schema = a.schema({
       serviceCity: a.string(),
       serviceState: a.string(),
       serviceZip: a.string(),
-      billingStreet: a.string(),
-      billingCity: a.string(),
-      billingState: a.string(),
-      billingZip: a.string(),
+      // GL-13 field-level least-privilege. A technician receives only the
+      // fields needed to perform the visit — name, contact, and the service
+      // address above. Billing, provider identifiers, portal internals, lead
+      // attribution, and org-wide customer notes carry their own field auth
+      // that omits TECH (fieldNoTech), so a TECH token reading the raw Customer
+      // model (get/list/subscribe/pagination) gets null for them, not merely a
+      // UI that hides them. Each rule mirrors the office and portal-customer
+      // access the model already grants (OWNER/OFFICE create+read, the
+      // accessGroups dynamic group read) minus TECH — nothing else changes.
+      billingStreet: a.string().authorization(fieldNoTech),
+      billingCity: a.string().authorization(fieldNoTech),
+      billingState: a.string().authorization(fieldNoTech),
+      billingZip: a.string().authorization(fieldNoTech),
       status: a.ref("CustomerStatus").required(),
-      leadSource: a.string(),
-      leadNotes: a.string(),
+      leadSource: a.string().authorization(fieldNoTech),
+      leadNotes: a.string().authorization(fieldNoTech),
       // TCPA evidence: whether this contact opted in to calls/texts, and when.
       // Absent or false means email-only follow-up.
-      contactConsent: a.boolean(),
-      contactConsentAt: a.datetime(),
-      convertedAt: a.datetime(),
-      notes: a.string(),
+      contactConsent: a.boolean().authorization(fieldNoTech),
+      contactConsentAt: a.datetime().authorization(fieldNoTech),
+      convertedAt: a.datetime().authorization(fieldNoTech),
+      notes: a.string().authorization(fieldNoTech),
       groupId: a.id(),
       group: a.belongsTo("CustomerGroup", "groupId"),
-      stripeCustomerId: a.string(),
-      paymentMethodLabel: a.string(),
-      paymentMethodKind: a.ref("PaymentMethodKind"),
-      portalUserSub: a.string(),
-      portalInvitedAt: a.datetime(),
-      portalLastLoginAt: a.datetime(),
+      stripeCustomerId: a.string().authorization(fieldNoTech),
+      paymentMethodLabel: a.string().authorization(fieldNoTech),
+      paymentMethodKind: a.ref("PaymentMethodKind").authorization(fieldNoTech),
+      portalUserSub: a.string().authorization(fieldNoTech),
+      portalInvitedAt: a.datetime().authorization(fieldNoTech),
+      portalLastLoginAt: a.datetime().authorization(fieldNoTech),
       // The unguessable capability carried by this lead's booking link
       // (?lead=<token> on the funnel URL). A paid booking that arrives with
       // it converts THIS record — exactly — instead of guessing by email,
       // which can pick the wrong duplicate or merge people who share an
       // address. Minted lazily wherever a booking link is produced.
-      bookingLinkToken: a.string(),
-      accessGroups: a.string().array(),
+      bookingLinkToken: a.string().authorization(fieldNoTech),
+      accessGroups: a.string().array().authorization(fieldNoTech),
       servicePlans: a.hasMany("ServicePlan", "customerId"),
       jobs: a.hasMany("Job", "customerId"),
       agreements: a.hasMany("Agreement", "customerId"),
@@ -257,9 +292,13 @@ export const schema = a.schema({
     // flows through a Lambda (startSubscription/cancelSubscription, pause/resume,
     // the dunning cron, the Stripe webhook), which authenticate as IAM and are
     // unaffected. No screen writes a plan directly.
+    //
+    // GL-13: a plan carries its price and its Stripe subscription id — plan
+    // price/provider identifiers the field never needs. TECH's blanket read is
+    // dropped; the tech app reads jobs and customers, never plans. Office and
+    // the portal customer (accessGroups) keep their read.
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
-      allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -479,9 +518,11 @@ export const schema = a.schema({
       userSub: a.string(),
       color: a.string(),
       // The applicator's certification. It belongs on every pesticide record
-      // this business produces; a service report without it is not one.
-      licenseNumber: a.string(),
-      licenseExpiresOn: a.date(),
+      // this business produces; a service report without it is not one. GL-13:
+      // a licence number is another applicator's credential PII — office-only,
+      // never surfaced to a peer TECH through the raw Technician model.
+      licenseNumber: a.string().authorization(fieldOfficeOnly),
+      licenseExpiresOn: a.date().authorization(fieldOfficeOnly),
       routes: a.hasMany("Route", "technicianId"),
       jobs: a.hasMany("Job", "technicianId"),
       serviceReports: a.hasMany("ServiceReport", "technicianId"),

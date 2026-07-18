@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import {
   api,
   listAll,
+  techGetCustomer,
+  techListTechnicians,
   type Customer,
   type Job,
   type Route,
@@ -40,10 +42,12 @@ export default function TechToday() {
     (async () => {
       try {
         // Paged to exhaustion: a one-page read past 200 technicians would
-        // miss `mine` and tell a real tech their login isn't linked.
-        const all = await listAll((t) =>
-          api().models.Technician.list({ limit: 200, nextToken: t })
-        );
+        // miss `mine` and tell a real tech their login isn't linked. GL-13:
+        // techListTechnicians requests only the licence-free fields a TECH may
+        // read — the office picker and "which tech am I" resolution need
+        // nothing more, and a default (all-fields) read would fail on the
+        // office-only licence fields for a technician token.
+        const all = await techListTechnicians();
         setTechs(all.filter((t) => t.active));
         const mine = all.find((t) => t.userSub === roles.sub);
         if (mine) {
@@ -90,13 +94,10 @@ export default function TechToday() {
       ).sort((a, b) => (a.routeOrder ?? 0) - (b.routeOrder ?? 0));
       setJobs(jobList);
       const ids = [...new Set(jobList.map((j) => j.customerId))];
-      const loaded = await Promise.all(
-        ids.map((id) => api().models.Customer.get({ id }))
-      );
+      const loaded = await Promise.all(ids.map((id) => techGetCustomer(id)));
       setCustomers(
         new Map(
           loaded
-            .map((res) => res.data as unknown as Customer | null)
             .filter((c): c is Customer => Boolean(c))
             .map((c) => [c.id, c])
         )

@@ -3,6 +3,8 @@ import { useParams } from "react-router-dom";
 import {
   api,
   opResult,
+  techGetCustomer,
+  techListTechnicians,
   unwrap,
   type Customer,
   type Job,
@@ -117,9 +119,13 @@ export default function TechJob() {
       }
       setJob(j);
       const [c, reps, techs, prods, hist] = await Promise.all([
-        api().models.Customer.get({ id: j.customerId }),
+        // GL-13: the field app reads only the visit fields it is entitled to.
+        // Billing, provider ids, portal internals and org-wide notes carry
+        // office-only field @auth, so a default (all-fields) Customer read
+        // would fail for a technician; the same for a peer's licence fields.
+        techGetCustomer(j.customerId),
         api().models.ServiceReport.listServiceReportByJobId({ jobId }),
-        api().models.Technician.list({ limit: 200 }),
+        techListTechnicians(),
         // The catalog is optional (rows have a manual fallback) and the
         // Product model may not exist on the deployed backend yet — never
         // let it break the job screen.
@@ -146,7 +152,7 @@ export default function TechJob() {
           }
         })(),
       ]);
-      setCustomer(unwrap(c));
+      setCustomer(c);
       setPriorVisits(
         hist
           .filter(
@@ -181,7 +187,7 @@ export default function TechJob() {
               a.name.localeCompare(b.name)
           )
       );
-      const allTechs = unwrap(techs);
+      const allTechs = techs;
       // Identity comes from the signed-in user only. Never fall back to the job's
       // assigned technician: that attributes the report, GPS and sign-off to
       // someone who was not on site.
