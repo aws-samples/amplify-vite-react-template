@@ -2,14 +2,14 @@
 
 **Business review date:** 18 July 2026
 
-**Latest implementation review:** 16 commits after `108ea58`, from `8e5cf41` through `945320b`
+**Latest implementation review:** 6 commits after `945320b`, from `873a6e0` through `9276394`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** document. It excludes capabilities and acceptance items already achieved in
-the reviewed build. The four gates changed by the new commits—GL-05, GL-09, GL-14, and GL-15—have
+the reviewed build. The two gates changed by the new implementation commits—GL-13 and GL-15—have
 been reduced to their remaining failure, control, and business-approval requirements. The other
 gates remain because the reviewed commits did not close them. An omitted item is not a request to
 rebuild it.
@@ -49,9 +49,9 @@ implementation order, not launch status: **P0, P1, and P2 are all go-live blocke
 
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed |
 |---|---|---|---|---|
-| P0 | GL-13 | Complete technician least-privilege and audited field overrides | CEO | Unauthorized customer-data exposure or regulated action |
 | P0 | GL-14 | Make staff role changes and offboarding failure-safe | CEO | Departed or mis-privileged staff retain access after a partial action |
-| P0 | GL-15 | Complete failure-safe regulated report issuance | Compliance owner | Invalid, duplicate, or mis-authored legal record reaches a customer |
+| P0 | GL-13 | Finish technician session, route, and historical-data boundaries | CEO | Technician data survives reassignment, offboarding, or an inconsistent route |
+| P0 | GL-15 | Finish regulated-report durability and compliance sign-off | Compliance owner | Invalid, duplicate, or falsely delivered legal record reaches a customer |
 | P0 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Work is billed out of season or performed outside legal authority |
 | P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | Unsafe or unperformable visit is dispatched |
 | P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | Money, commitment, or confirmation can disagree or duplicate |
@@ -77,60 +77,6 @@ implementation order, not launch status: **P0, P1, and P2 are all go-live blocke
 ---
 
 ## Priority 0 — Critical money, security, compliance, safety, and customer commitments
-
-### GL-13 — Complete technician least-privilege and audited field overrides
-
-**Business outcome:** A technician can see only the minimum customer and work data needed for an
-authorized assignment, while office emergency access is explicit and accountable.
-
-**Why this is still a gate (narrowed by commits `2949dd5`, `b439ad6`, and `fb98587`):** The technician
-data exposures are now closed. Field-action mutations and document links are assignment-scoped: a
-technician can start, end, report on, finalize, or pull photos/documents only for a job currently
-assigned to their own active, unexpired-licence record — evaluated fresh on every call — and document
-links are limited to a customer they actually serve (`2949dd5`). Field exposure is closed at AppSync:
-the model read no longer surfaces a customer's billing address, Stripe ids and payment-method label,
-lead source/notes, org-wide notes, portal internals, or booking token; a plan's price and subscription
-id; or another applicator's licence number (`b439ad6`). And row exposure is closed: TECH now holds *no*
-model read on Customer, Job, Route, Technician, ServiceReport, or amendments, so a known id can no
-longer fetch, list, subscribe to, or paginate another worker's rows. The field app reads only through
-two server-scoped queries — `technicianDay` (the signed-in technician's own route and stops; office may
-target any technician) and `technicianJob` (one job only if the caller is its current assignee, or
-office) — which minimize the customer to visit fields and drop the job's money fields, and refuse a job
-that is not the caller's with the same opaque error as a missing one, so a reassignment removes the
-former assignee's read on the very next call. Route create/update is off the TECH grant entirely (the
-office owns routing), and the office customer view is no longer reachable by a technician (`fb98587`).
-**What remains the gate:** reassignment/deactivation must record actor, reason, former/new technician,
-effective time, route effect, and stale-draft disposition, and actively invalidate any cached/offline
-copy on the device (server reads and actions are already refused on the next operation, but the audit
-and client-cache invalidation are not built). The office/owner break-glass override still lacks the
-reasoned, reviewed audit and the prohibition on silent impersonation. And the Operations/Compliance-
-approved historical-lookback bound on document access (beyond the current assignment) is unspecified.
-
-**Required acceptance evidence:**
-
-- Technician list, search, get, and subscription results are server-scoped to the signed-in
-  technician's current/approved assignments. Knowing a customer, job, route, report, plan, group, or
-  technician ID cannot reveal another worker's data.
-- The technician receives only the fields needed to perform the visit. Billing, plan price/provider
-  identifiers, organization-wide customer/group notes, unrelated contacts, and other technicians'
-  work are not exposed through the model API even if the UI hides them.
-- Route create/read/update and every remaining technician-accessible model operation are restricted
-  to the caller's own authorized route/work. The same rule applies to direct API calls, realtime
-  subscriptions, pagination, and cached/offline data after reassignment.
-- Document access is limited to the assigned visit and an Operations/Compliance-approved historical
-  lookback. A completed job from years ago cannot grant indefinite access to every future agreement,
-  report, or photo for that customer; inactive/expired technicians receive no document links.
-- Reassignment records actor, reason, former/new technician, effective time, route effect, and stale
-  draft disposition. Access changes immediately and cached work is invalidated or refused on the
-  next operation.
-- Office/owner emergency field access has an approved purpose, requires a reason, records the actor
-  and affected job/report, and is reviewed. Shared logins and silent impersonation of the assigned
-  applicator are prohibited.
-- Direct authorization tests prove Technician A cannot list, fetch, subscribe to, mutate, or obtain
-  document links for Technician B's data; cannot retain access after reassignment/deactivation; and
-  cannot regain broad access through an old completed job.
-
-**Pass owner:** CEO, with Compliance and Operations verification.
 
 ### GL-14 — Make staff role changes and offboarding failure-safe
 
@@ -167,56 +113,92 @@ completed.
 **Pass owner:** CEO, with Operations verifying reassigned work and Engineering providing direct
 access/failure evidence.
 
-### GL-15 — Complete failure-safe regulated report issuance
+### GL-13 — Finish technician session, route, and historical-data boundaries
 
-**Business outcome:** Every issued service report and correction is an accurate, durable,
-correctly authored legal record with a truthful customer-delivery state.
+**Business outcome:** A technician can see only the minimum data for legitimate current or
+business-approved historical work, and access disappears when assignment or employment ends.
 
-**Why this is still a gate:** The engineering failure paths are now closed (see below); what remains
-is Compliance's own review — signing a rendered original and amendment for every launch service type,
-and approving the capture-window grace, accuracy/distance thresholds, evidence, SLA, and resolution
-policy — plus the end-to-end failure-test rehearsal. The gate cannot be marked Passed on code alone.
-
-Closed by `crm-docs/handler.ts` (with failure tests in `crm-docs/compliance.test.ts`): (1) an applied
-product's rate/dilution is now validated against the approved catalog label rate at finalize —
-plausible free text can no longer authorize a strength the label does not allow; (2) finalization is
-a resumable, checkpointed sequence — the report and job are made durable *before* the customer is
-told anything, and delivery is gated on a durable `emailedAt` outbox marker, so a failed write can no
-longer leave a delivered “complete” message attached to a draft and a retry cannot re-send; (3)
-amendment issuance is deterministic on the correction request (a content-derived id), so a retry
-resumes onto the same append-only row with no duplicate or orphaned document, and the rendered
-amendment now names the actual signed-in issuer (token `name`/email), never the original technician;
-(4) a warranted on-site-presence review that fails its durable write no longer vanishes silently — it
-escalates to the office through a separate channel while still never blocking the technician.
+**Why this is still a gate:** The technician-day response trusts route membership and returns every
+job carrying that route ID without independently confirming that each job is currently assigned to
+the signed-in technician. A partial or inconsistent reassignment can therefore expose another
+technician's job and customer. Read and document checks also do not require an active technician
+record, so a disabled employee using an unexpired session can still reach assigned work and any
+customer documents unlocked by a historical job. Locally stored report drafts/customer context are
+not invalidated on reassignment or deactivation. Historical access has no approved time/scope bound,
+and office/owner field overrides and reassignment still lack reasoned audit.
 
 **Required acceptance evidence:**
 
-- Every applied product uses an active Compliance-approved catalog identity and an allowed
-  label/service combination. Quantity, concentration, rate/dilution, target site/pest, and re-entry
-  interval are selected or validated against the approved label; plausible free text cannot
-  authorize an application record.
-- Report issuance is deterministic and resumable across PDF generation/storage, report finalization,
-  job completion, billing/next-visit effects, customer delivery, and review creation. Every required
-  write is checked, and retry returns the same report without a duplicate document, email, invoice,
-  or next visit.
-- No customer message says the visit/report is complete until the durable report and job state
-  support that statement. Delivery uses durable outbox/provider evidence and distinguishes
-  **Delivered**, **Pending**, **Failed**, **No email**, and approved alternate delivery with proof.
-- The CEO's non-blocking field rule is preserved: a technician is not stranded for imprecise or
-  distant GPS. However, every reading that exceeds the approved threshold must create durable owned
-  review; a failed route/review write cannot silently erase the obligation. Compliance approves the
-  capture-window grace, accuracy/distance thresholds, evidence, SLA, and resolution policy.
-- Amendments are append-only, deterministic on the correction request, and resumable through render,
-  store, deliver, and metadata steps. The record and PDF identify the actual signed-in issuer,
-  preserve the original, require reason and changed facts, and cannot create duplicate or orphaned
-  amendments after retry.
-- Operations can retrieve the original, all amendments, delivery evidence, photos, no-access
-  evidence, and review history through authorized screens without engineering assistance.
-- Compliance signs a rendered original and amendment for every launch service type. Failure tests
-  cover invalid label rate, write failure before/after delivery, hard termination at every issuance
-  step, duplicate/concurrent finalize and amendment, missing/failed email, missing document, stale/
-  distant/imprecise location, review-write failure, expired/reassigned technician, and offline draft
-  recovery.
+- Every technician-day job is independently checked against the signed-in technician's current
+  assignment; route ID alone is never authority. A route/job technician mismatch is withheld and
+  becomes owned Operations work rather than leaking the row.
+- Technician job, day, report, photo, and document access verify that the linked technician is still
+  active. The business explicitly approves whether a currently employed technician with an expired
+  applicator credential may review prior work; an offboarded/inactive person receives no field data
+  or document links even with an unexpired session.
+- Operations and Compliance approve a historical-access matrix defining which completed jobs,
+  reports, photos, and customer facts remain visible, to whom, and for how long. Any prior job cannot
+  grant indefinite access to every future document for that customer.
+- Reassignment/deactivation immediately refuses server reads and actions and removes or renders
+  unreadable cached customer/job/report data and local drafts on the next app interaction. The
+  workflow records the approved disposition of a former technician's unsent draft.
+- Reassignment records actor, controlled reason, former/new technician, effective time, route
+  effects, affected in-progress work, stale-draft disposition, and final access result.
+- Office/owner emergency field access requires an approved purpose and reason, records actor and
+  affected job/report, is reviewed, and cannot silently impersonate the assigned applicator.
+- Direct authorization and device tests cover a foreign job incorrectly attached to the caller's
+  route, stale access tokens after offboarding, inactive/expired technician states, reassignment
+  while a page/draft is open, historical-job document probing, subscriptions/pagination, and
+  cached/offline data after access ends.
+
+**Pass owner:** CEO, with Compliance and Operations verification.
+
+### GL-15 — Finish regulated-report durability and compliance sign-off
+
+**Business outcome:** Every issued service report and correction is an accurate, durable,
+correctly authored legal record with a truthful, non-duplicating customer-delivery state.
+
+**Why this is still a gate:** Report-finalization, job-completion, delivery-status, and amendment
+metadata writes are awaited but their persisted results are not verified before in-memory state or
+success is reported. Concurrent requests can therefore both continue from the same draft. Report and
+amendment emails are sent before the durable sent marker is stored; a hard stop or failed marker write
+after provider acceptance causes an untracked duplicate on retry. **Delivered** currently means the
+email provider accepted the message, not that delivery survived a later bounce or suppression. The
+label check compares one free-text rate to one catalog string but does not yet enforce the approved
+quantity, concentration range, target site/pest, or re-entry rule. A failed location-review write
+falls back to another best-effort email and can still disappear. Required Compliance samples,
+threshold decisions, and the end-to-end failure rehearsal are also outstanding.
+
+**Required acceptance evidence:**
+
+- The launch catalog encodes every allowed product/service/site/pest combination, quantity or
+  concentration range, rate/dilution, and re-entry rule from the approved label. Finalization fails
+  closed when any recorded application fact is outside that rule; matching one product name and one
+  default-rate string is insufficient.
+- Finalization uses a conditional claim/version and verifies the persisted report and job results
+  before continuing or reporting success. Concurrent, duplicate, and resumed requests converge on
+  one report, one completion, one billing/next-visit outcome, and one delivery attempt.
+- No customer message says the service/report is complete until the durable report and job state
+  support it. Report and amendment delivery use a provider-supported idempotency key or equivalent
+  outbox protocol that covers **accepted but marker not stored**; every marker/status write is
+  verified.
+- Delivery distinguishes **Pending/provider accepted**, **Delivered**, **Bounced/suppressed**,
+  **Failed**, **No email**, and approved alternate delivery with proof. Provider delivery events
+  update the report/amendment and owned case; provider acceptance alone cannot display “sent to
+  customer.”
+- Amendment creation, PDF storage, metadata, issuer identity, and delivery are one resumable,
+  checked issuance. Retry cannot duplicate the row, overwrite an already issued correction with
+  changed facts, or send a second customer email after an ambiguous provider result.
+- Every required on-site presence review is durably queued. If the primary queue is unavailable, a
+  persistent recovery record—not only another best-effort email—survives until Operations verifies
+  or resolves the review. The technician remains unblocked under the CEO's field rule.
+- Operations can retrieve the original, every amendment, delivery evidence, photos, no-access
+  evidence, and location-review history through authorized screens without engineering assistance.
+- Compliance approves the capture-window grace, location thresholds, label rules, evidence, SLA,
+  and resolution policy, then signs a rendered original and amendment for every launch service type.
+  A production-equivalent rehearsal forces null/failed writes, concurrent finalize/amendment,
+  termination before and after provider email acceptance, bounce/suppression, missing document,
+  location-review queue and fallback failure, reassignment/expired credential, and offline recovery.
 
 **Pass owner:** Named Compliance owner; Operations signs delivery/retrieval and Engineering signs
 failure-recovery evidence.
