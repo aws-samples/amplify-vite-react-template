@@ -100,6 +100,24 @@ export async function sendEmail(opts: {
     return false;
   }
 
+  // GL-02: a do-not-contact customer receives no NON-ESSENTIAL outreach (booking
+  // links, reminders). Essential/transactional mail (receipts, failed-payment
+  // notices, legal service reports) still sends — the split is a business
+  // decision encoded in NON_ESSENTIAL_TEMPLATES. Recorded SUPPRESSED so it is a
+  // visible fact, never counted as a touch.
+  if (
+    opts.customerId &&
+    NON_ESSENTIAL_TEMPLATES.has(opts.template) &&
+    (await isDoNotContact(opts.customerId))
+  ) {
+    await recordEmailLog(opts, {
+      status: "FAILED",
+      deliveryStatus: "SUPPRESSED",
+      error: "Customer is on do-not-contact; a non-essential email was skipped.",
+    });
+    return false;
+  }
+
   const configurationSet = process.env.SES_CONFIGURATION_SET;
   let error: string | undefined;
   let transient = false;
@@ -156,6 +174,29 @@ export async function sendEmail(opts: {
   }
 
   return !error;
+}
+
+// GL-02: templates that are marketing/nudges, not transactional or legal — the
+// only mail withheld from a do-not-contact customer. Everything not listed here
+// (receipts, failed-payment, cancellation, service reports) is essential and
+// always sends. Head of Sales / Compliance confirm the split.
+const NON_ESSENTIAL_TEMPLATES = new Set<string>([
+  "booking-link",
+  "portal-reminder",
+  "upcoming-service",
+]);
+
+/** Whether this customer asked not to be contacted (GL-02 do-not-contact). */
+async function isDoNotContact(customerId: string): Promise<boolean> {
+  try {
+    const client = await dataClient();
+    const { data } = await client.models.Customer.get({ id: customerId });
+    return Boolean(data?.doNotContact);
+  } catch (err) {
+    // Fail open on a lookup error: a DNC check outage must not block all mail.
+    console.error("do-not-contact check failed", customerId, err);
+    return false;
+  }
 }
 
 /** Whether a hard bounce or complaint has taken this address out of service. */

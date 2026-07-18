@@ -34,6 +34,12 @@ import {
   releaseOwnedWorkForSub,
 } from "../shared/ownedWork";
 import { callerEmail, callerSub } from "../shared/authz";
+import {
+  assignLeadOwner,
+  createLead,
+  logLeadTouch,
+  setLeadDisposition,
+} from "../shared/leadLifecycle";
 import { recordCustomerLifecycleEvent } from "../shared/lifecycleLog";
 import {
   findStaffAccessEventByKey,
@@ -182,6 +188,28 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
     }
     case "updateCustomerContact":
       return updateCustomerContact(event.arguments as UpdateCustomerContactArgs);
+    // GL-02 lead lifecycle. The actor is read from the token, never the request,
+    // so ownership and who-decided are trustworthy.
+    case "createLead":
+      return createLead(event.arguments as never, {
+        sub: callerSub(event.identity),
+        email: callerEmail(event.identity),
+      });
+    case "logLeadTouch":
+      return logLeadTouch(event.arguments as never, {
+        sub: callerSub(event.identity),
+        email: callerEmail(event.identity),
+      });
+    case "setLeadDisposition":
+      return setLeadDisposition(event.arguments as never, {
+        sub: callerSub(event.identity),
+        email: callerEmail(event.identity),
+      });
+    case "assignLeadOwner":
+      return assignLeadOwner(event.arguments as never, {
+        sub: callerSub(event.identity),
+        email: callerEmail(event.identity),
+      });
     case "deactivateTechnician":
       return deactivateTechnician(
         (event.arguments as TechnicianIdArgs).technicianId

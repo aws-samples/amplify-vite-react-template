@@ -47,6 +47,7 @@ import {
   StatusBadge,
 } from "../ui/kit";
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
+import LeadPanel from "../components/LeadPanel";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import VisitCancelSheet from "../components/VisitCancelSheet";
 import DocButton from "../components/DocButton";
@@ -309,6 +310,10 @@ export default function CustomerDetail() {
       </Card>
 
       {isLead && roles.office ? (
+        <LeadPanel customer={customer} onChanged={() => void load()} />
+      ) : null}
+
+      {isLead && roles.office ? (
         <Card
           title="Convert this lead"
           actions={
@@ -331,7 +336,7 @@ export default function CustomerDetail() {
           <Button
             block
             loading={busyAction === "bookinglink"}
-            disabled={!customer.email}
+            disabled={!customer.email || Boolean(customer.doNotContact)}
             onClick={() =>
               void run(
                 "bookinglink",

@@ -27,6 +27,116 @@ export type LeadPricingRun = Schema["LeadPricingRun"]["type"];
 export type Product = Schema["Product"]["type"];
 export type WorkItem = Schema["WorkItem"]["type"];
 export type WorkEvent = Schema["WorkEvent"]["type"];
+export type LeadActivity = Schema["LeadActivity"]["type"];
+
+/** GL-02 — controlled lead vocabularies (mirror the server validators). */
+export const LEAD_LOST_REASONS = [
+  { code: "PRICE", label: "Price" },
+  { code: "NO_RESPONSE", label: "No response" },
+  { code: "WENT_COMPETITOR", label: "Went with a competitor" },
+  { code: "NOT_QUALIFIED", label: "Not qualified / out of scope" },
+  { code: "OUT_OF_AREA", label: "Outside service area" },
+  { code: "DUPLICATE", label: "Duplicate record" },
+  { code: "OTHER", label: "Other" },
+] as const;
+export const LEAD_TOUCH_CHANNELS = [
+  { code: "CALL", label: "Call" },
+  { code: "TEXT", label: "Text" },
+  { code: "EMAIL", label: "Email" },
+  { code: "NOTE", label: "Note (no contact)" },
+] as const;
+export const LEAD_TOUCH_OUTCOMES = [
+  { code: "REACHED", label: "Reached them" },
+  { code: "LEFT_MESSAGE", label: "Left a message" },
+  { code: "NO_ANSWER", label: "No answer" },
+  { code: "SENT", label: "Sent" },
+  { code: "NOTE", label: "Just a note" },
+] as const;
+
+/** GL-02 lead mutations. Widened like the staff mutations — the actor is stamped
+ *  server-side from the token, never these args. */
+export function createLead(input: {
+  displayName: string;
+  contactName?: string;
+  email?: string;
+  phone?: string;
+  serviceStreet?: string;
+  serviceCity?: string;
+  serviceState?: string;
+  serviceZip?: string;
+  leadSource?: string;
+  notes?: string;
+  force?: boolean;
+}): OpResult {
+  return (
+    api().mutations as unknown as { createLead: (i: typeof input) => OpResult }
+  ).createLead(input);
+}
+
+export function logLeadTouch(input: {
+  customerId: string;
+  channel: string;
+  direction?: string;
+  outcome: string;
+  note?: string;
+  nextAction?: string;
+  nextActionAt?: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as { logLeadTouch: (i: typeof input) => OpResult }
+  ).logLeadTouch(input);
+}
+
+export function setLeadDisposition(input: {
+  customerId: string;
+  disposition: "LOST" | "DNC" | "CLEAR";
+  reasonCode?: string;
+  note?: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      setLeadDisposition: (i: typeof input) => OpResult;
+    }
+  ).setLeadDisposition(input);
+}
+
+export function assignLeadOwner(input: {
+  customerId: string;
+  toSub?: string;
+  toEmail?: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      assignLeadOwner: (i: typeof input) => OpResult;
+    }
+  ).assignLeadOwner(input);
+}
+
+/** List a lead's activity timeline, tolerant of the model being absent before
+ *  the backend wave lands (same guard as listWorkItems). */
+export function listLeadActivity(customerId: string): Promise<{
+  data: LeadActivity[];
+  nextToken?: string | null;
+  errors?: { message: string }[];
+}> {
+  const models = api().models as unknown as {
+    LeadActivity?: {
+      list: (a: {
+        filter?: unknown;
+        limit?: number;
+      }) => Promise<{
+        data: LeadActivity[];
+        nextToken?: string | null;
+        errors?: { message: string }[];
+      }>;
+    };
+  };
+  if (!models.LeadActivity) return Promise.resolve({ data: [], nextToken: null });
+  return models.LeadActivity.list({
+    filter: { customerId: { eq: customerId } },
+    limit: 100,
+  });
+}
 
 /**
  * GL-13 row-scoping — the field app's scoped read surface.

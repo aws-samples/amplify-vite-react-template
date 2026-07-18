@@ -597,6 +597,13 @@ async function convertExistingCustomer(
       `finalizeBooking: could not convert existing customer ${existing.id}`
     );
   }
+  // GL-02: the lead is Won — close any open follow-up so it doesn't keep nagging
+  // sales about a customer who already booked. Best-effort and idempotent.
+  await resolveOwnedWork({
+    kind: "LEAD_FOLLOWUP",
+    dedupeKey: existing.id,
+    note: "Lead converted to a customer on a paid booking.",
+  });
   return { id: updated.id, groupId: updated.groupId };
 }
 

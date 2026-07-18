@@ -200,6 +200,20 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  LEAD_FOLLOWUP: {
+    label: "Lead follow-up",
+    severity: "HIGH",
+    customerImpact:
+      "An open lead has no next step, or its next step is overdue — it's going cold.",
+    verified: [],
+    manualReasons: [
+      { code: "TOUCHED_ADVANCED", label: "Contacted / moved it forward" },
+      { code: "BOOKING_SENT", label: "Sent the booking link" },
+      { code: "MARKED_LOST", label: "Marked the lead lost" },
+      { code: "MARKED_DNC", label: "Set do-not-contact" },
+      OTHER,
+    ],
+  },
 };
 
 export function workPolicy(kind: string | null | undefined): CrmWorkPolicy | null {

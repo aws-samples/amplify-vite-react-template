@@ -27,6 +27,11 @@ import {
   type ReconBooking,
   type ReconInvoice,
 } from "../shared/bookingReconcile";
+import {
+  isLeadActionOverdue,
+  isLeadOpen,
+  staleLeadReason,
+} from "../shared/leadStage";
 
 type OwedInvoice = {
   id: string;
@@ -109,6 +114,9 @@ export const handler = async () => {
   // GL-05: prove, against the real tables and Stripe, that every succeeded
   // booking payment has exactly one complete booking and vice versa.
   const reconciliation = await reconcilePaidBookings();
+  // GL-02: no lead may silently go cold — surface every open lead whose next
+  // action is overdue as an owned follow-up, routed to its owner or the team.
+  const staleLeads = await reportStaleLeads();
   console.log("Reminder totals:", JSON.stringify(totals));
   return [
     ...totals,
@@ -121,8 +129,61 @@ export const handler = async () => {
     disputes,
     overdueWork,
     reconciliation,
+    staleLeads,
   ];
 };
+
+/**
+ * GL-02 stale-lead sweep. Scans every open lead, and for each whose next action
+ * is overdue (or which was never contacted past its first-touch window) opens or
+ * re-announces a LEAD_FOLLOWUP owned-work row — routed to the lead's assigned
+ * owner when set, else the SALES team inbox. The deterministic id (kind+customer)
+ * collapses daily re-runs into one row while appending a recurrence event, so a
+ * lead that stays cold keeps announcing itself without spamming new rows. Any
+ * real touch, booking link, lost/DNC decision, or conversion resolves it — so
+ * the queue is self-healing and no lead can fall out of the pipeline unnoticed.
+ */
+async function reportStaleLeads() {
+  const client = await dataClient();
+  const now = new Date();
+  let opened = 0;
+  let scanned = 0;
+  let token: string | null | undefined;
+  try {
+    do {
+      const page = await client.models.Customer.listCustomerByStatusAndDisplayName(
+        { status: "LEAD" },
+        { limit: 200, nextToken: token }
+      );
+      for (const lead of page.data ?? []) {
+        scanned++;
+        if (!isLeadOpen(lead) || !isLeadActionOverdue(lead, now)) continue;
+        const reason =
+          staleLeadReason(lead, now) ??
+          "This open lead needs a next step.";
+        await openOwnedWork({
+          kind: "LEAD_FOLLOWUP",
+          dedupeKey: lead.id,
+          title: `Follow up: ${lead.displayName}`,
+          detail: `${reason}${lead.leadSource ? ` Source: ${lead.leadSource}.` : ""} Contact them and record the outcome, or mark the lead lost / do-not-contact.`,
+          customerId: lead.id,
+          relatedId: lead.id,
+          sourceUrl: `/customers/${lead.id}`,
+          resolutionAction:
+            "Contact the lead and log the touch, send the booking link, or mark it lost / do-not-contact. This closes automatically when you do.",
+          ownerTeam: "SALES",
+          ownerSub: lead.leadOwnerSub ?? undefined,
+          ownerEmail: lead.leadOwnerEmail ?? undefined,
+        });
+        opened++;
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    console.error("reportStaleLeads failed", err);
+  }
+  return { staleLeadsScanned: scanned, staleLeadsOpened: opened };
+}
 
 /**
  * Serviced-but-not-billing digest.

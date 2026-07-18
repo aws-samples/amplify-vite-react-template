@@ -58,6 +58,7 @@ import {
   workPolicy,
   type VerifierId,
 } from "../shared/workPolicy";
+import { appendLeadActivity } from "../shared/leadLifecycle";
 
 const s3 = new S3Client();
 const BUCKET = () => {
@@ -295,7 +296,8 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return sendCustomerEmail(
         event.arguments.customerId!,
         event.arguments.kind!,
-        event.arguments.note ?? undefined
+        event.arguments.note ?? undefined,
+        { sub: callerSub(event.identity), email: callerEmail(event.identity) }
       );
     }
     default:
@@ -592,7 +594,8 @@ async function closeResolvedWorkItem(input: {
 async function sendCustomerEmail(
   customerId: string,
   kind: string,
-  note?: string
+  note?: string,
+  actor: { sub: string | null; email: string | null } = { sub: null, email: null }
 ) {
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({
@@ -664,6 +667,30 @@ async function sendCustomerEmail(
     customerId,
     html: emailShell(heading, body),
   });
+
+  // GL-02: record the send as a lead touch (a failed send is logged as an
+  // attempt, never a touch). A sent booking link advances the derived pipeline
+  // stage to Booking-sent.
+  await appendLeadActivity({
+    customerId,
+    channel: kind === "booking-link" ? "BOOKING_LINK" : "EMAIL",
+    direction: "OUTBOUND",
+    outcome: sent ? "SENT" : "FAILED",
+    note: `${kind} email`,
+    actor,
+  });
+  if (kind === "booking-link" && sent) {
+    // Best-effort: failing to stamp the sent time must never fail the send.
+    try {
+      await client.models.Customer.update({
+        id: customerId,
+        bookingLinkSentAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error("could not stamp bookingLinkSentAt", customerId, err);
+    }
+  }
+
   return { sent, to: customer.email };
 }
 

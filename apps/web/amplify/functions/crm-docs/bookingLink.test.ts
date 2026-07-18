@@ -106,11 +106,13 @@ describe("sendCustomerEmail kind booking-link", () => {
     expect(email.html).toMatch(
       /Or paste this link into your browser: https:\/\/staging\.d26qpsjewk0bee\.amplifyapp\.com\/quote\?lead=/
     );
-    // First send mints the token onto the record.
-    expect(customerUpdates).toHaveLength(1);
+    // First send mints the token onto the record, then (GL-02) stamps the
+    // sent time so the derived pipeline stage advances to Booking-sent.
+    expect(customerUpdates).toHaveLength(2);
     expect(String(customerUpdates[0].bookingLinkToken)).toMatch(
       /^[A-Za-z0-9_-]{16,}$/
     );
+    expect(customerUpdates[1].bookingLinkSentAt).toBeTruthy();
   });
 
   it("reuses the already-minted token on a resend", async () => {
@@ -119,7 +121,9 @@ describe("sendCustomerEmail kind booking-link", () => {
     await send("booking-link");
 
     expect(sentEmails[0].html).toContain("/quote?lead=tok-already-minted-0123");
-    expect(customerUpdates).toHaveLength(0);
+    // No token mint on a resend, but the sent time is stamped (GL-02).
+    expect(customerUpdates).toHaveLength(1);
+    expect(customerUpdates[0].bookingLinkSentAt).toBeTruthy();
   });
 
   it("a mint failure still sends the bare link — email matching stays the fallback", async () => {

@@ -35,6 +35,10 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // enabled or ambiguously privileged, or a sensitive action left unproven. The
   // security-critical clock: shortest of the staff kinds.
   STAFF_SECURITY: 30,
+  // GL-02: a lead's follow-up is surfaced by the daily sweep only once it is
+  // already overdue, so the item itself carries a routine one-day clock to be
+  // picked up. Business-tunable.
+  LEAD_FOLLOWUP: 24 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {
@@ -76,6 +80,12 @@ type OpenOwnedWorkInput = {
   resolutionAction: string;
   ownerTeam: WorkOwnerTeam;
   dueAt?: string;
+  // GL-02: route a fresh item to a specific owner (e.g. a lead's assigned
+  // owner) instead of only the team inbox. Omitted by every other caller, so
+  // this is backward compatible: without it the item lands on the team inbox
+  // exactly as before.
+  ownerSub?: string | null;
+  ownerEmail?: string;
 };
 
 /**
@@ -89,7 +99,8 @@ export async function openOwnedWork(
   const id = workItemId(input.kind, input.dedupeKey);
   const now = new Date();
   const nowIso = now.toISOString();
-  const ownerEmail = defaultWorkOwner(input.ownerTeam);
+  const ownerEmail = input.ownerEmail ?? defaultWorkOwner(input.ownerTeam);
+  const ownerSub = input.ownerSub ?? null;
   try {
     const client = await dataClient();
     // Some unit-test fakes (and a Lambda container briefly straddling a schema
@@ -122,9 +133,9 @@ export async function openOwnedWork(
         sourceUrl: input.sourceUrl,
         resolutionAction: input.resolutionAction,
         ownerTeam: input.ownerTeam,
-        // A resolved item starts a fresh ownership/SLA cycle. An already-open
-        // item keeps its claimant and original deadline.
-        ownerSub: existing.status === "RESOLVED" ? null : existing.ownerSub,
+        // A resolved item starts a fresh ownership/SLA cycle (with the caller's
+        // routed owner, if any). An already-open item keeps its claimant.
+        ownerSub: existing.status === "RESOLVED" ? ownerSub : existing.ownerSub,
         ownerEmail:
           existing.status === "RESOLVED" ? ownerEmail : existing.ownerEmail,
         dueAt:
@@ -158,6 +169,7 @@ export async function openOwnedWork(
         resolutionAction: input.resolutionAction,
         ownerTeam: input.ownerTeam,
         ownerEmail,
+        ownerSub: ownerSub ?? undefined,
         dueAt: dueAtFor(input.kind, now, input.dueAt),
         lastOccurredAt: nowIso,
         occurrenceCount: 1,

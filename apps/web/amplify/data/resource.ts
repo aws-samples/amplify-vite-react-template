@@ -153,6 +153,12 @@ export const schema = a.schema({
     // enabled/ambiguously privileged, or a sensitive change left unproven. A
     // security case with one idempotent resume.
     "STAFF_SECURITY",
+    // GL-02: an open lead has no next step, or its next step is overdue — it is
+    // going cold. Opened by the daily stale-lead sweep, routed to the lead's
+    // assigned owner (or the SALES team inbox), and auto-resolved the moment the
+    // lead is genuinely worked (a logged touch, a booking link, lost, DNC, or
+    // conversion). The mechanism that guarantees no lead silently disappears.
+    "LEAD_FOLLOWUP",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -229,6 +235,34 @@ export const schema = a.schema({
       contactConsent: a.boolean().authorization(fieldNoTech),
       contactConsentAt: a.datetime().authorization(fieldNoTech),
       convertedAt: a.datetime().authorization(fieldNoTech),
+      // GL-02 lead lifecycle. The pipeline STAGE is never stored or manually set
+      // (a status employees must remember to update goes stale); it is DERIVED
+      // from these facts by shared/leadStage.ts. Only the two deliberate terminal
+      // decisions — Lost (with a reason) and Do-not-contact — are explicit.
+      // lastTouchedAt: most-recent real touch (distinct from createdAt=arrival,
+      //   convertedAt=won). Set by every logged LeadActivity.
+      lastTouchedAt: a.datetime().authorization(fieldNoTech),
+      // bookingLinkSentAt: the booking link was actually sent (→ Booking-sent
+      //   stage). Distinct from bookingLinkToken, which is merely minted.
+      bookingLinkSentAt: a.datetime().authorization(fieldNoTech),
+      // The assigned lead owner (optional; unassigned = the SALES team queue).
+      // Stamped server-side from the caller's identity, never from the request.
+      leadOwnerSub: a.string().authorization(fieldNoTech),
+      leadOwnerEmail: a.string().authorization(fieldNoTech),
+      // An optional explicit next step + due time the office committed to. When
+      // unset, the due time is DERIVED from the stage SLA (leadStage.ts) — so the
+      // system always has a next action without anyone having to type one.
+      nextAction: a.string().authorization(fieldNoTech),
+      nextActionAt: a.datetime().authorization(fieldNoTech),
+      // Lost: a controlled reason code (validated in the Lambda, not an enum, per
+      // the CustomerLifecycleEvent/StaffAccessEvent precedent) + when.
+      lostReason: a.string().authorization(fieldNoTech),
+      lostAt: a.datetime().authorization(fieldNoTech),
+      // Do-not-contact: immediate suppression of non-essential outreach, with who
+      // decided and when (R5).
+      doNotContact: a.boolean().authorization(fieldNoTech),
+      doNotContactAt: a.datetime().authorization(fieldNoTech),
+      doNotContactBy: a.string().authorization(fieldNoTech),
       notes: a.string().authorization(fieldNoTech),
       groupId: a.id(),
       group: a.belongsTo("CustomerGroup", "groupId"),
@@ -1154,6 +1188,37 @@ export const schema = a.schema({
    * (no added enum type) against a schema already near TypeScript's inference
    * depth ceiling. Values today: DEACTIVATE | REACTIVATE.
    */
+  /**
+   * GL-02 — the append-only touch ledger for a lead/customer. One immutable row
+   * per real communication attempt (call, text, email, booking link) or lifecycle
+   * change, with the actual outcome — so "called, no answer" is recorded as an
+   * attempt, never as contact made. This is the record that makes lastTouchedAt
+   * trustworthy and the derived pipeline stage honest.
+   *
+   * Kept flat (channel/direction/outcome are validated strings, not enums) like
+   * CustomerLifecycleEvent/StaffAccessEvent, against a schema near TypeScript's
+   * inference-depth ceiling. Written only by Lambdas as IAM; browser read-only.
+   * channel: CALL | TEXT | EMAIL | BOOKING_LINK | LIFECYCLE.
+   * direction: OUTBOUND | INBOUND.
+   * outcome: REACHED | LEFT_MESSAGE | NO_ANSWER | SENT | DELIVERED | FAILED |
+   *   BOUNCED | SUPPRESSED | NOTE.
+   */
+  LeadActivity: a
+    .model({
+      customerId: a.id().required(),
+      channel: a.string().required(),
+      direction: a.string(),
+      actorSub: a.string(),
+      actorEmail: a.string().required(),
+      outcome: a.string().required(),
+      note: a.string(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [index("customerId").sortKeys(["occurredAt"])])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
   CustomerLifecycleEvent: a
     .model({
       customerId: a.id().required(),
@@ -1393,6 +1458,92 @@ export const schema = a.schema({
       billingZip: a.string(),
       leadSource: a.string(),
       notes: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-02 — create a lead through the dedup gate. The server normalizes the
+   * contact details and looks for existing matches BEFORE creating anything;
+   * on a match (and force !== true) it creates NOTHING and returns a decision
+   * envelope with the candidates, so the office chooses Use-existing /
+   * Create-separate / Ask-manager — the system never silently merges people.
+   * force:true (Create-separate / Ask-manager) creates the lead and opens a
+   * DUPLICATE_LEAD case, so a deliberate second record is always audited.
+   */
+  createLead: a
+    .mutation()
+    .arguments({
+      displayName: a.string().required(),
+      contactName: a.string(),
+      email: a.string(),
+      phone: a.string(),
+      serviceStreet: a.string(),
+      serviceCity: a.string(),
+      serviceState: a.string(),
+      serviceZip: a.string(),
+      leadSource: a.string(),
+      notes: a.string(),
+      force: a.boolean(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-02 — record a real communication attempt with a lead (call/text/email/
+   * booking link). Appends an immutable LeadActivity with the actual outcome the
+   * staff member selected and bumps lastTouchedAt, so a "no answer" is an attempt
+   * and never counts as contact made. Optionally records the next action + due
+   * time. Any successful touch resolves the lead's open LEAD_FOLLOWUP.
+   */
+  logLeadTouch: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      channel: a.string().required(),
+      direction: a.string(),
+      outcome: a.string().required(),
+      note: a.string(),
+      nextAction: a.string(),
+      nextActionAt: a.datetime(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-02 — the two deliberate terminal lead decisions (the only lead states a
+   * human sets by hand; every other stage is derived). LOST records a controlled
+   * reason. DNC immediately suppresses non-essential outreach and records who
+   * decided and when. CLEAR reopens a lead (undoes LOST/DNC). Each appends a
+   * LeadActivity and resolves any open LEAD_FOLLOWUP.
+   */
+  setLeadDisposition: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      /** LOST | DNC | CLEAR */
+      disposition: a.string().required(),
+      reasonCode: a.string(),
+      note: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-02 — take ownership of a lead. "Assign to me" stamps the caller's own
+   * Cognito sub/email server-side (never from the request); a manager may pass
+   * toSub/toEmail to reassign. Mirrors assignRecoveryOwner.
+   */
+  assignLeadOwner: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      toSub: a.string(),
+      toEmail: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])

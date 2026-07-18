@@ -25,6 +25,7 @@ const ALL_KINDS: WorkKind[] = [
   "LOCATION_REVIEW",
   "STAFF_OFFBOARD",
   "STAFF_SECURITY",
+  "LEAD_FOLLOWUP",
 ];
 
 describe("GL-18 work policy registry", () => {

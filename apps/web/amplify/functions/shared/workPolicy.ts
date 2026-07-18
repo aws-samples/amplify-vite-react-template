@@ -32,7 +32,8 @@ export type WorkKind =
   | "PAID_NOT_FINALIZED"
   | "LOCATION_REVIEW"
   | "STAFF_OFFBOARD"
-  | "STAFF_SECURITY";
+  | "STAFF_SECURITY"
+  | "LEAD_FOLLOWUP";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -273,6 +274,24 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "ACCESS_CONFIRMED_REMOVED", label: "Access confirmed removed" },
       { code: "RERUN_COMPLETE", label: "Re-ran the change — complete" },
       { code: "FALSE_ALARM", label: "No access was actually left" },
+      OTHER,
+    ],
+  },
+  LEAD_FOLLOWUP: {
+    severity: "HIGH",
+    customerImpact:
+      "An open lead has no next step, or its next step is overdue — it's going cold.",
+    ownerTeam: "SALES",
+    // No in-place verifier: the system auto-resolves this the moment the lead is
+    // genuinely worked (a logged touch, a booking link, lost, DNC, or a
+    // conversion), so a salesperson closes it by working the lead, not by a note.
+    // The owner override is the escape hatch if it ever gets stuck open.
+    verified: [],
+    manualReasons: [
+      { code: "TOUCHED_ADVANCED", label: "Contacted / moved it forward" },
+      { code: "BOOKING_SENT", label: "Sent the booking link" },
+      { code: "MARKED_LOST", label: "Marked the lead lost" },
+      { code: "MARKED_DNC", label: "Set do-not-contact" },
       OTHER,
     ],
   },

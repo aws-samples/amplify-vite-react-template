@@ -1,6 +1,8 @@
 import type { Handler } from "aws-lambda";
 import { dataClient } from "../shared/dataClient";
 import { notifyLeads } from "../shared/email";
+import { findLeadDuplicates } from "../shared/leadIdentity";
+import { openOwnedWork } from "../shared/ownedWork";
 
 /**
  * Lead intake for every public form on the marketing site.
@@ -265,6 +267,35 @@ export const handler: Handler = async (event) => {
     return jsonResponse(502, {
       error: `We couldn't submit your request. Please call us at ${SUPPORT_PHONE} and we'll take care of it.`,
     });
+  }
+
+  // GL-02: detect a possible duplicate at INTAKE, not only after payment. Never
+  // drop a website lead — it is already created — but open DUPLICATE_LEAD so a
+  // human reconciles the two before both get worked. The system never merges.
+  try {
+    const dupes = await findLeadDuplicates({
+      email: input.email,
+      phone: input.phone,
+      name: record.displayName,
+      zip: record.serviceZip,
+      excludeId: leadId,
+    });
+    if (dupes.length > 0) {
+      await openOwnedWork({
+        kind: "DUPLICATE_LEAD",
+        dedupeKey: leadId,
+        title: `Possible duplicate website lead: ${record.displayName}`,
+        detail: `A new website lead for ${record.displayName} matches ${dupes.length} existing record${dupes.length === 1 ? "" : "s"} (${dupes.map((d) => d.displayName).join(", ")}). Confirm whether it's the same person before working both.`,
+        customerId: leadId,
+        relatedId: leadId,
+        sourceUrl: `/customers/${leadId}`,
+        resolutionAction:
+          "Compare the new lead to the match. If they are the same person, keep one record and note the decision; if distinct, confirm and close.",
+        ownerTeam: "SALES",
+      });
+    }
+  } catch (err) {
+    console.error("lead-intake: duplicate check failed", err);
   }
 
   await notifyLeads({
