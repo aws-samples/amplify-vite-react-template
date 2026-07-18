@@ -2,20 +2,20 @@
 
 **Business review date:** 18 July 2026
 
-**Latest commit review:** 2 commits after `8d98df4`, from `2f433c0` through `16f16d6`; newest
-implementation commit `2f433c0`
+**Latest commit review:** 2 commits after `16f16d6`, from `5007ca2` through `9e11c71`; newest
+implementation commit `5007ca2`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commit affects GL-08 and the
-plan-cancellation portions of GL-18, GL-19, and GL-22. Completed duplicate-click protection,
-provider/CRM success-state handling, and success-screen qualification have been removed. Those gates now
-contain only the crash recovery, post-request charge/refund, customer-message, operator-workflow,
-reconciliation, and business-policy gaps that remain. The other gates remain because the new commits did
-not close them. An omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The latest implementation commit affects GL-02 and the
+lead-ownership, consent, exception, command-view, and monitoring portions of GL-03, GL-14, GL-18, GL-19,
+and GL-22. Completed basic pipeline, controlled-lost-reason, lead-board, touch-ledger, and overdue-work
+scaffolding has been removed. Those gates now contain only the bypass, timing, durability, identity,
+suppression, recovery, management-view, and business-policy gaps that remain. The other gates remain
+because the new commits did not close them. An omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -62,15 +62,17 @@ action, and physical operating setup as dependencies the agent cannot complete a
 
 ## Systemic issues behind several gates
 
-- **X1 — Customer and visit-change history can still disappear.** `CustomerLifecycleEvent` and
-  `VisitChangeEvent` writes are best-effort and neither history is available on a business screen.
-  Sensitive customer, money, and schedule changes can therefore be applied without durable,
-  business-readable history.
+- **X1 — Customer, lead, and visit-change history can still disappear.** `CustomerLifecycleEvent`,
+  `LeadActivity`, and `VisitChangeEvent` writes are best-effort. The first and third have no business
+  screen; the lead screen silently substitutes an empty list on failure and shows only its first 100
+  rows. Sensitive customer, sales, money, and schedule changes can therefore be applied without durable,
+  complete business-readable history.
 - **X2 — An exception can still turn green before the business obligation is fulfilled.** A canceled
   visit can count as money settled while a paid charge remains; adding an email can count as delivering
   the missed notice; any technician ID can count as safe staffing; plan-cancellation recovery is offered
-  portal-sign-in closure reasons; and materially different paid-booking problems are offered the same
-  retry action even when no booking exists to retry.
+  portal-sign-in closure reasons; a lead-follow-up can close even when its activity/state write failed;
+  and materially different paid-booking problems are offered the same retry action even when no booking
+  exists to retry.
 - **X3 — Customer communication is still best-effort after provider acceptance.** An accepted email can
   lose its log and provider ID; transient failures have no actual retry; delivery-event processing can
   acknowledge and discard a failed update; and the business record that originated the message is not
@@ -103,8 +105,8 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **48% — Medium** |
 | P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning | **70% — High** |
 | P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **60% — Medium** |
-| P1 | GL-02 | A lead lifecycle in which no lead can disappear | Head of Sales | Revenue leaks through unowned, unstaged, or duplicate leads | **80% — High** |
 | P1 | GL-03 | Finish durable fallback promises and email recovery | Head of Sales + Head of Operations | A promised follow-up disappears, or an undelivered message remains falsely complete | **68% — Medium** |
+| P1 | GL-02 | Finish a failure-safe lead lifecycle | Head of Sales | A lead bypasses ownership, is mislabeled as contacted, or duplicates during conversion | **70% — High** |
 | P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **74% — High** |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner | **24% — Low** |
 
@@ -117,40 +119,32 @@ action, and physical operating setup as dependencies the agent cannot complete a
 **Business outcome:** A role change or departure cannot leave a person with unintended access, and
 leadership can retrieve the complete record of who changed access, why, and what work was reassigned.
 
-**Why this is still a gate:** The idempotency/audit row is created only after provider and database
-changes, so a hard stop can apply access changes with no durable request or recovery state; concurrent
-requests using the same key can both proceed. Role changes add/remove groups and then sign out without
-an owned failure path, so a mid-change error can leave an unintended role set or an old privileged
-session. The separate Schedule-board **Deactivate technician** action still bypasses the hardened staff
-workflow, controlled reason, audit, security ownership, and readback. Future-job updates accept a null
-write without failing, required Operations/security cases are best-effort, and the Access History
-screen searches/exports only its first 500 rows. Last-owner protection still relies on a post-change
-rollback rather than one serialized provider-safe decision. Returning a departing employee's claimed
-exceptions to the team inbox is also best-effort: a failed reassignment or missing history can be
-suppressed while offboarding still reports completion.
+**Why this is still a gate:** Several hand-over and unification gaps closed; two durability items and a
+production-ownership item remain. Closed this pass: the separate Schedule-board **Deactivate technician**
+action no longer bypasses the workflow — a technician with a login is routed through the one hardened
+offboard (controlled reason, immutable ledger, a security case on a failed kill, read-back, and the
+work/lead release), and a login-less technician's deactivation is still recorded and reasoned in the
+ledger. The offboard now hands a departing person's **open leads** back to the Sales team queue (owner
+cleared, recorded in the activity ledger) so no later stale-lead sweep routes revenue work to someone who
+has left, and **returning their claimed exceptions is no longer best-effort**: a partial release is
+counted, keeps offboarding out of COMPLETE, and opens an owned, idempotently-resumable case. Access
+History now pages the **entire** immutable ledger, not only its first 500 rows.
 
 **Remaining requirements:**
 
 - Create and conditionally claim one durable access-change command before any provider or work change.
   The server requires a unique idempotency/version key, stores actor, target, controlled reason, prior
-  and requested roles, and resumes the same command after timeout, retry, or concurrent submission.
-- Every staff-access entrance—including Schedule-board technician deactivation—uses the same workflow.
-  No alternate action may reassign work before access is revoked or omit the reason, audit, ownership,
-  session invalidation, and final readback.
+  and requested roles, and resumes the same command after timeout, retry, or concurrent submission. (The
+  idempotency/audit row is still written only after the changes; the atomic pre-claim is not built yet.)
 - A role reduction cannot leave a combined role set or an old privileged session after any failed
   add, remove, or sign-out step. Every partial state has a durably confirmed security owner and one
   safe resume action; the UI never claims a case exists when its write failed.
 - Owner changes are serialized so concurrent demotion/offboarding cannot require a fallible rollback
   to preserve access. At least one usable owner remains technically, and production has two named
-  owners with MFA and separate recovery access.
-- Every affected job, route, technician, claimed exception, in-progress review, security case, and audit
-  write is checked and read back. **Complete** means all future jobs are unassigned, the technician is
-  inactive, every claimed exception is back in its staffed team inbox with history, and every in-progress
-  visit has a durable Operations disposition. A failed release is visible, owned, and safely resumable.
-- Access History pages, searches, and exports the entire immutable ledger—not only the first 500
-  records—and makes partial/recovery state visible without engineering assistance.
+  owners with MFA and separate recovery access. (The two-named-owners-with-MFA setup is an ops/people
+  task, not code.)
 
-**Pass owner:** CEO, with Operations verifying reassigned work.
+**Pass owner:** CEO, with Operations and Sales verifying reassigned work.
 
 ### GL-13 — Finish technician session, route, and historical-data boundaries
 
@@ -439,14 +433,16 @@ even though some represent an orphan payment, duplicate record, provider outage,
 that cannot be fixed by retrying a booking. Plan-cancellation failure is filed as **Portal failure**,
 whose employee label and close choices are about repairing sign-in, while an unpaid visit stranded by a
 plan cancel is filed as **Paid cancellation**, whose instructions are about settling money. The
-plan-level schedule-read failure is not linked to a job that its normal verifier can inspect. Eight of
-the thirteen exception types have no verified normal completion path, so callbacks, delivery failures,
-duplicate leads, portal failures, pricing decisions, location reviews, and staff-access recovery can be
-closed only as an OWNER manual override. For email failures, the instruction says to correct, unsuppress,
-and resend, but the case provides no bounded action to do those things or identify every message the
-customer missed. That turns routine work into an executive bottleneck and treats a normal completion as
-an exception to policy. Claim and close actions also have no single-winner control, so two employees can
-act on the same case.
+plan-level schedule-read failure is not linked to a job that its normal verifier can inspect. Nine of
+the fourteen exception types have no verified normal completion path. The new lead-follow-up type is one:
+it can be manually closed as **contacted**, **booking sent**, **lost**, or **do-not-contact** without
+verifying the corresponding lead fact, and the automatic path can resolve it after a swallowed activity
+or state-write failure. Callbacks, delivery failures, duplicate leads, portal failures, pricing decisions,
+location reviews, and staff-access recovery likewise depend on an OWNER manual override. For email
+failures, the instruction says to correct, unsuppress, and resend, but the case provides no bounded action
+to do those things or identify every message the customer missed. That turns routine work into an
+executive bottleneck and treats a normal completion as an exception to policy. Claim and close actions
+also have no single-winner control, so two employees can act on the same case.
 
 **Remaining requirements:**
 
@@ -469,6 +465,10 @@ act on the same case.
   obligation: provider/CRM stop and post-request refunds for Finance; schedule disposition and final
   customer contact for Operations. An unpaid stranded visit is not presented as a refund case, and a
   plan-level schedule-read failure remains closable only after the schedule has actually been checked.
+- A lead-follow-up case closes only after the matching durable lead fact exists: recorded attempt and its
+  actual outcome, confirmed booking-link send, controlled lost decision, do-not-contact decision, or paid
+  conversion. Closing today's task must also leave the next approved action and due time visible; a free-
+  text/manual close cannot make an open lead disappear from follow-up.
 - For every exception type, the Head of Operations approves the normal resolution event a routine role
   may complete and what system or business evidence proves it. Ordinary callback, delivery, merge,
   portal-recovery, pricing, and staff-recovery outcomes use bounded actions; a manual override is reserved
@@ -702,8 +702,10 @@ can be restored after human or provider error.
   silent Lambda crash, scheduled job that never fired, or run of email-send failures would page no one.
   Alerts must cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email
   failures, stale plan-cancellation commands/claims, cancellation promises nearing or missing deadline,
-  reconciliation mismatches, capacity anomalies, document generation/storage failure, and growing/
-  overdue exception queues, and reach a named primary and backup.
+  a lead sweep that stopped partway or missed its promised first-response window, reconciliation
+  mismatches, capacity anomalies, document generation/storage failure, and growing/overdue exception
+  queues, and reach a named primary and backup. A subtask that catches its own failure and returns success
+  is not a healthy scheduled run.
 - **A failed email-delivery event can be permanently acknowledged.** The event consumer catches malformed
   messages and database/work-queue failures and then returns success; there is no retained failure queue
   or operator alert. Every provider event must be retried until its email state, suppression decision, and
@@ -743,9 +745,12 @@ asking engineering to query production.
   delinquent-still-scheduled, active-plan-without-next-service, stale cancellation commands/claims,
   pending cancellations past promise, post-request charges/refunds, stranded visits, and missing final
   notices must appear in one owned reconciliation view.
-- **No dedicated sales view** (leads by stage/owner/age, first-response SLA, overdue next action, source,
-  conversion/loss) and **no service-quality view** (completion, report delivery, no-access, callbacks,
-  repeat-callback rate, technician trends).
+- **The new Sales board is an operating list, not yet a leadership command view.** It groups leads by
+  derived stage and flags overdue rows, but does not show the actual next action/due time or provide
+  first-response performance, attempt-vs-reached, qualification, conversion/loss, duplicate/contact-data
+  exception aging, source/owner trends, or manager workload totals. Leadership needs those measures plus
+  a **service-quality view** covering completion, report delivery, no-access, callbacks, repeat-callback
+  rate, and technician trends.
 - **No codified pause/rollback thresholds.** The CEO defines the launch thresholds that force
   pause/rollback — any double charge, paid customer without a job, unauthorized access, unlicensed
   assignment, or unexplained money mismatch — and names who decides.
@@ -777,38 +782,6 @@ outcome.
   and margin signal.
 
 **Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
-
-### GL-02 — A lead lifecycle in which no lead can disappear
-
-**Business outcome:** Every lead always has an accountable person, a next action, and an auditable outcome
-until it becomes a customer or is deliberately closed.
-
-**Why this is still a gate:** Engineering closed the lifecycle, built to the CEO's constraint that a
-week-one employee must not be relied on to keep a status field up to date. The pipeline **stage is
-derived, never hand-set**: New → Contacted → Booking-sent → Won is inferred from facts the system already
-records (a logged touch, a sent booking link, the paid conversion), so a stage can never go stale. Only
-the two deliberate terminal decisions — Lost (with a controlled reason) and Do-not-contact — are set by
-hand. Every call/text/email/booking-link is recorded in an append-only `LeadActivity` ledger with the
-real outcome, and a failed delivery is logged as an attempt, never a touch. Ownership and the overdue
-queue ride the existing owned-work system: a daily stale-lead sweep opens a `LEAD_FOLLOWUP` item for any
-open lead whose next action is overdue (first touch within 1 business hour of arrival, then a 2-business-
-day cadence, encoded in one place), routed to the lead's owner or the Sales team inbox and escalated if
-it lapses — and any real touch, booking link, lost/DNC decision, or conversion resolves it, so the queue
-is self-healing and no lead falls out silently. Duplicate detection now runs at intake (and on manual
-create) before a record exists: an exact email/phone or name+zip match returns candidates for a
-Use-existing / Create-separate decision — never a silent merge — and a website match still creates the
-lead but opens a `DUPLICATE_LEAD` case. Incomplete contact data is accepted but owned (`MISSING_CONTACT`);
-a do-not-contact flag suppresses non-essential outreach at the send choke point and records who decided.
-
-**Remaining requirements:**
-
-- Head of Sales / CEO sign off the encoded values (all one-line changes): the follow-up SLA numbers
-  (1 business hour / 2 business days / 14-day stale), the controlled lost-reason list, and the
-  essential-vs-non-essential email split for do-not-contact. Confirm phone-only leads are a supported
-  ongoing path (they are — same pipeline and follow-up), and that calls/texts are logged manually (there
-  is no telephony integration to auto-capture them).
-
-**Pass owner:** Head of Sales.
 
 ### GL-03 — Finish durable fallback promises and email recovery
 
@@ -844,7 +817,10 @@ resend action.
   the same channel and timing rule.
 - Compliance approves channel-specific consent and withdrawal language. The record retains the wording/
   policy version, time, source, and channels authorized; it does not claim text consent when no approved
-  text workflow exists. A phone number without the applicable consent never creates a call promise.
+  text workflow exists. A phone number without the applicable consent never creates a call promise or an
+  enabled call/text action. Do-not-contact blocks every non-essential channel and sender, fails closed or
+  creates an owned consent decision when its status cannot be read, and can be cleared only by an
+  authorized role with a controlled reason and retained evidence (**GL-02**).
 - Every send has a durable attempt/outbox record before provider submission, one retry identity, the
   originating customer/lead/business record, owner team, message purpose, and provider ID. Provider
   acceptance cannot become an untracked message when the next write fails, and a retry cannot duplicate a
@@ -863,6 +839,63 @@ resend action.
 
 **Pass owner:** Head of Sales; Head of Operations approves delivery recovery and Compliance approves
 consent.
+
+### GL-02 — Finish a failure-safe lead lifecycle
+
+**Business outcome:** Every lead always has an accountable person, a visible next action, and an auditable
+outcome until it becomes a customer or is deliberately closed.
+
+**Why this is still a gate:** The Customers screen still creates leads through the raw record path,
+bypassing duplicate review, ownership, missing-contact work, and the new lifecycle command; the data
+permission still allows any office client to do the same. Website intake returns success with no named
+owner or due action and treats duplicate lookup/case failures as harmless. The promised one-business-hour
+response is enforced by a sweep that runs only once each morning, after the deadline, and then gives the
+new case another day. The board shows only **overdue**, not the action or due time an employee should work
+next.
+
+Lead actions can also report success while their activity, customer state, owner, or next-action write
+failed, because those writes are best-effort or unchecked; the history screen then hides an error as an
+empty timeline and stops at 100 rows. **No answer**, **left message**, and provider-accepted email all
+derive the same **Contacted** stage, while qualification has no state. Do-not-contact covers only selected
+email templates, fails open when its status cannot be read, does not govern manual call/text choices, and
+can be cleared by any office user without a reason. Finally, a phone-only lead is sent to a bare booking
+URL while paid conversion matches only a lead reference or email, so the payment can create a second
+customer and leave the original lead open.
+
+**Remaining requirements:**
+
+- Every lead entrance—website, Leads screen, Customers screen, and any client/API route—uses one safe
+  intake contract. Success means the lead, a valid person/team owner, next action, due time, and every
+  required missing-contact or duplicate decision are durably present. Retries and concurrent submissions
+  converge on one intake; duplicate lookup or case-write failure cannot silently create an ordinary lead,
+  and no raw staff create route can bypass these controls.
+- The current action, due time, owner, age, and urgency are visible and sorted before a lead becomes late.
+  Enforcement runs often enough to meet the approved first-response promise, isolates one failed lead
+  from the rest of the queue, alerts on a missed/partial sweep, and escalates to a manager at the actual
+  deadline—not a day later. Reassignment/offboarding transfers both the lead and all current/future work
+  to a verified active owner (**GL-14**).
+- The Head of Sales approves unambiguous stage and outcome definitions. An attempted call is not labeled
+  **Contacted**, provider acceptance is not customer delivery, and the workflow distinguishes attempted,
+  reached, qualified/unqualified, booking sent, won, lost, and do-not-contact to the extent Sales needs.
+  Every completed action clears or replaces its prior next action so an old explicit deadline cannot
+  govern the lead forever.
+- A lead mutation reports success only after the requested state, immutable activity, actor, owner, and
+  next obligation are confirmed. A failed audit/state write cannot advance the stage or close follow-up;
+  routine case closure is evidence-based under GL-18. Sales can page, search, and export the complete
+  timeline, and a read failure is shown as a failure rather than **no activity** (**X1**).
+- Consent and do-not-contact are enforced at every non-essential email, call, and text entrance. A status
+  lookup failure cannot authorize outreach; channel choices reflect the exact retained permission; and
+  clearing suppression requires an authorized role, controlled reason, evidence, and audit (**GL-03**).
+- Every supported conversion method—including a phone-only lead using a spoken link—reliably resolves the
+  originating lead or creates a visible identity decision before the original can keep aging. Shared
+  phone/email/household data never silently merges people, and a new paid customer cannot leave a second
+  open lead representing the same conversion.
+- Head of Sales approves the response/follow-up calendar and SLA by source, manager escalation, stage and
+  lost-reason vocabulary, qualification rule, duplicate decision authority, phone-only operating path,
+  and which calls/texts may rely on manual logging. Compliance approves consent, do-not-contact,
+  essential-message, and suppression-release policy.
+
+**Pass owner:** Head of Sales; Compliance approves consent and suppression policy.
 
 ### GL-11 — Minimum complete customer/group portal
 
@@ -918,10 +951,10 @@ The launch approver should use this table only after every named owner approves 
 | Function | Named approver | Date | Gates accepted | Approval record |
 |---|---|---|---|---|
 | CEO |  |  | GL-01, 05, 06, 08, 13, 14, 16–20, 22 |  |
-| Sales |  |  | GL-02, 03, 19 |  |
+| Sales |  |  | GL-02, 03, 14, 19 |  |
 | Operations |  |  | GL-03, 04, 06, 07, 09–15, 18, 19, 23 |  |
 | Finance |  |  | GL-05–09, 16–19, 21 |  |
-| Compliance/legal |  |  | GL-01, 03, 10, 13, 15, 17, 20, 22 |  |
+| Compliance/legal |  |  | GL-01–03, 10, 13, 15, 17, 20, 22 |  |
 | Engineering |  |  | GL-05, 21, 22 |  |
 
 **Production go-live decision:** `NO-GO / GO`
