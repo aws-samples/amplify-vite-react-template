@@ -716,18 +716,26 @@ until it becomes a customer or is deliberately closed.
 **Business outcome:** Customers are told what will actually happen, and staff never see a success message
 for a communication that was not delivered.
 
+**Why this is still a gate:** Engineering closed both halves. The quote review fallback now promises a
+channel it can keep: a call only when the lead gave a valid phone AND ticked call consent, otherwise an
+email (the funnel always captures a valid email), and the timing is truthful, "within the hour" only in
+business hours (Mon–Fri 8am–6pm ET) and a real next-window time ("first thing tomorrow morning", "on
+Monday morning") after hours, with the exception deadline moved to match. On the delivery side, every
+send now branches on a real result: it is stamped with an SES configuration set and its provider message
+id, records SENT / QUEUED (a transient throttle, never a silent drop) / SUPPRESSED / FAILED, and a
+permanent failure opens owned EMAIL_FAILURE work. A new ses-events function consumes SES bounce,
+complaint, and delivery notifications: it flips the message to DELIVERED or BOUNCED/COMPLAINED,
+suppresses a dead or complaining address so nothing is re-sent to it, and opens an owned exception with
+an approved alternate-contact next step, so a message the provider accepted and then bounced no longer
+reads "sent" forever. The office email log shows the true delivery state, not just provider acceptance.
+
 **Remaining requirements:**
 
-- **The quote fallback promises a call even when there is no phone or consent.** Phone is optional in the
-  funnel, yet every review fallback tells the customer a specialist will call within the hour, and
-  after-hours submissions get the same "within the hour." A quote needing review must capture a usable
-  channel: if a call is promised, a valid phone number and call consent are required, otherwise the
-  promise says email — and after-hours submissions receive a truthful next-business-window time.
-- **Sends are binary, with no "queued for retry" state**, and only synchronous provider errors are caught.
-  There is no handler for asynchronous bounce/complaint/suppression, so a message the provider accepts and
-  then bounces stays "sent" forever. Every send must branch on the delivery result — sent /
-  not-sent-fix-this-now / queued — and bounce, suppression, missing mailbox, and provider failure must
-  create an owned exception tied to the lead/customer with an approved alternate-contact next step.
+- The SES account must actually publish these events: the sending identity/domain is verified for
+  DKIM/SPF/DMARC and the configuration set's SNS event destination is enabled in the production SES
+  account. The code path is complete and inert until that production step lands (owned by GL-21).
+- The Head of Sales confirms the business hours encoded (Mon–Fri 8am–6pm ET), the call-consent wording,
+  and the approved alternate-contact next step for a suppressed/bounced lead.
 
 **Pass owner:** Head of Sales.
 
