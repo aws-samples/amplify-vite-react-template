@@ -2,19 +2,20 @@
 
 **Business review date:** 18 July 2026
 
-**Latest commit review:** 2 commits after `e5d585f`, from `3f437c9` through `8d98df4`; newest
-implementation commit `3f437c9`
+**Latest commit review:** 2 commits after `8d98df4`, from `2f433c0` through `16f16d6`; newest
+implementation commit `2f433c0`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commit affects GL-06 and the
-payment/capacity portions of GL-04, GL-05, GL-19, and GL-21. Closed copy and state-label work has been
-removed; those gates contain only the nonexistent hold, premature success, unsafe event transition,
-timeout/recovery, production-account, and business-policy gaps that remain. The other gates remain
-because the new commits did not close them. An omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The latest implementation commit affects GL-08 and the
+plan-cancellation portions of GL-18, GL-19, and GL-22. Completed duplicate-click protection,
+provider/CRM success-state handling, and success-screen qualification have been removed. Those gates now
+contain only the crash recovery, post-request charge/refund, customer-message, operator-workflow,
+reconciliation, and business-policy gaps that remain. The other gates remain because the new commits did
+not close them. An omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -67,8 +68,9 @@ action, and physical operating setup as dependencies the agent cannot complete a
   business-readable history.
 - **X2 — An exception can still turn green before the business obligation is fulfilled.** A canceled
   visit can count as money settled while a paid charge remains; adding an email can count as delivering
-  the missed notice; any technician ID can count as safe staffing; and materially different paid-booking
-  problems are offered the same retry action even when no booking exists to retry.
+  the missed notice; any technician ID can count as safe staffing; plan-cancellation recovery is offered
+  portal-sign-in closure reasons; and materially different paid-booking problems are offered the same
+  retry action even when no booking exists to retry.
 - **X3 — Customer communication is still best-effort after provider acceptance.** An accepted email can
   lose its log and provider ID; transient failures have no actual retry; delivery-event processing can
   acknowledge and discard a failed update; and the business record that originated the message is not
@@ -89,7 +91,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched | **62% — Medium** |
 | P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **72% — High** |
 | P0 | GL-09 | Make customer lifecycle transitions atomic and auditable | Head of Operations | Deactivation leaves a live portal login, or status disagrees with billing | **76% — High** |
-| P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | Customer told billing stopped while the subscription is still live | **82% — High** |
+| P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | A cancel stalls, a later charge is not refunded, or the customer receives a false outcome | **76% — High** |
 | P0 | GL-07 | Finish durable office cancel/reschedule | Head of Operations | A canceled visit still charges, promised credit vanishes, or concurrent changes conflict | **74% — High** |
 | P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **68% — Medium** |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **57% — Medium** |
@@ -341,26 +343,42 @@ recovery policy.
 **Business outcome:** A customer's online cancellation is a durable instruction, and every customer
 message matches the actual billing, plan, schedule, and delivery state.
 
-**Why this is still a gate:** Engineering closed the durability and the truthfulness, following the same
-durable-command pattern as GL-05/GL-07. A customer cancel now takes a single-winner claim
-(`PlanCancellationClaim`, id = plan id) BEFORE any Stripe call, so two simultaneous confirm clicks cannot
-both drive a cancel — the loser reports the truthful in-flight state instead of firing a second cancel
-and a second confirmation. The instruction is recorded durably (the claim, plus `cancellationPending`)
-BEFORE the provider is touched, so a crash between the Stripe cancel and the CRM transition leaves a
-visible, recoverable state, not a lost instruction. The plan is reported **Canceled** only after both the
-Stripe stop AND the CRM transition are confirmed written (`cancelPlanBilling` now read-backs the record
-and throws if it did not flip, so a provider-success + CRM-write-failure returns PENDING and resumes,
-not a false "canceled"). The pending copy no longer promises "you won't be charged again" while billing
-is live: it states the plan is still active, that any charge that posts will be refunded, and when the
-customer will hear. The success message says "recurring visits have stopped" only when every cancelable
-visit actually came off, and "we've emailed you" only when the confirmation truly sent; a failed
-visit-removal is now durable owned work (one item per stranded visit), not just an office email.
+**Why this is still a gate:** The claim is a durable lock, but nothing processes or ages it. A process
+stop after the claim is created can leave the plan active, no recovery case, and every later click stuck
+at **Pending** indefinitely. The pending message promises a refund for a charge that posts before
+completion, but no charge/refund workflow implements that promise. The portal's plan list simultaneously
+says **You won't be charged again** while its pending state means billing may still be live. After a
+partial schedule failure, the screen is qualified but the confirmation email still says all recurring
+visits stopped and describes every remaining visit as prepaid. Recovery work also uses generic case types
+whose labels, actions, and close evidence do not match the obligation.
 
 **Remaining requirements:**
 
-- Finance/Operations confirm the pending-state **resolution-time** commitment shown to the customer
-  (encoded as "usually within one business day") and the wording of the refund promise if a charge posts
-  before the cancel completes.
+- One durable cancellation command—not merely a lock—owns the request from the first confirmed click to
+  a terminal outcome. A worker automatically resumes every unfinished command; stale claims, process
+  stops, timeouts, and failures while writing the pending flag or recovery case cannot strand it. The
+  customer is never required to retry, and an accepted request cannot return **Pending** unless it has a
+  named owner, due time, and visible safe resume path.
+- Pending copy is identical everywhere and never says billing stopped while the provider may still
+  charge. Finance approves and the system enforces the promise for any charge after the customer's first
+  accepted cancellation time: identify it, stop the subscription, issue the exact provider-confirmed
+  refund, record it against the customer/plan, notify the customer, and escalate any mismatch. If the
+  business will not provide that protection, remove the refund promise and replace it with approved
+  truthful treatment before launch.
+- Every success screen, plan-list status, email, and staff view is generated from the actual final
+  provider, CRM, schedule, refund, and message state. A failed unpaid visit removal is not described as a
+  prepaid visit; neither the screen nor email says all recurring visits stopped while any cancelable visit
+  remains; and a confirmation is not described as emailed when it has no terminal delivery outcome
+  (**GL-03**).
+- Cancellation recovery has a purpose-built, routine-employee workflow. Finance can complete and verify
+  provider/CRM/refund work; Operations can resolve each remaining visit and contact outcome; the case
+  cannot close until billing is inactive, the plan is canceled, every visit has a disposition, every
+  promised refund is settled, and the customer has received the final outcome. A generic portal-repair
+  reason or paid-visit case for an unpaid stranded visit is not an acceptable substitute (**GL-18**).
+- The CEO, Finance, and Operations approve the launch policy for effective time, current-period charges,
+  outstanding balances, prepaid and in-progress visits, post-request charges/refunds, save offers, and
+  the pending resolution commitment (currently **usually within one business day**). Preview, accepted
+  terms, portal, employee recovery, reconciliation, and customer notices all enforce the same policy.
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
 
@@ -418,13 +436,17 @@ missing-contact case closes when an email address merely exists, not when the mi
 delivered. An unstaffed visit closes for any technician ID without proving that person is active,
 qualified, available, and valid for the service. All paid-booking exceptions show the same retry action
 even though some represent an orphan payment, duplicate record, provider outage, or amount mismatch
-that cannot be fixed by retrying a booking. Eight of the thirteen exception types have no verified
-normal completion path, so callbacks, delivery failures, duplicate leads, portal failures, pricing
-decisions, location reviews, and staff-access recovery can be closed only as an OWNER manual override.
-For email failures, the instruction says to correct, unsuppress, and resend, but the case provides no
-bounded action to do those things or identify every message the customer missed. That turns routine work
-into an executive bottleneck and treats a normal completion as an exception to policy. Claim and close
-actions also have no single-winner control, so two employees can act on the same case.
+that cannot be fixed by retrying a booking. Plan-cancellation failure is filed as **Portal failure**,
+whose employee label and close choices are about repairing sign-in, while an unpaid visit stranded by a
+plan cancel is filed as **Paid cancellation**, whose instructions are about settling money. The
+plan-level schedule-read failure is not linked to a job that its normal verifier can inspect. Eight of
+the thirteen exception types have no verified normal completion path, so callbacks, delivery failures,
+duplicate leads, portal failures, pricing decisions, location reviews, and staff-access recovery can be
+closed only as an OWNER manual override. For email failures, the instruction says to correct, unsuppress,
+and resend, but the case provides no bounded action to do those things or identify every message the
+customer missed. That turns routine work into an executive bottleneck and treats a normal completion as
+an exception to policy. Claim and close actions also have no single-winner control, so two employees can
+act on the same case.
 
 **Remaining requirements:**
 
@@ -443,6 +465,10 @@ actions also have no single-winner control, so two employees can act on the same
 - Each paid-booking exception shows only an action that fits its actual cause and records the resulting
   money and booking state. Orphan payments, duplicate payments/records, amount mismatches, and provider
   outages must not offer a misleading **Retry finalization** action.
+- Plan-cancellation recovery uses case types, actions, owners, and closure evidence that match the actual
+  obligation: provider/CRM stop and post-request refunds for Finance; schedule disposition and final
+  customer contact for Operations. An unpaid stranded visit is not presented as a refund case, and a
+  plan-level schedule-read failure remains closable only after the schedule has actually been checked.
 - For every exception type, the Head of Operations approves the normal resolution event a routine role
   may complete and what system or business evidence proves it. Ordinary callback, delivery, merge,
   portal-recovery, pricing, and staff-recovery outcomes use bounded actions; a manual override is reserved
@@ -675,8 +701,9 @@ can be restored after human or provider error.
   it does not page an operator. There are no CloudWatch alarms or business-impact metric thresholds, so a
   silent Lambda crash, scheduled job that never fired, or run of email-send failures would page no one.
   Alerts must cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email
-  failures, reconciliation mismatches, capacity anomalies, document generation/storage failure, and
-  growing/overdue exception queues, and reach a named primary and backup.
+  failures, stale plan-cancellation commands/claims, cancellation promises nearing or missing deadline,
+  reconciliation mismatches, capacity anomalies, document generation/storage failure, and growing/
+  overdue exception queues, and reach a named primary and backup.
 - **A failed email-delivery event can be permanently acknowledged.** The event consumer catches malformed
   messages and database/work-queue failures and then returns success; there is no retained failure queue
   or operator alert. Every provider event must be retried until its email state, suppression decision, and
@@ -713,7 +740,9 @@ asking engineering to query production.
   notified, or which attempts exceeded the approved GL-06 promise. Stale, failed, late-succeeded, and
   customer-retried attempts must reconcile without an engineering query.
 - **No plan reconciliation** — provider subscription vs CRM plan mismatches, canceled-still-billing,
-  delinquent-still-scheduled, and active-plan-without-next-service as a reconciliation report.
+  delinquent-still-scheduled, active-plan-without-next-service, stale cancellation commands/claims,
+  pending cancellations past promise, post-request charges/refunds, stranded visits, and missing final
+  notices must appear in one owned reconciliation view.
 - **No dedicated sales view** (leads by stage/owner/age, first-response SLA, overdue next action, source,
   conversion/loss) and **no service-quality view** (completion, report delivery, no-access, callbacks,
   repeat-callback rate, technician trends).
@@ -754,26 +783,30 @@ outcome.
 **Business outcome:** Every lead always has an accountable person, a next action, and an auditable outcome
 until it becomes a customer or is deliberately closed.
 
+**Why this is still a gate:** Engineering closed the lifecycle, built to the CEO's constraint that a
+week-one employee must not be relied on to keep a status field up to date. The pipeline **stage is
+derived, never hand-set**: New → Contacted → Booking-sent → Won is inferred from facts the system already
+records (a logged touch, a sent booking link, the paid conversion), so a stage can never go stale. Only
+the two deliberate terminal decisions — Lost (with a controlled reason) and Do-not-contact — are set by
+hand. Every call/text/email/booking-link is recorded in an append-only `LeadActivity` ledger with the
+real outcome, and a failed delivery is logged as an attempt, never a touch. Ownership and the overdue
+queue ride the existing owned-work system: a daily stale-lead sweep opens a `LEAD_FOLLOWUP` item for any
+open lead whose next action is overdue (first touch within 1 business hour of arrival, then a 2-business-
+day cadence, encoded in one place), routed to the lead's owner or the Sales team inbox and escalated if
+it lapses — and any real touch, booking link, lost/DNC decision, or conversion resolves it, so the queue
+is self-healing and no lead falls out silently. Duplicate detection now runs at intake (and on manual
+create) before a record exists: an exact email/phone or name+zip match returns candidates for a
+Use-existing / Create-separate decision — never a silent merge — and a website match still creates the
+lead but opens a `DUPLICATE_LEAD` case. Incomplete contact data is accepted but owned (`MISSING_CONTACT`);
+a do-not-contact flag suppresses non-essential outreach at the send choke point and records who decided.
+
 **Remaining requirements:**
 
-- **There is no pipeline.** Customer status is only Lead / Active / Inactive — none of New, Attempting
-  contact, Qualified, Booking sent, Booked/Won, Lost, or Do-not-contact exists. The business approves that
-  small, unambiguous pipeline.
-- **A lead has no owner, next action, or due time, and no overdue queue.** Every open lead needs an owner,
-  created time, last-touch time, next action, and due time, and missing or overdue actions appear in an
-  owner and manager queue — not by browsing a list. (There is no lead follow-up work type and no stale-lead
-  sweep today.)
-- **No duplicate detection at intake.** Creation runs with no duplicate lookup and no Use-existing /
-  Create-separate / Ask-manager decision; a possible duplicate is only flagged after payment. Normalization
-  and duplicate detection must run before creation, and the system never silently merges people.
-- **Incomplete third-party contact data is rejected rather than owned.** When incomplete data must be
-  accepted, the save creates an owned "obtain contact information" exception automatically.
-- **No controlled lost reason and no do-not-contact suppression.** Lost leads require a controlled reason;
-  do-not-contact immediately suppresses non-essential outreach and records who decided.
-- Every call, email, text, and booking-link attempt records time, channel, actor, and actual outcome — a
-  failed delivery is not a successful touch. The CEO sets response and follow-up SLAs by source and decides
-  how phone-only and non-card customers are handled (a supported path with the same controls, or a truthful
-  close reason — not a dead end).
+- Head of Sales / CEO sign off the encoded values (all one-line changes): the follow-up SLA numbers
+  (1 business hour / 2 business days / 14-day stale), the controlled lost-reason list, and the
+  essential-vs-non-essential email split for do-not-contact. Confirm phone-only leads are a supported
+  ongoing path (they are — same pipeline and follow-up), and that calls/texts are logged manually (there
+  is no telephony integration to auto-capture them).
 
 **Pass owner:** Head of Sales.
 
