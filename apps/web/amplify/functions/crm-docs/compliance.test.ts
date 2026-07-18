@@ -24,6 +24,7 @@ let customer: Record<string, unknown>;
 let routes: Record<string, unknown>[] = [];
 let catalog: Record<string, unknown>[] = [];
 let workItems: Record<string, unknown>[] = [];
+let amendments: Record<string, unknown>[] = [];
 const officeEmails: { subject: string; bodyHtml: string }[] = [];
 
 const fakeDataClient = {
@@ -81,6 +82,22 @@ const fakeDataClient = {
     Product: {
       list: async () => ({ data: catalog }),
     },
+    ServiceReportAmendment: {
+      create: async (input: Record<string, unknown>) => {
+        const a = { id: `amd_${amendments.length + 1}`, ...input } as Record<
+          string,
+          unknown
+        >;
+        amendments.push(a);
+        return { data: a, errors: undefined };
+      },
+      update: async (patch: Record<string, unknown>) => {
+        const i = amendments.findIndex((a) => a.id === patch.id);
+        if (i < 0) return { data: null, errors: [{ message: "not found" }] };
+        amendments[i] = { ...amendments[i], ...patch };
+        return { data: amendments[i], errors: undefined };
+      },
+    },
     WorkItem: {
       get: async ({ id }: { id: string }) => ({
         data: workItems.find((w) => w.id === id) ?? null,
@@ -122,7 +139,10 @@ vi.mock("../shared/recurring", () => ({
   prettyDate: (d: string) => d,
   scheduleNextRecurringVisit: vi.fn(async () => undefined),
 }));
-vi.mock("../shared/pdf", () => ({ renderServiceReportPdf: async () => new Uint8Array([1]) }));
+vi.mock("../shared/pdf", () => ({
+  renderServiceReportPdf: async () => new Uint8Array([1]),
+  renderAmendmentPdf: async () => new Uint8Array([2]),
+}));
 vi.mock("@aws-sdk/client-s3", () => ({
   S3Client: class { async send() { return {}; } },
   PutObjectCommand: class {},
@@ -202,6 +222,7 @@ beforeEach(() => {
     },
   ];
   workItems = [];
+  amendments = [];
   officeEmails.length = 0;
   vi.mocked(sendEmail).mockReset();
   vi.mocked(sendEmail).mockResolvedValue(true);
@@ -1000,6 +1021,132 @@ describe("a finalized report is immutable", () => {
         identity: { sub: "sub-unlinked", groups: ["TECH"], claims: {} },
       } as never)
     ).rejects.toThrow(/isn't linked to a technician record/i);
+  });
+});
+
+describe("issued reports are corrected by append-only amendments", () => {
+  const finalizedReport = (over: Partial<Report> = {}): Report =>
+    validReport({
+      status: "FINALIZED",
+      pdfKey: "reports/c1/rep_1.pdf",
+      servicesPerformed: "Exterior barrier treatment and web removal",
+      ...over,
+    });
+  const CHANGES = JSON.stringify([
+    { label: "Areas treated", from: "Kitchen", to: "Kitchen, basement, garage" },
+  ]);
+
+  it("issues an amendment linked to the original, with reason, author, time, and changes", async () => {
+    reports.push(finalizedReport());
+
+    const res = (await call(
+      "amendServiceReport",
+      { reportId: "rep_1", reason: "Missed two treated areas", changes: CHANGES },
+      ["OFFICE"]
+    )) as { amendmentId: string; deliveryStatus: string };
+
+    expect(amendments).toHaveLength(1);
+    const amd = amendments[0];
+    expect(amd.originalReportId).toBe("rep_1");
+    expect(amd.reason).toBe("Missed two treated areas");
+    expect(amd.customerId).toBe("c1");
+    expect(amd.issuedAt).toBeTruthy();
+    // Author comes from the token, never the request body.
+    expect(amd.authorEmail).toBe("marco@x.com");
+    expect(JSON.parse(String(amd.changes))).toEqual([
+      { label: "Areas treated", from: "Kitchen", to: "Kitchen, basement, garage" },
+    ]);
+    expect(amd.pdfKey).toContain("amendments/");
+    expect(res.deliveryStatus).toBe("DELIVERED");
+  });
+
+  it("never touches the original issued record", async () => {
+    reports.push(finalizedReport());
+
+    await call(
+      "amendServiceReport",
+      { reportId: "rep_1", reason: "Typo in areas", changes: CHANGES },
+      ["OFFICE"]
+    );
+
+    // The original is preserved exactly — an amendment appends, it does not edit.
+    expect(reports[0].status).toBe("FINALIZED");
+    expect(reports[0].servicesPerformed).toBe(
+      "Exterior barrier treatment and web removal"
+    );
+    expect(reports[0].areasTreated).toBe(validReport().areasTreated);
+  });
+
+  it("refuses to amend an unfinalized draft — a draft is edited, not amended", async () => {
+    reports.push(finalizedReport({ status: "DRAFT" }));
+
+    await expect(
+      call(
+        "amendServiceReport",
+        { reportId: "rep_1", reason: "x", changes: CHANGES },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/only an issued report|draft/i);
+    expect(amendments).toHaveLength(0);
+  });
+
+  it("refuses an amendment with no reason", async () => {
+    reports.push(finalizedReport());
+
+    await expect(
+      call(
+        "amendServiceReport",
+        { reportId: "rep_1", reason: "   ", changes: CHANGES },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/reason/i);
+    expect(amendments).toHaveLength(0);
+  });
+
+  it("refuses an amendment with no corrected facts", async () => {
+    reports.push(finalizedReport());
+
+    await expect(
+      call(
+        "amendServiceReport",
+        {
+          reportId: "rep_1",
+          reason: "Fixing something",
+          changes: JSON.stringify([{ label: "Areas treated", from: "Kitchen", to: "  " }]),
+        },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/corrected fact|what changed/i);
+    expect(amendments).toHaveLength(0);
+  });
+
+  it("a technician cannot issue an amendment — that is the office's to do", async () => {
+    reports.push(finalizedReport());
+
+    await expect(
+      call("amendServiceReport", { reportId: "rep_1", reason: "x", changes: CHANGES }, [
+        "TECH",
+      ])
+    ).rejects.toThrow(/office role required/i);
+    expect(amendments).toHaveLength(0);
+  });
+
+  it("delivers the amendment and opens an owned task when there is no email", async () => {
+    customer.email = null;
+    reports.push(finalizedReport());
+
+    const res = (await call(
+      "amendServiceReport",
+      { reportId: "rep_1", reason: "Correcting the rate", changes: CHANGES },
+      ["OFFICE"]
+    )) as { amendmentId: string; deliveryStatus: string };
+
+    expect(res.deliveryStatus).toBe("NO_EMAIL");
+    expect(amendments[0].deliveryStatus).toBe("NO_EMAIL");
+    const task = workItems.find(
+      (w) => w.kind === "MISSING_CONTACT" && w.relatedId === res.amendmentId
+    );
+    expect(task).toBeTruthy();
   });
 });
 

@@ -737,6 +737,38 @@ export const schema = a.schema({
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
+  // A finalized report is never overwritten. A correction is an append-only
+  // amendment: a new record linked to the original, carrying the reason, the
+  // author, the time, and the changed facts, delivered to the customer, with the
+  // original preserved. Written only through amendServiceReport (office-issued);
+  // read-only from every browser, including the customer's portal.
+  ServiceReportAmendment: a
+    .model({
+      /** The finalized report this corrects. Plain indexed id, not a modeled
+       *  relation — the link is one-way and the original is never mutated. */
+      originalReportId: a.id().required(),
+      customerId: a.id().required(),
+      jobId: a.id().required(),
+      /** Why the correction was made. */
+      reason: a.string().required(),
+      /** The corrected facts: [{ label, from, to }]. */
+      changes: a.json().required(),
+      /** Who issued it, from the signed-in token — never from the request body. */
+      authorSub: a.string(),
+      authorEmail: a.string(),
+      issuedAt: a.datetime(),
+      pdfKey: a.string(),
+      emailedAt: a.datetime(),
+      /** Whether the customer received the amendment — separate from issuance. */
+      deliveryStatus: a.ref("ReportDelivery"),
+      accessGroups: a.string().array(),
+    })
+    .secondaryIndexes((index) => [index("originalReportId")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "TECH"]).to(["read"]),
+      allow.groupsDefinedIn("accessGroups").to(["read"]),
+    ]),
+
   Invoice: a
     .model({
       customerId: a.id().required(),
@@ -1701,6 +1733,20 @@ export const schema = a.schema({
     .arguments({ reportId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** Issue an append-only correction to a finalized report. Office/owner only —
+   *  a technician asks the office; no role overwrites the issued record. */
+  amendServiceReport: a
+    .mutation()
+    .arguments({
+      reportId: a.string().required(),
+      reason: a.string().required(),
+      /** [{ label, from, to }] — the corrected facts. */
+      changes: a.json().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Office-side job completion without a field report — marks COMPLETED and

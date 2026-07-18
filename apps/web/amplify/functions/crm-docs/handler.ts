@@ -31,7 +31,12 @@ import {
   prettyDate,
   scheduleNextRecurringVisit,
 } from "../shared/recurring";
-import { renderServiceReportPdf, type ReportProduct } from "../shared/pdf";
+import {
+  renderAmendmentPdf,
+  renderServiceReportPdf,
+  type AmendmentChange,
+  type ReportProduct,
+} from "../shared/pdf";
 import { stripeClient } from "../shared/stripeClient";
 import { startPlanBilling } from "../shared/subscription";
 import {
@@ -72,6 +77,7 @@ type Args = {
   notes?: string;
   contentType?: string;
   reason?: string;
+  changes?: unknown;
   photoKey?: string;
   servicesPerformed?: string;
   productsUsed?: unknown;
@@ -183,6 +189,17 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "finalizeServiceReport": {
       await assertCanActOnReportId(event.identity, event.arguments.reportId!);
       return finalizeServiceReport(event.arguments.reportId!);
+    }
+    case "amendServiceReport": {
+      // The office issues amendments; a technician asks the office. No role
+      // overwrites the issued record, so this only ever appends a new one.
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return amendServiceReport(event.arguments.reportId!, {
+        reason: event.arguments.reason,
+        changes: event.arguments.changes,
+        authorSub: callerSub(event.identity),
+        authorEmail: callerEmail(event.identity),
+      });
     }
     case "saveProduct": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
@@ -1211,6 +1228,183 @@ async function finalizeServiceReport(reportId: string) {
   await scheduleNextRecurringVisit({ ...job, completedAt });
 
   return { pdfKey, emailed, deliveryStatus, alreadyFinalized: false };
+}
+
+/** Corrected facts as they arrive from the office UI (AWSJSON, may be a string). */
+function parseAmendmentChanges(raw: unknown): AmendmentChange[] {
+  let list: unknown;
+  try {
+    list = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((c) => {
+      const row = (c ?? {}) as { label?: unknown; field?: unknown; from?: unknown; to?: unknown };
+      const label = String(row.label ?? row.field ?? "").trim();
+      return {
+        label,
+        from: row.from == null ? "" : String(row.from),
+        to: row.to == null ? "" : String(row.to),
+      };
+    })
+    // A correction has to name what changed and give its corrected value. A blank
+    // "to" is not a correction, it is an erasure with no record of what now stands.
+    .filter((c) => c.label && c.to.trim());
+}
+
+/**
+ * Issue an append-only correction to a finalized report. The original record is
+ * never touched — this creates a new, linked document carrying the reason, the
+ * author (from the token, not the request), the time, and the changed facts, and
+ * delivers it to the customer the same way a report is delivered. A draft is not
+ * amended (it is still editable); an amendment only corrects an issued record.
+ */
+async function amendServiceReport(
+  reportId: string,
+  input: {
+    reason?: string | null;
+    changes?: unknown;
+    authorSub: string | null;
+    authorEmail: string | null;
+  }
+) {
+  const client = await dataClient();
+  const { data: original } = await client.models.ServiceReport.get({ id: reportId });
+  if (!original) throw new Error(`ServiceReport ${reportId} not found`);
+  if (original.status !== "FINALIZED") {
+    throw new Error(
+      "Only an issued report can be amended — an unfinalized draft is corrected by editing it, not by an amendment"
+    );
+  }
+  const reason = input.reason?.trim();
+  if (!reason) {
+    throw new Error("An amendment needs the reason the record is being corrected");
+  }
+  const changes = parseAmendmentChanges(input.changes);
+  if (!changes.length) {
+    throw new Error(
+      "An amendment needs at least one corrected fact — name what changed and its corrected value"
+    );
+  }
+
+  const [{ data: customer }, { data: job }, { data: technician }] = await Promise.all([
+    client.models.Customer.get({ id: original.customerId }),
+    client.models.Job.get({ id: original.jobId }),
+    original.technicianId
+      ? client.models.Technician.get({ id: original.technicianId })
+      : Promise.resolve({ data: null }),
+  ]);
+  if (!customer) throw new Error("The amended report is missing its customer");
+  const serviceType = job?.serviceType ?? "service";
+
+  const issuedAt = new Date().toISOString();
+  // Append-only: a brand-new row. Nothing here updates the original report.
+  const { data: amendment, errors } =
+    await client.models.ServiceReportAmendment.create({
+      originalReportId: reportId,
+      customerId: original.customerId,
+      jobId: original.jobId,
+      reason,
+      changes: JSON.stringify(changes),
+      authorSub: input.authorSub ?? undefined,
+      authorEmail: input.authorEmail ?? undefined,
+      issuedAt,
+      accessGroups: customerAccessGroups(original.customerId, customer.groupId),
+    });
+  if (!amendment) {
+    throw new Error(
+      errors?.map((e) => e.message).join("; ") || "Could not create the amendment"
+    );
+  }
+
+  const serviceAddress = [
+    customer.serviceStreet,
+    customer.serviceCity,
+    customer.serviceState,
+    customer.serviceZip,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const pdf = await renderAmendmentPdf({
+    amendmentId: amendment.id,
+    originalReportId: reportId,
+    customerName: customer.displayName,
+    serviceAddress: serviceAddress || undefined,
+    serviceType,
+    originalServiceDateIso: original.serviceDate,
+    reason,
+    changes,
+    authorName: technician?.name ?? input.authorEmail ?? "BuzzKill office",
+    authorEmail: input.authorEmail,
+    issuedAtIso: issuedAt,
+  });
+
+  const pdfKey = `reports/${original.customerId}/${reportId}/amendments/${amendment.id}.pdf`;
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET(),
+      Key: pdfKey,
+      Body: pdf,
+      ContentType: "application/pdf",
+    })
+  );
+
+  let emailed = false;
+  if (customer.email) {
+    emailed = await sendEmail({
+      to: customer.email,
+      subject: `Corrected service report — ${serviceType}`,
+      template: "service-report-amendment",
+      customerId: customer.id,
+      relatedId: amendment.id,
+      attachments: [
+        {
+          filename: "BuzzKill-Service-Report-Amendment.pdf",
+          content: pdf,
+          contentType: "application/pdf",
+        },
+      ],
+      html: emailShell(
+        "Your service report has been corrected",
+        `<p>Hi ${customer.contactName ?? customer.displayName},</p>
+         <p>We've issued a correction to your <strong>${serviceType}</strong> service report. The corrected details are in the attached amendment${customer.portalUserSub ? ", and it's always available in your BuzzKill portal" : ""}. Your original report is unchanged and still on file.</p>
+         <p style="color:#666;font-size:13px;">Reason for the correction: ${reason}</p>
+         <p style="color:#666;font-size:13px;">Questions? Just reply to this email.</p>`
+      ),
+    });
+  }
+  // Delivery is a separate fact from issuance, exactly as it is for a report.
+  const deliveryStatus: "DELIVERED" | "FAILED" | "NO_EMAIL" = emailed
+    ? "DELIVERED"
+    : customer.email
+      ? "FAILED"
+      : "NO_EMAIL";
+  if (deliveryStatus === "NO_EMAIL") {
+    await openOwnedWork({
+      kind: "MISSING_CONTACT",
+      dedupeKey: `report-amendment-delivery:${amendment.id}`,
+      title: `Report amendment undelivered — no email on file: ${customer.displayName}`,
+      detail: `A correction to ${customer.displayName}'s ${serviceType} service report was issued, but there is no email address on file to deliver the amendment.`,
+      customerId: customer.id,
+      relatedId: amendment.id,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Add and verify the customer's email and re-send the amendment, or deliver the corrected report by an approved alternate method and record how.",
+      ownerTeam: "OPS",
+    });
+  }
+
+  await client.models.ServiceReportAmendment.update({
+    id: amendment.id,
+    pdfKey,
+    deliveryStatus,
+    ...(emailed ? { emailedAt: new Date().toISOString() } : {}),
+  });
+
+  return { amendmentId: amendment.id, pdfKey, deliveryStatus, emailed };
 }
 
 /**

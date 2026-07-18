@@ -22,6 +22,7 @@ export type Route = Schema["Route"]["type"];
 export type Technician = Schema["Technician"]["type"];
 export type Agreement = Schema["Agreement"]["type"];
 export type ServiceReport = Schema["ServiceReport"]["type"];
+export type ServiceReportAmendment = Schema["ServiceReportAmendment"]["type"];
 export type LeadPricingRun = Schema["LeadPricingRun"]["type"];
 export type Product = Schema["Product"]["type"];
 export type WorkItem = Schema["WorkItem"]["type"];

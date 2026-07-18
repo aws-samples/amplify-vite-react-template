@@ -386,3 +386,59 @@ export async function renderServiceReportPdf(opts: {
   w.text(`Report reference: ${opts.reportId}`, { size: 8.5, color: MUTED });
   return w.save();
 }
+
+export type AmendmentChange = { label: string; from: string; to: string };
+
+/**
+ * A correction to an already-issued service report. It is its own document: it
+ * names the original, states why the correction was made and by whom, and shows
+ * each changed fact as was → now. The original report is preserved unchanged;
+ * this rides alongside it as part of the record.
+ */
+export async function renderAmendmentPdf(opts: {
+  amendmentId: string;
+  originalReportId: string;
+  customerName: string;
+  serviceAddress?: string;
+  serviceType: string;
+  originalServiceDateIso: string;
+  reason: string;
+  changes: AmendmentChange[];
+  authorName: string;
+  authorEmail?: string | null;
+  issuedAtIso: string;
+}): Promise<Uint8Array> {
+  const w = await PdfWriter.create();
+  w.header("Amended Service Report");
+
+  w.labelValue("Customer", opts.customerName);
+  if (opts.serviceAddress) w.labelValue("Service address", opts.serviceAddress);
+  w.labelValue("Service", opts.serviceType);
+  w.labelValue("Original report", fmtDateTime(opts.originalServiceDateIso));
+  w.labelValue("Amendment issued", fmtDateTime(opts.issuedAtIso));
+  w.labelValue(
+    "Issued by",
+    opts.authorEmail ? `${opts.authorName}  ·  ${opts.authorEmail}` : opts.authorName
+  );
+  w.rule();
+
+  w.heading("Reason for the correction");
+  w.text(opts.reason, { gapAfter: 12 });
+
+  w.heading("What was corrected");
+  for (const c of opts.changes) {
+    w.text(c.label, { font: w.bold, size: 10.5 });
+    w.text(`Was:  ${c.from || "—"}`, { size: 10, color: MUTED });
+    w.text(`Now:  ${c.to}`, { size: 10 });
+    w.y -= 8;
+  }
+
+  w.rule();
+  w.text(
+    `This amendment corrects the service report issued ${fmtDateTime(
+      opts.originalServiceDateIso
+    )} and forms part of that record. The original report is preserved unchanged. Amendment reference: ${opts.amendmentId}.`,
+    { size: 8.5, color: MUTED }
+  );
+  return w.save();
+}

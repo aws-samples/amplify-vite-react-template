@@ -16,6 +16,7 @@ import {
   type Job,
   type ServicePlan,
   type ServiceReport,
+  type ServiceReportAmendment,
 } from "../lib/api";
 import { bookingFunnelSpoken, bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
@@ -96,6 +97,8 @@ export default function CustomerDetail() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [agreements, setAgreements] = useState<Agreement[]>([]);
   const [reports, setReports] = useState<ServiceReport[]>([]);
+  const [amendments, setAmendments] = useState<ServiceReportAmendment[]>([]);
+  const [amending, setAmending] = useState<ServiceReport | null>(null);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [groups, setGroups] = useState<CustomerGroup[]>([]);
   const [rescheduling, setRescheduling] = useState<Job | null>(null);
@@ -130,11 +133,12 @@ export default function CustomerDetail() {
       }
       setCustomer(c);
       const filter = { customerId: { eq: id } };
-      const [pl, jb, ag, rp, inv, gr] = await Promise.all([
+      const [pl, jb, ag, rp, amd, inv, gr] = await Promise.all([
         api().models.ServicePlan.list({ filter, limit: 200 }),
         api().models.Job.list({ filter, limit: 500 }),
         api().models.Agreement.list({ filter, limit: 200 }),
         api().models.ServiceReport.list({ filter, limit: 500 }),
+        api().models.ServiceReportAmendment.list({ filter, limit: 500 }),
         api().models.Invoice.list({ filter, limit: 500 }),
         api().models.CustomerGroup.list({ limit: 500 }),
       ]);
@@ -146,6 +150,11 @@ export default function CustomerDetail() {
       );
       setAgreements(unwrap(ag));
       setReports(unwrap(rp).filter((r) => r.status === "FINALIZED"));
+      setAmendments(
+        unwrap(amd).sort((a, b) =>
+          (a.issuedAt ?? "").localeCompare(b.issuedAt ?? "")
+        )
+      );
       setInvoices(
         unwrap(inv).sort((a, b) =>
           (b.issuedAt ?? "").localeCompare(a.issuedAt ?? "")
@@ -880,22 +889,54 @@ export default function CustomerDetail() {
         {reports.length === 0 ? (
           <p className="muted small">No completed service reports.</p>
         ) : (
-          reports.map((r) => (
-            <ListRow
-              key={r.id}
-              title={fmtDate(r.serviceDate, true)}
-              subtitle={r.servicesPerformed ?? undefined}
-              meta={
-                <>
-                  <DeliveryBadge
-                    status={r.deliveryStatus}
-                    emailedAt={r.emailedAt}
-                  />
-                  {r.pdfKey ? <DocButton docKey={r.pdfKey} /> : null}
-                </>
-              }
-            />
-          ))
+          reports.map((r) => {
+            const reportAmendments = amendments.filter(
+              (a) => a.originalReportId === r.id
+            );
+            return (
+              <div key={r.id}>
+                <ListRow
+                  title={fmtDate(r.serviceDate, true)}
+                  subtitle={r.servicesPerformed ?? undefined}
+                  meta={
+                    <>
+                      <DeliveryBadge
+                        status={r.deliveryStatus}
+                        emailedAt={r.emailedAt}
+                      />
+                      {r.pdfKey ? <DocButton docKey={r.pdfKey} /> : null}
+                      {roles.office ? (
+                        <Button
+                          small
+                          variant="ghost"
+                          onClick={() => setAmending(r)}
+                        >
+                          Issue amendment
+                        </Button>
+                      ) : null}
+                    </>
+                  }
+                />
+                {reportAmendments.map((a) => (
+                  <div key={a.id} style={{ marginLeft: 16 }}>
+                    <ListRow
+                      title={`Amendment — ${fmtDate(a.issuedAt ?? "", true)}`}
+                      subtitle={a.reason ?? undefined}
+                      meta={
+                        <>
+                          <DeliveryBadge
+                            status={a.deliveryStatus}
+                            emailedAt={a.emailedAt}
+                          />
+                          {a.pdfKey ? <DocButton docKey={a.pdfKey} /> : null}
+                        </>
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+            );
+          })
         )}
       </Card>
 
@@ -1238,6 +1279,23 @@ export default function CustomerDetail() {
 
       <Sheet open={sheet === "price"} onClose={() => setSheet(null)} title="AI price this lead">
         <PriceLeadSheet customer={customer} />
+      </Sheet>
+
+      <Sheet
+        open={amending !== null}
+        onClose={() => setAmending(null)}
+        title="Issue report amendment"
+      >
+        {amending ? (
+          <AmendReportForm
+            report={amending}
+            onDone={async () => {
+              setAmending(null);
+              setNotice("Amendment issued and sent to the customer.");
+              await load();
+            }}
+          />
+        ) : null}
       </Sheet>
 
       <Sheet
@@ -1976,6 +2034,120 @@ function RescheduleForm({
         }}
       >
         {date ? "Save schedule" : "Mark unscheduled"}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Issue an append-only correction to a finalized report (GL-15). The office
+ * states why, and each fact being corrected as was → now. Nothing here edits the
+ * original record — the mutation appends a new, linked amendment and delivers it.
+ */
+function AmendReportForm({
+  report,
+  onDone,
+}: {
+  report: ServiceReport;
+  onDone: () => Promise<void>;
+}) {
+  type Row = { label: string; from: string; to: string };
+  const [reason, setReason] = useState("");
+  const [rows, setRows] = useState<Row[]>([{ label: "", from: "", to: "" }]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const setRow = (i: number, k: keyof Row, v: string) =>
+    setRows((list) => list.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
+
+  const ready =
+    reason.trim().length > 0 &&
+    rows.some((r) => r.label.trim() && r.to.trim());
+
+  return (
+    <div className="form-grid">
+      <p className="muted small" style={{ margin: 0 }}>
+        The original report is preserved unchanged. This issues a correction
+        linked to it and sends the customer the amended copy.
+      </p>
+      <Field label="Reason for the correction">
+        <textarea
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Why is this record being corrected?"
+        />
+      </Field>
+      {rows.map((r, i) => (
+        <Field group label={`Correction ${i + 1}`} key={i}>
+          <input
+            placeholder="What changed (e.g. Areas treated)"
+            value={r.label}
+            onChange={(e) => setRow(i, "label", e.target.value)}
+          />
+          <div className="form-row-2">
+            <input
+              placeholder="Was (optional)"
+              value={r.from}
+              onChange={(e) => setRow(i, "from", e.target.value)}
+            />
+            <input
+              placeholder="Now (corrected value)"
+              value={r.to}
+              onChange={(e) => setRow(i, "to", e.target.value)}
+            />
+          </div>
+          {rows.length > 1 ? (
+            <Button
+              small
+              variant="ghost"
+              onClick={() => setRows((l) => l.filter((_, idx) => idx !== i))}
+            >
+              ✕ Remove
+            </Button>
+          ) : null}
+        </Field>
+      ))}
+      <Button
+        small
+        variant="ghost"
+        onClick={() =>
+          setRows((l) => [...l, { label: "", from: "", to: "" }])
+        }
+      >
+        + Add another correction
+      </Button>
+      <ErrorNote error={error} />
+      <Button
+        block
+        loading={busy}
+        disabled={!ready}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          const changes = rows
+            .filter((r) => r.label.trim() && r.to.trim())
+            .map((r) => ({
+              label: r.label.trim(),
+              from: r.from.trim(),
+              to: r.to.trim(),
+            }));
+          api()
+            .mutations.amendServiceReport({
+              reportId: report.id,
+              reason: reason.trim(),
+              changes: JSON.stringify(changes),
+            })
+            .then((res) => {
+              opResult(res);
+              return onDone();
+            })
+            .catch((err) => {
+              setError(err.message ?? "Could not issue the amendment");
+              setBusy(false);
+            });
+        }}
+      >
+        Issue amendment &amp; send
       </Button>
     </div>
   );
