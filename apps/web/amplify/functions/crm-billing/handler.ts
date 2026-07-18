@@ -4,6 +4,7 @@ import { opFieldName } from "../shared/opEvent";
 import {
   assertCanActForCustomer,
   assertFinance,
+  assertOffice,
   callerIsFinance,
   callerIsOwner,
   callerSub,
@@ -29,6 +30,12 @@ import {
   buildCancellationPreview,
   cancelPlanForCustomer,
 } from "../shared/planCancellation";
+import {
+  buildVisitChangePreview,
+  cancelVisit,
+  rescheduleVisit,
+  type CancelDecision,
+} from "../shared/visitChange";
 import { deactivateCustomer as sharedDeactivateCustomer } from "../shared/deactivation";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 
@@ -48,6 +55,13 @@ type Args = {
   note?: string;
   kind?: string;
   id?: string;
+  // GL-07 visit cancel/reschedule.
+  decision?: string;
+  scheduledDate?: string;
+  timeWindow?: string;
+  technicianId?: string;
+  routeId?: string;
+  routeOrder?: number;
 };
 
 // The shared helpers take an injected Stripe client because booking-public
@@ -232,6 +246,34 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       await assertCanActForPlan(event.identity, event.arguments.servicePlanId!);
       return cancelPlanForCustomer(stripeClient(), event.arguments.servicePlanId!, {
         reason: event.arguments.reason ?? null,
+      });
+    }
+    case "previewVisitChange": {
+      assertOffice(event.identity);
+      return buildVisitChangePreview(event.arguments.jobId!);
+    }
+    case "cancelVisit": {
+      assertOffice(event.identity);
+      const a = actorOf(event);
+      return cancelVisit(stripeClient(), {
+        jobId: event.arguments.jobId!,
+        decision: (event.arguments.decision ?? "") as CancelDecision,
+        reason: event.arguments.reason ?? null,
+        actor: { sub: a.sub, email: a.email, isOwner: a.isOwner },
+      });
+    }
+    case "rescheduleVisit": {
+      assertOffice(event.identity);
+      const a = actorOf(event);
+      return rescheduleVisit({
+        jobId: event.arguments.jobId!,
+        scheduledDate: event.arguments.scheduledDate ?? null,
+        timeWindow: event.arguments.timeWindow ?? null,
+        technicianId: event.arguments.technicianId ?? null,
+        routeId: event.arguments.routeId ?? null,
+        routeOrder: event.arguments.routeOrder ?? null,
+        reason: event.arguments.reason ?? null,
+        actor: { sub: a.sub, email: a.email, isOwner: a.isOwner },
       });
     }
     case "assignRecoveryOwner": {

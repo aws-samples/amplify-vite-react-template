@@ -1122,6 +1122,46 @@ export const schema = a.schema({
     .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   /**
+   * The visit cancel/reschedule audit trail (GL-07). One immutable row per
+   * office cancellation or reschedule of a paid or unpaid visit: who did it, the
+   * controlled decision and reason, the policy applied, the money amount and its
+   * disposition (refund / retained credit / late fee / none), the prior and new
+   * scheduled dates, the customer-communication result, and a COMPLETE|PARTIAL
+   * outcome. This is the durable record leadership reads to prove a refund,
+   * route change, or notice was right — without engineering pulling logs.
+   *
+   * Read-only for OWNER/OFFICE/FINANCE, Lambda-written as IAM, no delete — kept
+   * flat (string action/decision/disposition/outcome, effects folded into one
+   * summary) like the other lifecycle ledgers to stay under tsc's depth ceiling.
+   * Values today: action CANCEL | RESCHEDULE; disposition REFUND | CREDIT |
+   * FEE_RETAINED | NONE; outcome COMPLETE | PARTIAL.
+   */
+  VisitChangeEvent: a
+    .model({
+      jobId: a.id().required(),
+      customerId: a.id().required(),
+      action: a.string().required(),
+      decision: a.string(),
+      actorSub: a.string(),
+      actorEmail: a.string().required(),
+      reason: a.string(),
+      policyUsed: a.string(),
+      amountCents: a.integer(),
+      disposition: a.string(),
+      refundStripeId: a.string(),
+      priorScheduledDate: a.string(),
+      newScheduledDate: a.string(),
+      communicationResult: a.string(),
+      effects: a.string(),
+      outcome: a.string().required(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [index("jobId").sortKeys(["occurredAt"])])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+    ]),
+
+  /**
    * Provision a Cognito login for staff (roles OWNER/OFFICE/FINANCE/TECH —
    * combinations are simply multiple roles) or a customer (roles
    * ["CUSTOMER"] + customerId). Optionally links a Technician record via
@@ -1658,6 +1698,67 @@ export const schema = a.schema({
     .authorization((allow) => [
       allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),
     ])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * GL-07 — the honest consequences of canceling or rescheduling ONE visit,
+   * computed server-side so the office confirmation shows exactly what will
+   * happen before the employee commits: customer and visit, amount paid/open,
+   * the policy deadline and the calculated refund/credit/fee, the plan
+   * consequence (canceling a visit never cancels the plan), the route
+   * consequence, and the exact notice that will be sent. Read-only; moves
+   * nothing. OWNER/OFFICE — the office does the work; FINANCE included so the
+   * money owner can review a disposition.
+   */
+  previewVisitChange: a
+    .query()
+    .arguments({ jobId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * GL-07 — cancel one visit as a single guided action. The decision is a plain
+   * business choice (CANCEL_REFUND, CANCEL_CREDIT, MANAGER_EXCEPTION); the server
+   * computes every amount from policy — staff never type one. One confirmation
+   * performs all approved consequences (refund or retained credit, void an open
+   * invoice, take the visit off its route, notify the customer) and records an
+   * immutable VisitChangeEvent. If a consequence fails it does NOT report success
+   * — it opens an owned exception with a safe resume and returns PARTIAL.
+   * MANAGER_EXCEPTION (waive the late-cancel fee) is owner-only, enforced in the
+   * handler. Canceling a visit never cancels the recurring plan.
+   */
+  cancelVisit: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      decision: a.string().required(),
+      reason: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmBilling)),
+
+  /**
+   * GL-07 — reschedule one visit as a single guided action: revalidate capacity
+   * and (when a technician is named) their license for the new date, move the
+   * visit and its route claim, and notify the customer with the old and new
+   * details. Records an immutable VisitChangeEvent; a notice failure is owned,
+   * never a false success. OWNER/OFFICE.
+   */
+  rescheduleVisit: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      scheduledDate: a.date(),
+      timeWindow: a.string(),
+      technicianId: a.string(),
+      routeId: a.string(),
+      routeOrder: a.integer(),
+      reason: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmBilling)),
 
   /**

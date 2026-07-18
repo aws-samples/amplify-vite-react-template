@@ -260,6 +260,120 @@ export function cancelPlanByCustomer(input: {
 }
 
 /**
+ * GL-07 — one safe office cancel/reschedule workflow. The preview computes every
+ * consequence server-side (amount paid/open, policy deadline, refund/credit/fee,
+ * plan and route effects, the exact notice); the office picks a plain decision
+ * and never types an amount.
+ */
+export type VisitCancellationPolicy = {
+  policyDeadline: string | null;
+  withinFreeWindow: boolean;
+  daysUntilVisit: number | null;
+  amountPaidCents: number;
+  refundableCents: number;
+  feeCents: number;
+  explanation: string;
+};
+
+export type VisitChangePreview = {
+  jobId: string;
+  customerId: string;
+  customerName: string;
+  customerEmail: string | null;
+  serviceType: string;
+  scheduledDate: string | null;
+  timeWindow: string | null;
+  status: string;
+  changeable: boolean;
+  alreadyCanceled: boolean;
+  amountPaidCents: number;
+  amountOpenCents: number;
+  policy: VisitCancellationPolicy;
+  decisions: {
+    reschedule: { available: boolean; description: string };
+    cancelRefund: { available: boolean; amountCents: number; description: string };
+    cancelCredit: { available: boolean; amountCents: number; description: string };
+    managerException: { ownerOnly: true; amountCents: number; description: string };
+  };
+  planConsequence: string;
+  routeConsequence: string;
+  noticePreview: string;
+};
+
+export type CancelDecision =
+  | "CANCEL_REFUND"
+  | "CANCEL_CREDIT"
+  | "MANAGER_EXCEPTION";
+
+export type VisitCancelOutcome = {
+  jobId: string;
+  action: "CANCEL";
+  decision: CancelDecision;
+  canceled: boolean;
+  alreadyCanceled: boolean;
+  disposition: "REFUND" | "CREDIT" | "FEE_RETAINED" | "NONE";
+  refundedCents: number;
+  creditCents: number;
+  invoiceVoided: boolean;
+  communicationResult: "SENT" | "FAILED" | "NO_EMAIL";
+  outcome: "COMPLETE" | "PARTIAL";
+  message: string;
+};
+
+export type VisitRescheduleOutcome = {
+  jobId: string;
+  action: "RESCHEDULE";
+  rescheduled: boolean;
+  priorScheduledDate: string | null;
+  newScheduledDate: string | null;
+  assignedToRoute: boolean;
+  communicationResult: "SENT" | "FAILED" | "NO_EMAIL";
+  outcome: "COMPLETE" | "PARTIAL";
+  message: string;
+};
+
+export function previewVisitChange(input: { jobId: string }): OpResult {
+  return (
+    api().queries as unknown as {
+      previewVisitChange: (i: typeof input) => OpResult;
+    }
+  ).previewVisitChange(input);
+}
+
+/** Cancel one visit as a single guided action — the server performs the refund/
+ *  credit, voids any open invoice, takes the visit off its route, and notifies
+ *  the customer, or opens an owned exception and reports PARTIAL. */
+export function cancelVisit(input: {
+  jobId: string;
+  decision: CancelDecision;
+  reason?: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      cancelVisit: (i: typeof input) => OpResult;
+    }
+  ).cancelVisit(input);
+}
+
+/** Reschedule one visit — revalidates capacity + technician license, moves the
+ *  route, and emails the customer old and new details. */
+export function rescheduleVisit(input: {
+  jobId: string;
+  scheduledDate?: string;
+  timeWindow?: string;
+  technicianId?: string;
+  routeId?: string;
+  routeOrder?: number;
+  reason?: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      rescheduleVisit: (i: typeof input) => OpResult;
+    }
+  ).rescheduleVisit(input);
+}
+
+/**
  * Claim ownership of a recovery item ("Assign to me") — sets ownerSub/
  * ownerEmail from the caller's identity on an Invoice or Dispute (R78).
  * OWNER/FINANCE/OFFICE.

@@ -5,9 +5,11 @@ import {
   dueDateForTerms,
   opResult,
   recordOfflinePayment,
+  rescheduleVisit,
   sendInvoicePaymentLink,
   settleInvoice,
   unwrap,
+  type VisitRescheduleOutcome,
   type Agreement,
   type Customer,
   type CustomerGroup,
@@ -46,6 +48,7 @@ import {
 } from "../ui/kit";
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
+import VisitCancelSheet from "../components/VisitCancelSheet";
 import DocButton from "../components/DocButton";
 import PriceLeadSheet from "../components/PriceLeadSheet";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
@@ -102,6 +105,7 @@ export default function CustomerDetail() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [groups, setGroups] = useState<CustomerGroup[]>([]);
   const [rescheduling, setRescheduling] = useState<Job | null>(null);
+  const [cancelingJob, setCancelingJob] = useState<Job | null>(null);
   const [packeting, setPacketing] = useState<Job | null>(null);
   const [pm, setPm] = useState<{ hasPaymentMethod: boolean; label: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -793,18 +797,7 @@ export default function CustomerDetail() {
                           <Button
                             small
                             variant="danger"
-                            loading={busyAction === `canceljob-${j.id}`}
-                            onClick={() => {
-                              if (!window.confirm("Cancel this job?")) return;
-                              void run(`canceljob-${j.id}`, async () =>
-                                opResult(
-                                  await api().mutations.updateJobSchedule({
-                                    jobId: j.id,
-                                    operation: "CANCEL",
-                                  })
-                                )
-                              );
-                            }}
+                            onClick={() => setCancelingJob(j)}
                           >
                             ✕
                           </Button>
@@ -1313,6 +1306,13 @@ export default function CustomerDetail() {
           />
         ) : null}
       </Sheet>
+
+      <VisitCancelSheet
+        jobId={cancelingJob?.id ?? null}
+        open={cancelingJob !== null}
+        onClose={() => setCancelingJob(null)}
+        onDone={() => void load()}
+      />
 
       <Sheet
         open={packeting !== null}
@@ -1991,6 +1991,7 @@ function RescheduleForm({
 }) {
   const [date, setDate] = useState(job.scheduledDate ?? "");
   const [timeWindow, setTimeWindow] = useState(job.timeWindow ?? "");
+  const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dateChanged = date !== (job.scheduledDate ?? "");
@@ -2009,6 +2010,12 @@ function RescheduleForm({
           re-routed for the new day.
         </p>
       ) : null}
+      <p className="muted small">
+        GL-07: the customer is emailed the old and new details when you save.
+      </p>
+      <Field label="Reason (optional)">
+        <input value={reason} onChange={(e) => setReason(e.target.value)} />
+      </Field>
       <ErrorNote error={error} />
       <Button
         block
@@ -2016,15 +2023,21 @@ function RescheduleForm({
         onClick={() => {
           setBusy(true);
           setError(null);
-          api()
-            .mutations.updateJobSchedule({
-              jobId: job.id,
-              operation: "RESCHEDULE",
-              scheduledDate: date || null,
-              timeWindow: timeWindow.trim() || null,
-            })
+          rescheduleVisit({
+            jobId: job.id,
+            scheduledDate: date || undefined,
+            timeWindow: timeWindow.trim() || undefined,
+            reason: reason.trim() || undefined,
+          })
             .then((res) => {
-              opResult(res);
+              const data = opResult<VisitRescheduleOutcome>(res);
+              // A rescheduled visit whose customer notice failed is owned, not a
+              // clean success — tell the office so they follow up.
+              if (data && data.outcome === "PARTIAL") {
+                throw new Error(
+                  "Rescheduled, but we couldn't email the customer — an operations task was opened to reach them."
+                );
+              }
               return onDone();
             })
             .catch((err) => {
