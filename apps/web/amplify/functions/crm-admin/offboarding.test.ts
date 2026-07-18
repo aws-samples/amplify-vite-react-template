@@ -19,6 +19,9 @@ process.env.AMPLIFY_AUTH_USERPOOL_ID = "pool-1";
 
 type Send = { type: string; input: Record<string, unknown> };
 const sends: Send[] = [];
+/** An ordered log of the Cognito commands and the technician-deactivation write,
+ *  so a test can prove access was revoked BEFORE any downstream data change. */
+const timeline: string[] = [];
 
 /** A Cognito user in the fake pool. */
 type PoolUser = {
@@ -66,9 +69,26 @@ vi.mock("@aws-sdk/client-cognito-identity-provider", () => {
     CognitoIdentityProviderClient: class {
       async send(c: { __type: string; input: Record<string, unknown> }) {
         sends.push({ type: c.__type, input: c.input });
+        timeline.push(c.__type);
         const username = c.input.Username as string;
         if (c.__type === "ListGroups") {
           return { Groups: groupsFor(username).map((g) => ({ GroupName: g })) };
+        }
+        if (c.__type === "AddToGroup" || c.__type === "RemoveFromGroup") {
+          // Apply the membership change to the fake pool so a later ListGroups —
+          // e.g. the effective-roles read-back after changeStaffRoles — sees the
+          // real end state, exactly as Cognito would.
+          const group = c.input.GroupName as string;
+          const u = pool.get(username);
+          if (c.__type === "AddToGroup") {
+            if (u) {
+              if (!u.groups.includes(group)) u.groups.push(group);
+            } else if (!userGroups.includes(group)) userGroups = [...userGroups, group];
+          } else {
+            if (u) u.groups = u.groups.filter((g) => g !== group);
+            else userGroups = userGroups.filter((g) => g !== group);
+          }
+          return {};
         }
         if (c.__type === "GetUser") {
           const u = pool.get(username);
@@ -155,6 +175,13 @@ type Job = {
 const customers = new Map<string, Customer>();
 const technicians = new Map<string, Technician>();
 const jobs = new Map<string, Job>();
+/** Rows written to the append-only staff-access ledger (StaffAccessEvent). */
+const staffAccessEvents: Record<string, unknown>[] = [];
+/** Owned-work rows opened via openOwnedWork — keyed by the deterministic id. */
+const workItems = new Map<string, Record<string, unknown>>();
+/** Force the technician-deactivation write to fail, so a test can drive the
+ *  fail-safe "access removed, downstream owned by a case" (PARTIAL) path. */
+let technicianUpdateThrows = false;
 
 const fakeDataClient = {
   models: {
@@ -168,6 +195,8 @@ const fakeDataClient = {
     Technician: {
       get: async ({ id }: { id: string }) => ({ data: technicians.get(id) ?? null }),
       update: async (patch: Partial<Technician> & { id: string }) => {
+        if (technicianUpdateThrows) throw new Error("Technician.update failed (injected)");
+        timeline.push("TechUpdate");
         technicians.set(patch.id, { ...technicians.get(patch.id)!, ...patch });
         return { data: technicians.get(patch.id) };
       },
@@ -186,6 +215,26 @@ const fakeDataClient = {
         jobs.set(patch.id, { ...jobs.get(patch.id)!, ...patch });
         return { data: jobs.get(patch.id) };
       },
+    },
+    StaffAccessEvent: {
+      create: async (row: Record<string, unknown>) => {
+        staffAccessEvents.push(row);
+        return { data: row };
+      },
+    },
+    WorkItem: {
+      get: async ({ id }: { id: string }) => ({ data: workItems.get(id) ?? null }),
+      create: async (row: Record<string, unknown>) => {
+        workItems.set(row.id as string, row);
+        return { data: row };
+      },
+      update: async (patch: Record<string, unknown> & { id: string }) => {
+        workItems.set(patch.id, { ...workItems.get(patch.id), ...patch });
+        return { data: workItems.get(patch.id) };
+      },
+    },
+    WorkEvent: {
+      create: async (row: Record<string, unknown>) => ({ data: row }),
     },
   },
 };
@@ -207,7 +256,12 @@ const call = (field: string, args: Record<string, unknown>) =>
   (handler as unknown as (e: unknown) => Promise<unknown>)({
     info: { fieldName: field },
     arguments: args,
-    identity: { sub: "owner-1", groups: ["OWNER"] },
+    identity: {
+      sub: "owner-1",
+      groups: ["OWNER"],
+      username: "owner@x.com",
+      claims: { email: "owner@x.com" },
+    },
   });
 
 const sentTypes = () => sends.map((s) => s.type);
@@ -217,11 +271,15 @@ const FUTURE_LICENSE = "2099-12-31";
 
 beforeEach(() => {
   sends.length = 0;
+  timeline.length = 0;
   userGroups = [];
   pool.clear();
   customers.clear();
   technicians.clear();
   jobs.clear();
+  staffAccessEvents.length = 0;
+  workItems.clear();
+  technicianUpdateThrows = false;
   notifyOffice.mockClear();
   sendEmail.mockClear();
 });
@@ -397,6 +455,36 @@ describe("changeStaffRoles (GL-14)", () => {
     })) as { removed: string[] };
     expect(res.removed).toContain("OWNER");
   });
+
+  it("records the reasoned change in the ledger with actor, prior/effective roles, and reports convergence", async () => {
+    pool.set("dana@x.com", {
+      username: "dana@x.com",
+      sub: "sub-dana",
+      email: "dana@x.com",
+      groups: ["OFFICE"],
+    });
+
+    const res = (await call("changeStaffRoles", {
+      email: "dana@x.com",
+      roles: ["OFFICE", "FINANCE"],
+      reason: "took over refunds",
+    })) as { effectiveRoles: string[]; converged: boolean };
+
+    // The end state is read back from Cognito, not assumed from the request.
+    expect(res.converged).toBe(true);
+    expect(res.effectiveRoles.sort()).toEqual(["FINANCE", "OFFICE"]);
+
+    expect(staffAccessEvents).toHaveLength(1);
+    expect(staffAccessEvents[0]).toMatchObject({
+      subjectEmail: "dana@x.com",
+      action: "CHANGE_ROLES",
+      actorEmail: "owner@x.com",
+      reason: "took over refunds",
+      priorRoles: "OFFICE",
+      outcome: "COMPLETE",
+    });
+    expect(staffAccessEvents[0].newRoles).toMatch(/FINANCE/);
+  });
 });
 
 describe("offboardStaff (GL-14)", () => {
@@ -495,6 +583,97 @@ describe("offboardStaff (GL-14)", () => {
     };
     expect(res.loginDisabled).toBe(true);
     expect(sentTypes()).toContain("Disable");
+  });
+
+  it("revokes access (disable + sign out) before any downstream technician change", async () => {
+    pool.set("marcus@buzzkill.com", {
+      username: "marcus@buzzkill.com",
+      sub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      groups: ["TECH"],
+    });
+    technicians.set("t1", {
+      id: "t1",
+      name: "Marcus",
+      active: true,
+      userSub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      licenseNumber: "APP-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+
+    await call("offboardStaff", { email: "marcus@buzzkill.com" });
+
+    // Access removal (Disable + SignOut) must land before the technician is
+    // flipped inactive — removing access is the security-critical step and can
+    // never wait on a downstream write.
+    const disableAt = timeline.indexOf("Disable");
+    const signOutAt = timeline.indexOf("SignOut");
+    const techUpdateAt = timeline.indexOf("TechUpdate");
+    expect(disableAt).toBeGreaterThanOrEqual(0);
+    expect(techUpdateAt).toBeGreaterThan(disableAt);
+    expect(techUpdateAt).toBeGreaterThan(signOutAt);
+  });
+
+  it("records the offboarding in the ledger with actor, reason, and effects", async () => {
+    pool.set("finance@x.com", {
+      username: "finance@x.com",
+      sub: "sub-fin",
+      email: "finance@x.com",
+      groups: ["FINANCE", "OFFICE"],
+    });
+
+    await call("offboardStaff", { email: "finance@x.com", reason: "left the company" });
+
+    expect(staffAccessEvents).toHaveLength(1);
+    expect(staffAccessEvents[0]).toMatchObject({
+      subjectEmail: "finance@x.com",
+      action: "OFFBOARD",
+      actorEmail: "owner@x.com",
+      reason: "left the company",
+      newRoles: undefined,
+      outcome: "COMPLETE",
+    });
+    expect(staffAccessEvents[0].effects).toMatch(/disabled and globally signed out/i);
+  });
+
+  it("on a partial downstream failure keeps access removed, opens an owned case, and reports PARTIAL without throwing", async () => {
+    pool.set("marcus@buzzkill.com", {
+      username: "marcus@buzzkill.com",
+      sub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      groups: ["TECH"],
+    });
+    technicians.set("t1", {
+      id: "t1",
+      name: "Marcus",
+      active: true,
+      userSub: "sub-marcus",
+      email: "marcus@buzzkill.com",
+      licenseNumber: "APP-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+    technicianUpdateThrows = true;
+
+    const res = (await call("offboardStaff", { email: "marcus@buzzkill.com" })) as {
+      loginDisabled: boolean;
+      outcome: string;
+      technicianDeactivated: boolean;
+    };
+
+    // Access was still removed — the fail-safe guarantee.
+    expect(res.loginDisabled).toBe(true);
+    expect(sentTypes()).toContain("Disable");
+    expect(sentTypes()).toContain("SignOut");
+    // But the downstream effect didn't finish, so it's PARTIAL, not a clean win.
+    expect(res.outcome).toBe("PARTIAL");
+    expect(res.technicianDeactivated).toBe(false);
+    // An owned OPS case with a safe resume was opened.
+    const staffCase = [...workItems.values()].find((w) => w.kind === "STAFF_OFFBOARD");
+    expect(staffCase).toBeDefined();
+    expect(String(staffCase!.resolutionAction)).toMatch(/re-run offboard/i);
+    // And the ledger records the partial outcome.
+    expect(staffAccessEvents[0]).toMatchObject({ action: "OFFBOARD", outcome: "PARTIAL" });
   });
 });
 

@@ -127,6 +127,11 @@ export const schema = a.schema({
     // service address. An after-the-fact on-site-presence review — the record is
     // never blocked and never waits on a manager.
     "LOCATION_REVIEW",
+    // GL-14: an offboarding revoked a staff member's access but a downstream
+    // effect (returning their future jobs to the pool, deactivating the
+    // technician) did not complete. Access is already gone — the resume action
+    // is a safe re-run of Offboard.
+    "STAFF_OFFBOARD",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -1078,6 +1083,45 @@ export const schema = a.schema({
     ]),
 
   /**
+   * The staff-access audit trail (GL-14). One immutable row per role change or
+   * offboarding — who did it, when, why, the effective staff roles it moved
+   * from and to, and a human-readable summary of the login/session, linked
+   * technician, and reassigned-work effects. This is the durable record a role
+   * change or departure starts from, so leadership can prove who changed access,
+   * why, and what work moved without engineering pulling Cognito logs.
+   *
+   * OWNER-read-only in the browser (staff access is an owner concern) and
+   * written only by a Lambda (shared/staffAccessLog) as IAM — an audit trail the
+   * audited party can edit is not one, and there is no delete: it is append-only,
+   * so an offboarded person stays visible in history after they leave the roster.
+   *
+   * Kept deliberately flat — action/outcome are strings, and the granular
+   * effects (login/session result, technician state, jobs reassigned, in-progress
+   * exceptions) are folded into `effects` exactly as CustomerLifecycleEvent folds
+   * its money/job/access effects — against a schema already near TypeScript's
+   * inference depth ceiling. Values today: action CHANGE_ROLES | OFFBOARD,
+   * outcome COMPLETE | PARTIAL.
+   */
+  StaffAccessEvent: a
+    .model({
+      subjectEmail: a.string().required(),
+      subjectSub: a.string(),
+      action: a.string().required(),
+      actorSub: a.string(),
+      actorEmail: a.string().required(),
+      reason: a.string(),
+      priorRoles: a.string(),
+      newRoles: a.string(),
+      effects: a.string(),
+      outcome: a.string().required(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [
+      index("subjectEmail").sortKeys(["occurredAt"]),
+    ])
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
+
+  /**
    * Provision a Cognito login for staff (roles OWNER/OFFICE/FINANCE/TECH —
    * combinations are simply multiple roles) or a customer (roles
    * ["CUSTOMER"] + customerId). Optionally links a Technician record via
@@ -1257,6 +1301,7 @@ export const schema = a.schema({
     .arguments({
       email: a.string().required(),
       roles: a.string().required().array().required(),
+      reason: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
@@ -1271,7 +1316,7 @@ export const schema = a.schema({
    */
   offboardStaff: a
     .mutation()
-    .arguments({ email: a.string().required() })
+    .arguments({ email: a.string().required(), reason: a.string() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),

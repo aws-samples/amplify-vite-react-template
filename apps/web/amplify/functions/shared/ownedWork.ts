@@ -12,7 +12,8 @@ export type WorkKind =
   | "PRICING_ESCALATION"
   | "MISSING_CONTACT"
   | "PAID_NOT_FINALIZED"
-  | "LOCATION_REVIEW";
+  | "LOCATION_REVIEW"
+  | "STAFF_OFFBOARD";
 
 export type WorkOwnerTeam = "OPS" | "SALES" | "FINANCE";
 
@@ -33,6 +34,11 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // record already stands — this is an after-the-fact presence review, never a
   // block — so it carries a routine clock.
   LOCATION_REVIEW: 24 * 60,
+  // Access was revoked, but a downstream offboarding effect (future-job
+  // reassignment or technician deactivation) did not complete. The person is
+  // already locked out (fail-safe), so the clock is operational, not the
+  // security-critical shortest one — the resume action is to re-run offboard.
+  STAFF_OFFBOARD: 4 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

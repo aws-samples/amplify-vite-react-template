@@ -201,6 +201,7 @@ function StaffActions({
 }) {
   const me = useRoles();
   const [choice, setChoice] = useState<RoleChoice>(choiceForRoles(row.roles));
+  const [reason, setReason] = useState("");
   const [busy, setBusy] = useState<null | "role" | "offboard">(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmOffboard, setConfirmOffboard] = useState(false);
@@ -213,8 +214,20 @@ function StaffActions({
       const res = await changeStaffRoles({
         email: row.email,
         roles: [...ROLE_CHOICES[choice].groups],
+        reason: reason.trim() || undefined,
       });
       if (res.errors?.length) throw new Error(res.errors[0].message);
+      // The server reads the effective roles back from Cognito and reports
+      // whether they converged on the request — surface a mismatch rather than
+      // a false success, so a group change that didn't take isn't hidden.
+      const data = opResult<{ converged?: boolean; effectiveRoles?: string[] }>(res);
+      if (data && data.converged === false) {
+        throw new Error(
+          `The role change didn't fully take — the login is now ${
+            (data.effectiveRoles ?? []).join(", ") || "no roles"
+          }. Try again; it will converge on the requested set.`
+        );
+      }
       await onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not change the role");
@@ -226,8 +239,20 @@ function StaffActions({
     setBusy("offboard");
     setError(null);
     try {
-      const res = await offboardStaff({ email: row.email });
+      const res = await offboardStaff({
+        email: row.email,
+        reason: reason.trim() || undefined,
+      });
       if (res.errors?.length) throw new Error(res.errors[0].message);
+      // A PARTIAL outcome means access was removed but a downstream effect
+      // (reassignment) is now owned by an OPS case — report that truthfully
+      // instead of a clean success.
+      const data = opResult<{ outcome?: string }>(res);
+      if (data && data.outcome === "PARTIAL") {
+        throw new Error(
+          "Access was removed, but returning their future jobs to the pool didn't finish — an operations case was opened. Re-run Offboard to complete the reassignment."
+        );
+      }
       await onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not offboard this person");
@@ -293,6 +318,16 @@ function StaffActions({
             </option>
           ))}
         </select>
+      </Field>
+      <Field
+        label="Reason"
+        hint="Recorded in the staff-access ledger with your name and the time — used for both a role change and offboarding."
+      >
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="e.g. promoted to office lead, or left the company"
+        />
       </Field>
       <Button
         block

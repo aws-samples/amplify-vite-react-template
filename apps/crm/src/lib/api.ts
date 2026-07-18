@@ -470,10 +470,12 @@ export function staffRoster(): OpResult {
 }
 
 /** Set a staff login's role set to exactly `roles`. Server enforces the
- *  last-owner and technician-linkage rules. */
+ *  last-owner and technician-linkage rules, reads the effective roles back, and
+ *  records the reasoned change in the staff-access ledger. */
 export function changeStaffRoles(input: {
   email: string;
   roles: string[];
+  reason?: string;
 }): OpResult {
   return (
     api().mutations as unknown as {
@@ -483,8 +485,13 @@ export function changeStaffRoles(input: {
 }
 
 /** Offboard a staff member: disable + sign out, remove groups, reassign a
- *  linked technician's future work. Server refuses the last usable owner. */
-export function offboardStaff(input: { email: string }): OpResult {
+ *  linked technician's future work. Server refuses the last usable owner,
+ *  opens an owned case on any partial result, and records the departure in the
+ *  staff-access ledger. */
+export function offboardStaff(input: {
+  email: string;
+  reason?: string;
+}): OpResult {
   return (
     api().mutations as unknown as {
       offboardStaff: (i: typeof input) => OpResult;
