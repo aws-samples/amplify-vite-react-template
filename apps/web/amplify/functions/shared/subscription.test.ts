@@ -79,6 +79,12 @@ vi.mock("./email", () => ({
     (notifyOffice as unknown as (...a: unknown[]) => Promise<boolean>)(...args),
 }));
 
+const openOwnedWork = vi.fn(async () => "work-1");
+vi.mock("./ownedWork", () => ({
+  openOwnedWork: (...args: unknown[]) =>
+    (openOwnedWork as unknown as (...a: unknown[]) => Promise<string | null>)(...args),
+}));
+
 const { startPlanBilling, cancelPlanBilling, cancelQueuedPlanVisits } =
   await import("./subscription");
 
@@ -132,6 +138,7 @@ beforeEach(() => {
     return { data: jobs.get(patch.id) ?? null };
   };
   notifyOffice.mockClear();
+  openOwnedWork.mockClear();
   customers.set("c1", {
     id: "c1",
     displayName: "Dana Whitlock",
@@ -452,6 +459,14 @@ describe("cancelPlanBilling resolves the queued visits", () => {
     expect(notifyOffice).toHaveBeenCalledOnce();
     const [alert] = notifyOffice.mock.calls[0] as unknown as [{ subject: string }];
     expect(alert.subject).toMatch(/ACTION REQUIRED/);
+    // GL-08 R2: the failed removal is durable owned work, not just an email.
+    expect(openOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "PAID_VISIT_CANCELLATION",
+        dedupeKey: "plan-cancel-visit:j1",
+        ownerTeam: "OPS",
+      })
+    );
   });
 
   it("pages the office when the schedule cannot be checked at all", async () => {

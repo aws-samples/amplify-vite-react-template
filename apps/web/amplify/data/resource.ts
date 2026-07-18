@@ -455,6 +455,18 @@ export const schema = a.schema({
     })
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
 
+  // GL-08: the durable, single-winner claim for a customer plan cancellation
+  // (id = servicePlanId). An atomic create is taken BEFORE the Stripe call, so
+  // two concurrent "cancel" clicks cannot both drive a cancel, and the request
+  // is durably recorded before the provider is touched. Same shape/role as
+  // BookingFinalization — Lambda-written under IAM; browser read/delete only.
+  PlanCancellationClaim: a
+    .model({
+      note: a.string(),
+      requestedAt: a.datetime(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
+
   // Best-effort per-IP throttle for the public quote endpoint (id =
   // "<ip>#<hour>"). Not a hard lock — it exists so a single abusive source
   // can't spin billed AI research and Routes calls unbounded.

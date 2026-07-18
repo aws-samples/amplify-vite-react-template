@@ -232,6 +232,24 @@ export type CustomerCancelOutcome =
  * truthful in-progress state, never a false success and never a bare error that
  * hides that we already know they asked.
  */
+/**
+ * GL-08 R1 — the truthful pending message. Billing may still be live, so it must
+ * NOT promise "you won't be charged again": it states the in-flight status, what
+ * happens if a charge posts before we finish, and when the customer will hear.
+ */
+const PENDING_CANCEL_MESSAGE =
+  "We've received your cancellation and we're finishing it now. Your plan is still active until we complete it, so if a scheduled charge happens to post in the meantime, we'll refund it. Our team finishes this and emails your confirmation, usually within one business day. Nothing more is needed from you.";
+
+const alreadyCanceledOutcome = (): CustomerCancelOutcome => ({
+  status: "CANCELED",
+  alreadyCanceled: true,
+  stripeSubscriptionCanceled: false,
+  visitsStopped: 0,
+  visitsRemaining: 0,
+  confirmationEmailed: false,
+  message: "This plan is already canceled.",
+});
+
 export async function cancelPlanForCustomer(
   stripe: Stripe,
   servicePlanId: string,
@@ -247,16 +265,56 @@ export async function cancelPlanForCustomer(
 
   // Duplicate-click / already-done: a second confirm on a plan that is already
   // canceled is a no-op success, not an error and not a second Stripe call.
-  if (plan.status === "CANCELED") {
-    return {
-      status: "CANCELED",
-      alreadyCanceled: true,
-      stripeSubscriptionCanceled: false,
-      visitsStopped: 0,
-      visitsRemaining: 0,
-      confirmationEmailed: false,
-      message: "This plan is already canceled.",
-    };
+  if (plan.status === "CANCELED") return alreadyCanceledOutcome();
+
+  const requestedAt = new Date().toISOString();
+
+  // GL-08 R5: single-winner claim taken BEFORE any provider call. `create` is
+  // conditional on the id (= plan id) not existing, so two simultaneous confirm
+  // clicks cannot both drive a cancel — the loser reports the truthful in-flight
+  // state instead of firing a second Stripe cancel and a second confirmation.
+  const { data: claim } = await client.models.PlanCancellationClaim.create({
+    id: servicePlanId,
+    requestedAt,
+    note: reason ?? undefined,
+  });
+  if (!claim) {
+    const { data: current } = await client.models.ServicePlan.get({
+      id: servicePlanId,
+    });
+    return current?.status === "CANCELED"
+      ? alreadyCanceledOutcome()
+      : { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
+  }
+
+  // Close the tiny window where another request flipped the plan CANCELED
+  // between our first read and taking the claim.
+  const { data: afterClaim } = await client.models.ServicePlan.get({
+    id: servicePlanId,
+  });
+  if (afterClaim?.status === "CANCELED") {
+    await client.models.PlanCancellationClaim.delete({ id: servicePlanId }).catch(
+      () => undefined
+    );
+    return alreadyCanceledOutcome();
+  }
+
+  // GL-08 R4: record the instruction durably BEFORE touching the provider. If the
+  // process dies between the Stripe cancel and the CRM transition, the plan still
+  // shows cancellationPending and the claim still exists — a visible, recoverable
+  // state, never a silently lost instruction.
+  try {
+    await client.models.ServicePlan.update({
+      id: servicePlanId,
+      cancellationPending: true,
+      cancellationRequestedAt: requestedAt,
+      cancellationReason: reason ?? undefined,
+    });
+  } catch (flagErr) {
+    console.error(
+      `cancelPlanForCustomer: could not pre-record pending cancel on ${servicePlanId}`,
+      flagErr
+    );
   }
 
   let result: {
@@ -266,32 +324,18 @@ export async function cancelPlanForCustomer(
   try {
     result = await cancelPlanBilling(stripe, servicePlanId);
   } catch (err) {
-    // Billing is still live and the plan is still ACTIVE. Do not say canceled.
-    const requestedAt = new Date().toISOString();
+    // Provider unreachable, or (R3) the CRM transition did not persist: billing
+    // may still be live and the plan still ACTIVE. Do not say canceled. The
+    // instruction is already recorded above; open the durable recovery case, page
+    // the office, release the claim so a retry can resume, and return PENDING.
     const message = err instanceof Error ? err.message : String(err);
     console.error(`cancelPlanForCustomer failed for plan ${servicePlanId}`, err);
-
-    try {
-      await client.models.ServicePlan.update({
-        id: servicePlanId,
-        cancellationPending: true,
-        cancellationRequestedAt: requestedAt,
-        cancellationReason: reason ?? undefined,
-      });
-    } catch (flagErr) {
-      // The flag is a nicety; the owned exception below is the durable record
-      // that guarantees a human finishes this. Never let the flag write mask it.
-      console.error(
-        `cancelPlanForCustomer: could not flag pending cancel on ${servicePlanId}`,
-        flagErr
-      );
-    }
 
     await openOwnedWork({
       kind: "PORTAL_FAILURE",
       dedupeKey: `plan-cancel:${servicePlanId}`,
       title: `Finish a customer's plan cancellation: ${plan.planName}`,
-      detail: `A customer confirmed canceling plan ${servicePlanId} (${plan.planName}) in the portal on ${requestedAt}, but the cancellation could not be completed: ${message}. Billing is still live and the plan is still ACTIVE.${reason ? ` Reason they gave: "${reason}".` : ""}`,
+      detail: `A customer confirmed canceling plan ${servicePlanId} (${plan.planName}) in the portal on ${requestedAt}, but the cancellation could not be completed: ${message}. Billing may still be live and the plan may still be ACTIVE.${reason ? ` Reason they gave: "${reason}".` : ""}`,
       customerId: plan.customerId,
       relatedId: servicePlanId,
       sourceUrl: `/customers/${plan.customerId}`,
@@ -310,25 +354,26 @@ export async function cancelPlanForCustomer(
       template: "ops-plan-cancel-failed",
       customerId: plan.customerId,
       relatedId: servicePlanId,
-      bodyHtml: `<p><strong>${name}</strong> confirmed canceling their plan <strong>${plan.planName}</strong> in the portal, but it did not go through. <strong>The plan is still ACTIVE and the card is still on subscription.</strong></p>
+      bodyHtml: `<p><strong>${name}</strong> confirmed canceling their plan <strong>${plan.planName}</strong> in the portal, but it did not go through. <strong>The plan may still be ACTIVE and the card still on subscription.</strong></p>
          <p><strong>Cancel it by hand now</strong> — they have been told we're finishing it, and another monthly charge must not post.</p>
          <p style="color:#666;font-size:13px;">Plan: ${servicePlanId}<br/>Error: ${message}</p>`,
     });
 
-    return {
-      status: "PENDING",
-      requestedAt,
-      message:
-        "We've recorded your cancellation and we're finishing it now. You won't be charged again — if anything needs a moment on our side, our team completes it and emails you. Nothing more is needed from you.",
-    };
+    // Release the claim so the customer's own retry (or the office recovery) can
+    // resume — cancelPlanBilling is idempotent, so resuming is safe.
+    await client.models.PlanCancellationClaim.delete({ id: servicePlanId }).catch(
+      () => undefined
+    );
+
+    return { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
   }
 
-  // Canceled for real. Stamp the reason and clear any earlier pending flag.
+  // Canceled for real. Clear the pending flag and stamp the reason.
   try {
     await client.models.ServicePlan.update({
       id: servicePlanId,
       cancellationPending: false,
-      cancellationRequestedAt: new Date().toISOString(),
+      cancellationRequestedAt: requestedAt,
       cancellationReason: reason ?? undefined,
     });
   } catch (stampErr) {
@@ -339,15 +384,32 @@ export async function cancelPlanForCustomer(
   }
 
   const visitsStopped = result.queuedVisits.canceled.length;
-  const visitsRemaining =
-    result.queuedVisits.needsDecision.length +
-    result.queuedVisits.failed.length;
+  const failedCount = result.queuedVisits.failed.length;
+  const needsDecisionCount = result.queuedVisits.needsDecision.length;
+  const visitsRemaining = needsDecisionCount + failedCount;
 
   const confirmationEmailed = await sendCancellationConfirmation(
     plan.customerId,
     plan.planName,
     result.queuedVisits
   );
+
+  await client.models.PlanCancellationClaim.delete({ id: servicePlanId }).catch(
+    () => undefined
+  );
+
+  // GL-08 R2/R6: claim "visits stopped" only when every cancelable visit actually
+  // came off (none failed), and "emailed" only when the confirmation truly sent.
+  let message = "Your plan is canceled and you won't be billed again.";
+  message +=
+    failedCount === 0
+      ? " Your recurring visits have stopped."
+      : ` Most of your recurring visits have stopped; ${failedCount} still need our team to take off the schedule, and we're on it.`;
+  if (needsDecisionCount > 0) {
+    message +=
+      " A visit you'd already paid for stays on our books — we'll be in touch to keep it or refund it, your choice.";
+  }
+  if (confirmationEmailed) message += " We've emailed you a confirmation.";
 
   return {
     status: "CANCELED",
@@ -356,8 +418,7 @@ export async function cancelPlanForCustomer(
     visitsStopped,
     visitsRemaining,
     confirmationEmailed,
-    message:
-      "Your plan is canceled. You won't be billed again and your recurring visits have stopped. We've emailed you a confirmation.",
+    message,
   };
 }
 

@@ -353,12 +353,25 @@ export async function cancelPlanBilling(
     }
   }
 
-  await client.models.ServicePlan.update({
-    id: servicePlanId,
-    status: "CANCELED",
-    stripeSubscriptionId: null,
-    canceledAt: new Date().toISOString(),
-  });
+  // GL-08 R3: the plan is "canceled" only after BOTH the provider stop AND this
+  // CRM transition are confirmed written. If the record does not flip, do NOT
+  // report success — throw so the caller resumes. It is safe to resume: Stripe
+  // is already canceled, so a retry reads resource_missing as success and only
+  // re-attempts this write.
+  const { data: canceledPlan, errors: cancelErrors } =
+    await client.models.ServicePlan.update({
+      id: servicePlanId,
+      status: "CANCELED",
+      stripeSubscriptionId: null,
+      canceledAt: new Date().toISOString(),
+    });
+  if (!canceledPlan) {
+    throw new Error(
+      `Stripe subscription for plan ${servicePlanId} was canceled, but the plan record did not update: ${
+        cancelErrors?.map((e) => e.message).join("; ") ?? "unknown error"
+      }`
+    );
+  }
 
   // The billing is stopped; now stop the trucks. Nothing past this point may
   // throw — the cancellation is real, and a caller (the customer-facing
@@ -394,6 +407,39 @@ export async function cancelPlanBilling(
       }.</p>
          <p><strong>Open the Schedule and cancel this customer's queued visits by hand.</strong> Anything left will dispatch a technician for a visit nobody is paying for.</p>`,
     });
+
+    // GL-08 R2: a failed schedule write is durable owned work, not just an email
+    // that can be missed — one item per stranded visit, closable only once the
+    // visit is actually off the schedule (its GL-18 verifier checks the job is
+    // canceled). A visit the schedule could not even be read is owned per plan.
+    for (const v of queuedVisits?.failed ?? []) {
+      await openOwnedWork({
+        kind: "PAID_VISIT_CANCELLATION",
+        dedupeKey: `plan-cancel-visit:${v.jobId}`,
+        title: `Take a visit off a canceled plan: ${name}`,
+        detail: `Plan ${plan.planName} (${servicePlanId}) was canceled, but queued visit ${v.jobId}${v.scheduledDate ? ` on ${v.scheduledDate}` : ""} could not be removed from the schedule automatically. Until it is, a technician could be dispatched for a visit nobody is paying for.`,
+        customerId: plan.customerId,
+        relatedId: v.jobId,
+        sourceUrl: `/customers/${plan.customerId}`,
+        resolutionAction:
+          "Cancel or reassign this visit on the Schedule board. If the customer had paid for it, refund or keep it per their wishes.",
+        ownerTeam: "OPS",
+      });
+    }
+    if (!queuedVisits) {
+      await openOwnedWork({
+        kind: "PAID_VISIT_CANCELLATION",
+        dedupeKey: `plan-cancel-visits:${servicePlanId}`,
+        title: `Check a canceled plan's visits by hand: ${name}`,
+        detail: `Plan ${plan.planName} (${servicePlanId}) was canceled, but its queued visits could not be read to take them off the schedule. Any left will dispatch a technician for a visit nobody is paying for.`,
+        customerId: plan.customerId,
+        relatedId: servicePlanId,
+        sourceUrl: `/customers/${plan.customerId}`,
+        resolutionAction:
+          "Open the Schedule for this customer and cancel any visits still queued on the canceled plan.",
+        ownerTeam: "OPS",
+      });
+    }
   }
 
   return {

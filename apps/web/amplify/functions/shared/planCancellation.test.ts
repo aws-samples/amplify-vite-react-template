@@ -44,6 +44,7 @@ type Invoice = {
 const plans = new Map<string, Plan>();
 const jobs = new Map<string, Job>();
 const invoices = new Map<string, Invoice>();
+const claims = new Map<string, Record<string, unknown>>();
 const customers = new Map<
   string,
   { id: string; displayName: string; email?: string | null }
@@ -56,6 +57,20 @@ const fakeDataClient = {
       update: async (patch: Partial<Plan> & { id: string }) => {
         plans.set(patch.id, { ...plans.get(patch.id)!, ...patch });
         return { data: plans.get(patch.id) };
+      },
+    },
+    // Atomic claim: create fails (returns null) if the id already exists — the
+    // single-winner guard the wrapper relies on for concurrent clicks (R5).
+    PlanCancellationClaim: {
+      create: async (input: { id: string } & Record<string, unknown>) => {
+        if (claims.has(input.id)) return { data: null };
+        claims.set(input.id, input);
+        return { data: input };
+      },
+      delete: async ({ id }: { id: string }) => {
+        const existed = claims.get(id) ?? null;
+        claims.delete(id);
+        return { data: existed };
       },
     },
     Job: {
@@ -142,6 +157,7 @@ beforeEach(() => {
   plans.clear();
   jobs.clear();
   invoices.clear();
+  claims.clear();
   customers.clear();
   notifyOffice.mockClear();
   sendEmail.mockClear();
@@ -314,7 +330,11 @@ describe("cancelPlanForCustomer — provider/API failure", () => {
 
     expect(out.status).toBe("PENDING");
     if (out.status !== "PENDING") throw new Error("unreachable");
-    expect(out.message).toMatch(/won't be charged again/i);
+    // GL-08 R1: truthful pending copy — the plan is still active, a charge that
+    // posts gets refunded. It must NOT falsely promise "won't be charged again".
+    expect(out.message).toMatch(/still active/i);
+    expect(out.message).toMatch(/refund it/i);
+    expect(out.message).not.toMatch(/won't be charged again/i);
 
     // The plan is still ACTIVE — the customer is not told a false "canceled".
     expect(plans.get("p1")?.status).toBe("ACTIVE");
@@ -331,5 +351,48 @@ describe("cancelPlanForCustomer — provider/API failure", () => {
     expect(notifyOffice).toHaveBeenCalledOnce();
     // No false confirmation email on a failed cancel.
     expect(sendEmail).not.toHaveBeenCalled();
+    // The claim is released so a retry (or the office recovery) can resume.
+    expect(claims.has("p1")).toBe(false);
+  });
+});
+
+describe("cancelPlanForCustomer — GL-08 durability & honesty", () => {
+  it("a concurrent click that loses the claim returns PENDING, not a second cancel", async () => {
+    // Simulate a live in-flight cancel already holding the claim.
+    claims.set("p1", { id: "p1" });
+    const out = await cancelPlanForCustomer(stripe, "p1", {});
+    expect(out.status).toBe("PENDING");
+    // No second Stripe cancel and no second confirmation email fired.
+    expect(cancelPlanBilling).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("clears the claim on success so the plan is not wedged", async () => {
+    const out = await cancelPlanForCustomer(stripe, "p1", {});
+    expect(out.status).toBe("CANCELED");
+    expect(claims.has("p1")).toBe(false);
+  });
+
+  it("says visits stopped only when none failed to come off (R2)", async () => {
+    cancelPlanBilling.mockResolvedValue({
+      stripeSubscriptionCanceled: true,
+      queuedVisits: resolution({
+        canceled: [{ jobId: "j1", scheduledDate: null }],
+        failed: [{ jobId: "j2", scheduledDate: "2026-08-01" }],
+      }),
+    });
+    const out = await cancelPlanForCustomer(stripe, "p1", {});
+    if (out.status !== "CANCELED") throw new Error("unreachable");
+    expect(out.message).not.toMatch(/your recurring visits have stopped\./i);
+    expect(out.message).toMatch(/still need our team/i);
+    expect(out.visitsRemaining).toBe(1);
+  });
+
+  it("claims 'emailed' only when the confirmation actually sent (R6)", async () => {
+    customers.set("c1", { id: "c1", displayName: "Dana Whitlock", email: null });
+    const out = await cancelPlanForCustomer(stripe, "p1", {});
+    if (out.status !== "CANCELED") throw new Error("unreachable");
+    expect(out.confirmationEmailed).toBe(false);
+    expect(out.message).not.toMatch(/emailed/i);
   });
 });
