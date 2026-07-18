@@ -1562,7 +1562,12 @@ export const schema = a.schema({
    */
   deactivateTechnician: a
     .mutation()
-    .arguments({ technicianId: a.string().required() })
+    // GL-14 R2: an optional controlled reason (defaults to ROLE_ENDED). A tech
+    // with a login is routed through the hardened offboard workflow.
+    .arguments({
+      technicianId: a.string().required(),
+      reasonCode: a.string(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),

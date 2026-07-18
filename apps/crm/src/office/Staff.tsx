@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   changeStaffRoles,
+  listAll,
   listStaffAccessEvents,
   offboardStaff,
   opResult,
@@ -224,10 +225,11 @@ function AccessHistory() {
   const [query, setQuery] = useState("");
 
   useEffect(() => {
-    listStaffAccessEvents({ limit: 500 })
-      .then((res) => {
-        if (res.errors?.length) throw new Error(res.errors[0].message);
-        const rows = [...res.data].sort((a, b) =>
+    // GL-14 R7: page the ENTIRE immutable ledger, not just the first 500 rows,
+    // so search and export cover the complete access history.
+    listAll((t) => listStaffAccessEvents({ limit: 1000, nextToken: t }))
+      .then((all) => {
+        const rows = [...all].sort((a, b) =>
           String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
         );
         setEvents(rows);

@@ -246,25 +246,27 @@ export async function resolveOwnedWork(input: {
 }
 
 /**
- * GL-18 — return every OPEN exception a departing person had claimed to its team
- * inbox, so no required action stays owned by someone who has been offboarded.
- * Called from the offboarding flow after access is revoked. Best-effort and
- * never throws into the caller: the person is already locked out, so a failure
- * here leaves the work owned-by-a-departed-person (visible, not lost) rather
- * than breaking the offboard. Each release appends an immutable RELEASED event.
+ * GL-18 / GL-14 — return every OPEN exception a departing person had claimed to
+ * its team inbox, so no required action stays owned by someone who has been
+ * offboarded. Called from the offboarding flow after access is revoked. It never
+ * throws into the caller (the person is already locked out), but it now REPORTS
+ * failures: `failed > 0` means some claim could not be moved, so the offboard
+ * owns it and does not report COMPLETE (GL-14 R5). Each release appends an
+ * immutable RELEASED event.
  */
 export async function releaseOwnedWorkForSub(input: {
   sub: string;
   reason: string;
   actorEmail?: string | null;
-}): Promise<number> {
-  if (!input.sub) return 0;
+}): Promise<{ released: number; failed: number }> {
+  let released = 0;
+  let failed = 0;
+  if (!input.sub) return { released, failed };
   try {
     const client = await dataClient();
     if (!("WorkItem" in client.models) || !("WorkEvent" in client.models)) {
-      return 0;
+      return { released, failed };
     }
-    let released = 0;
     let token: string | undefined;
     do {
       const page = await client.models.WorkItem.list({
@@ -282,7 +284,10 @@ export async function releaseOwnedWorkForSub(input: {
           ownerSub: null,
           ownerEmail: defaultWorkOwner(team),
         });
-        if (!updated) continue;
+        if (!updated) {
+          failed++;
+          continue;
+        }
         await client.models.WorkEvent.create({
           workItemId: item.id,
           eventType: "RELEASED",
@@ -294,11 +299,11 @@ export async function releaseOwnedWorkForSub(input: {
       }
       token = page.nextToken ?? undefined;
     } while (token);
-    return released;
   } catch (err) {
     console.error("releaseOwnedWorkForSub failed", input.sub, err);
-    return 0;
+    failed++;
   }
+  return { released, failed };
 }
 
 export async function openMissingContactWork(input: {

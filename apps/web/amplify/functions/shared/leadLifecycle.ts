@@ -300,6 +300,61 @@ export async function setLeadDisposition(
   return { ok: true, disposition: args.disposition };
 }
 
+/**
+ * GL-14 R6 — hand a departing person's open leads back to the Sales team queue
+ * so no later stale-lead sweep routes revenue work to someone who has left.
+ * Clears the lead's owner (unassigned → SALES team inbox) and records the
+ * handover in the activity ledger. Never throws into the offboard; reports
+ * `failed > 0` so a partial handover is owned and re-runnable.
+ */
+export async function reassignLeadsForSub(input: {
+  sub: string;
+  actorEmail?: string | null;
+}): Promise<{ reassigned: number; failed: number }> {
+  let reassigned = 0;
+  let failed = 0;
+  if (!input.sub) return { reassigned, failed };
+  try {
+    const client = await dataClient();
+    if (!("Customer" in client.models)) return { reassigned, failed };
+    let token: string | undefined;
+    do {
+      const page =
+        await client.models.Customer.listCustomerByStatusAndDisplayName(
+          { status: "LEAD" },
+          { limit: 200, nextToken: token }
+        );
+      for (const lead of page.data ?? []) {
+        if ((lead as { leadOwnerSub?: string | null }).leadOwnerSub !== input.sub) {
+          continue;
+        }
+        const { data: updated } = await client.models.Customer.update({
+          id: lead.id,
+          leadOwnerSub: null,
+          leadOwnerEmail: null,
+        });
+        if (!updated) {
+          failed++;
+          continue;
+        }
+        await appendLeadActivity({
+          customerId: lead.id,
+          channel: "LIFECYCLE",
+          outcome: "NOTE",
+          note: "Lead owner was offboarded — returned to the Sales team queue.",
+          actor: { sub: null, email: input.actorEmail ?? null },
+        });
+        reassigned++;
+      }
+      token = page.nextToken ?? undefined;
+    } while (token);
+  } catch (err) {
+    console.error("reassignLeadsForSub failed", input.sub, err);
+    failed++;
+  }
+  return { reassigned, failed };
+}
+
 export async function assignLeadOwner(
   args: { customerId: string; toSub?: string | null; toEmail?: string | null },
   actor: LeadActor

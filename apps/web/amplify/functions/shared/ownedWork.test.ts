@@ -173,7 +173,7 @@ describe("releasing owned work on offboarding (GL-18)", () => {
       actorEmail: "owner@example.com",
     });
 
-    expect(released).toBe(1);
+    expect(released).toMatchObject({ released: 1, failed: 0 });
     // Only the leaver's OPEN item moved back to the inbox; unclaimed.
     expect(rows.find((r) => r.id === "w-1")).toMatchObject({
       ownerSub: null,
@@ -188,6 +188,8 @@ describe("releasing owned work on offboarding (GL-18)", () => {
   });
 
   it("is a no-op with no sub and never throws", async () => {
-    await expect(releaseOwnedWorkForSub({ sub: "", reason: "x" })).resolves.toBe(0);
+    await expect(
+      releaseOwnedWorkForSub({ sub: "", reason: "x" })
+    ).resolves.toMatchObject({ released: 0, failed: 0 });
   });
 });

@@ -201,6 +201,17 @@ const fakeDataClient = {
         customers.set(patch.id, { ...customers.get(patch.id)!, ...patch });
         return { data: customers.get(patch.id) };
       },
+      // GL-14 R6: the offboard reassigns the departing person's leads.
+      listCustomerByStatusAndDisplayName: async ({
+        status,
+      }: {
+        status: string;
+      }) => ({
+        data: [...customers.values()].filter(
+          (c) => (c as { status?: string }).status === status
+        ),
+        nextToken: null,
+      }),
     },
     Technician: {
       get: async ({ id }: { id: string }) => ({ data: technicians.get(id) ?? null }),
@@ -250,6 +261,21 @@ const fakeDataClient = {
         workItems.set(patch.id, { ...workItems.get(patch.id), ...patch });
         return { data: workItems.get(patch.id) };
       },
+      // GL-14 R5: the offboard releases claimed exceptions owned by the departing
+      // person; the release lists OPEN items filtered by ownerSub.
+      list: async ({
+        filter,
+      }: {
+        filter?: { status?: { eq?: string }; ownerSub?: { eq?: string } };
+      } = {}) => ({
+        data: [...workItems.values()].filter(
+          (w) =>
+            (filter?.status?.eq === undefined || w.status === filter.status.eq) &&
+            (filter?.ownerSub?.eq === undefined ||
+              w.ownerSub === filter.ownerSub.eq)
+        ),
+        nextToken: null,
+      }),
     },
     WorkEvent: {
       create: async (row: Record<string, unknown>) => ({ data: row }),
@@ -1066,6 +1092,14 @@ describe("deactivateTechnician", () => {
       email: "marcus@buzzkill.com",
       active: true,
       userSub: "sub-tech-1",
+    });
+    // GL-14 R2: a tech with a login is now offboarded through the ONE hardened
+    // workflow, so the login must resolve in the Cognito pool.
+    pool.set("marcus@buzzkill.com", {
+      username: "marcus@buzzkill.com",
+      sub: "sub-tech-1",
+      email: "marcus@buzzkill.com",
+      groups: ["TECH"],
     });
   });
 

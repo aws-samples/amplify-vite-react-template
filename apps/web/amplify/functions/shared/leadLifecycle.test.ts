@@ -33,6 +33,14 @@ vi.mock("./dataClient", () => ({
           return { data: row };
         },
         get: async ({ id }: { id: string }) => ({ data: customers.get(id) ?? null }),
+        listCustomerByStatusAndDisplayName: async ({
+          status,
+        }: {
+          status: string;
+        }) => ({
+          data: [...customers.values()].filter((c) => c.status === status),
+          nextToken: null,
+        }),
       },
       LeadActivity: {
         create: async (input: Record<string, unknown>) => {
@@ -60,6 +68,7 @@ const {
   logLeadTouch,
   setLeadDisposition,
   assignLeadOwner,
+  reassignLeadsForSub,
 } = await import("./leadLifecycle");
 
 const actor = { sub: "sub-1", email: "olga@example.com" };
@@ -180,6 +189,32 @@ describe("assignLeadOwner", () => {
     expect(customers.get("l1")).toMatchObject({
       leadOwnerSub: "sub-1",
       leadOwnerEmail: "olga@example.com",
+    });
+  });
+});
+
+describe("reassignLeadsForSub (GL-14 R6)", () => {
+  it("returns a departing person's open leads to the team, leaving others alone", async () => {
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "A", leadOwnerSub: "leaver" });
+    customers.set("l2", { id: "l2", status: "LEAD", displayName: "B", leadOwnerSub: "someone-else" });
+    customers.set("l3", { id: "l3", status: "ACTIVE", displayName: "C", leadOwnerSub: "leaver" });
+
+    const res = await reassignLeadsForSub({ sub: "leaver", actorEmail: "owner@example.com" });
+
+    expect(res).toMatchObject({ reassigned: 1, failed: 0 });
+    // The leaver's open lead is unassigned (→ Sales team queue).
+    expect(customers.get("l1")).toMatchObject({ leadOwnerSub: null, leadOwnerEmail: null });
+    // A peer's lead and a converted (ACTIVE) record are untouched.
+    expect(customers.get("l2")).toMatchObject({ leadOwnerSub: "someone-else" });
+    expect(customers.get("l3")).toMatchObject({ leadOwnerSub: "leaver" });
+    // The handover is recorded in the activity ledger.
+    expect(activities.some((a) => String(a.note).includes("offboarded"))).toBe(true);
+  });
+
+  it("is a no-op with no sub", async () => {
+    await expect(reassignLeadsForSub({ sub: "" })).resolves.toMatchObject({
+      reassigned: 0,
+      failed: 0,
     });
   });
 });

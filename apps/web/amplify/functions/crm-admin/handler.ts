@@ -38,6 +38,7 @@ import {
   assignLeadOwner,
   createLead,
   logLeadTouch,
+  reassignLeadsForSub,
   setLeadDisposition,
 } from "../shared/leadLifecycle";
 import { recordCustomerLifecycleEvent } from "../shared/lifecycleLog";
@@ -212,7 +213,9 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
       });
     case "deactivateTechnician":
       return deactivateTechnician(
-        (event.arguments as TechnicianIdArgs).technicianId
+        (event.arguments as TechnicianIdArgs).technicianId,
+        { sub: callerSub(event.identity), email: callerEmail(event.identity) },
+        (event.arguments as { reasonCode?: string }).reasonCode ?? null
       );
     case "saveTechnician":
       return saveTechnician(event.arguments as SaveTechnicianArgs);
@@ -931,42 +934,72 @@ async function notifyOffboard(opts: {
  * OWNER-only (enforced at the schema). Idempotent — a re-run finds no assigned
  * future jobs and re-asserts the disabled login and active:false.
  */
-async function deactivateTechnician(technicianId: string) {
+async function deactivateTechnician(
+  technicianId: string,
+  actor: StaffAccessActor,
+  reasonCode?: string | null
+) {
   const client = await dataClient();
   const { data: tech } = await client.models.Technician.get({
     id: technicianId,
   });
   if (!tech) throw new Error(`Technician ${technicianId} not found`);
 
+  // GL-14 R2: a technician who has a login is ended through the ONE hardened
+  // staff-access workflow — controlled reason, immutable ledger, a STAFF_SECURITY
+  // case on a failed kill, read-back, and the work/lead release — never the old
+  // lite bypass that reassigned jobs and killed the login with no audit.
+  if (tech.userSub && tech.email) {
+    return offboardStaff(
+      {
+        email: tech.email,
+        reasonCode: reasonCode ?? "ROLE_ENDED",
+        reason: "Deactivated from the Schedule board.",
+      },
+      actor
+    );
+  }
+
+  // A technician who was never invited to a login (no Cognito account) — there is
+  // no session to end or work/leads to release, but the deactivation is still a
+  // recorded, reasoned, audited action, not a silent flag flip.
   const { jobsUnassigned, inProgress } = await reassignFutureJobs(
     technicianId,
     tech.name
   );
-
-  // Kill the login now — disable, global sign-out, drop the TECH group (and any
-  // dynamic groups). A tech invited via adminCreateUser has userSub and email
-  // set; without them there is nothing to disable.
-  let loginDisabled = false;
-  if (tech.userSub) {
-    const username = tech.email?.toLowerCase();
-    if (username) {
-      await killLogin(username, ["TECH", "cus-", "grp-"]);
-      loginDisabled = true;
-    }
-  }
-
   await client.models.Technician.update({ id: technicianId, active: false });
-
   await notifyOffboard({
     name: tech.name,
     relatedId: technicianId,
-    loginDisabled,
+    loginDisabled: false,
     rolesEnded: ["TECH"],
     jobsUnassigned,
     inProgress,
   });
+  const ledgerRecorded = await recordStaffAccessEventDurable({
+    subjectEmail: tech.email ?? tech.name,
+    subjectSub: technicianId,
+    action: "OFFBOARD",
+    actor,
+    reasonCode: reasonCode ?? "ROLE_ENDED",
+    reason: "Deactivated from the Schedule board (technician has no login).",
+    priorRoles: ["TECH"],
+    requestedRoles: [],
+    newRoles: [],
+    idempotencyKey: null,
+    effects: `Technician ${tech.name} deactivated; ${jobsUnassigned} future job${
+      jobsUnassigned === 1 ? "" : "s"
+    } returned to the scheduling pool.${
+      inProgress.length
+        ? ` ${inProgress.length} in-progress visit${
+            inProgress.length === 1 ? "" : "s"
+          } left in place.`
+        : ""
+    }`,
+    outcome: "COMPLETE",
+  });
 
-  return { jobsUnassigned, loginDisabled };
+  return { technicianId, jobsUnassigned, loginDisabled: false, ledgerRecorded };
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,18 +1445,43 @@ async function offboardStaff(
     });
   }
 
-  // GL-18: any open exception this person had claimed goes back to its team
-  // inbox — no required action may stay owned by someone who has been offboarded.
+  // GL-18/GL-14 R5: every open exception this person had claimed goes back to
+  // its team inbox — no required action may stay owned by someone offboarded.
   const workReleased = await releaseOwnedWorkForSub({
     sub: target.sub,
     reason: `${target.email} was offboarded.`,
     actorEmail: actor.email,
   });
+  // GL-14 R6: hand their open leads back to the Sales queue so no later sweep
+  // routes revenue work to a departed person.
+  const leadsReassigned = await reassignLeadsForSub({
+    sub: target.sub,
+    actorEmail: actor.email,
+  });
+
+  // GL-14 R5: a partial hand-over is not "complete" — own it and keep offboarding
+  // out of COMPLETE until every claim and lead is actually re-homed, with a safe
+  // idempotent resume (re-run Offboard).
+  const releaseFailed = workReleased.failed > 0 || leadsReassigned.failed > 0;
+  if (releaseFailed) {
+    await openOwnedWork({
+      kind: "STAFF_OFFBOARD",
+      dedupeKey: `${target.email}:release`,
+      title: `Finish returning ${tech?.name ?? target.email}'s owned work and leads`,
+      detail: `Offboarding ${target.email} could not return ${workReleased.failed} owned exception(s) and ${leadsReassigned.failed} lead(s) to the team. Access is already revoked; the hand-over is incomplete.`,
+      relatedId: target.sub,
+      sourceUrl: "/staff",
+      resolutionAction:
+        "Re-run Offboard for this person (idempotent) to return their remaining claimed exceptions and open leads to the Sales/Ops team queues.",
+      ownerTeam: "OPS",
+    });
+  }
 
   const outcome =
     downstreamError ||
     !loginConfirmedDisabled ||
-    !technicianConfirmedInactive
+    !technicianConfirmedInactive ||
+    releaseFailed
       ? "PARTIAL"
       : "COMPLETE";
 
@@ -1467,10 +1525,18 @@ async function offboardStaff(
             inProgress.length === 1 ? "" : "s"
           } put in owned Operations review.`
         : "",
-      workReleased
-        ? `${workReleased} owned exception${
-            workReleased === 1 ? "" : "s"
+      workReleased.released
+        ? `${workReleased.released} owned exception${
+            workReleased.released === 1 ? "" : "s"
           } returned to the team inbox.`
+        : "",
+      leadsReassigned.reassigned
+        ? `${leadsReassigned.reassigned} open lead${
+            leadsReassigned.reassigned === 1 ? "" : "s"
+          } returned to the Sales queue.`
+        : "",
+      releaseFailed
+        ? `Hand-over incomplete (${workReleased.failed} exception(s), ${leadsReassigned.failed} lead(s)) — owned OPS case opened.`
         : "",
     ]
       .filter(Boolean)
@@ -1495,7 +1561,9 @@ async function offboardStaff(
     technicianConfirmedInactive,
     jobsUnassigned,
     inProgressCount: inProgress.length,
-    workReleased,
+    workReleased: workReleased.released,
+    leadsReassigned: leadsReassigned.reassigned,
+    releaseFailed,
     ledgerRecorded,
     outcome: ledgerRecorded ? outcome : "PARTIAL",
   };
