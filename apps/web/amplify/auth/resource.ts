@@ -47,6 +47,11 @@ export const auth = defineAuth({
   userAttributes: {
     "custom:loginTokenHash": { dataType: "String", mutable: true },
     "custom:loginTokenExp": { dataType: "String", mutable: true },
+    // GL-14: last successful sign-in, stamped by the post-auth trigger. Cognito
+    // does not record a last-login natively, so the staff roster reads it here —
+    // the one place that covers every staff role (OWNER/OFFICE/FINANCE/TECH)
+    // without inventing a staff-profile table just to hold one timestamp.
+    "custom:lastLoginAt": { dataType: "String", mutable: true },
   },
   groups: ["OWNER", "OFFICE", "FINANCE", "TECH", "CUSTOMER"],
   triggers: {
@@ -85,6 +90,10 @@ export const auth = defineAuth({
     // REQUEST_LINK answer and burns it on redemption. create issues the
     // challenge and touches nothing.
     allow.resource(verifyChallenge).to(["manageUsers"]),
+    // post-auth stamps custom:lastLoginAt on every successful sign-in (GL-14
+    // roster last-login). Only the granular updateUserAttributes action — it has
+    // no reason to read, disable, or group-manage anyone.
+    allow.resource(postAuth).to(["updateUserAttributes"]),
     // Portal provisioning at conversion (R41): finalizeBooking runs in the
     // Stripe webhook and creates the customer's portal login the moment a
     // booking converts them — same bundle as crm-admin's invite path, because

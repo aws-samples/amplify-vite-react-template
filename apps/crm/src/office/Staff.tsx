@@ -10,7 +10,7 @@ import {
   type Technician,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { fmtDate } from "../lib/format";
+import { fmtDate, fmtDateTime } from "../lib/format";
 import {
   Badge,
   Button,
@@ -131,7 +131,15 @@ export default function Staff() {
                   {!row.enabled ? <Badge tone="danger">disabled</Badge> : null}
                 </span>
               }
-              subtitle={row.email}
+              subtitle={
+                <span>
+                  {row.email}
+                  {" · "}
+                  {row.lastLoginAt
+                    ? `last login ${fmtDate(row.lastLoginAt)}`
+                    : "never signed in"}
+                </span>
+              }
               meta={<RosterBadges row={row} />}
               onClick={() => setSelected(row)}
             />
@@ -238,6 +246,16 @@ function StaffActions({
               <Badge tone="ok">active login</Badge>
             ) : (
               <Badge tone="danger">disabled</Badge>
+            )
+          }
+        />
+        <ListRow
+          title="Last login"
+          meta={
+            row.lastLoginAt ? (
+              fmtDateTime(row.lastLoginAt)
+            ) : (
+              <Badge tone="muted">never signed in</Badge>
             )
           }
         />

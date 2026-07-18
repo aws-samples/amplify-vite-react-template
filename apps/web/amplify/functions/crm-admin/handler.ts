@@ -1079,6 +1079,9 @@ type StaffRosterRow = {
   /** An invite that hasn't been redeemed yet: a single-use link token is still
    *  live on the account. Cleared the moment they sign in via the link. */
   pendingInvite: boolean;
+  /** Last successful sign-in (ISO), stamped by the post-auth trigger. Null for a
+   *  login that has never been used — i.e. an invite that was never accepted. */
+  lastLoginAt: string | null;
   roles: StaffRole[];
   linkedTechnicianId: string | null;
   technicianActive: boolean | null;
@@ -1132,6 +1135,7 @@ async function staffRoster() {
             Boolean(attrs["custom:loginTokenHash"]) &&
             Number.isFinite(tokenExp) &&
             tokenExp > Date.now(),
+          lastLoginAt: attrs["custom:lastLoginAt"] ?? null,
           roles: [role],
           linkedTechnicianId: null,
           technicianActive: null,

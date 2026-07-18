@@ -506,6 +506,7 @@ describe("staffRoster (GL-14)", () => {
       email: "owner@x.com",
       name: "Olivia Owner",
       groups: ["OWNER"],
+      attributes: { "custom:lastLoginAt": "2026-07-18T10:00:00.000Z" },
     });
     pool.set("tech@x.com", {
       username: "tech@x.com",
@@ -513,7 +514,7 @@ describe("staffRoster (GL-14)", () => {
       email: "tech@x.com",
       name: "Terry Tech",
       groups: ["TECH"],
-      // A pending, unredeemed invite.
+      // A pending, unredeemed invite that has never been used to sign in.
       attributes: {
         "custom:loginTokenHash": "abc",
         "custom:loginTokenExp": String(Date.now() + 60_000),
@@ -527,15 +528,20 @@ describe("staffRoster (GL-14)", () => {
         roles: string[];
         unlinkedTech: boolean;
         pendingInvite: boolean;
+        lastLoginAt: string | null;
       }[];
     };
 
     // Owner sorts first.
     expect(res.staff[0].email).toBe("owner@x.com");
+    // Last login is surfaced for a user who has signed in, and null for one who
+    // has only ever been invited.
+    expect(res.staff[0].lastLoginAt).toBe("2026-07-18T10:00:00.000Z");
     const tech = res.staff.find((s) => s.email === "tech@x.com")!;
     expect(tech.roles).toEqual(["TECH"]);
     expect(tech.unlinkedTech).toBe(true);
     expect(tech.pendingInvite).toBe(true);
+    expect(tech.lastLoginAt).toBeNull();
   });
 
   it("joins the linked technician and reports licence validity", async () => {

@@ -385,6 +385,7 @@ export type StaffRosterRow = {
   enabled: boolean;
   status: string | null;
   pendingInvite: boolean;
+  lastLoginAt: string | null;
   roles: string[];
   linkedTechnicianId: string | null;
   technicianActive: boolean | null;

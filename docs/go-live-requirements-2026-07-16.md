@@ -429,11 +429,11 @@ are never deleted). The last usable owner cannot be demoted or offboarded.
 - ✅ Creating a technician login atomically creates/links exactly one technician profile with required
   active license data, or refuses with a fixable error. “Invite now, link later” is not available.
   *(crm-admin `adminCreateUser`; the CRM invite form requires the technician pick.)*
-- ⚠️ An owner-only staff roster shows person, email, role(s), linked profile, status, and pending
-  invite, and blocks duplicate/shared identities and unlinked users (shared identity is refused at
-  creation; unlinked technicians are flagged in the roster). **Residual:** last-login is not yet
-  populated — Cognito does not record last sign-in and no staff-profile store stamps it, so that
-  column is deferred to a follow-up.
+- ✅ An owner-only staff roster shows person, email, role(s), linked profile, status, last login, and
+  pending invite, and blocks duplicate/shared identities and unlinked users (shared identity is
+  refused at creation; unlinked technicians are flagged in the roster). Cognito records no native
+  last-login, so the post-auth trigger stamps `custom:lastLoginAt` on every sign-in and the roster
+  reads it — one uniform source across every staff role, "never signed in" for an unaccepted invite.
 - ✅ Owners can change role and offboard OWNER, OFFICE, FINANCE, and TECH users. Offboarding disables
   login/sessions, removes groups, reassigns owned work and future jobs, and preserves audit/legal
   records in one guided action.
