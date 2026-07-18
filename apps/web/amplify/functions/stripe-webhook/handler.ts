@@ -8,7 +8,7 @@ import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 import { finalizeBooking } from "../shared/bookingFinalize";
 import { applyRefundToInvoice } from "../shared/refund";
-import { notifyOffice } from "../shared/email";
+import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
   escapeHtml,
   sendChargeReceipt,
@@ -70,9 +70,20 @@ export const handler = async (
         }
         break;
       }
-      case "payment_intent.payment_failed":
-        await settlePaymentIntent(stripeEvent.data.object, "FAILED");
+      // GL-06: an async funnel payment (e.g. bank debit) is still clearing —
+      // hold the slot as PROCESSING, never a commitment, until it resolves.
+      case "payment_intent.processing":
+        await onFunnelPaymentProcessing(stripeEvent.data.object);
         break;
+      case "payment_intent.payment_failed": {
+        const pi = stripeEvent.data.object;
+        // A funnel payment has no invoice yet (finalization never ran), so it is
+        // handled directly — the booking is marked failed and the customer told.
+        // Everything else settles its invoice FAILED.
+        const handledAsFunnel = await onFunnelPaymentFailed(pi);
+        if (!handledAsFunnel) await settlePaymentIntent(pi, "FAILED");
+        break;
+      }
       case "invoice.paid":
         await onSubscriptionInvoice(stripeEvent.data.object, "PAID");
         break;
@@ -134,6 +145,96 @@ async function onSetupIntentSucceeded(intent: Stripe.SetupIntent) {
 }
 
 /** One-time job charges: settle the Invoice created by chargeOneTimeJob. */
+/**
+ * GL-06 — a funnel payment entered `processing` (an async method still clearing).
+ * Mark the booking PROCESSING: the slot is held but it is NOT a commitment (no
+ * job, no confirmation) until the money lands. Only advances from QUOTED, and
+ * only for the intent the booking currently points at, so an out-of-order or
+ * stale event can never downgrade a booking that already succeeded/finalized.
+ */
+async function onFunnelPaymentProcessing(intent: Stripe.PaymentIntent) {
+  const bookingRequestId = intent.metadata?.bookingRequestId;
+  if (!bookingRequestId) return;
+  const client = await dataClient();
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: bookingRequestId,
+  });
+  if (!booking || booking.status !== "QUOTED") return;
+  if (
+    booking.stripePaymentIntentId &&
+    booking.stripePaymentIntentId !== intent.id
+  ) {
+    return;
+  }
+  await client.models.BookingRequest.update({
+    id: booking.id,
+    status: "PROCESSING",
+  });
+}
+
+/**
+ * GL-06 — a funnel payment failed. A funnel booking has no CRM customer or
+ * invoice yet (finalization only runs on success), so there is nothing to
+ * settle: mark the booking PAYMENT_FAILED with the reason, and tell the customer
+ * once (retry-safe) that no charge was made and their slot is still open.
+ * Returns true when this WAS a funnel booking (so the caller skips invoice
+ * settlement), false otherwise.
+ */
+async function onFunnelPaymentFailed(
+  intent: Stripe.PaymentIntent
+): Promise<boolean> {
+  const bookingRequestId = intent.metadata?.bookingRequestId;
+  if (!bookingRequestId) return false;
+  const client = await dataClient();
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: bookingRequestId,
+  });
+  if (!booking) return true;
+  // A booking that already succeeded is not un-booked by a stale failure event,
+  // and a repointed intent's failure is not this booking's.
+  if (booking.status === "BOOKED") return true;
+  if (
+    booking.stripePaymentIntentId &&
+    booking.stripePaymentIntentId !== intent.id
+  ) {
+    return true;
+  }
+  const reason = intent.last_payment_error?.message ?? "The payment was declined.";
+  await client.models.BookingRequest.update({
+    id: booking.id,
+    status: "PAYMENT_FAILED",
+    paymentFailedReason: reason,
+  });
+  // Tell the customer once — the marker keeps a replayed webhook from re-sending.
+  if (!booking.paymentFailedNoticeSentAt && booking.email) {
+    const marketingUrl = process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com";
+    const dateLine = booking.selectedDate
+      ? `${escapeHtml(booking.selectedDate)} `
+      : "";
+    const sent = await sendEmail({
+      to: booking.email,
+      subject: "Your BuzzKill booking didn't go through",
+      template: "booking-payment-failed",
+      relatedId: booking.id,
+      html: emailShell(
+        "Your payment didn't go through",
+        `<p>Hi ${escapeHtml(booking.name ?? "there")},</p>
+         <p>We couldn't complete the payment for your ${dateLine}pest control booking, so <strong>the booking was not completed and you have not been charged</strong>.</p>
+         <p>Your slot is still open. You can pick a time and try again here:</p>
+         <p><a href="${marketingUrl}/quote">Book your visit</a></p>
+         <p>If you keep having trouble, reply to this email or give us a call and we'll help.</p>`
+      ),
+    });
+    if (sent) {
+      await client.models.BookingRequest.update({
+        id: booking.id,
+        paymentFailedNoticeSentAt: new Date().toISOString(),
+      });
+    }
+  }
+  return true;
+}
+
 async function settlePaymentIntent(
   intent: Stripe.PaymentIntent,
   status: "PAID" | "FAILED"

@@ -1130,9 +1130,18 @@ async function book(
   let existing: Stripe.PaymentIntent | null = null;
   if (booking.stripePaymentIntentId) {
     existing = await s.paymentIntents.retrieve(booking.stripePaymentIntentId);
-    if (existing.status === "succeeded" || existing.status === "processing") {
+    // GL-06: a succeeded payment is booked; a still-processing one is NOT paid
+    // yet and no confirmation has been sent — say so honestly and do not invite
+    // a second payment.
+    if (existing.status === "succeeded") {
       throw new HttpError(409, {
         error: "This booking is already paid — check your email for the confirmation.",
+      });
+    }
+    if (existing.status === "processing") {
+      throw new HttpError(409, {
+        error:
+          "Your payment is still processing — please don't pay again. We'll email your confirmation as soon as it clears, or let you know if it doesn't go through.",
       });
     }
   }
@@ -1207,12 +1216,18 @@ async function book(
 
   await client.models.BookingRequest.update({
     id: booking.id,
+    // GL-06: a fresh payable intent resets the booking to QUOTED, clearing any
+    // prior PROCESSING/PAYMENT_FAILED so a retried attempt finalizes cleanly.
+    status: "QUOTED",
     selectedDate: date,
     selectedWindow: window,
     recurring,
     amountCents,
     stripeCustomerId: customerId,
     stripePaymentIntentId: intent.id,
+    // A new attempt clears the prior failure's reason and notice marker.
+    paymentFailedReason: null,
+    paymentFailedNoticeSentAt: null,
     // R17: the acceptance record. tcAcceptedAt is server time — a client
     // clock (or a client lie) never decides when the terms were accepted.
     tcVersion,

@@ -17,9 +17,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type Plan = Record<string, unknown> & { id: string };
 type Job = Record<string, unknown> & { id: string };
 type Invoice = Record<string, unknown> & { id: string };
+type Booking = Record<string, unknown> & { id: string };
 
 const plans = new Map<string, Plan>();
 const jobs = new Map<string, Job>();
+const bookings = new Map<string, Booking>();
 let invoices: Invoice[] = [];
 const invoicesCreated: Invoice[] = [];
 let customerEmail: string | null = "dana@example.com";
@@ -31,6 +33,13 @@ const fakeDataClient = {
       update: async (patch: Plan) => {
         plans.set(patch.id, { ...plans.get(patch.id)!, ...patch });
         return { data: plans.get(patch.id) };
+      },
+    },
+    BookingRequest: {
+      get: async ({ id }: { id: string }) => ({ data: bookings.get(id) ?? null }),
+      update: async (patch: Booking) => {
+        bookings.set(patch.id, { ...bookings.get(patch.id)!, ...patch });
+        return { data: bookings.get(patch.id) };
       },
     },
     Customer: {
@@ -171,6 +180,7 @@ const seedJob = (over: Partial<Job> = {}): Job => {
 beforeEach(() => {
   plans.clear();
   jobs.clear();
+  bookings.clear();
   invoices = [];
   invoicesCreated.length = 0;
   customerEmail = "dana@example.com";
@@ -419,5 +429,83 @@ describe("charge.refunded sends the refund notice", () => {
     });
 
     expect(sendEmail).toHaveBeenCalledOnce();
+  });
+});
+
+describe("GL-06 funnel processing / failed payments", () => {
+  const seedBooking = (over: Partial<Booking> = {}): Booking => {
+    const booking: Booking = {
+      id: "bk1",
+      status: "QUOTED",
+      email: "dana@example.com",
+      name: "Dana",
+      selectedDate: "2026-10-14",
+      stripePaymentIntentId: "pi_funnel",
+      ...over,
+    };
+    bookings.set(booking.id, booking);
+    return booking;
+  };
+
+  it("holds an async payment as PROCESSING, never a commitment", async () => {
+    seedBooking();
+
+    await invoke("payment_intent.processing", {
+      id: "pi_funnel",
+      metadata: { bookingRequestId: "bk1" },
+    });
+
+    expect(bookings.get("bk1")?.status).toBe("PROCESSING");
+    // No confirmation is sent while it is only processing.
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("does not downgrade a booking that already finalized", async () => {
+    seedBooking({ status: "BOOKED" });
+
+    await invoke("payment_intent.processing", {
+      id: "pi_funnel",
+      metadata: { bookingRequestId: "bk1" },
+    });
+
+    expect(bookings.get("bk1")?.status).toBe("BOOKED");
+  });
+
+  it("marks a funnel failure PAYMENT_FAILED and tells the customer once", async () => {
+    seedBooking({ status: "PROCESSING" });
+
+    await invoke("payment_intent.payment_failed", {
+      id: "pi_funnel",
+      metadata: { bookingRequestId: "bk1" },
+      last_payment_error: { message: "Your card was declined." },
+    });
+
+    const booking = bookings.get("bk1");
+    expect(booking?.status).toBe("PAYMENT_FAILED");
+    expect(booking?.paymentFailedReason).toBe("Your card was declined.");
+    expect(booking?.paymentFailedNoticeSentAt).toBeTruthy();
+    expect(sendEmail).toHaveBeenCalledOnce();
+
+    // A replayed webhook must not re-email the customer.
+    await invoke("payment_intent.payment_failed", {
+      id: "pi_funnel",
+      metadata: { bookingRequestId: "bk1" },
+      last_payment_error: { message: "Your card was declined." },
+    });
+    expect(sendEmail).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a non-funnel payment_failed to invoice settlement", async () => {
+    invoices = [
+      { id: "inv1", stripePaymentIntentId: "pi_inv", status: "OPEN", customerId: "c1", amountCents: 4500 },
+    ];
+
+    await invoke("payment_intent.payment_failed", {
+      id: "pi_inv",
+      metadata: {},
+      last_payment_error: { message: "declined" },
+    });
+
+    expect(invoices[0].status).toBe("FAILED");
   });
 });

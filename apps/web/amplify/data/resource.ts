@@ -351,10 +351,19 @@ export const schema = a.schema({
       status: a.enum([
         "PENDING",
         "QUOTED",
+        // GL-06: the payment cleared instantly and finalization ran — a real
+        // commitment with a job, agreement, invoice, and confirmation email.
         "BOOKED",
         "CANCELED",
         "EXPIRED",
         "CONTACT",
+        // GL-06: an async payment (e.g. bank debit) is still clearing. The slot
+        // is held but NOT yet a commitment: no job, no confirmation. It becomes
+        // BOOKED when the payment succeeds, or PAYMENT_FAILED if it does not.
+        "PROCESSING",
+        // GL-06: the payment did not go through. No charge stuck, no booking
+        // created; the customer was told and can try again.
+        "PAYMENT_FAILED",
       ]),
       propertyKind: a.enum(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]),
       service: a.enum([
@@ -425,6 +434,11 @@ export const schema = a.schema({
       // duplicate confirmation or duplicate sales alert.
       confirmationSentAt: a.datetime(),
       officeAlertSentAt: a.datetime(),
+      // GL-06: why a funnel payment failed (Stripe's decline message), and a
+      // retry-safe marker so a replayed payment_failed webhook never re-emails
+      // the "your payment didn't go through" notice.
+      paymentFailedReason: a.string(),
+      paymentFailedNoticeSentAt: a.datetime(),
     })
     .secondaryIndexes((index) => [index("cancelToken"), index("status")])
     .authorization((allow) => [

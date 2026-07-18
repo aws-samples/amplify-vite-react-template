@@ -172,9 +172,11 @@ export default function BookPage() {
 
     if (result.status === 409 || result.status === 410 || result.status === 404) {
       // Day gone / quote expired / quote not found → back to a fresh quote.
-      // "Already paid" is the one 409 that ends well — no fresh quote needed.
-      const alreadyPaid = /already paid/i.test(message);
-      setFatal({ message, offerFreshQuote: !alreadyPaid });
+      // "Already paid" and "still processing" (GL-06) are the 409s that end well
+      // — the customer has a payment done or in flight, so no fresh quote and no
+      // invitation to pay again.
+      const settledOrInFlight = /already paid|still processing/i.test(message);
+      setFatal({ message, offerFreshQuote: !settledOrInFlight });
       return;
     }
     setError(message);
@@ -194,8 +196,13 @@ export default function BookPage() {
           <div className="bk-form-success-icon" aria-hidden="true">
             <CheckIcon />
           </div>
-          <div className="bk-eyebrow">{processing ? "Payment processing" : "Confirmed"}</div>
-          <h1 className="bk-h2">You&rsquo;re booked.</h1>
+          {/* GL-06: a processing payment is NOT a booking and NOT paid. Say so. */}
+          <div className="bk-eyebrow">
+            {processing ? "Payment processing" : "Confirmed"}
+          </div>
+          <h1 className="bk-h2">
+            {processing ? "Your slot is held." : <>You&rsquo;re booked.</>}
+          </h1>
           {quote && selection && (
             <div className="bk-quote-card">
               <div className="bk-quote-card__label">Your visit</div>
@@ -208,15 +215,31 @@ export default function BookPage() {
               </div>
               <div className="bk-quote-card__meta">
                 {quote.service}
-                {amountCents != null ? <> &bull; {money(amountCents)} paid today</> : null}
+                {amountCents != null ? (
+                  <>
+                    {" "}
+                    &bull; {money(amountCents)}{" "}
+                    {processing ? "processing" : "paid today"}
+                  </>
+                ) : null}
               </div>
             </div>
           )}
-          <p className="bk-body-lead">
-            {processing
-              ? "Your payment is processing — once it completes, a confirmation email with your receipt and cancellation link is on its way."
-              : "A confirmation email with your receipt and cancellation link is on its way."}
-          </p>
+          {processing ? (
+            <p className="bk-body-lead">
+              Your payment is still processing and your slot is held while it
+              clears. Nothing is confirmed yet and you have not been charged. As
+              soon as it completes, we&rsquo;ll email your confirmation, receipt,
+              and cancellation link. If the payment doesn&rsquo;t go through,
+              we&rsquo;ll email you, no charge will be made, and the slot
+              won&rsquo;t be booked.
+            </p>
+          ) : (
+            <p className="bk-body-lead">
+              A confirmation email with your receipt and cancellation link is on
+              its way.
+            </p>
+          )}
         </div>
       </Shell>
     );

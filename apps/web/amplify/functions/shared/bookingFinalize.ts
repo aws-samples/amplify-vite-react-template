@@ -71,12 +71,16 @@ export async function finalizeBooking(opts: {
     return;
   }
 
-  // Any other non-QUOTED status is a paid booking that cannot enter
-  // finalization: CANCELED/EXPIRED before it ever finalized (jobId is unset —
-  // a booking that WAS finalized and later canceled is the refund flow's, not
-  // this exception's), or a PENDING/CONTACT row that should never have a
-  // payment. Either way the money succeeded, so it is a Finance case.
-  if (booking.status !== "QUOTED") {
+  // QUOTED (instant card) and PROCESSING (an async payment that has now cleared)
+  // are the two states a success may finalize from. GL-06: a booking marked
+  // PROCESSING by the payment_intent.processing webhook must still finalize when
+  // the money lands — otherwise a cleared bank debit looks stuck-paid forever.
+  // Any OTHER non-QUOTED/PROCESSING status is a paid booking that cannot enter
+  // finalization: CANCELED/EXPIRED before it ever finalized (jobId is unset — a
+  // booking that WAS finalized and later canceled is the refund flow's, not this
+  // exception's), or a PENDING/CONTACT row that should never have a payment.
+  // Either way the money succeeded, so it is a Finance case.
+  if (booking.status !== "QUOTED" && booking.status !== "PROCESSING") {
     if (booking.jobId) return; // finalized earlier, then canceled — not stuck-paid
     console.warn(
       `finalizeBooking: booking ${booking.id} is ${booking.status}, not QUOTED, for succeeded PaymentIntent ${opts.paymentIntentId}`

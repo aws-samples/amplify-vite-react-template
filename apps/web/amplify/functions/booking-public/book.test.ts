@@ -243,6 +243,19 @@ describe("booking re-checks live availability (R29)", () => {
     expect(res.body.error).toMatch(/already paid/i);
     expect(intentCancel).not.toHaveBeenCalled();
   });
+
+  it("a still-processing booking says so, never 'already paid' (GL-06)", async () => {
+    booking.stripePaymentIntentId = "pi_old";
+    existingIntent = { id: "pi_old", status: "processing", amount: 31300 };
+    stopsOnDay = Array.from({ length: 8 }, (_, i) => gpcStop(i));
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/still processing/i);
+    expect(res.body.error).not.toMatch(/already paid/i);
+    expect(intentCancel).not.toHaveBeenCalled();
+  });
 });
 
 describe("plan-only quotes always book the plan", () => {
