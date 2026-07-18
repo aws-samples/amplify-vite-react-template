@@ -238,9 +238,12 @@ export const schema = a.schema({
     // Lambdas (Stripe ids, paid state). The office keeps its safe edits —
     // contact name, email, phone, address, notes — through updateCustomerContact,
     // which can touch only those fields. create stays so a lead can be added.
+    // GL-13 row-scoping: TECH holds no model read. Knowing a customer id must
+    // not reveal a customer a technician has no assignment for. A technician
+    // sees a customer only through the scoped technicianDay/technicianJob
+    // queries — and then only the visit fields (the field-level @auth above).
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
-      allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -531,11 +534,15 @@ export const schema = a.schema({
     // No browser delete: every finalized pesticide record names this
     // technician and carries their licence number. Deactivate instead —
     // the record has to outlive the employment.
+    // GL-13 row-scoping: TECH holds no model read. A technician cannot list or
+    // fetch the technician roster (another worker's record, active status, or —
+    // via the licence fields above — credentials) by id. The one thing a field
+    // login needs, "which technician am I", is resolved server-side inside the
+    // technicianDay/technicianJob queries from the signed-in identity.
     .authorization((allow) => [
       // Browser writes go through saveTechnician, which conditionally requires
       // current license data before active:true can ever be stored.
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
-      allow.groups(["TECH"]).to(["read"]),
     ]),
 
   Route: a
@@ -551,9 +558,13 @@ export const schema = a.schema({
       index("technicianId").sortKeys(["date"]),
       index("date"),
     ])
+    // GL-13 row-scoping: a route belongs to one technician, and a TECH token
+    // with model read/create/update could read, build, or reorder another
+    // worker's route by id. The office owns routing; a technician sees only
+    // their own route, and only through the technicianDay query (scoped
+    // server-side). No TECH grant on the raw model.
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
-      allow.groups(["TECH"]).to(["create", "read", "update"]),
     ]),
 
   Job: a
@@ -648,8 +659,13 @@ export const schema = a.schema({
       // Scheduling writes go through createOfficeJob/updateJobSchedule. In
       // particular, assignment must resolve and validate the technician's
       // current license; a raw Job.update cannot provide that guarantee.
+      //
+      // GL-13 row-scoping: TECH holds no model read. A known job id must not let
+      // one technician fetch, list, or subscribe to another worker's job. A
+      // technician reaches a job only through technicianDay (their route's
+      // stops) and technicianJob (a job they are currently assigned), both
+      // scoped server-side; the field-action mutations remain assignment-gated.
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
-      allow.groups(["TECH"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -777,8 +793,12 @@ export const schema = a.schema({
     // Read-only from a browser. Drafts are written through
     // saveServiceReportDraft and setReportPhotos, which refuse once the report
     // is FINALIZED; nothing edits it after that.
+    // GL-13 row-scoping: TECH holds no model read. A technician cannot pull
+    // another worker's pesticide records by id; they see the reports for a job
+    // they are currently assigned, returned by the scoped technicianJob query.
+    // Writes still flow through the assignment-gated draft/finalize mutations.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "TECH"]).to(["read"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -809,8 +829,11 @@ export const schema = a.schema({
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [index("originalReportId")])
+    // GL-13 row-scoping: TECH holds no model read (the tech app never displays
+    // amendments — they are issued by the office and read by the office and the
+    // customer's portal). Office and portal access are unchanged.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "TECH"]).to(["read"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1853,6 +1876,30 @@ export const schema = a.schema({
     .arguments({ key: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH", "CUSTOMER"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * GL-13 row-scoping — the field app's scoped read surface. The Job, Customer,
+   * Route, Technician, and ServiceReport models no longer grant TECH a read, so
+   * a technician cannot list, get, or subscribe to another worker's rows by id.
+   * These two queries return only the caller's own authorized work, scoped
+   * server-side in the crm-docs Lambda: technicianDay gives the signed-in
+   * technician their route and stops for a date (office may target any tech via
+   * technicianId and receives the picker roster); technicianJob gives one job
+   * and its context only if the caller is its current assignee (or office).
+   */
+  technicianDay: a
+    .query()
+    .arguments({ date: a.string(), technicianId: a.string() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  technicianJob: a
+    .query()
+    .arguments({ jobId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Office-initiated transactional emails: payment-request, portal-reminder,

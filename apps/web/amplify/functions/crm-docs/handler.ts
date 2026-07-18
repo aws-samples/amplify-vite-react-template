@@ -24,6 +24,10 @@ import {
   assertCanActOnReportId,
   technicianServesCustomer,
 } from "../shared/jobAssignment";
+import {
+  buildTechnicianDay,
+  buildTechnicianJob,
+} from "../shared/technicianReads";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { drivingDistanceMetersFromPoint } from "../shared/driveTime";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
@@ -110,6 +114,7 @@ type Args = {
   timeWindow?: string;
   operation?: string;
   technicianId?: string;
+  date?: string;
   routeId?: string;
   routeOrder?: number;
   otherJobId?: string;
@@ -248,6 +253,18 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "getDocumentUrl": {
       return getDocumentUrl(event.identity, event.arguments.key!);
+    }
+    // GL-13 row-scoping: the field app's only read surface. Each returns just
+    // the caller's own authorized work — a technician cannot reach another
+    // worker's day or job by id, because the model API no longer serves TECH.
+    case "technicianDay": {
+      return buildTechnicianDay(event.identity, {
+        date: event.arguments.date,
+        technicianId: event.arguments.technicianId,
+      });
+    }
+    case "technicianJob": {
+      return buildTechnicianJob(event.identity, event.arguments.jobId!);
     }
     case "getReportPhotoUploadUrl": {
       await assertCanActOnReportId(event.identity, event.arguments.reportId!);

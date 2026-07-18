@@ -3,16 +3,15 @@ import { useParams } from "react-router-dom";
 import {
   api,
   opResult,
-  techGetCustomer,
-  techListTechnicians,
+  technicianJob,
   unwrap,
   type Customer,
   type Job,
   type Product as CatalogProduct,
   type ServiceReport,
   type Technician,
+  type TechnicianJobDetail,
 } from "../lib/api";
-import { useRoles } from "../lib/auth";
 import { fmtDate } from "../lib/format";
 import {
   clearDraft,
@@ -100,98 +99,56 @@ function parseProducts(raw: unknown): ProductRow[] {
  */
 export default function TechJob() {
   const { jobId } = useParams<{ jobId: string }>();
-  const roles = useRoles();
   const [job, setJob] = useState<Job | null>(null);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [report, setReport] = useState<ServiceReport | null>(null);
   const [techRecord, setTechRecord] = useState<Technician | null>(null);
   const [catalog, setCatalog] = useState<CatalogProduct[]>([]);
-  const [priorVisits, setPriorVisits] = useState<Job[]>([]);
+  const [priorVisits, setPriorVisits] = useState<
+    TechnicianJobDetail["priorVisits"]
+  >([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!jobId) return;
     try {
-      const j = unwrap(await api().models.Job.get({ id: jobId }));
-      if (!j) {
-        setError("Job not found");
-        return;
-      }
-      setJob(j);
-      const [c, reps, techs, prods, hist] = await Promise.all([
-        // GL-13: the field app reads only the visit fields it is entitled to.
-        // Billing, provider ids, portal internals and org-wide notes carry
-        // office-only field @auth, so a default (all-fields) Customer read
-        // would fail for a technician; the same for a peer's licence fields.
-        techGetCustomer(j.customerId),
-        api().models.ServiceReport.listServiceReportByJobId({ jobId }),
-        techListTechnicians(),
-        // The catalog is optional (rows have a manual fallback) and the
-        // Product model may not exist on the deployed backend yet — never
-        // let it break the job screen.
-        (async (): Promise<CatalogProduct[]> => {
-          try {
-            return unwrap(await api().models.Product.list({ limit: 500 }));
-          } catch {
-            return [];
-          }
-        })(),
-        // GL-12: the prior relevant outcomes for this address — the last few
-        // visits that didn't happen (no-access, canceled) or did (completed).
-        // Best-effort: history context must never block the working screen.
-        (async (): Promise<Job[]> => {
-          try {
-            return unwrap(
-              await api().models.Job.list({
-                filter: { customerId: { eq: j.customerId } },
-                limit: 200,
-              })
-            );
-          } catch {
-            return [];
-          }
-        })(),
-      ]);
-      setCustomer(c);
+      // GL-13 row-scoping: one server-scoped read. The Lambda proves this job is
+      // the caller's (or office), returns the job, its customer (visit fields
+      // only), its reports, the catalog, prior-visit context, and the caller's
+      // OWN technician record — identity for the report is the signed-in user,
+      // never the job's assigned tech. A job that is not the caller's rejects
+      // with the same opaque error as a missing one.
+      const d = await technicianJob(jobId);
+      setJob(d.job);
+      setCustomer(d.customer);
+      setReport(d.reports[0] ?? null);
+      setTechRecord(d.technician as Technician | null);
+      // GL-12: the last few relevant outcomes at this address (didn't happen /
+      // did). The query already excludes the current job.
       setPriorVisits(
-        hist
+        d.priorVisits
           .filter(
             (h) =>
-              h.id !== j.id &&
-              (h.status === "NO_ACCESS" ||
-                h.status === "CANCELED" ||
-                h.status === "COMPLETED")
+              h.status === "NO_ACCESS" ||
+              h.status === "CANCELED" ||
+              h.status === "COMPLETED"
           )
           .sort((a, b) =>
             (b.scheduledDate ?? "0").localeCompare(a.scheduledDate ?? "0")
           )
           .slice(0, 4)
       );
-      setReport(unwrap(reps)[0] ?? null);
+      // The query already restricts the catalog to active, label-approved rows;
+      // sort for stable field ordering.
       setCatalog(
-        prods
-          // Existing rows from before the server gate may still say active.
-          // Do not offer one in the field until its approved label facts are
-          // complete; saveProduct makes this invariant permanent for new edits.
-          .filter(
-            (pr) =>
-              pr.active &&
-              pr.labelApproved &&
-              !!pr.epaNumber?.trim() &&
-              !!pr.defaultRate?.trim() &&
-              pr.reEntryHours != null
-          )
+        d.catalog
+          .slice()
           .sort(
             (a, b) =>
               (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
               a.name.localeCompare(b.name)
           )
       );
-      const allTechs = techs;
-      // Identity comes from the signed-in user only. Never fall back to the job's
-      // assigned technician: that attributes the report, GPS and sign-off to
-      // someone who was not on site.
-      setTechRecord(allTechs.find((t) => t.userSub === roles.sub) ?? null);
       setError(null);
     } catch (err) {
       setError(
@@ -202,7 +159,7 @@ export default function TechJob() {
             : "Could not load job"
       );
     }
-  }, [jobId, roles.sub]);
+  }, [jobId]);
 
   useEffect(() => {
     void load();

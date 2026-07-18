@@ -195,7 +195,11 @@ function Shell() {
         <Route path="/work" element={<Require when={workStaff}><WorkQueue /></Require>} />
         <Route path="/leads" element={<Require when={staff}><Leads /></Require>} />
         <Route path="/customers" element={<Require when={staff}><Customers /></Require>} />
-        <Route path="/customers/:id" element={<Require when={staff || roles.tech}><CustomerDetail /></Require>} />
+        {/* GL-13: the office customer view exposes plans, invoices, agreements
+            and every job across the customer — not a technician surface. The
+            field app never links here; a tech's customer context comes scoped
+            through /tech/job/:jobId. Staff only. */}
+        <Route path="/customers/:id" element={<Require when={staff}><CustomerDetail /></Require>} />
         <Route path="/groups/:id" element={<Require when={staff}><GroupDetail /></Require>} />
         <Route path="/schedule" element={<Require when={staff}><Schedule /></Require>} />
         <Route path="/pricing" element={<Require when={staff}><PricingLog /></Require>} />

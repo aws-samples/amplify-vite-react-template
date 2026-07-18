@@ -93,6 +93,30 @@ export async function assertCanActOnJob(
   });
 }
 
+/**
+ * Prove the caller may READ this job right now — the row-scoping half of GL-13.
+ *
+ * Same shape as assertCanActOnJob, minus the active-licence requirement: viewing
+ * one's own assigned or completed work is not applying pesticide, so a technician
+ * whose credential has lapsed can still review their record even though they can
+ * no longer act on it. Office/owner always may. A technician may read only a job
+ * currently assigned to their own linked record, so a reassignment removes the
+ * former technician's read on the very next fetch, and a known job id belonging
+ * to another technician yields the same opaque refusal as a missing one.
+ */
+export async function assertCanReadJob(
+  identity: AppSyncIdentity | undefined | null,
+  job: JobAssignment | null | undefined
+): Promise<void> {
+  if (callerIsOffice(identity)) return;
+  if (!job) throw new Error(NOT_AUTHORIZED_JOB);
+  const tech = await technicianForCaller(identity);
+  if (!tech) throw new Error(UNLINKED_TECHNICIAN);
+  if (!job.technicianId || job.technicianId !== tech.id) {
+    throw new Error(NOT_AUTHORIZED_JOB);
+  }
+}
+
 /** Same proof, fetching the job by id first (dispatch-layer convenience). */
 export async function assertCanActOnJobId(
   identity: AppSyncIdentity | undefined | null,

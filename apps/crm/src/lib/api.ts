@@ -29,63 +29,71 @@ export type WorkItem = Schema["WorkItem"]["type"];
 export type WorkEvent = Schema["WorkEvent"]["type"];
 
 /**
- * GL-13 technician least-privilege reads. The Customer and Technician models
- * grant TECH a blanket read, but their sensitive fields — billing, provider
- * ids, portal internals, lead attribution, org-wide customer notes; and another
- * applicator's licence credentials — now carry field-level @auth that omits
- * TECH. AppSync returns an authorization error for any such field a caller
- * *requests*, and the Amplify client's default selection set requests every
- * field, so a plain Customer.get / Technician.list from the field app would now
- * fail. These helpers request exactly the fields a technician is entitled to
- * and uses — which is itself the least-privilege posture the requirement asks
- * for — and are the ONLY way the tech screens should read these two models.
- * Office and portal code keep using the raw models with default selection; they
- * are authorized for the restricted fields, so nothing there changes.
+ * GL-13 row-scoping — the field app's scoped read surface.
  *
- * The Amplify client's `selectionSet` generic (ModelPath/ReturnValue) collapses
- * under this project's schema type depth, so the field list is passed through
- * `never[]` (the runtime still sends the real array) and the narrowed result is
- * cast back to the model type. The cast is contained entirely here.
+ * The Job, Customer, Route, Technician, and ServiceReport models no longer grant
+ * TECH a model read: a technician must not be able to list, fetch, or subscribe
+ * to another worker's rows by id. The two tech screens read exclusively through
+ * these server-scoped queries, which the crm-docs Lambda answers under IAM after
+ * proving the caller owns the work. Customer is reduced to visit fields and the
+ * Job's money fields are dropped, server-side, so field least-privilege holds
+ * here too. Office/portal code keeps using the raw models (they are authorized).
+ *
+ * A refused technicianJob (a job that is not the caller's) rejects with the same
+ * opaque "Not authorized for this job" as a missing one — a known id proves
+ * nothing. technicianDay returns { unlinked: true } for a TECH login the office
+ * has not linked yet, so the screen shows guidance instead of an error.
  */
-const TECH_CUSTOMER_FIELDS = [
-  "id",
-  "displayName",
-  "contactName",
-  "email",
-  "phone",
-  "serviceStreet",
-  "serviceCity",
-  "serviceState",
-  "serviceZip",
-] as const;
+export type TechnicianDay = {
+  unlinked?: boolean;
+  technicianId: string | null;
+  technicianName: string | null;
+  canPickTechnician: boolean;
+  technicians: { id: string; name: string }[];
+  route: {
+    id: string;
+    date: string | null;
+    status: string | null;
+    notes: string | null;
+  } | null;
+  jobs: Job[];
+  customers: Record<string, Customer>;
+};
 
-const TECH_TECHNICIAN_FIELDS = ["id", "name", "active", "userSub"] as const;
-
-type LeastPrivSelection = readonly never[];
-
-/** A customer, limited to the visit fields a technician may read (GL-13). */
-export async function techGetCustomer(id: string): Promise<Customer | null> {
-  const res = await api().models.Customer.get(
-    { id },
-    { selectionSet: TECH_CUSTOMER_FIELDS as unknown as LeastPrivSelection }
-  );
-  return (unwrap(res) as Customer | null) ?? null;
+export async function technicianDay(
+  date: string,
+  technicianId?: string
+): Promise<TechnicianDay> {
+  const res = await api().queries.technicianDay({ date, technicianId });
+  const parsed = opResult<TechnicianDay>(res);
+  if (!parsed) throw new Error("Could not load your day");
+  return parsed;
 }
 
-/**
- * Technicians (paged to exhaustion), limited to the licence-free fields a
- * technician may read (GL-13) — enough to resolve "which technician am I" and
- * to label a route, never a peer's credential PII.
- */
-export async function techListTechnicians(): Promise<Technician[]> {
-  const rows = await listAll((nextToken) =>
-    api().models.Technician.list({
-      selectionSet: TECH_TECHNICIAN_FIELDS as unknown as LeastPrivSelection,
-      limit: 200,
-      nextToken,
-    })
-  );
-  return rows as unknown as Technician[];
+export type TechnicianJobDetail = {
+  job: Job;
+  customer: Customer | null;
+  reports: ServiceReport[];
+  technician: {
+    id: string;
+    name: string | null;
+    active: boolean | null;
+    userSub: string | null;
+  } | null;
+  catalog: Product[];
+  priorVisits: Pick<
+    Job,
+    "id" | "status" | "serviceType" | "scheduledDate" | "noAccessReason"
+  >[];
+};
+
+export async function technicianJob(
+  jobId: string
+): Promise<TechnicianJobDetail> {
+  const res = await api().queries.technicianJob({ jobId });
+  const parsed = opResult<TechnicianJobDetail>(res);
+  if (!parsed) throw new Error("Job not found");
+  return parsed;
 }
 
 export function updateOwnedWork(input: {

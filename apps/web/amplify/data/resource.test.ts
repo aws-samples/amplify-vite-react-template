@@ -87,8 +87,12 @@ describe("custom operations vs generated model operations", () => {
  * GL-13 — technician least-privilege at the model API. A TECH token reads the
  * raw model (get/list/subscribe/pagination), so "the UI hides it" is not a
  * control. These assertions run against the transformed SDL — the actual
- * @auth directives AppSync enforces — so a field or model that quietly regains
- * TECH read fails here, not in production.
+ * @auth directives AppSync enforces — so a model or field that quietly regains
+ * TECH read fails here, not in production. Two layers are checked: row-scoping
+ * (the tech-served models grant TECH no model read; the field app reads only
+ * through the scoped technicianDay/technicianJob queries) and field-scoping
+ * (the sensitive Customer/Technician fields carry field @auth that omits TECH,
+ * as defense in depth even where a model read is granted to office/portal).
  */
 describe("GL-13 technician least-privilege (SDL @auth)", () => {
   const sdl = schema.transform().schema;
@@ -105,8 +109,7 @@ describe("GL-13 technician least-privilege (SDL @auth)", () => {
     const block = modelBlock(name);
     return block.slice(0, block.indexOf("\n{"));
   };
-  // A field's declaration plus its own directives, up to the next field. A
-  // field with no field-level @auth inherits the model's rules (incl. TECH).
+  // A field's declaration plus its own directives, up to the next field.
   const fieldText = (name: string, field: string) => {
     const lines = modelBlock(name).split("\n");
     const start = lines.findIndex((l) => new RegExp(`^  ${field}:`).test(l));
@@ -124,35 +127,38 @@ describe("GL-13 technician least-privilege (SDL @auth)", () => {
 
   it("still sees the schema (regex rot guard)", () => {
     expect(modelHeader("Customer")).toContain("@auth");
-    // Visit fields have no field-level override, so the model's TECH read
-    // still reaches them — the whole point is that TECH keeps *these*.
-    expect(fieldText("Customer", "displayName")).not.toContain("@auth");
+    expect(fieldText("Customer", "displayName")).toContain("displayName");
   });
 
-  it("a technician still reads the fields needed to perform the visit", () => {
-    // Customer + Job both grant TECH read at the model level...
-    expect(modelHeader("Customer")).toContain('groups: ["TECH"]');
-    expect(modelHeader("Job")).toContain('groups: ["TECH"]');
-    expect(modelHeader("Technician")).toContain('groups: ["TECH"]');
-    // ...and these visit fields carry no field override that would strip it.
-    for (const f of [
-      "displayName",
-      "contactName",
-      "email",
-      "phone",
-      "serviceStreet",
-      "serviceCity",
-      "serviceState",
-      "serviceZip",
+  it("grants TECH no model read on any tech-served model (row-scoping)", () => {
+    // A known customer/job/route/report/technician id must not reveal another
+    // worker's rows through the model API. TECH reads only via the scoped
+    // queries; office and the portal (accessGroups) keep their access.
+    for (const model of [
+      "Customer",
+      "Job",
+      "Route",
+      "Technician",
+      "ServiceReport",
+      "ServiceReportAmendment",
+      "ServicePlan",
+      "CustomerGroup",
     ]) {
-      expect(fieldText("Customer", f), `Customer.${f}`).not.toContain("@auth");
+      expect(modelHeader(model), `${model} must not grant TECH`).not.toContain(
+        "TECH"
+      );
+      expect(modelHeader(model), `${model} keeps office read`).toContain(
+        'groups: ["OWNER", "OFFICE"]'
+      );
     }
-    for (const f of ["serviceType", "scheduledDate", "accessInstructions", "hazardNotes"]) {
-      expect(fieldText("Job", f), `Job.${f}`).not.toContain("@auth");
-    }
-    for (const f of ["name", "userSub", "active"]) {
-      expect(fieldText("Technician", f), `Technician.${f}`).not.toContain("@auth");
-    }
+  });
+
+  it("exposes the scoped read surface the field app uses instead", () => {
+    // The two server-scoped queries must exist (they are the ONLY way a TECH
+    // reaches job/customer/route data now).
+    const queryBlock = sdl.match(/type Query[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(queryBlock).toContain("technicianDay");
+    expect(queryBlock).toContain("technicianJob");
   });
 
   it("a technician cannot read billing, provider ids, portal internals, lead data, or org notes on Customer", () => {
@@ -186,20 +192,12 @@ describe("GL-13 technician least-privilege (SDL @auth)", () => {
   });
 
   it("a technician cannot read another applicator's licence credentials", () => {
+    // Defense in depth: even though TECH now has no Technician model read at
+    // all, the licence fields carry their own office-only @auth.
     for (const f of ["licenseNumber", "licenseExpiresOn"]) {
       const t = fieldText("Technician", f);
       expect(t, `Technician.${f} field @auth`).toContain("@auth");
       expect(t, `Technician.${f} no TECH`).not.toContain("TECH");
     }
-  });
-
-  it("a technician has no read on ServicePlan or CustomerGroup at all", () => {
-    // These models carry plan price/provider ids and org-wide group notes; the
-    // tech app never reads them, so TECH's blanket read is dropped model-wide.
-    expect(modelHeader("ServicePlan")).not.toContain("TECH");
-    expect(modelHeader("CustomerGroup")).not.toContain("TECH");
-    // Office and portal access survive.
-    expect(modelHeader("ServicePlan")).toContain('groups: ["OWNER", "OFFICE"]');
-    expect(modelHeader("CustomerGroup")).toContain('groups: ["OWNER", "OFFICE"]');
   });
 });
