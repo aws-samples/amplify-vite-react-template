@@ -83,10 +83,23 @@ implementation order, not launch status: **P0, P1, and P2 are all go-live blocke
 **Business outcome:** A technician can see only the minimum customer and work data needed for an
 authorized assignment, while office emergency access is explicit and accountable.
 
-**Why this is still a gate:** The TECH role can read broad customer, job, plan, report, group, route,
-and technician data. Document access is granted when the technician has any historical job for the
-customer, not only a legitimate current assignment or approved lookback. Office/owner bypass and
-reassignment also lack the required reasoned audit.
+**Why this is still a gate (narrowed by commits `2949dd5` and `b439ad6`):** Two of the exposures are
+now closed. Field-action mutations and document links are assignment-scoped: a technician can start,
+end, report on, finalize, or pull photos/documents only for a job currently assigned to their own
+active, unexpired-licence record — evaluated fresh on every call, so a reassignment takes effect on
+the next action — and document links are limited to a customer they actually serve (`2949dd5`).
+Field-level exposure is closed at AppSync: the TECH blanket model read no longer surfaces a customer's
+billing address, Stripe ids and payment-method label, lead source/notes, org-wide notes, portal
+internals, or booking token; a plan's price and subscription id; or another applicator's licence
+number — each carries field auth that omits TECH, and ServicePlan and CustomerGroup drop TECH read
+entirely (`b439ad6`). **What remains the gate:** per-record *row*-scoping is still missing — knowing a
+customer, job, route, report, or technician ID still lets a technician fetch, list, subscribe to, or
+paginate another worker's rows through the model API (the fields on each row are now minimized, the set
+of rows returned is not). Route create/read/update is not restricted to the caller's own work.
+Reassignment/deactivation does not yet invalidate cached/offline access on the next operation, nor
+record actor, reason, and route effect. The office/owner break-glass override still lacks the reasoned,
+reviewed audit and the prohibition on silent impersonation, and the Operations/Compliance-approved
+historical-lookback bound on document access (beyond the current assignment) is unspecified.
 
 **Required acceptance evidence:**
 
