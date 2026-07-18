@@ -172,6 +172,10 @@ export const schema = a.schema({
     // the customer has the final outcome. Its resume action is a safe re-run of
     // the idempotent cancellation.
     "PLAN_CANCELLATION_RECOVERY",
+    // GL-07: an office visit cancel/reschedule could not complete every step, or
+    // its immutable audit row failed to write. A critical recovery case whose
+    // resume is a safe re-run of the idempotent visit-change command.
+    "VISIT_CHANGE_RECOVERY",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -526,6 +530,43 @@ export const schema = a.schema({
       attemptCount: a.integer(),
       lastError: a.string(),
       recoveryWorkItemId: a.string(),
+    })
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
+    ]),
+
+  /**
+   * GL-07 — the single-winner durable command for one visit's cancel/reschedule.
+   * id = jobId, so concurrent cancel/reschedule clicks and retries converge on
+   * ONE decision, one money disposition, one schedule result, and one customer
+   * notice. Mirrors PlanCancellationClaim: a failed step KEEPS the command
+   * (records the stage reached + the error + a next-attempt time) so the reconcile
+   * sweep and a retry resume from the last completed step and can never refund
+   * twice or strand a refunded-but-still-scheduled visit. Deleted on a terminal
+   * outcome so a later legitimate change to the same visit can re-acquire. Flat
+   * (validated strings, no new enum) against a schema near TS's inference ceiling.
+   * Stages: REQUESTED | MONEY_DONE | VOIDED | CANCELED | RESCHEDULED | COMPLETE |
+   * PENDING | FAILED.
+   */
+  VisitChangeClaim: a
+    .model({
+      customerId: a.id(),
+      action: a.string(),
+      decision: a.string(),
+      stage: a.string(),
+      reason: a.string(),
+      ownerTeam: a.string(),
+      requestedAt: a.datetime(),
+      nextAttemptAt: a.datetime(),
+      attemptCount: a.integer(),
+      lastError: a.string(),
+      recoveryWorkItemId: a.string(),
+      // Checked results carried across a resume so a re-drive skips completed
+      // steps and never re-issues a refund that already went out.
+      refundStripeId: a.string(),
+      refundedCents: a.integer(),
+      invoiceVoided: a.boolean(),
+      newScheduledDate: a.string(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
@@ -2075,7 +2116,8 @@ export const schema = a.schema({
     .arguments({
       jobId: a.string().required(),
       decision: a.string().required(),
-      reason: a.string(),
+      reasonCode: a.string().required(),
+      note: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2097,11 +2139,26 @@ export const schema = a.schema({
       technicianId: a.string(),
       routeId: a.string(),
       routeOrder: a.integer(),
-      reason: a.string(),
+      reasonCode: a.string().required(),
+      note: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmBilling)),
+
+  /**
+   * GL-07 — resume a stuck office visit cancel/reschedule. The safe re-run the
+   * VISIT_CHANGE_RECOVERY case prescribes and the entry the reconcile sweep
+   * calls; idempotent, and never re-refunds because the command records what
+   * already went out. FINANCE/OWNER/OFFICE. Handled by crm-docs alongside the
+   * other resume actions (it holds the Stripe client for the refund resume).
+   */
+  resumeVisitChange: a
+    .mutation()
+    .arguments({ jobId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .handler(a.handler.function(crmDocs)),
 
   /**
    * Take ownership of a recovery item — an Invoice or a Dispute — so every

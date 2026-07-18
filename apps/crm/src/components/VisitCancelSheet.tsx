@@ -3,6 +3,7 @@ import {
   cancelVisit,
   opResult,
   previewVisitChange,
+  VISIT_CANCEL_REASONS,
   type CancelDecision,
   type VisitCancelOutcome,
   type VisitChangePreview,
@@ -10,6 +11,12 @@ import {
 import { useRoles } from "../lib/auth";
 import { money } from "../lib/format";
 import { Button, ErrorNote, Field, Sheet, Spinner } from "../ui/kit";
+
+/** CUSTOMER_REQUEST → "Customer request". */
+function reasonLabel(code: string): string {
+  const s = code.replace(/_/g, " ").toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 /**
  * GL-07 — one safe office cancel workflow for a single visit.
@@ -39,7 +46,8 @@ export default function VisitCancelSheet({
   const roles = useRoles();
   const [preview, setPreview] = useState<VisitChangePreview | null>(null);
   const [decision, setDecision] = useState<CancelDecision>("CANCEL_REFUND");
-  const [reason, setReason] = useState("");
+  const [reasonCode, setReasonCode] = useState<string>(VISIT_CANCEL_REASONS[0]);
+  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<VisitCancelOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +56,8 @@ export default function VisitCancelSheet({
     if (!open || !jobId) return;
     setPreview(null);
     setDecision("CANCEL_REFUND");
-    setReason("");
+    setReasonCode(VISIT_CANCEL_REASONS[0]);
+    setNote("");
     setOutcome(null);
     setError(null);
     previewVisitChange({ jobId })
@@ -68,7 +77,12 @@ export default function VisitCancelSheet({
     setError(null);
     try {
       const res = opResult<VisitCancelOutcome>(
-        await cancelVisit({ jobId, decision, reason: reason.trim() || undefined })
+        await cancelVisit({
+          jobId,
+          decision,
+          reasonCode,
+          note: note.trim() || undefined,
+        })
       );
       if (!res) throw new Error("The cancellation could not be completed");
       setOutcome(res);
@@ -89,7 +103,7 @@ export default function VisitCancelSheet({
       {outcome ? (
         <div className="form-grid">
           <div
-            className={outcome.outcome === "PARTIAL" ? "warn-note" : "success-note"}
+            className={outcome.outcome !== "COMPLETE" ? "warn-note" : "success-note"}
             role="status"
           >
             <p>{outcome.message}</p>
@@ -154,12 +168,6 @@ export default function VisitCancelSheet({
                   ? `refund ${money(preview.decisions.cancelRefund.amountCents)}`
                   : "no refund (late-cancel fee applies)"}
               </option>
-              {preview.decisions.cancelCredit.available ? (
-                <option value="CANCEL_CREDIT">
-                  Cancel and keep {money(preview.decisions.cancelCredit.amountCents)} as
-                  account credit
-                </option>
-              ) : null}
               {roles.owner ? (
                 <option value="MANAGER_EXCEPTION">
                   Manager exception — waive fee, refund{" "}
@@ -173,18 +181,30 @@ export default function VisitCancelSheet({
             <p className="muted small">
               {preview.decisions.managerException.description}
             </p>
-          ) : decision === "CANCEL_CREDIT" ? (
-            <p className="muted small">{preview.decisions.cancelCredit.description}</p>
           ) : (
             <p className="muted small">{preview.decisions.cancelRefund.description}</p>
           )}
 
-          <Field label="Reason" hint="Required — recorded on the visit's audit history.">
-            <textarea
-              rows={2}
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Why is this visit being canceled?"
+          <Field
+            label="Reason"
+            hint="A controlled reason is recorded on the visit's audit history."
+          >
+            <select
+              value={reasonCode}
+              onChange={(e) => setReasonCode(e.target.value)}
+            >
+              {VISIT_CANCEL_REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {reasonLabel(r)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Note" hint="Required when the reason is 'Other'.">
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Optional context"
             />
           </Field>
 
@@ -192,7 +212,7 @@ export default function VisitCancelSheet({
             block
             variant="danger"
             loading={busy}
-            disabled={busy || !reason.trim()}
+            disabled={busy || (reasonCode === "OTHER" && !note.trim())}
             onClick={() => void confirm()}
           >
             Cancel this visit

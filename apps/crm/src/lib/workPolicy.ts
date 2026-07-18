@@ -249,6 +249,23 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  VISIT_CHANGE_RECOVERY: {
+    label: "Visit change recovery",
+    severity: "CRITICAL",
+    customerImpact:
+      "An office visit cancel or reschedule didn't fully finish — the money, the schedule, the customer notice, or the audit record may not match.",
+    externalAction: {
+      mutation: "resumeVisitChange",
+      label: "Resume visit change",
+    },
+    verified: [],
+    manualReasons: [
+      { code: "RERAN_CHANGE_COMPLETE", label: "Re-ran the change — complete" },
+      { code: "SETTLED_OFFLINE", label: "Settled with the customer offline" },
+      { code: "AUDIT_ROW_RECONSTRUCTED", label: "Reconstructed the audit record" },
+      OTHER,
+    ],
+  },
 };
 
 export function workPolicy(kind: string | null | undefined): CrmWorkPolicy | null {

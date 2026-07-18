@@ -50,6 +50,7 @@ import {
   planCancellationSettled,
   resumePlanCancellation,
 } from "../shared/planCancellation";
+import { resumeVisitChange } from "../shared/visitChange";
 import {
   openMissingContactWork,
   openOwnedWork,
@@ -268,6 +269,15 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         event.arguments.servicePlanId!,
         { auto: false }
       );
+    }
+    case "resumeVisitChange": {
+      // GL-07: the safe re-run the VISIT_CHANGE_RECOVERY case prescribes.
+      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
+        throw new Error("Office or finance role required");
+      }
+      return resumeVisitChange(stripeClient(), event.arguments.jobId!, {
+        auto: false,
+      });
     }
     case "updateOwnedWork": {
       if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {

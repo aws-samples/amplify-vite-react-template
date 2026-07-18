@@ -262,6 +262,36 @@ export default function WorkQueue() {
     [load]
   );
 
+  // GL-07: resume a stuck office visit cancel/reschedule. Idempotent — re-runs
+  // the cancel from its last completed step and never re-refunds.
+  const resumeVisitChangeItem = useCallback(
+    async (item: WorkItem) => {
+      if (
+        !window.confirm(
+          "Resume this visit change? This re-runs the cancel and is safe to run more than once."
+        )
+      ) {
+        return;
+      }
+      setBusyId(item.id);
+      setError(null);
+      try {
+        const res = opResult<{ outcome?: string }>(
+          await api().mutations.resumeVisitChange({ jobId: item.relatedId })
+        );
+        if (!res) throw new Error("The resume did not run");
+        await load();
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Could not resume the visit change"
+        );
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
   if (!items) {
     return (
       <Page title="Owned work" back={roles.office ? "/dashboard" : "/more"}>
@@ -405,6 +435,18 @@ export default function WorkQueue() {
                     variant="subtle"
                     loading={busyId === item.id}
                     onClick={() => void resumeCancellation(item)}
+                  >
+                    {policy.externalAction.label}
+                  </Button>
+                ) : null}
+                {item.status === "OPEN" &&
+                policy?.externalAction?.mutation === "resumeVisitChange" &&
+                (roles.office || roles.finance) ? (
+                  <Button
+                    small
+                    variant="subtle"
+                    loading={busyId === item.id}
+                    onClick={() => void resumeVisitChangeItem(item)}
                   >
                     {policy.externalAction.label}
                   </Button>

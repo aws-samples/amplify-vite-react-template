@@ -46,6 +46,9 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // customer cancelled. Billing may be live and money is owed back — a prompt,
   // money-critical clock (Finance-owned).
   PLAN_CANCELLATION_RECOVERY: 60,
+  // GL-07: a visit cancel/reschedule didn't fully finish — a refund may be issued
+  // while the visit stayed scheduled, or the audit didn't write. Money-critical.
+  VISIT_CHANGE_RECOVERY: 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

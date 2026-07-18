@@ -35,7 +35,8 @@ export type WorkKind =
   | "STAFF_SECURITY"
   | "LEAD_FOLLOWUP"
   | "LIFECYCLE_RECOVERY"
-  | "PLAN_CANCELLATION_RECOVERY";
+  | "PLAN_CANCELLATION_RECOVERY"
+  | "VISIT_CHANGE_RECOVERY";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -346,6 +347,26 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "SETTLED_OFFLINE", label: "Fully settled with the customer offline" },
       { code: "REFUNDED_ELSEWHERE", label: "Late charge refunded another way" },
       { code: "NO_REFUND_OWED", label: "Reviewed — no refund was owed" },
+      OTHER,
+    ],
+  },
+  VISIT_CHANGE_RECOVERY: {
+    severity: "CRITICAL",
+    // A visit cancel/reschedule left money, schedule, or the audit record in a
+    // mixed state: a refund may have issued while the visit stayed scheduled, a
+    // charge may be mid-flight, or the immutable change record didn't write.
+    customerImpact:
+      "An office visit cancel or reschedule didn't fully finish — the money, the schedule, the customer notice, or the audit record may not match.",
+    ownerTeam: "FINANCE",
+    externalAction: {
+      mutation: "resumeVisitChange",
+      label: "Resume visit change",
+    },
+    verified: [],
+    manualReasons: [
+      { code: "RERAN_CHANGE_COMPLETE", label: "Re-ran the change — complete" },
+      { code: "SETTLED_OFFLINE", label: "Settled with the customer offline" },
+      { code: "AUDIT_ROW_RECONSTRUCTED", label: "Reconstructed the audit record" },
       OTHER,
     ],
   },

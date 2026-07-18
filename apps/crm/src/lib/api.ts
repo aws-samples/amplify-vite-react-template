@@ -410,7 +410,6 @@ export type VisitChangePreview = {
   decisions: {
     reschedule: { available: boolean; description: string };
     cancelRefund: { available: boolean; amountCents: number; description: string };
-    cancelCredit: { available: boolean; amountCents: number; description: string };
     managerException: { ownerOnly: true; amountCents: number; description: string };
   };
   planConsequence: string;
@@ -418,10 +417,8 @@ export type VisitChangePreview = {
   noticePreview: string;
 };
 
-export type CancelDecision =
-  | "CANCEL_REFUND"
-  | "CANCEL_CREDIT"
-  | "MANAGER_EXCEPTION";
+/** "Keep as account credit" was dropped for launch (no real credit ledger). */
+export type CancelDecision = "CANCEL_REFUND" | "MANAGER_EXCEPTION";
 
 export type VisitCancelOutcome = {
   jobId: string;
@@ -429,14 +426,61 @@ export type VisitCancelOutcome = {
   decision: CancelDecision;
   canceled: boolean;
   alreadyCanceled: boolean;
-  disposition: "REFUND" | "CREDIT" | "FEE_RETAINED" | "NONE";
+  disposition: "REFUND" | "FEE_RETAINED" | "NONE";
   refundedCents: number;
-  creditCents: number;
   invoiceVoided: boolean;
-  communicationResult: "SENT" | "FAILED" | "NO_EMAIL";
-  outcome: "COMPLETE" | "PARTIAL";
+  communicationResult: "SENT" | "FAILED" | "NO_EMAIL" | "PENDING";
+  outcome: "COMPLETE" | "PARTIAL" | "PENDING";
   message: string;
 };
+
+/** Controlled reason codes for a visit cancel/reschedule (GL-07) — mirrors the
+ *  server's VISIT_CANCEL_REASONS / VISIT_RESCHEDULE_REASONS. OTHER needs a note. */
+export const VISIT_CANCEL_REASONS = [
+  "CUSTOMER_REQUEST",
+  "SCHEDULING_CONFLICT",
+  "WEATHER",
+  "TECH_UNAVAILABLE",
+  "ACCESS_ISSUE",
+  "DUPLICATE",
+  "SERVICE_NOT_NEEDED",
+  "OTHER",
+] as const;
+export const VISIT_RESCHEDULE_REASONS = [
+  "CUSTOMER_REQUEST",
+  "WEATHER",
+  "TECH_UNAVAILABLE",
+  "ROUTE_CHANGE",
+  "ACCESS_ISSUE",
+  "OTHER",
+] as const;
+
+/** The immutable visit-change ledger row (GL-07), read for the history screen. */
+export type VisitChangeEvent = Schema["VisitChangeEvent"]["type"];
+
+/** List visit-change ledger rows for the Ops/Finance history screen. Tolerant of
+ *  the model being absent before the backend wave lands. */
+export function listVisitChangeEvents(args?: {
+  limit?: number;
+  nextToken?: string;
+}): Promise<{
+  data: VisitChangeEvent[];
+  nextToken?: string | null;
+  errors?: { message: string }[];
+}> {
+  const models = api().models as unknown as {
+    VisitChangeEvent?: {
+      list: (a?: typeof args) => Promise<{
+        data: VisitChangeEvent[];
+        nextToken?: string | null;
+        errors?: { message: string }[];
+      }>;
+    };
+  };
+  if (!models.VisitChangeEvent)
+    return Promise.resolve({ data: [], nextToken: null });
+  return models.VisitChangeEvent.list(args);
+}
 
 export type VisitRescheduleOutcome = {
   jobId: string;
@@ -464,7 +508,8 @@ export function previewVisitChange(input: { jobId: string }): OpResult {
 export function cancelVisit(input: {
   jobId: string;
   decision: CancelDecision;
-  reason?: string;
+  reasonCode: string;
+  note?: string;
 }): OpResult {
   return (
     api().mutations as unknown as {
@@ -482,7 +527,8 @@ export function rescheduleVisit(input: {
   technicianId?: string;
   routeId?: string;
   routeOrder?: number;
-  reason?: string;
+  reasonCode: string;
+  note?: string;
 }): OpResult {
   return (
     api().mutations as unknown as {

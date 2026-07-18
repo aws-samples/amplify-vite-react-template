@@ -25,6 +25,7 @@ import ProductLog from "./office/ProductLog";
 import MarketRates from "./office/MarketRates";
 import Schedule from "./office/Schedule";
 import Staff from "./office/Staff";
+import VisitChangeHistory from "./pages/VisitChangeHistory";
 import More from "./pages/More";
 import TechToday from "./tech/Today";
 import TechJob from "./tech/JobDetail";
@@ -193,6 +194,7 @@ function Shell() {
         {/* Office */}
         <Route path="/dashboard" element={<Require when={staff}><Dashboard /></Require>} />
         <Route path="/work" element={<Require when={workStaff}><WorkQueue /></Require>} />
+        <Route path="/visit-changes" element={<Require when={workStaff}><VisitChangeHistory /></Require>} />
         <Route path="/leads" element={<Require when={staff}><Leads /></Require>} />
         <Route path="/customers" element={<Require when={staff}><Customers /></Require>} />
         {/* GL-13: the office customer view exposes plans, invoices, agreements

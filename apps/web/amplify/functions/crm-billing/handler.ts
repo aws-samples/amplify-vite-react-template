@@ -36,6 +36,10 @@ import {
   rescheduleVisit,
   type CancelDecision,
 } from "../shared/visitChange";
+import {
+  assertVisitChangeReason,
+  visitChangeReasonSummary,
+} from "../shared/visitChangeReasons";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 
 type Args = {
@@ -47,6 +51,7 @@ type Args = {
   idempotencyKey?: string;
   invoiceId?: string;
   reason?: string;
+  reasonCode?: string;
   status?: string;
   method?: string;
   terms?: string;
@@ -244,16 +249,26 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "cancelVisit": {
       assertOffice(event.identity);
       const a = actorOf(event);
+      const code = assertVisitChangeReason(
+        "CANCEL",
+        event.arguments.reasonCode,
+        event.arguments.note
+      );
       return cancelVisit(stripeClient(), {
         jobId: event.arguments.jobId!,
         decision: (event.arguments.decision ?? "") as CancelDecision,
-        reason: event.arguments.reason ?? null,
+        reason: visitChangeReasonSummary(code, event.arguments.note),
         actor: { sub: a.sub, email: a.email, isOwner: a.isOwner },
       });
     }
     case "rescheduleVisit": {
       assertOffice(event.identity);
       const a = actorOf(event);
+      const code = assertVisitChangeReason(
+        "RESCHEDULE",
+        event.arguments.reasonCode,
+        event.arguments.note
+      );
       return rescheduleVisit({
         jobId: event.arguments.jobId!,
         scheduledDate: event.arguments.scheduledDate ?? null,
@@ -261,7 +276,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         technicianId: event.arguments.technicianId ?? null,
         routeId: event.arguments.routeId ?? null,
         routeOrder: event.arguments.routeOrder ?? null,
-        reason: event.arguments.reason ?? null,
+        reason: visitChangeReasonSummary(code, event.arguments.note),
         actor: { sub: a.sub, email: a.email, isOwner: a.isOwner },
       });
     }

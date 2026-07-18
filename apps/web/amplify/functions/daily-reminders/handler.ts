@@ -2,6 +2,7 @@ import { dataClient } from "../shared/dataClient";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import { stripeClient } from "../shared/stripeClient";
 import { resumePlanCancellation } from "../shared/planCancellation";
+import { resumeVisitChange } from "../shared/visitChange";
 import {
   sendInvoiceReminder,
   sendPaymentFailedNotice,
@@ -118,6 +119,9 @@ export const handler = async () => {
   // GL-08: resume every plan cancellation a prior attempt could not finish, so
   // an accepted cancel can never sit Pending forever with billing still live.
   const cancellations = await reconcilePlanCancellations();
+  // GL-07: resume every office visit cancel a prior attempt could not finish, so
+  // a refunded-but-still-scheduled visit is never stranded.
+  const visitChanges = await reconcileVisitChanges();
   // GL-02: no lead may silently go cold — surface every open lead whose next
   // action is overdue as an owned follow-up, routed to its owner or the team.
   const staleLeads = await reportStaleLeads();
@@ -134,9 +138,67 @@ export const handler = async () => {
     overdueWork,
     reconciliation,
     cancellations,
+    visitChanges,
     staleLeads,
   ];
 };
+
+/**
+ * GL-07 R1 — resume every office visit cancel/reschedule a prior attempt could
+ * not carry to a terminal outcome. Each open VisitChangeClaim is a durable
+ * command; resumeVisitChange re-drives the idempotent cancel from its last
+ * completed step (never re-refunding). A one-shot AppSync mutation nobody
+ * redelivers, so this sweep is the only thing that finishes a stuck visit change.
+ */
+export async function reconcileVisitChanges() {
+  const client = await dataClient();
+  if (!("VisitChangeClaim" in client.models)) {
+    return {
+      task: "reconcile-visit-changes" as const,
+      open: 0,
+      completed: 0,
+      stillPending: 0,
+      failed: 0,
+    };
+  }
+  const stripe = stripeClient();
+  const ids: string[] = [];
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.VisitChangeClaim.list({
+      limit: 200,
+      nextToken: token,
+    });
+    for (const cmd of page.data) ids.push(cmd.id);
+    token = page.nextToken;
+  } while (token);
+
+  let completed = 0;
+  let stillPending = 0;
+  let failed = 0;
+  for (const id of ids) {
+    try {
+      const outcome = await resumeVisitChange(stripe, id, { auto: true });
+      if (outcome.outcome === "COMPLETE" || outcome.alreadyCanceled) completed++;
+      else stillPending++;
+    } catch (err) {
+      failed++;
+      console.error(`reconcileVisitChanges: could not resume ${id}`, err);
+    }
+  }
+  if (stillPending > 0 || failed > 0) {
+    console.warn(
+      `reconcileVisitChanges: ${completed} completed, ${stillPending} still pending, ${failed} errored of ${ids.length} open command(s)`
+    );
+  }
+  return {
+    task: "reconcile-visit-changes" as const,
+    open: ids.length,
+    completed,
+    stillPending,
+    failed,
+  };
+}
 
 /**
  * GL-08 R1 — the reconcile sweep that guarantees no accepted plan cancellation

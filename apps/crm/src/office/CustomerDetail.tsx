@@ -12,6 +12,7 @@ import {
   sendInvoicePaymentLink,
   settleInvoice,
   unwrap,
+  VISIT_RESCHEDULE_REASONS,
   type CustomerLifecycleEvent,
   type VisitRescheduleOutcome,
   type Agreement,
@@ -2176,13 +2177,32 @@ function RescheduleForm({
 }) {
   const [date, setDate] = useState(job.scheduledDate ?? "");
   const [timeWindow, setTimeWindow] = useState(job.timeWindow ?? "");
-  const [reason, setReason] = useState("");
+  const [reasonCode, setReasonCode] = useState<string>(
+    VISIT_RESCHEDULE_REASONS[0]
+  );
+  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dateChanged = date !== (job.scheduledDate ?? "");
 
   return (
     <div className="form-grid">
+      {/* GL-07 R5: the same consequence preview as cancel — what a reschedule
+          does and doesn't touch, before it's committed. */}
+      <ul className="cancel-consequences">
+        <li>No money moves — a reschedule never refunds or charges.</li>
+        <li>
+          {job.servicePlanId
+            ? "This moves only this visit; a recurring plan keeps running."
+            : "This is a one-time visit."}
+        </li>
+        <li>
+          We revalidate the technician's license and the day's capacity before
+          committing; a visit given a date with no technician is put in the
+          Operations staffing queue, never left silently unassigned.
+        </li>
+        <li>The customer is emailed the old and new details when you save.</li>
+      </ul>
       <Field label="Date">
         <DateField value={date} onChange={setDate} allowClear />
       </Field>
@@ -2195,16 +2215,26 @@ function RescheduleForm({
           re-routed for the new day.
         </p>
       ) : null}
-      <p className="muted small">
-        GL-07: the customer is emailed the old and new details when you save.
-      </p>
-      <Field label="Reason (optional)">
-        <input value={reason} onChange={(e) => setReason(e.target.value)} />
+      <Field
+        label="Reason"
+        hint="A controlled reason is recorded on the visit's audit history."
+      >
+        <select value={reasonCode} onChange={(e) => setReasonCode(e.target.value)}>
+          {VISIT_RESCHEDULE_REASONS.map((r) => (
+            <option key={r} value={r}>
+              {reasonLabel(r)}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Note" hint="Required when the reason is 'Other'.">
+        <input value={note} onChange={(e) => setNote(e.target.value)} />
       </Field>
       <ErrorNote error={error} />
       <Button
         block
         loading={busy}
+        disabled={reasonCode === "OTHER" && !note.trim()}
         onClick={() => {
           setBusy(true);
           setError(null);
@@ -2212,7 +2242,8 @@ function RescheduleForm({
             jobId: job.id,
             scheduledDate: date || undefined,
             timeWindow: timeWindow.trim() || undefined,
-            reason: reason.trim() || undefined,
+            reasonCode,
+            note: note.trim() || undefined,
           })
             .then((res) => {
               const data = opResult<VisitRescheduleOutcome>(res);

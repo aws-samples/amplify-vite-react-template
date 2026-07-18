@@ -87,6 +87,18 @@ export default function More() {
         </Card>
       ) : null}
 
+      {/* GL-07 R6: reachable by finance too — a finance-only user must be able to
+          audit the money side of every cancel/reschedule, not just office. */}
+      {roles.office || roles.finance ? (
+        <Card title="Records">
+          <ListRow
+            title="Visit changes"
+            subtitle="Every cancel/reschedule — actor, reason, money, schedule, delivery"
+            onClick={() => navigate("/visit-changes")}
+          />
+        </Card>
+      ) : null}
+
       <Button block variant="ghost" onClick={() => void signOut().then(() => window.location.assign("/"))}>
         Sign out
       </Button>

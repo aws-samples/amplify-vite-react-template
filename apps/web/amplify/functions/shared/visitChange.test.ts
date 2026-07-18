@@ -22,6 +22,8 @@ const plans = new Map<string, Row>();
 const routes = new Map<string, Row>();
 const technicians = new Map<string, Row>();
 const visitEvents: Row[] = [];
+/** The durable single-winner command store (id = jobId). */
+const visitClaims = new Map<string, Row>();
 
 function listBy(map: Map<string, Row>, field: string, value: unknown): Row[] {
   return [...map.values()].filter((r) => r[field] === value);
@@ -72,9 +74,40 @@ const fakeDataClient = {
     },
     VisitChangeEvent: {
       create: async (row: Row) => {
-        visitEvents.push(row);
+        visitEvents.push({ ...row, id: `vce-${visitEvents.length + 1}` });
+        return { data: visitEvents.at(-1) };
+      },
+      list: async ({ filter }: { filter?: { jobId?: { eq: string } } }) => ({
+        data: filter?.jobId
+          ? visitEvents.filter((e) => e.jobId === filter.jobId!.eq)
+          : [...visitEvents],
+        nextToken: null,
+      }),
+    },
+    // The durable visit-change command (id = jobId). create is conditional on the
+    // id not existing — the single-winner lock the wrapper relies on.
+    VisitChangeClaim: {
+      get: async ({ id }: { id: string }) => ({ data: visitClaims.get(id) ?? null }),
+      create: async (input: Row) => {
+        if (visitClaims.has(input.id)) return { data: null };
+        visitClaims.set(input.id, {
+          createdAt: new Date().toISOString(),
+          ...input,
+        });
+        return { data: visitClaims.get(input.id) };
+      },
+      update: async (patch: Row) => {
+        const row = visitClaims.get(patch.id) ?? { id: patch.id };
+        Object.assign(row, patch);
+        visitClaims.set(patch.id, row);
         return { data: row };
       },
+      delete: async ({ id }: { id: string }) => {
+        const existed = visitClaims.get(id) ?? null;
+        visitClaims.delete(id);
+        return { data: existed };
+      },
+      list: async () => ({ data: [...visitClaims.values()], nextToken: null }),
     },
   },
 };
@@ -106,11 +139,19 @@ vi.mock("./receipts", () => ({
 }));
 
 const refundsCreate = vi.fn(async () => ({ id: "re_1" }));
-const fakeStripe = { refunds: { create: refundsCreate } } as never;
+const intentRetrieve = vi.fn(async () => ({ status: "succeeded" }));
+const intentCancel = vi.fn(async () => ({ status: "canceled" }));
+const fakeStripe = {
+  refunds: { create: refundsCreate },
+  paymentIntents: { retrieve: intentRetrieve, cancel: intentCancel },
+} as never;
 
-const { buildVisitChangePreview, cancelVisit, rescheduleVisit } = await import(
-  "./visitChange"
-);
+const {
+  buildVisitChangePreview,
+  cancelVisit,
+  rescheduleVisit,
+  resumeVisitChange,
+} = await import("./visitChange");
 
 // A licence date comfortably in the future so an active tech is compliant.
 const FUTURE_LICENSE = "2099-12-31";
@@ -158,12 +199,16 @@ beforeEach(() => {
   routes.clear();
   technicians.clear();
   visitEvents.length = 0;
+  visitClaims.clear();
   sendEmail.mockClear();
   sendEmail.mockImplementation(async () => true);
   openOwnedWork.mockClear();
   sendRefundNotice.mockClear();
   refundsCreate.mockClear();
   refundsCreate.mockImplementation(async () => ({ id: "re_1" }));
+  intentRetrieve.mockClear();
+  intentRetrieve.mockImplementation(async () => ({ status: "succeeded" }));
+  intentCancel.mockClear();
   fakeDataClient.models.ServicePlan.update.mockClear();
 });
 
@@ -261,22 +306,15 @@ describe("cancelVisit — money", () => {
     expect(jobs.get("j1")!.status).toBe("SCHEDULED");
   });
 
-  it("CANCEL_CREDIT keeps the money as account credit and opens an owned finance task", async () => {
+  it("deletes the command on a clean cancel so the visit can be changed again later", async () => {
     seedPaidVisit({ scheduledDate: daysFromNow(10) });
-    const res = await cancelVisit(fakeStripe, {
+    await cancelVisit(fakeStripe, {
       jobId: "j1",
-      decision: "CANCEL_CREDIT",
-      reason: "customer prefers credit",
+      decision: "CANCEL_REFUND",
+      reason: "customer moving",
       actor: OFFICE,
     });
-    expect(refundsCreate).not.toHaveBeenCalled();
-    expect(res.disposition).toBe("CREDIT");
-    expect(res.creditCents).toBe(15000);
-    const creditTask = openOwnedWork.mock.calls.find((c) =>
-      String((c[0] as { title?: string }).title).match(/account credit/i)
-    );
-    expect(creditTask).toBeDefined();
-    expect(jobs.get("j1")!.status).toBe("CANCELED");
+    expect(visitClaims.has("j1")).toBe(false);
   });
 
   it("voids an open unpaid invoice and cancels an unpaid visit with no refund", async () => {
@@ -331,10 +369,47 @@ describe("cancelVisit — fail-safe", () => {
     // The visit is NOT canceled — no false completion.
     expect(jobs.get("j1")!.status).toBe("SCHEDULED");
     const failCase = openOwnedWork.mock.calls.find(
-      (c) => (c[0] as { kind?: string }).kind === "PAID_VISIT_CANCELLATION"
+      (c) => (c[0] as { kind?: string }).kind === "VISIT_CHANGE_RECOVERY"
     );
     expect(failCase).toBeDefined();
     expect(visitEvents.at(-1)).toMatchObject({ outcome: "PARTIAL" });
+    // R1/R2: the command is KEPT (not deleted) so the sweep/retry can resume it.
+    expect(visitClaims.has("j1")).toBe(true);
+    expect(visitClaims.get("j1")).toMatchObject({ stage: "REQUESTED" });
+  });
+
+  it("resumes a stuck cancel from the recorded stage and never refunds twice", async () => {
+    seedPaidVisit({ scheduledDate: daysFromNow(10) });
+    // First attempt: refund succeeds, but the CANCELED flip fails → command kept.
+    const jobUpdate = fakeDataClient.models.Job.update;
+    const origUpdate = jobUpdate;
+    (fakeDataClient.models.Job as unknown as { update: unknown }).update =
+      async (patch: Row) => {
+        if (patch.status === "CANCELED")
+          return { data: null, errors: [{ message: "flip failed" }] };
+        return origUpdate(patch);
+      };
+    await expect(
+      cancelVisit(fakeStripe, {
+        jobId: "j1",
+        decision: "CANCEL_REFUND",
+        reason: "customer moving",
+        actor: OFFICE,
+      })
+    ).rejects.toThrow(/could not be canceled/i);
+    expect(refundsCreate).toHaveBeenCalledOnce();
+    expect(visitClaims.get("j1")).toMatchObject({ stage: "MONEY_DONE" });
+    // The invoice is now REFUNDED, so a re-refund would throw — the resume must
+    // skip the money step. Restore the flip and resume.
+    (fakeDataClient.models.Job as unknown as { update: unknown }).update =
+      origUpdate;
+    const res = await resumeVisitChange(fakeStripe, "j1", { auto: false });
+    expect(res.outcome).toBe("COMPLETE");
+    expect(res.refundedCents).toBe(15000);
+    // Still only ONE refund across the whole flow (R2: never twice).
+    expect(refundsCreate).toHaveBeenCalledOnce();
+    expect(jobs.get("j1")!.status).toBe("CANCELED");
+    expect(visitClaims.has("j1")).toBe(false);
   });
 
   it("still cancels but reports PARTIAL when the customer notice fails", async () => {
@@ -447,6 +522,7 @@ describe("rescheduleVisit", () => {
         scheduledDate: newDate,
         technicianId: "t1",
         routeId: "r-new",
+        reason: "customer request",
         actor: OFFICE,
       })
     ).rejects.toThrow(/licen[sc]e/i);

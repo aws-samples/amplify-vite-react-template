@@ -1,13 +1,23 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
 import { emailShell, sendEmail } from "./email";
-import { openOwnedWork } from "./ownedWork";
+import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
 import { refundInvoice, refundableRemaining } from "./refund";
 import { assertTechnicianCompliance } from "./compliance";
 import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
 } from "./cancellationPolicy";
+
+/** A visit-change command older than this, with its next-attempt time passed (or
+ *  never set), belongs to a dead attempt the reconcile sweep or a retry may
+ *  resume. */
+const VISIT_CHANGE_ORPHAN_MS = 10 * 60_000;
+/** After a failed attempt the sweep won't auto-resume before this. */
+const VISIT_CHANGE_RETRY_MS = 15 * 60_000;
+/** After this many failed AUTO resumes the sweep stops re-driving and leaves it
+ *  to the already-open recovery case; a person can always resume by hand. */
+export const MAX_VISIT_CHANGE_RESUME_ATTEMPTS = 5;
 
 /**
  * GL-07 — one safe office cancel/reschedule workflow for a single visit.
@@ -42,11 +52,10 @@ export type VisitChangeActor = {
 };
 
 /** The plain business decisions the office may pick. Amounts are never typed —
- *  the server derives them from policy. */
-export type CancelDecision =
-  | "CANCEL_REFUND"
-  | "CANCEL_CREDIT"
-  | "MANAGER_EXCEPTION";
+ *  the server derives them from policy. ("Keep as account credit" was removed
+ *  for launch: it promised a balance with no real credit ledger behind it. Cancel
+ *  offers refund-to-card, an owner manager exception, or a policy fee-retained.) */
+export type CancelDecision = "CANCEL_REFUND" | "MANAGER_EXCEPTION";
 
 const todayEastern = (): string =>
   new Intl.DateTimeFormat("en-CA", {
@@ -150,7 +159,6 @@ export type VisitChangePreview = {
   decisions: {
     reschedule: { available: boolean; description: string };
     cancelRefund: { available: boolean; amountCents: number; description: string };
-    cancelCredit: { available: boolean; amountCents: number; description: string };
     managerException: { ownerOnly: true; amountCents: number; description: string };
   };
   planConsequence: string;
@@ -232,14 +240,6 @@ export async function buildVisitChangePreview(
         amountCents: policy.refundableCents,
         description: refundLine,
       },
-      cancelCredit: {
-        available: changeable && policy.refundableCents > 0,
-        amountCents: policy.refundableCents,
-        description:
-          policy.refundableCents > 0
-            ? `Keep ${usd(policy.refundableCents)} as account credit toward future service instead of refunding the card.`
-            : "No refundable amount, so there is nothing to keep as credit.",
-      },
       managerException: {
         ownerOnly: true,
         amountCents: amountPaidCents,
@@ -264,9 +264,14 @@ export async function buildVisitChangePreview(
 
 type Disposition = "REFUND" | "CREDIT" | "FEE_RETAINED" | "NONE";
 
-/** Write one immutable audit row. Best-effort like the other lifecycle ledgers:
- *  the change is already durably applied, so a missed audit row is logged, never
- *  thrown (which would invite a double-applying retry). */
+/**
+ * Write one immutable audit row (GL-07 R6). The change itself is already durably
+ * applied, so we do NOT throw and invite a double-applying retry — but a lost
+ * audit row is a real gap in a record Ops and Finance rely on, so a write failure
+ * opens a blocking VISIT_CHANGE_RECOVERY owned case (the change stands; the
+ * missing history is now owned, visible, and owed a fix) instead of only logging.
+ * Returns whether the row landed. Mirrors lifecycleLog.recordCustomerLifecycleEvent.
+ */
 async function recordVisitChangeEvent(input: {
   jobId: string;
   customerId: string;
@@ -282,11 +287,12 @@ async function recordVisitChangeEvent(input: {
   newScheduledDate?: string | null;
   communicationResult: string;
   effects: string;
-  outcome: "COMPLETE" | "PARTIAL";
-}): Promise<void> {
+  outcome: string;
+}): Promise<{ recorded: boolean }> {
+  const occurredAt = new Date().toISOString();
   try {
     const client = await dataClient();
-    await client.models.VisitChangeEvent.create({
+    const { data, errors } = await client.models.VisitChangeEvent.create({
       jobId: input.jobId,
       customerId: input.customerId,
       action: input.action,
@@ -303,13 +309,37 @@ async function recordVisitChangeEvent(input: {
       communicationResult: input.communicationResult,
       effects: input.effects,
       outcome: input.outcome,
-      occurredAt: new Date().toISOString(),
+      occurredAt,
     });
+    if (!data) {
+      throw new Error(errors?.map((e) => e.message).join("; ") || "no row returned");
+    }
+    return { recorded: true };
   } catch (err) {
     console.error(
       `Failed to record visit change event (${input.action} on ${input.jobId}) — the change was applied; the audit row was not`,
       err
     );
+    try {
+      await openOwnedWork({
+        kind: "VISIT_CHANGE_RECOVERY",
+        dedupeKey: `visit-change-audit:${input.jobId}:${occurredAt}`,
+        title: `Reconstruct a missing visit-change record: ${input.jobId}`,
+        detail: `A ${input.action} on visit ${input.jobId} was applied (${input.effects}) by ${input.actor.email ?? "system"} at ${occurredAt}, but the audit row failed to write, so this change is missing from the visit-change history.`,
+        customerId: input.customerId,
+        relatedId: input.jobId,
+        sourceUrl: `/customers/${input.customerId}`,
+        resolutionAction:
+          "Confirm the visit's money, schedule, and customer notice match the intended change, reconstruct the missing visit-change audit entry, then close.",
+        ownerTeam: "FINANCE",
+      });
+    } catch (workErr) {
+      console.error(
+        `Failed to open VISIT_CHANGE_RECOVERY for the lost audit row on ${input.jobId}`,
+        workErr
+      );
+    }
+    return { recorded: false };
   }
 }
 
@@ -366,26 +396,21 @@ export type VisitCancelOutcome = {
   alreadyCanceled: boolean;
   disposition: Disposition;
   refundedCents: number;
-  creditCents: number;
   invoiceVoided: boolean;
-  communicationResult: "SENT" | "FAILED" | "NO_EMAIL";
-  outcome: "COMPLETE" | "PARTIAL";
+  communicationResult: "SENT" | "FAILED" | "NO_EMAIL" | "PENDING";
+  /** COMPLETE — done and the customer was told. PARTIAL — done but the notice is
+   *  owned. PENDING — a charge is still processing, so the money state is not yet
+   *  final and the visit change is owned through settlement (R3). */
+  outcome: "COMPLETE" | "PARTIAL" | "PENDING";
   message: string;
 };
 
 /**
- * Cancel one visit as a single guided action. Ordered so nothing lies:
- *   1. Money first — refund the policy amount (or the full amount on a manager
- *      exception). If the refund throws, the visit is NOT canceled: an owned
- *      exception is opened and the error propagates, so the screen shows a
- *      failure, never a false "canceled" with the money stuck.
- *   2. Void any open/unpaid invoice for the visit — a canceled visit is not owed.
- *   3. Flip the job CANCELED and off its route. A failure here (money already
- *      moved) opens an owned exception and throws loudly.
- *   4. Notify the customer. A failed/absent notice is owned and downgrades the
- *      outcome to PARTIAL, but the cancellation stands.
- * Records an immutable VisitChangeEvent throughout. Canceling a visit never
- * touches the recurring plan.
+ * Cancel one visit as a single guided action, under a durable single-winner
+ * command (GL-07 R1/R2): validate, take the VisitChangeClaim (id = jobId) BEFORE
+ * any money/schedule change, then drive the ordered consequences. A concurrent
+ * cancel loses the claim; a hard stop is resumable from the last completed step
+ * and can never refund twice. Canceling a visit never touches the recurring plan.
  */
 export async function cancelVisit(
   stripe: Stripe,
@@ -400,24 +425,9 @@ export async function cancelVisit(
   const { data: job } = await client.models.Job.get({ id: args.jobId });
   if (!job) throw new Error(`Job ${args.jobId} not found`);
 
-  // Idempotent: a second confirm (or a second employee) on an already-canceled
-  // visit is a no-op success, not a second refund.
-  if (job.status === "CANCELED") {
-    return {
-      jobId: job.id,
-      action: "CANCEL",
-      decision: args.decision,
-      canceled: true,
-      alreadyCanceled: true,
-      disposition: "NONE",
-      refundedCents: 0,
-      creditCents: 0,
-      invoiceVoided: false,
-      communicationResult: "SENT",
-      outcome: "COMPLETE",
-      message: "This visit was already canceled.",
-    };
-  }
+  // R7 idempotent replay: a second confirm on an already-canceled visit returns
+  // the STORED outcome from the audit ledger — never a fabricated SENT/COMPLETE.
+  if (job.status === "CANCELED") return storedCancelOutcome(job.id, args.decision);
   if (!CHANGEABLE.has(job.status)) {
     throw new Error(
       `This visit is ${job.status.toLowerCase().replace(/_/g, " ")} — it can't be canceled here. Only a scheduled or unscheduled visit can be canceled.`
@@ -425,67 +435,130 @@ export async function cancelVisit(
   }
 
   const reason = args.reason?.trim();
-  if (!reason) {
-    throw new Error("A reason is required to cancel a visit.");
-  }
-
+  if (!reason) throw new Error("A reason is required to cancel a visit.");
   if (args.decision === "MANAGER_EXCEPTION" && !args.actor.isOwner) {
     throw new Error(
       "Only an owner can approve a manager exception. Pick Cancel and refund (policy amount), or ask an owner."
     );
   }
 
+  // R1: take the single-winner durable command BEFORE any money/schedule change.
+  const { data: claim } = await client.models.VisitChangeClaim.create({
+    id: job.id,
+    action: "CANCEL",
+    decision: args.decision,
+    reason,
+    stage: "REQUESTED",
+    ownerTeam: "FINANCE",
+    requestedAt: new Date().toISOString(),
+    attemptCount: 0,
+    customerId: job.customerId,
+  });
+  if (!claim) {
+    // A live attempt holds the command — reclaim it only if orphaned, else report
+    // in-progress rather than driving a second refund.
+    const reclaimed = await reclaimOrphanedVisitChange(job.id);
+    if (!reclaimed) return inProgressCancelOutcome(job.id, args.decision);
+  }
+
+  return driveHeldVisitCancel(stripe, job as JobRow, {
+    decision: args.decision,
+    reason,
+    actor: args.actor,
+  });
+}
+
+/**
+ * Drive a cancellation to a terminal outcome, assuming this caller HOLDS the
+ * command. Reads the command's stage so a resume SKIPS a refund that already went
+ * out (R2: never twice, never a refunded-but-scheduled visit). On any step
+ * failure it KEEPS the command (records stage/error/next-attempt) and opens an
+ * owned recovery case; on a clean terminal it deletes the command. A charge still
+ * PROCESSING makes the outcome PENDING — the money is owned through settlement,
+ * never reported as a finished state (R3).
+ */
+async function driveHeldVisitCancel(
+  stripe: Stripe,
+  job: JobRow,
+  args: { decision: CancelDecision; reason: string; actor: VisitChangeActor }
+): Promise<VisitCancelOutcome> {
+  const client = await dataClient();
+  const jobId = job.id;
+  const { decision, reason, actor } = args;
+  const { data: claim } = await client.models.VisitChangeClaim.get({ id: jobId });
+  const attemptCount = claim?.attemptCount ?? 0;
+  const moneyDone = ["MONEY_DONE", "VOIDED", "CANCELED"].includes(
+    String(claim?.stage ?? "")
+  );
+
   const [{ data: customer }, invoices] = await Promise.all([
     client.models.Customer.get({ id: job.customerId }),
-    invoicesForJob(job.id),
+    invoicesForJob(jobId),
   ]);
   const { paid, open } = classifyInvoices(invoices);
-  const amountPaidCents = amountPaidFor(job as JobRow, paid);
+  const amountPaidCents = amountPaidFor(job, paid);
   const policy = computeVisitCancellationPolicy({
     scheduledDate: job.scheduledDate ?? null,
     amountPaidCents,
     today: todayEastern(),
   });
 
-  // What this decision is worth — computed, never typed.
   const refundTarget =
-    args.decision === "MANAGER_EXCEPTION"
+    decision === "MANAGER_EXCEPTION"
       ? amountPaidCents
-      : args.decision === "CANCEL_REFUND"
+      : decision === "CANCEL_REFUND"
         ? policy.refundableCents
-        : 0; // CANCEL_CREDIT refunds nothing to the card
-  const creditTarget = args.decision === "CANCEL_CREDIT" ? policy.refundableCents : 0;
+        : 0;
 
   let disposition: Disposition = "NONE";
   if (refundTarget > 0) disposition = "REFUND";
-  else if (creditTarget > 0) disposition = "CREDIT";
   else if (policy.feeCents > 0) disposition = "FEE_RETAINED";
 
   const policyUsed = policy.withinFreeWindow
     ? "Full-refund window"
-    : args.decision === "MANAGER_EXCEPTION"
+    : decision === "MANAGER_EXCEPTION"
       ? "Late cancel — fee waived by manager exception"
       : "Late cancel — fee retained";
 
-  // 1. Money first. A refund that fails must not leave a canceled visit.
-  let refundStripeId: string | null = null;
-  let refundedCents = 0;
-  if (refundTarget > 0) {
+  const custName = customer?.displayName ?? job.customerId;
+  const dateSuffix = job.scheduledDate ? ` on ${job.scheduledDate}` : "";
+  // Keep the command on a failure so the reconcile sweep / a retry resumes from
+  // here — never deleting it, unlike a clean terminal.
+  const keepFailed = async (
+    stage: string,
+    error: string,
+    workId: string | null,
+    extra: Record<string, unknown> = {}
+  ) => {
+    await client.models.VisitChangeClaim.update({
+      id: jobId,
+      stage,
+      lastError: error,
+      attemptCount: attemptCount + 1,
+      nextAttemptAt: new Date(Date.now() + VISIT_CHANGE_RETRY_MS).toISOString(),
+      ...(workId ? { recoveryWorkItemId: workId } : {}),
+      ...extra,
+    }).catch(() => undefined);
+  };
+
+  // 1. Money first — skipped on a resume where it already went out.
+  let refundStripeId: string | null = claim?.refundStripeId ?? null;
+  let refundedCents = moneyDone ? (claim?.refundedCents ?? 0) : 0;
+  if (!moneyDone && refundTarget > 0) {
     if (!paid) {
-      // Paid (job.paidAt) but no invoice to refund against — cannot move money
-      // safely. Own it; do not cancel with the money unresolved.
-      await openOwnedWork({
-        kind: "PAID_VISIT_CANCELLATION",
-        dedupeKey: `visit-cancel-refund:${job.id}`,
-        title: `Refund a paid visit by hand: ${customer?.displayName ?? job.customerId}`,
-        detail: `A ${usd(amountPaidCents)} refund is owed for canceling ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""}, but no paid invoice was found to refund against. The visit was NOT canceled.`,
+      const workId = await openOwnedWork({
+        kind: "VISIT_CHANGE_RECOVERY",
+        dedupeKey: `visit-change:${jobId}`,
+        title: `Refund a paid visit by hand: ${custName}`,
+        detail: `A ${usd(amountPaidCents)} refund is owed for canceling ${job.serviceType}${dateSuffix}, but no paid invoice was found to refund against. The visit was NOT canceled.`,
         customerId: job.customerId,
-        relatedId: job.id,
+        relatedId: jobId,
         sourceUrl: `/customers/${job.customerId}`,
         resolutionAction:
-          "Find the payment in Stripe, refund it, record the invoice, then cancel the visit again.",
+          "Find the payment in Stripe, refund it, record the invoice, then resume the visit change.",
         ownerTeam: "FINANCE",
       });
+      await keepFailed("REQUESTED", "No paid invoice found to refund against.", workId);
       throw new Error(
         `A refund is owed but no paid invoice was found for this visit — an operations case was opened. The visit was not canceled.`
       );
@@ -495,30 +568,31 @@ export async function cancelVisit(
         invoiceId: paid.id,
         amountCents: refundTarget,
         reason,
-        actor: { sub: args.actor.sub, email: args.actor.email },
+        actor: { sub: actor.sub, email: actor.email },
       });
       refundStripeId = outcome.stripeRefundId ?? null;
       refundedCents = outcome.refundedNowCents;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      await openOwnedWork({
-        kind: "PAID_VISIT_CANCELLATION",
-        dedupeKey: `visit-cancel-refund:${job.id}`,
-        title: `Finish canceling a paid visit: ${customer?.displayName ?? job.customerId}`,
-        detail: `Canceling ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} could not refund ${usd(refundTarget)}: ${detail}. The visit was NOT canceled.`,
+      const workId = await openOwnedWork({
+        kind: "VISIT_CHANGE_RECOVERY",
+        dedupeKey: `visit-change:${jobId}`,
+        title: `Finish canceling a paid visit: ${custName}`,
+        detail: `Canceling ${job.serviceType}${dateSuffix} could not refund ${usd(refundTarget)}: ${detail}. The visit was NOT canceled.`,
         customerId: job.customerId,
-        relatedId: job.id,
+        relatedId: jobId,
         sourceUrl: `/customers/${job.customerId}`,
         resolutionAction:
-          "Retry the cancellation once the refund can be issued, or refund in Stripe and then cancel the visit.",
+          "Resume the visit change once the refund can be issued, or refund in Stripe and then resume.",
         ownerTeam: "FINANCE",
       });
+      await keepFailed("REQUESTED", detail, workId);
       await recordVisitChangeEvent({
-        jobId: job.id,
+        jobId,
         customerId: job.customerId,
         action: "CANCEL",
-        decision: args.decision,
-        actor: args.actor,
+        decision,
+        actor,
         reason,
         policyUsed,
         amountCents: refundTarget,
@@ -528,50 +602,78 @@ export async function cancelVisit(
         effects: `Refund of ${usd(refundTarget)} failed — visit left scheduled, owned case opened. ${detail}`,
         outcome: "PARTIAL",
       });
-      // Person is waiting on the answer — surface the failure, don't fake success.
       throw new Error(
         `The refund could not be issued (${detail}) — the visit was not canceled and an operations case was opened.`
       );
     }
+    // Checkpoint: money is done and durably recorded so a resume never re-refunds.
+    await client.models.VisitChangeClaim.update({
+      id: jobId,
+      stage: "MONEY_DONE",
+      refundedCents,
+      ...(refundStripeId ? { refundStripeId } : {}),
+    }).catch(() => undefined);
   }
 
-  // A retained credit is durable owned finance work — recorded, not forgotten.
-  if (creditTarget > 0) {
-    await openOwnedWork({
-      kind: "PAID_VISIT_CANCELLATION",
-      dedupeKey: `visit-credit:${job.id}`,
-      title: `Apply ${usd(creditTarget)} account credit: ${customer?.displayName ?? job.customerId}`,
-      detail: `Canceling ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""}, the office chose to keep ${usd(creditTarget)} as account credit toward future service instead of refunding the card. Reason: "${reason}".`,
-      customerId: job.customerId,
-      relatedId: job.id,
-      sourceUrl: `/customers/${job.customerId}`,
-      resolutionAction:
-        "Apply the credit to the customer's next invoice or plan renewal, and tell the customer it's on their account.",
-      ownerTeam: "FINANCE",
-    });
-  }
-
-  // 2. Void the open/unpaid invoice — a canceled visit is not owed. Only when
-  // there is no live charge in flight: an OPEN invoice with a PaymentIntent is
-  // money still moving (a bank debit takes days), and voiding the row without
-  // canceling the intent would let the charge land anyway. That case is handed
-  // to finance rather than silently dropped.
-  let invoiceVoided = false;
-  if (open) {
+  // 2. Void the open/unpaid invoice. R3: never COMPLETE while a charge is still
+  // processing — retrieve the intent and branch on its real state.
+  let invoiceVoided = claim?.invoiceVoided ?? false;
+  let moneyPending = false;
+  let pendingDetail = "";
+  if (open && !invoiceVoided) {
     const liveCharge = open.status === "OPEN" && Boolean(open.stripePaymentIntentId);
     if (liveCharge) {
-      await openOwnedWork({
-        kind: "PAID_VISIT_CANCELLATION",
-        dedupeKey: `visit-void-open:${job.id}`,
-        title: `Void an in-flight charge for a canceled visit: ${customer?.displayName ?? job.customerId}`,
-        detail: `The canceled ${job.serviceType} visit has an OPEN invoice (${open.id}) with a payment still in motion. It can't be safely voided here without stopping the charge.`,
-        customerId: job.customerId,
-        relatedId: job.id,
-        sourceUrl: `/customers/${job.customerId}`,
-        resolutionAction:
-          "Void the invoice through the billing tools (which stops the PaymentIntent), or refund it if the charge has since settled.",
-        ownerTeam: "FINANCE",
-      });
+      let intentStatus = "unknown";
+      try {
+        const pi = await stripe.paymentIntents.retrieve(open.stripePaymentIntentId!);
+        intentStatus = pi.status;
+        if (
+          pi.status === "requires_payment_method" ||
+          pi.status === "requires_action" ||
+          pi.status === "requires_confirmation" ||
+          pi.status === "requires_capture"
+        ) {
+          // A cancelable pre-processing intent — cancel it, then void the invoice.
+          await stripe.paymentIntents
+            .cancel(open.stripePaymentIntentId!)
+            .catch(() => undefined);
+          await client.models.Invoice.update({
+            id: open.id,
+            status: "VOID",
+            voidedAt: new Date().toISOString(),
+            voidReason: `Visit canceled: ${reason}`,
+            ...(actor.sub ? { voidedBy: actor.sub } : {}),
+            ...(actor.email ? { voidedByEmail: actor.email } : {}),
+          });
+          const { data: reread } = await client.models.Invoice.get({ id: open.id });
+          invoiceVoided = reread?.status === "VOID";
+        } else if (pi.status === "processing" || pi.status === "succeeded") {
+          // A bank debit in flight (or already landed) is NOT safely voidable
+          // here — own it through settlement rather than reporting a final state.
+          moneyPending = true;
+          pendingDetail = `the payment is ${pi.status}`;
+        }
+        // "canceled" → nothing to do; the charge is already gone.
+      } catch (err) {
+        moneyPending = true;
+        pendingDetail = "the payment status could not be read";
+        console.error(`cancelVisit: could not retrieve intent for ${open.id}`, err);
+      }
+      if (moneyPending) {
+        const workId = await openOwnedWork({
+          kind: "VISIT_CHANGE_RECOVERY",
+          dedupeKey: `visit-change:${jobId}`,
+          title: `A charge is still processing on a canceled visit: ${custName}`,
+          detail: `The ${job.serviceType} visit was canceled, but its open invoice (${open.id}) has a payment still in motion (${intentStatus}). It can't be voided or refunded until it settles.`,
+          customerId: job.customerId,
+          relatedId: jobId,
+          sourceUrl: `/customers/${job.customerId}`,
+          resolutionAction:
+            "Once the payment settles, refund it in the billing tools and confirm the visit is fully settled.",
+          ownerTeam: "FINANCE",
+        });
+        await keepFailed("PENDING", `Charge ${intentStatus}, awaiting settlement.`, workId);
+      }
     } else {
       try {
         await client.models.Invoice.update({
@@ -579,19 +681,43 @@ export async function cancelVisit(
           status: "VOID",
           voidedAt: new Date().toISOString(),
           voidReason: `Visit canceled: ${reason}`,
-          ...(args.actor.sub ? { voidedBy: args.actor.sub } : {}),
-          ...(args.actor.email ? { voidedByEmail: args.actor.email } : {}),
+          ...(actor.sub ? { voidedBy: actor.sub } : {}),
+          ...(actor.email ? { voidedByEmail: actor.email } : {}),
         });
-        invoiceVoided = true;
+        // R3: read back the void — a silently-failed void must not report done.
+        const { data: reread } = await client.models.Invoice.get({ id: open.id });
+        invoiceVoided = reread?.status === "VOID";
+        if (!invoiceVoided) {
+          const workId = await openOwnedWork({
+            kind: "VISIT_CHANGE_RECOVERY",
+            dedupeKey: `visit-change:${jobId}`,
+            title: `Void an open invoice for a canceled visit: ${custName}`,
+            detail: `The open invoice (${open.id}) for the canceled ${job.serviceType} visit did not read back as VOID.`,
+            customerId: job.customerId,
+            relatedId: jobId,
+            sourceUrl: `/customers/${job.customerId}`,
+            resolutionAction:
+              "Void the invoice in the billing tools and confirm it reads voided.",
+            ownerTeam: "FINANCE",
+          });
+          await keepFailed("MONEY_DONE", "Open-invoice void did not persist.", workId);
+        }
       } catch (err) {
         console.error(`cancelVisit: could not void open invoice ${open.id}`, err);
       }
+    }
+    if (invoiceVoided) {
+      await client.models.VisitChangeClaim.update({
+        id: jobId,
+        stage: "VOIDED",
+        invoiceVoided: true,
+      }).catch(() => undefined);
     }
   }
 
   // 3. Flip the visit CANCELED and off its route.
   const { data: canceled, errors } = await client.models.Job.update({
-    id: job.id,
+    id: jobId,
     status: "CANCELED",
     routeId: null,
     technicianId: null,
@@ -599,29 +725,30 @@ export async function cancelVisit(
   });
   if (!canceled) {
     const detail = errors?.map((e) => e.message).join("; ") ?? "unknown error";
-    await openOwnedWork({
-      kind: "PAID_VISIT_CANCELLATION",
-      dedupeKey: `visit-cancel-state:${job.id}`,
-      title: `Finish canceling a visit: ${customer?.displayName ?? job.customerId}`,
+    const workId = await openOwnedWork({
+      kind: "VISIT_CHANGE_RECOVERY",
+      dedupeKey: `visit-change:${jobId}`,
+      title: `Finish canceling a visit: ${custName}`,
       detail: `${
         refundedCents > 0 ? `${usd(refundedCents)} was already refunded, but ` : ""
       }the visit could not be flipped to canceled: ${detail}.`,
       customerId: job.customerId,
-      relatedId: job.id,
+      relatedId: jobId,
       sourceUrl: `/customers/${job.customerId}`,
       resolutionAction:
-        "Cancel the visit by hand and confirm the refund/credit already issued is correct.",
+        "Resume the visit change — the refund already issued is recorded, so it won't refund twice.",
       ownerTeam: "OPS",
     });
+    await keepFailed("MONEY_DONE", detail, workId);
     await recordVisitChangeEvent({
-      jobId: job.id,
+      jobId,
       customerId: job.customerId,
       action: "CANCEL",
-      decision: args.decision,
-      actor: args.actor,
+      decision,
+      actor,
       reason,
       policyUsed,
-      amountCents: refundedCents || creditTarget,
+      amountCents: refundedCents,
       disposition,
       refundStripeId,
       priorScheduledDate: job.scheduledDate ?? null,
@@ -633,16 +760,19 @@ export async function cancelVisit(
       `${refundedCents > 0 ? `A ${usd(refundedCents)} refund was issued, but ` : ""}the visit could not be canceled (${detail}) — an operations case was opened.`
     );
   }
+  await client.models.VisitChangeClaim.update({
+    id: jobId,
+    stage: moneyPending ? "PENDING" : "CANCELED",
+  }).catch(() => undefined);
 
-  // 4. Notify the customer. A failed/absent notice is owned, not fatal.
-  const moneyLine =
-    disposition === "REFUND"
+  // 4. Notify the customer — the truthful money state (R3: pending vs final).
+  const moneyLine = moneyPending
+    ? `<p>Your visit is canceled. A payment for this visit is still processing; once it clears we'll refund it — you don't need to do anything.</p>`
+    : disposition === "REFUND"
       ? `<p>We've refunded <strong>${usd(refundedCents)}</strong> to your card — allow a few business days for it to appear.</p>`
-      : disposition === "CREDIT"
-        ? `<p>We've kept <strong>${usd(creditTarget)}</strong> as credit on your account toward future service.</p>`
-        : disposition === "FEE_RETAINED"
-          ? `<p>As this cancellation is within ${policy.daysUntilVisit ?? 0} day(s) of the visit, the amount paid is retained per our cancellation policy.</p>`
-          : "";
+      : disposition === "FEE_RETAINED"
+        ? `<p>As this cancellation is within ${policy.daysUntilVisit ?? 0} day(s) of the visit, the amount paid is retained per our cancellation policy.</p>`
+        : "";
   const html = emailShell(
     "Your visit is canceled",
     `<p>Your <strong>${job.serviceType}</strong> visit${
@@ -653,38 +783,41 @@ export async function cancelVisit(
   );
   const communicationResult = await notifyCustomer({
     customerId: job.customerId,
-    customerName: customer?.displayName ?? job.customerId,
+    customerName: custName,
     email: customer?.email ?? null,
     subject: "Your BuzzKill visit is canceled",
     html,
     template: "visit-canceled",
-    relatedId: job.id,
-    missingContactContext: `${customer?.displayName ?? job.customerId}'s ${job.serviceType} visit was canceled${
+    relatedId: jobId,
+    missingContactContext: `${custName}'s ${job.serviceType} visit was canceled${
       disposition === "REFUND" ? ` with a ${usd(refundedCents)} refund` : ""
     }, but the record has no email to confirm it.`,
   });
 
-  const outcome: "COMPLETE" | "PARTIAL" =
-    communicationResult === "SENT" ? "COMPLETE" : "PARTIAL";
+  const outcome: "COMPLETE" | "PARTIAL" | "PENDING" = moneyPending
+    ? "PENDING"
+    : communicationResult === "SENT"
+      ? "COMPLETE"
+      : "PARTIAL";
 
   await recordVisitChangeEvent({
-    jobId: job.id,
+    jobId,
     customerId: job.customerId,
     action: "CANCEL",
-    decision: args.decision,
-    actor: args.actor,
+    decision,
+    actor,
     reason,
     policyUsed,
-    amountCents: refundedCents || creditTarget || policy.feeCents,
+    amountCents: refundedCents || policy.feeCents,
     disposition,
     refundStripeId,
     priorScheduledDate: job.scheduledDate ?? null,
     communicationResult,
     effects: [
-      disposition === "REFUND"
-        ? `Refunded ${usd(refundedCents)} to card.`
-        : disposition === "CREDIT"
-          ? `Kept ${usd(creditTarget)} as account credit (owned finance task).`
+      moneyPending
+        ? `A charge is still processing (${pendingDetail}) — refund owed on settlement, owned by finance.`
+        : disposition === "REFUND"
+          ? `Refunded ${usd(refundedCents)} to card.`
           : disposition === "FEE_RETAINED"
             ? `Late-cancel fee of ${usd(policy.feeCents)} retained.`
             : "No money moved.",
@@ -702,23 +835,198 @@ export async function cancelVisit(
     outcome,
   });
 
+  // Terminal: the visit is canceled, so the CANCEL command is done — delete it so
+  // a later legitimate change to this visit can re-acquire. A processing charge is
+  // owned by the finance case above, not by keeping the command open forever.
+  await releaseVisitChangeClaim(jobId);
+
   return {
-    jobId: job.id,
+    jobId,
     action: "CANCEL",
-    decision: args.decision,
+    decision,
     canceled: true,
     alreadyCanceled: false,
     disposition,
     refundedCents,
-    creditCents: creditTarget,
     invoiceVoided,
     communicationResult,
     outcome,
-    message:
-      outcome === "COMPLETE"
+    message: moneyPending
+      ? "Visit canceled. A payment is still processing — the refund is owned by finance and will be issued once it settles."
+      : outcome === "COMPLETE"
         ? "Visit canceled. The customer has been emailed."
         : "Visit canceled. We couldn't reach the customer — an operations task was opened to notify them.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Visit-change command: reclaim / resume / stored-outcome replay
+// ---------------------------------------------------------------------------
+
+/** Steal a stuck visit-change command so this caller can resume it. A command
+ *  whose next-attempt time hasn't arrived still belongs to a live/paced attempt;
+ *  an old or overdue one is fair game. Returns whether we now hold it. */
+async function reclaimOrphanedVisitChange(jobId: string): Promise<boolean> {
+  const client = await dataClient();
+  const { data: held } = await client.models.VisitChangeClaim.get({ id: jobId });
+  if (!held) {
+    const { data } = await client.models.VisitChangeClaim.create({
+      id: jobId,
+      stage: "REQUESTED",
+      ownerTeam: "FINANCE",
+      requestedAt: new Date().toISOString(),
+      attemptCount: 0,
+    });
+    return Boolean(data);
+  }
+  const stampedMs = held.createdAt ? new Date(held.createdAt).getTime() : NaN;
+  const readyMs = held.nextAttemptAt ? new Date(held.nextAttemptAt).getTime() : NaN;
+  const nextArrived = Number.isNaN(readyMs) ? false : Date.now() >= readyMs;
+  const old =
+    Number.isNaN(stampedMs) || Date.now() - stampedMs >= VISIT_CHANGE_ORPHAN_MS;
+  return old || nextArrived;
+}
+
+/** Release the command on a terminal outcome. Idempotent; swallows its own
+ *  failure (a lingering command only delays the next change, never corrupts). */
+async function releaseVisitChangeClaim(jobId: string): Promise<void> {
+  const client = await dataClient();
+  await client.models.VisitChangeClaim.delete({ id: jobId }).catch(() => undefined);
+}
+
+/** The newest visit-change audit row for a job, for the R7 stored-outcome replay. */
+async function latestVisitChangeEvent(jobId: string): Promise<{
+  disposition?: string | null;
+  amountCents?: number | null;
+  communicationResult?: string | null;
+  outcome?: string | null;
+} | null> {
+  const client = await dataClient();
+  const page = await client.models.VisitChangeEvent.list({
+    filter: { jobId: { eq: jobId } },
+    limit: 200,
+  }).catch(() => ({ data: [] as Record<string, unknown>[] }));
+  const rows = (page.data ?? []) as {
+    occurredAt?: string | null;
+    disposition?: string | null;
+    amountCents?: number | null;
+    communicationResult?: string | null;
+    outcome?: string | null;
+  }[];
+  if (!rows.length) return null;
+  rows.sort((a, b) =>
+    String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
+  );
+  return rows[0];
+}
+
+/** R7: an already-canceled visit returns the STORED money/notice/outcome from the
+ *  ledger, never a fabricated clean result. */
+async function storedCancelOutcome(
+  jobId: string,
+  decision: CancelDecision
+): Promise<VisitCancelOutcome> {
+  const ev = await latestVisitChangeEvent(jobId);
+  const disposition = (ev?.disposition ?? "NONE") as Disposition;
+  const refundedCents =
+    disposition === "REFUND" ? Math.max(0, ev?.amountCents ?? 0) : 0;
+  const comm = (ev?.communicationResult ?? "SENT") as
+    | "SENT"
+    | "FAILED"
+    | "NO_EMAIL"
+    | "PENDING";
+  const outcome = (ev?.outcome ?? "COMPLETE") as "COMPLETE" | "PARTIAL" | "PENDING";
+  return {
+    jobId,
+    action: "CANCEL",
+    decision,
+    canceled: true,
+    alreadyCanceled: true,
+    disposition,
+    refundedCents,
+    invoiceVoided: false,
+    communicationResult: comm,
+    outcome,
+    message:
+      outcome === "PENDING"
+        ? "This visit was already canceled; a payment is still settling."
+        : "This visit was already canceled.",
+  };
+}
+
+/** A concurrent cancel that lost the command to a live attempt — report the
+ *  truthful in-progress state, never a second refund. */
+function inProgressCancelOutcome(
+  jobId: string,
+  decision: CancelDecision
+): VisitCancelOutcome {
+  return {
+    jobId,
+    action: "CANCEL",
+    decision,
+    canceled: false,
+    alreadyCanceled: false,
+    disposition: "NONE",
+    refundedCents: 0,
+    invoiceVoided: false,
+    communicationResult: "PENDING",
+    outcome: "PENDING",
+    message:
+      "This visit's cancellation is already in progress — refresh in a moment to see the result.",
+  };
+}
+
+/**
+ * Resume a stuck visit-change command (GL-07 R1/R2). The safe re-run the
+ * VISIT_CHANGE_RECOVERY case prescribes and the entry the reconcile sweep calls.
+ * Idempotent: an already-canceled visit returns its stored outcome and clears the
+ * command. `auto` (the sweep) respects the attempt cap and next-attempt time.
+ */
+export async function resumeVisitChange(
+  stripe: Stripe,
+  jobId: string,
+  opts: { auto?: boolean } = {}
+): Promise<VisitCancelOutcome> {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+
+  const { data: existing } = await client.models.VisitChangeClaim.get({ id: jobId });
+
+  // Nothing to resume, or the visit is already canceled — clean up and report.
+  if (job.status === "CANCELED") {
+    if (existing) await releaseVisitChangeClaim(jobId);
+    return storedCancelOutcome(jobId, (existing?.decision ?? "CANCEL_REFUND") as CancelDecision);
+  }
+  if (!existing) {
+    // A hard kill left no command but the visit is not canceled — nothing durable
+    // to resume from; leave it for a fresh office action.
+    return inProgressCancelOutcome(jobId, "CANCEL_REFUND");
+  }
+
+  if (opts.auto) {
+    const readyMs = existing.nextAttemptAt
+      ? new Date(existing.nextAttemptAt).getTime()
+      : 0;
+    if (Number.isFinite(readyMs) && Date.now() < readyMs) {
+      return inProgressCancelOutcome(jobId, (existing.decision ?? "CANCEL_REFUND") as CancelDecision);
+    }
+    if ((existing.attemptCount ?? 0) >= MAX_VISIT_CHANGE_RESUME_ATTEMPTS) {
+      return inProgressCancelOutcome(jobId, (existing.decision ?? "CANCEL_REFUND") as CancelDecision);
+    }
+  }
+
+  // Only CANCEL commands are auto-driveable to completion; a stuck RESCHEDULE is
+  // left to the office (its consequences need a person's date/tech choice).
+  if ((existing.action ?? "CANCEL") !== "CANCEL") {
+    return inProgressCancelOutcome(jobId, "CANCEL_REFUND");
+  }
+
+  return driveHeldVisitCancel(stripe, job as JobRow, {
+    decision: (existing.decision ?? "CANCEL_REFUND") as CancelDecision,
+    reason: existing.reason ?? "Resumed cancellation",
+    actor: { sub: null, email: "system", isOwner: true },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -766,10 +1074,35 @@ export async function rescheduleVisit(args: {
 
   const priorScheduledDate = job.scheduledDate ?? null;
   const newDate = args.scheduledDate?.trim() || null;
-  const reason = args.reason?.trim() || null;
+  // R5: reschedule now requires a controlled reason, the same as cancel.
+  const reason = args.reason?.trim();
+  if (!reason) throw new Error("A reason is required to reschedule a visit.");
+
+  // R1: single-winner command so concurrent reschedules converge on one result.
+  const { data: claim } = await client.models.VisitChangeClaim.create({
+    id: job.id,
+    action: "RESCHEDULE",
+    reason,
+    stage: "REQUESTED",
+    ownerTeam: "OPS",
+    requestedAt: new Date().toISOString(),
+    attemptCount: 0,
+    customerId: job.customerId,
+  });
+  if (!claim) {
+    const reclaimed = await reclaimOrphanedVisitChange(job.id);
+    if (!reclaimed) {
+      throw new Error(
+        "This visit's reschedule is already in progress — refresh in a moment to see the result."
+      );
+    }
+  }
 
   const wantsAssignment = Boolean(args.technicianId && args.routeId && newDate);
   let assignedToRoute = false;
+  // R5: a dated visit left without a technician is never a clean SCHEDULED —
+  // its staffing is put in an owned queue below.
+  let staffingOwned = false;
 
   if (wantsAssignment) {
     const [{ data: technician }, { data: route }, { data: customer0 }] =
@@ -843,6 +1176,27 @@ export async function rescheduleVisit(args: {
         errors?.map((e) => e.message).join("; ") || "Could not reschedule the visit"
       );
     }
+    // R5: a visit given a date but no technician is not a clean SCHEDULED — put
+    // its staffing in an owned queue so it can't silently sit unassigned. (An
+    // UNSCHEDULED move has no date to staff, so it needs no case.)
+    if (newDate) {
+      const { data: customer0 } = await client.models.Customer.get({
+        id: job.customerId,
+      });
+      await openOwnedWork({
+        kind: "UNSTAFFED_VISIT",
+        dedupeKey: `visit-reschedule-unstaffed:${job.id}`,
+        title: `Assign a technician: ${customer0?.displayName ?? job.customerId} on ${newDate}`,
+        detail: `${job.serviceType} was rescheduled to ${newDate} without a technician or route. It needs a validated technician assigned before the day so it isn't a scheduled visit with no one to work it.`,
+        customerId: job.customerId,
+        relatedId: job.id,
+        sourceUrl: `/schedule`,
+        resolutionAction:
+          "Assign a licensed, available technician and put the visit on that day's route.",
+        ownerTeam: "OPS",
+      });
+      staffingOwned = true;
+    }
   }
 
   const { data: customer } = await client.models.Customer.get({
@@ -886,8 +1240,10 @@ export async function rescheduleVisit(args: {
     effects: [
       `Moved from ${priorScheduledDate ?? "unscheduled"} to ${newDate ?? "unscheduled"}.`,
       assignedToRoute
-        ? "Assigned to a validated technician and route."
-        : "Returned to the scheduling pool for assignment.",
+        ? "Assigned to a validated technician and route (capacity + license checked)."
+        : staffingOwned
+          ? "No technician yet — staffing is in an owned queue (UNSTAFFED_VISIT)."
+          : "Returned to the scheduling pool for assignment.",
       communicationResult === "SENT"
         ? "Customer emailed the old and new details."
         : communicationResult === "FAILED"
@@ -896,6 +1252,9 @@ export async function rescheduleVisit(args: {
     ].join(" "),
     outcome,
   });
+
+  // Terminal: the reschedule is applied, so release the single-winner command.
+  await releaseVisitChangeClaim(job.id);
 
   return {
     jobId: job.id,
