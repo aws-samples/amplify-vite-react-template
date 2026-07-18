@@ -33,7 +33,8 @@ export type WorkKind =
   | "LOCATION_REVIEW"
   | "STAFF_OFFBOARD"
   | "STAFF_SECURITY"
-  | "LEAD_FOLLOWUP";
+  | "LEAD_FOLLOWUP"
+  | "LIFECYCLE_RECOVERY";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -292,6 +293,26 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "BOOKING_SENT", label: "Sent the booking link" },
       { code: "MARKED_LOST", label: "Marked the lead lost" },
       { code: "MARKED_DNC", label: "Set do-not-contact" },
+      OTHER,
+    ],
+  },
+  LIFECYCLE_RECOVERY: {
+    severity: "CRITICAL",
+    // Money/access are in a mixed state and a status transition did not fully
+    // complete or record: billing may be stopped while a portal login is still
+    // live, or a status change happened with no audit row. Either way something
+    // the business must be able to prove or rely on is currently untrue.
+    customerImpact:
+      "A customer deactivation or reactivation didn't fully complete — access, billing, or the audit record may not match the customer's real state.",
+    ownerTeam: "OPS",
+    // No auto-verifier: the safe resume is to re-run the transition (it is
+    // idempotent) and confirm access + billing + status agree, then close with
+    // the matching reason. The owner override is the escape hatch.
+    verified: [],
+    manualReasons: [
+      { code: "RERAN_TRANSITION_COMPLETE", label: "Re-ran the transition — complete" },
+      { code: "PORTAL_CONFIRMED_ENDED", label: "Portal login confirmed ended" },
+      { code: "AUDIT_ROW_RECONSTRUCTED", label: "Reconstructed the audit record" },
       OTHER,
     ],
   },

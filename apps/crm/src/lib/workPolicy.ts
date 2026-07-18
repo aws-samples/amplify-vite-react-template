@@ -214,6 +214,19 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  LIFECYCLE_RECOVERY: {
+    label: "Lifecycle recovery",
+    severity: "CRITICAL",
+    customerImpact:
+      "A customer deactivation or reactivation didn't fully complete — access, billing, or the audit record may not match the customer's real state.",
+    verified: [],
+    manualReasons: [
+      { code: "RERAN_TRANSITION_COMPLETE", label: "Re-ran the transition — complete" },
+      { code: "PORTAL_CONFIRMED_ENDED", label: "Portal login confirmed ended" },
+      { code: "AUDIT_ROW_RECONSTRUCTED", label: "Reconstructed the audit record" },
+      OTHER,
+    ],
+  },
 };
 
 export function workPolicy(kind: string | null | undefined): CrmWorkPolicy | null {

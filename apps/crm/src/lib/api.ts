@@ -782,6 +782,55 @@ export function listStaffAccessEvents(args?: {
   return models.StaffAccessEvent.list(args);
 }
 
+/** Controlled reason codes for a customer lifecycle transition (GL-09) — mirrors
+ *  the server's DEACTIVATION_REASONS / REACTIVATION_REASONS. OTHER needs a note. */
+export const DEACTIVATION_REASONS = [
+  "CUSTOMER_REQUEST",
+  "NONPAYMENT",
+  "MOVED",
+  "PROPERTY_SOLD",
+  "SERVICE_ENDED",
+  "DUPLICATE",
+  "OTHER",
+] as const;
+export const REACTIVATION_REASONS = [
+  "CUSTOMER_RETURNED",
+  "PAYMENT_RESOLVED",
+  "DEACTIVATED_IN_ERROR",
+  "OTHER",
+] as const;
+
+/** The immutable customer-lifecycle ledger row (GL-09), read directly from the
+ *  model (OWNER/OFFICE/FINANCE-readable) for the customer's history card. */
+export type CustomerLifecycleEvent = Schema["CustomerLifecycleEvent"]["type"];
+
+/** List a customer's lifecycle transitions for the history card. Tolerates the
+ *  model being absent before the backend wave lands; the caller sorts. */
+export function listCustomerLifecycleEvents(customerId: string): Promise<{
+  data: CustomerLifecycleEvent[];
+  nextToken?: string | null;
+  errors?: { message: string }[];
+}> {
+  const models = api().models as unknown as {
+    CustomerLifecycleEvent?: {
+      list: (a: {
+        filter?: { customerId: { eq: string } };
+        limit?: number;
+      }) => Promise<{
+        data: CustomerLifecycleEvent[];
+        nextToken?: string | null;
+        errors?: { message: string }[];
+      }>;
+    };
+  };
+  if (!models.CustomerLifecycleEvent)
+    return Promise.resolve({ data: [], nextToken: null });
+  return models.CustomerLifecycleEvent.list({
+    filter: { customerId: { eq: customerId } },
+    limit: 100,
+  });
+}
+
 /** Parse an AWSJSON field that may arrive as a string. */
 export function jsonField<T>(raw: unknown): T | null {
   if (raw == null) return null;

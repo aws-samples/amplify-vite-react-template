@@ -8,7 +8,7 @@ import {
   type WorkKind,
 } from "./workPolicy";
 
-// The 13 kinds the system actually produces (mirrors the WorkKind union). If a
+// The kinds the system actually produces (mirrors the WorkKind union). If a
 // new kind is added, this list must grow too — that is the point: a kind can
 // never ship without a severity, an owner, and a controlled way to close it.
 const ALL_KINDS: WorkKind[] = [
@@ -26,6 +26,7 @@ const ALL_KINDS: WorkKind[] = [
   "STAFF_OFFBOARD",
   "STAFF_SECURITY",
   "LEAD_FOLLOWUP",
+  "LIFECYCLE_RECOVERY",
 ];
 
 describe("GL-18 work policy registry", () => {

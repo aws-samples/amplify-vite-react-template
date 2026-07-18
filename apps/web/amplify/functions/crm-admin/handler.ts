@@ -42,6 +42,16 @@ import {
   setLeadDisposition,
 } from "../shared/leadLifecycle";
 import { recordCustomerLifecycleEvent } from "../shared/lifecycleLog";
+import { deactivateCustomer as sharedDeactivateCustomer } from "../shared/deactivation";
+import {
+  assertLifecycleReason,
+  lifecycleReasonSummary,
+} from "../shared/lifecycleReasons";
+import {
+  acquireLifecycleClaim,
+  releaseLifecycleClaim,
+} from "../shared/lifecycleClaim";
+import { stripeClient } from "../shared/stripeClient";
 import {
   findStaffAccessEventByKey,
   recordStaffAccessEvent,
@@ -78,6 +88,12 @@ type SetCustomerGroupArgs = {
 };
 
 type CustomerIdArgs = { customerId: string };
+/** deactivate/reactivate carry a controlled reason (+ optional note for OTHER). */
+type LifecycleArgs = {
+  customerId: string;
+  reasonCode: string;
+  note?: string | null;
+};
 type TechnicianIdArgs = { technicianId: string };
 type SaveTechnicianArgs = {
   technicianId?: string | null;
@@ -127,6 +143,7 @@ type AdminArgs =
   | AdminCreateUserArgs
   | SetCustomerGroupArgs
   | CustomerIdArgs
+  | LifecycleArgs
   | TechnicianIdArgs
   | SaveTechnicianArgs
   | ChangeStaffRolesArgs
@@ -171,16 +188,38 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         throw err;
       }
     }
+    case "deactivateCustomer": {
+      // The whole offboarding in one action (GL-09): money + schedule + portal +
+      // status, ordered so INACTIVE never implies a live login. Stripe access is
+      // wired into crm-admin (resource.ts) so the plan-cancel half runs here too;
+      // the portal revoke is injected because only this function holds the pool.
+      const args = event.arguments as LifecycleArgs;
+      const code = assertLifecycleReason("DEACTIVATE", args.reasonCode, args.note);
+      return await sharedDeactivateCustomer(
+        stripeClient(),
+        args.customerId,
+        { sub: callerSub(event.identity), email: callerEmail(event.identity) },
+        {
+          reason: lifecycleReasonSummary(code, args.note),
+          revokePortalAccess: async () => {
+            const r = await revokePortalAccess(args.customerId);
+            return { revoked: r.revoked, detail: r.groupsRemoved.join(", ") };
+          },
+        }
+      );
+    }
     case "reactivateCustomer": {
-      const customerId = (event.arguments as CustomerIdArgs).customerId;
+      const args = event.arguments as LifecycleArgs;
+      const code = assertLifecycleReason("REACTIVATE", args.reasonCode, args.note);
       try {
-        return await reactivateCustomer(customerId, {
-          sub: callerSub(event.identity),
-          email: callerEmail(event.identity),
-        });
+        return await reactivateCustomer(
+          args.customerId,
+          { sub: callerSub(event.identity), email: callerEmail(event.identity) },
+          { reason: lifecycleReasonSummary(code, args.note) }
+        );
       } catch (err) {
         await recordPortalFailure(
-          customerId,
+          args.customerId,
           "Customer reactivation failed",
           err
         );
@@ -702,7 +741,8 @@ async function restorePortalAccess(customerId: string) {
  */
 async function reactivateCustomer(
   customerId: string,
-  actor: { sub: string | null; email: string | null }
+  actor: { sub: string | null; email: string | null },
+  opts: { reason: string }
 ) {
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({
@@ -710,43 +750,99 @@ async function reactivateCustomer(
   });
   if (!customer) throw new Error(`Customer ${customerId} not found`);
 
-  if (customer.status === "ACTIVE") {
-    const restore = await restorePortalAccess(customerId);
+  // R5: single-winner claim, shared with deactivation, so an interleaving
+  // deactivate cannot race this into mixed state. The loser reports the current
+  // fact instead of driving a second transition.
+  const won = await acquireLifecycleClaim(customerId, "REACTIVATE");
+  if (!won) {
+    const { data: current } = await client.models.Customer.get({
+      id: customerId,
+    });
+    const status = current?.status ?? customer.status;
     return {
       customerId,
       reactivated: false,
-      alreadyActive: true,
-      portalRestored: restore.restored,
-      status: "ACTIVE",
+      alreadyActive: status === "ACTIVE",
+      portalRestored: false,
+      status,
+      inProgress: true,
+      audited: true,
     };
   }
 
-  // Access before status — see the header. restorePortalAccess is idempotent
-  // and a no-op when there is no portal user.
-  const restore = await restorePortalAccess(customerId);
-  const priorStatus = customer.status;
-  await client.models.Customer.update({ id: customerId, status: "ACTIVE" });
+  try {
+    if (customer.status === "ACTIVE") {
+      const restore = await restorePortalAccess(customerId);
+      return {
+        customerId,
+        reactivated: false,
+        alreadyActive: true,
+        portalRestored: restore.restored,
+        status: "ACTIVE",
+        audited: true,
+      };
+    }
 
-  await recordCustomerLifecycleEvent({
-    customerId,
-    action: "REACTIVATE",
-    actor,
-    priorStatus,
-    newStatus: "ACTIVE",
-    effects: restore.restored
-      ? `Portal login re-enabled (${restore.groupsAdded.join(
-          ", "
-        )}). Canceled plans left canceled; customer re-subscribes through a new booking.`
-      : "No portal login to re-enable. Canceled plans left canceled.",
-  });
+    // Access before status — see the header. restorePortalAccess is idempotent
+    // and a no-op when there is no portal user.
+    const restore = await restorePortalAccess(customerId);
+    const priorStatus = customer.status;
+    await client.models.Customer.update({ id: customerId, status: "ACTIVE" });
 
-  return {
-    customerId,
-    reactivated: true,
-    alreadyActive: false,
-    portalRestored: restore.restored,
-    status: "ACTIVE",
-  };
+    // R4: read the status back. A silently-failed flip must not report success —
+    // open blocking recovery and tell the truth.
+    const { data: readBack } = await client.models.Customer.get({
+      id: customerId,
+    });
+    if (readBack?.status !== "ACTIVE") {
+      await openOwnedWork({
+        kind: "LIFECYCLE_RECOVERY",
+        dedupeKey: `reactivate-status:${customerId}`,
+        title: `Finish a reactivation — status did not persist: ${customer.displayName}`,
+        detail: `${customer.displayName}'s portal login was ${restore.restored ? "re-enabled" : "handled"}, but the ACTIVE status write did not persist (still reads ${readBack?.status ?? "unknown"}).`,
+        customerId,
+        relatedId: customerId,
+        sourceUrl: `/customers/${customerId}`,
+        resolutionAction:
+          "Re-run the reactivation to re-assert ACTIVE — it is idempotent — and confirm the record reads active.",
+        ownerTeam: "OPS",
+      });
+      return {
+        customerId,
+        reactivated: false,
+        alreadyActive: false,
+        portalRestored: restore.restored,
+        status: readBack?.status ?? customer.status,
+        partial: true,
+        audited: true,
+      };
+    }
+
+    const { recorded } = await recordCustomerLifecycleEvent({
+      customerId,
+      action: "REACTIVATE",
+      actor,
+      reason: opts.reason,
+      priorStatus,
+      newStatus: "ACTIVE",
+      effects: restore.restored
+        ? `Portal login re-enabled (${restore.groupsAdded.join(
+            ", "
+          )}). Canceled plans left canceled; customer re-subscribes through a new booking.`
+        : "No portal login to re-enable. Canceled plans left canceled.",
+    });
+
+    return {
+      customerId,
+      reactivated: true,
+      alreadyActive: false,
+      portalRestored: restore.restored,
+      status: "ACTIVE",
+      audited: recorded,
+    };
+  } finally {
+    await releaseLifecycleClaim(customerId);
+  }
 }
 
 /**

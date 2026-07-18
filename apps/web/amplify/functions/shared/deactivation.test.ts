@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type Stripe from "stripe";
 
 /**
- * Customer deactivation guarantees. This is money + service in one button, so
- * the tests assert the promises, not the plumbing: every active plan's billing
- * is stopped, the remaining visits leave the schedule, the balance is REPORTED
- * and never charged, INACTIVE is set LAST, and a half-done deactivation (a plan
- * that would not cancel) leaves the customer ACTIVE and pages a human rather
- * than hiding a live charge behind an INACTIVE flag.
+ * Customer deactivation guarantees (GL-09). This is money + service + access in
+ * one action, so the tests assert the promises, not the plumbing: every active
+ * plan's billing is stopped, the remaining visits leave the schedule, the
+ * balance is REPORTED and never charged, the portal login is ended BEFORE the
+ * status flip (so INACTIVE never implies a live login), INACTIVE is set LAST and
+ * read back, the transition is recorded, and any half-done step leaves the
+ * customer ACTIVE with an owned, resumable recovery rather than a hidden
+ * inconsistency. A single-winner claim serializes racing transitions.
  */
 
 type Plan = { id: string; customerId: string; planName: string; status: string };
@@ -40,8 +42,11 @@ const customers = new Map<string, Customer>();
 const plans = new Map<string, Plan>();
 const jobs = new Map<string, Job>();
 const invoices = new Map<string, Invoice>();
+/** The single-winner lifecycle claim store (id = customerId). */
+const claims = new Map<string, Record<string, unknown>>();
 
-/** Ordered log of the side effects, so we can prove INACTIVE is set LAST. */
+/** Ordered log of the side effects, so we can prove the sequence:
+ *  money → work → portal → INACTIVE(last). */
 let events: string[] = [];
 let jobUpdate = async (patch: Partial<Job> & { id: string }) => {
   jobs.set(patch.id, { ...jobs.get(patch.id)!, ...patch });
@@ -84,6 +89,21 @@ const fakeDataClient = {
         nextToken: null,
       }),
     },
+    // The lifecycle claim: create is conditional on the id not existing, exactly
+    // like the real single-winner lock. A second create loses (data: null).
+    CustomerLifecycleClaim: {
+      create: async (input: { id: string }) => {
+        if (claims.has(input.id)) return { data: null };
+        claims.set(input.id, { ...input });
+        events.push(`claim:acquire:${input.id}`);
+        return { data: { ...input } };
+      },
+      delete: async ({ id }: { id: string }) => {
+        claims.delete(id);
+        events.push(`claim:release:${id}`);
+        return { data: { id } };
+      },
+    },
   },
 };
 
@@ -93,6 +113,12 @@ const notifyOffice = vi.fn(async () => true);
 vi.mock("./email", () => ({
   notifyOffice: (...a: unknown[]) =>
     (notifyOffice as unknown as (...x: unknown[]) => Promise<boolean>)(...a),
+}));
+
+const openOwnedWork = vi.fn(async () => "work-1");
+vi.mock("./ownedWork", () => ({
+  openOwnedWork: (...a: unknown[]) =>
+    (openOwnedWork as unknown as (...x: unknown[]) => Promise<string>)(...a),
 }));
 
 const cancelPlanBilling = vi.fn(async (_stripe: unknown, servicePlanId: string) => {
@@ -111,12 +137,14 @@ vi.mock("./subscription", () => ({
   cancelPlanBilling: (stripe: unknown, id: string) => cancelPlanBilling(stripe, id),
 }));
 
-const recordCustomerLifecycleEvent = vi.fn(async () => {});
+const recordCustomerLifecycleEvent = vi.fn(async () => ({ recorded: true }));
 vi.mock("./lifecycleLog", () => ({
   recordCustomerLifecycleEvent: (...a: unknown[]) =>
-    (recordCustomerLifecycleEvent as unknown as (...x: unknown[]) => Promise<void>)(
-      ...a
-    ),
+    (
+      recordCustomerLifecycleEvent as unknown as (
+        ...x: unknown[]
+      ) => Promise<{ recorded: boolean }>
+    )(...a),
 }));
 
 const { deactivateCustomer } = await import("./deactivation");
@@ -127,15 +155,34 @@ const stripe = {
   paymentIntents: { create: paymentIntentsCreate },
 } as unknown as Stripe;
 
+const actor = { sub: "fin-1", email: "finance@buzzkill.com" };
+
+/** The injected Cognito revoke; records its ordering in the event log. */
+const revokePortal = vi.fn(async () => {
+  events.push("portal:revoke");
+  return { revoked: true };
+});
+
+/** Default options a real caller passes: a controlled reason + the portal hook. */
+const opts = () => ({ reason: "CUSTOMER_REQUEST", revokePortalAccess: revokePortal });
+
 beforeEach(() => {
   customers.clear();
   plans.clear();
   jobs.clear();
   invoices.clear();
+  claims.clear();
   events = [];
   notifyOffice.mockClear();
+  openOwnedWork.mockClear();
   paymentIntentsCreate.mockClear();
   recordCustomerLifecycleEvent.mockClear();
+  recordCustomerLifecycleEvent.mockResolvedValue({ recorded: true });
+  revokePortal.mockClear();
+  revokePortal.mockImplementation(async () => {
+    events.push("portal:revoke");
+    return { revoked: true };
+  });
   cancelPlanBilling.mockClear();
   cancelPlanBilling.mockImplementation(async (_s: unknown, servicePlanId: string) => {
     events.push(`cancelPlan:${servicePlanId}`);
@@ -208,7 +255,7 @@ describe("deactivateCustomer", () => {
     seedPlan({ id: "p2" });
     seedPlan({ id: "p3", status: "CANCELED" }); // already gone — skipped
 
-    const res = await deactivateCustomer(stripe, "c1");
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
     expect(cancelPlanBilling).toHaveBeenCalledTimes(2);
     const ids = cancelPlanBilling.mock.calls.map((c) => c[1]);
@@ -218,10 +265,23 @@ describe("deactivateCustomer", () => {
     expect(res.visitsResolved).toBe(2); // one auto-queued visit resolved per plan
   });
 
+  it("requires a reason — refuses to deactivate with a blank one", async () => {
+    seedPlan({ id: "p1" });
+    await expect(
+      deactivateCustomer(stripe, "c1", actor, {
+        reason: "   ",
+        revokePortalAccess: revokePortal,
+      })
+    ).rejects.toThrow(/reason is required/i);
+    // Nothing was touched — no plan cancel, no status flip.
+    expect(cancelPlanBilling).not.toHaveBeenCalled();
+    expect(customers.get("c1")!.status).toBe("ACTIVE");
+  });
+
   it("sweeps a remaining future visit off its route and cancels it", async () => {
     const job = seedJob({ status: "SCHEDULED", routeId: "r1", routeOrder: 3, technicianId: "t1" });
 
-    const res = await deactivateCustomer(stripe, "c1");
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
     expect(jobs.get(job.id)).toMatchObject({
       status: "CANCELED",
@@ -237,7 +297,7 @@ describe("deactivateCustomer", () => {
     const paid = seedJob({ status: "SCHEDULED", paidAt: "2026-07-10T12:00:00Z" });
     const done = seedJob({ status: "COMPLETED" });
 
-    const res = await deactivateCustomer(stripe, "c1");
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
     expect(jobs.get(paid.id)!.status).toBe("SCHEDULED");
     expect(jobs.get(done.id)!.status).toBe("COMPLETED");
@@ -249,65 +309,114 @@ describe("deactivateCustomer", () => {
     seedInvoice({ status: "FAILED", amountCents: 3000, refundedAmountCents: 1000 });
     seedInvoice({ status: "PAID", amountCents: 9999 }); // settled — owes nothing
 
-    const res = await deactivateCustomer(stripe, "c1");
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
     expect(res.outstandingBalanceCents).toBe(5000 + (3000 - 1000));
     expect(paymentIntentsCreate).not.toHaveBeenCalled();
   });
 
-  it("flips INACTIVE last, after the money and the work are resolved, and returns the portal sub", async () => {
+  it("ends the portal login BEFORE flipping INACTIVE, sets INACTIVE last, and records the transition", async () => {
     seedPlan({ id: "p1" });
     seedJob({ status: "SCHEDULED" });
 
-    const res = await deactivateCustomer(stripe, "c1");
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
     expect(customers.get("c1")!.status).toBe("INACTIVE");
     expect(res.status).toBe("INACTIVE");
     expect(res.partial).toBe(false);
-    expect(res.portalUserSub).toBe("sub-portal-1");
-    // The INACTIVE flip is the final side effect of the whole operation.
-    expect(events[events.length - 1]).toBe("customer:INACTIVE");
+    expect(res.portalRevoked).toBe(true);
+    expect(revokePortal).toHaveBeenCalledOnce();
+    // Access before status: the portal revoke happens before the INACTIVE write,
+    // so INACTIVE never implies a live login.
+    expect(events.indexOf("portal:revoke")).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf("portal:revoke")).toBeLessThan(
+      events.indexOf("customer:INACTIVE")
+    );
+    // The INACTIVE flip is the final state write of the whole operation.
     expect(events.indexOf("cancelPlan:p1")).toBeLessThan(
       events.indexOf("customer:INACTIVE")
     );
-    // The transition is recorded for leadership: actor, prior → new status, and
-    // the money/job effects (GL-09).
+    // The transition is recorded for leadership: actor, prior → new, the money/
+    // job effects, and the controlled reason.
     expect(recordCustomerLifecycleEvent).toHaveBeenCalledOnce();
     const [entry] = recordCustomerLifecycleEvent.mock.calls[0] as unknown as [
-      { action: string; priorStatus: string; newStatus: string; effects: string },
+      {
+        action: string;
+        priorStatus: string;
+        newStatus: string;
+        effects: string;
+        reason: string;
+      },
     ];
     expect(entry.action).toBe("DEACTIVATE");
     expect(entry.priorStatus).toBe("ACTIVE");
     expect(entry.newStatus).toBe("INACTIVE");
     expect(entry.effects).toMatch(/not charged/i);
+    expect(entry.reason).toBe("CUSTOMER_REQUEST");
+    expect(res.audited).toBe(true);
   });
 
-  it("does NOT flip INACTIVE and pages the office when a plan's cancel fails", async () => {
-    // cancelPlanBilling throws only when the Stripe cancel itself failed — the
-    // subscription is still live and still charging. An INACTIVE customer that
-    // is still billing is invisible, so the flip must not happen.
+  it("does NOT revoke the portal or flip INACTIVE and pages the office when a plan's cancel fails", async () => {
     seedPlan({ id: "p1" });
     seedJob({ status: "SCHEDULED", routeId: "r1" });
     cancelPlanBilling.mockImplementationOnce(async () => {
       throw new Error("stripe is down");
     });
 
-    const res = await deactivateCustomer(stripe, "c1");
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
     expect(res.partial).toBe(true);
     expect(res.status).toBe("ACTIVE");
     expect(customers.get("c1")!.status).toBe("ACTIVE");
     expect(events).not.toContain("customer:INACTIVE");
-    // No transition happened, so nothing is written to the lifecycle ledger.
+    // The portal is NOT ended for a customer we couldn't finish deactivating —
+    // they are still ACTIVE and still a customer.
+    expect(revokePortal).not.toHaveBeenCalled();
     expect(recordCustomerLifecycleEvent).not.toHaveBeenCalled();
-    // The schedule sweep is skipped too — we don't half-deactivate.
     expect(res.jobsCanceled).toBe(0);
     expect(notifyOffice).toHaveBeenCalledOnce();
     const [alert] = notifyOffice.mock.calls[0] as unknown as [{ subject: string }];
     expect(alert.subject).toMatch(/ACTION REQUIRED/);
   });
 
-  it("is idempotent: a re-run on an already-inactive customer is a clean no-op flip", async () => {
+  it("when the portal revoke fails, leaves the customer ACTIVE with owned recovery — never INACTIVE-with-live-login", async () => {
+    seedPlan({ id: "p1" });
+    revokePortal.mockImplementationOnce(async () => {
+      throw new Error("cognito unreachable");
+    });
+
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
+
+    expect(res.partial).toBe(true);
+    expect(res.portalRevoked).toBe(false);
+    expect(res.status).toBe("ACTIVE");
+    // Money was stopped, but the status is NOT flipped — the invisible bad state
+    // (INACTIVE with a live portal) never happens.
+    expect(cancelPlanBilling).toHaveBeenCalledOnce();
+    expect(events).not.toContain("customer:INACTIVE");
+    // A durable, resumable recovery owns finishing it.
+    expect(openOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "LIFECYCLE_RECOVERY" })
+    );
+    expect(notifyOffice).toHaveBeenCalledOnce();
+    expect(recordCustomerLifecycleEvent).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a lost audit write as audited:false while the transition still stands", async () => {
+    seedPlan({ id: "p1" });
+    recordCustomerLifecycleEvent.mockResolvedValueOnce({ recorded: false });
+
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
+
+    // The customer is genuinely deactivated; only the audit row missed, which
+    // recordCustomerLifecycleEvent itself owns recovering.
+    expect(res.status).toBe("INACTIVE");
+    expect(res.partial).toBe(false);
+    expect(res.audited).toBe(false);
+    expect(customers.get("c1")!.status).toBe("INACTIVE");
+  });
+
+  it("is idempotent: a re-run on an already-inactive customer heals access and logs no second transition", async () => {
     customers.set("c1", {
       id: "c1",
       displayName: "Dana Whitlock",
@@ -315,18 +424,47 @@ describe("deactivateCustomer", () => {
       portalUserSub: "sub-portal-1",
     });
 
-    const res = await deactivateCustomer(stripe, "c1");
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
     expect(res.partial).toBe(false);
+    expect(res.alreadyInactive).toBe(true);
     expect(res.plansCanceled).toBe(0);
     expect(res.jobsCanceled).toBe(0);
     expect(customers.get("c1")!.status).toBe("INACTIVE");
-    // Already INACTIVE: the re-run re-asserts the flag but records no second
-    // transition — the ledger is transitions, not idempotent no-ops.
+    // The portal revoke is re-asserted to heal any drift (INACTIVE-with-live-login).
+    expect(revokePortal).toHaveBeenCalledOnce();
+    // Already INACTIVE: no second transition row.
     expect(recordCustomerLifecycleEvent).not.toHaveBeenCalled();
   });
 
+  it("serializes racing transitions: the claim loser reports in-progress and drives nothing", async () => {
+    seedPlan({ id: "p1" });
+    // A transition is already in flight — its claim is held.
+    claims.set("c1", { id: "c1", action: "REACTIVATE" });
+
+    const res = await deactivateCustomer(stripe, "c1", actor, opts());
+
+    expect(res.partial).toBe(true);
+    expect(res.message).toMatch(/in progress/i);
+    // The loser did not cancel billing, revoke the portal, or flip status.
+    expect(cancelPlanBilling).not.toHaveBeenCalled();
+    expect(revokePortal).not.toHaveBeenCalled();
+    expect(events).not.toContain("customer:INACTIVE");
+    // And it did not delete the in-flight winner's claim.
+    expect(claims.has("c1")).toBe(true);
+  });
+
+  it("releases the claim on a clean deactivation so a later transition can proceed", async () => {
+    seedPlan({ id: "p1" });
+    await deactivateCustomer(stripe, "c1", actor, opts());
+    expect(claims.has("c1")).toBe(false);
+    expect(events).toContain("claim:acquire:c1");
+    expect(events).toContain("claim:release:c1");
+  });
+
   it("throws on a missing customer rather than reporting a deactivation it did not do", async () => {
-    await expect(deactivateCustomer(stripe, "nope")).rejects.toThrow(/not found/);
+    await expect(
+      deactivateCustomer(stripe, "nope", actor, opts())
+    ).rejects.toThrow(/not found/);
   });
 });

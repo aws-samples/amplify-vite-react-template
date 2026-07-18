@@ -501,6 +501,25 @@ export const schema = a.schema({
     })
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
 
+  /**
+   * GL-09 — the single-winner lock that serializes a customer's lifecycle
+   * transitions. id = customerId, so an in-flight deactivate and a racing
+   * reactivate cannot both run and leave mixed state (INACTIVE-but-live-portal,
+   * or ACTIVE-but-dead-login). `create` is conditional on the id not existing;
+   * the loser reports the current transition/outcome instead of driving a second
+   * one, and the winner deletes it on a terminal result so the next legitimate
+   * transition can proceed. Read/delete only from the browser — like
+   * PlanCancellationClaim it is an operational lock, not customer data.
+   */
+  CustomerLifecycleClaim: a
+    .model({
+      action: a.string(),
+      requestedAt: a.datetime(),
+    })
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
+    ]),
+
   // Best-effort per-IP throttle for the public quote endpoint (id =
   // "<ip>#<hour>"). Not a hard lock — it exists so a single abusive source
   // can't spin billed AI research and Routes calls unbounded.
@@ -1427,7 +1446,11 @@ export const schema = a.schema({
    */
   reactivateCustomer: a
     .mutation()
-    .arguments({ customerId: a.string().required() })
+    .arguments({
+      customerId: a.string().required(),
+      reasonCode: a.string().required(),
+      note: a.string(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
     .handler(a.handler.function(crmAdmin)),
@@ -1781,22 +1804,33 @@ export const schema = a.schema({
     .handler(a.handler.function(crmBilling)),
 
   /**
-   * Deactivate a customer for real, not as a status flag. In order: cancel
-   * every ACTIVE plan's Stripe subscription and resolve its queued visits,
-   * sweep the remaining future jobs off their routes, compute (and RETURN, not
-   * charge) the outstanding balance, and only then flip status → INACTIVE — so
-   * a mid-flow failure never leaves an INACTIVE customer still billing. Pair
-   * with revokePortalAccess to end their portal login.
+   * Deactivate a customer as ONE server action (GL-09). In order, under a
+   * single-winner lifecycle claim: cancel every ACTIVE plan's Stripe
+   * subscription and resolve its queued visits, sweep the remaining future jobs
+   * off their routes, compute (and RETURN, not charge) the outstanding balance,
+   * END THE PORTAL LOGIN, and only then flip status → INACTIVE. Portal access is
+   * revoked BEFORE the status flip, so an INACTIVE customer never keeps a live
+   * login, and a mid-flow failure never leaves an INACTIVE customer still
+   * billing or still able to sign in — the visible state is "still ACTIVE, one
+   * step left", owned and resumable. Requires a controlled reason, which is
+   * recorded with the transition. This is the whole offboarding; there is no
+   * separate revoke step to remember.
    *
-   * FINANCE/OWNER: it cancels subscriptions, which is money authority, the same
-   * bar as cancelSubscription.
+   * Handled by crm-admin (it holds the Cognito pool credentials the portal
+   * revoke needs) with Stripe access added for the plan cancels. FINANCE/OWNER:
+   * it cancels subscriptions, which is money authority, the same bar as
+   * cancelSubscription.
    */
   deactivateCustomer: a
     .mutation()
-    .arguments({ customerId: a.string().required() })
+    .arguments({
+      customerId: a.string().required(),
+      reasonCode: a.string().required(),
+      note: a.string(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
-    .handler(a.handler.function(crmBilling)),
+    .handler(a.handler.function(crmAdmin)),
 
   /**
    * Deactivate/reactivate a plan without ending it: pauses Stripe payment

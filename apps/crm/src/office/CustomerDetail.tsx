@@ -2,13 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   api,
+  DEACTIVATION_REASONS,
   dueDateForTerms,
+  listCustomerLifecycleEvents,
   opResult,
+  REACTIVATION_REASONS,
   recordOfflinePayment,
   rescheduleVisit,
   sendInvoicePaymentLink,
   settleInvoice,
   unwrap,
+  type CustomerLifecycleEvent,
   type VisitRescheduleOutcome,
   type Agreement,
   type Customer,
@@ -54,6 +58,13 @@ import DocButton from "../components/DocButton";
 import PriceLeadSheet from "../components/PriceLeadSheet";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
+
+/** Human-friendly label for a controlled reason code (CUSTOMER_REQUEST →
+ *  "Customer request"). Mirrors the same helper on the Staff screen. */
+function reasonLabel(code: string): string {
+  const s = code.replace(/_/g, " ").toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 /**
  * What deactivation actually does, said before the button runs it. The money
@@ -126,6 +137,14 @@ export default function CustomerDetail() {
     | "price"
   >(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  // GL-09 — the lifecycle transition ledger (deactivate/reactivate history) and
+  // the reason-picker sheets that gate each transition on a controlled reason.
+  const [lifecycle, setLifecycle] = useState<CustomerLifecycleEvent[]>([]);
+  const [lifecycleSheet, setLifecycleSheet] = useState<
+    "deactivate" | "reactivate" | null
+  >(null);
+  const [reasonCode, setReasonCode] = useState<string>("");
+  const [reasonNote, setReasonNote] = useState("");
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -166,10 +185,22 @@ export default function CustomerDetail() {
         )
       );
       setGroups(unwrap(gr));
+      // The lifecycle ledger is OWNER/OFFICE/FINANCE-readable; load it for those
+      // roles so the transition history refreshes after every deactivate/reactivate.
+      if (roles.office || roles.finance) {
+        const lc = await listCustomerLifecycleEvents(id);
+        setLifecycle(
+          (lc.data ?? [])
+            .slice()
+            .sort((a, b) =>
+              String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
+            )
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load customer");
     }
-  }, [id]);
+  }, [id, roles.office, roles.finance]);
 
   useEffect(() => {
     void load();
@@ -1138,68 +1169,9 @@ export default function CustomerDetail() {
               variant="danger"
               loading={busyAction === "deactivate"}
               onClick={() => {
-                const activePlanCount = plans.filter(
-                  (p) => p.status === "ACTIVE"
-                ).length;
-                const upcomingVisits = jobs.filter(
-                  (j) =>
-                    (j.status === "SCHEDULED" || j.status === "UNSCHEDULED") &&
-                    !j.paidAt
-                ).length;
-                if (
-                  !window.confirm(
-                    deactivateConfirmText(customer.displayName, {
-                      activePlanCount,
-                      upcomingVisits,
-                      hasPortal: !!customer.portalUserSub,
-                    })
-                  )
-                ) {
-                  return;
-                }
-                void run("deactivate", async () => {
-                  const res = opResult<{
-                    plansCanceled: number;
-                    jobsCanceled: number;
-                    visitsResolved: number;
-                    outstandingBalanceCents: number;
-                    partial: boolean;
-                  }>(
-                    await api().mutations.deactivateCustomer({
-                      customerId: customer.id,
-                    })
-                  );
-                  // A plan's Stripe cancel failed: the customer is still ACTIVE
-                  // and still billing on purpose, and the office was paged. Do
-                  // NOT go on to revoke the portal — the deactivation didn't
-                  // finish. Surface it instead of claiming success.
-                  if (res?.partial) {
-                    throw new Error(
-                      "A plan could not be canceled at Stripe, so the customer is still active and still billing. The office has been notified — try again once Stripe is reachable."
-                    );
-                  }
-                  unwrap(
-                    await api().mutations.revokePortalAccess({
-                      customerId: customer.id,
-                    })
-                  );
-                  const bal = res?.outstandingBalanceCents ?? 0;
-                  setNotice(
-                    `${customer.displayName} deactivated — billing stopped, ${
-                      res?.jobsCanceled ?? 0
-                    } upcoming visit(s) canceled, portal login ended.${
-                      bal > 0
-                        ? ` Outstanding balance of ${money(
-                            bal
-                          )} is NOT charged — settle it separately.`
-                        : ""
-                    }`
-                  );
-                  window.setTimeout(
-                    () => setNotice((n) => (n && n.startsWith(customer.displayName) ? null : n)),
-                    12000
-                  );
-                });
+                setReasonCode(DEACTIVATION_REASONS[0]);
+                setReasonNote("");
+                setLifecycleSheet("deactivate");
               }}
             >
               Mark inactive
@@ -1215,24 +1187,11 @@ export default function CustomerDetail() {
             block
             variant="subtle"
             loading={busyAction === "reactivate"}
-            onClick={() =>
-              void run(
-                "reactivate",
-                async () => {
-                  // One server action (GL-09): restores the portal login first,
-                  // then flips status to ACTIVE, then records the transition, so
-                  // the customer is never left ACTIVE with a dead login. Canceled
-                  // plans stay canceled — a reactivated customer re-subscribes
-                  // through a new booking.
-                  unwrap(
-                    await api().mutations.reactivateCustomer({
-                      customerId: customer.id,
-                    })
-                  );
-                },
-                "Customer reactivated — their portal login is back on. Canceled plans stay canceled; add a new plan through a booking."
-              )
-            }
+            onClick={() => {
+              setReasonCode(REACTIVATION_REASONS[0]);
+              setReasonNote("");
+              setLifecycleSheet("reactivate");
+            }}
           >
             Reactivate customer
           </Button>
@@ -1243,7 +1202,224 @@ export default function CustomerDetail() {
         )
       ) : null}
 
+      {/* ---------- Lifecycle history (GL-09) ---------- */}
+      {(roles.office || roles.finance) && lifecycle.length > 0 ? (
+        <Card title="Lifecycle history">
+          {lifecycle.map((e) => {
+            const parts = String(e.reason ?? "").split(" — ");
+            const code = parts[0]?.trim();
+            const note = parts.slice(1).join(" — ").trim();
+            return (
+              <ListRow
+                key={e.id}
+                title={
+                  <span>
+                    {e.action === "DEACTIVATE" ? "Deactivated" : "Reactivated"}
+                    {e.priorStatus && e.newStatus ? (
+                      <span className="muted small">
+                        {" "}
+                        ({e.priorStatus} → {e.newStatus})
+                      </span>
+                    ) : null}
+                  </span>
+                }
+                subtitle={
+                  <span>
+                    {code ? reasonLabel(code) : "—"}
+                    {note ? ` · ${note}` : ""}
+                    {" · by "}
+                    {e.actorEmail}
+                    {e.effects ? (
+                      <>
+                        <br />
+                        <span className="muted small">{e.effects}</span>
+                      </>
+                    ) : null}
+                  </span>
+                }
+                meta={
+                  <span className="muted small">
+                    {e.occurredAt ? fmtDateTime(e.occurredAt) : ""}
+                  </span>
+                }
+              />
+            );
+          })}
+        </Card>
+      ) : null}
+
       {/* ---------- Sheets ---------- */}
+
+      {/* GL-09 — deactivation is one server action gated on a controlled reason.
+          The button opens this sheet; confirming fires the single
+          deactivateCustomer mutation (money + schedule + portal + status), and a
+          partial result is surfaced truthfully instead of claimed as done. */}
+      <Sheet
+        open={lifecycleSheet === "deactivate"}
+        onClose={() => setLifecycleSheet(null)}
+        title={`Deactivate ${customer.displayName}`}
+      >
+        <div className="form-grid">
+          <p className="muted small" style={{ margin: 0 }}>
+            {deactivateConfirmText(customer.displayName, {
+              activePlanCount: plans.filter((p) => p.status === "ACTIVE").length,
+              upcomingVisits: jobs.filter(
+                (j) =>
+                  (j.status === "SCHEDULED" || j.status === "UNSCHEDULED") &&
+                  !j.paidAt
+              ).length,
+              hasPortal: !!customer.portalUserSub,
+            })}
+          </p>
+          <Field
+            label="Reason"
+            hint="A controlled reason is recorded with your name and the time in the lifecycle history."
+          >
+            <select
+              value={reasonCode}
+              onChange={(e) => setReasonCode(e.target.value)}
+            >
+              {DEACTIVATION_REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {reasonLabel(r)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Note" hint="Required when the reason is 'Other'.">
+            <input
+              value={reasonNote}
+              onChange={(e) => setReasonNote(e.target.value)}
+              placeholder="Optional context"
+            />
+          </Field>
+          <Button
+            block
+            variant="danger"
+            loading={busyAction === "deactivate"}
+            disabled={reasonCode === "OTHER" && !reasonNote.trim()}
+            onClick={() => {
+              if (reasonCode === "OTHER" && !reasonNote.trim()) return;
+              const rc = reasonCode;
+              const note = reasonNote.trim() || null;
+              setLifecycleSheet(null);
+              void run("deactivate", async () => {
+                const res = opResult<{
+                  jobsCanceled: number;
+                  outstandingBalanceCents: number;
+                  portalRevoked: boolean;
+                  partial: boolean;
+                  message?: string;
+                }>(
+                  await api().mutations.deactivateCustomer({
+                    customerId: customer.id,
+                    reasonCode: rc,
+                    note,
+                  })
+                );
+                // A step didn't finish (a plan still billing, the portal login
+                // still live, or the status write didn't stick): the customer is
+                // still ACTIVE on purpose, the office was paged, and an owned
+                // recovery is open. Surface the truth instead of claiming success.
+                if (res?.partial) {
+                  throw new Error(
+                    res.message ??
+                      "The deactivation could not be finished, so the customer is still active. The office has been notified — it's owned and safe to retry."
+                  );
+                }
+                const bal = res?.outstandingBalanceCents ?? 0;
+                setNotice(
+                  `${customer.displayName} deactivated — billing stopped, ${
+                    res?.jobsCanceled ?? 0
+                  } upcoming visit(s) canceled${
+                    res?.portalRevoked ? ", portal login ended" : ""
+                  }.${
+                    bal > 0
+                      ? ` Outstanding balance of ${money(
+                          bal
+                        )} is NOT charged — settle it separately.`
+                      : ""
+                  }`
+                );
+                window.setTimeout(
+                  () =>
+                    setNotice((n) =>
+                      n && n.startsWith(customer.displayName) ? null : n
+                    ),
+                  12000
+                );
+              });
+            }}
+          >
+            Deactivate customer
+          </Button>
+        </div>
+      </Sheet>
+
+      {/* GL-09 — reactivation is one server action (restores the login first,
+          then flips ACTIVE, then records the transition), also gated on a reason. */}
+      <Sheet
+        open={lifecycleSheet === "reactivate"}
+        onClose={() => setLifecycleSheet(null)}
+        title={`Reactivate ${customer.displayName}`}
+      >
+        <div className="form-grid">
+          <p className="muted small" style={{ margin: 0 }}>
+            Restores their portal login and marks them active again. Canceled
+            plans stay canceled — a reactivated customer re-subscribes through a
+            new booking.
+          </p>
+          <Field
+            label="Reason"
+            hint="A controlled reason is recorded with your name and the time in the lifecycle history."
+          >
+            <select
+              value={reasonCode}
+              onChange={(e) => setReasonCode(e.target.value)}
+            >
+              {REACTIVATION_REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {reasonLabel(r)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Note" hint="Required when the reason is 'Other'.">
+            <input
+              value={reasonNote}
+              onChange={(e) => setReasonNote(e.target.value)}
+              placeholder="Optional context"
+            />
+          </Field>
+          <Button
+            block
+            variant="subtle"
+            loading={busyAction === "reactivate"}
+            disabled={reasonCode === "OTHER" && !reasonNote.trim()}
+            onClick={() => {
+              if (reasonCode === "OTHER" && !reasonNote.trim()) return;
+              const rc = reasonCode;
+              const note = reasonNote.trim() || null;
+              setLifecycleSheet(null);
+              void run(
+                "reactivate",
+                async () => {
+                  unwrap(
+                    await api().mutations.reactivateCustomer({
+                      customerId: customer.id,
+                      reasonCode: rc,
+                      note,
+                    })
+                  );
+                },
+                "Customer reactivated — their portal login is back on. Canceled plans stay canceled; add a new plan through a booking."
+              );
+            }}
+          >
+            Reactivate customer
+          </Button>
+        </div>
+      </Sheet>
 
       <Sheet open={sheet === "edit"} onClose={() => setSheet(null)} title="Edit customer">
         <CustomerForm

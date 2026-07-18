@@ -62,6 +62,8 @@ type Customer = {
   groupId?: string | null;
 };
 const customers = new Map<string, Customer>();
+/** The single-winner lifecycle claim store (id = customerId). */
+const claims = new Map<string, Record<string, unknown>>();
 
 /** Records every field written to a Customer, so a test can assert exactly
  *  which columns updateCustomerContact touched. */
@@ -78,18 +80,33 @@ const fakeDataClient = {
         return { data: customers.get(patch.id) };
       },
     },
+    // The lifecycle claim: create is conditional on the id not existing.
+    CustomerLifecycleClaim: {
+      create: async (input: { id: string }) => {
+        if (claims.has(input.id)) return { data: null };
+        claims.set(input.id, { ...input });
+        return { data: { ...input } };
+      },
+      delete: async ({ id }: { id: string }) => {
+        claims.delete(id);
+        return { data: { id } };
+      },
+    },
   },
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
 const recordCustomerLifecycleEvent = vi.fn(async () => {
   events.push("audit");
+  return { recorded: true };
 });
 vi.mock("../shared/lifecycleLog", () => ({
   recordCustomerLifecycleEvent: (...a: unknown[]) =>
-    (recordCustomerLifecycleEvent as unknown as (...x: unknown[]) => Promise<void>)(
-      ...a
-    ),
+    (
+      recordCustomerLifecycleEvent as unknown as (
+        ...x: unknown[]
+      ) => Promise<{ recorded: boolean }>
+    )(...a),
 }));
 
 const notifyOffice = vi.fn(async () => true);
@@ -123,6 +140,7 @@ const call = (field: string, args: Record<string, unknown>) =>
 beforeEach(() => {
   events = [];
   customers.clear();
+  claims.clear();
   lastCustomerPatch = null;
   recordCustomerLifecycleEvent.mockClear();
   notifyOffice.mockClear();
@@ -140,7 +158,7 @@ describe("reactivateCustomer (GL-09)", () => {
       portalUserSub: "sub-portal-1",
     });
 
-    const res = (await call("reactivateCustomer", { customerId: "c1" })) as {
+    const res = (await call("reactivateCustomer", { customerId: "c1", reasonCode: "CUSTOMER_RETURNED" })) as {
       reactivated: boolean;
       alreadyActive: boolean;
       portalRestored: boolean;
@@ -178,7 +196,7 @@ describe("reactivateCustomer (GL-09)", () => {
       portalUserSub: "sub-portal-1",
     });
 
-    const res = (await call("reactivateCustomer", { customerId: "c1" })) as {
+    const res = (await call("reactivateCustomer", { customerId: "c1", reasonCode: "CUSTOMER_RETURNED" })) as {
       reactivated: boolean;
       alreadyActive: boolean;
       status: string;
@@ -199,7 +217,7 @@ describe("reactivateCustomer (GL-09)", () => {
       portalUserSub: null,
     });
 
-    const res = (await call("reactivateCustomer", { customerId: "c1" })) as {
+    const res = (await call("reactivateCustomer", { customerId: "c1", reasonCode: "CUSTOMER_RETURNED" })) as {
       portalRestored: boolean;
       status: string;
     };
@@ -211,7 +229,7 @@ describe("reactivateCustomer (GL-09)", () => {
 
   it("throws on a missing customer rather than reporting a reactivation it did not do", async () => {
     await expect(
-      call("reactivateCustomer", { customerId: "nope" })
+      call("reactivateCustomer", { customerId: "nope", reasonCode: "CUSTOMER_RETURNED" })
     ).rejects.toThrow(/not found/i);
   });
 });
