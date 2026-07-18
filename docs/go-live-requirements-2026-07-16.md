@@ -186,20 +186,23 @@ bypass and reassignment also lack the required reasoned audit.
 **Business outcome:** A finalized service report is an accurate, delivered, correctable legal
 record—not merely a PDF the UI says was sent.
 
-**Why this is still a gate after commits `b9d75df`, `af289df`, `5eff5ac`, and `608239e`:** Finalization
-no longer infers the application window—it refuses any report whose job lacks a server-stamped Start and
-End, so the record's times are the real on-site times. It also refuses any product that is not an
-active, label-approved catalog row (matched by EPA number and name), so an arbitrary manual pesticide
-can no longer reach a finalized record—an unknown product must be reviewed into the catalog by the
-office first. Completion and delivery are now separate facts: every finalized report carries a
-deliveryStatus (delivered, failed, or no-email), a missing address or a bounce opens an owned delivery
-task instead of passing silently, and the office and technician screens show the real delivery state
-rather than an unconditional "sent". Location is now validated as evidence of presence: an impossible
-coordinate, a reading with no timestamp or accuracy, a cell-tower-grade radius, or a capture from
-outside the server-stamped application window all block finalization. **The remaining gaps are the
-Compliance owner's to close:** the exact required GPS accuracy, the maximum distance from the geocoded
-service address, and the named-manager exception process (the objective, non-policy checks are in
-place under them); and no append-only amendment workflow exists.
+**Why this is still a gate after commits `b9d75df`, `af289df`, `5eff5ac`, `608239e`, and `8fdeb02`:**
+Finalization no longer infers the application window—it refuses any report whose job lacks a
+server-stamped Start and End, so the record's times are the real on-site times. It also refuses any
+product that is not an active, label-approved catalog row (matched by EPA number and name), so an
+arbitrary manual pesticide can no longer reach a finalized record—an unknown product must be reviewed
+into the catalog by the office first. Completion and delivery are now separate facts: every finalized
+report carries a deliveryStatus (delivered, failed, or no-email), a missing address or a bounce opens
+an owned delivery task instead of passing silently, and the office and technician screens show the real
+delivery state rather than an unconditional "sent". Location is now validated as evidence of presence:
+an impossible coordinate, a reading with no timestamp or accuracy, a cell-tower-grade radius, or a
+capture from outside the server-stamped application window all block finalization. Corrections are now
+append-only amendments: a finalized report is never overwritten, and an office-issued ServiceReportAmendment
+links to the original carrying the reason, author, time, and changed facts, renders its own document,
+and is delivered to the customer with the original preserved. **The one remaining gap is the Compliance
+owner's to close:** the exact required GPS accuracy, the maximum distance from the geocoded service
+address, and the named-manager exception process for the on-site-presence rule (the objective,
+non-policy location checks are in place under them).
 
 **Required acceptance evidence:**
 
