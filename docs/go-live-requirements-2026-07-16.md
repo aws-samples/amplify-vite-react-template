@@ -2,23 +2,17 @@
 
 **Business review date:** 18 July 2026
 
-**Implementation reviewed:** working tree at `b5a26b8` (through the GL-07 and GL-14 commits),
-verified file-by-file against the Amplify backend, the public site, and the CRM app.
+**Latest implementation review:** 5 commits after `18138bc`, from `0709bc5` through `143b254`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
-This is a **delta-only** document. It lists only what is *not yet done*. Where this review confirmed a
-capability is genuinely built and working, it has been removed from the gate or moved to a short
-**Already delivered** line so engineering keeps the credit and no one rebuilds it. An omitted item is
-not a request to rebuild it. A listed item is a launch blocker.
-
-**A note on the commit history.** Three commits describe gates as "engineering closed" — GL-14, GL-13,
-and GL-15. A line-by-line read of the tree does not support those words. Real work landed in each, but
-named requirements remain (session end on demotion, the day-view route-ID check, durable audit ledgers,
-report-finalize concurrency, email idempotency, real delivery states). Those gates stay open below with
-only the unfinished parts listed. Only **GL-07** is genuinely reduced to operational proof.
+This is a **delta-only** business requirements document. It excludes completed capabilities,
+implementation detail, and proof-only tasks. The two implementation commits
+reviewed here affect GL-07 and GL-14; both gates have been reduced to their remaining production
+failure, control, and business-approval requirements. The other gates remain because these commits
+did not close them. An omitted item is not a request to rebuild it.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -47,32 +41,21 @@ Go-live requires all of the following:
 Within each tier, gates are ordered from highest expected business impact to lowest. Priority changes
 implementation order, not launch status: **P0, P1, and P2 are all go-live blockers.**
 
-## Two systemic issues behind several gates
+## Systemic issues behind several gates
 
-Before the gate register, two failure patterns recur across the audit. Fixing them once retires part of
-several gates at the same time.
-
-- **X1 — The audit ledgers exist but no human can read them.** The system writes immutable history for
-  staff-access changes, customer lifecycle changes, and visit changes (`StaffAccessEvent`,
-  `CustomerLifecycleEvent`, `VisitChangeEvent`). None of them is surfaced on any business screen — only
-  the exception queue's own events are ever displayed. "Leadership can prove who changed what, and
-  export it, without engineering" is therefore unmet everywhere it is promised (GL-14, GL-09, GL-15,
-  GL-07). Worse, these same ledger writes are **best-effort**: the code logs and swallows a failed write,
-  so the one record that proves a sensitive action can silently not exist. *(Update: the `StaffAccessEvent`
-  side is now closed under GL-14 — its write is a required durable outcome that opens a security case on
-  failure, and an owner-only Access history screen searches and exports it. `CustomerLifecycleEvent` and
-  `VisitChangeEvent` remain best-effort and unsurfaced.)*
-
-- **X2 — Any office user can close any exception by typing a note.** The exception-resolution path
-  accepts a single free-text note from routine OFFICE staff and closes the case, including money and
-  no-access cases whose real-world outcome was never verified. This is the single change that would most
-  improve trust in the whole exception system, and it undermines GL-18, GL-10, GL-05, and GL-15 at once.
+- **X1 — Customer and visit-change history can still disappear.** `CustomerLifecycleEvent` and
+  `VisitChangeEvent` writes are best-effort and neither history is available on a business screen.
+  Sensitive customer, money, and schedule changes can therefore be applied without durable,
+  business-readable history.
+- **X2 — Routine office users can close exceptions without verifying the outcome.** A free-text note
+  can close money, access, and customer-impact cases even when the refund, delivery, rebooking, or
+  restoration has not occurred.
 
 ## Gate register
 
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed |
 |---|---|---|---|---|
-| P0 | GL-14 | Finish fail-safe staff access changes and offboarding | CEO | Demoted or departed staff keep live access; changes go unowned and unprovable |
+| P0 | GL-14 | Finish durable staff-access changes and offboarding | CEO | Partial or legacy access changes leave live privilege, stranded work, or missing history |
 | P0 | GL-13 | Finish technician session, route, and historical-data boundaries | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access |
 | P0 | GL-15 | Finish regulated-report durability and compliance sign-off | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer |
 | P0 | GL-17 | Seasonal plan and licensed-scope decisions | CEO + Compliance owner | Work billed out of season or performed outside legal authority |
@@ -80,9 +63,9 @@ several gates at the same time.
 | P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money |
 | P0 | GL-09 | Make customer lifecycle transitions atomic and auditable | Head of Operations | Deactivation leaves a live portal login, or status disagrees with billing |
 | P0 | GL-08 | Finish failure-safe customer plan cancellation | CEO | Customer told billing stopped while the subscription is still live |
+| P0 | GL-07 | Finish durable office cancel/reschedule | Head of Operations | A canceled visit still charges, promised credit vanishes, or concurrent changes conflict |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it |
 | P0 | GL-06 | Honest handling of processing and failed payments | Finance lead | Customer told "booked/paid" while the payment can still fail |
-| P0 | GL-07 | One safe office cancel/reschedule workflow | Head of Operations | *(Engineering closed — operational proof only)* |
 | P0 | GL-16 | Governed pricing and margin protection | CEO + Finance lead | AI or an employee publishes a loss-making or nonsensical price |
 | P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented |
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims |
@@ -101,50 +84,40 @@ several gates at the same time.
 
 ## Priority 0 — Critical money, security, compliance, safety, and customer commitments
 
-### GL-14 — Finish fail-safe staff access changes and offboarding
+### GL-14 — Finish durable staff-access changes and offboarding
 
 **Business outcome:** A role change or departure cannot leave a person with unintended access, and
-leadership can prove who changed access, why, and what work was reassigned.
+leadership can retrieve the complete record of who changed access, why, and what work was reassigned.
 
-**Already delivered (verified this review):** Offboarding ends the login for real — it disables the
-Cognito user and forces a global sign-out, not just a group change. There is a last-owner guard so the
-company cannot lock itself out. A role change reads the person's effective roles back and reports a
-partial result if they do not converge. Technician and login records are linked atomically at creation.
-Future jobs are unassigned with a per-job check, and a downstream failure opens an owned Operations case
-instead of a false "done." The immutable `StaffAccessEvent` ledger model exists and is read-only.
+**Why this is still a gate:** The idempotency/audit row is created only after provider and database
+changes, so a hard stop can apply access changes with no durable request or recovery state; concurrent
+requests using the same key can both proceed. Role changes add/remove groups and then sign out without
+an owned failure path, so a mid-change error can leave an unintended role set or an old privileged
+session. The separate Schedule-board **Deactivate technician** action still bypasses the hardened staff
+workflow, controlled reason, audit, security ownership, and readback. Future-job updates accept a null
+write without failing, required Operations/security cases are best-effort, and the Access History
+screen searches/exports only its first 500 rows. Last-owner protection still relies on a post-change
+rollback rather than one serialized provider-safe decision.
 
-**Closed since last review (commit `50e04b4`, verified against the tree):**
+**Remaining requirements:**
 
-- **A demotion now ends the person's sessions.** `changeStaffRoles` globally signs the login out whenever
-  any role is removed, so an old token cannot keep the removed role, and it reads the effective groups
-  back from Cognito and reports `sessionsInvalidated` — the operator is told the real end state, not the
-  requested one.
-- **Offboarding is fail-safe and correctly ordered.** `killLogin` now disables and globally signs out
-  **first**, then removes groups, so the moment those two land the person cannot act even if a later
-  step fails. Any step failing opens a durable owned **STAFF_SECURITY** case (30-minute clock) with one
-  idempotent resume — re-run — and rethrows, so success is never reported over a half-revoked login.
-- **Every change starts from a durable, controlled request.** A role reduction and an offboarding each
-  require an **approved reason from a fixed list** (`STAFF_ROLE_CHANGE_REASONS` / `STAFF_OFFBOARD_REASONS`;
-  `OTHER` demands a note) — blank or free-typed reasons are refused before anything is touched — and carry
-  an **idempotency key** that dedupes a replay to a no-op returning the recorded outcome. The row records
-  actor, target, prior and requested roles, the verified new roles, the reason code, and the key. A
-  post-change concurrency net re-counts all usable owners; if a race (two owners removing each other) would
-  zero them out, the last change is rolled back and refused, so a recovery path always remains.
-- **Success is read back, not assumed.** Offboarding confirms the login is disabled (re-read) and the
-  technician is verified inactive before it reports **COMPLETE**; jobs are unassigned by the per-job sweep,
-  and each in-progress visit is placed in an owned Operations review. A read-back that cannot confirm the
-  disable opens a security case and downgrades the result to PARTIAL.
-- **The audit ledger is a required durable outcome, and it is visible (X1).** `recordStaffAccessEvent`
-  returns whether the row was written; a miss opens a STAFF_SECURITY case demanding reconstruction and
-  downgrades the action to PARTIAL, so the proof of a sensitive change cannot silently not exist. An
-  owner-only **Access history** screen in the CRM searches and exports (CSV) the immutable
-  `StaffAccessEvent` history without engineering.
-
-**What remains the gate — operational proof only:**
-
-- Production has at least two named usable owners with MFA and separate recovery access, and a witnessed
-  break-glass drill in which either owner recovers access and offboards the other without engineering or a
-  shared login.
+- Create and conditionally claim one durable access-change command before any provider or work change.
+  The server requires a unique idempotency/version key, stores actor, target, controlled reason, prior
+  and requested roles, and resumes the same command after timeout, retry, or concurrent submission.
+- Every staff-access entrance—including Schedule-board technician deactivation—uses the same workflow.
+  No alternate action may reassign work before access is revoked or omit the reason, audit, ownership,
+  session invalidation, and final readback.
+- A role reduction cannot leave a combined role set or an old privileged session after any failed
+  add, remove, or sign-out step. Every partial state has a durably confirmed security owner and one
+  safe resume action; the UI never claims a case exists when its write failed.
+- Owner changes are serialized so concurrent demotion/offboarding cannot require a fallible rollback
+  to preserve access. At least one usable owner remains technically, and production has two named
+  owners with MFA and separate recovery access.
+- Every affected job, route, technician, in-progress review, security case, and audit write is checked
+  and read back. **Complete** means all future jobs are unassigned, the technician is inactive, and
+  every in-progress visit has a durable Operations disposition.
+- Access History pages, searches, and exports the entire immutable ledger—not only the first 500
+  records—and makes partial/recovery state visible without engineering assistance.
 
 **Pass owner:** CEO, with Operations verifying reassigned work.
 
@@ -153,19 +126,12 @@ instead of a false "done." The immutable `StaffAccessEvent` ledger model exists 
 **Business outcome:** A technician sees only the minimum data for legitimate current or
 business-approved historical work, and access disappears when assignment or employment ends.
 
-**Already delivered (verified this review):** When a technician opens a *single* job, the server proves
-that job is currently assigned to them (or refuses opaquely), and reassignment removes the former
-assignee's access on the next fetch. Field actions additionally require an active technician and an
-unexpired license. Payloads are least-privilege: the technician gets visit fields only, never billing,
-plan price, provider IDs, or a peer's license. Document links are scoped to customers the technician
-serves.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **The day view still trusts the route, not the assignment.** The technician's day is built by pulling
   every job carrying that route's ID, with no per-job check that the job is still assigned to the
   signed-in technician. A partial or inconsistent reassignment therefore exposes another technician's job
-  and customer — the exact leak this gate names, and it has no test. Each day-view job must be checked
+  and customer — the exact leak this gate names. Each day-view job must be checked
   the same way a single job is; a route/job mismatch is withheld and becomes owned Operations work.
 - **Reads do not require an active technician.** A read only matches the caller to a technician record;
   it does not confirm the technician is still active. A deactivated employee with an unexpired session
@@ -193,12 +159,7 @@ serves.
 **Business outcome:** Every issued service report and correction is an accurate, durable, correctly
 authored legal record with a truthful, non-duplicating customer-delivery state.
 
-**Already delivered (verified this review):** Report finalization is durable before any customer message
-and resumes rather than restarts. A correction is an append-only amendment with a content-derived
-identity, so a retry lands the same row instead of a second correction. The issuer's identity comes from
-their authenticated session, not a free-text field.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **Finalization is not concurrency-safe.** It reads the draft, then writes the finalized report,
   completed job, billing start, and next visit with no conditional claim or version. Two simultaneous
@@ -236,7 +197,7 @@ their authenticated session, not a free-text field.
 **Business outcome:** Seasonal and specialized services bill and schedule exactly as customers were told,
 and are performed only under valid business and technician authority.
 
-**What remains the gate:**
+**Remaining requirements:**
 
 - **No seasonal policy is encoded anywhere.** "May–Oct" exists only as a display label on a mosquito
   price line; plans carry only a frequency and a status. Nothing stops a seasonal plan from billing or
@@ -261,7 +222,7 @@ and are performed only under valid business and technician authority.
 **Business outcome:** A technician is dispatched only with the service-specific facts and approved scope
 needed to complete the visit safely, and can exit an unperformable visit without inventing a workaround.
 
-**What remains the gate** *(the engineering commit itself lists these as not-yet-closed):*
+**Remaining requirements:**
 
 - **Readiness is still free-text based.** The dispatch gate only checks the address fields are non-blank;
   it does not prove a valid **in-area** address or enforce duration, scope, required prep, required
@@ -285,16 +246,7 @@ needed to complete the visit safely, and can exit an unperformable visit without
 customer commitment or one visible, verified refund/recovery case — even when execution stops between
 steps.
 
-**Already delivered (verified this review):** Finalization is an atomic, resumable claim, so concurrent
-webhook deliveries cannot both finalize the same booking and a retry resumes rather than duplicates.
-Confirmation and office-alert each have a durable "sent" marker, so a resumed finalization sends only the
-message that was missed — never a duplicate booking. Any money without a complete booking (missing,
-wrong-status, stale, or amount-mismatched) always becomes an owned Finance case. A daily reconciliation
-proves **both directions** for the accounting window — every succeeded payment maps to exactly one whole
-booking and every booked commitment to one paid invoice for the exact amount — and a provider read error
-opens owned work instead of reading as "all clear." Cases are written only server-side.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **The confirmation email itself can still duplicate.** The marker prevents re-*booking*, but the send
   has no provider idempotency key, so a crash between provider acceptance and the marker write re-sends
@@ -322,13 +274,7 @@ opens owned work instead of reading as "all clear." Cases are written only serve
 **Business outcome:** Customer status, billing, access, scheduled work, and customer communication never
 disagree, and an employee always sees the real outcome of deactivation or reactivation.
 
-**Already delivered (verified this review):** Reactivation is one server action that restores access,
-then status, then records the event, and heals a partially-restored customer without a second
-transition. The money-and-work side of deactivation is coordinated in the right order (money first,
-status last) with partial-plan-cancel detection and an idempotent re-run. The safe-edit path blocks
-protected lifecycle fields. The immutable `CustomerLifecycleEvent` ledger model exists.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **"Deactivate customer" is still two actions chained in the browser.** The screen calls the money/work
   deactivation, then separately calls revoke-portal-access. If the browser dies or the second call fails,
@@ -359,12 +305,7 @@ recovery policy.
 **Business outcome:** A customer's online cancellation is a durable instruction, and every customer
 message matches the actual billing, plan, schedule, and delivery state.
 
-**Already delivered (verified this review):** A duplicate click is a no-op success. Cancellation attempts
-the provider first and treats an already-canceled subscription as success. When the provider call fails,
-the system sets a pending flag and opens a durable owned case with an office alert. Whether a confirmation
-email was actually sent is tracked as a truthful flag, and a missing or failed email opens owned work.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **The pending screen still promises "you won't be charged again" while the subscription is live.** On a
   provider failure — where billing is explicitly still active — the customer message tells them they will
@@ -390,16 +331,54 @@ email was actually sent is tracked as a truthful flag, and a missing or failed e
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
 
+### GL-07 — Finish durable office cancel/reschedule
+
+**Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
+credit, capacity, route, audit, and customer-notification consequences in one guided action.
+
+**Why this is still a gate:** A cancel/reschedule has no durable command or conditional claim before
+money and schedule changes, so concurrent actions can both proceed and a hard stop after refund but
+before job cancellation is not resumable. An invoice void is reported successful without checking the
+write, and a visit can be canceled while a payment remains in flight—then return **Complete** if email
+succeeds. Retained credit is only a best-effort Finance task, yet the customer is told the credit
+exists. Visit-change audit and notification cases are best-effort and the history has no business
+screen. The reschedule form does not show the consequence preview, makes reason optional, and does not
+send a technician/route, so the server skips its capacity check and can mark an unassigned visit
+scheduled. Repeating an already-canceled request also reports the customer notice as sent without
+reading the prior outcome.
+
+**Remaining requirements:**
+
+- Create and conditionally claim one durable visit-change command before refund, credit, invoice,
+  route, job, or message changes. Concurrent cancel/reschedule requests and retries converge on one
+  decision, one money disposition, one schedule result, and one customer notice.
+- A provider-accepted refund followed by a timeout or failed CRM write resumes from the same command
+  and cannot refund twice or strand a paid visit as scheduled. Every provider and CRM step records a
+  checked result before **Complete**.
+- Cancellation does not complete while a charge is processing. The workflow stops the payment or
+  owns it through settlement/refund, verifies any open invoice is void, and tells the customer the
+  truthful pending or final money state.
+- **Retain as account credit** creates a real customer credit balance/ledger entry before the visit is
+  canceled or the customer is told it exists. Finance can see, apply, expire, reverse, and reconcile
+  the credit; a best-effort task or email is not the balance.
+- Reschedule uses the same visible consequence preview as cancellation, requires a controlled reason,
+  and applies the shared capacity/credential rule before committing the customer date. A visit cannot
+  be labeled scheduled without a valid capacity disposition and owned staffing state.
+- Visit-change audit and any notification/recovery case are required durable outcomes. Operations and
+  Finance can search/export the complete cancellation/reschedule history, including actor, reason,
+  policy, money, prior/new schedule, delivery, partial state, and final resolution.
+- Customer communication uses durable delivery state and one retry-safe notice. An already-processed
+  request returns the stored money, schedule, and communication outcome rather than inventing a clean
+  **Sent/Complete** result. Canceling one visit never silently cancels its recurring plan.
+
+**Pass owner:** Head of Operations; Finance approves money and credit dispositions.
+
 ### GL-04 — Capacity that cannot be oversold
 
 **Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
 cannot buy the same last unit of capacity.
 
-**Already delivered (verified this review):** Availability accounts for service on-site duration and real
-drive-time between stops, and the booking step re-checks the specific day against the live schedule
-before taking payment.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **No slot is ever reserved.** There is no capacity-hold concept in the system; two concurrent bookings
   for the last slot both pass the check because capacity is derived from existing jobs and nothing is
@@ -428,11 +407,7 @@ before taking payment.
 **Business outcome:** A customer is never told they are booked or paid while the payment can still fail,
 and Operations never dispatches an unconfirmed payment as if it were settled.
 
-**Already delivered (verified this review):** The webhook finalizes a booking only on a *succeeded*
-payment; a payment still processing does not create a booking, and a failed payment is handled on its own
-path.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **The customer UI announces "You're booked" and "paid today" on a still-processing payment.** The
   success screen renders those headings for both succeeded and processing states, softening only the
@@ -449,32 +424,6 @@ path.
 
 **Pass owner:** Finance lead.
 
-### GL-07 — One safe office cancel/reschedule workflow *(engineering closed)*
-
-**Business outcome:** An employee cannot cancel or move a paid visit without completing the money, plan,
-capacity, route, and customer-notification consequences in one guided action.
-
-**Engineering is genuinely closed here — verified this review.** A read-only preview shows every
-consequence before the employee commits (customer and visit, amount paid and open, the policy deadline,
-the policy-computed refund/credit/fee, the plan consequence, the route consequence, and the exact notice),
-and the employee picks a plain decision. The server computes every amount from one shared cancellation
-policy — the same free-cancel window the booking funnel enforces — so staff never type an amount. Cancel
-performs all consequences money-first and fail-safe: a refund that cannot be issued leaves the visit
-uncanceled and opens an owned exception, and any partial failure returns PARTIAL rather than claiming
-completion. Reschedule revalidates the technician's license for the new date and the route's ownership and
-capacity. Every action records an immutable `VisitChangeEvent`, and a manager exception is owner-only.
-Covered by 22 handler/policy tests.
-
-**What remains — operational proof only:**
-
-- A retained account credit is handed to Finance as owned work rather than auto-applied, so its redemption
-  needs the Finance operating step defined (GL-18/GL-23).
-- Like every money gate, the live end-to-end rehearsal — a real cancel plus provider refund against the
-  production account (GL-21) — must be witnessed before sign-off.
-- The `VisitChangeEvent` history must be visible on a business screen (**see X1**).
-
-**Pass owner:** Head of Operations; Finance approves money dispositions.
-
 ### GL-16 — Governed pricing and margin protection
 
 **Business outcome:** Neither AI nor a low-skill employee can publish a loss-making, nonsensical, or
@@ -490,7 +439,7 @@ gap. The CEO and Finance must explicitly choose one:
   owner rollback), and the acceptance is recorded here; **or**
 - **(b) Govern it**, in which case the following apply.
 
-**If (b): what remains the gate:**
+**Remaining requirements:**
 
 - Finance approves fully-loaded cost and minimum gross-margin rules for every launch catalog item —
   labor time, drive time, material, lead cost, payment fee, callback allowance, overhead, seasonality,
@@ -515,7 +464,7 @@ gap. The CEO and Finance must explicitly choose one:
 **Business outcome:** A customer can never be promised a service the operating system cannot price,
 staff, perform, document, and support profitably.
 
-**What remains the gate:**
+**Remaining requirements:**
 
 - **There is no single source of truth for services.** Service definitions are hand-duplicated across at
   least four taxonomies (the funnel's six flat codes, the wire codes, the server allow-list, and the
@@ -541,7 +490,7 @@ staff, perform, document, and support profitably.
 **Business outcome:** Marketing, quote, checkout, agreement, portal, and field execution describe the
 same offer, and no unsupported claim creates customer, regulatory, or brand exposure.
 
-**What remains the gate (specific unbacked claims found live on the site):**
+**Remaining requirements:**
 
 - **License status and numbers are hard-coded "Active."** The licensed/insured page renders credential
   cards with the word "Active" and fixed license numbers as static text, not driven by verified current
@@ -574,14 +523,7 @@ same offer, and no unsupported claim creates customer, regulatory, or brand expo
 **Business outcome:** Production does not depend on a staging assumption, missing mailbox, stale secret,
 or unconfigured provider event.
 
-**Already delivered (verified this review):** The Stripe webhook handler already processes all nine event
-types the application relies on (`setup_intent.succeeded`, `payment_intent.succeeded`,
-`payment_intent.payment_failed`, `invoice.paid`, `invoice.payment_failed`,
-`customer.subscription.deleted`, `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`),
-idempotently. No credentials are hard-coded in source (Buildium and provider keys read from environment
-/ secret store). A branch guard blocks live Stripe keys on non-production branches.
-
-**What remains the gate (operational — not provable from source):**
+**Remaining requirements:**
 
 - The previously exposed Buildium credential is rotated and revoked **at the provider**, its access logs
   reviewed, and current credentials exist only in the approved secret store. Removing it from code does
@@ -603,11 +545,7 @@ idempotently. No credentials are hard-coded in source (Buildium and provider key
 **Business outcome:** A background failure is noticed before the customer reports it, and business records
 can be restored after human or provider error.
 
-**Already delivered (verified this review):** Idempotent replay/recovery logic exists on the code side —
-dunning cadence, a single card-charge path, replay-safe webhooks, and a reconciliation retry that opens
-owned work rather than requiring database hand-edits.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **There is no infrastructure alerting at all.** The backend defines no CloudWatch alarms, no SNS topics,
   and no metric filters; every "alert" today is an application email to a shared inbox. A silent Lambda
@@ -636,13 +574,7 @@ owned work rather than requiring database hand-edits.
 **Business outcome:** An operational failure stays visible until the promised real-world outcome is true;
 employees cannot make the dashboard green by writing a note.
 
-**Already delivered (verified this review):** The exception queue is genuinely solid on structure. A
-recurrence reopens the same underlying item with a fresh SLA cycle and an occurrence count rather than
-vanishing. The queue supports claim, escalation, age, due dates, and an automated overdue sweep. Some
-cases already auto-resolve only from a verified event (paid-not-finalized on a real booking; no-access on
-a real rebook).
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **Any routine OFFICE user can close any exception with a free-text note (X2).** The resolve path requires
   only a non-empty note and is open to routine staff, including money and no-access cases whose outcome
@@ -664,14 +596,7 @@ a real rebook).
 **Business outcome:** Leadership can tell each morning whether customers, work, and money agree, without
 asking engineering to query production.
 
-**Already delivered (verified this review):** A daily booking reconciliation runs and proves the
-succeeded-payment ↔ whole-booking relationship both ways, flags paid-not-finalized, duplicate
-bookings/invoices, amount mismatches, and dangling child records, and opens owned Finance cases (an
-outage opens work rather than reading clean). An operations command dashboard exists showing the
-exception queue, open leads, AR aging, a recovery queue, card disputes, completed-but-never-charged jobs,
-serviced-but-not-billing plans, and active plans with no next visit.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **No daily money reconciliation** proving successful provider payments equal CRM paid invoices with net
   cash explainable and every mismatch an owned, Finance-signed case (today only *booking* payment intents
@@ -693,11 +618,7 @@ serviced-but-not-billing plans, and active plans with no next visit.
 failed access visit cannot be "resolved" without actually completing the approved customer and money
 outcome.
 
-**Already delivered (verified this review):** No-access rebooking is well built — a rebooked job is
-linked to the original and carries the prior payment forward so it cannot be recharged as a new sale, and
-that rebook resolves the no-access case from a real event.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **No guarantee matrix and no return-service lifecycle for completed jobs.** Public pages promise
   guarantees/free returns, but a customer invoking one has no distinct linked path. The CEO approves a
@@ -720,10 +641,7 @@ that rebook resolves the no-access case from a real event.
 **Business outcome:** Every lead always has an accountable person, a next action, and an auditable outcome
 until it becomes a customer or is deliberately closed.
 
-**Already delivered (verified this review):** Intake refuses a lead with no usable contact route (name
-plus email or phone required), and email/phone normalization helpers exist.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **There is no pipeline.** Customer status is only Lead / Active / Inactive — none of New, Attempting
   contact, Qualified, Booking sent, Booked/Won, Lost, or Do-not-contact exists. The business approves that
@@ -751,10 +669,7 @@ plus email or phone required), and email/phone normalization helpers exist.
 **Business outcome:** Customers are told what will actually happen, and staff never see a success message
 for a communication that was not delivered.
 
-**Already delivered (verified this review):** A synchronous email-send failure opens an owned exception,
-and report delivery already carries a proper Delivered/Failed/No-email state with owned work.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **The quote fallback promises a call even when there is no phone or consent.** Phone is optional in the
   funnel, yet every review fallback tells the customer a specialist will call within the hour, and
@@ -774,12 +689,7 @@ and report delivery already carries a proper Delivered/Failed/No-email state wit
 **Business outcome:** A customer or property manager can complete the tasks the business directs them to
 the portal for without calling the office.
 
-**Already delivered (verified this review):** An authorized group/property manager can retrieve service
-reports, agreements, and invoices scoped to their own properties (Cognito group scoping), without reaching
-unrelated customers. The portal supports paying invoices, viewing documents, and canceling a plan, and
-those actions persist.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - **Customers cannot initiate a reschedule, callback/guarantee, or general help request.** Reschedule is
   office-only, and there is no customer-facing callback, guarantee, or help path, so these fall back to
@@ -801,7 +711,7 @@ those actions persist.
 **Business outcome:** The production app contains the real facts needed to sell and serve, and every queue
 has a staffed owner from the first lead through the last payment exception.
 
-**What remains the gate:**
+**Remaining requirements:**
 
 - Production contains CEO-approved service areas, catalog/rates/cost floors, durations, products and label
   data, technician identities/licenses/expiry dates, working calendars, territories, customer communication
@@ -824,11 +734,7 @@ has a staffed owner from the first lead through the last payment exception.
 **Business outcome:** The system makes the safe action the obvious action for a new employee and does not
 depend on tribal knowledge.
 
-**Already delivered (verified this review):** Positive signals exist — error and notification emails state
-the consequence and one safe next step and never route an alert through the failing subsystem, and
-idempotent handlers prevent duplicate charges from retries.
-
-**What remains the gate:**
+**Remaining requirements:**
 
 - Every irreversible confirmation uses customer/business language, states the consequence, prevents
   duplicate clicks, and returns a receipt/reference. Error messages identify what happened, whether
