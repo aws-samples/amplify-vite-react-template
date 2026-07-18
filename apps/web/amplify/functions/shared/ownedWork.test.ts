@@ -19,6 +19,19 @@ const fakeDataClient = {
         if (row) Object.assign(row, input);
         return { data: row ?? null };
       },
+      list: async ({
+        filter,
+      }: {
+        filter?: { status?: { eq?: string }; ownerSub?: { eq?: string } };
+      } = {}) => ({
+        data: rows.filter(
+          (row) =>
+            (filter?.status?.eq === undefined || row.status === filter.status.eq) &&
+            (filter?.ownerSub?.eq === undefined ||
+              row.ownerSub === filter.ownerSub.eq)
+        ),
+        nextToken: null,
+      }),
     },
     WorkEvent: {
       create: async (input: Record<string, unknown>) => {
@@ -31,7 +44,9 @@ const fakeDataClient = {
 
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const { openOwnedWork, workItemId } = await import("./ownedWork");
+const { openOwnedWork, releaseOwnedWorkForSub, workItemId } = await import(
+  "./ownedWork"
+);
 
 const input = {
   kind: "CALLBACK_PROMISE" as const,
@@ -119,5 +134,60 @@ describe("durable owned work", () => {
       "OPENED",
       "REOPENED",
     ]);
+  });
+});
+
+describe("releasing owned work on offboarding (GL-18)", () => {
+  beforeEach(() => {
+    process.env.SES_NOTIFY_EMAIL = "info@example.com";
+  });
+
+  it("returns a departing person's OPEN claims to the team inbox with a RELEASED event", async () => {
+    rows.push(
+      {
+        id: "w-1",
+        status: "OPEN",
+        ownerSub: "leaver",
+        ownerEmail: "leaver@example.com",
+        ownerTeam: "OPS",
+      },
+      {
+        id: "w-2",
+        status: "OPEN",
+        ownerSub: "someone-else",
+        ownerEmail: "other@example.com",
+        ownerTeam: "OPS",
+      },
+      {
+        id: "w-3",
+        status: "RESOLVED",
+        ownerSub: "leaver",
+        ownerEmail: "leaver@example.com",
+        ownerTeam: "OPS",
+      }
+    );
+
+    const released = await releaseOwnedWorkForSub({
+      sub: "leaver",
+      reason: "leaver@example.com was offboarded.",
+      actorEmail: "owner@example.com",
+    });
+
+    expect(released).toBe(1);
+    // Only the leaver's OPEN item moved back to the inbox; unclaimed.
+    expect(rows.find((r) => r.id === "w-1")).toMatchObject({
+      ownerSub: null,
+      ownerEmail: "info@example.com",
+    });
+    // A peer's item and the leaver's already-resolved item are untouched.
+    expect(rows.find((r) => r.id === "w-2")).toMatchObject({ ownerSub: "someone-else" });
+    expect(rows.find((r) => r.id === "w-3")).toMatchObject({ ownerSub: "leaver" });
+    expect(events).toContainEqual(
+      expect.objectContaining({ workItemId: "w-1", eventType: "RELEASED" })
+    );
+  });
+
+  it("is a no-op with no sub and never throws", async () => {
+    await expect(releaseOwnedWorkForSub({ sub: "", reason: "x" })).resolves.toBe(0);
   });
 });

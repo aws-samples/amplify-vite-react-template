@@ -31,6 +31,7 @@ import {
 import {
   openMissingContactWork,
   openOwnedWork,
+  releaseOwnedWorkForSub,
 } from "../shared/ownedWork";
 import { callerEmail, callerSub } from "../shared/authz";
 import { recordCustomerLifecycleEvent } from "../shared/lifecycleLog";
@@ -1383,6 +1384,14 @@ async function offboardStaff(
     });
   }
 
+  // GL-18: any open exception this person had claimed goes back to its team
+  // inbox — no required action may stay owned by someone who has been offboarded.
+  const workReleased = await releaseOwnedWorkForSub({
+    sub: target.sub,
+    reason: `${target.email} was offboarded.`,
+    actorEmail: actor.email,
+  });
+
   const outcome =
     downstreamError ||
     !loginConfirmedDisabled ||
@@ -1430,6 +1439,11 @@ async function offboardStaff(
             inProgress.length === 1 ? "" : "s"
           } put in owned Operations review.`
         : "",
+      workReleased
+        ? `${workReleased} owned exception${
+            workReleased === 1 ? "" : "s"
+          } returned to the team inbox.`
+        : "",
     ]
       .filter(Boolean)
       .join(" "),
@@ -1453,6 +1467,7 @@ async function offboardStaff(
     technicianConfirmedInactive,
     jobsUnassigned,
     inProgressCount: inProgress.length,
+    workReleased,
     ledgerRecorded,
     outcome: ledgerRecorded ? outcome : "PARTIAL",
   };

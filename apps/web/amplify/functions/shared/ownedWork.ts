@@ -1,20 +1,10 @@
 import { createHash } from "node:crypto";
 import { dataClient } from "./dataClient";
+import type { WorkKind } from "./workPolicy";
 
-export type WorkKind =
-  | "NO_ACCESS"
-  | "EMAIL_FAILURE"
-  | "CALLBACK_PROMISE"
-  | "DUPLICATE_LEAD"
-  | "UNSTAFFED_VISIT"
-  | "PAID_VISIT_CANCELLATION"
-  | "PORTAL_FAILURE"
-  | "PRICING_ESCALATION"
-  | "MISSING_CONTACT"
-  | "PAID_NOT_FINALIZED"
-  | "LOCATION_REVIEW"
-  | "STAFF_OFFBOARD"
-  | "STAFF_SECURITY";
+// WorkKind is owned by workPolicy.ts (the GL-18 registry) — re-exported here so
+// the many producers that already import it from ownedWork keep compiling.
+export type { WorkKind };
 
 export type WorkOwnerTeam = "OPS" | "SALES" | "FINANCE";
 
@@ -240,6 +230,62 @@ export async function resolveOwnedWork(input: {
   } catch (err) {
     console.error("resolveOwnedWork failed", input.kind, input.dedupeKey, err);
     return false;
+  }
+}
+
+/**
+ * GL-18 — return every OPEN exception a departing person had claimed to its team
+ * inbox, so no required action stays owned by someone who has been offboarded.
+ * Called from the offboarding flow after access is revoked. Best-effort and
+ * never throws into the caller: the person is already locked out, so a failure
+ * here leaves the work owned-by-a-departed-person (visible, not lost) rather
+ * than breaking the offboard. Each release appends an immutable RELEASED event.
+ */
+export async function releaseOwnedWorkForSub(input: {
+  sub: string;
+  reason: string;
+  actorEmail?: string | null;
+}): Promise<number> {
+  if (!input.sub) return 0;
+  try {
+    const client = await dataClient();
+    if (!("WorkItem" in client.models) || !("WorkEvent" in client.models)) {
+      return 0;
+    }
+    let released = 0;
+    let token: string | undefined;
+    do {
+      const page = await client.models.WorkItem.list({
+        filter: {
+          status: { eq: "OPEN" },
+          ownerSub: { eq: input.sub },
+        },
+        limit: 200,
+        nextToken: token,
+      });
+      for (const item of page.data ?? []) {
+        const team = (item.ownerTeam as WorkOwnerTeam) ?? "OPS";
+        const { data: updated } = await client.models.WorkItem.update({
+          id: item.id,
+          ownerSub: null,
+          ownerEmail: defaultWorkOwner(team),
+        });
+        if (!updated) continue;
+        await client.models.WorkEvent.create({
+          workItemId: item.id,
+          eventType: "RELEASED",
+          actorEmail: input.actorEmail ?? "system@pestbuzzkill.com",
+          note: `Returned to the ${team} team inbox — the previous owner was offboarded. ${input.reason}`,
+          occurredAt: new Date().toISOString(),
+        });
+        released++;
+      }
+      token = page.nextToken ?? undefined;
+    } while (token);
+    return released;
+  } catch (err) {
+    console.error("releaseOwnedWorkForSub failed", input.sub, err);
+    return 0;
   }
 }
 

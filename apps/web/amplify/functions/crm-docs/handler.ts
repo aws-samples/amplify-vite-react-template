@@ -16,6 +16,7 @@ import {
   callerGroups,
   callerIsFinance,
   callerIsOffice,
+  callerIsOwner,
   callerName,
   callerSub,
 } from "../shared/authz";
@@ -50,6 +51,13 @@ import {
   openOwnedWork,
   workItemId,
 } from "../shared/ownedWork";
+import {
+  isValidManualReason,
+  isVerifiable,
+  verifiedResolution,
+  workPolicy,
+  type VerifierId,
+} from "../shared/workPolicy";
 
 const s3 = new S3Client();
 const BUCKET = () => {
@@ -122,6 +130,8 @@ type Args = {
   otherRouteOrder?: number;
   workItemId?: string;
   action?: string;
+  resolutionActionId?: string;
+  reasonCode?: string;
   accessInstructions?: string;
   hazardNotes?: string;
   prepInstructions?: string;
@@ -249,8 +259,13 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         workItemId: event.arguments.workItemId!,
         action: event.arguments.action!,
         note: event.arguments.note,
+        resolutionActionId: event.arguments.resolutionActionId ?? undefined,
+        reasonCode: event.arguments.reasonCode ?? undefined,
         actorSub: callerSub(event.identity),
         actorEmail: callerEmail(event.identity),
+        // GL-18: a free-text "manual override" close is limited to an owner. The
+        // caller's role is read from the token here, never trusted from the args.
+        actorIsOwner: callerIsOwner(event.identity),
       });
     }
     case "getDocumentUrl": {
@@ -288,12 +303,86 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
   }
 };
 
+/**
+ * GL-18 — re-confirm a verified resolution's real-world outcome server-side, so
+ * "close only from the verified event" is enforced by the data, not by trusting
+ * a button. Returns why it is not yet true so the office gets the one next step.
+ * Read-only and side-effect-free; the caller closes the item only on { ok }.
+ */
+async function runWorkVerifier(
+  verifier: VerifierId,
+  item: { relatedId: string; customerId?: string | null }
+): Promise<{ ok: boolean; message: string }> {
+  const client = await dataClient();
+  switch (verifier) {
+    case "CUSTOMER_HAS_EMAIL": {
+      const id = item.customerId ?? item.relatedId;
+      const { data: customer } = await client.models.Customer.get({ id });
+      const email = customer?.email?.trim();
+      return {
+        ok: Boolean(email && email.includes("@")),
+        message:
+          "Add a valid email to the customer record first, then confirm the contact is on file.",
+      };
+    }
+    case "JOB_STAFFED": {
+      const { data: job } = await client.models.Job.get({ id: item.relatedId });
+      const staffed =
+        Boolean(job?.technicianId) &&
+        (job?.status === "SCHEDULED" || job?.status === "IN_PROGRESS");
+      return {
+        ok: staffed,
+        message:
+          "Assign a technician and put the visit on the schedule first — then confirm it's staffed.",
+      };
+    }
+    case "VISIT_MONEY_SETTLED": {
+      const { data: job } = await client.models.Job.get({ id: item.relatedId });
+      const { data: invoices } = await client.models.Invoice.list({
+        filter: { jobId: { eq: item.relatedId } },
+      });
+      const list = invoices ?? [];
+      // A charge still moving must not be called settled — voiding the row would
+      // let the charge land anyway (mirrors cancelVisit's live-charge guard).
+      const liveChargeInFlight = list.some(
+        (i) => i.status === "OPEN" && Boolean(i.stripePaymentIntentId)
+      );
+      const moneyReturned = list.some(
+        (i) =>
+          i.status === "REFUNDED" ||
+          i.status === "VOID" ||
+          (i.refundedAmountCents ?? 0) > 0
+      );
+      const visitGone = job?.status === "CANCELED";
+      return {
+        ok: !liveChargeInFlight && (moneyReturned || visitGone),
+        message:
+          "Refund the payment, void the open invoice, or cancel the visit in the billing tools first — then confirm the money is settled.",
+      };
+    }
+    default:
+      return { ok: false, message: "This exception has no automatic check." };
+  }
+}
+
 export async function updateOwnedWork(args: {
   workItemId: string;
   action: string;
   note?: string;
+  /** GL-18: which controlled resolution the caller chose (a verified id). */
+  resolutionActionId?: string;
+  /** GL-18: the controlled reason for an owner manual override. */
+  reasonCode?: string;
   actorSub: string | null;
   actorEmail: string | null;
+  /** True only for an OWNER token — gates the manual-override close. */
+  actorIsOwner?: boolean;
+  /**
+   * Set by trusted server callers (e.g. rebookJob) that have already carried out
+   * the verified real-world event, so the close records as verified without a
+   * human owner/override. Never set from a browser argument.
+   */
+  verified?: boolean;
 }) {
   const client = await dataClient();
   const { data: item } = await client.models.WorkItem.get({ id: args.workItemId });
@@ -339,57 +428,163 @@ export async function updateOwnedWork(args: {
   }
 
   if (args.action === "RESOLVE") {
-    const note = args.note?.trim();
-    if (!note) throw new Error("Say how this was resolved before closing it");
     if (item.status === "RESOLVED") {
       return { workItemId: item.id, status: "RESOLVED", alreadyResolved: true };
     }
-    const resolved = await client.models.WorkItem.update({
-      id: item.id,
-      status: "RESOLVED",
-      ownerSub: args.actorSub ?? item.ownerSub ?? undefined,
-      ownerEmail: actorEmail,
-      resolvedAt: now,
-      resolvedBySub: args.actorSub ?? undefined,
-      resolvedByEmail: actorEmail,
-      resolutionNote: note,
-    });
-    if (!resolved.data) {
-      throw new Error(
-        resolved.errors?.map((error) => error.message).join("; ") ||
-          "Could not resolve work"
-      );
-    }
-    const resolutionEvent = await client.models.WorkEvent.create({
-      workItemId: item.id,
-      eventType: "RESOLVED",
-      actorSub: args.actorSub ?? undefined,
-      actorEmail,
-      note,
-      occurredAt: now,
-    });
-    if (!resolutionEvent.data) {
-      // A resolution without permanent history is not a resolution. Reopen
-      // the row so the action remains visible and can be retried.
-      await client.models.WorkItem.update({
-        id: item.id,
-        status: "OPEN",
-        ownerSub: item.ownerSub ?? null,
-        ownerEmail: item.ownerEmail,
-        resolvedAt: null,
-        resolvedBySub: null,
-        resolvedByEmail: null,
-        resolutionNote: null,
+    const kind = item.kind ?? "";
+    const policy = workPolicy(kind);
+    const note = args.note?.trim();
+
+    // Path 1 — a trusted server caller (e.g. rebookJob) has already carried out
+    // the verified real-world event. It closes as a verified resolution with no
+    // owner/override needed. Never reachable from a browser argument.
+    if (args.verified) {
+      return closeResolvedWorkItem({
+        item,
+        actorSub: args.actorSub,
+        actorEmail,
+        now,
+        note: note || "Closed by a verified system action.",
+        eventType: "RESOLVED",
       });
+    }
+
+    // Path 2 — a routine OFFICE/FINANCE user runs an in-place verified close.
+    // The server re-checks the real-world outcome; the item closes only if true.
+    const chosen = args.resolutionActionId
+      ? verifiedResolution(kind, args.resolutionActionId)
+      : null;
+    if (chosen) {
+      const check = await runWorkVerifier(chosen.verifier, item);
+      if (!check.ok) {
+        throw new Error(`This isn't done yet, so it can't be closed. ${check.message}`);
+      }
+      return closeResolvedWorkItem({
+        item,
+        actorSub: args.actorSub,
+        actorEmail,
+        now,
+        note: note || `${chosen.label} — confirmed.`,
+        eventType: "RESOLVED",
+      });
+    }
+
+    // Path 3 — a manual override: no verified outcome, so this is a manager
+    // decision. Owner only, a controlled reason, evidence, and recorded as a
+    // separately-reportable MANUAL_OVERRIDE (GL-18 / X2). A routine user is
+    // steered to the verified action instead of being able to close by note.
+    if (!args.actorIsOwner) {
+      if (policy && isVerifiable(kind)) {
+        const how =
+          policy.externalAction?.label ??
+          policy.verified[0]?.label ??
+          "its verified action";
+        throw new Error(
+          `Close this by running "${how}" so the outcome is verified. To close it any other way, an owner must record a manual override.`
+        );
+      }
       throw new Error(
-        resolutionEvent.errors?.map((error) => error.message).join("; ") ||
-          "Could not record resolution history"
+        "Only an owner can close this. It has no automatic check, so closing it is a manager decision recorded as a manual override with a reason and evidence."
       );
     }
-    return { workItemId: item.id, status: "RESOLVED" };
+    const reasonCode = args.reasonCode?.trim();
+    if (!reasonCode) {
+      throw new Error("Choose a reason for this manual override before closing it.");
+    }
+    if (policy && !isValidManualReason(kind, reasonCode)) {
+      throw new Error("That reason isn't one of the allowed reasons for this exception.");
+    }
+    if (!note) {
+      throw new Error("Add a short note of evidence for this manual override.");
+    }
+    return closeResolvedWorkItem({
+      item,
+      actorSub: args.actorSub,
+      actorEmail,
+      now,
+      note,
+      eventType: "MANUAL_OVERRIDE",
+      manualOverride: true,
+      reasonCode,
+    });
   }
 
   throw new Error("Unknown work action — use CLAIM or RESOLVE");
+}
+
+/**
+ * Flip a WorkItem RESOLVED and append its immutable close event, with the same
+ * fail-safe the queue has always had: a resolution the ledger did not record is
+ * reopened so the action stays visible and can be retried. eventType is RESOLVED
+ * for a verified close and MANUAL_OVERRIDE for an owner override (which also
+ * stamps resolvedManualOverride/resolvedReason so overrides can be reported on
+ * their own).
+ */
+async function closeResolvedWorkItem(input: {
+  item: {
+    id: string;
+    ownerSub?: string | null;
+    ownerEmail: string;
+  };
+  actorSub: string | null;
+  actorEmail: string;
+  now: string;
+  note: string;
+  eventType: "RESOLVED" | "MANUAL_OVERRIDE";
+  manualOverride?: boolean;
+  reasonCode?: string;
+}) {
+  const client = await dataClient();
+  const { item, actorSub, actorEmail, now, note } = input;
+  const resolved = await client.models.WorkItem.update({
+    id: item.id,
+    status: "RESOLVED",
+    ownerSub: actorSub ?? item.ownerSub ?? undefined,
+    ownerEmail: actorEmail,
+    resolvedAt: now,
+    resolvedBySub: actorSub ?? undefined,
+    resolvedByEmail: actorEmail,
+    resolutionNote: note,
+    resolvedManualOverride: input.manualOverride ?? false,
+    resolvedReason: input.reasonCode ?? null,
+  });
+  if (!resolved.data) {
+    throw new Error(
+      resolved.errors?.map((error) => error.message).join("; ") ||
+        "Could not resolve work"
+    );
+  }
+  const resolutionEvent = await client.models.WorkEvent.create({
+    workItemId: item.id,
+    eventType: input.eventType,
+    actorSub: actorSub ?? undefined,
+    actorEmail,
+    note,
+    occurredAt: now,
+  });
+  if (!resolutionEvent.data) {
+    await client.models.WorkItem.update({
+      id: item.id,
+      status: "OPEN",
+      ownerSub: item.ownerSub ?? null,
+      ownerEmail: item.ownerEmail,
+      resolvedAt: null,
+      resolvedBySub: null,
+      resolvedByEmail: null,
+      resolutionNote: null,
+      resolvedManualOverride: null,
+      resolvedReason: null,
+    });
+    throw new Error(
+      resolutionEvent.errors?.map((error) => error.message).join("; ") ||
+        "Could not record resolution history"
+    );
+  }
+  return {
+    workItemId: item.id,
+    status: "RESOLVED",
+    manualOverride: Boolean(input.manualOverride),
+  };
 }
 
 /** Office-initiated transactional emails (payment request, portal reminder,
@@ -825,6 +1020,8 @@ async function resolveRebookedNoAccessWork(
       note: `Rebooked as linked visit ${rebookedJobId}; the original no-access record remains unchanged.`,
       actorSub,
       actorEmail,
+      // The rebook IS the verified event — close as verified, not as a note.
+      verified: true,
     });
   } catch (err) {
     // A legacy no-access row may predate owned work. That is the only benign

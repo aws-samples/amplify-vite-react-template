@@ -13,6 +13,12 @@ import {
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
 import {
+  isVerifiable,
+  SEVERITY_LABEL,
+  SEVERITY_TONE,
+  workPolicy,
+} from "../lib/workPolicy";
+import {
   Badge,
   Button,
   Card,
@@ -27,27 +33,20 @@ import {
 
 type Tab = "OPEN" | "RESOLVED";
 
-const KIND_LABEL: Record<string, string> = {
-  NO_ACCESS: "No access",
-  EMAIL_FAILURE: "Failed email",
-  CALLBACK_PROMISE: "Callback",
-  DUPLICATE_LEAD: "Duplicate lead",
-  UNSTAFFED_VISIT: "Unstaffed visit",
-  PAID_VISIT_CANCELLATION: "Paid cancellation",
-  PORTAL_FAILURE: "Portal failure",
-  PRICING_ESCALATION: "Pricing",
-  MISSING_CONTACT: "Missing contact",
-  PAID_NOT_FINALIZED: "Paid, not finalized",
-  LOCATION_REVIEW: "Location review",
-};
+function kindLabel(kind: string | null | undefined): string {
+  return workPolicy(kind)?.label ?? kind ?? "Exception";
+}
 
 export default function WorkQueue() {
   const navigate = useNavigate();
   const roles = useRoles();
   const [tab, setTab] = useState<Tab>("OPEN");
+  const [overridesOnly, setOverridesOnly] = useState(false);
   const [items, setItems] = useState<WorkItem[] | null>(null);
   const [events, setEvents] = useState<WorkEvent[]>([]);
-  const [selected, setSelected] = useState<WorkItem | null>(null);
+  // The owner-only "manager override" sheet — a close with no verified outcome.
+  const [override, setOverride] = useState<WorkItem | null>(null);
+  const [reasonCode, setReasonCode] = useState("");
   const [note, setNote] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,31 +73,42 @@ export default function WorkQueue() {
   const shown = useMemo(() => {
     return (items ?? [])
       .filter((item) => item.status === tab)
+      .filter((item) =>
+        tab === "RESOLVED" && overridesOnly ? item.resolvedManualOverride : true
+      )
       .sort((a, b) =>
         tab === "OPEN"
           ? a.dueAt.localeCompare(b.dueAt)
           : (b.resolvedAt ?? "").localeCompare(a.resolvedAt ?? "")
       );
-  }, [items, tab]);
+  }, [items, tab, overridesOnly]);
 
-  const act = useCallback(
-    async (item: WorkItem, action: "CLAIM" | "RESOLVE", resolutionNote?: string) => {
+  const overrideCount = useMemo(
+    () =>
+      (items ?? []).filter(
+        (i) => i.status === "RESOLVED" && i.resolvedManualOverride
+      ).length,
+    [items]
+  );
+
+  const closeOverride = useCallback(() => {
+    setOverride(null);
+    setReasonCode("");
+    setNote("");
+  }, []);
+
+  const claim = useCallback(
+    async (item: WorkItem) => {
       setBusyId(item.id);
       setError(null);
       try {
-        const result = opResult<{ workItemId: string; status: string }>(
-          await updateOwnedWork({
-            workItemId: item.id,
-            action,
-            note: resolutionNote,
-          })
+        const result = opResult<{ workItemId: string }>(
+          await updateOwnedWork({ workItemId: item.id, action: "CLAIM" })
         );
         if (!result) throw new Error("The work update did not complete");
-        setSelected(null);
-        setNote("");
         await load();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not update work");
+        setError(err instanceof Error ? err.message : "Could not claim work");
       } finally {
         setBusyId(null);
       }
@@ -106,9 +116,70 @@ export default function WorkQueue() {
     [load]
   );
 
+  // A verified close: the server re-checks the real-world outcome (technician
+  // assigned, money settled, contact on file) and refuses if it isn't true yet.
+  const confirmVerified = useCallback(
+    async (item: WorkItem, actionId: string, label: string) => {
+      if (
+        !window.confirm(
+          `${label}? BuzzKill will re-check this is actually done before it closes.`
+        )
+      ) {
+        return;
+      }
+      setBusyId(item.id);
+      setError(null);
+      try {
+        const result = opResult<{ workItemId: string }>(
+          await updateOwnedWork({
+            workItemId: item.id,
+            action: "RESOLVE",
+            resolutionActionId: actionId,
+          })
+        );
+        if (!result) throw new Error("The work update did not complete");
+        await load();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not close this work");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
+  const saveOverride = useCallback(async () => {
+    if (!override) return;
+    setBusyId(override.id);
+    setError(null);
+    try {
+      const result = opResult<{ workItemId: string }>(
+        await updateOwnedWork({
+          workItemId: override.id,
+          action: "RESOLVE",
+          reasonCode,
+          note: note.trim(),
+        })
+      );
+      if (!result) throw new Error("The override did not complete");
+      closeOverride();
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not record the override");
+    } finally {
+      setBusyId(null);
+    }
+  }, [override, reasonCode, note, closeOverride, load]);
+
+  // Rebook a no-access visit. The server resolves the exception from the rebook
+  // itself (the verified event) — no separate close is needed here.
   const rebookNoAccess = useCallback(
     async (item: WorkItem) => {
-      if (!window.confirm("Create a new linked visit and keep the no-access record untouched?")) {
+      if (
+        !window.confirm(
+          "Create a new linked visit and keep the no-access record untouched?"
+        )
+      ) {
         return;
       }
       setBusyId(item.id);
@@ -118,14 +189,6 @@ export default function WorkQueue() {
           await api().mutations.rebookJob({ jobId: item.relatedId })
         );
         if (!rebooked?.jobId) throw new Error("The visit was not rebooked");
-        const resolved = opResult<{ workItemId: string }>(
-          await updateOwnedWork({
-            workItemId: item.id,
-            action: "RESOLVE",
-            note: `Rebooked as linked visit ${rebooked.jobId}; the original no-access record remains unchanged.`,
-          })
-        );
-        if (!resolved) throw new Error("The visit was rebooked, but the work item did not close");
         await load();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not rebook the visit");
@@ -137,8 +200,8 @@ export default function WorkQueue() {
   );
 
   // GL-05: finish a paid booking whose finalization got stuck. The mutation
-  // re-confirms the Stripe payment and resumes the SAME booking (idempotent),
-  // then auto-resolves this exception on success.
+  // re-confirms the Stripe payment, resumes the SAME booking (idempotent), and
+  // auto-resolves this exception on success.
   const retryFinalization = useCallback(
     async (item: WorkItem) => {
       if (
@@ -186,23 +249,41 @@ export default function WorkQueue() {
         value={tab}
         onChange={setTab}
       />
+      {tab === "RESOLVED" ? (
+        <label className="inline-check small" style={{ margin: "8px 0" }}>
+          <input
+            type="checkbox"
+            checked={overridesOnly}
+            onChange={(e) => setOverridesOnly(e.target.checked)}
+          />{" "}
+          Manager overrides only ({overrideCount})
+        </label>
+      ) : null}
       <ErrorNote error={error} />
 
       {shown.length === 0 ? (
         <EmptyState
-          title={tab === "OPEN" ? "No exception work is open" : "No work has been resolved yet"}
+          title={
+            tab === "OPEN"
+              ? "No exception work is open"
+              : overridesOnly
+                ? "No manager overrides recorded"
+                : "No work has been resolved yet"
+          }
           body={
             tab === "OPEN"
-              ? "New exceptions appear here with an owner, deadline, and resolution action."
+              ? "New exceptions appear here with a severity, owner, deadline, and how to close them."
               : "Resolved work remains here permanently with its full history."
           }
         />
       ) : (
         shown.map((item) => {
           const overdue = item.status === "OPEN" && item.dueAt < new Date().toISOString();
+          const policy = workPolicy(item.kind);
           const history = events
             .filter((event) => event.workItemId === item.id)
             .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+          const mine = item.ownerSub === roles.sub;
           return (
             <Card
               key={item.id}
@@ -213,10 +294,22 @@ export default function WorkQueue() {
                 </Badge>
               }
             >
+              <p className="small" style={{ marginTop: 2, marginBottom: 8 }}>
+                <Badge tone="info">{kindLabel(item.kind)}</Badge>{" "}
+                {policy ? (
+                  <Badge tone={SEVERITY_TONE[policy.severity]}>
+                    {SEVERITY_LABEL[policy.severity]}
+                  </Badge>
+                ) : null}
+              </p>
+              {policy ? (
+                <p className="small" style={{ marginTop: 0 }}>
+                  <strong>Who it affects:</strong> {policy.customerImpact}
+                </p>
+              ) : null}
               <p className="muted small">{item.detail}</p>
               <p className="small" style={{ marginTop: 8 }}>
-                <Badge tone="info">{KIND_LABEL[item.kind ?? ""] ?? item.kind}</Badge>{" "}
-                Owner: <strong>{item.ownerSub === roles.sub ? "you" : item.ownerEmail}</strong>
+                Owner: <strong>{mine ? "you" : item.ownerEmail}</strong>
                 {item.status === "OPEN" ? <> · Due {fmtDateTime(item.dueAt)}</> : null}
                 {(item.occurrenceCount ?? 1) > 1 ? ` · ${item.occurrenceCount} occurrences` : ""}
               </p>
@@ -225,7 +318,8 @@ export default function WorkQueue() {
               </p>
               {item.resolutionNote ? (
                 <p className="success-note" style={{ marginTop: 10 }}>
-                  ✓ {item.resolutionNote}
+                  {item.resolvedManualOverride ? "⚑ Manager override — " : "✓ "}
+                  {item.resolutionNote}
                 </p>
               ) : null}
               <div className="inline-actions" style={{ marginTop: 12 }}>
@@ -234,28 +328,33 @@ export default function WorkQueue() {
                     Open source
                   </Button>
                 ) : null}
-                {item.status === "OPEN" && item.ownerSub !== roles.sub ? (
+                {item.status === "OPEN" && !mine ? (
                   <Button
                     small
                     variant="ghost"
                     loading={busyId === item.id}
-                    onClick={() => void act(item, "CLAIM")}
+                    onClick={() => void claim(item)}
                   >
                     Assign to me
                   </Button>
                 ) : null}
-                {item.status === "OPEN" && item.kind === "NO_ACCESS" ? (
+
+                {/* Verified closes — a dedicated action that does the work AND
+                    resolves the exception, or an in-place check the server
+                    re-confirms. Available to routine office/finance. */}
+                {item.status === "OPEN" &&
+                policy?.externalAction?.mutation === "rebookJob" ? (
                   <Button
                     small
                     variant="subtle"
                     loading={busyId === item.id}
                     onClick={() => void rebookNoAccess(item)}
                   >
-                    Rebook visit
+                    {policy.externalAction.label}
                   </Button>
                 ) : null}
                 {item.status === "OPEN" &&
-                item.kind === "PAID_NOT_FINALIZED" &&
+                policy?.externalAction?.mutation === "retryBookingFinalization" &&
                 (roles.office || roles.finance) ? (
                   <Button
                     small
@@ -263,15 +362,47 @@ export default function WorkQueue() {
                     loading={busyId === item.id}
                     onClick={() => void retryFinalization(item)}
                   >
-                    Retry finalization
+                    {policy.externalAction.label}
                   </Button>
                 ) : null}
-                {item.status === "OPEN" ? (
-                  <Button small onClick={() => setSelected(item)}>
-                    Resolve
+                {item.status === "OPEN" &&
+                  (roles.office || roles.finance) &&
+                  policy?.verified.map((action) => (
+                    <Button
+                      key={action.id}
+                      small
+                      loading={busyId === item.id}
+                      onClick={() => void confirmVerified(item, action.id, action.label)}
+                    >
+                      {action.label}
+                    </Button>
+                  ))}
+
+                {/* Manager override — close with no verified outcome. Owner only,
+                    controlled reason + evidence, reported separately (GL-18). */}
+                {item.status === "OPEN" && roles.owner ? (
+                  <Button
+                    small
+                    variant="danger"
+                    onClick={() => {
+                      setOverride(item);
+                      setReasonCode("");
+                      setNote("");
+                    }}
+                  >
+                    Manager override
                   </Button>
                 ) : null}
               </div>
+              {item.status === "OPEN" &&
+              !roles.owner &&
+              policy &&
+              !isVerifiable(item.kind) ? (
+                <p className="muted small" style={{ marginTop: 8 }}>
+                  This exception has no automatic check — a manager closes it once
+                  the real-world outcome is done.
+                </p>
+              ) : null}
               <details style={{ marginTop: 12 }}>
                 <summary className="small">Permanent history ({history.length})</summary>
                 {history.map((event) => (
@@ -286,25 +417,47 @@ export default function WorkQueue() {
         })
       )}
 
-      <Sheet open={Boolean(selected)} onClose={() => setSelected(null)} title="Resolve owned work">
-        {selected ? (
+      <Sheet
+        open={Boolean(override)}
+        onClose={closeOverride}
+        title="Manager override"
+      >
+        {override ? (
           <div className="form-grid">
-            <p className="muted small">{selected.resolutionAction}</p>
-            <Field label="What permanently resolved this?">
+            <p className="muted small">
+              Close <strong>{override.title}</strong> without a verified outcome.
+              This is a manager decision, recorded on its own for review. Prefer a
+              verified action whenever one is available.
+            </p>
+            <Field label="Reason for this override">
+              <select
+                value={reasonCode}
+                onChange={(event) => setReasonCode(event.target.value)}
+              >
+                <option value="">Choose a reason…</option>
+                {workPolicy(override.kind)?.manualReasons.map((reason) => (
+                  <option key={reason.code} value={reason.code}>
+                    {reason.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Evidence — what confirms this is actually done?">
               <textarea
                 rows={4}
                 value={note}
                 onChange={(event) => setNote(event.target.value)}
-                placeholder="Called customer, moved visit to July 20, and confirmed by phone…"
+                placeholder="Called the customer, confirmed the refund posted, ref #…"
               />
             </Field>
             <Button
               block
-              loading={busyId === selected.id}
-              disabled={!note.trim()}
-              onClick={() => void act(selected, "RESOLVE", note.trim())}
+              variant="danger"
+              loading={busyId === override.id}
+              disabled={!reasonCode || !note.trim()}
+              onClick={() => void saveOverride()}
             >
-              Save resolution
+              Record override & close
             </Button>
           </div>
         ) : null}

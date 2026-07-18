@@ -96,10 +96,18 @@ export async function technicianJob(
   return parsed;
 }
 
+/**
+ * GL-18 — claim or resolve an exception. RESOLVE closes only from a verified
+ * outcome: pass resolutionActionId to run a verified close (the server re-checks
+ * the real-world fact), or reasonCode + note for an owner manual override. A
+ * routine user can no longer close by free-text note alone.
+ */
 export function updateOwnedWork(input: {
   workItemId: string;
   action: "CLAIM" | "RESOLVE";
   note?: string;
+  resolutionActionId?: string;
+  reasonCode?: string;
 }): OpResult {
   return api().mutations.updateOwnedWork(input);
 }

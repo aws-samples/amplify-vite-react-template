@@ -146,6 +146,13 @@ export const schema = a.schema({
     "CLAIMED",
     "OVERDUE",
     "RESOLVED",
+    // GL-18: a manager closed an exception without a verified outcome — a
+    // reasoned, evidenced override that is reported on its own, distinct from a
+    // verified RESOLVED close.
+    "MANUAL_OVERRIDE",
+    // GL-18: a claimed item was returned to its team inbox because its owner was
+    // offboarded — no required action may stay owned by a departed person.
+    "RELEASED",
   ]),
   // A card dispute's lifecycle at Stripe. NEEDS_RESPONSE is the one with a
   // clock on it (evidenceDueBy); WON/LOST are terminal.
@@ -1025,6 +1032,12 @@ export const schema = a.schema({
       resolvedBySub: a.string(),
       resolvedByEmail: a.string(),
       resolutionNote: a.string(),
+      // GL-18: true when this closed as an owner manual override (no verified
+      // outcome), with the controlled reason code — so overrides can be listed
+      // and reviewed separately from verified closes. Null/false on a verified
+      // or system close.
+      resolvedManualOverride: a.boolean(),
+      resolvedReason: a.string(),
       events: a.hasMany("WorkEvent", "workItemId"),
     })
     .secondaryIndexes((index) => [
@@ -1803,9 +1816,12 @@ export const schema = a.schema({
     .handler(a.handler.function(crmBilling)),
 
   /**
-   * Claim or resolve durable exception work. CLAIM assigns the signed-in
-   * staff member. RESOLVE requires a note describing what actually happened;
-   * both changes append an immutable WorkEvent.
+   * Claim or resolve durable exception work (GL-18). CLAIM assigns the signed-in
+   * staff member. RESOLVE closes only from a verified outcome — either a chosen
+   * verified resolution (resolutionActionId) the server re-checks against the
+   * real world, or an owner-only manual override (reasonCode + note evidence).
+   * A routine user can no longer close an exception by typing a note. Every
+   * change appends an immutable WorkEvent.
    */
   updateOwnedWork: a
     .mutation()
@@ -1813,6 +1829,11 @@ export const schema = a.schema({
       workItemId: a.string().required(),
       action: a.string().required(),
       note: a.string(),
+      // The controlled verified-resolution id (e.g. STAFFED, MONEY_SETTLED) the
+      // server confirms before closing; omitted for a manual override.
+      resolutionActionId: a.string(),
+      // The controlled reason code for an owner manual override.
+      reasonCode: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
