@@ -83,11 +83,27 @@ implementation order, not launch status: **P0, P1, and P2 are all go-live blocke
 **Business outcome:** A role change or departure cannot leave a person with unintended access, and
 leadership can prove who changed access, why, and what work was reassigned.
 
-**Why this is still a gate:** Multi-role changes are applied group by group, and technician
-work/profile changes can occur before login revocation. A mid-action failure can leave requested and
-effective roles different without a durable recovery case. Role changes and offboarding also lack a
-reasoned, immutable staff-access history, and the production break-glass operating proof has not been
-completed.
+**Why this is still a gate (narrowed by commit `ebd5793`):** The engineering half is now closed. A role
+change and an offboarding each carry an approved `reason` and the acting owner, and are recorded as one
+immutable row in an append-only staff-access ledger (`StaffAccessEvent`, OWNER-read-only, Lambda-written
+as IAM) — actor, reason, prior/new *effective* roles read back from Cognito, login/session result,
+linked-technician state, reassigned jobs, and in-progress exceptions — so an offboarded person stays
+visible in history after they leave the roster. Multi-role changes reconcile the effective set and read
+it back from Cognito rather than assuming the request took, so a retry converges and a group op that
+silently failed surfaces as a non-convergence to the caller instead of a false success. Offboarding is
+now ordered fail-safe: the login is disabled and globally signed out and its groups removed *first*
+(security-critical, so a throw here fails the whole action and errs toward access-removed); only then are
+the technician's future jobs returned to the pool and the record flipped inactive, and because access is
+already gone a failure there never leaves the person able to act — it opens an owned OPS case with one
+safe resume (`STAFF_OFFBOARD`, re-run offboard) and reports a truthful PARTIAL outcome. Failure injection
+for the reassignment step and convergence under a mid-loop failure are covered by the handler tests.
+**What remains the gate — live/operational proof only:** direct authorization evidence from the deployed
+stack that an *old* session and a *fresh* token cannot read or act after offboarding (the disable +
+global sign-out and group removal are built and unit-covered, but the end-to-end refusal must be
+witnessed against live Cognito/AppSync), failure injection across each Cognito-side step (per
+provider-group removal, sign-out) run against the live pool, and the production operating proof: at least
+two named usable owners with MFA/recovery access and a witnessed break-glass drill in which one owner
+recovers access and offboards the other without engineering or a shared login.
 
 **Required acceptance evidence:**
 
