@@ -104,6 +104,10 @@ const LOCK_MODELS = [
   "WorkItem",
   "CapacityDay",
   "CapacityClaim",
+  // GL-17: schedule publishes are optimistically guarded on the job's
+  // scheduledDate (two concurrent movers can't both land), so the CAS
+  // helper needs the Job table.
+  "Job",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],

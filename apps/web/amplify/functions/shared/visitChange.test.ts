@@ -234,6 +234,7 @@ beforeEach(() => {
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
       TreatmentObligation: obligations,
+      Job: jobs,
     })
   );
   obligations.clear();
@@ -295,11 +296,11 @@ describe("cancelVisit — money", () => {
     expect(res.disposition).toBe("REFUND");
     expect(res.refundedCents).toBe(15000);
     expect(res.outcome).toBe("COMPLETE");
-    expect(jobs.get("j1")).toMatchObject({
-      status: "CANCELED",
-      routeId: null,
-      technicianId: null,
-    });
+    expect(jobs.get("j1")!.status).toBe("CANCELED");
+    // The guarded publish REMOVES cleared attributes (Dynamo REMOVE) — reads
+    // surface them as null/undefined; both mean "off the route".
+    expect(jobs.get("j1")!.routeId ?? null).toBeNull();
+    expect(jobs.get("j1")!.technicianId ?? null).toBeNull();
     expect(invoices.get("inv-paid")!.status).toBe("REFUNDED");
     expect(sendEmail).toHaveBeenCalledOnce();
     expect(visitEvents[0]).toMatchObject({
@@ -414,15 +415,26 @@ describe("cancelVisit — fail-safe", () => {
 
   it("resumes a stuck cancel from the recorded stage and never refunds twice", async () => {
     seedPaidVisit({ scheduledDate: daysFromNow(10) });
-    // First attempt: refund succeeds, but the CANCELED flip fails → command kept.
-    const jobUpdate = fakeDataClient.models.Job.update;
-    const origUpdate = jobUpdate;
-    (fakeDataClient.models.Job as unknown as { update: unknown }).update =
-      async (patch: Row) => {
-        if (patch.status === "CANCELED")
-          return { data: null, errors: [{ message: "flip failed" }] };
-        return origUpdate(patch);
-      };
+    // First attempt: refund succeeds, but the CANCELED flip fails (the
+    // guarded publish loses its lock store) → command kept.
+    const fullStore = () =>
+      memoryLockStore({
+        VisitChangeClaim: visitClaims,
+        CapacityDay: capacityFixture.maps.capacityDays,
+        CapacityClaim: capacityFixture.maps.capacityClaims,
+        TreatmentObligation: obligations,
+        Job: jobs,
+      });
+    _setLockStoreForTests(
+      memoryLockStore({
+        VisitChangeClaim: visitClaims,
+        CapacityDay: capacityFixture.maps.capacityDays,
+        CapacityClaim: capacityFixture.maps.capacityClaims,
+        TreatmentObligation: obligations,
+        // No Job wiring: the CANCELED flip fails closed, exactly like a
+        // refused conditional write.
+      })
+    );
     await expect(
       cancelVisit(fakeStripe, {
         jobId: "j1",
@@ -435,8 +447,7 @@ describe("cancelVisit — fail-safe", () => {
     expect(visitClaims.get("j1")).toMatchObject({ stage: "MONEY_DONE" });
     // The invoice is now REFUNDED, so a re-refund would throw — the resume must
     // skip the money step. Restore the flip and resume.
-    (fakeDataClient.models.Job as unknown as { update: unknown }).update =
-      origUpdate;
+    _setLockStoreForTests(fullStore());
     const res = await resumeVisitChange(fakeStripe, "j1", { auto: false });
     if (res.action !== "CANCEL") throw new Error("expected a cancel outcome");
     expect(res.outcome).toBe("COMPLETE");
@@ -612,6 +623,43 @@ describe("rescheduleVisit", () => {
     expect(jobs.get("j1")).toMatchObject({ scheduledDate: "2026-08-05" });
   });
 
+  it("GL-17: a publish against a STALE schedule read loses — the ledger is never clobbered", async () => {
+    seedForReschedule("2026-09-10");
+    jobs.set("j1", { ...jobs.get("j1")!, scheduledDate: "2026-08-05", servicePlanId: "p1" });
+    plans.set("p1", { id: "p1", planName: "Mosquito", seasonal: true });
+    // Simulate a concurrent mover landing between this attempt's read and its
+    // publish: the read returns an OLD date while the stored row has moved on.
+    const origGet = fakeDataClient.models.Job.get;
+    (fakeDataClient.models.Job as unknown as { get: unknown }).get = async ({
+      id,
+    }: {
+      id: string;
+    }) => {
+      const row = jobs.get(id);
+      return {
+        data: row ? { ...row, scheduledDate: "2026-07-06" } : null,
+      };
+    };
+    try {
+      await expect(
+        rescheduleVisit({
+          jobId: "j1",
+          scheduledDate: "2026-09-10",
+          technicianId: "t1",
+          routeId: "r-new",
+          reason: "customer request",
+          actor: OFFICE,
+        })
+      ).rejects.toThrow(/changed while rescheduling/);
+    } finally {
+      (fakeDataClient.models.Job as unknown as { get: unknown }).get = origGet;
+    }
+    // The stored row was NOT clobbered by the stale publish, and the month
+    // claimed for the failed move was rolled back.
+    expect(jobs.get("j1")).toMatchObject({ scheduledDate: "2026-08-05" });
+    expect(obligations.get("p1#2026-09")?.jobId ?? null).not.toBe("j1");
+  });
+
   it("GL-17: a month claimed for a move that fails validation is rolled back", async () => {
     seedForReschedule("2026-09-10");
     jobs.set("j1", { ...jobs.get("j1")!, scheduledDate: "2026-08-05", servicePlanId: "p1" });
@@ -672,10 +720,10 @@ describe("rescheduleVisit", () => {
     // staffing case, and the notice promises confirmation, not a set time.
     expect(jobs.get("j1")).toMatchObject({
       scheduledDate: newDate,
-      routeId: null,
-      technicianId: null,
       status: "UNSCHEDULED",
     });
+    expect(jobs.get("j1")!.routeId ?? null).toBeNull();
+    expect(jobs.get("j1")!.technicianId ?? null).toBeNull();
     expect(openOwnedWork).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "UNSTAFFED_VISIT" })
     );

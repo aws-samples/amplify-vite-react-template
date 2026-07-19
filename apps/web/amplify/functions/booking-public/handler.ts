@@ -1062,13 +1062,16 @@ async function quote(
     }[service]!;
   }
 
-  // Day-priced availability from the live schedule.
+  // Day-priced availability from the live schedule. The on-site duration is
+  // the LOCKED property-class rule: commercial/community 60, residential 30.
   let days = await buildDayMatrix({
     routesKey,
     candidateAddress: address,
     service,
     baseCents: baseCents!,
     zone: priceZone,
+    onsiteMinutes:
+      propertyKind === "COMMERCIAL" || propertyKind === "COMMUNITY" ? 60 : 30,
   });
   if (days.length === 0) {
     return contact(

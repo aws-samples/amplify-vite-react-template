@@ -293,6 +293,11 @@ beforeEach(() => {
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
       TreatmentObligation: new Map(),
+      // A live get-only view over the test's job array: guarded publishes
+      // mutate the same row objects the fake models serve.
+      Job: {
+        get: (id: string) => jobs.find((j) => j.id === id),
+      } as unknown as Map<string, Record<string, unknown>>,
     })
   );
   finalizeClaims.clear();

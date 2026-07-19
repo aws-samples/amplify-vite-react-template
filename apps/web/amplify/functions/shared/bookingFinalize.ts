@@ -11,7 +11,14 @@ import {
   reserveSlot,
   type CapacityWindow,
 } from "./capacity";
-import { isSeasonalPlanName, monthKeyOf, isServiceMonth, SEASONAL_SERVICE_MONTHS } from "./season";
+import {
+  firstWeekdayOf,
+  isSeasonalPlanName,
+  isServiceMonth,
+  monthKeyOf,
+  nextServiceMonth,
+  SEASONAL_SERVICE_MONTHS,
+} from "./season";
 import { ensureObligation } from "./obligations";
 import { customerAccessGroups } from "./dynamicGroups";
 import { emailShell, notifyLeads, sendEmail } from "./email";
@@ -1078,6 +1085,23 @@ async function finalizeClaimed(
   // paid" is true the instant the job exists.
   const paidAtIso = new Date().toISOString();
   const jobId = `job-${booking.id}`;
+  // GL-17 (defense-in-depth): no funnel service can currently mint a seasonal
+  // plan, but if one ever does, an off-season selected date must not become a
+  // SCHEDULED off-season treatment — the office paths hard-refuse the same
+  // date. The first visit targets the next service month instead, pending
+  // assignment, and the office owns confirming the real date with the
+  // customer.
+  const offSeasonFirstVisit = Boolean(
+    isSeasonalPlanName(serviceLabel) &&
+      plan?.id &&
+      booking.selectedDate &&
+      !isServiceMonth({ seasonal: true }, booking.selectedDate.slice(0, 7))
+  );
+  const firstVisitDate = offSeasonFirstVisit
+    ? firstWeekdayOf(
+        nextServiceMonth({ seasonal: true }, booking.selectedDate!.slice(0, 7))
+      )
+    : (booking.selectedDate ?? undefined);
   const job = await createOrGet(
     "job",
     () =>
@@ -1087,7 +1111,7 @@ async function finalizeClaimed(
         servicePlanId,
         type: booking.recurring ? "RECURRING" : "ONE_TIME",
         serviceType: serviceLabel,
-        scheduledDate: booking.selectedDate ?? undefined,
+        scheduledDate: firstVisitDate,
         timeWindow: windowLabel,
         // GL-04: the visit's locked on-site class rides on the job — the
         // nightly rebuild and office assignment count commercial/community
@@ -1096,14 +1120,43 @@ async function finalizeClaimed(
           (booking as { propertyKind?: string | null }).propertyKind ??
           "RESIDENTIAL",
         priceCents: booking.amountCents ?? undefined,
-        status: "SCHEDULED",
+        status: offSeasonFirstVisit ? "UNSCHEDULED" : "SCHEDULED",
         paidAt: booking.amountCents ? paidAtIso : undefined,
         paidPaymentIntentId: booking.amountCents ? paymentIntentId : undefined,
-        notes: `Website booking ${booking.id}. Paid up front (${paymentIntentId}).`,
+        notes: offSeasonFirstVisit
+          ? `Website booking ${booking.id}. Paid up front (${paymentIntentId}). The selected date ${booking.selectedDate} is OFF-SEASON for this seasonal plan — the first treatment targets ${firstVisitDate}; confirm the date with the customer.`
+          : `Website booking ${booking.id}. Paid up front (${paymentIntentId}).`,
         accessGroups,
       }),
     () => client.models.Job.get({ id: jobId })
   );
+  if (offSeasonFirstVisit) {
+    // The shifted first visit claims ITS month on the ledger — the month
+    // mutex must see this pending treatment, or a second visit could be
+    // booked into the same month beside it.
+    if (plan?.id) {
+      await ensureObligation({
+        servicePlanId: plan.id,
+        customerId: customer.id,
+        monthKey: firstVisitDate!.slice(0, 7),
+        status: "SCHEDULED",
+        jobId,
+        accessGroups,
+      });
+    }
+    await openOwnedWork({
+      kind: "UNSTAFFED_VISIT",
+      dedupeKey: `booking-off-season:${booking.id}`,
+      title: `Confirm a seasonal plan's first treatment date: ${booking.name ?? booking.email ?? booking.id}`,
+      detail: `Booking ${booking.id} enrolled a seasonal plan with an off-season selected date (${booking.selectedDate}). Billing started as approved; the first treatment was targeted to ${firstVisitDate} (the next service month) and is pending assignment. Confirm the date with the customer and assign it.`,
+      customerId: customer.id,
+      relatedId: jobId,
+      sourceUrl: `/schedule`,
+      resolutionAction:
+        "Agree the first in-season treatment date with the customer and assign a technician.",
+      ownerTeam: "OPS",
+    });
+  }
 
   // 3b. The money moved at checkout, so the ledger records it here — a PAID
   // invoice, id derived from the booking. It is REQUIRED now: because every

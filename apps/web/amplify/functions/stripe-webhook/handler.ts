@@ -644,6 +644,12 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     id: crmServicePlanId,
   });
   if (!sub || sub.status === "CANCELED") return;
+  // The anchor is the subscription's REAL cancel moment from Stripe — not
+  // webhook delivery time. A retried delivery must not re-date the
+  // cancellation past a charge that settled in the retry gap.
+  const canceledAtIso = stripeSub.canceled_at
+    ? new Date(stripeSub.canceled_at * 1000).toISOString()
+    : new Date().toISOString();
   await client.models.ServicePlan.update({
     id: crmServicePlanId,
     status: "CANCELED",
@@ -652,11 +658,10 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     stripeSubscriptionId: null,
     // GL-08 R3: keep the durable reference for the settlement readback.
     canceledStripeSubscriptionId: stripeSub.id,
-    canceledAt: new Date().toISOString(),
+    canceledAt: canceledAtIso,
     // A dashboard cancel is an accepted cancellation too — anchor it so
     // later charges are judged against the real cancel moment.
-    cancellationRequestedAt:
-      sub.cancellationRequestedAt ?? new Date().toISOString(),
+    cancellationRequestedAt: sub.cancellationRequestedAt ?? canceledAtIso,
   });
 
   // Nothing below may throw: the plan is now CANCELED, so a Stripe retry of

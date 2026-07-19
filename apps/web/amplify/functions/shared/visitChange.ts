@@ -6,6 +6,7 @@ import {
   casFencedUpdate,
   casFencedDelete,
   casGuardedDelete,
+  casGuardedUpdate,
 } from "./atomicLock";
 import { emailShell, sendEmail } from "./email";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
@@ -792,32 +793,43 @@ async function driveHeldVisitCancel(
 
   // 3. Flip the visit CANCELED and off its route — with the machine-readable
   // money disposition, so settlement verifies the exact policy outcome.
-  const { data: canceled, errors } = await client.models.Job.update({
-    id: jobId,
-    status: "CANCELED",
-    routeId: null,
-    technicianId: null,
-    routeOrder: null,
-    // The stamps end WITH the hold: the release below uses the pre-update
-    // row, and a resumed drive re-reads a job with no stamps — so the slot
-    // (or pool) minutes can never be given back twice.
-    capacityWindow: null,
-    capacityMinutes: null,
-    capacityTechnicianId: null,
-    cancelDisposition: moneyPending
-      ? "AWAIT_SETTLEMENT"
-      : disposition === "REFUND"
-        ? refundedCents >= refundTarget
-          ? "REFUNDED"
-          : "REFUND_OWED"
-        : disposition === "FEE_RETAINED"
-          ? "FEE_RETAINED"
-          : "NONE",
-    cancelDispositionCents:
-      disposition === "REFUND" ? refundedCents : policy.feeCents,
-  });
-  if (!canceled) {
-    const detail = errors?.map((e) => e.message).join("; ") ?? "unknown error";
+  // Guarded on the schedule this cancel read: a concurrent move can't leave
+  // the month/slot releases below keyed to a stale date.
+  const cancelPublished = await casGuardedUpdate(
+    "Job",
+    jobId,
+    {
+      status: "CANCELED",
+      routeId: null,
+      technicianId: null,
+      routeOrder: null,
+      // The stamps end WITH the hold: the release below uses the pre-update
+      // row, and a resumed drive re-reads a job with no stamps — so the slot
+      // (or pool) minutes can never be given back twice.
+      capacityWindow: null,
+      capacityMinutes: null,
+      capacityTechnicianId: null,
+      cancelDisposition: moneyPending
+        ? "AWAIT_SETTLEMENT"
+        : disposition === "REFUND"
+          ? refundedCents >= refundTarget
+            ? "REFUNDED"
+            : "REFUND_OWED"
+          : disposition === "FEE_RETAINED"
+            ? "FEE_RETAINED"
+            : "NONE",
+      cancelDispositionCents:
+        disposition === "REFUND" ? refundedCents : policy.feeCents,
+    },
+    job.scheduledDate
+      ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
+      : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+  );
+  if (!cancelPublished.ok) {
+    const detail =
+      cancelPublished.reason === "UNSUPPORTED"
+        ? "the scheduling lock store is unavailable"
+        : "the visit's schedule changed while canceling — Resume re-reads it";
     const workId = await openOwnedWork({
       kind: "VISIT_CHANGE_RECOVERY",
       dedupeKey: `visit-change:${jobId}`,
@@ -1610,25 +1622,38 @@ export async function rescheduleVisit(args: {
       throw new Error(reserved.message);
     }
 
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      scheduledDate: newDate,
-      timeWindow: args.timeWindow?.trim() || null,
-      technicianId: technician.id,
-      routeId: route.id,
-      routeOrder: args.routeOrder ?? stops + 1,
-      status: "SCHEDULED",
-      capacityWindow: targetWindow,
-      capacityMinutes: slotMinutes,
-    });
-    if (!data) {
+    // Guarded on the schedule this move validated: a concurrent office
+    // mutation that already moved the visit makes this publish LOSE — its
+    // month claim and slot reserve are compensated instead of clobbering a
+    // ledger another mover just updated.
+    const published = await casGuardedUpdate(
+      "Job",
+      job.id,
+      {
+        scheduledDate: newDate!,
+        timeWindow: args.timeWindow?.trim() || null,
+        technicianId: technician.id,
+        routeId: route.id,
+        routeOrder: args.routeOrder ?? stops + 1,
+        status: "SCHEDULED",
+        capacityWindow: targetWindow,
+        capacityMinutes: slotMinutes,
+        capacityTechnicianId: null,
+      },
+      job.scheduledDate
+        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
+        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+    );
+    if (!published.ok) {
       // Compensation: the freshly reserved slot must not stay held for a
       // publish that never landed.
       await releaseSlot(newDate!, targetWindow, technician.id, slotMinutes).catch(
         () => undefined
       );
       throw new Error(
-        errors?.map((e) => e.message).join("; ") || "Could not reschedule the visit"
+        published.reason === "UNSUPPORTED"
+          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
+          : "This visit's schedule changed while rescheduling — refresh and try again."
       );
     }
     mutated = true;
@@ -1673,25 +1698,44 @@ export async function rescheduleVisit(args: {
       }
       staffingOwned = true;
     }
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      scheduledDate: newDate,
-      timeWindow: args.timeWindow?.trim() || null,
-      routeId: null,
-      technicianId: null,
-      routeOrder: null,
-      // Pending assignment is UNSCHEDULED-with-a-target-date, not a published
-      // schedule the dispatch board and reminders would trust.
-      status: "UNSCHEDULED",
-    });
-    if (!data) {
+    const poolWindow = windowOfTimeWindow(
+      args.timeWindow ?? job.timeWindow ?? null
+    );
+    const poolMinutes = slotOnsiteMinutes(job.propertyClass);
+    const published = await casGuardedUpdate(
+      "Job",
+      job.id,
+      {
+        scheduledDate: newDate,
+        timeWindow: args.timeWindow?.trim() || null,
+        routeId: null,
+        technicianId: null,
+        routeOrder: null,
+        // Pending assignment is UNSCHEDULED-with-a-target-date, not a published
+        // schedule the dispatch board and reminders would trust.
+        status: "UNSCHEDULED",
+        // Pool facts replace whatever hold the visit had — INCLUDING a funnel
+        // checkout's capacityTechnicianId; leaving that stale would key the
+        // next release to a technician slot the pool note never touched.
+        capacityWindow: newDate ? poolWindow : null,
+        capacityMinutes: newDate ? poolMinutes : null,
+        capacityTechnicianId: null,
+      },
+      job.scheduledDate
+        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
+        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+    );
+    if (!published.ok) {
       throw new Error(
-        errors?.map((e) => e.message).join("; ") || "Could not reschedule the visit"
+        published.reason === "UNSUPPORTED"
+          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
+          : "This visit's schedule changed while rescheduling — refresh and try again."
       );
     }
     mutated = true;
     // Publish landed: the prior month is given back (the target month claim
-    // rides with the pending-assignment visit).
+    // rides with the pending-assignment visit). A move to NO date also frees
+    // the month — the visit no longer serves it.
     if (priorMonthToRelease && seasonalPlanId) {
       await releaseMonthForJob({
         servicePlanId: seasonalPlanId,
@@ -1699,24 +1743,22 @@ export async function rescheduleVisit(args: {
         jobId: job.id,
         note: "Visit moved to a different month.",
       }).catch(() => undefined);
+    } else if (!newDate && job.servicePlanId && job.scheduledDate) {
+      await releaseMonthForJob({
+        servicePlanId: job.servicePlanId,
+        monthKey: job.scheduledDate.slice(0, 7),
+        jobId: job.id,
+        note: "Visit unscheduled — the month is owed again.",
+      }).catch(() => undefined);
     }
     // A pending-assignment move shows on the POOL accounting slot (visible on
     // the Operations readout, never blocking a real slot) — the real
     // technician-window claim happens at assignment, which is also where the
     // customer's window becomes a confirmed commitment.
     if (newDate) {
-      await notePoolMinutes(
-        newDate,
-        windowOfTimeWindow(args.timeWindow ?? job.timeWindow ?? null),
-        slotOnsiteMinutes(job.propertyClass)
-      ).catch(() => undefined);
-      await client.models.Job.update({
-        id: job.id,
-        capacityWindow: windowOfTimeWindow(
-          args.timeWindow ?? job.timeWindow ?? null
-        ),
-        capacityMinutes: slotOnsiteMinutes(job.propertyClass),
-      }).catch(() => undefined);
+      await notePoolMinutes(newDate, poolWindow, poolMinutes).catch(
+        () => undefined
+      );
     }
     // The prior slot's minutes come back after the move landed.
     await releaseJobSlot(job);

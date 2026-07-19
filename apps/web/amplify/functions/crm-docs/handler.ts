@@ -2115,26 +2115,36 @@ async function updateJobSchedule(
       await compensateMonth();
       throw new Error(reserved.message);
     }
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      routeId: route.id,
-      technicianId: technician.id,
-      routeOrder: args.routeOrder ?? 1,
-      scheduledDate: args.scheduledDate,
-      status: "SCHEDULED",
-      capacityWindow: targetWindow,
-      capacityMinutes: slotMinutes,
-      // A real assignment supersedes the checkout-time hold — the release
-      // below gives that hold back from the pre-update row.
-      capacityTechnicianId: null,
-      ...(routeProof
-        ? {
-            dispatchDriveMinutes: routeProof.driveMinutes,
-            dispatchRouteCheckedAt: routeProof.checkedAt,
-          }
-        : {}),
-    });
-    if (!data) {
+    // The publish is GUARDED on the schedule this assignment validated: a
+    // concurrent reschedule that moved the visit (and its month claim) makes
+    // this write LOSE instead of silently dating the job into a month whose
+    // ledger row was released under us.
+    const published = await casGuardedUpdate(
+      "Job",
+      job.id,
+      {
+        routeId: route.id,
+        technicianId: technician.id,
+        routeOrder: args.routeOrder ?? 1,
+        scheduledDate: args.scheduledDate,
+        status: "SCHEDULED",
+        capacityWindow: targetWindow,
+        capacityMinutes: slotMinutes,
+        // A real assignment supersedes the checkout-time hold — the release
+        // below gives that hold back from the pre-update row.
+        capacityTechnicianId: null,
+        ...(routeProof
+          ? {
+              dispatchDriveMinutes: routeProof.driveMinutes,
+              dispatchRouteCheckedAt: routeProof.checkedAt,
+            }
+          : {}),
+      },
+      job.scheduledDate
+        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
+        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+    );
+    if (!published.ok) {
       await compensateMonth();
       await releaseSlot(
         args.scheduledDate,
@@ -2142,7 +2152,11 @@ async function updateJobSchedule(
         technician.id,
         slotMinutes
       ).catch(() => undefined);
-      throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
+      throw new Error(
+        published.reason === "UNSUPPORTED"
+          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
+          : "This visit's schedule changed while assigning — refresh and try again."
+      );
     }
     // Publish landed: NOW the prior month/slot are given back.
     if (priorMonthToRelease && seasonalPlanId) {
@@ -2157,7 +2171,7 @@ async function updateJobSchedule(
     // note — comes back strictly from the pre-update stamps.
     await releaseJobCapacity(job);
     return finish(
-      { jobId: data.id },
+      { jobId: job.id },
       {
         technicianId: technician.id,
         routeId: route.id,
@@ -2234,18 +2248,32 @@ async function updateJobSchedule(
     assertJobCanBeScheduled(job);
     // The cancel WRITE comes first and clears the capacity stamps in the same
     // update; the releases below read the pre-update row. A retried cancel
-    // re-reads a job with no stamps and releases nothing — exactly once.
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      status: "CANCELED",
-      routeId: null,
-      technicianId: null,
-      routeOrder: null,
-      capacityWindow: null,
-      capacityMinutes: null,
-      capacityTechnicianId: null,
-    });
-    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not cancel job");
+    // re-reads a job with no stamps and releases nothing — exactly once. The
+    // write is guarded on the schedule this cancel read, so a concurrent
+    // move can't leave the month/slot release keyed to a stale date.
+    const published = await casGuardedUpdate(
+      "Job",
+      job.id,
+      {
+        status: "CANCELED",
+        routeId: null,
+        technicianId: null,
+        routeOrder: null,
+        capacityWindow: null,
+        capacityMinutes: null,
+        capacityTechnicianId: null,
+      },
+      job.scheduledDate
+        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
+        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+    );
+    if (!published.ok) {
+      throw new Error(
+        published.reason === "UNSUPPORTED"
+          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
+          : "This visit's schedule changed while canceling — refresh and try again."
+      );
+    }
     // GL-17: a canceled seasonal visit gives its month back (guarded on the
     // month still belonging to this job).
     if (job.servicePlanId && job.scheduledDate) {
@@ -2260,7 +2288,7 @@ async function updateJobSchedule(
     // slot (or the pool accounting slot) — strictly from its stamps.
     await releaseJobCapacity(job);
     return finish(
-      { jobId: data.id },
+      { jobId: job.id },
       {
         technicianId: null,
         routeId: null,
@@ -2331,9 +2359,14 @@ async function updateJobSchedule(
 
     // GL-04: capacity moves WITH the visit. A date change drops the
     // assignment, so accounting moves to the pool for the new date. A
-    // window-only change on an ASSIGNED visit must fit the technician's
-    // OTHER window first — refused when it doesn't.
-    const keptTech = !dateChanged ? (job.technicianId ?? null) : null;
+    // window-only change must fit the held slot's OTHER window first —
+    // refused when it doesn't. The hold may ride on the assigned technician
+    // OR a funnel checkout's capacityTechnicianId; window moves move THAT
+    // slot, and the attribution survives so the eventual release hits the
+    // same ledger row.
+    const heldTech = !dateChanged
+      ? (job.technicianId ?? job.capacityTechnicianId ?? null)
+      : null;
     const windowChanged =
       !dateChanged &&
       date != null &&
@@ -2341,11 +2374,11 @@ async function updateJobSchedule(
       (job.capacityWindow ?? windowOfTimeWindow(job.timeWindow)) !== newWindow;
     let stamped: { window: CapacityWindow; minutes: number } | null = null;
     if (date) {
-      if (keptTech && windowChanged && job.capacityMinutes != null) {
+      if (heldTech && windowChanged && job.capacityMinutes != null) {
         const movedRes = await reserveSlot(
           date,
           newWindow!,
-          keptTech,
+          heldTech,
           job.capacityMinutes
         );
         if (!movedRes.ok) {
@@ -2353,7 +2386,7 @@ async function updateJobSchedule(
           throw new Error(movedRes.message);
         }
         stamped = { window: newWindow!, minutes: job.capacityMinutes };
-      } else if (keptTech) {
+      } else if (heldTech) {
         // Same slot (or an unstamped legacy hold): stamps carry over.
         stamped =
           job.capacityWindow && job.capacityMinutes != null
@@ -2369,34 +2402,49 @@ async function updateJobSchedule(
         };
       }
     }
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      scheduledDate: date,
-      timeWindow: args.timeWindow?.trim() || null,
-      status: date ? "SCHEDULED" : "UNSCHEDULED",
-      capacityWindow: stamped?.window ?? null,
-      capacityMinutes: stamped?.minutes ?? null,
-      ...(dateChanged
-        ? { routeId: null, technicianId: null, routeOrder: null, capacityTechnicianId: null }
-        : {}),
-    });
-    if (!data) {
+    // Guarded on the schedule this move validated — a concurrent mover wins
+    // at most once (see ASSIGN).
+    const published = await casGuardedUpdate(
+      "Job",
+      job.id,
+      {
+        scheduledDate: date,
+        timeWindow: args.timeWindow?.trim() || null,
+        status: date ? "SCHEDULED" : "UNSCHEDULED",
+        capacityWindow: stamped?.window ?? null,
+        capacityMinutes: stamped?.minutes ?? null,
+        capacityTechnicianId: dateChanged
+          ? null
+          : (job.capacityTechnicianId ?? null),
+        ...(dateChanged
+          ? { routeId: null, technicianId: null, routeOrder: null }
+          : {}),
+      },
+      job.scheduledDate
+        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
+        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+    );
+    if (!published.ok) {
       await rollbackMonth();
-      if (keptTech && windowChanged && job.capacityMinutes != null && date) {
-        await releaseSlot(date, newWindow!, keptTech, job.capacityMinutes).catch(
+      if (heldTech && windowChanged && job.capacityMinutes != null && date) {
+        await releaseSlot(date, newWindow!, heldTech, job.capacityMinutes).catch(
           () => undefined
         );
       }
-      throw new Error(errors?.map((e) => e.message).join("; ") || "Could not reschedule job");
+      throw new Error(
+        published.reason === "UNSUPPORTED"
+          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
+          : "This visit's schedule changed while rescheduling — refresh and try again."
+      );
     }
     // Publish landed: the PRIOR hold and month come back, from the
     // pre-update row — a retry re-reads fresh stamps and cannot double-release.
     const capacityMoved =
-      dateChanged || windowChanged || (!keptTech && date != null) || !date;
+      dateChanged || windowChanged || (!heldTech && date != null) || !date;
     if (capacityMoved) {
       await releaseJobCapacity(job);
     }
-    if (date && !keptTech) {
+    if (date && !heldTech) {
       await notePoolMinutes(
         date,
         newWindow!,
@@ -2415,7 +2463,7 @@ async function updateJobSchedule(
       }
     }
     return finish(
-      { jobId: data.id },
+      { jobId: job.id },
       {
         technicianId: dateChanged ? null : prior.technicianId,
         routeId: dateChanged ? null : prior.routeId,
