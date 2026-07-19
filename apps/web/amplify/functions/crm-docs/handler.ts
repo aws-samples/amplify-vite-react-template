@@ -2,7 +2,11 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AppSyncIdentity, AppSyncResolverEvent } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { casTakeover, casFencedDelete } from "../shared/atomicLock";
+import {
+  casTakeover,
+  casFencedDelete,
+  casGuardedUpdate,
+} from "../shared/atomicLock";
 import { dataClient } from "../shared/dataClient";
 import {
   assertApplicationWithinLabel,
@@ -56,7 +60,7 @@ import {
   planCancellationSettled,
   resumePlanCancellation,
 } from "../shared/planCancellation";
-import { resumeVisitChange } from "../shared/visitChange";
+import { resumeVisitChange, STOPS_PER_TECH } from "../shared/visitChange";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
 import { isServiceMonth } from "../shared/season";
@@ -71,10 +75,12 @@ import {
   releaseMonthForJob,
 } from "../shared/obligations";
 import {
+  defaultWorkOwner,
   openMissingContactWork,
   openOwnedWork,
   resolveOwnedWork,
   workItemId,
+  type WorkOwnerTeam,
 } from "../shared/ownedWork";
 import {
   isValidManualReason,
@@ -392,6 +398,9 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         // GL-18: a free-text "manual override" close is limited to an owner. The
         // caller's role is read from the token here, never trusted from the args.
         actorIsOwner: callerIsOwner(event.identity),
+        // GL-18 R10: money-verified closes are role-controlled — Finance (or an
+        // owner), never any office login.
+        actorIsFinance: callerIsFinance(event.identity),
       });
     }
     case "getDocumentUrl": {
@@ -436,21 +445,133 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
  * a button. Returns why it is not yet true so the office gets the one next step.
  * Read-only and side-effect-free; the caller closes the item only on { ok }.
  */
+/** GL-18 R1 — the exact per-visit money reconciliation shared by the
+ *  paid-cancellation and visit-change verifiers. Every invoice on the visit
+ *  must reach ONE durable disposition: fully refunded, voided, or the
+ *  72-hour policy's RECORDED retained-fee outcome (the latest visit-change
+ *  audit row saying FEE_RETAINED / no money owed). */
+async function visitMoneySettled(
+  jobId: string
+): Promise<{ ok: true } | { ok: false; problem: string }> {
+  const client = await dataClient();
+  const { data: invoices } = await client.models.Invoice.list({
+    filter: { jobId: { eq: jobId } },
+    limit: 200,
+  });
+  const list = invoices ?? [];
+  if (list.some((i) => i.status === "OPEN" && Boolean(i.stripePaymentIntentId))) {
+    return {
+      ok: false,
+      problem: "A charge on this visit is still in flight — it can't be settled until the payment lands or fails.",
+    };
+  }
+  if (list.some((i) => i.status === "OPEN" || i.status === "FAILED")) {
+    return {
+      ok: false,
+      problem: "An open/unpaid invoice on this visit hasn't been voided.",
+    };
+  }
+  const unsettledPaid = list.filter(
+    (i) =>
+      (i.status === "PAID" || i.status === "REFUNDED") &&
+      (i.refundedAmountCents ?? 0) < (i.amountCents ?? 0)
+  );
+  if (unsettledPaid.length > 0) {
+    // Money is still held. That is settled ONLY when the 72-hour policy's
+    // retained-fee outcome is durably recorded on the change's audit ledger.
+    let retainedRecorded = false;
+    if ("VisitChangeEvent" in client.models) {
+      const { data: events } = await client.models.VisitChangeEvent.list({
+        filter: { jobId: { eq: jobId } },
+        limit: 200,
+      });
+      const rows = (events ?? [])
+        .slice()
+        .sort((a, b) =>
+          String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
+        );
+      retainedRecorded = rows[0]?.disposition === "FEE_RETAINED";
+    }
+    if (!retainedRecorded) {
+      return {
+        ok: false,
+        problem: `A paid invoice still holds $${(
+          unsettledPaid.reduce(
+            (t, i) =>
+              t + Math.max(0, (i.amountCents ?? 0) - (i.refundedAmountCents ?? 0)),
+            0
+          ) / 100
+        ).toFixed(2)} with no full refund and no recorded retained-fee outcome.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 async function runWorkVerifier(
   verifier: VerifierId,
-  item: { relatedId: string; customerId?: string | null }
+  item: {
+    relatedId: string;
+    customerId?: string | null;
+    createdAt?: string | null;
+  }
 ): Promise<{ ok: boolean; message: string }> {
   const client = await dataClient();
   switch (verifier) {
     case "CUSTOMER_HAS_EMAIL": {
+      // GL-18 R2: merely ADDING an address never satisfies a promise to send
+      // something. The case closes only when the customer has a working,
+      // unsuppressed address AND a message to them was provider-accepted (or
+      // delivered) AFTER this case opened — proof the missed notice went out.
       const id = item.customerId ?? item.relatedId;
       const { data: customer } = await client.models.Customer.get({ id });
-      const email = customer?.email?.trim();
-      return {
-        ok: Boolean(email && email.includes("@")),
-        message:
-          "Add a valid email to the customer record first, then confirm the contact is on file.",
-      };
+      const email = customer?.email?.trim().toLowerCase();
+      if (!email || !email.includes("@")) {
+        return {
+          ok: false,
+          message:
+            "Add a valid email to the customer record first, then re-send the missed message.",
+        };
+      }
+      if ("SuppressedEmail" in client.models) {
+        const { data: suppressed } = await client.models.SuppressedEmail.get({
+          email,
+        }).catch(() => ({ data: null }));
+        if (suppressed) {
+          return {
+            ok: false,
+            message: `${email} is suppressed (${suppressed.source ?? "bounce/complaint"}). Lift the suppression (with the customer's consent) or record a different address, then re-send.`,
+          };
+        }
+      }
+      if ("EmailLog" in client.models) {
+        const since = item.createdAt ?? "";
+        let sentSince = false;
+        let token: string | null | undefined;
+        let scanned = 0;
+        do {
+          const page = await client.models.EmailLog.list({
+            filter: { customerId: { eq: id } },
+            limit: 200,
+            nextToken: token,
+          });
+          sentSince = (page.data ?? []).some(
+            (l) =>
+              (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
+              String(l.createdAt ?? "") >= since
+          );
+          scanned += (page.data ?? []).length;
+          token = sentSince ? null : page.nextToken;
+        } while (token && scanned < 1000);
+        if (!sentSince) {
+          return {
+            ok: false,
+            message:
+              "The address is on file, but no message to this customer has gone out since this case opened — re-send the missed notice (the origin record's resend/resume action), then confirm.",
+          };
+        }
+      }
+      return { ok: true, message: "" };
     }
     case "JOB_STAFFED": {
       // "Staffed" is verified against the dispatch facts, not the presence of
@@ -480,6 +601,19 @@ async function runWorkVerifier(
             "The assigned technician must be active with a current licence on the service date — reassign the visit, then confirm.",
         };
       }
+      // Working availability: Mon–Fri is the operating week (GL-18 R3). PTO,
+      // holiday, and closure calendars land with GL-04's capacity model and
+      // will join this check there.
+      if (job.scheduledDate) {
+        const dow = new Date(`${job.scheduledDate}T00:00:00Z`).getUTCDay();
+        if (dow === 0 || dow === 6) {
+          return {
+            ok: false,
+            message:
+              "The visit is dated on a weekend — technicians work Monday–Friday. Reschedule it to a weekday, then confirm.",
+          };
+        }
+      }
       if (job.routeId) {
         const { data: route } = await client.models.Route.get({
           id: job.routeId,
@@ -495,6 +629,26 @@ async function runWorkVerifier(
               "The visit's route and its assigned technician/date disagree — fix the assignment on the Schedule board, then confirm.",
           };
         }
+        // Route capacity: the day must actually hold this stop.
+        let stops = 0;
+        let token: string | null | undefined;
+        do {
+          const page = await client.models.Job.list({
+            filter: { routeId: { eq: job.routeId } },
+            limit: 200,
+            nextToken: token,
+          });
+          stops += (page.data ?? []).filter(
+            (j) => j.status !== "CANCELED"
+          ).length;
+          token = page.nextToken;
+        } while (token);
+        if (stops > STOPS_PER_TECH) {
+          return {
+            ok: false,
+            message: `That route holds ${stops} stops — more than the ${STOPS_PER_TECH}-stop day. Move a stop off it, then confirm.`,
+          };
+        }
       } else if (job.status === "SCHEDULED") {
         return {
           ok: false,
@@ -505,28 +659,73 @@ async function runWorkVerifier(
       return { ok: true, message: "" };
     }
     case "VISIT_MONEY_SETTLED": {
-      const { data: job } = await client.models.Job.get({ id: item.relatedId });
-      const { data: invoices } = await client.models.Invoice.list({
-        filter: { jobId: { eq: item.relatedId } },
-      });
-      const list = invoices ?? [];
-      // A charge still moving must not be called settled — voiding the row would
-      // let the charge land anyway (mirrors cancelVisit's live-charge guard).
-      const liveChargeInFlight = list.some(
-        (i) => i.status === "OPEN" && Boolean(i.stripePaymentIntentId)
-      );
-      const moneyReturned = list.some(
-        (i) =>
-          i.status === "REFUNDED" ||
-          i.status === "VOID" ||
-          (i.refundedAmountCents ?? 0) > 0
-      );
-      const visitGone = job?.status === "CANCELED";
+      // GL-18 R1: EXACT reconciliation. Canceling the visit alone never proves
+      // the money settled; a partial refund never settles a full amount; every
+      // invoice on the visit reaches ONE durable disposition — fully refunded,
+      // voided, or the 72-hour policy's recorded retained-fee outcome.
+      const money = await visitMoneySettled(item.relatedId);
       return {
-        ok: !liveChargeInFlight && (moneyReturned || visitGone),
-        message:
-          "Refund the payment, void the open invoice, or cancel the visit in the billing tools first — then confirm the money is settled.",
+        ok: money.ok,
+        message: money.ok
+          ? ""
+          : `${money.problem} Settle it in the billing tools (or resume the visit change), then confirm.`,
       };
+    }
+    case "VISIT_CHANGE_SETTLED": {
+      // GL-18 R6: a visit-change case closes only when EVERYTHING agrees —
+      // money exactly reconciled, the schedule fact terminal, the customer's
+      // notice provider-accepted, and the immutable audit row present.
+      const { data: job } = await client.models.Job.get({ id: item.relatedId });
+      if (!job) return { ok: false, message: "The visit could not be read." };
+      const money = await visitMoneySettled(item.relatedId);
+      if (!money.ok) {
+        return {
+          ok: false,
+          message: `${money.problem} Resume the visit change to finish it, then confirm.`,
+        };
+      }
+      let auditExists = false;
+      if ("VisitChangeEvent" in client.models) {
+        const { data: events } = await client.models.VisitChangeEvent.list({
+          filter: { jobId: { eq: item.relatedId } },
+          limit: 200,
+        });
+        auditExists = (events ?? []).length > 0;
+      }
+      if (!auditExists) {
+        return {
+          ok: false,
+          message:
+            "The change's immutable audit row is missing — Resume the visit change (it re-records the audit), then confirm.",
+        };
+      }
+      let noticeAccepted = false;
+      if ("EmailLog" in client.models) {
+        const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
+          { relatedId: item.relatedId },
+          { limit: 50 }
+        );
+        noticeAccepted = (logs ?? []).some(
+          (l) =>
+            (l.template === "visit-canceled" ||
+              l.template === "visit-rescheduled") &&
+            (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+        );
+      }
+      if (!noticeAccepted) {
+        const { data: cust } = await client.models.Customer.get({
+          id: job.customerId,
+        });
+        if (cust?.email?.trim()) {
+          return {
+            ok: false,
+            message:
+              "The customer's change notice hasn't gone out — Resume the visit change (it re-sends or adopts the notice), then confirm.",
+          };
+        }
+        // No email on file: the MISSING_CONTACT case owns the alternate path.
+      }
+      return { ok: true, message: "" };
     }
     case "LIFECYCLE_SETTLED": {
       // GL-09/X2: a lifecycle-recovery case closes only when the customer's
@@ -691,6 +890,8 @@ export async function updateOwnedWork(args: {
   actorEmail: string | null;
   /** True only for an OWNER token — gates the manual-override close. */
   actorIsOwner?: boolean;
+  /** True for a FINANCE token — money-verified closes are Finance/Owner only. */
+  actorIsFinance?: boolean;
   /**
    * Set by trusted server callers (e.g. rebookJob) that have already carried out
    * the verified real-world event, so the close records as verified without a
@@ -706,16 +907,49 @@ export async function updateOwnedWork(args: {
 
   if (args.action === "CLAIM") {
     if (item.status !== "OPEN") throw new Error("Resolved work cannot be claimed");
-    const claimed = await client.models.WorkItem.update({
-      id: item.id,
-      ownerSub: args.actorSub ?? undefined,
-      ownerEmail: actorEmail,
-    });
-    if (!claimed.data) {
+    if (item.ownerSub && item.ownerSub === args.actorSub) {
+      // Idempotent: already the claimer.
+      return { workItemId: item.id, status: "OPEN", ownerEmail: actorEmail };
+    }
+    // GL-18 R11: ONE winner. The claim is a single guarded write conditioned on
+    // the item still being OPEN and UNCLAIMED — two concurrent claimers cannot
+    // both own it, and a claim can never silently steal an already-claimed
+    // case (release or an owner reassign first).
+    const guarded = await casGuardedUpdate(
+      "WorkItem",
+      item.id,
+      { ownerSub: args.actorSub ?? actorEmail, ownerEmail: actorEmail },
+      [
+        { kind: "fieldEquals", field: "status", value: "OPEN" },
+        { kind: "fieldMissingOrNull", field: "ownerSub" },
+      ]
+    );
+    if (!guarded.ok && guarded.reason === "LOST") {
       throw new Error(
-        claimed.errors?.map((error) => error.message).join("; ") ||
-          "Could not claim work"
+        item.ownerSub
+          ? `This case is already claimed by ${item.ownerEmail}. Ask them to release it, or an owner to reassign it.`
+          : "Someone else claimed this case just now — refresh the queue."
       );
+    }
+    if (!guarded.ok) {
+      // UNSUPPORTED (no CAS wiring): the pre-checked plain write, with the
+      // steal refusal enforced from the read above.
+      if (item.ownerSub) {
+        throw new Error(
+          `This case is already claimed by ${item.ownerEmail}. Ask them to release it, or an owner to reassign it.`
+        );
+      }
+      const claimed = await client.models.WorkItem.update({
+        id: item.id,
+        ownerSub: args.actorSub ?? undefined,
+        ownerEmail: actorEmail,
+      });
+      if (!claimed.data) {
+        throw new Error(
+          claimed.errors?.map((error) => error.message).join("; ") ||
+            "Could not claim work"
+        );
+      }
     }
     const claimEvent = await client.models.WorkEvent.create({
       workItemId: item.id,
@@ -727,18 +961,74 @@ export async function updateOwnedWork(args: {
     });
     if (!claimEvent.data) {
       // Keep the queue honest: without history, the ownership change did not
-      // happen. Roll it back so the user can retry the whole action.
-      await client.models.WorkItem.update({
-        id: item.id,
-        ownerSub: item.ownerSub ?? null,
-        ownerEmail: item.ownerEmail,
-      });
+      // happen. Roll it back (guarded — never clobber a NEWER claim) so the
+      // user can retry the whole action.
+      await casGuardedUpdate(
+        "WorkItem",
+        item.id,
+        { ownerSub: item.ownerSub ?? null, ownerEmail: item.ownerEmail },
+        [
+          {
+            kind: "fieldEquals",
+            field: "ownerSub",
+            value: args.actorSub ?? actorEmail,
+          },
+        ]
+      );
       throw new Error(
         claimEvent.errors?.map((error) => error.message).join("; ") ||
           "Could not record ownership history"
       );
     }
     return { workItemId: item.id, status: "OPEN", ownerEmail: actorEmail };
+  }
+
+  if (args.action === "RELEASE") {
+    // GL-18 R9: a routine employee can hand a claimed case back to the shared
+    // queue (or an owner can release anyone's) — completing ordinary work
+    // never depends on the original claimer or an OWNER close.
+    if (item.status !== "OPEN") throw new Error("Resolved work cannot be released");
+    if (!item.ownerSub) {
+      return { workItemId: item.id, status: "OPEN", ownerEmail: item.ownerEmail };
+    }
+    if (item.ownerSub !== args.actorSub && !args.actorIsOwner) {
+      throw new Error(
+        `Only ${item.ownerEmail} (or an owner) can release this case.`
+      );
+    }
+    // History BEFORE the ownership move (the offboarding sweep's rule), then
+    // ONE guarded write conditioned on the owner being unchanged — a release
+    // can never clobber a newer claim.
+    const releaseEvent = await client.models.WorkEvent.create({
+      workItemId: item.id,
+      eventType: "RELEASED",
+      actorSub: args.actorSub ?? undefined,
+      actorEmail,
+      note: args.note?.trim() || "Returned to the shared team queue.",
+      occurredAt: now,
+    });
+    if (!releaseEvent.data) {
+      throw new Error("Could not record the release history — try again.");
+    }
+    const team = (item.ownerTeam as WorkOwnerTeam) ?? "OPS";
+    const released = await casGuardedUpdate(
+      "WorkItem",
+      item.id,
+      { ownerSub: null, ownerEmail: defaultWorkOwner(team) },
+      [{ kind: "fieldEquals", field: "ownerSub", value: item.ownerSub }]
+    );
+    if (!released.ok && released.reason === "UNSUPPORTED") {
+      await client.models.WorkItem.update({
+        id: item.id,
+        ownerSub: null,
+        ownerEmail: defaultWorkOwner(team),
+      });
+    }
+    return {
+      workItemId: item.id,
+      status: "OPEN",
+      ownerEmail: defaultWorkOwner(team),
+    };
   }
 
   if (args.action === "RESOLVE") {
@@ -771,6 +1061,23 @@ export async function updateOwnedWork(args: {
       ? verifiedResolution(kind, args.resolutionActionId)
       : null;
     if (chosen) {
+      // GL-18 R10: money authority is role-controlled — the money-settlement
+      // verified closes require FINANCE (or an owner); any other office user
+      // is told who can run it instead of being able to settle money.
+      const MONEY_VERIFIERS: VerifierId[] = [
+        "VISIT_MONEY_SETTLED",
+        "PLAN_CANCELLATION_SETTLED",
+        "VISIT_CHANGE_SETTLED",
+      ];
+      if (
+        MONEY_VERIFIERS.includes(chosen.verifier) &&
+        !args.actorIsOwner &&
+        !args.actorIsFinance
+      ) {
+        throw new Error(
+          "Confirming a money settlement needs the Finance role (or an owner) — ask Finance to run this close."
+        );
+      }
       const check = await runWorkVerifier(chosen.verifier, item);
       if (!check.ok) {
         throw new Error(`This isn't done yet, so it can't be closed. ${check.message}`);
@@ -858,23 +1165,47 @@ async function closeResolvedWorkItem(input: {
 }) {
   const client = await dataClient();
   const { item, actorSub, actorEmail, now, note } = input;
-  const resolved = await client.models.WorkItem.update({
-    id: item.id,
-    status: "RESOLVED",
-    ownerSub: actorSub ?? item.ownerSub ?? undefined,
-    ownerEmail: actorEmail,
-    resolvedAt: now,
-    resolvedBySub: actorSub ?? undefined,
-    resolvedByEmail: actorEmail,
-    resolutionNote: note,
-    resolvedManualOverride: input.manualOverride ?? false,
-    resolvedReason: input.reasonCode ?? null,
-  });
-  if (!resolved.data) {
-    throw new Error(
-      resolved.errors?.map((error) => error.message).join("; ") ||
-        "Could not resolve work"
-    );
+  // GL-18 R11: ONE winner completes a case. The terminal write is guarded on
+  // the item not already being RESOLVED, so two employees who both passed the
+  // OPEN check cannot both close it (and both run the money action it gates).
+  const guarded = await casGuardedUpdate(
+    "WorkItem",
+    item.id,
+    {
+      status: "RESOLVED",
+      ownerSub: actorSub ?? item.ownerSub ?? null,
+      ownerEmail: actorEmail,
+      resolvedAt: now,
+      resolvedBySub: actorSub ?? null,
+      resolvedByEmail: actorEmail,
+      resolutionNote: note,
+      resolvedManualOverride: input.manualOverride ?? false,
+      resolvedReason: input.reasonCode ?? null,
+    },
+    [{ kind: "fieldNotIn", field: "status", values: ["RESOLVED"] }]
+  );
+  if (!guarded.ok && guarded.reason === "LOST") {
+    return { workItemId: item.id, status: "RESOLVED", alreadyResolved: true };
+  }
+  if (!guarded.ok) {
+    const resolved = await client.models.WorkItem.update({
+      id: item.id,
+      status: "RESOLVED",
+      ownerSub: actorSub ?? item.ownerSub ?? undefined,
+      ownerEmail: actorEmail,
+      resolvedAt: now,
+      resolvedBySub: actorSub ?? undefined,
+      resolvedByEmail: actorEmail,
+      resolutionNote: note,
+      resolvedManualOverride: input.manualOverride ?? false,
+      resolvedReason: input.reasonCode ?? null,
+    });
+    if (!resolved.data) {
+      throw new Error(
+        resolved.errors?.map((error) => error.message).join("; ") ||
+          "Could not resolve work"
+      );
+    }
   }
   const resolutionEvent = await client.models.WorkEvent.create({
     workItemId: item.id,
@@ -885,18 +1216,24 @@ async function closeResolvedWorkItem(input: {
     occurredAt: now,
   });
   if (!resolutionEvent.data) {
-    await client.models.WorkItem.update({
-      id: item.id,
-      status: "OPEN",
-      ownerSub: item.ownerSub ?? null,
-      ownerEmail: item.ownerEmail,
-      resolvedAt: null,
-      resolvedBySub: null,
-      resolvedByEmail: null,
-      resolutionNote: null,
-      resolvedManualOverride: null,
-      resolvedReason: null,
-    });
+    // Reopen ONLY our own resolution (guarded on resolvedByEmail) — a rollback
+    // must never clobber a concurrent winner's completed close.
+    await casGuardedUpdate(
+      "WorkItem",
+      item.id,
+      {
+        status: "OPEN",
+        ownerSub: item.ownerSub ?? null,
+        ownerEmail: item.ownerEmail,
+        resolvedAt: null,
+        resolvedBySub: null,
+        resolvedByEmail: null,
+        resolutionNote: null,
+        resolvedManualOverride: null,
+        resolvedReason: null,
+      },
+      [{ kind: "fieldEquals", field: "resolvedByEmail", value: actorEmail }]
+    );
     throw new Error(
       resolutionEvent.errors?.map((error) => error.message).join("; ") ||
         "Could not record resolution history"

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { dataClient } from "./dataClient";
+import { casGuardedUpdate } from "./atomicLock";
 import type { WorkKind } from "./workPolicy";
 
 // WorkKind is owned by workPolicy.ts (the GL-18 registry) — re-exported here so
@@ -338,13 +339,27 @@ export async function releaseOwnedWorkForSub(input: {
             failed++;
             continue;
           }
-          const { data: updated } = await client.models.WorkItem.update({
-            id: item.id,
-            ownerSub: null,
-            ownerEmail: defaultWorkOwner(team),
-          });
-          if (!updated) {
-            failed++;
+          // ONE guarded write conditioned on the departing person still being
+          // the owner — a claim landing between the re-read and this move
+          // stands; offboarding can never overwrite a newer claim (GL-18 R11).
+          const moved = await casGuardedUpdate(
+            "WorkItem",
+            item.id,
+            { ownerSub: null, ownerEmail: defaultWorkOwner(team) },
+            [{ kind: "fieldEquals", field: "ownerSub", value: input.sub }]
+          );
+          if (!moved.ok && moved.reason === "UNSUPPORTED") {
+            const { data: updated } = await client.models.WorkItem.update({
+              id: item.id,
+              ownerSub: null,
+              ownerEmail: defaultWorkOwner(team),
+            });
+            if (!updated) {
+              failed++;
+              continue;
+            }
+          } else if (!moved.ok) {
+            // A newer claim won — that owner keeps it; not a failure.
             continue;
           }
           released++;

@@ -426,10 +426,38 @@ export async function planCancellationSettled(
       };
     }
   }
+  // GL-18 R5: final customer delivery is part of settled. When the customer
+  // is reachable, the plan-canceled confirmation must be provider-accepted;
+  // with no address on file, the MISSING_CONTACT case owns the alternate path.
+  try {
+    const { data: cust } = await client.models.Customer.get({
+      id: plan.customerId,
+    });
+    if (cust?.email?.trim() && "EmailLog" in client.models) {
+      const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
+        { relatedId: servicePlanId },
+        { limit: 50 }
+      );
+      const accepted = (logs ?? []).some(
+        (l) =>
+          l.template === "plan-canceled" &&
+          (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+      );
+      if (!accepted) {
+        return {
+          settled: false,
+          reason:
+            "The cancellation confirmation hasn't gone out — resume the cancellation (it re-sends or adopts the notice).",
+        };
+      }
+    }
+  } catch (err) {
+    console.error("planCancellationSettled: notice check failed", err);
+  }
   return {
     settled: true,
     reason:
-      "Provider subscription stopped, plan canceled, visits cleared, and every late charge fully refunded.",
+      "Provider subscription stopped, plan canceled, visits cleared, every late charge fully refunded, and the customer notified.",
   };
 }
 

@@ -55,7 +55,7 @@ export const MAX_VISIT_CHANGE_RESUME_ATTEMPTS = 5;
 
 // The per-technician daily stop capacity — one route is one technician-day of
 // capacity. Kept in step with booking-public/availability.ts (STOPS_PER_TECH).
-const STOPS_PER_TECH = 8;
+export const STOPS_PER_TECH = 8;
 
 export type VisitChangeActor = {
   sub: string | null;

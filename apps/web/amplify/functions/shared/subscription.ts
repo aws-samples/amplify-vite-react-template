@@ -538,7 +538,7 @@ export async function cancelPlanBilling(
     // canceled). A visit the schedule could not even be read is owned per plan.
     for (const v of queuedVisits?.failed ?? []) {
       await openOwnedWork({
-        kind: "PAID_VISIT_CANCELLATION",
+        kind: "VISIT_CHANGE_RECOVERY",
         dedupeKey: `plan-cancel-visit:${v.jobId}`,
         title: `Take a visit off a canceled plan: ${name}`,
         detail: `Plan ${plan.planName} (${servicePlanId}) was canceled, but queued visit ${v.jobId}${v.scheduledDate ? ` on ${v.scheduledDate}` : ""} could not be removed from the schedule automatically. Until it is, a technician could be dispatched for a visit nobody is paying for.`,
@@ -546,14 +546,18 @@ export async function cancelPlanBilling(
         relatedId: v.jobId,
         sourceUrl: `/customers/${plan.customerId}`,
         resolutionAction:
-          "Cancel or reassign this visit on the Schedule board. If the customer had paid for it, refund or keep it per their wishes.",
+          "Cancel this visit on the Schedule board (or resume the plan cancellation — it re-sweeps). A paid visit gets the 72-hour outcome: full refund if it was more than 72 hours out at cancellation, retained otherwise.",
         ownerTeam: "OPS",
       });
     }
     if (!queuedVisits) {
+      // A plan-level schedule-READ failure belongs to the plan's own recovery
+      // case (its verifier re-reads the schedule and refuses to close while a
+      // cancelable visit remains) — never a money-shaped "paid" case with a
+      // plan id its money verifier can't inspect.
       await openOwnedWork({
-        kind: "PAID_VISIT_CANCELLATION",
-        dedupeKey: `plan-cancel-visits:${servicePlanId}`,
+        kind: "PLAN_CANCELLATION_RECOVERY",
+        dedupeKey: servicePlanId,
         title: `Check a canceled plan's visits by hand: ${name}`,
         detail: `Plan ${plan.planName} (${servicePlanId}) was canceled, but its queued visits could not be read to take them off the schedule. Any left will dispatch a technician for a visit nobody is paying for.`,
         customerId: plan.customerId,

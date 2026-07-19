@@ -61,7 +61,8 @@ export type VerifierId =
   | "PLAN_CANCELLATION_SETTLED"
   | "TECH_LICENSED"
   | "DISPATCH_READY"
-  | "LIFECYCLE_SETTLED";
+  | "LIFECYCLE_SETTLED"
+  | "VISIT_CHANGE_SETTLED";
 
 /**
  * A close the app can *confirm*. Running it re-checks the real-world fact
@@ -514,11 +515,15 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       mutation: "resumeVisitChange",
       label: "Resume visit change",
     },
-    verified: [],
+    verified: [
+      {
+        id: "SETTLED",
+        label: "Confirm the change is fully settled (money, schedule, notice, audit)",
+        verifier: "VISIT_CHANGE_SETTLED",
+      },
+    ],
     manualReasons: [
-      { code: "RERAN_CHANGE_COMPLETE", label: "Re-ran the change — complete" },
       { code: "SETTLED_OFFLINE", label: "Settled with the customer offline" },
-      { code: "AUDIT_ROW_RECONSTRUCTED", label: "Reconstructed the audit record" },
       OTHER,
     ],
   },

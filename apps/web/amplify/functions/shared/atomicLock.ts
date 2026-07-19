@@ -50,7 +50,9 @@ export type LockCondition =
   | { kind: "fieldEqualsOrMissing"; field: string; value: string | number | boolean }
   | { kind: "fieldIn"; field: string; values: (string | number)[] }
   /** The field is missing or not any of the given values. */
-  | { kind: "fieldNotIn"; field: string; values: (string | number)[] };
+  | { kind: "fieldNotIn"; field: string; values: (string | number)[] }
+  /** The field was never written or holds null (e.g. "unclaimed"). */
+  | { kind: "fieldMissingOrNull"; field: string };
 
 export type LockSets = Record<string, string | number | boolean | null>;
 
@@ -159,6 +161,10 @@ function buildCondition(
             })
             .join(" AND ")}))`
         );
+        break;
+      case "fieldMissingOrNull":
+        values[`:c${i}`] = null;
+        parts.push(`(attribute_not_exists(${n}) OR ${n} = :c${i})`);
         break;
     }
   });
@@ -419,6 +425,9 @@ export function memoryLockStore(
         case "fieldNotIn":
           if (v !== undefined && v !== null && c.values.includes(v as string | number))
             return false;
+          break;
+        case "fieldMissingOrNull":
+          if (v !== undefined && v !== null) return false;
           break;
       }
     }

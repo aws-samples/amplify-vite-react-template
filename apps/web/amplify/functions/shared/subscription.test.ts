@@ -555,9 +555,11 @@ describe("cancelPlanBilling resolves the queued visits", () => {
     const [alert] = notifyOffice.mock.calls[0] as unknown as [{ subject: string }];
     expect(alert.subject).toMatch(/ACTION REQUIRED/);
     // GL-08 R2: the failed removal is durable owned work, not just an email.
+    // GL-18: a failed schedule REMOVAL is schedule-recovery work whose GL-18
+    // verifier can inspect the job — not a money-shaped "paid" case.
     expect(openOwnedWork).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "PAID_VISIT_CANCELLATION",
+        kind: "VISIT_CHANGE_RECOVERY",
         dedupeKey: "plan-cancel-visit:j1",
         ownerTeam: "OPS",
       })

@@ -239,12 +239,21 @@ export async function technicianJob(
  */
 export function updateOwnedWork(input: {
   workItemId: string;
-  action: "CLAIM" | "RESOLVE";
+  action: "CLAIM" | "RESOLVE" | "RELEASE";
   note?: string;
   resolutionActionId?: string;
   reasonCode?: string;
 }): OpResult {
   return api().mutations.updateOwnedWork(input);
+}
+
+/** GL-18 R2: lift a bounce/complaint suppression (required consent note) so
+ *  the missed message can be re-sent. */
+export function liftEmailSuppression(input: {
+  email: string;
+  note: string;
+}): OpResult {
+  return api().mutations.liftEmailSuppression(input);
 }
 
 /**

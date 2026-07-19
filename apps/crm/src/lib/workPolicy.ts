@@ -262,11 +262,14 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       mutation: "resumeVisitChange",
       label: "Resume visit change",
     },
-    verified: [],
+    verified: [
+      {
+        id: "SETTLED",
+        label: "Confirm the change is fully settled (money, schedule, notice, audit)",
+      },
+    ],
     manualReasons: [
-      { code: "RERAN_CHANGE_COMPLETE", label: "Re-ran the change — complete" },
       { code: "SETTLED_OFFLINE", label: "Settled with the customer offline" },
-      { code: "AUDIT_ROW_RECONSTRUCTED", label: "Reconstructed the audit record" },
       OTHER,
     ],
   },

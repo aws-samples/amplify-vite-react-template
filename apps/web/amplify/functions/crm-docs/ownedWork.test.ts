@@ -221,10 +221,11 @@ describe("owned-work: verified close (GL-18)", () => {
     );
   });
 
-  it("closes a paid-cancellation only when the money is settled", async () => {
+  it("closes a paid-cancellation only when the money is EXACTLY settled, and only for Finance", async () => {
     item.kind = "PAID_VISIT_CANCELLATION";
     job = { id: "rel-1", status: "SCHEDULED" };
     invoices = [{ status: "OPEN", stripePaymentIntentId: "pi_live" }];
+    // GL-18 R10: money settlement is role-controlled — plain office can't run it.
     await expect(
       updateOwnedWork({
         workItemId: "work-1",
@@ -234,16 +235,45 @@ describe("owned-work: verified close (GL-18)", () => {
         actorIsOwner: false,
         resolutionActionId: "MONEY_SETTLED",
       })
-    ).rejects.toThrow(/settled/i);
+    ).rejects.toThrow(/finance role/i);
+    // An in-flight charge refuses even for Finance.
+    await expect(
+      updateOwnedWork({
+        workItemId: "work-1",
+        action: "RESOLVE",
+        actorSub: "fin-1",
+        actorEmail: "finance@example.com",
+        actorIsOwner: false,
+        actorIsFinance: true,
+        resolutionActionId: "MONEY_SETTLED",
+      })
+    ).rejects.toThrow(/in flight/i);
 
-    invoices = [{ status: "REFUNDED", refundedAmountCents: 5000 }];
+    // GL-18 R1: a PARTIAL refund on a canceled visit is NOT settled — the old
+    // visitGone/any-refund shortcuts are gone.
+    invoices = [{ status: "REFUNDED", amountCents: 15000, refundedAmountCents: 5000 }];
     job = { id: "rel-1", status: "CANCELED" };
+    await expect(
+      updateOwnedWork({
+        workItemId: "work-1",
+        action: "RESOLVE",
+        actorSub: "fin-1",
+        actorEmail: "finance@example.com",
+        actorIsOwner: false,
+        actorIsFinance: true,
+        resolutionActionId: "MONEY_SETTLED",
+      })
+    ).rejects.toThrow(/full refund|retained/i);
+
+    // Fully refunded settles.
+    invoices = [{ status: "REFUNDED", amountCents: 15000, refundedAmountCents: 15000 }];
     await updateOwnedWork({
       workItemId: "work-1",
       action: "RESOLVE",
       actorSub: "fin-1",
       actorEmail: "finance@example.com",
       actorIsOwner: false,
+      actorIsFinance: true,
       resolutionActionId: "MONEY_SETTLED",
     });
     expect(item.status).toBe("RESOLVED");

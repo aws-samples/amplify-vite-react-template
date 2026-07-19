@@ -9,6 +9,7 @@ import {
   updateOwnedWork,
   type WorkEvent,
   type WorkItem,
+  liftEmailSuppression,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
@@ -109,6 +110,62 @@ export default function WorkQueue() {
         await load();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not claim work");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
+  // GL-18: hand a claimed case back to the shared queue (own claims; an owner
+  // can release anyone's) — routine work never depends on one named person.
+  const release = useCallback(
+    async (item: WorkItem) => {
+      setBusyId(item.id);
+      setError(null);
+      try {
+        const result = opResult<{ workItemId: string }>(
+          await updateOwnedWork({ workItemId: item.id, action: "RELEASE" })
+        );
+        if (!result) throw new Error("The work update did not complete");
+        await load();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not release work");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
+  // GL-18 R2: the bounded suppression release for a bounced/complained
+  // address — required consent note; the server records the lift on the case.
+  const liftSuppression = useCallback(
+    async (item: WorkItem) => {
+      const guess =
+        item.relatedId && item.relatedId.includes("@") ? item.relatedId : "";
+      const email = window.prompt(
+        "Which suppressed address should be re-enabled?",
+        guess
+      );
+      if (!email) return;
+      const note = window.prompt(
+        "How did the customer consent / what changed? (required — recorded on the case)"
+      );
+      if (!note) return;
+      setBusyId(item.id);
+      setError(null);
+      try {
+        const result = opResult<{ lifted: boolean; message: string }>(
+          await liftEmailSuppression({ email, note })
+        );
+        if (!result) throw new Error("The suppression lift did not complete");
+        window.alert(result.message);
+        await load();
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Could not lift the suppression"
+        );
       } finally {
         setBusyId(null);
       }
@@ -400,6 +457,28 @@ export default function WorkQueue() {
                     Assign to me
                   </Button>
                 ) : null}
+                {item.status === "OPEN" && (mine || roles.owner) && item.ownerSub ? (
+                  <Button
+                    small
+                    variant="ghost"
+                    loading={busyId === item.id}
+                    onClick={() => void release(item)}
+                  >
+                    Release to queue
+                  </Button>
+                ) : null}
+                {item.status === "OPEN" &&
+                (item.kind === "EMAIL_FAILURE" || item.kind === "MISSING_CONTACT") &&
+                (roles.office || roles.finance) ? (
+                  <Button
+                    small
+                    variant="subtle"
+                    loading={busyId === item.id}
+                    onClick={() => void liftSuppression(item)}
+                  >
+                    Lift email suppression…
+                  </Button>
+                ) : null}
 
                 {/* Verified closes — a dedicated action that does the work AND
                     resolves the exception, or an in-place check the server
@@ -417,6 +496,12 @@ export default function WorkQueue() {
                 ) : null}
                 {item.status === "OPEN" &&
                 policy?.externalAction?.mutation === "retryBookingFinalization" &&
+                // GL-18 R4: only a booking-shaped case gets Retry — an orphan
+                // payment (pi_…) or a provider-outage sweep row has no booking
+                // to retry, and offering the button would mislead.
+                item.relatedId &&
+                !item.relatedId.startsWith("pi_") &&
+                item.relatedId !== "reconciliation" &&
                 (roles.office || roles.finance) ? (
                   <Button
                     small

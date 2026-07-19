@@ -64,7 +64,7 @@ export async function appendLeadActivity(input: {
     const client = await dataClient();
     if (!("LeadActivity" in client.models)) return;
     const nowIso = new Date().toISOString();
-    await client.models.LeadActivity.create({
+    const { data: activityRow } = await client.models.LeadActivity.create({
       customerId: input.customerId,
       channel: input.channel,
       direction: input.direction ?? "OUTBOUND",
@@ -74,13 +74,29 @@ export async function appendLeadActivity(input: {
       note: input.note ?? undefined,
       occurredAt: nowIso,
     });
+    if (!activityRow) {
+      // GL-18 R8: the durable lead fact did NOT land — the follow-up must not
+      // close on a swallowed write. The obligation stays open.
+      console.error(
+        "appendLeadActivity: activity write failed — follow-up left open",
+        input.customerId
+      );
+      return;
+    }
     const realTouch =
       input.channel !== "LIFECYCLE" && !NON_TOUCH_OUTCOMES.has(input.outcome);
     if (realTouch) {
-      await client.models.Customer.update({
+      const { data: touched } = await client.models.Customer.update({
         id: input.customerId,
         lastTouchedAt: nowIso,
       });
+      if (!touched) {
+        console.error(
+          "appendLeadActivity: lastTouchedAt write failed — follow-up left open",
+          input.customerId
+        );
+        return;
+      }
       // The lead was genuinely worked — clear the follow-up task. A new one
       // reappears when the next cadence lapses (the sweep is self-healing).
       await resolveOwnedWork({
@@ -240,16 +256,27 @@ export async function setLeadDisposition(
   const nowIso = new Date().toISOString();
   const actorLabel = actor.email ?? actor.sub ?? "unknown staff";
 
+  // GL-18 R8: the follow-up closes only after the matching DURABLE lead fact
+  // exists — every state write below is checked, and a failed write throws
+  // instead of resolving the case over nothing.
+  const requireWrite = (row: unknown, what: string) => {
+    if (!row) {
+      throw new Error(
+        `The ${what} could not be recorded — nothing was closed. Try again.`
+      );
+    }
+  };
   if (args.disposition === "LOST") {
     const reason = (args.reasonCode ?? "").trim();
     if (!(LEAD_LOST_REASONS as readonly string[]).includes(reason)) {
       throw new Error("Choose a controlled reason for marking this lead lost.");
     }
-    await client.models.Customer.update({
+    const { data: lostRow } = await client.models.Customer.update({
       id: args.customerId,
       lostReason: reason,
       lostAt: nowIso,
     });
+    requireWrite(lostRow, "lost decision");
     await appendLeadActivity({
       customerId: args.customerId,
       channel: "LIFECYCLE",
@@ -258,12 +285,13 @@ export async function setLeadDisposition(
       actor,
     });
   } else if (args.disposition === "DNC") {
-    await client.models.Customer.update({
+    const { data: dncRow } = await client.models.Customer.update({
       id: args.customerId,
       doNotContact: true,
       doNotContactAt: nowIso,
       doNotContactBy: actorLabel,
     });
+    requireWrite(dncRow, "do-not-contact decision");
     await appendLeadActivity({
       customerId: args.customerId,
       channel: "LIFECYCLE",
@@ -272,7 +300,7 @@ export async function setLeadDisposition(
       actor,
     });
   } else if (args.disposition === "CLEAR") {
-    await client.models.Customer.update({
+    const { data: clearRow } = await client.models.Customer.update({
       id: args.customerId,
       lostReason: null,
       lostAt: null,
@@ -280,6 +308,7 @@ export async function setLeadDisposition(
       doNotContactAt: null,
       doNotContactBy: null,
     });
+    requireWrite(clearRow, "reopen decision");
     await appendLeadActivity({
       customerId: args.customerId,
       channel: "LIFECYCLE",

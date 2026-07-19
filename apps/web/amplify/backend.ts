@@ -101,6 +101,7 @@ const LOCK_MODELS = [
   "BookingCommsSend",
   "ServiceReportFinalizeClaim",
   "TreatmentObligation",
+  "WorkItem",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],

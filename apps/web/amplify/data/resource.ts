@@ -238,6 +238,9 @@ export const schema = a.schema({
     // GL-18: a claimed item was returned to its team inbox because its owner was
     // offboarded — no required action may stay owned by a departed person.
     "RELEASED",
+    // GL-18 R2: an office user lifted a bounce/complaint suppression with the
+    // customer's consent recorded — the accountable trail for re-enabling sends.
+    "SUPPRESSION_LIFTED",
   ]),
   // A card dispute's lifecycle at Stripe. NEEDS_RESPONSE is the one with a
   // clock on it (evidenceDueBy); WON/LOST are terminal.
@@ -2064,6 +2067,23 @@ export const schema = a.schema({
    * OWNER-only, mirroring adminCreateUser: it kills a login, which is a
    * management action, and the same bar that provisions one should end one.
    */
+  /**
+   * GL-18 R2 — the bounded suppression release. A permitted office role lifts a
+   * bounce/complaint suppression when the customer's consent and a working
+   * address support it (required note = the evidence), so the missed message
+   * can actually be re-sent. Recorded as a SUPPRESSION_LIFTED event on the
+   * address's EMAIL_FAILURE case — never a silent table edit.
+   */
+  liftEmailSuppression: a
+    .mutation()
+    .arguments({
+      email: a.string().required(),
+      note: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
   deactivateTechnician: a
     .mutation()
     // GL-14: the Schedule entrance carries the same controlled reason (+ note

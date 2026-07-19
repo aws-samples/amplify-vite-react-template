@@ -29,6 +29,7 @@ import {
   openMissingContactWork,
   openOwnedWork,
   releaseOwnedWorkForSub,
+  workItemId,
 } from "../shared/ownedWork";
 import { disposeStaleDrafts } from "../shared/jobAssignment";
 import { callerEmail, callerSub } from "../shared/authz";
@@ -307,6 +308,13 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
       });
+    case "liftEmailSuppression": {
+      const args = event.arguments as { email?: string; note?: string };
+      return liftEmailSuppression(
+        { email: args.email ?? "", note: args.note ?? "" },
+        { sub: callerSub(event.identity), email: callerEmail(event.identity) }
+      );
+    }
     case "deactivateTechnician": {
       const args = event.arguments as TechnicianIdArgs & {
         reasonCode?: string | null;
@@ -2827,4 +2835,66 @@ async function staffRoster() {
     return ao - bo || (a.name ?? a.email).localeCompare(b.name ?? b.email);
   });
   return { staff, generatedAt: new Date().toISOString() };
+}
+
+/**
+ * GL-18 R2 — lift a bounce/complaint suppression so the missed message can be
+ * re-sent. The note is REQUIRED evidence (the customer's consent / corrected
+ * address); the lift is recorded as a SUPPRESSION_LIFTED event on the
+ * address's EMAIL_FAILURE case so the release is accountable, and the deletion
+ * is verified by read-back — "lifted" is a fact, not a hope.
+ */
+async function liftEmailSuppression(
+  args: { email: string; note: string },
+  actor: { sub: string | null; email: string | null }
+): Promise<{ lifted: boolean; message: string }> {
+  const email = args.email.trim().toLowerCase();
+  if (!email || !email.includes("@")) {
+    throw new Error("Enter the suppressed email address to lift.");
+  }
+  if (!args.note.trim()) {
+    throw new Error(
+      "A short note is required — how did the customer consent, and what changed about the address?"
+    );
+  }
+  const client = await dataClient();
+  if (!("SuppressedEmail" in client.models)) {
+    return { lifted: false, message: "Suppression records are unavailable here." };
+  }
+  const { data: row } = await client.models.SuppressedEmail.get({ email });
+  if (!row) {
+    return {
+      lifted: true,
+      message: `${email} isn't suppressed — sends to it are already allowed.`,
+    };
+  }
+  await client.models.SuppressedEmail.delete({ email });
+  const { data: verify } = await client.models.SuppressedEmail.get({ email });
+  if (verify) {
+    throw new Error(
+      "The suppression could not be removed — try again in a moment."
+    );
+  }
+  // The accountable trail: an event on the address's bounce/complaint case.
+  if ("WorkEvent" in client.models) {
+    for (const dedupe of [`bounced:${email}`, `complained:${email}`]) {
+      const itemId = workItemId("EMAIL_FAILURE", dedupe);
+      const { data: item } = await client.models.WorkItem.get({
+        id: itemId,
+      }).catch(() => ({ data: null }));
+      if (!item) continue;
+      await client.models.WorkEvent.create({
+        workItemId: itemId,
+        eventType: "SUPPRESSION_LIFTED",
+        actorSub: actor.sub ?? undefined,
+        actorEmail: actor.email ?? "unknown staff",
+        note: `Suppression lifted for ${email}: ${args.note.trim()}`,
+        occurredAt: new Date().toISOString(),
+      }).catch(() => undefined);
+    }
+  }
+  return {
+    lifted: true,
+    message: `${email} can receive email again. Now re-send the missed message so its case can close.`,
+  };
 }
