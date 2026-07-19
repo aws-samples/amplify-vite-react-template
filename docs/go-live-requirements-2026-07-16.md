@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `dc39f74`; newest
-implementation commit `dc39f74`
+**Latest commit review:** every commit after `f70e621` through `1228822`; newest
+implementation commit `1228822`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 88 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 81 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -18,7 +18,14 @@ headings below — sub-clauses inside one bullet are not counted separately.
 **Business policy inputs approved:** 18–19 July 2026
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The newest commits close GL-09's engineering (`82f5fbf`)
+implementation detail, and proof-only tasks. The newest commits close GL-06's engineering
+(`1228822` — pending bank debits are real "Payment pending" commitments under one conditional payment
+state machine, with exactly-once failure/settlement/cancel paths, a daily Stripe reconcile, durable
+returning-customer states, and the office payments-in-flight view) and remediate the GL-16 production
+cost incident (`d990d07` — one research drainer at a time, atomic per-day budget reserved before every
+provider call, bounded backoff with owned exhaustion, seeding that cannot regenerate retired work, one
+daily digest instead of per-rate emails, and the Market Rates engine panel; GL-16's audit/rollback
+requirements remain open below). The prior commits close GL-09's engineering (`82f5fbf`)
 and land a systemic remediation (`d546c10`) that every earlier "single-winner" closure claim depended
 on: stale-lease takeover on every operational lock and durable command (staff access, owner serial,
 lifecycle claim/command, plan cancellation, visit change, booking finalization, booking communications,
@@ -171,10 +178,6 @@ action, and physical operating setup as dependencies the agent cannot complete a
   lose its log and provider ID; transient failures have no actual retry; delivery-event processing can
   acknowledge and discard a failed update; and the business record that originated the message is not
   brought back out of “sent” when the later outcome is a bounce or complaint.
-- **X4 — Payment status and capacity can still tell different stories.** A processing payment is called a
-  held slot even though availability does not reserve or count it; a succeeded payment is called booked
-  before the server confirms finalization; and concurrent webhook events can overwrite a later state
-  because their transitions are not single-winner decisions.
 
 ## Gate register
 
@@ -191,7 +194,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-07 | Copy sign-off; atomic capacity rides GL-04 — engineering closed (`5b2fb76`) | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **12% — Very low (sign-offs + GL-04 tie)** |
 | P0 | GL-18 | Override-authority + queue-ops sign-off — engineering closed (`f6a34a8`) | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-04/GL-23 ties)** |
 | P0 | GL-04 | Travel-model calibration + data entry — engineering closed (`dc39f74`) | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
-| P0 | GL-06 | Finish honest, race-safe processing and failed payments | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **80% — High** |
+| P0 | GL-06 | Copy + recovery-workflow sign-offs — engineering closed (`1228822`) | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **12% — Very low (sign-offs)** |
 | P0 | GL-16 | Prompt-governed AI pricing with rollback | CEO + Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **78% — High** |
 | P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented | **52% — Medium** |
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
@@ -416,8 +419,6 @@ cannot buy the same last unit of capacity.
 - Operations ratifies the quote-time insertion estimate (a new stop's marginal travel = the real
   Routes leg to its nearest same-window stop, both ways) against the first weeks of real routes; the
   nightly rebuild already re-measures every slot as base → stops in route order → base.
-- The pending-bank-debit claim converts into the visible "Payment pending" scheduled visit in GL-06's
-  processing flow (the slot is already held and counted today; GL-06 adds the booked-job surface).
 
 **Pass owner:** Head of Operations.
 
@@ -427,52 +428,21 @@ cannot buy the same last unit of capacity.
 an async payment cannot create a double payment, a nonexistent hold, an oversold visit, or an obligation
 that waits forever.
 
-**Why this is still a gate:** A processing customer is told **Your slot is held**, but no capacity record
-is created and availability does not count the PROCESSING booking. The customer is also told no charge was
-made, which is not a truthful description of a pending bank debit that may proceed to service.
-The repeat-booking endpoint rejects any persisted status other than QUOTED before it reaches its
-“still processing—do not pay again” branch, so a returning processing customer can instead receive
-**Quote not found** and be offered a fresh payment path.
-
-Processing, failed, and successful webhook handlers read a status and then write without a conditional
-transition. Concurrent events can therefore both read QUOTED and let a late processing/failure update
-overwrite a BOOKED success; failed writes are not checked before the event is acknowledged. There is no
-processing start/expiry, stale-processing sweep, provider reconciliation, owned timeout case, or office
-screen for these states. The failed-payment email is marked only after provider acceptance with an
-unchecked write, so replay can duplicate it and a failed delivery follows the unresolved X3 path.
+**Engineering:** closed (`1228822`). A pending bank debit creates the full scheduled commitment
+immediately with every surface saying **Payment pending**; all payment/booking transitions are one
+conditional state machine; pre/post-service failure, late success, cancel, and reconcile paths are
+exactly-once; returning customers always retrieve the durable state; Operations has the payments-in-flight
+view. Only the items below remain; they are sign-offs — not software this repository can finish alone.
 
 **Remaining requirements:**
 
-- A pending bank debit creates one real scheduled commitment immediately: customer, agreement/mandate,
-  pending invoice, job, capacity claim, payment attempt, and truthful confirmation are linked and read
-  back. It may be dispatched and completed while payment remains pending; every customer, Office, route,
-  technician, and leadership view says **Payment pending**, not paid or settled (**GL-04** and **GL-05**).
-- Payment and booking transitions use one approved, conditional state machine. Processing, success,
-  failure, cancellation, expiry, and retry events apply only to the current payment attempt and allowed
-  prior state; duplicate, concurrent, stale, or out-of-order events cannot regress BOOKED or overwrite a
-  later business decision. Every rejected or failed transition remains visible and owned.
-- PROCESSING has a durable start time, method, customer promise, next check, expected provider date, job/
-  invoice references, and shared-Office ownership. Reconciliation re-reads Stripe until success/failure,
-  finds missing webhook events, and raises work that receives a response within one business day when the
-  provider result is late or contradictory.
-- Bank failure before service cancels the pending commitment, releases capacity once, voids the pending
-  invoice, and sends one retry path. Failure after service never erases or cancels completed work: the
-  invoice becomes **Balance due**, the customer receives a one-business-day payment-retry notice, and the
-  shared Office queue owns collection. A later provider success or retry applies exactly once to that
-  balance; concurrent failure/success events cannot double-collect or turn it back into pending.
-- Returning, refreshing, or retrying customers retrieve the durable state: processing means **do not pay
-  again—the visit is scheduled with payment pending**, succeeded-but-incomplete means **payment
-  received—finalizing**, settled means paid, pre-service failure means canceled plus retry, and post-service
-  failure means balance due. No state falls through to **Quote not found** or invites another payment
-  without proving how the prior attempt affects the job and balance (**GL-05**).
-- Customer copy distinguishes card authorization/settlement from a bank debit that may take several
-  business days: authorized, processing, settled, failed, reversed, or refunded. It never says no money
-  moved while a debit is pending. The accepted mandate, payment-method label, expected date, service
-  status, balance consequence, and durable notices remain linked to the attempt.
-- Operations has a plain-language view of every processing/failed attempt showing customer, amount,
-  method, selected slot/hold, age, provider state, notice state, owner, and one safe next action. The
-  leadership aging/reconciliation view is completed in GL-19, production webhook setup in GL-21, and
-  durable notification handling in GL-03.
+- CEO/Finance/Operations sign off the changed customer-facing copy and workflow now live: the
+  "visit scheduled — payment processing, don't pay again" confirmation, the pre-service
+  "visit canceled, no money collected, rebook" and post-service "outstanding balance" failure notices,
+  the pending-cancel refund wording (refund completes after the debit settles), and the Finance-owned
+  balance-collection flow (case closes only on a verified money settle). The leadership
+  aging/reconciliation view is completed in GL-19, production webhook setup in GL-21, and durable
+  notification handling in GL-03.
 
 **Pass owner:** CEO and Finance lead jointly; Head of Operations approves the recovery workflow.
 
