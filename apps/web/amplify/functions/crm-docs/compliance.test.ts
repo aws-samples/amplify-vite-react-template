@@ -31,6 +31,8 @@ const officeEmails: { subject: string; bodyHtml: string }[] = [];
 const amendmentPdfCalls: Record<string, unknown>[] = [];
 
 const finalizeClaims = new Map<string, Record<string, unknown>>();
+/** Immutable packet-change rows (JobPacketEvent). */
+let packetEvents: Record<string, unknown>[] = [];
 /** EmailLog rows the SENDING-adoption resume reads (GL-15 outbox check). */
 let emailLogRows: Record<string, unknown>[] = [];
 /** Force WorkItem.create to fail so a test can prove the FLAGGED presence-review
@@ -39,6 +41,12 @@ let workItemCreateFails = false;
 
 const fakeDataClient = {
   models: {
+    JobPacketEvent: {
+      create: async (input: Record<string, unknown>) => {
+        packetEvents.push({ ...input });
+        return { data: input };
+      },
+    },
     ServiceReportFinalizeClaim: {
       // Conditional create: an existing id loses — the single-winner finalize
       // claim (GL-15).
@@ -185,6 +193,8 @@ vi.mock("../shared/pdf", () => ({
 }));
 vi.mock("../shared/driveTime", () => ({
   drivingDistanceMetersFromPoint: vi.fn(async () => null),
+  driveMinutesBetween: vi.fn(async () => 25),
+  HQ_ADDRESS: "81 Greenwich Rd, Ware, MA 01082",
 }));
 vi.mock("@aws-sdk/client-s3", () => {
   class PutObjectCommand {}
@@ -260,6 +270,7 @@ const validReport = (over: Partial<Report> = {}): Report => ({
 
 beforeEach(() => {
   finalizeClaims.clear();
+  packetEvents = [];
   emailLogRows = [];
   workItemCreateFails = false;
   process.env.DOCS_BUCKET = "docs";
@@ -279,7 +290,7 @@ beforeEach(() => {
     serviceState: "RI",
     serviceZip: "02906",
   };
-  jobs = [{ id: "j1", customerId: "c1", technicianId: "t1", status: "IN_PROGRESS", serviceType: "General pest", type: "ONE_TIME" }];
+  jobs = [{ id: "j1", customerId: "c1", technicianId: "t1", status: "IN_PROGRESS", serviceType: "General pest", type: "ONE_TIME", propertyClass: "RESIDENTIAL" }];
   reports = [];
   routes = [];
   // The office-approved product log. validReport applies "Suspend PolyZone",
@@ -1567,7 +1578,7 @@ describe("terminal visits are immutable — rebooking makes a new linked attempt
     jobs = [{ id: "j1", customerId: "c1", type: "ONE_TIME", serviceType: "General pest", status: "COMPLETED" }];
 
     await expect(call("rebookJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow(
-      /no-access or canceled/i
+      /terminal outcome/i
     );
     expect(jobs).toHaveLength(1);
   });
@@ -1697,5 +1708,153 @@ describe("GL-15 — finalize is single-winner, verified, and durable", () => {
     expect(
       (sendEmail as unknown as { mock: { calls: unknown[] } }).mock.calls.length
     ).toBe(1);
+  });
+});
+
+describe("GL-12 — the honest one-tap exits and the versioned packet", () => {
+  beforeEach(() => {
+    jobs[0].startedAt = "2026-07-16T13:05:00Z";
+    jobs[0].applicationEndAt = "2026-07-16T14:10:00Z";
+  });
+
+  it("scope mismatch: never starts/completes, frees the route, preserves paidAt, opens owned work, tells the customer", async () => {
+    jobs[0] = {
+      ...jobs[0],
+      status: "SCHEDULED",
+      startedAt: null,
+      applicationEndAt: null,
+      routeId: "r1",
+      routeOrder: 3,
+      paidAt: "2026-07-01T00:00:00Z",
+    };
+    const res = (await call("reportScopeMismatch", {
+      jobId: "j1",
+      reason: "DIFFERENT_PEST",
+      note: "Carpenter ants, not general pest",
+    })) as { status: string; alreadyReported: boolean };
+
+    expect(res.status).toBe("SCOPE_MISMATCH");
+    expect(jobs[0].status).toBe("SCOPE_MISMATCH");
+    expect(jobs[0].startedAt).toBeNull();
+    expect(jobs[0].completedAt ?? null).toBeNull();
+    expect(jobs[0].routeId).toBeNull();
+    expect(jobs[0].paidAt).toBe("2026-07-01T00:00:00Z");
+    const workRow = workItems.find((w) => w.kind === "SCOPE_MISMATCH");
+    expect(workRow).toBeTruthy();
+    // The customer email went out (sendEmail mock records calls).
+    const calls = (sendEmail as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls;
+    expect(
+      calls.some(
+        (c) => (c[0] as { template?: string }).template === "scope-mismatch-next-step"
+      )
+    ).toBe(true);
+    // Idempotent re-report.
+    const again = (await call("reportScopeMismatch", {
+      jobId: "j1",
+      reason: "DIFFERENT_PEST",
+    })) as { alreadyReported: boolean };
+    expect(again.alreadyReported).toBe(true);
+  });
+
+  it("prep missing opens its own owned case and next-step message", async () => {
+    jobs[0] = {
+      ...jobs[0],
+      status: "SCHEDULED",
+      startedAt: null,
+      applicationEndAt: null,
+    };
+    await call("reportPrepMissing", {
+      jobId: "j1",
+      reason: "AREAS_NOT_CLEARED",
+    });
+    expect(jobs[0].status).toBe("PREP_MISSING");
+    expect(workItems.find((w) => w.kind === "PREP_MISSING")).toBeTruthy();
+  });
+
+  it("a packet change bumps the version, records the immutable event, and blocks Start until acknowledged", async () => {
+    jobs[0] = {
+      ...jobs[0],
+      status: "SCHEDULED",
+      startedAt: null,
+      applicationEndAt: null,
+      packetVersion: 1,
+      propertyClass: "RESIDENTIAL",
+    };
+    await call(
+      "updateJobPacket",
+      { jobId: "j1", hazardNotes: "Aggressive dog on site" },
+      ["OFFICE"]
+    );
+    expect(jobs[0].packetVersion).toBe(2);
+    expect(packetEvents).toHaveLength(1);
+    expect(String(packetEvents[0].changedFields)).toContain("hazardNotes");
+
+    // Start refuses until the technician acknowledges the new version.
+    await expect(call("startJob", { jobId: "j1" })).rejects.toThrow(
+      /packet changed .*acknowledge/i
+    );
+    await call("acknowledgePacket", { jobId: "j1", version: 2 });
+    expect(jobs[0].packetAckVersion).toBe(2);
+    await call("startJob", { jobId: "j1" });
+    expect(jobs[0].startedAt).toBeTruthy();
+  });
+
+  it("a material change AFTER service starts requires a recorded manager reason", async () => {
+    jobs[0] = {
+      ...jobs[0],
+      status: "IN_PROGRESS",
+      startedAt: "2026-07-16T13:05:00Z",
+      packetVersion: 1,
+      propertyClass: "RESIDENTIAL",
+    };
+    await expect(
+      call(
+        "updateJobPacket",
+        { jobId: "j1", hazardNotes: "New hazard mid-visit" },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/manager reason/i);
+    await call(
+      "updateJobPacket",
+      {
+        jobId: "j1",
+        hazardNotes: "New hazard mid-visit",
+        managerReason: "Customer reported a wasp allergy after start",
+      },
+      ["OFFICE"]
+    );
+    expect(jobs[0].packetVersion).toBe(2);
+    expect(packetEvents[0].afterStart).toBe(true);
+    expect(packetEvents[0].managerReason).toContain("wasp allergy");
+  });
+
+  it("assignment persists the Google Routes proof on the decision", async () => {
+    process.env.GOOGLE_ROUTES_API_KEY = "key-1";
+    const { driveMinutesBetween } = await import("../shared/driveTime");
+    vi.mocked(driveMinutesBetween).mockResolvedValue(37);
+    jobs[0] = {
+      ...jobs[0],
+      status: "UNSCHEDULED",
+      startedAt: null,
+      applicationEndAt: null,
+      propertyClass: "RESIDENTIAL",
+    };
+    routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
+    await call(
+      "updateJobSchedule",
+      {
+        jobId: "j1",
+        operation: "ASSIGN",
+        technicianId: "t1",
+        routeId: "r1",
+        routeOrder: 1,
+        scheduledDate: "2026-07-20",
+      },
+      ["OFFICE"]
+    );
+    expect(jobs[0].dispatchDriveMinutes).toBe(37);
+    expect(jobs[0].dispatchRouteCheckedAt).toBeTruthy();
+    delete process.env.GOOGLE_ROUTES_API_KEY;
   });
 });

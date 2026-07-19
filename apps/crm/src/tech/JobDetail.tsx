@@ -108,6 +108,11 @@ export default function TechJob() {
     TechnicianJobDetail["priorVisits"]
   >([]);
   const [error, setError] = useState<string | null>(null);
+  const [packetChanged, setPacketChanged] = useState(false);
+  const [onsiteMinutes, setOnsiteMinutes] = useState<number | null>(null);
+  const [lineage, setLineage] = useState<
+    NonNullable<TechnicianJobDetail["lineage"]>
+  >([]);
 
   const load = useCallback(async () => {
     if (!jobId) return;
@@ -120,6 +125,9 @@ export default function TechJob() {
       // with the same opaque error as a missing one.
       const d = await technicianJob(jobId);
       setJob(d.job);
+      setPacketChanged(Boolean(d.packetChanged));
+      setOnsiteMinutes(d.onsiteMinutes ?? null);
+      setLineage(d.lineage ?? []);
       setCustomer(d.customer);
       setReport(d.reports[0] ?? null);
       setTechRecord(d.technician as Technician | null);
@@ -285,6 +293,18 @@ export default function TechJob() {
               </dd>
             </>
           ) : null}
+          {onsiteMinutes != null ? (
+            <>
+              <dt>On-site time</dt>
+              <dd>
+                {onsiteMinutes} minutes (
+                {job.propertyClass
+                  ? String(job.propertyClass).toLowerCase()
+                  : "residential"}
+                )
+              </dd>
+            </>
+          ) : null}
           <dt>Payment</dt>
           <dd>{paymentExpectationLabel(job)}</dd>
           {job.notes ? (
@@ -295,6 +315,20 @@ export default function TechJob() {
           ) : null}
         </dl>
       </Card>
+
+      {lineage.length ? (
+        <Card>
+          <Badge tone="info">attempt {lineage.length + 1} of this visit</Badge>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+            {lineage
+              .map(
+                (a) =>
+                  `${fmtDate(a.scheduledDate ?? null, true)}: ${String(a.status).replace(/_/g, " ").toLowerCase()}`
+              )
+              .join(" · ")}
+          </p>
+        </Card>
+      ) : null}
 
       {priorVisits.length ? (
         <Card title="Before this visit">
@@ -308,9 +342,44 @@ export default function TechJob() {
                     ? ` — ${NO_ACCESS_LABEL[v.noAccessReason] ?? "couldn't access"}`
                     : ""}
                 </span>
+                {v.findings ? (
+                  <div className="muted small" style={{ marginLeft: 24 }}>
+                    {[
+                      v.findings.servicesPerformed
+                        ? `did: ${v.findings.servicesPerformed}`
+                        : null,
+                      v.findings.areasTreated
+                        ? `areas: ${v.findings.areasTreated}`
+                        : null,
+                      v.findings.targetPests
+                        ? `pests: ${v.findings.targetPests}`
+                        : null,
+                      v.findings.recommendations
+                        ? `recommended: ${v.findings.recommendations}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </div>
+                ) : null}
               </li>
             ))}
           </ul>
+        </Card>
+      ) : null}
+
+      {job.status === "SCOPE_MISMATCH" || job.status === "PREP_MISSING" ? (
+        <Card>
+          <Badge tone="warn">
+            {job.status === "SCOPE_MISMATCH"
+              ? "scope doesn't match"
+              : "required prep missing"}
+          </Badge>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+            {job.notPerformedNote ? `${job.notPerformedNote} — ` : ""}
+            The office has been told and will contact the customer within one
+            business day. Nothing was started, charged, or reported.
+          </p>
         </Card>
       ) : null}
 
@@ -325,6 +394,38 @@ export default function TechJob() {
             The office has been told. Nothing was charged and no report was
             filed.
           </p>
+        </Card>
+      ) : null}
+
+      {packetChanged ? (
+        <Card>
+          <Badge tone="warn">the packet changed</Badge>
+          <p className="muted small" style={{ marginTop: 8 }}>
+            The office changed this visit's access, safety, prep, or scope
+            details since it was assigned. Re-read the packet above, then
+            acknowledge — starting is blocked until you do.
+          </p>
+          <Button
+            block
+            onClick={() =>
+              api()
+                .mutations.acknowledgePacket({
+                  jobId: job.id,
+                  version: job.packetVersion ?? 1,
+                })
+                .then((res) => {
+                  if (res.errors?.length) throw new Error(res.errors[0].message);
+                  return load();
+                })
+                .catch((err) =>
+                  setError(
+                    err instanceof Error ? err.message : "Could not acknowledge"
+                  )
+                )
+            }
+          >
+            I've read the change — acknowledge
+          </Button>
         </Card>
       ) : null}
 
@@ -364,11 +465,14 @@ export default function TechJob() {
           customer a pesticide record, arms the charge, and advances the plan.
           The tech was never being dishonest; the app routed them there. */}
       {job.status === "SCHEDULED" || job.status === "IN_PROGRESS" ? (
-        <NoAccessCard
-          job={job}
-          ownerSub={techRecord?.userSub ?? null}
-          onDone={load}
-        />
+        <>
+          <NoAccessCard
+            job={job}
+            ownerSub={techRecord?.userSub ?? null}
+            onDone={load}
+          />
+          <ScopePrepExits job={job} onDone={load} />
+        </>
       ) : null}
 
       {report?.status === "FINALIZED" ? (
@@ -426,6 +530,124 @@ const NO_ACCESS_LABEL: Record<string, string> = {
  * no-access billing decision turns on, and what protects the technician from
  * being told they never went.
  */
+/**
+ * GL-12 — the other two honest exits: "scope doesn't match" and "required
+ * prep missing". One tap each: pick what you found, add a note, done. Neither
+ * starts or completes service; the office owns the follow-up (the customer is
+ * told we'll be in touch within one business day), and the money facts are
+ * preserved for their decision.
+ */
+const SCOPE_EXIT_OPTIONS: { value: string; label: string }[] = [
+  { value: "DIFFERENT_PEST", label: "Different pest than the work order" },
+  { value: "DIFFERENT_PROPERTY", label: "Property/structure doesn't match" },
+  { value: "WRONG_SERVICE_SOLD", label: "Sold service can't address the site" },
+  { value: "OUT_OF_SCOPE_AREA", label: "Needed area isn't in the sold scope" },
+];
+const PREP_EXIT_OPTIONS: { value: string; label: string }[] = [
+  { value: "AREAS_NOT_CLEARED", label: "Areas not cleared / prepared" },
+  { value: "PETS_NOT_SECURED", label: "Pets not secured" },
+  { value: "OCCUPANTS_PRESENT", label: "Occupants present who must vacate" },
+  { value: "PREP_NOT_DONE", label: "Required prep visibly not done" },
+];
+
+function ScopePrepExits({ job, onDone }: { job: Job; onDone: () => Promise<void> }) {
+  const [mode, setMode] = useState<null | "scope" | "prep">(null);
+  const [reason, setReason] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!reason || !mode) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const mutations = api().mutations as unknown as {
+        reportScopeMismatch: (i: {
+          jobId: string;
+          reason: string;
+          note?: string;
+        }) => Promise<{ errors?: { message: string }[] }>;
+        reportPrepMissing: (i: {
+          jobId: string;
+          reason: string;
+          note?: string;
+        }) => Promise<{ errors?: { message: string }[] }>;
+      };
+      const res =
+        mode === "scope"
+          ? await mutations.reportScopeMismatch({
+              jobId: job.id,
+              reason,
+              note: note.trim() || undefined,
+            })
+          : await mutations.reportPrepMissing({
+              jobId: job.id,
+              reason,
+              note: note.trim() || undefined,
+            });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      await onDone();
+    } catch (err) {
+      setError(
+        isConnectivityError(err)
+          ? "No connection — nothing was recorded. Try again with signal."
+          : err instanceof Error
+            ? err.message
+            : "Could not record the outcome"
+      );
+      setBusy(false);
+    }
+  };
+
+  const options = mode === "scope" ? SCOPE_EXIT_OPTIONS : PREP_EXIT_OPTIONS;
+
+  return (
+    <Card>
+      {mode === null ? (
+        <div className="form-grid" style={{ gap: 8 }}>
+          <Button block variant="ghost" onClick={() => setMode("scope")}>
+            The work doesn't match the site
+          </Button>
+          <Button block variant="ghost" onClick={() => setMode("prep")}>
+            The required prep isn't done
+          </Button>
+        </div>
+      ) : (
+        <div className="form-grid" style={{ gap: 8 }}>
+          <p className="muted small" style={{ margin: 0 }}>
+            {mode === "scope"
+              ? "Nothing starts and nothing is charged. The office corrects the service with the customer — we tell them we'll be in touch within one business day."
+              : "Nothing starts and nothing is charged. The office reschedules once the customer is ready — we tell them we'll be in touch within one business day."}
+          </p>
+          {options.map((o) => (
+            <Button
+              key={o.value}
+              block
+              variant={reason === o.value ? "primary" : "ghost"}
+              onClick={() => setReason(o.value)}
+            >
+              {o.label}
+            </Button>
+          ))}
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Anything the office should know (optional)"
+          />
+          <Button block loading={busy} disabled={!reason} onClick={() => void submit()}>
+            Record it — the office takes it from here
+          </Button>
+          <Button block variant="ghost" onClick={() => { setMode(null); setReason(null); }}>
+            Back
+          </Button>
+        </div>
+      )}
+      <ErrorNote error={error} />
+    </Card>
+  );
+}
+
 function NoAccessCard({
   job,
   ownerSub,

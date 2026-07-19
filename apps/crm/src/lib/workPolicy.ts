@@ -312,6 +312,48 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  SCOPE_MISMATCH: {
+    label: "Scope doesn't match",
+    severity: "HIGH",
+    customerImpact:
+      "A technician arrived and the sold service doesn't match what the site needs — the customer is waiting on the corrected service.",
+    verified: [],
+    externalAction: { mutation: "rebookJob", label: "Rebook corrected visit" },
+    manualReasons: [
+      { code: "SCOPE_CORRECTED_REBOOKED", label: "Scope corrected and rebooked" },
+      { code: "CUSTOMER_DECLINED", label: "Customer declined the corrected service" },
+      { code: "REFUNDED_INSTEAD", label: "Refunded instead" },
+      OTHER,
+    ],
+  },
+  PREP_MISSING: {
+    label: "Required prep missing",
+    severity: "HIGH",
+    customerImpact:
+      "A visit couldn't be performed because the customer's required preparation wasn't in place — they're waiting on a rebook.",
+    verified: [],
+    externalAction: { mutation: "rebookJob", label: "Rebook visit" },
+    manualReasons: [
+      { code: "PREP_DONE_REBOOKED", label: "Prep completed and rebooked" },
+      { code: "CUSTOMER_DECLINED", label: "Customer declined to reschedule" },
+      { code: "REFUNDED_INSTEAD", label: "Refunded instead" },
+      OTHER,
+    ],
+  },
+  DISPATCH_NOT_READY: {
+    label: "Not dispatch-ready",
+    severity: "HIGH",
+    customerImpact:
+      "Tomorrow's visit is missing a dispatch fact (address, classification, or packet) — it can't safely go out as booked.",
+    verified: [
+      { id: "READY", label: "Confirm the visit is dispatch-ready" },
+    ],
+    manualReasons: [
+      { code: "RESCHEDULED", label: "Rescheduled with the customer" },
+      { code: "CANCELED_WITH_CUSTOMER", label: "Canceled with the customer" },
+      OTHER,
+    ],
+  },
   OFFICE_FIELD_REVIEW: {
     label: "Office field-action review",
     severity: "ROUTINE",

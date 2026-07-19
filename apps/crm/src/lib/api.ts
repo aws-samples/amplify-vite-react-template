@@ -184,8 +184,29 @@ export async function technicianDay(
   return parsed;
 }
 
+export type PriorVisitFindings = {
+  servicesPerformed?: string | null;
+  productsUsed?: unknown;
+  areasTreated?: string | null;
+  targetPests?: string | null;
+  recommendations?: string | null;
+  reEntryIntervalHours?: number | null;
+};
+
 export type TechnicianJobDetail = {
   job: Job;
+  /** GL-12: the locked on-site duration for the property classification. */
+  onsiteMinutes?: number;
+  /** GL-12: the packet changed since the technician last acknowledged. */
+  packetChanged?: boolean;
+  /** GL-12: this visit's chain of earlier attempts (rebook lineage). */
+  lineage?: {
+    id: string;
+    status: string;
+    scheduledDate?: string | null;
+    noAccessReason?: string | null;
+    notPerformedReason?: string | null;
+  }[];
   customer: Customer | null;
   reports: ServiceReport[];
   technician: {
@@ -195,10 +216,10 @@ export type TechnicianJobDetail = {
     userSub: string | null;
   } | null;
   catalog: Product[];
-  priorVisits: Pick<
+  priorVisits: (Pick<
     Job,
     "id" | "status" | "serviceType" | "scheduledDate" | "noAccessReason"
-  >[];
+  > & { notPerformedReason?: string | null; findings?: PriorVisitFindings | null })[];
 };
 
 export async function technicianJob(

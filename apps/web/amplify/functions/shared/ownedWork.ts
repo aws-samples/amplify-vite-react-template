@@ -62,6 +62,12 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-17: a licence is expiring or expired — advance renewal/reassignment
   // work so customers move before a doorstep failure.
   LICENSE_LAPSE: 24 * 60,
+  // GL-12: honest field exits — the customer is waiting on the office's next
+  // step, promised within one business day.
+  SCOPE_MISMATCH: 4 * 60,
+  PREP_MISSING: 4 * 60,
+  // GL-12: tomorrow's visit is missing a dispatch fact — same-day fix.
+  DISPATCH_NOT_READY: 4 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

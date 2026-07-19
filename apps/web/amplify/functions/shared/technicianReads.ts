@@ -4,6 +4,7 @@ import { licenseFactsFor } from "./licenses";
 import { dataClient } from "./dataClient";
 import { assertCanReadJob, technicianForCaller } from "./jobAssignment";
 import { openOwnedWork } from "./ownedWork";
+import { onsiteMinutesFor } from "./dispatchReadiness";
 
 /**
  * GL-13 row-scoping — the technician read surface.
@@ -257,6 +258,9 @@ function emptyDay(opts: {
 
 export type TechnicianJobResult = {
   job: AnyRecord;
+  onsiteMinutes?: number;
+  packetChanged?: boolean;
+  lineage?: AnyRecord[];
   customer: AnyRecord | null;
   reports: AnyRecord[];
   /** The caller's OWN technician record (null for an office viewer) — identity
@@ -307,17 +311,76 @@ export async function buildTechnicianJob(
     tech != null &&
     !(await licenseFactsFor(tech)).current;
 
-  const priorVisits = lapsedReview
+  const allPrior = lapsedReview
     ? []
-    : ((priorRes.data as AnyRecord[]) ?? [])
-        .filter((v) => v.id !== j.id)
-        .map((v) => ({
-          id: v.id,
-          status: v.status,
-          serviceType: v.serviceType ?? null,
-          scheduledDate: v.scheduledDate ?? null,
-          noAccessReason: v.noAccessReason ?? null,
-        }));
+    : ((priorRes.data as AnyRecord[]) ?? []).filter((v) => v.id !== j.id);
+
+  // GL-12: the packet carries the relevant PRIOR TREATMENT FINDINGS, not only
+  // statuses — for each completed earlier visit, the finalized report's facts.
+  // Bounded to the most recent few, matching what the screen shows.
+  const sortedPrior = allPrior
+    .slice()
+    .sort((a, b) =>
+      String(b.scheduledDate ?? "0").localeCompare(String(a.scheduledDate ?? "0"))
+    )
+    .slice(0, 6);
+  const priorVisits: AnyRecord[] = [];
+  for (const v of sortedPrior) {
+    let findings: AnyRecord | null = null;
+    if (v.status === "COMPLETED") {
+      try {
+        const { data: priorReports } =
+          await client.models.ServiceReport.listServiceReportByJobId({
+            jobId: String(v.id),
+          });
+        const finalized = (priorReports as AnyRecord[] | null)?.find(
+          (r) => r.status === "FINALIZED"
+        );
+        if (finalized) {
+          findings = {
+            servicesPerformed: finalized.servicesPerformed ?? null,
+            productsUsed: finalized.productsUsed ?? null,
+            areasTreated: finalized.areasTreated ?? null,
+            targetPests: finalized.targetPests ?? null,
+            recommendations: finalized.recommendations ?? null,
+            reEntryIntervalHours: finalized.reEntryIntervalHours ?? null,
+          };
+        }
+      } catch {
+        findings = null;
+      }
+    }
+    priorVisits.push({
+      id: v.id,
+      status: v.status,
+      serviceType: v.serviceType ?? null,
+      scheduledDate: v.scheduledDate ?? null,
+      noAccessReason: v.noAccessReason ?? null,
+      notPerformedReason: v.notPerformedReason ?? null,
+      findings,
+    });
+  }
+
+  // GL-12: callback/rebook lineage — this visit's chain of earlier attempts.
+  const lineage: AnyRecord[] = [];
+  let cursor: AnyRecord | null = j;
+  for (let i = 0; i < 5 && cursor; i++) {
+    const fromId = cursor.rebookedFromJobId;
+    if (!fromId) break;
+    const { data: fromJob } = await client.models.Job.get({
+      id: String(fromId),
+    });
+    if (!fromJob) break;
+    const fj = fromJob as unknown as AnyRecord;
+    lineage.push({
+      id: fj.id,
+      status: fj.status,
+      scheduledDate: fj.scheduledDate ?? null,
+      noAccessReason: fj.noAccessReason ?? null,
+      notPerformedReason: fj.notPerformedReason ?? null,
+    });
+    cursor = fj;
+  }
 
   const catalog = ((catalogRes.data as AnyRecord[]) ?? []).filter(
     (p) =>
@@ -338,6 +401,17 @@ export async function buildTechnicianJob(
 
   return {
     job: pickJob(j),
+    // GL-12: the locked on-site duration for the visit's classification —
+    // residential 30, commercial/community 60 — travels with the packet.
+    onsiteMinutes: onsiteMinutesFor(
+      (j.propertyClass as string | null | undefined) ?? null
+    ),
+    // GL-12: attention flag — the packet changed since the technician last
+    // acknowledged; the app shows the change and Start refuses until acked.
+    packetChanged:
+      Number(j.packetVersion ?? 1) > 1 &&
+      Number(j.packetAckVersion ?? 0) < Number(j.packetVersion ?? 1),
+    lineage,
     customer: pickCustomer((customerRes as { data?: AnyRecord | null }).data),
     reports,
     technician: tech

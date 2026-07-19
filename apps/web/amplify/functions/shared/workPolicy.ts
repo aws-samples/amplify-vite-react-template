@@ -40,7 +40,10 @@ export type WorkKind =
   | "ROUTE_MISMATCH"
   | "STALE_DRAFT"
   | "OFFICE_FIELD_REVIEW"
-  | "LICENSE_LAPSE";
+  | "LICENSE_LAPSE"
+  | "SCOPE_MISMATCH"
+  | "PREP_MISSING"
+  | "DISPATCH_NOT_READY";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -55,7 +58,8 @@ export type VerifierId =
   | "JOB_STAFFED"
   | "VISIT_MONEY_SETTLED"
   | "PLAN_CANCELLATION_SETTLED"
-  | "TECH_LICENSED";
+  | "TECH_LICENSED"
+  | "DISPATCH_READY";
 
 /**
  * A close the app can *confirm*. Running it re-checks the real-world fact
@@ -407,6 +411,52 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     manualReasons: [
       { code: "REVIEWED_APPROPRIATE", label: "Reviewed — appropriate use" },
       { code: "REVIEWED_COACHED", label: "Reviewed — coached the employee" },
+      OTHER,
+    ],
+  },
+  SCOPE_MISMATCH: {
+    severity: "HIGH",
+    customerImpact:
+      "A technician arrived and the sold service doesn't match what the site needs — the customer is waiting on the corrected service.",
+    ownerTeam: "OPS",
+    verified: [],
+    externalAction: { mutation: "rebookJob", label: "Rebook corrected visit" },
+    manualReasons: [
+      { code: "SCOPE_CORRECTED_REBOOKED", label: "Scope corrected and rebooked" },
+      { code: "CUSTOMER_DECLINED", label: "Customer declined the corrected service" },
+      { code: "REFUNDED_INSTEAD", label: "Refunded instead" },
+      OTHER,
+    ],
+  },
+  PREP_MISSING: {
+    severity: "HIGH",
+    customerImpact:
+      "A visit couldn't be performed because the customer's required preparation wasn't in place — they're waiting on a rebook.",
+    ownerTeam: "OPS",
+    verified: [],
+    externalAction: { mutation: "rebookJob", label: "Rebook visit" },
+    manualReasons: [
+      { code: "PREP_DONE_REBOOKED", label: "Prep completed and rebooked" },
+      { code: "CUSTOMER_DECLINED", label: "Customer declined to reschedule" },
+      { code: "REFUNDED_INSTEAD", label: "Refunded instead" },
+      OTHER,
+    ],
+  },
+  DISPATCH_NOT_READY: {
+    severity: "HIGH",
+    customerImpact:
+      "Tomorrow's visit is missing a dispatch fact (address, classification, or packet) — it can't safely go out as booked.",
+    ownerTeam: "OPS",
+    verified: [
+      {
+        id: "READY",
+        label: "Confirm the visit is dispatch-ready",
+        verifier: "DISPATCH_READY",
+      },
+    ],
+    manualReasons: [
+      { code: "RESCHEDULED", label: "Rescheduled with the customer" },
+      { code: "CANCELED_WITH_CUSTOMER", label: "Canceled with the customer" },
       OTHER,
     ],
   },

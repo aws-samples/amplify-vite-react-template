@@ -3,6 +3,7 @@ import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import { licenseFactsFor } from "../shared/licenses";
 import { ensureObligation, markObligation } from "../shared/obligations";
 import { isServiceMonth, monthKeyOf } from "../shared/season";
+import { assertDispatchFacts } from "../shared/dispatchReadiness";
 import { stripeClient } from "../shared/stripeClient";
 import { resumePlanCancellation } from "../shared/planCancellation";
 import { resumeVisitChange } from "../shared/visitChange";
@@ -134,6 +135,10 @@ export const handler = async () => {
   const presenceReviews = await reconcilePresenceReviews();
   // GL-17: advance licence-lapse work + capacity effects of expiry.
   const licenses = await sweepLicenseLapses();
+  // GL-12: tomorrow's staffed visits must pass the pure dispatch facts — a
+  // missing classification or placeholder address is owned work today, not a
+  // doorstep discovery tomorrow.
+  const readiness = await sweepDispatchReadiness();
   // GL-17: seasonal obligations — month rollover marks missed months (no
   // catch-up) and ensures the current in-season month is visible.
   const seasonal = await sweepSeasonalObligations();
@@ -155,8 +160,67 @@ export const handler = async () => {
     presenceReviews,
     licenses,
     seasonal,
+    readiness,
   ];
 };
+
+/**
+ * GL-12 — day-before dispatch readiness. Every SCHEDULED visit dated tomorrow
+ * is re-checked against the pure dispatch facts (routable-shaped MA/RI
+ * address, no placeholders, explicit property classification). Failures open
+ * owned DISPATCH_NOT_READY work with the exact office fix named; the verified
+ * close re-runs the same checks.
+ */
+export async function sweepDispatchReadiness() {
+  const client = await dataClient();
+  if (!("Job" in client.models)) {
+    return { task: "dispatch-readiness" as const, checked: 0, notReady: 0 };
+  }
+  let checked = 0;
+  let notReady = 0;
+  try {
+    const tomorrow = easternPlusDays(1);
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Job.listJobByScheduledDate(
+        { scheduledDate: tomorrow },
+        { limit: 200, nextToken: token }
+      );
+      for (const job of page.data ?? []) {
+        if (job.status !== "SCHEDULED") continue;
+        checked++;
+        const { data: customer } = await client.models.Customer.get({
+          id: job.customerId,
+        });
+        try {
+          assertDispatchFacts(customer ?? {}, {
+            propertyClass: job.propertyClass,
+            serviceType: job.serviceType,
+          });
+        } catch (err) {
+          notReady++;
+          await openOwnedWork({
+            kind: "DISPATCH_NOT_READY",
+            dedupeKey: `dispatch-ready:${job.id}`,
+            title: `Tomorrow's visit isn't dispatch-ready: ${customer?.displayName ?? job.customerId}`,
+            detail:
+              err instanceof Error ? err.message : "The dispatch facts are incomplete.",
+            customerId: job.customerId,
+            relatedId: job.id,
+            sourceUrl: `/customers/${job.customerId}`,
+            resolutionAction:
+              "Fix the named facts on the customer/visit, then confirm the visit is dispatch-ready (or reschedule it with the customer).",
+            ownerTeam: "OPS",
+          });
+        }
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    console.error("sweepDispatchReadiness failed", err);
+  }
+  return { task: "dispatch-readiness" as const, checked, notReady };
+}
 
 /** GL-17 — licences expiring within this many days open advance owned work. */
 const LICENSE_WARN_DAYS = 30;

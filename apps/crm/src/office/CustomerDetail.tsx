@@ -2696,12 +2696,46 @@ function JobPacketForm({
         ? job.paymentExpectation
         : "",
   });
+  // GL-12: explicit property classification — duration and pricing hang off it.
+  const [propertyClass, setPropertyClass] = useState<string>(
+    (job as { propertyClass?: string | null }).propertyClass ?? ""
+  );
+  // GL-12: a material change after the technician started needs a recorded
+  // manager reason — the server refuses without it.
+  const [managerReason, setManagerReason] = useState("");
+  const started = Boolean(job.startedAt);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   return (
     <div className="form-grid">
+      <Field
+        label="Property classification"
+        hint="Residential visits take 30 minutes on site; commercial and community/common-area take 60. Required before dispatch."
+      >
+        <select
+          value={propertyClass}
+          onChange={(e) => setPropertyClass(e.target.value)}
+        >
+          <option value="">Pick one…</option>
+          <option value="RESIDENTIAL">Residential (30 min)</option>
+          <option value="COMMERCIAL">Commercial (60 min)</option>
+          <option value="COMMUNITY">Community / common area (60 min)</option>
+        </select>
+      </Field>
       <PacketFields value={packet} onChange={setPacket} />
+      {started ? (
+        <Field
+          label="Manager reason (service already started)"
+          hint="Changing safety/access/scope/prep mid-visit is recorded with your name and shown to the technician."
+        >
+          <input
+            value={managerReason}
+            onChange={(e) => setManagerReason(e.target.value)}
+            placeholder="Why this is changing now"
+          />
+        </Field>
+      ) : null}
       <ErrorNote error={error} />
       <Button
         block
@@ -2721,6 +2755,8 @@ function JobPacketForm({
                     ? packet.prepConfirmed
                     : undefined,
                   paymentExpectation: packet.paymentExpectation || undefined,
+                  propertyClass: propertyClass || undefined,
+                  managerReason: managerReason.trim() || undefined,
                 })
               );
               await onDone();

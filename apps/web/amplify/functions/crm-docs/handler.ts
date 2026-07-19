@@ -36,7 +36,7 @@ import {
   buildTechnicianJob,
 } from "../shared/technicianReads";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
-import { drivingDistanceMetersFromPoint } from "../shared/driveTime";
+import { drivingDistanceMetersFromPoint, HQ_ADDRESS } from "../shared/driveTime";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
   nextVisitDate,
@@ -59,6 +59,12 @@ import { resumeVisitChange } from "../shared/visitChange";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
 import { isServiceMonth } from "../shared/season";
+import {
+  assertDispatchFacts,
+  normalizePropertyClass,
+  onsiteMinutesFor,
+  proveRoutable,
+} from "../shared/dispatchReadiness";
 import { ensureObligation } from "../shared/obligations";
 import {
   openMissingContactWork,
@@ -192,6 +198,44 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         )
       );
     }
+    case "reportScopeMismatch": {
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      await assertOfficeFieldAccess(
+        event.identity,
+        "reportScopeMismatch",
+        event.arguments.jobId!,
+        event.arguments.officeReason
+      );
+      return reportVisitNotPerformed("SCOPE_MISMATCH", {
+        jobId: event.arguments.jobId!,
+        reason: event.arguments.reason ?? "",
+        note: event.arguments.note,
+        photoKey: event.arguments.photoKey,
+      });
+    }
+    case "reportPrepMissing": {
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      await assertOfficeFieldAccess(
+        event.identity,
+        "reportPrepMissing",
+        event.arguments.jobId!,
+        event.arguments.officeReason
+      );
+      return reportVisitNotPerformed("PREP_MISSING", {
+        jobId: event.arguments.jobId!,
+        reason: event.arguments.reason ?? "",
+        note: event.arguments.note,
+        photoKey: event.arguments.photoKey,
+      });
+    }
+    case "acknowledgePacket": {
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      return acknowledgePacket(
+        event.identity,
+        event.arguments.jobId!,
+        (event.arguments as { version?: number }).version ?? 0
+      );
+    }
     case "reportNoAccess": {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       await assertOfficeFieldAccess(
@@ -289,7 +333,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "updateJobPacket": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
-      return updateJobPacket(event.arguments);
+      return updateJobPacket(event.identity, event.arguments);
     }
     case "rebookJob": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
@@ -518,6 +562,37 @@ async function runWorkVerifier(
         message:
           "Record a current licence for this technician (or offboard them and reassign their work) — then confirm.",
       };
+    }
+    case "DISPATCH_READY": {
+      // GL-12: re-run the pure dispatch facts + staffing agreement for the
+      // visit. Green only when it would actually pass the gate today.
+      const { data: job } = await client.models.Job.get({ id: item.relatedId });
+      if (!job) return { ok: false, message: "The visit could not be read." };
+      if (
+        job.status === "CANCELED" ||
+        job.status === "COMPLETED" ||
+        job.status === "NO_ACCESS" ||
+        job.status === "SCOPE_MISMATCH" ||
+        job.status === "PREP_MISSING"
+      ) {
+        return { ok: true, message: "" };
+      }
+      const { data: cust } = await client.models.Customer.get({
+        id: job.customerId,
+      });
+      if (!cust) return { ok: false, message: "The customer could not be read." };
+      try {
+        assertDispatchFacts(cust, {
+          propertyClass: job.propertyClass,
+          serviceType: job.serviceType,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          message: err instanceof Error ? err.message : "Not dispatch-ready.",
+        };
+      }
+      return { ok: true, message: "" };
     }
     case "PLAN_CANCELLATION_SETTLED": {
       // GL-08 R4: the same settlement check the auto-resolve uses, so the case
@@ -1078,10 +1153,16 @@ async function createOfficeJob(args: Args) {
   if (!customer) throw new Error(`Customer ${customerId} not found`);
   // A job created with a service date is already dispatch-bound — it lands
   // SCHEDULED and shows up on the board to be routed. Hold it to the same
-  // deliverable-address minimum as assignment, so the gap can never be created
-  // in the first place. A date-less job (scheduled later) is allowed through;
-  // updateJobSchedule enforces the address before it can reach a technician.
-  if (args.scheduledDate) assertDeliverableAddress(customer);
+  // dispatch facts as assignment (routable MA/RI address, no placeholders,
+  // explicit property classification), so the gap can never be created in the
+  // first place. A date-less job (scheduled later) is allowed through;
+  // updateJobSchedule enforces the full gate before it can reach a technician.
+  if (args.scheduledDate) {
+    assertDispatchFacts(customer, {
+      propertyClass: (args as { propertyClass?: string | null }).propertyClass,
+      serviceType,
+    });
+  }
   if (args.servicePlanId) {
     const { data: plan } = await client.models.ServicePlan.get({
       id: args.servicePlanId,
@@ -1122,6 +1203,11 @@ async function createOfficeJob(args: Args) {
     scheduledDate: args.scheduledDate || undefined,
     timeWindow: args.timeWindow?.trim() || undefined,
     ...packetFields(args),
+    propertyClass:
+      normalizePropertyClass(
+        (args as { propertyClass?: string | null }).propertyClass
+      ) ?? undefined,
+    packetVersion: 1,
     accessGroups: customerAccessGroups(customerId, customer.groupId),
   });
   if (!created) {
@@ -1143,11 +1229,14 @@ function assertJobCanBeScheduled(job: { status?: string | null }) {
   // note, and door photo are evidence that the attempt happened. Reusing the
   // row (assign flipping it back to SCHEDULED) destroys that record. Rebooking
   // is a new, linked visit — see rebookJob — never a mutation of this one.
-  if (job.status === "NO_ACCESS" || job.status === "CANCELED") {
+  if (
+    job.status === "NO_ACCESS" ||
+    job.status === "SCOPE_MISMATCH" ||
+    job.status === "PREP_MISSING" ||
+    job.status === "CANCELED"
+  ) {
     throw new Error(
-      `A ${
-        job.status === "NO_ACCESS" ? "no-access" : "canceled"
-      } visit is a terminal record and cannot be reused — rebook it to create a new linked visit`
+      "This visit reached a terminal outcome and cannot be reused — rebook it to create a new linked visit"
     );
   }
 }
@@ -1344,11 +1433,22 @@ async function updateJobSchedule(
         client.models.Route.get({ id: args.routeId }),
         client.models.Customer.get({ id: job.customerId }),
       ]);
-    // GL-12: the job cannot be routed to a technician without a deliverable
-    // address. Checked before the technician's own credential so the office
-    // sees every blocker, and never bypassable — there is no override branch.
+    // GL-12: the job cannot be routed to a technician without the full
+    // dispatch facts — a routable MA/RI address (no placeholders), an explicit
+    // property classification (the locked 30/60-minute durations hang off it),
+    // and a Google Routes drive-time proof attached to the decision. Checked
+    // before the technician's own credential so the office sees every blocker,
+    // and never bypassable — there is no override branch.
     if (!customer) throw new Error(`Customer ${job.customerId} no longer exists`);
-    assertDeliverableAddress(customer);
+    assertDispatchFacts(customer, {
+      propertyClass: job.propertyClass,
+      serviceType: job.serviceType,
+    });
+    const routeProof = await proveRoutable(
+      process.env.GOOGLE_ROUTES_API_KEY,
+      HQ_ADDRESS,
+      customer
+    );
     if (!technician) throw new Error(`Technician ${args.technicianId} not found`);
     if (!technician.active) {
       throw new Error(
@@ -1397,6 +1497,12 @@ async function updateJobSchedule(
       routeOrder: args.routeOrder ?? 1,
       scheduledDate: args.scheduledDate,
       status: "SCHEDULED",
+      ...(routeProof
+        ? {
+            dispatchDriveMinutes: routeProof.driveMinutes,
+            dispatchRouteCheckedAt: routeProof.checkedAt,
+          }
+        : {}),
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
     return finish(
@@ -1508,19 +1614,37 @@ async function updateJobSchedule(
   throw new Error(`Unknown scheduling operation: ${args.operation ?? ""}`);
 }
 
+/** The packet fields whose change is MATERIAL — safety/access/scope/prep. A
+ *  material change after service starts needs an audited manager reason. */
+const MATERIAL_PACKET_FIELDS = [
+  "accessInstructions",
+  "hazardNotes",
+  "prepInstructions",
+  "prepConfirmed",
+  "propertyClass",
+] as const;
+
 /**
- * GL-12: write the dispatch packet on an existing job. Deliberately narrow —
- * it only ever touches the four packet fields, never schedule, assignment, or
- * any completion/pesticide-record timestamp. A finalized visit's packet is
- * history, so a completed or terminal job is not editable here.
+ * GL-12: write the dispatch packet on an existing job, VERSIONED. Every change
+ * to a safety/access/scope/prep fact bumps packetVersion, writes one immutable
+ * JobPacketEvent (who, what, before/after), and is brought to the assigned
+ * technician's attention (their app shows the change until they acknowledge
+ * the new version; startJob refuses on an unacknowledged change). A material
+ * change AFTER service started additionally requires a recorded manager
+ * reason. A finalized/terminal visit's packet is history and not editable.
  */
-async function updateJobPacket(args: Args) {
+async function updateJobPacket(
+  identity: AppSyncIdentity | undefined | null,
+  args: Args
+) {
   const client = await dataClient();
   const { data: job } = await client.models.Job.get({ id: args.jobId! });
   if (!job) throw new Error(`Job ${args.jobId} not found`);
   if (
     job.status === "COMPLETED" ||
     job.status === "NO_ACCESS" ||
+    job.status === "SCOPE_MISMATCH" ||
+    job.status === "PREP_MISSING" ||
     job.status === "CANCELED"
   ) {
     throw new Error(
@@ -1528,6 +1652,44 @@ async function updateJobPacket(args: Args) {
     );
   }
   const packet = packetFields(args);
+  const propertyClass = normalizePropertyClass(
+    (args as { propertyClass?: string | null }).propertyClass
+  );
+
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+  const jobAny = job as unknown as Record<string, unknown>;
+  const next: Record<string, unknown> = {
+    accessInstructions: packet.accessInstructions ?? null,
+    hazardNotes: packet.hazardNotes ?? null,
+    prepInstructions: packet.prepInstructions ?? null,
+    prepConfirmed: packet.prepConfirmed ?? null,
+    propertyClass: propertyClass ?? jobAny.propertyClass ?? null,
+  };
+  const changed: string[] = [];
+  for (const f of MATERIAL_PACKET_FIELDS) {
+    const prev = jobAny[f] ?? null;
+    const val = next[f] ?? null;
+    if (JSON.stringify(prev) !== JSON.stringify(val)) {
+      changed.push(f);
+      before[f] = prev;
+      after[f] = val;
+    }
+  }
+
+  // The audited manager gate: a material change after service started needs a
+  // recorded reason — never a silent rewrite under a technician mid-visit.
+  const afterStart = Boolean(job.startedAt);
+  const managerReason = (args as { managerReason?: string | null }).managerReason
+    ?.trim();
+  if (changed.length > 0 && afterStart && !managerReason) {
+    throw new Error(
+      "Service has already started — changing the packet now needs a short manager reason (recorded and shown to the technician)."
+    );
+  }
+
+  const newVersion =
+    changed.length > 0 ? (job.packetVersion ?? 1) + 1 : job.packetVersion ?? 1;
   const { data, errors } = await client.models.Job.update({
     id: job.id,
     // Explicit nulls so clearing a field actually clears it: an office user who
@@ -1537,13 +1699,109 @@ async function updateJobPacket(args: Args) {
     prepInstructions: packet.prepInstructions ?? null,
     prepConfirmed: packet.prepConfirmed ?? null,
     paymentExpectation: packet.paymentExpectation ?? null,
+    ...(propertyClass ? { propertyClass } : {}),
+    ...(changed.length > 0
+      ? { packetVersion: newVersion, packetChangedAt: new Date().toISOString() }
+      : {}),
   });
   if (!data) {
     throw new Error(
       errors?.map((e) => e.message).join("; ") || "Could not update the job packet"
     );
   }
-  return { jobId: data.id };
+
+  let eventRecorded = true;
+  if (changed.length > 0) {
+    try {
+      const { data: ev } = await client.models.JobPacketEvent.create({
+        jobId: job.id,
+        version: newVersion,
+        changedFields: changed.join(", "),
+        beforeJson: JSON.stringify(before),
+        afterJson: JSON.stringify(after),
+        changedBySub: callerSub(identity) ?? undefined,
+        changedByEmail: callerEmail(identity) ?? undefined,
+        afterStart,
+        managerReason: managerReason || undefined,
+        occurredAt: new Date().toISOString(),
+      });
+      eventRecorded = Boolean(ev);
+    } catch (err) {
+      console.error("JobPacketEvent write failed", job.id, err);
+      eventRecorded = false;
+    }
+    if (!eventRecorded) {
+      await openOwnedWork({
+        kind: "ROUTE_MISMATCH",
+        dedupeKey: `packet-audit:${job.id}:${newVersion}`,
+        title: "A packet change could not write its audit record",
+        detail: `Visit ${job.id}'s packet changed to version ${newVersion} (${changed.join(", ")}) but the immutable change record could not be written.`,
+        relatedId: job.id,
+        sourceUrl: "/schedule",
+        resolutionAction:
+          "Reconstruct the packet-change history for this visit from this case.",
+        ownerTeam: "OPS",
+      });
+    }
+    // Bring the change to the assigned technician's attention immediately —
+    // the app also blocks Start until they acknowledge the new version.
+    if (job.technicianId && afterStart) {
+      const { data: tech } = await client.models.Technician.get({
+        id: job.technicianId,
+      });
+      if (tech?.email) {
+        await sendEmail({
+          to: tech.email,
+          subject: "A visit you are on changed — check the packet",
+          template: "tech-packet-changed",
+          relatedId: job.id,
+          html: emailShell(
+            "Your current visit's packet changed",
+            `<p>The office changed ${changed.join(", ")} on the visit you started${managerReason ? `: ${managerReason}` : ""}. Open the job in the app and review before continuing.</p>`
+          ),
+        });
+      }
+    }
+  }
+  return {
+    jobId: data.id,
+    packetVersion: newVersion,
+    changedFields: changed,
+    eventRecorded,
+  };
+}
+
+/**
+ * GL-12 — the technician's acknowledgement of the packet version they read.
+ * Only the ASSIGNED technician's own identity can acknowledge (office cannot
+ * ack on their behalf), and the watermark never moves backwards.
+ */
+async function acknowledgePacket(
+  identity: AppSyncIdentity | undefined | null,
+  jobId: string,
+  version: number
+) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+  const tech = await technicianForCaller(identity);
+  if (!tech || job.technicianId !== tech.id) {
+    throw new Error(
+      "Only the assigned technician can acknowledge their packet — the point is that THEY read it."
+    );
+  }
+  const current = job.packetVersion ?? 1;
+  const ackTo = Math.min(version || current, current);
+  if ((job.packetAckVersion ?? 0) >= ackTo) {
+    return { jobId, packetAckVersion: job.packetAckVersion ?? 0, already: true };
+  }
+  const { data } = await client.models.Job.update({
+    id: jobId,
+    packetAckVersion: ackTo,
+    packetAckAt: new Date().toISOString(),
+  });
+  if (!data) throw new Error("Could not record the acknowledgement");
+  return { jobId, packetAckVersion: ackTo, already: false };
 }
 
 /**
@@ -1563,9 +1821,14 @@ async function rebookJob(
   const client = await dataClient();
   const { data: job } = await client.models.Job.get({ id: jobId });
   if (!job) throw new Error(`Job ${jobId} not found`);
-  if (job.status !== "NO_ACCESS" && job.status !== "CANCELED") {
+  if (
+    job.status !== "NO_ACCESS" &&
+    job.status !== "SCOPE_MISMATCH" &&
+    job.status !== "PREP_MISSING" &&
+    job.status !== "CANCELED"
+  ) {
     throw new Error(
-      "Only a no-access or canceled visit is rebooked — a live job is scheduled, and a completed one stays on the record"
+      "Only a visit that reached a terminal outcome (no access, scope mismatch, prep missing, canceled) is rebooked — a live job is scheduled, and a completed one stays on the record"
     );
   }
   const rebookedJobId = `rebook-${job.id}`;
@@ -1618,14 +1881,22 @@ async function resolveRebookedNoAccessWork(
   actorSub: string | null,
   actorEmail: string | null
 ) {
-  if (sourceJob.status !== "NO_ACCESS") return;
+  const kind =
+    sourceJob.status === "NO_ACCESS"
+      ? ("NO_ACCESS" as const)
+      : sourceJob.status === "SCOPE_MISMATCH"
+        ? ("SCOPE_MISMATCH" as const)
+        : sourceJob.status === "PREP_MISSING"
+          ? ("PREP_MISSING" as const)
+          : null;
+  if (!kind) return;
   const client = await dataClient();
   if (!("WorkItem" in client.models) || !("WorkEvent" in client.models)) return;
   try {
     await updateOwnedWork({
-      workItemId: workItemId("NO_ACCESS", sourceJob.id),
+      workItemId: workItemId(kind, sourceJob.id),
       action: "RESOLVE",
-      note: `Rebooked as linked visit ${rebookedJobId}; the original no-access record remains unchanged.`,
+      note: `Rebooked as linked visit ${rebookedJobId}; the original record remains unchanged.`,
       actorSub,
       actorEmail,
       // The rebook IS the verified event — close as verified, not as a note.
@@ -3052,6 +3323,13 @@ async function startJob(jobId: string) {
   if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") {
     throw new Error(`Can't start a ${job.status.toLowerCase()} job`);
   }
+  // GL-12: a packet change since assignment must reach the technician BEFORE
+  // work starts — the app shows the change; acknowledging it unblocks Start.
+  if ((job.packetVersion ?? 1) > 1 && (job.packetAckVersion ?? 0) < (job.packetVersion ?? 1)) {
+    throw new Error(
+      "The job packet changed since it was assigned — review the change in the packet and tap Acknowledge before starting."
+    );
+  }
   if (!job.technicianId) {
     throw new Error("This regulated job has no assigned technician");
   }
@@ -3364,6 +3642,155 @@ async function reportNoAccess(args: {
   });
 
   return { jobId: args.jobId, status: "NO_ACCESS", alreadyReported: false };
+}
+
+/** GL-12 — controlled reasons for the two honest one-tap exits. */
+const SCOPE_MISMATCH_LABEL: Record<string, string> = {
+  DIFFERENT_PEST: "The pest on site isn't the pest on the work order",
+  DIFFERENT_PROPERTY: "The property/structure doesn't match the work order",
+  WRONG_SERVICE_SOLD: "The sold service can't address what's on site",
+  OUT_OF_SCOPE_AREA: "The area needing treatment isn't in the sold scope",
+};
+const PREP_MISSING_LABEL: Record<string, string> = {
+  AREAS_NOT_CLEARED: "The areas to treat weren't cleared or prepared",
+  PETS_NOT_SECURED: "Pets weren't secured",
+  OCCUPANTS_PRESENT: "Occupants present who needed to vacate",
+  PREP_NOT_DONE: "The required preparation visibly wasn't done",
+};
+
+/**
+ * GL-12 — the technician's honest one-tap exit when the visit cannot
+ * legitimately proceed: SCOPE_MISMATCH (the work on the packet isn't the work
+ * the site needs) or PREP_MISSING (the required customer prep didn't happen).
+ * Mirrors reportNoAccess: never writes startedAt/completedAt or a report,
+ * frees the day's capacity (off the route), preserves the money facts
+ * (paidAt stays for the office decision), opens an owned Operations case, and
+ * sends the customer the approved next step (or opens missing-contact work).
+ * Idempotent — re-reporting the same exit returns the recorded state.
+ */
+async function reportVisitNotPerformed(
+  kind: "SCOPE_MISMATCH" | "PREP_MISSING",
+  args: {
+    jobId: string;
+    reason: string;
+    note?: string | null;
+    photoKey?: string | null;
+  }
+) {
+  const labels = kind === "SCOPE_MISMATCH" ? SCOPE_MISMATCH_LABEL : PREP_MISSING_LABEL;
+  const label = labels[args.reason];
+  if (!label) {
+    throw new Error(
+      `Unknown reason "${args.reason}" — use one of: ${Object.keys(labels).join(", ")}`
+    );
+  }
+
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: args.jobId });
+  if (!job) throw new Error(`Job ${args.jobId} not found`);
+  if (job.status === kind) {
+    return { jobId: args.jobId, status: kind, alreadyReported: true };
+  }
+  if (job.status === "COMPLETED") {
+    throw new Error(
+      "This job is already completed — if that was a mistake, tell the office rather than overwriting it"
+    );
+  }
+  if (job.status === "CANCELED") {
+    throw new Error("This job was canceled — nothing to report against it");
+  }
+
+  const nowIso = new Date().toISOString();
+  const { data: updated, errors } = await client.models.Job.update({
+    id: args.jobId,
+    status: kind,
+    notPerformedReason: args.reason,
+    notPerformedAt: nowIso,
+    notPerformedNote: args.note?.trim() || undefined,
+    notPerformedPhotoKey: args.photoKey ?? undefined,
+    // Off the route: the stop is done for today and the day's capacity frees.
+    routeId: null,
+    routeOrder: null,
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not record the outcome: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+
+  const [{ data: customer }, { data: technician }] = await Promise.all([
+    client.models.Customer.get({ id: job.customerId }),
+    job.technicianId
+      ? client.models.Technician.get({ id: job.technicianId })
+      : Promise.resolve({ data: null }),
+  ]);
+
+  const isScope = kind === "SCOPE_MISMATCH";
+  await openOwnedWork({
+    kind,
+    dedupeKey: job.id,
+    title: isScope
+      ? `Scope doesn't match: ${customer?.displayName ?? job.customerId}`
+      : `Required prep missing: ${customer?.displayName ?? job.customerId}`,
+    detail: `${label}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}. No service was performed${job.paidAt ? "; the visit was already paid up front and that money fact is preserved" : " and no charge was made"}.`,
+    customerId: job.customerId,
+    relatedId: job.id,
+    sourceUrl: `/customers/${job.customerId}`,
+    resolutionAction: isScope
+      ? "Review what the site actually needs, correct the service/scope (and price if needed) with the customer, then rebook the corrected visit or settle the money."
+      : "Confirm the prep steps with the customer, then rebook the visit once they're ready. The office decides any money outcome — the technician made no charge.",
+    ownerTeam: "OPS",
+  });
+
+  // The approved customer next step — one business day, plainly said. A
+  // customer with no email becomes owned missing-contact work instead of a
+  // silent gap.
+  if (customer?.email) {
+    await sendEmail({
+      to: customer.email,
+      subject: isScope
+        ? "About today's visit — we need to adjust your service"
+        : "About today's visit — we couldn't treat yet",
+      template: isScope ? "scope-mismatch-next-step" : "prep-missing-next-step",
+      customerId: customer.id,
+      relatedId: job.id,
+      html: emailShell(
+        isScope ? "We need to adjust your service" : "We couldn't treat today",
+        `<p>Hi ${customer.contactName ?? customer.displayName},</p>
+         ${
+           isScope
+             ? `<p>Our technician visited today and found the situation on site isn't what your booked service covers (${label.toLowerCase()}). No work was performed${job.paidAt ? ", and your payment stays attached to your visit while we sort this out" : " and you were not charged"}.</p>
+                <p><strong>We'll contact you within one business day</strong> with the right service and next steps.</p>`
+             : `<p>Our technician visited today but couldn't treat because the preparation steps weren't in place (${label.toLowerCase()}).${job.prepInstructions ? ` As a reminder: ${job.prepInstructions}` : ""}</p>
+                <p>No work was performed${job.paidAt ? ", and your payment stays attached to your visit" : " and you were not charged"}. <strong>We'll contact you within one business day</strong> to reschedule once you're ready.</p>`
+         }
+         <p style="color:#666;font-size:13px;">Questions? Just reply to this email.</p>`
+      ),
+    });
+  } else {
+    await openMissingContactWork({
+      customerId: job.customerId,
+      displayName: customer?.displayName ?? job.customerId,
+      context: isScope
+        ? "A scope-mismatch visit outcome needs to reach the customer."
+        : "A prep-missing visit outcome needs to reach the customer.",
+    });
+  }
+
+  await notifyOffice({
+    subject: `${isScope ? "Scope mismatch" : "Prep missing"}: ${customer?.displayName ?? job.customerId} — ${label}`,
+    heading: isScope
+      ? "A visit's scope doesn't match the site"
+      : "A visit's required prep wasn't done",
+    template: isScope ? "ops-scope-mismatch" : "ops-prep-missing",
+    customerId: job.customerId,
+    relatedId: job.id,
+    bodyHtml: `<p><strong>${technician?.name ?? "A technician"}</strong> attended <strong>${customer?.displayName ?? "this customer"}</strong> for ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} and made the honest exit: <strong>${label}</strong>${args.note?.trim() ? ` — ${args.note.trim()}` : ""}.</p>
+       <p>No service was started or completed, no report filed, no new charge.${job.paidAt ? " The visit was already paid online — that money is preserved for your decision." : ""} The customer has been told we'll follow up within one business day.</p>
+       <p style="margin:20px 0;"><a href="${CRM_URL()}/customers/${job.customerId}" style="background:#176b2c;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open the customer</a></p>`,
+  });
+
+  return { jobId: args.jobId, status: kind, alreadyReported: false };
 }
 
 /** Presigned PUT for the door photo. The job has no report to hang it off. */

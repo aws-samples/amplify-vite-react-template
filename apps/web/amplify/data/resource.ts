@@ -73,6 +73,15 @@ export const schema = a.schema({
     // report, no charge, no next visit queued. Without this the only way to
     // clear the screen was to file a report for a visit that never happened.
     "NO_ACCESS",
+    // GL-12 — the technician arrived and the work on the packet is not the
+    // work the site needs (wrong service sold, different pest/structure), or
+    // the required customer prep visibly did not happen. Both are honest
+    // one-tap terminal exits that never start or complete service: capacity
+    // frees, money facts (paidAt) are preserved for the office decision, an
+    // owned Operations case opens, and the customer gets the approved next
+    // step. Rebooking is a NEW linked visit, like NO_ACCESS.
+    "SCOPE_MISMATCH",
+    "PREP_MISSING",
     "CANCELED",
   ]),
   NoAccessReason: a.enum([
@@ -208,6 +217,10 @@ export const schema = a.schema({
     // GL-17: a licence is expiring/expired — advance renewal or reassignment
     // work opened before service dates arrive.
     "LICENSE_LAPSE",
+    // GL-12: honest field exits and the day-before readiness gate.
+    "SCOPE_MISMATCH",
+    "PREP_MISSING",
+    "DISPATCH_NOT_READY",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -965,6 +978,31 @@ export const schema = a.schema({
       // it retries. The original stays immutable; this links the new attempt
       // to it so the history reads as a chain, not a reused row.
       rebookedFromJobId: a.id(),
+      // GL-12 — evidence for the SCOPE_MISMATCH / PREP_MISSING one-tap exits:
+      // what the technician found, when, an optional site photo. Mirrors the
+      // noAccess* block; the status says which exit it was.
+      notPerformedReason: a.string(),
+      notPerformedAt: a.datetime(),
+      notPerformedNote: a.string(),
+      notPerformedPhotoKey: a.string(),
+      // GL-12 — explicit property classification, because the locked on-site
+      // durations (residential 30 min; commercial and community/common-area 60)
+      // and pricing depend on it: RESIDENTIAL | COMMERCIAL | COMMUNITY. Required
+      // at dispatch; the shared dispatchReadiness module derives onsiteMinutes.
+      propertyClass: a.string(),
+      // GL-12 — the Google Routes result attached to the dispatch decision:
+      // drive minutes from base at assignment time, and when it was checked.
+      // The same source capacity uses, persisted so the decision is auditable.
+      dispatchDriveMinutes: a.integer(),
+      dispatchRouteCheckedAt: a.datetime(),
+      // GL-12 — packet versioning: every safety/access/scope/prep change after
+      // assignment bumps the version; the technician's app shows the change and
+      // records their acknowledgement watermark. A post-start material change
+      // additionally requires an audited manager reason (JobPacketEvent).
+      packetVersion: a.integer(),
+      packetChangedAt: a.datetime(),
+      packetAckVersion: a.integer(),
+      packetAckAt: a.datetime(),
       notes: a.string(),
       // GL-12 dispatch packet: job-specific facts captured when the office
       // schedules this visit, so a technician is never sent on a permanent
@@ -1599,6 +1637,30 @@ export const schema = a.schema({
     ]),
 
   /**
+   * GL-12 — the immutable packet-change record. One row per packet version
+   * bump: which fields changed, the before/after values, who changed it, and —
+   * when the change landed after service started — the required manager
+   * reason. Office-read; Lambda-written; no delete.
+   */
+  JobPacketEvent: a
+    .model({
+      jobId: a.id().required(),
+      version: a.integer().required(),
+      changedFields: a.string(),
+      beforeJson: a.json(),
+      afterJson: a.json(),
+      changedBySub: a.string(),
+      changedByEmail: a.string(),
+      afterStart: a.boolean(),
+      managerReason: a.string(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [index("jobId").sortKeys(["occurredAt"])])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
+  /**
    * GL-13 — the assignment/route audit trail. One immutable row per scheduling
    * change (ASSIGN | UNASSIGN | REORDER | CANCEL | RESCHEDULE) and per
    * office/owner emergency field action (OFFICE_FIELD_ACTION): who did it, the
@@ -2039,6 +2101,7 @@ export const schema = a.schema({
       prepInstructions: a.string(),
       prepConfirmed: a.boolean(),
       paymentExpectation: a.string(),
+      propertyClass: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2060,6 +2123,10 @@ export const schema = a.schema({
       prepInstructions: a.string(),
       prepConfirmed: a.boolean(),
       paymentExpectation: a.string(),
+      propertyClass: a.string(),
+      // GL-12: required when a MATERIAL field changes after service started —
+      // the audited manager gate.
+      managerReason: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2593,6 +2660,52 @@ export const schema = a.schema({
     .handler(a.handler.function(crmDocs)),
 
   /** Presigned PUT for the no-access door photo, before the job has a report. */
+  /**
+   * GL-12 — the technician's honest one-tap exits when the visit cannot
+   * legitimately proceed: the work on the packet is not the work the site
+   * needs (SCOPE_MISMATCH), or the required customer prep visibly did not
+   * happen (PREP_MISSING). Neither starts nor completes service; capacity
+   * frees, money facts are preserved for the office, an owned Operations case
+   * opens, and the customer receives the approved next step.
+   */
+  reportScopeMismatch: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      reason: a.string().required(),
+      note: a.string(),
+      photoKey: a.string(),
+      officeReason: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  reportPrepMissing: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      reason: a.string().required(),
+      note: a.string(),
+      photoKey: a.string(),
+      officeReason: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** GL-12 — the technician's acknowledgement of the packet version they have
+   *  read. Stamped from the signed-in identity; office cannot ack for them. */
+  acknowledgePacket: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      version: a.integer().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
   getNoAccessPhotoUploadUrl: a
     .mutation()
     .arguments({
