@@ -1508,36 +1508,6 @@ async function cancel(body: Record<string, unknown>) {
     };
   }
 
-  // The visit's REAL state gates everything: a completed (billed, legally
-  // reported) or underway visit is never cancelable from the emailed link,
-  // and that refusal must come BEFORE the plan cancel and the refund — a
-  // late click must not refund a performed visit and then 409.
-  if (booking.jobId) {
-    const { data: gateJob, errors: gateErrors } = await client.models.Job.get({
-      id: booking.jobId,
-    });
-    if (gateErrors?.length) {
-      // FAIL CLOSED before any money moves: an unverifiable visit state must
-      // not be refunded on hope.
-      throw new HttpError(503, {
-        error: `We couldn't check your visit just now — nothing was changed. Please try again in a moment, or call us at ${SUPPORT_PHONE}.`,
-      });
-    }
-    if (
-      gateJob &&
-      gateJob.status !== "SCHEDULED" &&
-      gateJob.status !== "UNSCHEDULED" &&
-      gateJob.status !== "CANCELED"
-    ) {
-      throw new HttpError(409, {
-        error:
-          gateJob.status === "IN_PROGRESS"
-            ? `Your technician is already on this visit — call us at ${SUPPORT_PHONE} and we'll help right away.`
-            : `This visit has already taken place, so it can't be canceled online — if something's wrong, call us at ${SUPPORT_PHONE}.`,
-      });
-    }
-  }
-
   // Stamp the attempt before anything that can fail. This is what makes a
   // retry safe for the customer: if Stripe is down today and they succeed
   // tomorrow, `judgedOn` above still reads today and they keep their refund.
@@ -1573,6 +1543,40 @@ async function cancel(body: Record<string, unknown>) {
   // `judgedOn` above, so a customer whose cancellation succeeds is unaffected —
   // the date only matters to a later retry. If the cancellation below also
   // fails, its alert carries the date and says it was not saved.
+
+  // The visit's REAL state gates everything money-shaped: a completed
+  // (billed, legally reported) or underway visit is never cancelable from
+  // the emailed link, and that refusal comes BEFORE the plan cancel and the
+  // refund. It also comes AFTER the attempt date was stamped — a refusal or
+  // read fault today must not cost the customer the refund their FIRST
+  // attempt was entitled to when they retry.
+  if (booking.jobId) {
+    const { data: gateJob, errors: gateErrors } = await client.models.Job.get({
+      id: booking.jobId,
+    });
+    if (gateErrors?.length) {
+      // FAIL CLOSED before any money moves: an unverifiable visit state must
+      // not be refunded on hope. The attempt date above is already recorded.
+      throw new HttpError(503, {
+        error: `We couldn't check your visit just now — nothing was changed. Please try again in a moment, or call us at ${SUPPORT_PHONE}.`,
+        cancellationRecordedOn: requestedOn,
+        reassurance: `We've recorded that you asked to cancel on ${requestedOn}${refundable ? ", so your full refund still applies even though this didn't go through" : ""}.`,
+      });
+    }
+    if (
+      gateJob &&
+      gateJob.status !== "SCHEDULED" &&
+      gateJob.status !== "UNSCHEDULED" &&
+      gateJob.status !== "CANCELED"
+    ) {
+      throw new HttpError(409, {
+        error:
+          gateJob.status === "IN_PROGRESS"
+            ? `Your technician is already on this visit — call us at ${SUPPORT_PHONE} and we'll help right away.`
+            : `This visit has already taken place, so it can't be canceled online — if something's wrong, call us at ${SUPPORT_PHONE}.`,
+      });
+    }
+  }
 
   try {
     // Stop the recurring billing BEFORE anything else and before we tell the
@@ -1662,7 +1666,7 @@ async function cancel(body: Record<string, unknown>) {
       // a thrown error that would wedge the booking BOOKED with a refund
       // out and nobody told. The terminal record stands untouched.
       if (cancelJob.status !== "SCHEDULED" && cancelJob.status !== "UNSCHEDULED") {
-        await openOwnedWork({
+        const conflictCase = await openOwnedWork({
           kind: "VISIT_CHANGE_RECOVERY",
           dedupeKey: `completed-after-cancel:${booking.jobId}`,
           title: `A customer's cancel crossed the visit being performed: ${booking.name ?? booking.email ?? booking.id}`,
@@ -1675,7 +1679,19 @@ async function cancel(body: Record<string, unknown>) {
           resolutionAction:
             "Compare the refund against the visit's recorded outcome and settle the invoice one way — then close this.",
           ownerTeam: "FINANCE",
-        }).catch(() => undefined);
+        }).catch(() => null);
+        if (!conflictCase) {
+          // No durable case: page the office urgently — a refund issued for
+          // performed work must never disappear into a console log.
+          await notifyOffice({
+            subject: `URGENT — refund may conflict with a performed visit: booking ${booking.id}`,
+            heading: "A cancellation's refund crossed the visit being performed",
+            template: "ops-funnel-cancel-conflict",
+            customerId: booking.customerId ?? undefined,
+            relatedId: booking.jobId,
+            bodyHtml: `<p>Booking ${booking.id}'s cancellation${refundable ? " issued a full refund" : ""} while visit ${booking.jobId} went ${cancelJob.status}, and the Finance case could not be written. Reconcile the money now.</p>`,
+          }).catch(() => undefined);
+        }
         jobCancelSettled = true;
         break;
       }
