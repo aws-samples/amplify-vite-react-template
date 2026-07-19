@@ -96,7 +96,50 @@ async function correctOriginRecord(
   const client = await dataClient();
   const isReport = meta.template === "service-report";
   const isAmendment = meta.template === "service-report-amendment";
-  if (!isReport && !isAmendment) return;
+  const isBookingConfirm = meta.template === "booking-confirmation";
+  if (!isReport && !isAmendment && !isBookingConfirm) return;
+
+  // GL-05: the booking's confirmation state is corrected on the booking row
+  // itself — a bounce reopens the finalization communication outcome as owned
+  // work with a booking-shaped resend action, never only a general log line.
+  if (isBookingConfirm) {
+    try {
+      if (!("BookingRequest" in client.models)) return;
+      const { data: bk } = await client.models.BookingRequest.get({
+        id: meta.relatedId,
+      });
+      if (!bk) return;
+      const current = bk.confirmationDeliveryStatus ?? null;
+      if (
+        current === "ALTERNATE_DELIVERED" ||
+        (outcome === "DELIVERED" &&
+          (current === "BOUNCED" || current === "COMPLAINED"))
+      ) {
+        return;
+      }
+      await client.models.BookingRequest.update({
+        id: meta.relatedId,
+        confirmationDeliveryStatus: outcome,
+      });
+      if (outcome !== "DELIVERED") {
+        await openOwnedWork({
+          kind: "EMAIL_FAILURE",
+          dedupeKey: `booking-confirm-delivery:${meta.relatedId}`,
+          title: "A booking confirmation bounced — the customer doesn't have it",
+          detail: `${detail} The booking's confirmation (and attached agreement) did not reach the customer; its delivery state has been corrected.`,
+          customerId: meta.customerId ?? undefined,
+          relatedId: meta.relatedId,
+          sourceUrl: meta.customerId ? `/customers/${meta.customerId}` : "/work",
+          resolutionAction:
+            "Correct the address and re-send the exact confirmation + agreement, or record the approved alternate delivery.",
+          ownerTeam: "OPS",
+        });
+      }
+    } catch (err) {
+      console.error("booking confirmation correction failed", meta.relatedId, err);
+    }
+    return;
+  }
   try {
     // Branched (not a model-union) — naming the two model client types in one
     // expression trips tsc's inference-depth ceiling.

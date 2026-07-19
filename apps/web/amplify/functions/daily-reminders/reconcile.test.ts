@@ -17,6 +17,7 @@ const agreements = new Set<string>();
 const plans = new Set<string>();
 let stripePis: Record<string, unknown>[] = [];
 let stripeThrows = false;
+let stripeHasMoreAlways = false;
 
 const has = (set: Set<string>, id: string) => (set.has(id) ? { id } : null);
 
@@ -37,7 +38,7 @@ vi.mock("../shared/stripeClient", () => ({
     paymentIntents: {
       list: async () => {
         if (stripeThrows) throw new Error("stripe down");
-        return { data: stripePis, has_more: false };
+        return { data: stripePis, has_more: stripeHasMoreAlways };
       },
     },
   }),
@@ -200,5 +201,38 @@ describe("scheduled paid-booking reconciliation", () => {
 
     expect(res).toMatchObject({ reconciled: false, reason: "stripe-unavailable" });
     expect(opened.find((o) => o.dedupeKey === "recon-stripe-unavailable")).toBeDefined();
+  });
+});
+
+describe("GL-05 — a truncated scan can never report green", () => {
+  it("opens owned work, resolves nothing, and returns not-ok when the Stripe scan truncates", async () => {
+    bookings = [
+      {
+        id: "bh",
+        status: "BOOKED",
+        stripePaymentIntentId: "pi_h",
+        amountCents: 31300,
+        customerId: "c1",
+        jobId: "j1",
+        agreementId: "a1",
+      },
+    ];
+    invoices = [{ id: "booking-bh", status: "PAID", stripePaymentIntentId: "pi_h" }];
+    customers.add("c1");
+    jobs.add("j1");
+    agreements.add("a1");
+    // Force truncation: every page reports has_more with a full page.
+    stripePis = Array.from({ length: 100 }, (_, i) =>
+      succeeded(`pi_${i}`, `b_${i}`, 100)
+    );
+    stripeHasMoreAlways = true;
+
+    const res = await reconcilePaidBookings();
+
+    expect(res).toMatchObject({ reconciled: false, reason: "truncated", ok: false });
+    // The healthy booking was NOT auto-resolved against a partial payment set.
+    expect(resolved).toHaveLength(0);
+    expect(opened.find((o) => o.dedupeKey === "recon-truncated")).toBeTruthy();
+    stripeHasMoreAlways = false;
   });
 });

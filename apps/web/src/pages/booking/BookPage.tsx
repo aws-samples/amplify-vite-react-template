@@ -11,6 +11,8 @@ import {
 import SEO from "../../components/SEO";
 import {
   bookVisit,
+  checkBookingStatus,
+  type BookingStatusResponse,
   type BookingTerms,
   type PricedQuote,
 } from "../../lib/bookingApi";
@@ -59,7 +61,13 @@ export default function BookPage() {
 
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [chargedAmountCents, setChargedAmountCents] = useState<number | null>(null);
-  const [succeeded, setSucceeded] = useState(false);
+  // GL-05: the payment provider saying "succeeded" is NOT a booking. The page
+  // shows a truthful "Payment received — finalizing" state and only says
+  // "You're booked" once /booking-status confirms the complete commitment.
+  const [finalizing, setFinalizing] = useState(false);
+  const [booked, setBooked] = useState<BookingStatusResponse | null>(null);
+  const [recoveryMsg, setRecoveryMsg] = useState<string | null>(null);
+  const [statusToken, setStatusToken] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
 
   const stripePromise = useMemo(
@@ -76,8 +84,82 @@ export default function BookPage() {
       ),
     []
   );
+  // GL-05: the durable identifiers — a reload or redirect lands back on the
+  // same server-confirmed outcome instead of "nothing to check out yet".
+  const urlBookingRef = useMemo(() => {
+    const p = new URLSearchParams(window.location.search);
+    const bookingId = p.get("booking");
+    const t = p.get("t");
+    return bookingId && t ? { bookingId, t } : null;
+  }, []);
+
+  /** Enter the truthful finalizing state and poll until the server confirms. */
+  function enterFinalizing(bookingId: string, token: string) {
+    window.history.replaceState(
+      null,
+      "",
+      `/book?booking=${encodeURIComponent(bookingId)}&t=${encodeURIComponent(token)}`
+    );
+    setStatusToken(token);
+    setFinalizing(true);
+    void pollBookingStatus(bookingId, token);
+  }
+
+  async function pollBookingStatus(bookingId: string, token: string) {
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const res = await checkBookingStatus({ bookingId, statusToken: token });
+      if (res.ok) {
+        const body = res.body;
+        if (body.state === "BOOKED") {
+          setBooked(body);
+          setFinalizing(false);
+          clearFunnelState(window.sessionStorage);
+          return;
+        }
+        if (body.state === "RECOVERY") {
+          setRecoveryMsg(
+            body.message ??
+              `Your payment went through and our team is completing your booking — you will not be charged twice. We'll confirm by email, or call ${OFFICE_PHONE}.`
+          );
+          setFinalizing(false);
+          return;
+        }
+        if (body.state === "PAYMENT_FAILED") {
+          setFinalizing(false);
+          setError(
+            body.reason ??
+              "Your payment wasn't completed — no charge was made. You can try again."
+          );
+          return;
+        }
+        if (body.state === "CANCELED") {
+          setFinalizing(false);
+          setFatal({
+            message: "This booking was canceled.",
+            offerFreshQuote: true,
+          });
+          return;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+    // Poll budget exhausted: the money moved; the booking is being completed.
+    // Owned, honest copy — never an invitation to pay again.
+    setRecoveryMsg(
+      `Your payment was received and your booking is being completed. You will not be charged twice — we'll email your confirmation shortly, or call ${OFFICE_PHONE}.`
+    );
+    setFinalizing(false);
+  }
 
   useEffect(() => {
+    // Durable resume: the URL identifies the booking, the server has the
+    // truth. Works after reload, redirect, or a cleared session.
+    if (urlBookingRef && !returnSecret) {
+      setFinalizing(true);
+      setStatusToken(urlBookingRef.t);
+      void pollBookingStatus(urlBookingRef.bookingId, urlBookingRef.t);
+      return;
+    }
     const stored = loadFunnelState(window.sessionStorage);
     if (!stored || !stored.selection) {
       if (!returnSecret) setMissing(true);
@@ -88,6 +170,7 @@ export default function BookPage() {
       setSelection(stored.selection);
       setTerms(stored.quote.terms ?? null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [returnSecret]);
 
   // Resolve the outcome after a redirect round trip.
@@ -108,8 +191,17 @@ export default function BookPage() {
       }
       if (paymentIntent.status === "succeeded") {
         setChargedAmountCents(paymentIntent.amount);
-        setSucceeded(true);
-        clearFunnelState(window.sessionStorage);
+        // GL-05: provider success is not a booking — confirm with the server.
+        const stored = loadFunnelState(window.sessionStorage);
+        const bookingId = urlBookingRef?.bookingId ?? stored?.quote.bookingId;
+        const token = urlBookingRef?.t ?? stored?.quote.statusToken;
+        if (bookingId && token) {
+          enterFinalizing(bookingId, token);
+        } else {
+          setRecoveryMsg(
+            `Your payment was received and your booking is being completed. We'll email your confirmation shortly, or call ${OFFICE_PHONE}.`
+          );
+        }
       } else if (paymentIntent.status === "processing") {
         setChargedAmountCents(paymentIntent.amount);
         setProcessing(true);
@@ -148,6 +240,7 @@ export default function BookPage() {
     if (result.ok) {
       setClientSecret(result.body.clientSecret);
       setChargedAmountCents(result.body.amountCents);
+      if (result.body.statusToken) setStatusToken(result.body.statusToken);
       return;
     }
 
@@ -189,7 +282,78 @@ export default function BookPage() {
 
   // ── Terminal / empty states ───────────────────────────────────────
 
-  if (succeeded || processing) {
+  // GL-05: "You're booked" renders ONLY from the server-confirmed state — the
+  // complete commitment (customer, job, agreement, invoice, BOOKED) exists.
+  if (booked) {
+    return (
+      <Shell>
+        <div className="bk-confirm">
+          <div className="bk-form-success-icon" aria-hidden="true">
+            <CheckIcon />
+          </div>
+          <div className="bk-eyebrow">Confirmed</div>
+          <h1 className="bk-h2">You&rsquo;re booked.</h1>
+          <div className="bk-quote-card">
+            <div className="bk-quote-card__label">Your visit</div>
+            <div className="bk-quote-card__price">
+              {booked.selectedDate ? formatDay(booked.selectedDate) : "Scheduled"}
+              {booked.selectedWindow ? (
+                <span className="bk-quote-card__per">
+                  {" "}
+                  &bull; {windowLabel(booked.selectedWindow)}
+                </span>
+              ) : null}
+            </div>
+            {booked.amountCents != null ? (
+              <div className="bk-quote-card__meta">
+                {money(booked.amountCents)} paid today
+              </div>
+            ) : null}
+          </div>
+          <p className="bk-body-lead">
+            A confirmation email with your receipt and cancellation link is on
+            its way{booked.email ? ` to ${booked.email}` : ""}.
+          </p>
+        </div>
+      </Shell>
+    );
+  }
+
+  // GL-05: the truthful in-between — payment received, commitment not yet
+  // confirmed. Reload-safe (the URL carries the booking identifiers).
+  if (finalizing) {
+    return (
+      <Shell>
+        <div className="bk-confirm">
+          <div className="bk-eyebrow">Payment received</div>
+          <h1 className="bk-h2">Finalizing your booking&hellip;</h1>
+          <p className="bk-body-lead">
+            Your payment went through and we&rsquo;re completing your booking —
+            this usually takes a few seconds. Don&rsquo;t pay again; this page
+            will update on its own.
+          </p>
+        </div>
+      </Shell>
+    );
+  }
+
+  // GL-05: finalization needs a human — the owned, honest recovery state. The
+  // customer has ONE safe next step and is never invited to pay again.
+  if (recoveryMsg) {
+    return (
+      <Shell>
+        <div className="bk-confirm">
+          <div className="bk-eyebrow">Payment received</div>
+          <h1 className="bk-h2">We&rsquo;re completing your booking.</h1>
+          <div className="bk-notice" role="status">
+            {recoveryMsg}
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (processing) {
     return (
       <Shell>
         <div className="bk-confirm">
@@ -197,12 +361,8 @@ export default function BookPage() {
             <CheckIcon />
           </div>
           {/* GL-06: a processing payment is NOT a booking and NOT paid. Say so. */}
-          <div className="bk-eyebrow">
-            {processing ? "Payment processing" : "Confirmed"}
-          </div>
-          <h1 className="bk-h2">
-            {processing ? "Your slot is held." : <>You&rsquo;re booked.</>}
-          </h1>
+          <div className="bk-eyebrow">Payment processing</div>
+          <h1 className="bk-h2">Your slot is held.</h1>
           {quote && selection && (
             <div className="bk-quote-card">
               <div className="bk-quote-card__label">Your visit</div>
@@ -216,30 +376,19 @@ export default function BookPage() {
               <div className="bk-quote-card__meta">
                 {quote.service}
                 {amountCents != null ? (
-                  <>
-                    {" "}
-                    &bull; {money(amountCents)}{" "}
-                    {processing ? "processing" : "paid today"}
-                  </>
+                  <> &bull; {money(amountCents)} processing</>
                 ) : null}
               </div>
             </div>
           )}
-          {processing ? (
-            <p className="bk-body-lead">
-              Your payment is still processing and your slot is held while it
-              clears. Nothing is confirmed yet and you have not been charged. As
-              soon as it completes, we&rsquo;ll email your confirmation, receipt,
-              and cancellation link. If the payment doesn&rsquo;t go through,
-              we&rsquo;ll email you, no charge will be made, and the slot
-              won&rsquo;t be booked.
-            </p>
-          ) : (
-            <p className="bk-body-lead">
-              A confirmation email with your receipt and cancellation link is on
-              its way.
-            </p>
-          )}
+          <p className="bk-body-lead">
+            Your payment is still processing and your slot is held while it
+            clears. Nothing is confirmed yet and you have not been charged. As
+            soon as it completes, we&rsquo;ll email your confirmation, receipt,
+            and cancellation link. If the payment doesn&rsquo;t go through,
+            we&rsquo;ll email you, no charge will be made, and the slot
+            won&rsquo;t be booked.
+          </p>
         </div>
       </Shell>
     );
@@ -439,9 +588,23 @@ export default function BookPage() {
           >
             <PaymentForm
               payLabel={payLabel}
+              returnParams={
+                quote && (statusToken ?? quote.statusToken)
+                  ? {
+                      bookingId: quote.bookingId,
+                      t: (statusToken ?? quote.statusToken)!,
+                    }
+                  : null
+              }
               onSucceeded={() => {
-                setSucceeded(true);
-                clearFunnelState(window.sessionStorage);
+                const token = statusToken ?? quote?.statusToken;
+                if (quote && token) {
+                  enterFinalizing(quote.bookingId, token);
+                } else {
+                  setRecoveryMsg(
+                    `Your payment was received and your booking is being completed. We'll email your confirmation shortly, or call ${OFFICE_PHONE}.`
+                  );
+                }
               }}
               onProcessing={() => {
                 setProcessing(true);
@@ -461,10 +624,14 @@ export default function BookPage() {
 
 function PaymentForm({
   payLabel,
+  returnParams,
   onSucceeded,
   onProcessing,
 }: {
   payLabel: string;
+  /** GL-05: identifiers baked into the redirect return_url so a redirect
+   *  payment method lands back on the durable, server-confirmed outcome. */
+  returnParams: { bookingId: string; t: string } | null;
   onSucceeded: () => void;
   onProcessing: () => void;
 }) {
@@ -488,7 +655,11 @@ function PaymentForm({
       // payment_intent_client_secret query param resolves the outcome.
       const result = await stripe.confirmPayment({
         elements,
-        confirmParams: { return_url: `${window.location.origin}/book` },
+        confirmParams: {
+          return_url: returnParams
+            ? `${window.location.origin}/book?booking=${encodeURIComponent(returnParams.bookingId)}&t=${encodeURIComponent(returnParams.t)}`
+            : `${window.location.origin}/book`,
+        },
         redirect: "if_required",
       });
       if (result.error) {

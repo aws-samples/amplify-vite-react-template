@@ -126,6 +126,8 @@ export type PricedQuote = {
    * still renders correctly.
    */
   planOnly?: boolean;
+  /** GL-05: the customer token /booking-status authenticates with. */
+  statusToken?: string;
 };
 
 export type ContactQuote = {
@@ -159,6 +161,7 @@ export type BookResponse = {
   clientSecret: string;
   amountCents: number;
   summary: string;
+  statusToken?: string;
 };
 
 export type CancelPreview = {
@@ -324,4 +327,25 @@ export function previewCancel(token: string): Promise<ApiResult<CancelPreview>> 
 /** Actually cancel (refund per policy). */
 export function confirmCancel(token: string): Promise<ApiResult<CancelConfirmed>> {
   return post<CancelConfirmed>("/cancel", { token, confirm: true });
+}
+
+
+/** GL-05 — the server-confirmed post-payment state. */
+export type BookingStatusResponse = {
+  bookingId: string;
+  state: "BOOKED" | "FINALIZING" | "RECOVERY" | "PAYMENT_FAILED" | "CANCELED";
+  selectedDate?: string | null;
+  selectedWindow?: string | null;
+  amountCents?: number | null;
+  email?: string | null;
+  recurring?: boolean;
+  message?: string;
+  reason?: string;
+};
+
+export function checkBookingStatus(input: {
+  bookingId: string;
+  statusToken: string;
+}): Promise<ApiResult<BookingStatusResponse>> {
+  return post<BookingStatusResponse>("/booking-status", input);
 }

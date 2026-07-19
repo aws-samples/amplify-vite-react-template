@@ -9,7 +9,7 @@ import Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
 import { BOOKING_LINK_TOKEN_RE } from "../shared/bookingLink";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
-import { openOwnedWork } from "../shared/ownedWork";
+import { openOwnedWork, workItemId } from "../shared/ownedWork";
 import { contactDueAt, nextContactPhrase } from "../shared/businessHours";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
@@ -280,6 +280,9 @@ export const handler = async (
         })
       );
     }
+    if (path.endsWith("/booking-status")) {
+      return json(headers, await bookingStatus(body));
+    }
     if (path.endsWith("/cancel")) {
       return json(headers, await cancel(body));
     }
@@ -384,6 +387,10 @@ function pricedResponse(booking: StoredQuoteBooking) {
     })),
     expiresAt: booking.expiresAt,
     terms: { version: BOOKING_TERMS_VERSION, text: BOOKING_TERMS_TEXT },
+    // GL-05: the same customer token quoteStatus uses — the funnel carries it
+    // to /booking-status so the post-payment outcome is server-confirmed and
+    // durable across reloads/redirects.
+    statusToken: booking.cancelToken ?? undefined,
   };
 }
 
@@ -392,6 +399,77 @@ function pricedResponse(booking: StoredQuoteBooking) {
  * The token is the booking's existing high-entropy customer token; the
  * response never exposes the lead's contact details.
  */
+/**
+ * GL-05 — the truthful post-payment state, read (never assumed) by the funnel.
+ * Authenticated like quoteStatus: bookingId + the cancel token. Pure read.
+ * States:
+ *   BOOKED     — the complete commitment exists (date/window/amount returned
+ *                for the durable confirmation card).
+ *   FINALIZING — payment reported succeeded/processing; the server has not yet
+ *                confirmed the complete commitment.
+ *   RECOVERY   — an owned PAID_NOT_FINALIZED case exists: the customer sees
+ *                the safe next step and is never invited to pay again.
+ *   PAYMENT_FAILED / CANCELED — their terminal truths.
+ */
+async function bookingStatus(body: Record<string, unknown>) {
+  const bookingId = String(body.bookingId ?? "");
+  const statusToken = String(body.statusToken ?? "");
+  if (!bookingId || !statusToken) {
+    throw new HttpError(400, { error: "Missing booking token." });
+  }
+  const client = await dataClient();
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: bookingId,
+  });
+  if (!booking || booking.cancelToken !== statusToken) {
+    throw new HttpError(404, { error: "Booking not found." });
+  }
+
+  if (booking.status === "BOOKED") {
+    return {
+      bookingId,
+      state: "BOOKED" as const,
+      selectedDate: booking.selectedDate ?? null,
+      selectedWindow: booking.selectedWindow ?? null,
+      amountCents: booking.amountCents ?? null,
+      email: booking.email ?? null,
+      recurring: Boolean(booking.recurring),
+    };
+  }
+  if (booking.status === "CANCELED" || booking.status === "EXPIRED") {
+    return { bookingId, state: "CANCELED" as const };
+  }
+  if (booking.paymentFailedReason && booking.status !== "PROCESSING") {
+    return {
+      bookingId,
+      state: "PAYMENT_FAILED" as const,
+      reason: booking.paymentFailedReason,
+    };
+  }
+
+  // An owned recovery case for this booking means finalization needs a human —
+  // tell the customer the safe truth instead of spinning forever.
+  try {
+    if ("WorkItem" in client.models) {
+      const { data: item } = await client.models.WorkItem.get({
+        id: workItemId("PAID_NOT_FINALIZED", bookingId),
+      });
+      if (item && item.status === "OPEN") {
+        return {
+          bookingId,
+          state: "RECOVERY" as const,
+          message:
+            "Your payment went through and your booking is being completed by our team. You will not be charged twice — we'll confirm by email shortly. Questions? Reply to any BuzzKill email or call the office.",
+        };
+      }
+    }
+  } catch (err) {
+    console.error("bookingStatus: recovery check failed", bookingId, err);
+  }
+
+  return { bookingId, state: "FINALIZING" as const };
+}
+
 async function quoteStatus(
   body: Record<string, unknown>,
   sourceIp: string
@@ -1184,6 +1262,7 @@ async function book(
       return {
         clientSecret: existing.client_secret,
         amountCents,
+        statusToken: booking.cancelToken ?? undefined,
         summary: summaryFor(stored, date, window, recurring),
       };
     }
@@ -1239,6 +1318,7 @@ async function book(
   return {
     clientSecret: intent.client_secret,
     amountCents,
+    statusToken: booking.cancelToken ?? undefined,
     summary: summaryFor(stored, date, window, recurring),
   };
 }

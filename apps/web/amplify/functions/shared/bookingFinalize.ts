@@ -1138,6 +1138,81 @@ async function finalizeClaimed(
  * re-fetched from S3 so a customer who was killed before their first send still
  * receives the agreement.
  */
+/** GL-05 — how long one delivery attempt may hold a comms-send claim before a
+ *  retry may reclaim it (the webhook Lambda timeout is 30s). */
+const COMMS_CLAIM_STALE_MS = 90_000;
+
+/**
+ * GL-05 — claim one booking communication before the provider send.
+ *  WON        — this caller sends.
+ *  HELD       — another live delivery is sending right now; skip.
+ *  RECLAIMED  — a prior attempt crashed in the ambiguous window; this caller
+ *               must consult the EmailLog before re-sending.
+ */
+async function claimCommsSend(
+  claimId: string
+): Promise<"WON" | "HELD" | "RECLAIMED"> {
+  const client = await dataClient();
+  // A fake or a container straddling a schema deploy may lack the model; the
+  // marker + EmailLog checks still bound the duplicate risk to the old level.
+  if (!("BookingCommsSend" in client.models)) return "WON";
+  const attempt = async () => {
+    const { data } = await client.models.BookingCommsSend.create({
+      id: claimId,
+      requestedAt: new Date().toISOString(),
+    });
+    return Boolean(data);
+  };
+  if (await attempt()) return "WON";
+  const { data: held } = await client.models.BookingCommsSend.get({
+    id: claimId,
+  });
+  if (
+    held?.requestedAt &&
+    Date.now() - Date.parse(held.requestedAt) < COMMS_CLAIM_STALE_MS
+  ) {
+    return "HELD";
+  }
+  await client.models.BookingCommsSend.delete({ id: claimId }).catch(
+    () => undefined
+  );
+  return (await attempt()) ? "RECLAIMED" : "HELD";
+}
+
+async function releaseCommsSend(claimId: string): Promise<void> {
+  const client = await dataClient();
+  if (!("BookingCommsSend" in client.models)) return;
+  await client.models.BookingCommsSend.delete({ id: claimId }).catch(
+    () => undefined
+  );
+}
+
+/** GL-05 — did a prior attempt's send actually leave (provider accepted)?
+ *  The EmailLog is the outbox truth for the ambiguous crash window. */
+async function priorAcceptedBookingSend(
+  bookingId: string,
+  template: string
+): Promise<boolean> {
+  try {
+    const client = await dataClient();
+    if (!("EmailLog" in client.models)) return false;
+    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
+      { relatedId: bookingId },
+      { limit: 50 }
+    );
+    return (data ?? []).some(
+      (l) =>
+        l.template === template &&
+        (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+    );
+  } catch (err) {
+    console.error("priorAcceptedBookingSend failed", bookingId, err);
+    // Unknown ≠ safe to resend — treat as sent and let the owned marker work
+    // sort it out rather than double-emailing a customer.
+    return true;
+  }
+}
+
 async function deliverBookingComms(
   booking: BookingRecord,
   ctx: {
@@ -1191,6 +1266,20 @@ async function deliverBookingComms(
   }
 
   if (!booking.confirmationSentAt) {
+    // GL-05: the outbox claim closes the accepted-but-marker-not-stored
+    // window. HELD means another live delivery is mid-send — skip, never race
+    // a second email. A RECLAIMED stale claim consults the EmailLog first and
+    // adopts a proven send instead of duplicating.
+    const claimId = `confirm:${booking.id}`;
+    const claim = await claimCommsSend(claimId);
+    if (claim === "HELD") return;
+    if (
+      claim === "RECLAIMED" &&
+      (await priorAcceptedBookingSend(booking.id, "booking-confirmation"))
+    ) {
+      await stampCommsMarker(booking, "confirmationSentAt");
+      await releaseCommsSend(claimId);
+    } else {
     let sent = false;
     try {
       sent = await sendEmail({
@@ -1251,6 +1340,8 @@ async function deliverBookingComms(
         ownerTeam: "OPS",
       });
     }
+    await releaseCommsSend(claimId);
+    }
   }
 
   // R80: a paid website booking is a lead landing — route it to sales@.
@@ -1304,17 +1395,48 @@ async function stampCommsMarker(
 ): Promise<void> {
   const nowIso = new Date().toISOString();
   booking[field] = nowIso;
-  try {
+  const write = async (): Promise<boolean> => {
     const client = await dataClient();
-    await client.models.BookingRequest.update(
+    const { data } = await client.models.BookingRequest.update(
       field === "confirmationSentAt"
-        ? { id: booking.id, confirmationSentAt: nowIso }
+        ? {
+            id: booking.id,
+            confirmationSentAt: nowIso,
+            // Provider ACCEPTANCE — ses-events upgrades to DELIVERED or
+            // corrects to BOUNCED/COMPLAINED (never presented as delivery).
+            confirmationDeliveryStatus: "SENT",
+          }
         : { id: booking.id, officeAlertSentAt: nowIso }
     );
+    return Boolean(data);
+  };
+  let recorded = false;
+  try {
+    recorded = await write();
+    if (!recorded) recorded = await write(); // one retry before owning it
   } catch (err) {
-    // The message went out; failing to record that is a re-send risk on the
-    // next delivery, not a lost commitment. Log and move on.
     console.error(`finalizeBooking: could not stamp ${field} for ${booking.id}`, err);
+    try {
+      recorded = await write();
+    } catch {
+      recorded = false;
+    }
+  }
+  if (!recorded) {
+    // GL-05: "sent but not recorded" is VISIBLE owned work, never a log line —
+    // the outbox claim prevents the duplicate; this owns the inconsistency.
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `booking-marker:${booking.id}:${field}`,
+      title: `A booking message was sent but not recorded: ${booking.name}`,
+      detail: `The ${field === "confirmationSentAt" ? "customer confirmation" : "sales alert"} for booking ${booking.id} WAS accepted by the provider, but the sent-marker could not be stored. Do not blind-resend — verify the email log, then set the marker.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
+      resolutionAction:
+        "Check the email log for this booking. If the send is there, record the marker (re-run finalization adopts it); only resend if nothing was accepted.",
+      ownerTeam: "OPS",
+    });
   }
 }
 

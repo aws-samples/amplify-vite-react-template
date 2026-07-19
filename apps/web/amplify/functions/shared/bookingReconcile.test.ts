@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   danglingChildRecords,
+  mismatchedChildRelationships,
   reconcileBookings,
   type ReconBooking,
   type ReconInvoice,
@@ -184,6 +185,77 @@ describe("dangling checkpoint detection", () => {
   it("a blank checkpoint id is not counted as dangling here (that is the incomplete check's job)", () => {
     expect(
       danglingChildRecords(booked({ jobId: null }), { ...allExist, job: false })
+    ).toEqual([]);
+  });
+});
+
+describe("GL-05 — relationships, not existence", () => {
+  const BOOKING = {
+    id: "b1",
+    customerId: "c1",
+    jobId: "j1",
+    amountCents: 31300,
+    stripePaymentIntentId: "pi_1",
+    selectedDate: "2026-07-25",
+    recurring: false,
+  };
+
+  it("passes when every child belongs to the booking", () => {
+    expect(
+      mismatchedChildRelationships(BOOKING, {
+        customer: { id: "c1" },
+        job: { id: "j1", customerId: "c1", scheduledDate: "2026-07-25" },
+        agreement: { id: "a1", customerId: "c1" },
+        plan: null,
+        paidInvoice: {
+          id: "inv1",
+          customerId: "c1",
+          jobId: "j1",
+          amountCents: 31300,
+          stripePaymentIntentId: "pi_1",
+        },
+      })
+    ).toEqual([]);
+  });
+
+  it("flags a job cross-linked to another customer even though it EXISTS", () => {
+    const bad = mismatchedChildRelationships(BOOKING, {
+      customer: { id: "c1" },
+      job: { id: "j1", customerId: "c-OTHER", scheduledDate: "2026-07-25" },
+      agreement: null,
+      plan: null,
+      paidInvoice: null,
+    });
+    expect(bad.join(" ")).toMatch(/job belongs to customer c-OTHER/);
+  });
+
+  it("flags a paid invoice that belongs to a different job or amount", () => {
+    const bad = mismatchedChildRelationships(BOOKING, {
+      customer: null,
+      job: null,
+      agreement: null,
+      plan: null,
+      paidInvoice: {
+        id: "inv1",
+        customerId: "c1",
+        jobId: "j-OTHER",
+        amountCents: 100,
+        stripePaymentIntentId: "pi_1",
+      },
+    });
+    expect(bad.join(" ")).toMatch(/attached to job j-OTHER/);
+    expect(bad.join(" ")).toMatch(/\$1\.00.*\$313\.00/);
+  });
+
+  it("skips comparisons for fields the loaded row does not carry", () => {
+    expect(
+      mismatchedChildRelationships(BOOKING, {
+        customer: { id: "c1" },
+        job: { id: "j1" },
+        agreement: { id: "a1" },
+        plan: null,
+        paidInvoice: null,
+      })
     ).toEqual([]);
   });
 });

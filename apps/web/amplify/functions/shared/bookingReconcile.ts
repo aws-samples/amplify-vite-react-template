@@ -206,3 +206,112 @@ export function danglingChildRecords(
   }
   return missing;
 }
+
+
+export type ChildRows = {
+  customer: { id: string } | null;
+  job: {
+    id: string;
+    customerId?: string | null;
+    scheduledDate?: string | null;
+    servicePlanId?: string | null;
+  } | null;
+  agreement: { id: string; customerId?: string | null } | null;
+  plan: { id: string; customerId?: string | null } | null;
+  paidInvoice: {
+    id: string;
+    customerId?: string | null;
+    jobId?: string | null;
+    amountCents?: number | null;
+    stripePaymentIntentId?: string | null;
+  } | null;
+};
+
+/**
+ * GL-05 — relationships, not existence. A child record that RESOLVES but
+ * belongs to a different customer/booking (a cross-link) is exactly the
+ * corruption reconciliation exists to catch; "the id resolves" must never
+ * count it healthy. Pure; the caller supplies loaded rows.
+ */
+export function mismatchedChildRelationships(
+  booking: {
+    id: string;
+    customerId?: string | null;
+    jobId?: string | null;
+    servicePlanId?: string | null;
+    selectedDate?: string | null;
+    amountCents?: number | null;
+    stripePaymentIntentId?: string | null;
+    recurring?: boolean | null;
+  },
+  rows: ChildRows
+): string[] {
+  const bad: string[] = [];
+  const cid = booking.customerId ?? null;
+  // Each comparison runs only when the loaded row actually carries the field —
+  // a projection or fixture without it proves nothing either way.
+  if (rows.job && cid && rows.job.customerId != null && rows.job.customerId !== cid) {
+    bad.push(`job belongs to customer ${rows.job.customerId}, not ${cid}`);
+  }
+  if (
+    rows.job &&
+    booking.selectedDate &&
+    rows.job.scheduledDate &&
+    rows.job.scheduledDate !== booking.selectedDate
+  ) {
+    // The office may legitimately reschedule after booking; a mismatch is a
+    // flag for review, not proof of corruption — word it that way.
+    bad.push(
+      `job is dated ${rows.job.scheduledDate}, booking committed ${booking.selectedDate} (verify an office reschedule explains it)`
+    );
+  }
+  if (
+    rows.agreement &&
+    cid &&
+    rows.agreement.customerId != null &&
+    rows.agreement.customerId !== cid
+  ) {
+    bad.push(
+      `agreement belongs to customer ${rows.agreement.customerId}, not ${cid}`
+    );
+  }
+  if (rows.plan && cid && rows.plan.customerId != null && rows.plan.customerId !== cid) {
+    bad.push(`plan belongs to customer ${rows.plan.customerId}, not ${cid}`);
+  }
+  if (
+    booking.recurring &&
+    booking.servicePlanId &&
+    rows.job?.servicePlanId &&
+    rows.job.servicePlanId !== booking.servicePlanId
+  ) {
+    bad.push(
+      `job is attached to plan ${rows.job.servicePlanId}, booking committed ${booking.servicePlanId}`
+    );
+  }
+  if (rows.paidInvoice) {
+    if (cid && rows.paidInvoice.customerId && rows.paidInvoice.customerId !== cid) {
+      bad.push(
+        `paid invoice belongs to customer ${rows.paidInvoice.customerId}, not ${cid}`
+      );
+    }
+    if (
+      booking.jobId &&
+      rows.paidInvoice.jobId &&
+      rows.paidInvoice.jobId !== booking.jobId
+    ) {
+      bad.push(
+        `paid invoice is attached to job ${rows.paidInvoice.jobId}, not ${booking.jobId}`
+      );
+    }
+    if (
+      booking.amountCents != null &&
+      rows.paidInvoice.amountCents != null &&
+      rows.paidInvoice.amountCents !== booking.amountCents
+    ) {
+      bad.push(
+        `paid invoice is for $${((rows.paidInvoice.amountCents ?? 0) / 100).toFixed(2)}, booking committed $${((booking.amountCents ?? 0) / 100).toFixed(2)}`
+      );
+    }
+  }
+  return bad;
+}

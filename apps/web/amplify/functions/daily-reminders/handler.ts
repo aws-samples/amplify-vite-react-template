@@ -33,6 +33,8 @@ import {
   reconcileBookings,
   type ReconBooking,
   type ReconInvoice,
+  mismatchedChildRelationships,
+  type ChildRows,
 } from "../shared/bookingReconcile";
 import {
   isLeadActionOverdue,
@@ -1429,7 +1431,11 @@ async function reportDisputeDeadlines() {
 export async function reconcilePaidBookings() {
   const client = await dataClient();
 
-  let succeeded: { ids: string[]; paidCentsByPi: Record<string, number> };
+  let succeeded: {
+    ids: string[];
+    paidCentsByPi: Record<string, number>;
+    truncated?: boolean;
+  };
   try {
     succeeded = await fetchSucceededBookingPayments();
   } catch (err) {
@@ -1458,11 +1464,15 @@ export async function reconcilePaidBookings() {
     succeeded.paidCentsByPi
   );
 
-  const paidPiSet = new Set(
-    invoices
-      .filter((i) => i.status === "PAID" && i.stripePaymentIntentId?.trim())
-      .map((i) => i.stripePaymentIntentId!.trim())
-  );
+  const paidInvoiceByPi = new Map<
+    string,
+    ReconInvoiceRow
+  >();
+  for (const i of invoices) {
+    if (i.status === "PAID" && i.stripePaymentIntentId?.trim()) {
+      paidInvoiceByPi.set(i.stripePaymentIntentId.trim(), i);
+    }
+  }
   const bookingByPi = new Map<string, ReconBooking>();
   for (const b of bookings) {
     const pi = b.stripePaymentIntentId?.trim();
@@ -1507,11 +1517,21 @@ export async function reconcilePaidBookings() {
   const healthyBooked: string[] = [];
   for (const b of bookings) {
     if (b.status !== "BOOKED") continue;
-    const exists = await childExistenceFor(b, paidPiSet);
+    const { exists, rows } = await childExistenceFor(b, paidInvoiceByPi);
     const missing = missingChildRecords(b, exists);
     if (missing.length) {
       addIssue(b.id, `BOOKED but missing: ${missing.join(", ")}`);
-    } else if (!issues.has(b.id)) {
+    }
+    // GL-05: a child that RESOLVES but belongs to someone else is worse than a
+    // missing one — a cross-link. Relationships are validated, not existence.
+    const crossLinked = mismatchedChildRelationships(
+      b as Parameters<typeof mismatchedChildRelationships>[0],
+      rows
+    );
+    if (crossLinked.length) {
+      addIssue(b.id, `BOOKED but cross-linked: ${crossLinked.join("; ")}`);
+    }
+    if (!missing.length && !crossLinked.length && !issues.has(b.id)) {
       healthyBooked.push(b.id);
     }
   }
@@ -1576,6 +1596,35 @@ export async function reconcilePaidBookings() {
     opened++;
   }
 
+  // GL-05: a truncated provider scan reconciled against a PARTIAL payment set.
+  // It may not auto-resolve anything (a real anomaly could hide in the unread
+  // pages) and may not report green — it is owned Finance/Engineering work.
+  if (succeeded.truncated) {
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: "recon-truncated",
+      title: "Booking reconciliation was TRUNCATED — results are partial",
+      detail: `The daily reconciliation hit its Stripe page cap and reconciled against a partial payment set (${succeeded.ids.length} payments read). Anomalies below are real, but a clean-looking booking may still be broken in the unread pages. Prior open cases were left untouched.`,
+      relatedId: "reconciliation",
+      resolutionAction:
+        "Narrow RECONCILE_WINDOW_DAYS or raise the page cap, re-run the reconciliation, and confirm it completes without truncation.",
+      ownerTeam: "FINANCE",
+    });
+    const ok = false;
+    console.log(
+      `Reconciliation TRUNCATED: ${bookings.length} bookings, ${succeeded.ids.length} payments (partial), ok=${ok}`
+    );
+    return {
+      reconciled: false as const,
+      reason: "truncated" as const,
+      bookings: bookings.length,
+      succeededPayments: succeeded.ids.length,
+      anomaliesOpened: opened,
+      resolved: 0,
+      ok,
+    };
+  }
+
   // A booking that proves whole clears any exception a failed finalization left
   // open — reconciliation resolves, not just opens.
   let resolved = 0;
@@ -1583,7 +1632,7 @@ export async function reconcilePaidBookings() {
     const did = await resolveOwnedWork({
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: id,
-      note: "Daily reconciliation confirmed this booking is complete: every child record exists and the payment matches the committed amount.",
+      note: "Daily reconciliation confirmed this booking is complete: every child record exists, belongs to this booking, and the payment matches the committed amount.",
     });
     if (did) resolved++;
   }
@@ -1608,14 +1657,17 @@ export async function reconcilePaidBookings() {
 async function fetchSucceededBookingPayments(): Promise<{
   ids: string[];
   paidCentsByPi: Record<string, number>;
+  truncated: boolean;
 }> {
   const stripe = stripeClient();
-  const windowDays = Number(process.env.RECONCILE_WINDOW_DAYS ?? 45);
+  const configured = Number(process.env.RECONCILE_WINDOW_DAYS ?? 45);
+  const windowDays = Number.isFinite(configured) && configured > 0 ? configured : 45;
   const gte = Math.floor((Date.now() - windowDays * 86_400_000) / 1000);
   const ids: string[] = [];
   const paidCentsByPi: Record<string, number> = {};
   let startingAfter: string | undefined;
   let pages = 0;
+  let truncated = false;
   const MAX_PAGES = 100; // 100 * 100 = 10k PaymentIntents — a runaway backstop
   for (;;) {
     const page = await stripe.paymentIntents.list({
@@ -1632,6 +1684,9 @@ async function fetchSucceededBookingPayments(): Promise<{
     pages++;
     if (!page.has_more) break;
     if (pages >= MAX_PAGES) {
+      // GL-05: a truncated scan may NOT quietly report green — the caller
+      // opens owned work, skips auto-resolution, and returns not-ok.
+      truncated = true;
       console.error(
         `reconcilePaidBookings: stopped paging Stripe at ${MAX_PAGES} pages — narrow RECONCILE_WINDOW_DAYS or investigate volume`
       );
@@ -1640,7 +1695,7 @@ async function fetchSucceededBookingPayments(): Promise<{
     startingAfter = page.data[page.data.length - 1]?.id;
     if (!startingAfter) break;
   }
-  return { ids, paidCentsByPi };
+  return { ids, paidCentsByPi, truncated };
 }
 
 async function allBookingsForReconcile(): Promise<ReconBooking[]> {
@@ -1649,7 +1704,9 @@ async function allBookingsForReconcile(): Promise<ReconBooking[]> {
   let nextToken: string | null | undefined;
   do {
     const page = await client.models.BookingRequest.list({ nextToken, limit: 200 });
-    for (const b of page.data as unknown as ReconBooking[]) {
+    for (const b of page.data as unknown as (ReconBooking & {
+      selectedDate?: string | null;
+    })[]) {
       rows.push({
         id: b.id,
         status: b.status,
@@ -1662,24 +1719,37 @@ async function allBookingsForReconcile(): Promise<ReconBooking[]> {
         recurring: b.recurring,
         name: b.name,
         email: b.email,
-      });
+        // GL-05: the committed date, for the relationship check.
+        selectedDate: b.selectedDate,
+      } as ReconBooking);
     }
     nextToken = page.nextToken;
   } while (nextToken);
   return rows;
 }
 
-async function allInvoicesForReconcile(): Promise<ReconInvoice[]> {
+type ReconInvoiceRow = ReconInvoice & {
+  customerId?: string | null;
+  jobId?: string | null;
+  amountCents?: number | null;
+};
+
+async function allInvoicesForReconcile(): Promise<ReconInvoiceRow[]> {
   const client = await dataClient();
-  const rows: ReconInvoice[] = [];
+  const rows: ReconInvoiceRow[] = [];
   let nextToken: string | null | undefined;
   do {
     const page = await client.models.Invoice.list({ nextToken, limit: 200 });
-    for (const inv of page.data as unknown as ReconInvoice[]) {
+    for (const inv of page.data as unknown as ReconInvoiceRow[]) {
       rows.push({
         id: inv.id,
         status: inv.status,
         stripePaymentIntentId: inv.stripePaymentIntentId,
+        // GL-05: ownership facts — reconciliation validates relationships,
+        // not just that a paid row with this PaymentIntent exists somewhere.
+        customerId: inv.customerId,
+        jobId: inv.jobId,
+        amountCents: inv.amountCents,
       });
     }
     nextToken = page.nextToken;
@@ -1700,28 +1770,49 @@ type ChildLookupClient = {
   >;
 };
 
-/** Load each child record a BOOKED booking's checkpoint IDs claim and report
- *  which actually resolve — the dangling-checkpoint check GL-05 requires. */
-async function childExistenceFor(booking: ReconBooking, paidPiSet: Set<string>) {
+/** Load each child record a BOOKED booking's checkpoint IDs claim — the FULL
+ *  rows, not booleans, so reconciliation can check both existence AND
+ *  ownership (a resolving cross-linked child must never count healthy). */
+async function childExistenceFor(
+  booking: ReconBooking,
+  paidInvoiceByPi: Map<
+    string,
+    { id: string; customerId?: string | null; jobId?: string | null; amountCents?: number | null; stripePaymentIntentId?: string | null }
+  >
+) {
   const client = (await dataClient()) as unknown as ChildLookupClient;
-  const [customer, job, agreement, plan] = await Promise.all([
+  const [customerRow, jobRow, agreementRow, planRow] = await Promise.all([
     booking.customerId
-      ? client.models.Customer.get({ id: booking.customerId }).then((r) => Boolean(r.data))
-      : Promise.resolve(false),
+      ? client.models.Customer.get({ id: booking.customerId }).then((r) => r.data)
+      : Promise.resolve(null),
     booking.jobId
-      ? client.models.Job.get({ id: booking.jobId }).then((r) => Boolean(r.data))
-      : Promise.resolve(false),
+      ? client.models.Job.get({ id: booking.jobId }).then((r) => r.data)
+      : Promise.resolve(null),
     booking.agreementId
-      ? client.models.Agreement.get({ id: booking.agreementId }).then((r) => Boolean(r.data))
-      : Promise.resolve(false),
+      ? client.models.Agreement.get({ id: booking.agreementId }).then((r) => r.data)
+      : Promise.resolve(null),
     booking.servicePlanId
-      ? client.models.ServicePlan.get({ id: booking.servicePlanId }).then((r) => Boolean(r.data))
-      : Promise.resolve(false),
+      ? client.models.ServicePlan.get({ id: booking.servicePlanId }).then((r) => r.data)
+      : Promise.resolve(null),
   ]);
   const pi = booking.stripePaymentIntentId?.trim();
-  const paidInvoice =
-    (booking.amountCents ?? 0) <= 0 ? true : Boolean(pi && paidPiSet.has(pi));
-  return { customer, job, agreement, paidInvoice, plan };
+  const paidInvoiceRow = pi ? paidInvoiceByPi.get(pi) ?? null : null;
+  const exists = {
+    customer: Boolean(customerRow),
+    job: Boolean(jobRow),
+    agreement: Boolean(agreementRow),
+    paidInvoice:
+      (booking.amountCents ?? 0) <= 0 ? true : Boolean(paidInvoiceRow),
+    plan: Boolean(planRow),
+  };
+  const rows: ChildRows = {
+    customer: (customerRow as { id: string } | null) ?? null,
+    job: (jobRow as ChildRows["job"]) ?? null,
+    agreement: (agreementRow as ChildRows["agreement"]) ?? null,
+    plan: (planRow as ChildRows["plan"]) ?? null,
+    paidInvoice: paidInvoiceRow,
+  };
+  return { exists, rows };
 }
 
 /** Every child record a BOOKED booking is missing — whether the checkpoint ID

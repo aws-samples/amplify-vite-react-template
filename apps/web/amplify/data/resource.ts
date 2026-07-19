@@ -536,6 +536,11 @@ export const schema = a.schema({
       // duplicate confirmation or duplicate sales alert.
       confirmationSentAt: a.datetime(),
       officeAlertSentAt: a.datetime(),
+      // GL-05: the confirmation's true delivery state, corrected by ses-events
+      // (SENT → DELIVERED, or BOUNCED/COMPLAINED which reopens the obligation
+      // as owned work; ALTERNATE_DELIVERED is the office's recorded terminal).
+      // Provider acceptance is never presented as customer delivery.
+      confirmationDeliveryStatus: a.string(),
       // GL-06: why a funnel payment failed (Stripe's decline message), and a
       // retry-safe marker so a replayed payment_failed webhook never re-emails
       // the "your payment didn't go through" notice.
@@ -554,6 +559,21 @@ export const schema = a.schema({
   BookingFinalization: a
     .model({
       note: a.string(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
+
+  /**
+   * GL-05 — the outbox claim for one booking communication (id =
+   * `confirm:<bookingId>` / `office:<bookingId>`). Conditional create is taken
+   * BEFORE the provider send, closing the accepted-but-marker-not-stored
+   * window: a crash between SES acceptance and the marker write leaves this
+   * claim, and the next delivery adopts the proven send from the EmailLog
+   * instead of re-emailing the customer. Deleted once the marker is stamped;
+   * a stale claim (crashed holder) is reclaimable.
+   */
+  BookingCommsSend: a
+    .model({
+      requestedAt: a.datetime(),
     })
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
 
