@@ -203,11 +203,19 @@ export async function applyRefundToInvoice(opts: {
   if (!invoice && opts.stripeInvoiceId) {
     // A dashboard refund of a subscription charge must still land on the
     // CRM row — without this the settlement gate stays blocked forever
-    // after a REAL refund.
-    const { data: byInvoice } = await client.models.Invoice.list({
-      filter: { stripeInvoiceId: { eq: opts.stripeInvoiceId } },
-    });
-    invoice = (byInvoice[0] as RefundTargetRow | undefined) ?? null;
+    // after a REAL refund. The filter scan is PAGINATED to exhaustion: the
+    // filter applies after each scanned page, so the matching row can sit
+    // on any page.
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Invoice.list({
+        filter: { stripeInvoiceId: { eq: opts.stripeInvoiceId } },
+        limit: 200,
+        nextToken: token,
+      });
+      invoice = (page.data[0] as RefundTargetRow | undefined) ?? null;
+      token = invoice ? null : page.nextToken;
+    } while (token);
   }
   if (!invoice) {
     console.warn(

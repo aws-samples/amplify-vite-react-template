@@ -119,6 +119,10 @@ vi.mock("../shared/stripeClient", () => ({
     subscriptions: {
       retrieve: async () => ({ metadata: {} }),
     },
+    // basil+: the invoice↔PaymentIntent mapping lives on InvoicePayments.
+    invoicePayments: {
+      list: async () => ({ data: [] }),
+    },
   }),
   paymentMethodLabel: () => ({ label: "Visa ••4242", kind: "CARD" }),
 }));

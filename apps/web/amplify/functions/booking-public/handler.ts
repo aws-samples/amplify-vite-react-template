@@ -1508,6 +1508,29 @@ async function cancel(body: Record<string, unknown>) {
     };
   }
 
+  // The visit's REAL state gates everything: a completed (billed, legally
+  // reported) or underway visit is never cancelable from the emailed link,
+  // and that refusal must come BEFORE the plan cancel and the refund — a
+  // late click must not refund a performed visit and then 409.
+  if (booking.jobId) {
+    const { data: gateJob } = await client.models.Job.get({
+      id: booking.jobId,
+    });
+    if (
+      gateJob &&
+      gateJob.status !== "SCHEDULED" &&
+      gateJob.status !== "UNSCHEDULED" &&
+      gateJob.status !== "CANCELED"
+    ) {
+      throw new HttpError(409, {
+        error:
+          gateJob.status === "IN_PROGRESS"
+            ? `Your technician is already on this visit — call us at ${SUPPORT_PHONE} and we'll help right away.`
+            : `This visit has already taken place, so it can't be canceled online — if something's wrong, call us at ${SUPPORT_PHONE}.`,
+      });
+    }
+  }
+
   // Stamp the attempt before anything that can fail. This is what makes a
   // retry safe for the customer: if Stripe is down today and they succeed
   // tomorrow, `judgedOn` above still reads today and they keep their refund.
@@ -1613,11 +1636,15 @@ async function cancel(body: Record<string, unknown>) {
     // from the pre-update row. One re-read retry absorbs a concurrent office
     // move; a second loss falls to the owned cancellation work the caller
     // already records.
+    let jobCancelSettled = false;
     for (let attempt = 0; attempt < 2; attempt++) {
       const { data: cancelJob } = await client.models.Job.get({
         id: booking.jobId,
       });
-      if (!cancelJob || cancelJob.status === "CANCELED") break;
+      if (!cancelJob || cancelJob.status === "CANCELED") {
+        jobCancelSettled = true;
+        break;
+      }
       // Only an upcoming visit can be canceled from the emailed link — a
       // completed (billed, legally reported) or in-progress/terminal visit
       // must never be flipped by a late click.
@@ -1656,7 +1683,36 @@ async function cancel(body: Record<string, unknown>) {
           note: "Visit canceled by the customer — the month is owed again.",
         }).catch(() => undefined);
       }
+      jobCancelSettled = true;
       break;
+    }
+    if (!jobCancelSettled) {
+      // The money already moved and the customer's cancellation is accepted —
+      // but the visit row could not be flipped. That schedule cleanup is now
+      // OWNED work; a case that can't be written pages the office urgently so
+      // a live visit never hides behind a "canceled" story.
+      const caseId = await openOwnedWork({
+        kind: "VISIT_CHANGE_RECOVERY",
+        dedupeKey: `visit-change:${booking.jobId}`,
+        title: `Finish canceling a customer-canceled visit: ${booking.name ?? booking.email ?? booking.id}`,
+        detail: `The customer canceled booking ${booking.id} from their emailed link${refundable ? " and the full refund was issued" : ""}, but visit ${booking.jobId} could not be flipped to CANCELED (concurrent schedule change or lock-store fault). Cancel the visit from the customer screen — it must not dispatch.`,
+        customerId: booking.customerId ?? undefined,
+        relatedId: booking.jobId,
+        sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : `/schedule`,
+        resolutionAction:
+          "Cancel this visit from the CRM (the customer's refund decision is already applied), then close this.",
+        ownerTeam: "OPS",
+      }).catch(() => null);
+      if (!caseId) {
+        await notifyOffice({
+          subject: `URGENT — customer-canceled visit still live: booking ${booking.id}`,
+          heading: "A canceled booking's visit could not be taken off the schedule",
+          template: "ops-funnel-cancel-unfinished",
+          customerId: booking.customerId ?? undefined,
+          relatedId: booking.jobId,
+          bodyHtml: `<p>The customer canceled booking ${booking.id}${refundable ? " with a full refund issued" : ""}, but job ${booking.jobId} is still live and the recovery case could not be written. Cancel the visit now.</p>`,
+        }).catch(() => undefined);
+      }
     }
   }
   await client.models.BookingRequest.update({

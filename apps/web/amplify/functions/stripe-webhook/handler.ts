@@ -347,9 +347,24 @@ async function onSubscriptionInvoice(
   }
   if (!crmServicePlanId || !crmCustomerId) return;
 
-  const { data: existing } = await client.models.Invoice.list({
-    filter: { stripeInvoiceId: { eq: stripeInvoice.id } },
-  });
+  // PAGINATED to exhaustion: this lookup is BOTH the replay guard and the
+  // FAILED→PAID transition path — a row hiding past the first filter-scan
+  // page would otherwise be duplicated on the smart-retry success.
+  const existing: { id: string; amountCents: number; description?: string | null; status?: string | null }[] = [];
+  {
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Invoice.list({
+        filter: { stripeInvoiceId: { eq: stripeInvoice.id } },
+        limit: 200,
+        nextToken: token,
+      });
+      existing.push(
+        ...((page.data ?? []) as unknown as typeof existing)
+      );
+      token = existing.length ? null : page.nextToken;
+    } while (token);
+  }
   const paidAt =
     status === "PAID"
       ? new Date(
@@ -707,17 +722,17 @@ async function onChargeRefunded(charge: Stripe.Charge) {
   // subscription-invoice charge maps to its invoice via InvoicePayments.
   // Resolving it here lets a dashboard refund land on a CRM row that predates
   // PI stamping instead of leaving refundedAmountCents at 0 forever.
+  // One-time charges simply return an EMPTY list here (no throw) — so any
+  // throw is a real Stripe API failure and must propagate: the handler 500s
+  // and Stripe redelivers, instead of a transient fault permanently losing
+  // the refund for an unstamped legacy row.
   let stripeInvoiceId: string | null = null;
-  try {
-    const { data: invoicePayments } = await stripeClient().invoicePayments.list({
-      payment: { type: "payment_intent", payment_intent: paymentIntentId },
-      limit: 1,
-    });
-    const inv = invoicePayments[0]?.invoice;
-    stripeInvoiceId = typeof inv === "string" ? inv : (inv?.id ?? null);
-  } catch {
-    /* one-time charges have no invoice payment — the PI lookup owns those */
-  }
+  const { data: invoicePayments } = await stripeClient().invoicePayments.list({
+    payment: { type: "payment_intent", payment_intent: paymentIntentId },
+    limit: 1,
+  });
+  const inv = invoicePayments[0]?.invoice;
+  stripeInvoiceId = typeof inv === "string" ? inv : (inv?.id ?? null);
   await applyRefundToInvoice({
     paymentIntentId,
     stripeInvoiceId,
