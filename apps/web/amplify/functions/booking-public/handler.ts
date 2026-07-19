@@ -1556,11 +1556,26 @@ async function cancel(body: Record<string, unknown>) {
     });
     if (gateErrors?.length) {
       // FAIL CLOSED before any money moves: an unverifiable visit state must
-      // not be refunded on hope. The attempt date above is already recorded.
+      // not be refunded on hope. When the attempt-date stamp ALSO failed,
+      // the date must survive somewhere a human can honor it — the office
+      // alert carries it, and the customer is never told it was saved when
+      // it wasn't.
+      if (!datePersisted) {
+        await notifyOffice({
+          subject: `Cancellation attempt date NOT saved: booking ${booking.id}`,
+          heading: "A cancel attempt failed with its date unrecorded",
+          template: "ops-cancel-date-unsaved",
+          customerId: booking.customerId ?? undefined,
+          relatedId: booking.id,
+          bodyHtml: `<p>The customer tried to cancel booking ${booking.id} on ${requestedOn} and our side failed twice: the visit state couldn't be read AND the attempt date couldn't be stamped. If they retry after ${requestedOn}, judge their refund from ${requestedOn}${refundable ? " — they were inside the full-refund window" : ""}.</p>`,
+        }).catch(() => undefined);
+      }
       throw new HttpError(503, {
         error: `We couldn't check your visit just now — nothing was changed. Please try again in a moment, or call us at ${SUPPORT_PHONE}.`,
         cancellationRecordedOn: requestedOn,
-        reassurance: `We've recorded that you asked to cancel on ${requestedOn}${refundable ? ", so your full refund still applies even though this didn't go through" : ""}.`,
+        reassurance: datePersisted
+          ? `We've recorded that you asked to cancel on ${requestedOn}${refundable ? ", so your full refund still applies even though this didn't go through" : ""}.`
+          : `Your cancellation request counts from ${requestedOn}${refundable ? " and your full refund still applies" : ""} — we've alerted our office so it isn't lost, but please mention this date if you call.`,
       });
     }
     if (
