@@ -92,6 +92,7 @@ const fakeDataClient = {
     // The lifecycle claim: create is conditional on the id not existing, exactly
     // like the real single-winner lock. A second create loses (data: null).
     CustomerLifecycleClaim: {
+      get: async ({ id }: { id: string }) => ({ data: claims.get(id) ?? null }),
       create: async (input: { id: string }) => {
         if (claims.has(input.id)) return { data: null };
         claims.set(input.id, { ...input });
@@ -113,12 +114,15 @@ const notifyOffice = vi.fn(async () => true);
 vi.mock("./email", () => ({
   notifyOffice: (...a: unknown[]) =>
     (notifyOffice as unknown as (...x: unknown[]) => Promise<boolean>)(...a),
+  sendEmail: vi.fn(async () => true),
+  emailShell: (h: string, b: string) => `${h}${b}`,
 }));
 
 const openOwnedWork = vi.fn(async () => "work-1");
 vi.mock("./ownedWork", () => ({
   openOwnedWork: (...a: unknown[]) =>
     (openOwnedWork as unknown as (...x: unknown[]) => Promise<string>)(...a),
+  openMissingContactWork: vi.fn(async () => "work-mc"),
 }));
 
 const cancelPlanBilling = vi.fn(async (_stripe: unknown, servicePlanId: string) => {
@@ -408,10 +412,11 @@ describe("deactivateCustomer", () => {
 
     const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
-    // The customer is genuinely deactivated; only the audit row missed, which
-    // recordCustomerLifecycleEvent itself owns recovering.
+    // The customer is genuinely deactivated, but the immutable record is a
+    // COMPLETION REQUIREMENT (GL-09): a lost audit row keeps the transition
+    // PARTIAL (owned + resumable), never a clean success.
     expect(res.status).toBe("INACTIVE");
-    expect(res.partial).toBe(false);
+    expect(res.partial).toBe(true);
     expect(res.audited).toBe(false);
     expect(customers.get("c1")!.status).toBe("INACTIVE");
   });

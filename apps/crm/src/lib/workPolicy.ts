@@ -219,7 +219,12 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
     severity: "CRITICAL",
     customerImpact:
       "A customer deactivation or reactivation didn't fully complete — access, billing, or the audit record may not match the customer's real state.",
-    verified: [],
+    verified: [
+      {
+        id: "LIFECYCLE_SETTLED",
+        label: "Confirm billing, schedule, access, and status all agree",
+      },
+    ],
     manualReasons: [
       { code: "RERAN_TRANSITION_COMPLETE", label: "Re-ran the transition — complete" },
       { code: "PORTAL_CONFIRMED_ENDED", label: "Portal login confirmed ended" },

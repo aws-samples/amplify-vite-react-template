@@ -59,7 +59,8 @@ export type VerifierId =
   | "VISIT_MONEY_SETTLED"
   | "PLAN_CANCELLATION_SETTLED"
   | "TECH_LICENSED"
-  | "DISPATCH_READY";
+  | "DISPATCH_READY"
+  | "LIFECYCLE_SETTLED";
 
 /**
  * A close the app can *confirm*. Running it re-checks the real-world fact
@@ -317,10 +318,13 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     customerImpact:
       "A customer deactivation or reactivation didn't fully complete — access, billing, or the audit record may not match the customer's real state.",
     ownerTeam: "OPS",
-    // No auto-verifier: the safe resume is to re-run the transition (it is
-    // idempotent) and confirm access + billing + status agree, then close with
-    // the matching reason. The owner override is the escape hatch.
-    verified: [],
+    verified: [
+      {
+        id: "LIFECYCLE_SETTLED",
+        label: "Confirm billing, schedule, access, and status all agree",
+        verifier: "LIFECYCLE_SETTLED",
+      },
+    ],
     manualReasons: [
       { code: "RERAN_TRANSITION_COMPLETE", label: "Re-ran the transition — complete" },
       { code: "PORTAL_CONFIRMED_ENDED", label: "Portal login confirmed ended" },

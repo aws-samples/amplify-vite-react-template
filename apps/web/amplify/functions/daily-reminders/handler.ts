@@ -137,6 +137,10 @@ export const handler = async () => {
   const presenceReviews = await reconcilePresenceReviews();
   // GL-17: advance licence-lapse work + capacity effects of expiry.
   const licenses = await sweepLicenseLapses();
+  // GL-09: stale lifecycle commands (a process stop mid-transition) are
+  // escalated to owned work and stale claims reclaimed — a customer can never
+  // be stuck mid-transition silently or blocked forever.
+  const lifecycle = await reconcileLifecycleTransitions();
   // GL-12: tomorrow's staffed visits must pass the pure dispatch facts — a
   // missing classification or placeholder address is owned work today, not a
   // doorstep discovery tomorrow.
@@ -163,8 +167,59 @@ export const handler = async () => {
     licenses,
     seasonal,
     readiness,
+    lifecycle,
   ];
 };
+
+/**
+ * GL-09 — the lifecycle resume worker. Every non-terminal
+ * CustomerLifecycleCommand whose lease has expired is a transition a process
+ * stop abandoned: each gets (or re-escalates) an owned LIFECYCLE_RECOVERY case
+ * whose safe resume is re-running the idempotent transition from the customer
+ * screen; stale per-customer claims are reclaimed by the claim engine itself.
+ * The pass PAGES (owned work), never merely logs.
+ */
+export async function reconcileLifecycleTransitions() {
+  const client = await dataClient();
+  if (!("CustomerLifecycleCommand" in client.models)) {
+    return { task: "reconcile-lifecycle" as const, stale: 0, escalated: 0 };
+  }
+  let stale = 0;
+  let escalated = 0;
+  try {
+    const now = Date.now();
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.CustomerLifecycleCommand.list({
+        limit: 200,
+        nextToken: token,
+      });
+      for (const cmd of page.data ?? []) {
+        if (cmd.stage === "COMPLETE" || cmd.stage === "FAILED") continue;
+        const leaseExpired =
+          !cmd.leaseUntil || Date.parse(cmd.leaseUntil) < now;
+        if (!leaseExpired) continue;
+        stale++;
+        const opened = await openOwnedWork({
+          kind: "LIFECYCLE_RECOVERY",
+          dedupeKey: `lifecycle-command:${cmd.id}`,
+          title: `A customer ${cmd.action.toLowerCase()} is stuck mid-transition`,
+          detail: `Command ${cmd.id} for customer ${cmd.customerId} stopped at stage ${cmd.stage}${cmd.lastError ? ` (${cmd.lastError})` : ""}. Billing, schedule, access, status, audit, or the customer notice may be part-done.`,
+          customerId: cmd.customerId,
+          relatedId: cmd.customerId,
+          sourceUrl: `/customers/${cmd.customerId}`,
+          resolutionAction: `Open the customer and re-run the ${cmd.action === "DEACTIVATE" ? "deactivation" : "reactivation"} — it is idempotent and resumes from the last confirmed step — then confirm the command reads COMPLETE.`,
+          ownerTeam: "OPS",
+        });
+        if (opened) escalated++;
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    console.error("reconcileLifecycleTransitions failed", err);
+  }
+  return { task: "reconcile-lifecycle" as const, stale, escalated };
+}
 
 /**
  * GL-12 — day-before dispatch readiness. Every SCHEDULED visit dated tomorrow

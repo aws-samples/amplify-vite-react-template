@@ -113,6 +113,8 @@ const notifyOffice = vi.fn(async () => true);
 vi.mock("../shared/email", () => ({
   notifyOffice: (...a: unknown[]) =>
     (notifyOffice as unknown as (...x: unknown[]) => Promise<boolean>)(...a),
+  sendEmail: vi.fn(async () => true),
+  emailShell: (h: string, b: string) => `${h}${b}`,
 }));
 
 const openOwnedWork = vi.fn(async () => {});

@@ -5,6 +5,8 @@ import {
   DEACTIVATION_REASONS,
   dueDateForTerms,
   listCustomerLifecycleEvents,
+  listLifecycleCommands,
+  previewLifecycleTransition,
   opResult,
   REACTIVATION_REASONS,
   recordOfflinePayment,
@@ -141,6 +143,17 @@ export default function CustomerDetail() {
   // GL-09 — the lifecycle transition ledger (deactivate/reactivate history) and
   // the reason-picker sheets that gate each transition on a controlled reason.
   const [lifecycle, setLifecycle] = useState<CustomerLifecycleEvent[]>([]);
+  const [lifecycleReadFailed, setLifecycleReadFailed] = useState(false);
+  const [openLifecycleCommand, setOpenLifecycleCommand] = useState<{
+    id: string;
+    action: string;
+    stage: string;
+    lastError?: string | null;
+  } | null>(null);
+  const [lifecyclePreview, setLifecyclePreview] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
   const [lifecycleSheet, setLifecycleSheet] = useState<
     "deactivate" | "reactivate" | null
   >(null);
@@ -190,12 +203,19 @@ export default function CustomerDetail() {
       // roles so the transition history refreshes after every deactivate/reactivate.
       if (roles.office || roles.finance) {
         const lc = await listCustomerLifecycleEvents(id);
+        // GL-09/X1: a read failure is a FAILURE, never an empty timeline.
+        setLifecycleReadFailed(lc.readFailed);
         setLifecycle(
           (lc.data ?? [])
             .slice()
             .sort((a, b) =>
               String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
             )
+        );
+        // GL-09: a non-terminal lifecycle command = "Transition needs recovery".
+        const cmds = await listLifecycleCommands(id);
+        setOpenLifecycleCommand(
+          cmds.find((c) => c.stage !== "COMPLETE" && c.stage !== "FAILED") ?? null
         );
       }
     } catch (err) {
@@ -206,6 +226,33 @@ export default function CustomerDetail() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // GL-09: the employee confirmation renders the SERVER inventory, computed
+  // fresh each time the deactivate sheet opens.
+  useEffect(() => {
+    if (lifecycleSheet !== "deactivate" || !customer) {
+      setLifecyclePreview(null);
+      return;
+    }
+    let stale = false;
+    void (async () => {
+      try {
+        const res = await previewLifecycleTransition({
+          customerId: customer.id,
+          action: "DEACTIVATE",
+          reasonCode,
+        });
+        const data = opResult<Record<string, unknown>>(res);
+        if (!stale) setLifecyclePreview(data ?? null);
+      } catch {
+        if (!stale) setLifecyclePreview(null);
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lifecycleSheet, reasonCode, customer?.id]);
 
   // Payment summary is a live Stripe lookup — load after the record.
   useEffect(() => {
@@ -1258,6 +1305,12 @@ export default function CustomerDetail() {
       {/* ---------- Lifecycle history (GL-09) ---------- */}
       {(roles.office || roles.finance) && lifecycle.length > 0 ? (
         <Card title="Lifecycle history">
+          {lifecycleReadFailed ? (
+            <p className="small" style={{ color: "var(--danger, #b00)" }}>
+              Some history could not be read — this list may be incomplete. Try
+              again; a sensitive change must never look like it didn't happen.
+            </p>
+          ) : null}
           {lifecycle.map((e) => {
             const parts = String(e.reason ?? "").split(" — ");
             const code = parts[0]?.trim();
@@ -1301,6 +1354,59 @@ export default function CustomerDetail() {
         </Card>
       ) : null}
 
+      {/* GL-09: a customer mid-transition is a THIRD state, not active or
+          inactive — the next employee sees one safe resume action. */}
+      {openLifecycleCommand ? (
+        <Card>
+          <Badge tone="danger">transition needs recovery</Badge>
+          <p className="muted small" style={{ marginTop: 8 }}>
+            A {openLifecycleCommand.action.toLowerCase()} of this customer
+            stopped at {openLifecycleCommand.stage.replace(/_/g, " ").toLowerCase()}
+            {openLifecycleCommand.lastError
+              ? ` (${openLifecycleCommand.lastError})`
+              : ""}
+            . Billing, schedule, access, status, or the customer notice may be
+            part-done — treat this customer as neither fully active nor fully
+            inactive until it is resumed.
+          </p>
+          <Button
+            block
+            loading={busyAction === "resume-lifecycle"}
+            onClick={() => {
+              const cmd = openLifecycleCommand;
+              void run("resume-lifecycle", async () => {
+                // Resume = re-run the same idempotent transition under the SAME
+                // command key, so it continues from the last confirmed step.
+                const res = opResult<{ partial?: boolean; message?: string }>(
+                  cmd.action === "DEACTIVATE"
+                    ? await api().mutations.deactivateCustomer({
+                        customerId: customer.id,
+                        reasonCode: "OTHER",
+                        note: "Resuming an unfinished transition",
+                        idempotencyKey: cmd.id,
+                      })
+                    : await api().mutations.reactivateCustomer({
+                        customerId: customer.id,
+                        reasonCode: "OTHER",
+                        note: "Resuming an unfinished transition",
+                        idempotencyKey: cmd.id,
+                      })
+                );
+                if (res?.partial) {
+                  throw new Error(
+                    res.message ??
+                      "The transition still could not fully finish — it stays owned and is safe to retry."
+                  );
+                }
+                setNotice("The unfinished transition was completed.");
+              });
+            }}
+          >
+            Resume {openLifecycleCommand.action.toLowerCase()}
+          </Button>
+        </Card>
+      ) : null}
+
       {/* ---------- Sheets ---------- */}
 
       {/* GL-09 — deactivation is one server action gated on a controlled reason.
@@ -1313,17 +1419,67 @@ export default function CustomerDetail() {
         title={`Deactivate ${customer.displayName}`}
       >
         <div className="form-grid">
-          <p className="muted small" style={{ margin: 0 }}>
-            {deactivateConfirmText(customer.displayName, {
-              activePlanCount: plans.filter((p) => p.status === "ACTIVE").length,
-              upcomingVisits: jobs.filter(
-                (j) =>
-                  (j.status === "SCHEDULED" || j.status === "UNSCHEDULED") &&
-                  !j.paidAt
-              ).length,
-              hasPortal: !!customer.portalUserSub,
-            })}
-          </p>
+          {lifecyclePreview ? (
+            (() => {
+              const p = lifecyclePreview as {
+                willStop?: { plans: number; futureVisits: number; portalLogin: boolean };
+                needsDecision?: {
+                  paidVisits: { id: string; scheduledDate: string | null }[];
+                  inProgressVisits: { id: string }[];
+                };
+                outstandingBalanceCents?: number;
+                balanceHandling?: string;
+                notice?: { subject: string } | null;
+                readFailures?: string[];
+              };
+              return (
+                <div className="muted small" style={{ display: "grid", gap: 4 }}>
+                  <div>
+                    <strong>Will stop:</strong> {p.willStop?.plans ?? 0} plan(s)
+                    billing, {p.willStop?.futureVisits ?? 0} upcoming visit(s)
+                    {p.willStop?.portalLogin ? ", and the portal login" : ""}.
+                  </div>
+                  {(p.needsDecision?.paidVisits.length ?? 0) > 0 ||
+                  (p.needsDecision?.inProgressVisits.length ?? 0) > 0 ? (
+                    <div>
+                      <strong>Needs a decision (owned, 1 business day):</strong>{" "}
+                      {p.needsDecision?.paidVisits.length ?? 0} paid visit(s) and{" "}
+                      {p.needsDecision?.inProgressVisits.length ?? 0} in-progress
+                      visit(s) — each gets its own owned honor/refund/finish case.
+                    </div>
+                  ) : null}
+                  <div>
+                    <strong>Money:</strong>{" "}
+                    {(p.outstandingBalanceCents ?? 0) > 0
+                      ? `${money(p.outstandingBalanceCents ?? 0)} still owed — ${String(p.balanceHandling ?? "").toLowerCase().replace(/_/g, " ")}; nothing is auto-charged.`
+                      : "no outstanding balance; nothing is charged."}
+                  </div>
+                  <div>
+                    <strong>Customer notice:</strong>{" "}
+                    {p.notice ? `"${p.notice.subject}" will be sent.` : "none for this reason."}
+                  </div>
+                  {(p.readFailures?.length ?? 0) > 0 ? (
+                    <div style={{ color: "var(--danger, #b00)" }}>
+                      Some records could not be read ({p.readFailures!.join(", ")}) —
+                      this preview may be incomplete.
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()
+          ) : (
+            <p className="muted small" style={{ margin: 0 }}>
+              {deactivateConfirmText(customer.displayName, {
+                activePlanCount: plans.filter((p) => p.status === "ACTIVE").length,
+                upcomingVisits: jobs.filter(
+                  (j) =>
+                    (j.status === "SCHEDULED" || j.status === "UNSCHEDULED") &&
+                    !j.paidAt
+                ).length,
+                hasPortal: !!customer.portalUserSub,
+              })}
+            </p>
+          )}
           <Field
             label="Reason"
             hint="A controlled reason is recorded with your name and the time in the lifecycle history."
@@ -1454,19 +1610,48 @@ export default function CustomerDetail() {
               const rc = reasonCode;
               const note = reasonNote.trim() || null;
               setLifecycleSheet(null);
-              void run(
-                "reactivate",
-                async () => {
-                  unwrap(
-                    await api().mutations.reactivateCustomer({
-                      customerId: customer.id,
-                      reasonCode: rc,
-                      note,
-                    })
+              void run("reactivate", async () => {
+                // GL-09: the completion words come from the PERSISTED result —
+                // never an unconditional success over a partial/in-progress
+                // server outcome.
+                const res = opResult<{
+                  reactivated?: boolean;
+                  alreadyActive?: boolean;
+                  partial?: boolean;
+                  inProgress?: boolean;
+                  audited?: boolean;
+                  state?: string;
+                  message?: string;
+                }>(
+                  await api().mutations.reactivateCustomer({
+                    customerId: customer.id,
+                    reasonCode: rc,
+                    note,
+                  })
+                );
+                if (res?.inProgress) {
+                  throw new Error(
+                    res.message ??
+                      "A transition is already in progress for this customer — refresh in a moment for its outcome."
                   );
-                },
-                "Customer reactivated — their portal login is back on. Canceled plans stay canceled; add a new plan through a booking."
-              );
+                }
+                if (res?.partial || res?.state === "NEEDS_RECOVERY") {
+                  throw new Error(
+                    res.message ??
+                      "The reactivation could not fully finish — it is owned and safe to retry."
+                  );
+                }
+                if (res?.audited === false) {
+                  throw new Error(
+                    "The customer is active again, but the audit record could not be written — a recovery item now owns reconstructing it."
+                  );
+                }
+                setNotice(
+                  res?.alreadyActive
+                    ? "This customer was already active — portal access re-checked."
+                    : "Customer reactivated — their portal login is back on. Canceled plans stay canceled; add a new plan through a booking."
+                );
+              });
             }}
           >
             Reactivate customer

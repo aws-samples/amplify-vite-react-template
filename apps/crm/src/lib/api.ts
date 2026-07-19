@@ -919,18 +919,19 @@ export const REACTIVATION_REASONS = [
  *  model (OWNER/OFFICE/FINANCE-readable) for the customer's history card. */
 export type CustomerLifecycleEvent = Schema["CustomerLifecycleEvent"]["type"];
 
-/** List a customer's lifecycle transitions for the history card. Tolerates the
- *  model being absent before the backend wave lands; the caller sorts. */
-export function listCustomerLifecycleEvents(customerId: string): Promise<{
+/** List a customer's COMPLETE lifecycle history — paged to exhaustion, with a
+ *  read failure SURFACED (readFailed), never disguised as an empty timeline
+ *  (GL-09/X1). Tolerates the model being absent before the backend wave lands. */
+export async function listCustomerLifecycleEvents(customerId: string): Promise<{
   data: CustomerLifecycleEvent[];
-  nextToken?: string | null;
-  errors?: { message: string }[];
+  readFailed: boolean;
 }> {
   const models = api().models as unknown as {
     CustomerLifecycleEvent?: {
       list: (a: {
         filter?: { customerId: { eq: string } };
         limit?: number;
+        nextToken?: string | null;
       }) => Promise<{
         data: CustomerLifecycleEvent[];
         nextToken?: string | null;
@@ -938,12 +939,71 @@ export function listCustomerLifecycleEvents(customerId: string): Promise<{
       }>;
     };
   };
-  if (!models.CustomerLifecycleEvent)
-    return Promise.resolve({ data: [], nextToken: null });
-  return models.CustomerLifecycleEvent.list({
-    filter: { customerId: { eq: customerId } },
-    limit: 100,
-  });
+  if (!models.CustomerLifecycleEvent) return { data: [], readFailed: false };
+  const out: CustomerLifecycleEvent[] = [];
+  try {
+    let token: string | null | undefined;
+    do {
+      const page = await models.CustomerLifecycleEvent.list({
+        filter: { customerId: { eq: customerId } },
+        limit: 200,
+        nextToken: token ?? undefined,
+      });
+      if (page.errors?.length) return { data: out, readFailed: true };
+      out.push(...(page.data ?? []));
+      token = page.nextToken;
+    } while (token);
+    return { data: out, readFailed: false };
+  } catch {
+    return { data: out, readFailed: true };
+  }
+}
+
+/** GL-09 — the customer's lifecycle commands (durable transitions). A
+ *  non-terminal command is a "Transition needs recovery" banner + resume. */
+export async function listLifecycleCommands(customerId: string): Promise<
+  {
+    id: string;
+    action: string;
+    stage: string;
+    outcome?: string | null;
+    effects?: string | null;
+    lastError?: string | null;
+    requestedAt?: string | null;
+  }[]
+> {
+  const models = api().models as unknown as {
+    CustomerLifecycleCommand?: {
+      listCustomerLifecycleCommandByCustomerIdAndRequestedAt: (
+        q: { customerId: string },
+        o: { limit: number }
+      ) => Promise<{ data: Record<string, unknown>[] }>;
+    };
+  };
+  if (!models.CustomerLifecycleCommand) return [];
+  try {
+    const res =
+      await models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
+        { customerId },
+        { limit: 50 }
+      );
+    return (res.data ?? []) as never[];
+  } catch {
+    return [];
+  }
+}
+
+/** GL-09 — the server-computed transition preview. */
+export function previewLifecycleTransition(input: {
+  customerId: string;
+  action: string;
+  reasonCode?: string;
+}): OpResult {
+  return (
+    api().queries as unknown as {
+      previewLifecycleTransition: (i: typeof input) => OpResult;
+    }
+  ).previewLifecycleTransition(input);
 }
 
 /** Parse an AWSJSON field that may arrive as a string. */

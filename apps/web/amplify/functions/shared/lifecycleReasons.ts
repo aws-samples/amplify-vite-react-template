@@ -69,3 +69,110 @@ export function lifecycleReasonSummary(
   const trimmed = (note ?? "").trim();
   return trimmed ? `${reasonCode} — ${trimmed}` : reasonCode;
 }
+
+/**
+ * GL-09 — the versioned per-reason transition policy. Each deactivation reason
+ * drives its own balance handling, record note, and customer-notice wording —
+ * nonpayment, a duplicate record, a move, a sale, and a normal service end are
+ * NOT the same event even though the mechanical steps overlap. These are the
+ * engineering defaults awaiting leadership sign-off (the version records which
+ * policy an action ran under); the preview, provider actions, customer notice,
+ * and final record all read this one table.
+ */
+export const LIFECYCLE_POLICY_VERSION = "2026-07-19.1";
+
+export type ReasonPolicy = {
+  /** COLLECT — the office pursues the balance; REPORT_ONLY — surfaced, office
+   *  decides; WRITE_OFF_REVIEW — flagged for a Finance write-off decision. */
+  balanceHandling: "COLLECT" | "REPORT_ONLY" | "WRITE_OFF_REVIEW";
+  /** For DUPLICATE: documents are retained on the surviving record. */
+  retainDocumentsNote?: string;
+  /** The customer-notice subject + body intro for this reason. Empty subject
+   *  means NO customer notice is sent (e.g. a duplicate record — the person
+   *  still has their real record; a notice would confuse them). */
+  noticeSubject: string;
+  noticeIntro: string;
+};
+
+export const DEACTIVATION_POLICY: Record<string, ReasonPolicy> = {
+  CUSTOMER_REQUEST: {
+    balanceHandling: "COLLECT",
+    noticeSubject: "Your BuzzKill account has been closed",
+    noticeIntro:
+      "As requested, we've closed your account and stopped all future billing.",
+  },
+  NONPAYMENT: {
+    balanceHandling: "COLLECT",
+    noticeSubject: "Your BuzzKill service has been suspended",
+    noticeIntro:
+      "We've had to suspend your service because of an unpaid balance. Settling it restores service — reply to this email or call us and we'll sort it out together.",
+  },
+  MOVED: {
+    balanceHandling: "COLLECT",
+    noticeSubject: "Your BuzzKill account has been closed",
+    noticeIntro:
+      "We've closed your account following your move and stopped all future billing.",
+  },
+  PROPERTY_SOLD: {
+    balanceHandling: "COLLECT",
+    noticeSubject: "Your BuzzKill account has been closed",
+    noticeIntro:
+      "We've closed your account for this property and stopped all future billing.",
+  },
+  SERVICE_ENDED: {
+    balanceHandling: "COLLECT",
+    noticeSubject: "Your BuzzKill service has ended",
+    noticeIntro:
+      "Your service with us has ended and all future billing has stopped. Thank you for having us out.",
+  },
+  DUPLICATE: {
+    balanceHandling: "WRITE_OFF_REVIEW",
+    retainDocumentsNote:
+      "This record was a duplicate; its documents are retained under the customer's surviving record.",
+    // No customer notice: the person's real record is unaffected — a "your
+    // account was closed" email would be confusing and wrong.
+    noticeSubject: "",
+    noticeIntro: "",
+  },
+  OTHER: {
+    balanceHandling: "REPORT_ONLY",
+    noticeSubject: "Your BuzzKill account has been closed",
+    noticeIntro:
+      "We've closed your account and stopped all future billing.",
+  },
+};
+
+export const REACTIVATION_POLICY: Record<string, ReasonPolicy> = {
+  CUSTOMER_RETURNED: {
+    balanceHandling: "REPORT_ONLY",
+    noticeSubject: "Welcome back to BuzzKill",
+    noticeIntro:
+      "Your account is active again. Your previous plans stay closed — book the service you need and we'll take it from there.",
+  },
+  PAYMENT_RESOLVED: {
+    balanceHandling: "REPORT_ONLY",
+    noticeSubject: "Your BuzzKill service is restored",
+    noticeIntro:
+      "Thanks — your balance is settled and your account is active again.",
+  },
+  DEACTIVATED_IN_ERROR: {
+    balanceHandling: "REPORT_ONLY",
+    noticeSubject: "Your BuzzKill account is active",
+    noticeIntro:
+      "Your account was briefly marked inactive in error — it's fully active again, and nothing about your service or billing changed.",
+  },
+  OTHER: {
+    balanceHandling: "REPORT_ONLY",
+    noticeSubject: "Your BuzzKill account is active again",
+    noticeIntro: "Your account is active again.",
+  },
+};
+
+export function reasonPolicy(
+  action: LifecycleAction,
+  reasonCode: string
+): ReasonPolicy {
+  const table =
+    action === "DEACTIVATE" ? DEACTIVATION_POLICY : REACTIVATION_POLICY;
+  return table[reasonCode] ?? table.OTHER;
+}

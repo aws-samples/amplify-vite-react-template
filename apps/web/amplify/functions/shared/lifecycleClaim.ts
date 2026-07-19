@@ -15,21 +15,50 @@ import type { LifecycleAction } from "./lifecycleLog";
  * handled failure) so the next legitimate transition can proceed. Mirrors the
  * PlanCancellationClaim pattern used for plan cancellation.
  */
+/** How long one transition attempt may hold the per-customer claim. Generous
+ *  versus the Lambda timeout; a crashed holder is reclaimable after this. */
+const CLAIM_LEASE_MS = 5 * 60_000;
+
 export async function acquireLifecycleClaim(
   customerId: string,
   action: LifecycleAction
 ): Promise<boolean> {
   const client = await dataClient();
-  const { data } = await client.models.CustomerLifecycleClaim.create({
-    id: customerId,
-    action,
-    requestedAt: new Date().toISOString(),
-  });
+  const attempt = async () => {
+    const { data } = await client.models.CustomerLifecycleClaim.create({
+      id: customerId,
+      action,
+      requestedAt: new Date().toISOString(),
+      leaseUntil: new Date(Date.now() + CLAIM_LEASE_MS).toISOString(),
+    });
+    return Boolean(data);
+  };
   // A conditional-create conflict (a claim already exists) returns data: null,
   // not a throw — exactly like PlanCancellationClaim. Any other failure also
   // returns null here, and treating that as "not acquired" is the safe default:
   // the caller reports in-flight instead of racing a transition.
-  return Boolean(data);
+  if (await attempt()) return true;
+  // GL-09: a claim whose lease expired belongs to a crashed process — it may
+  // no longer block this customer's transitions forever. Reclaim it (the
+  // conditional re-create keeps exactly one winner).
+  const { data: held } = await client.models.CustomerLifecycleClaim.get({
+    id: customerId,
+  });
+  // Lease expiry: an explicit lease wins; a legacy row (pre-lease) expires
+  // CLAIM_LEASE_MS after its requestedAt; an unreadable row is assumed LIVE —
+  // the safe default is to report in-flight, never to race a winner.
+  const expiresAt = held?.leaseUntil
+    ? Date.parse(held.leaseUntil)
+    : held?.requestedAt
+      ? Date.parse(held.requestedAt) + CLAIM_LEASE_MS
+      : Date.now() + CLAIM_LEASE_MS;
+  if (expiresAt > Date.now()) {
+    return false;
+  }
+  await client.models.CustomerLifecycleClaim.delete({ id: customerId }).catch(
+    () => undefined
+  );
+  return attempt();
 }
 
 /** Release the lock. Idempotent and swallows its own failure — a lingering

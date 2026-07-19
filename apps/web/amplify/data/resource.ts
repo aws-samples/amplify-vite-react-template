@@ -657,9 +657,51 @@ export const schema = a.schema({
     .model({
       action: a.string(),
       requestedAt: a.datetime(),
+      /** GL-09: a crashed process may no longer block transitions forever — a
+       *  claim older than its lease is reclaimable. */
+      leaseUntil: a.datetime(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
+    ]),
+
+  /**
+   * GL-09 — the durable customer lifecycle command (id = the caller's
+   * idempotency key). Claimed BEFORE any billing/schedule/access/status/audit/
+   * message change; retains actor, controlled reason, prior/requested state,
+   * the server-computed inventory of every affected record, per-stage
+   * progress, provider references, retry count, and the persisted outcome. A
+   * duplicate returns the same persisted progress; a stale command is resumed
+   * under an exclusive nonce-verified lease by the daily worker or a retry.
+   * PARTIAL is resumable; COMPLETE/FAILED are settled. Stages: REQUESTED |
+   * INVENTORIED | BILLING_STOPPED | SCHEDULE_CLEARED | ACCESS_DONE |
+   * STATUS_DONE | AUDITED | NOTICE_SENT | COMPLETE | PARTIAL | FAILED.
+   */
+  CustomerLifecycleCommand: a
+    .model({
+      customerId: a.id().required(),
+      action: a.string().required(),
+      actorSub: a.string(),
+      actorEmail: a.string(),
+      reasonCode: a.string(),
+      reason: a.string(),
+      priorStatus: a.string(),
+      requestedStatus: a.string(),
+      stage: a.string().required(),
+      inventoryJson: a.json(),
+      resultJson: a.json(),
+      requestedAt: a.datetime().required(),
+      leaseUntil: a.datetime(),
+      leaseNonce: a.string(),
+      attemptCount: a.integer(),
+      lastError: a.string(),
+      effects: a.string(),
+      outcome: a.string(),
+      noticeMessageId: a.string(),
+    })
+    .secondaryIndexes((index) => [index("customerId").sortKeys(["requestedAt"])])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
     ]),
 
   /**
@@ -1858,6 +1900,7 @@ export const schema = a.schema({
       customerId: a.string().required(),
       reasonCode: a.string().required(),
       note: a.string(),
+      idempotencyKey: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
@@ -2281,9 +2324,27 @@ export const schema = a.schema({
       customerId: a.string().required(),
       reasonCode: a.string().required(),
       note: a.string(),
+      idempotencyKey: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-09 — the server-computed transition preview: what will stop, what will
+   * remain (paid/in-progress visits needing decisions), money paid, money
+   * owed, portal implication, and the notice that will be sent. The employee
+   * confirmation renders THIS, never client-side counts.
+   */
+  previewLifecycleTransition: a
+    .query()
+    .arguments({
+      customerId: a.string().required(),
+      action: a.string().required(),
+      reasonCode: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**

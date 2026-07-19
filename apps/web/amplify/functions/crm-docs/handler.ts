@@ -524,6 +524,69 @@ async function runWorkVerifier(
           "Refund the payment, void the open invoice, or cancel the visit in the billing tools first — then confirm the money is settled.",
       };
     }
+    case "LIFECYCLE_SETTLED": {
+      // GL-09/X2: a lifecycle-recovery case closes only when the customer's
+      // provider billing, CRM plans, status, access, and command state all
+      // AGREE — portal-only or audit-only repair cannot turn a mixed customer
+      // green.
+      const { data: cust } = await client.models.Customer.get({
+        id: item.customerId ?? item.relatedId,
+      });
+      if (!cust) return { ok: false, message: "The customer could not be read." };
+      const problems: string[] = [];
+      let planToken: string | null | undefined;
+      do {
+        const page = await client.models.ServicePlan.list({
+          filter: { customerId: { eq: cust.id } },
+          limit: 200,
+          nextToken: planToken,
+        });
+        for (const plan of page.data ?? []) {
+          if (cust.status === "INACTIVE" && plan.status === "ACTIVE") {
+            problems.push(`plan ${plan.planName} is still ACTIVE`);
+          }
+        }
+        planToken = page.nextToken;
+      } while (planToken);
+      if (cust.status === "INACTIVE") {
+        let jobToken: string | null | undefined;
+        do {
+          const page = await client.models.Job.list({
+            filter: { customerId: { eq: cust.id } },
+            limit: 200,
+            nextToken: jobToken,
+          });
+          for (const job of page.data ?? []) {
+            if (job.status === "SCHEDULED" && !job.paidAt) {
+              problems.push(`visit ${job.id} is still scheduled`);
+            }
+          }
+          jobToken = page.nextToken;
+        } while (jobToken);
+      }
+      if ("CustomerLifecycleCommand" in client.models) {
+        const { data: cmds } =
+          await client.models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
+            { customerId: cust.id },
+            { limit: 50 }
+          );
+        const unfinished = (cmds ?? []).filter(
+          (c) => c.stage !== "COMPLETE" && c.stage !== "FAILED"
+        );
+        if (unfinished.length) {
+          problems.push(
+            `${unfinished.length} lifecycle command(s) not terminal (${unfinished.map((c) => c.stage).join(", ")})`
+          );
+        }
+      }
+      if (problems.length) {
+        return {
+          ok: false,
+          message: `Not settled yet: ${problems.join("; ")}. Re-run the transition from the customer screen, then confirm.`,
+        };
+      }
+      return { ok: true, message: "" };
+    }
     case "TECH_LICENSED": {
       // GL-17: closable only when the technician holds a CURRENT unexpired
       // licence record, OR is inactive with no future assigned work.

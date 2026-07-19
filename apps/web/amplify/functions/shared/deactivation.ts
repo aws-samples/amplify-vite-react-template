@@ -1,7 +1,7 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
 import { notifyOffice } from "./email";
-import { openOwnedWork } from "./ownedWork";
+import { openMissingContactWork, openOwnedWork } from "./ownedWork";
 import { cancelPlanBilling } from "./subscription";
 import {
   recordCustomerLifecycleEvent,
@@ -11,6 +11,14 @@ import {
   acquireLifecycleClaim,
   releaseLifecycleClaim,
 } from "./lifecycleClaim";
+import {
+  claimLifecycleCommand,
+  finishLifecycleCommand,
+  recordLifecycleStage,
+} from "./lifecycleCommand";
+import { reasonPolicy, LIFECYCLE_POLICY_VERSION } from "./lifecycleReasons";
+import { emailShell, sendEmail } from "./email";
+
 
 /**
  * Customer deactivation — ONE server action for the whole offboarding (GL-09).
@@ -53,6 +61,13 @@ export type DeactivateCustomerOptions = {
    * audit ledger.
    */
   reason: string;
+  /** The bare controlled reason code — drives the per-reason policy (balance
+   *  handling + customer-notice wording). Defaults to OTHER when absent. */
+  reasonCode?: string;
+  /** GL-09: the durable command's idempotency key. A stable key from the UI
+   *  makes a retry resume the same command; absent, a fresh command is minted
+   *  (still durable + resumable by the daily worker). */
+  idempotencyKey?: string;
   /**
    * End the portal login. Injected by crm-admin (which holds the Cognito pool
    * credentials). Runs BEFORE the INACTIVE flip so INACTIVE never implies a live
@@ -145,6 +160,60 @@ export async function deactivateCustomer(
     };
   }
 
+  // GL-09: the durable command owns this transition end-to-end — claimed
+  // BEFORE any provider effect, with per-stage progress, so a process stop is
+  // resumable and a duplicate/opposite request is answered from persisted
+  // state instead of a fresh interpretation.
+  const commandKey =
+    opts.idempotencyKey?.trim() ||
+    `deact-${customerId}-${Date.now().toString(36)}`;
+  const reasonCode = opts.reasonCode ?? "OTHER";
+  const commandClaim = await claimLifecycleCommand({
+    idempotencyKey: commandKey,
+    customerId,
+    action: "DEACTIVATE",
+    actor: actor ?? null,
+    reasonCode,
+    reason,
+    priorStatus,
+  });
+  if (!commandClaim.claimed) {
+    await releaseLifecycleClaim(customerId);
+    const c = commandClaim.command;
+    if (commandClaim.state === "DONE") {
+      return {
+        plansCanceled: 0,
+        visitsResolved: 0,
+        jobsCanceled: 0,
+        outstandingBalanceCents: 0,
+        portalUserSub: customer.portalUserSub ?? null,
+        portalRevoked: false,
+        status: (await client.models.Customer.get({ id: customerId })).data
+          ?.status ?? priorStatus,
+        partial: c.outcome !== "COMPLETE",
+        alreadyInactive: c.outcome === "COMPLETE",
+        audited: true,
+        message: `This request already ran: ${c.outcome ?? c.stage}. ${c.effects ?? ""}`,
+      };
+    }
+    return {
+      plansCanceled: 0,
+      visitsResolved: 0,
+      jobsCanceled: 0,
+      outstandingBalanceCents: 0,
+      portalUserSub: customer.portalUserSub ?? null,
+      portalRevoked: false,
+      status: priorStatus,
+      partial: true,
+      alreadyInactive: false,
+      audited: true,
+      message:
+        commandClaim.state === "OPPOSITE_IN_FLIGHT"
+          ? `A ${c.action.toLowerCase()} of this customer is still unfinished (${c.stage}). Finish or recover it before the opposite change — nothing was done.`
+          : "This transition is already in progress — refresh in a moment for its recorded outcome.",
+    };
+  }
+
   try {
     // Idempotent re-run: already INACTIVE. Re-assert the portal revoke to heal
     // any drift (the exact INACTIVE-with-live-login bug this gate closes), but
@@ -153,6 +222,11 @@ export async function deactivateCustomer(
       const heal = opts.revokePortalAccess
         ? await opts.revokePortalAccess().catch(() => ({ revoked: false }))
         : { revoked: false };
+      await finishLifecycleCommand(commandKey, {
+        stage: "COMPLETE",
+        outcome: "COMPLETE",
+        effects: "Already inactive; portal access re-asserted to heal drift.",
+      });
       return {
         plansCanceled: 0,
         visitsResolved: 0,
@@ -167,6 +241,14 @@ export async function deactivateCustomer(
         message: "This customer is already inactive.",
       };
     }
+
+    // GL-09: the server-computed inventory of every affected record, persisted
+    // on the command BEFORE any provider effect — the resume and the employee
+    // preview both read the same facts.
+    const inventory = await buildLifecycleInventory(customerId);
+    await recordLifecycleStage(commandKey, "INVENTORIED", {
+      inventoryJson: JSON.stringify(inventory),
+    });
 
     // a. Stop the money first. cancelPlanBilling cancels the Stripe subscription
     //    AND resolves that plan's queued visits; it throws only when the Stripe
@@ -192,10 +274,35 @@ export async function deactivateCustomer(
 
     const outstandingBalanceCents = await outstandingBalance(customerId);
 
+    if (failedPlans.length === 0) {
+      await recordLifecycleStage(commandKey, "BILLING_STOPPED", {
+        effects: `${plansCanceled} plan(s) stopped, ${visitsResolved} queued visit(s) resolved.`,
+      });
+    }
+
     // A plan is still billing. Do NOT flip INACTIVE — that would hide the live
     // charge — do not revoke the portal, and do not sweep the schedule for a
-    // customer we can't finish deactivating. Page a human and hand back partial.
+    // customer we can't finish deactivating. A DURABLE owned case + page, and
+    // the command stays PARTIAL (resumable) — never merely an email.
     if (failedPlans.length > 0) {
+      const caseId = await openOwnedWork({
+        kind: "LIFECYCLE_RECOVERY",
+        dedupeKey: `deactivate-billing:${customerId}`,
+        title: `Finish a deactivation — a plan is still billing: ${customer.displayName}`,
+        detail: `${customer.displayName}'s deactivation could not stop ${failedPlans.length} plan(s) at Stripe (${failedPlans.map((p) => `${p.name}: ${p.message}`).join("; ")}). They are deliberately still ACTIVE — an INACTIVE customer that is still billing is invisible.`,
+        customerId,
+        relatedId: customerId,
+        sourceUrl: `/customers/${customerId}`,
+        resolutionAction:
+          "Cancel the plan by hand from the customer's page, then re-run the deactivation (idempotent).",
+        ownerTeam: "FINANCE",
+      });
+      await finishLifecycleCommand(commandKey, {
+        stage: "PARTIAL",
+        outcome: "PARTIAL",
+        effects: `Billing could not be fully stopped (${failedPlans.length} plan(s) live). Customer left ACTIVE. Recovery case ${caseId ? "opened" : "COULD NOT BE OPENED — escalate"}.`,
+        lastError: failedPlans.map((p) => p.message).join("; "),
+      });
       await notifyOffice({
         subject: `ACTION REQUIRED — deactivation left a plan still billing: ${customer.displayName}`,
         heading: "A customer deactivation could not stop the billing",
@@ -228,8 +335,16 @@ export async function deactivateCustomer(
 
     // b. Now the trucks. The plan cancels already took their own queued visits
     //    off the schedule; this sweeps what's left — one-time future jobs, and
-    //    any visit a slipped plan stranded — so no reminder or dispatch survives.
-    const jobsCanceled = await sweepRemainingFutureJobs(customerId);
+    //    any visit a slipped plan stranded — so no reminder or dispatch
+    //    survives. Paid and in-progress visits are NOT silently skipped: each
+    //    becomes an owned honor/refund/finish decision with a deadline.
+    const sweep = await sweepRemainingFutureJobs(customerId, customer.displayName);
+    const jobsCanceled = sweep.canceled;
+    if (sweep.failed === 0 && sweep.caseWriteFailed === 0) {
+      await recordLifecycleStage(commandKey, "SCHEDULE_CLEARED", {
+        effects: `${jobsCanceled} upcoming visit(s) canceled; ${sweep.paidDecisions} paid and ${sweep.inProgressDecisions} in-progress visit(s) put in owned decisions.`,
+      });
+    }
 
     // c. ACCESS before STATUS (R1). If the portal revoke fails, the money is
     //    already stopped but the login is still live and the record is still
@@ -268,6 +383,13 @@ export async function deactivateCustomer(
              <p style="color:#666;font-size:13px;">Error: ${message}</p>
              <p><strong>End their portal access, then deactivate them again.</strong></p>`,
         });
+        await finishLifecycleCommand(commandKey, {
+          stage: "PARTIAL",
+          outcome: "PARTIAL",
+          effects:
+            "Billing stopped and schedule cleared, but the portal login could not be ended. Customer left ACTIVE; owned recovery is open.",
+          lastError: message,
+        });
         return {
           plansCanceled,
           visitsResolved,
@@ -284,6 +406,7 @@ export async function deactivateCustomer(
         };
       }
     }
+    await recordLifecycleStage(commandKey, "ACCESS_DONE");
 
     // d. INACTIVE last, with a read-back (R4). A silently-failed status write
     //    must not report success — if the flip did not persist, open blocking
@@ -305,6 +428,12 @@ export async function deactivateCustomer(
           "Re-run the deactivation to re-assert INACTIVE — it is idempotent — and confirm the record reads inactive.",
         ownerTeam: "OPS",
       });
+      await finishLifecycleCommand(commandKey, {
+        stage: "PARTIAL",
+        outcome: "PARTIAL",
+        effects:
+          "Everything stopped but the INACTIVE status write did not persist. Owned recovery is open.",
+      });
       return {
         plansCanceled,
         visitsResolved,
@@ -320,6 +449,7 @@ export async function deactivateCustomer(
           "The INACTIVE status did not stick. It's owned and will be re-asserted; re-running is safe.",
       };
     }
+    await recordLifecycleStage(commandKey, "STATUS_DONE");
 
     // e. Record the transition for leadership (R3/R4). The audit write is
     //    blocking-on-failure inside recordCustomerLifecycleEvent (a lost row
@@ -338,6 +468,46 @@ export async function deactivateCustomer(
       }.`,
     });
 
+    if (recorded) await recordLifecycleStage(commandKey, "AUDITED");
+
+    // GL-09: the tracked final customer notice — the approved per-reason
+    // wording with effective date, disposition, balance next step, portal
+    // implication, and contact path. A customer with no email becomes owned
+    // missing-contact work (that case IS the tracking); a failed send keeps
+    // the command PARTIAL so the promise cannot silently vanish.
+    const notice = await sendLifecycleNotice({
+      action: "DEACTIVATE",
+      reasonCode,
+      customer: {
+        id: customerId,
+        displayName: customer.displayName,
+        email: customer.email ?? null,
+        contactName: customer.contactName ?? null,
+      },
+      outstandingBalanceCents,
+      sweep,
+    });
+    if (notice.outcome !== "FAILED") {
+      await recordLifecycleStage(commandKey, "NOTICE_SENT", {
+        effects: `Customer notice: ${notice.outcome}.`,
+      });
+    }
+
+    const sweepClean = sweep.failed === 0 && sweep.caseWriteFailed === 0;
+    const finalPartial = !recorded || notice.outcome === "FAILED" || !sweepClean;
+    const effectsSummary = `${plansCanceled} plan(s) billing stopped, ${visitsResolved} queued visit(s) resolved, ${jobsCanceled} upcoming visit(s) canceled${
+      sweep.failed ? ` (${sweep.failed} FAILED — owned)` : ""
+    }; ${sweep.paidDecisions} paid and ${sweep.inProgressDecisions} in-progress visit(s) in owned decisions. Outstanding balance ${formatCents(
+      outstandingBalanceCents
+    )} ${reasonPolicy("DEACTIVATE", reasonCode).balanceHandling.toLowerCase().replace(/_/g, " ")} (policy ${LIFECYCLE_POLICY_VERSION}). Portal ${
+      portalRevoked ? "ended" : "n/a"
+    }. Notice: ${notice.outcome}.`;
+    await finishLifecycleCommand(commandKey, {
+      stage: finalPartial ? "PARTIAL" : "COMPLETE",
+      outcome: finalPartial ? "PARTIAL" : "COMPLETE",
+      effects: effectsSummary,
+    });
+
     return {
       plansCanceled,
       visitsResolved,
@@ -346,9 +516,12 @@ export async function deactivateCustomer(
       portalUserSub: customer.portalUserSub ?? null,
       portalRevoked,
       status: "INACTIVE",
-      partial: false,
+      partial: finalPartial,
       alreadyInactive: false,
       audited: recorded,
+      message: finalPartial
+        ? "Deactivated, but a follow-up item is owned (see the customer's recovery work)."
+        : undefined,
     };
   } finally {
     // Whatever the outcome (clean, partial, or a throw), release the claim so a
@@ -389,42 +562,283 @@ async function listActivePlans(
   return out;
 }
 
+export type LifecycleSweepResult = {
+  canceled: number;
+  /** Cancel writes (or the list read) that failed — each keeps the transition
+   *  out of a clean COMPLETE and is resumable (GL-09). */
+  failed: number;
+  /** Paid visits given an owned honor/refund/cancel decision. */
+  paidDecisions: number;
+  /** In-progress visits given an owned finish/disposition decision. */
+  inProgressDecisions: number;
+  /** Owned-decision cases that could not be durably written. */
+  caseWriteFailed: number;
+};
+
 /**
  * Cancel the customer's remaining not-yet-done jobs and take them off their
- * routes. Leaves history (COMPLETED/NO_ACCESS/CANCELED), a technician mid-visit
- * (IN_PROGRESS), and anything paid up front — a paid visit is money already
- * collected, so honouring or refunding it is an office decision, not a silent
- * cancellation. Returns how many were swept.
+ * routes. Leaves history (COMPLETED/NO_ACCESS/CANCELED). A paid visit and a
+ * technician mid-visit are NOT silently skipped: each gets an OWNED
+ * honor/refund/finish decision with a staffed owner and deadline (GL-09) —
+ * money already collected and work already underway are office decisions, not
+ * silent gaps. Every failure is counted; a read failure is a failure, never an
+ * empty page.
  */
-async function sweepRemainingFutureJobs(customerId: string): Promise<number> {
+async function sweepRemainingFutureJobs(
+  customerId: string,
+  displayName: string
+): Promise<LifecycleSweepResult> {
   const client = await dataClient();
-  let count = 0;
+  const out: LifecycleSweepResult = {
+    canceled: 0,
+    failed: 0,
+    paidDecisions: 0,
+    inProgressDecisions: 0,
+    caseWriteFailed: 0,
+  };
   const note = `Auto-canceled ${new Date()
     .toISOString()
     .slice(0, 10)}: customer deactivated. Taken off the schedule so nothing dispatches.`;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.list({
-      filter: { customerId: { eq: customerId } },
-      nextToken: token,
-      limit: 200,
-    });
-    for (const job of page.data) {
-      if (job.status !== "SCHEDULED" && job.status !== "UNSCHEDULED") continue;
-      if (job.paidAt) continue;
-      const { data: updated } = await client.models.Job.update({
-        id: job.id,
-        status: "CANCELED",
-        routeId: null,
-        routeOrder: null,
-        technicianId: null,
-        notes: job.notes ? `${job.notes}\n${note}` : note,
+  try {
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Job.list({
+        filter: { customerId: { eq: customerId } },
+        nextToken: token,
+        limit: 200,
       });
-      if (updated) count++;
-    }
-    token = page.nextToken;
-  } while (token);
-  return count;
+      for (const job of page.data) {
+        if (job.status === "IN_PROGRESS") {
+          // Work underway right now — an owned finish/disposition decision.
+          const opened = await openOwnedWork({
+            kind: "LIFECYCLE_RECOVERY",
+            dedupeKey: `deactivate-inprogress:${job.id}`,
+            title: `Deactivation: a visit is IN PROGRESS — decide it: ${displayName}`,
+            detail: `${displayName} is being deactivated while visit ${job.id}${job.scheduledDate ? ` (${job.scheduledDate})` : ""} is in progress. It was left in place; decide whether it finishes, is cut short, or is rescheduled — and what the customer is told.`,
+            customerId,
+            relatedId: job.id,
+            sourceUrl: `/customers/${customerId}`,
+            resolutionAction:
+              "Decide the in-progress visit (finish / stop / disposition), record the outcome, and confirm the customer knows.",
+            ownerTeam: "OPS",
+          });
+          if (opened) out.inProgressDecisions++;
+          else out.caseWriteFailed++;
+          continue;
+        }
+        if (job.status !== "SCHEDULED" && job.status !== "UNSCHEDULED") continue;
+        if (job.paidAt) {
+          // Money already collected — an owned honor/refund/cancel decision,
+          // never a silent skip.
+          const opened = await openOwnedWork({
+            kind: "LIFECYCLE_RECOVERY",
+            dedupeKey: `deactivate-paid:${job.id}`,
+            title: `Deactivation: a PAID visit needs a decision: ${displayName}`,
+            detail: `${displayName} is being deactivated but visit ${job.id}${job.scheduledDate ? ` (${job.scheduledDate})` : ""} was already paid up front. Decide: honor it, refund it per the 72-hour policy, or reschedule it — the money is real either way.`,
+            customerId,
+            relatedId: job.id,
+            sourceUrl: `/customers/${customerId}`,
+            resolutionAction:
+              "Choose honor / refund / cancel for this paid visit through the visit tools, and confirm the customer knows.",
+            ownerTeam: "FINANCE",
+          });
+          if (opened) out.paidDecisions++;
+          else out.caseWriteFailed++;
+          continue;
+        }
+        try {
+          const { data: updated } = await client.models.Job.update({
+            id: job.id,
+            status: "CANCELED",
+            routeId: null,
+            routeOrder: null,
+            technicianId: null,
+            notes: job.notes ? `${job.notes}\n${note}` : note,
+          });
+          if (updated) out.canceled++;
+          else out.failed++;
+        } catch (err) {
+          console.error("sweepRemainingFutureJobs: job failed", job.id, err);
+          out.failed++;
+        }
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    // A failed schedule READ cannot be skipped or hidden by the final status.
+    console.error("sweepRemainingFutureJobs: list failed", customerId, err);
+    out.failed++;
+  }
+  if (out.failed > 0 || out.caseWriteFailed > 0) {
+    await openOwnedWork({
+      kind: "LIFECYCLE_RECOVERY",
+      dedupeKey: `deactivate-schedule:${customerId}`,
+      title: `Deactivation schedule sweep incomplete: ${displayName}`,
+      detail: `${out.failed} visit change(s) failed and ${out.caseWriteFailed} owned decision case(s) could not be written while deactivating ${displayName}. Re-running the deactivation resumes the sweep.`,
+      customerId,
+      relatedId: customerId,
+      sourceUrl: `/customers/${customerId}`,
+      resolutionAction:
+        "Re-run the deactivation (idempotent) to finish the schedule sweep, then confirm no future visit remains.",
+      ownerTeam: "OPS",
+    });
+  }
+  return out;
+}
+
+/**
+ * GL-09 — the server-computed inventory the command persists BEFORE any
+ * provider effect and the employee preview renders: every plan (with provider
+ * reference), every future/paid/in-progress visit, the outstanding balance,
+ * and the portal login. One source of truth for both.
+ */
+export async function buildLifecycleInventory(customerId: string): Promise<{
+  activePlans: { id: string; planName: string; stripeSubscriptionId: string | null; priceCents: number | null }[];
+  futureUnpaidJobs: { id: string; scheduledDate: string | null; serviceType: string }[];
+  paidJobs: { id: string; scheduledDate: string | null; serviceType: string }[];
+  inProgressJobs: { id: string; scheduledDate: string | null; serviceType: string }[];
+  outstandingBalanceCents: number;
+  portalUserSub: string | null;
+  readFailures: string[];
+}> {
+  const client = await dataClient();
+  const inv = {
+    activePlans: [] as { id: string; planName: string; stripeSubscriptionId: string | null; priceCents: number | null }[],
+    futureUnpaidJobs: [] as { id: string; scheduledDate: string | null; serviceType: string }[],
+    paidJobs: [] as { id: string; scheduledDate: string | null; serviceType: string }[],
+    inProgressJobs: [] as { id: string; scheduledDate: string | null; serviceType: string }[],
+    outstandingBalanceCents: 0,
+    portalUserSub: null as string | null,
+    readFailures: [] as string[],
+  };
+  try {
+    const { data: customer } = await client.models.Customer.get({ id: customerId });
+    inv.portalUserSub = customer?.portalUserSub ?? null;
+  } catch {
+    inv.readFailures.push("customer");
+  }
+  try {
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.ServicePlan.list({
+        filter: { customerId: { eq: customerId } },
+        nextToken: token,
+        limit: 200,
+      });
+      for (const plan of page.data) {
+        if (plan.status === "ACTIVE") {
+          inv.activePlans.push({
+            id: plan.id,
+            planName: plan.planName,
+            stripeSubscriptionId: plan.stripeSubscriptionId ?? null,
+            priceCents: plan.priceCents ?? null,
+          });
+        }
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch {
+    inv.readFailures.push("plans");
+  }
+  try {
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Job.list({
+        filter: { customerId: { eq: customerId } },
+        nextToken: token,
+        limit: 200,
+      });
+      for (const job of page.data) {
+        const summary = {
+          id: job.id,
+          scheduledDate: job.scheduledDate ?? null,
+          serviceType: job.serviceType,
+        };
+        if (job.status === "IN_PROGRESS") inv.inProgressJobs.push(summary);
+        else if (
+          (job.status === "SCHEDULED" || job.status === "UNSCHEDULED") &&
+          job.paidAt
+        )
+          inv.paidJobs.push(summary);
+        else if (job.status === "SCHEDULED" || job.status === "UNSCHEDULED")
+          inv.futureUnpaidJobs.push(summary);
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch {
+    inv.readFailures.push("jobs");
+  }
+  try {
+    inv.outstandingBalanceCents = await outstandingBalance(customerId);
+  } catch {
+    inv.readFailures.push("invoices");
+  }
+  return inv;
+}
+
+/**
+ * GL-09 — the tracked final customer notice, driven by the per-reason policy.
+ * Returns SENT | NO_EMAIL (owned missing-contact work IS the tracking) |
+ * SKIPPED_BY_POLICY (e.g. duplicate records get no notice) | FAILED.
+ */
+export async function sendLifecycleNotice(input: {
+  action: "DEACTIVATE" | "REACTIVATE";
+  reasonCode: string;
+  customer: {
+    id: string;
+    displayName: string;
+    email: string | null;
+    contactName: string | null;
+  };
+  outstandingBalanceCents: number;
+  sweep?: LifecycleSweepResult | null;
+}): Promise<{ outcome: "SENT" | "NO_EMAIL" | "SKIPPED_BY_POLICY" | "FAILED" }> {
+  const policy = reasonPolicy(input.action, input.reasonCode);
+  if (!policy.noticeSubject) return { outcome: "SKIPPED_BY_POLICY" };
+  if (!input.customer.email) {
+    await openMissingContactWork({
+      customerId: input.customer.id,
+      displayName: input.customer.displayName,
+      context: `The ${input.action === "DEACTIVATE" ? "deactivation" : "reactivation"} notice could not be delivered.`,
+    });
+    return { outcome: "NO_EMAIL" };
+  }
+  const balanceLine =
+    input.action === "DEACTIVATE" && input.outstandingBalanceCents > 0
+      ? `<p>Your account shows an outstanding balance of <strong>${formatCents(input.outstandingBalanceCents)}</strong>. ${
+          policy.balanceHandling === "COLLECT"
+            ? "We'll follow up about settling it — or just reply to this email."
+            : "We'll be in touch if anything is owed."
+        }</p>`
+      : "";
+  const paidLine =
+    input.action === "DEACTIVATE" && (input.sweep?.paidDecisions ?? 0) > 0
+      ? `<p>You have ${input.sweep!.paidDecisions} paid visit(s) on file — we'll contact you within one business day about honoring or refunding ${input.sweep!.paidDecisions === 1 ? "it" : "them"}.</p>`
+      : "";
+  const portalLine =
+    input.action === "DEACTIVATE"
+      ? "<p>Your online portal sign-in has been closed. Your service records stay safely on file.</p>"
+      : "<p>Your online portal works again with your usual sign-in.</p>";
+  const sent = await sendEmail({
+    to: input.customer.email,
+    subject: policy.noticeSubject,
+    template:
+      input.action === "DEACTIVATE"
+        ? "lifecycle-deactivated"
+        : "lifecycle-reactivated",
+    customerId: input.customer.id,
+    relatedId: input.customer.id,
+    html: emailShell(
+      policy.noticeSubject,
+      `<p>Hi ${input.customer.contactName ?? input.customer.displayName},</p>
+       <p>${policy.noticeIntro}</p>
+       ${balanceLine}
+       ${paidLine}
+       ${portalLine}
+       <p style="color:#666;font-size:13px;">Questions? Just reply to this email or call the office.</p>`
+    ),
+  });
+  return { outcome: sent ? "SENT" : "FAILED" };
 }
 
 /**
