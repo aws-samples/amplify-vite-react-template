@@ -1513,9 +1513,16 @@ async function cancel(body: Record<string, unknown>) {
   // and that refusal must come BEFORE the plan cancel and the refund — a
   // late click must not refund a performed visit and then 409.
   if (booking.jobId) {
-    const { data: gateJob } = await client.models.Job.get({
+    const { data: gateJob, errors: gateErrors } = await client.models.Job.get({
       id: booking.jobId,
     });
+    if (gateErrors?.length) {
+      // FAIL CLOSED before any money moves: an unverifiable visit state must
+      // not be refunded on hope.
+      throw new HttpError(503, {
+        error: `We couldn't check your visit just now — nothing was changed. Please try again in a moment, or call us at ${SUPPORT_PHONE}.`,
+      });
+    }
     if (
       gateJob &&
       gateJob.status !== "SCHEDULED" &&
@@ -1638,23 +1645,39 @@ async function cancel(body: Record<string, unknown>) {
     // already records.
     let jobCancelSettled = false;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const { data: cancelJob } = await client.models.Job.get({
-        id: booking.jobId,
-      });
+      const { data: cancelJob, errors: cancelJobErrors } =
+        await client.models.Job.get({ id: booking.jobId });
+      if (cancelJobErrors?.length) {
+        // A failed READ is not a missing job — retry once; a second failure
+        // falls through to the owned-recovery case below rather than telling
+        // a canceled story over a live visit.
+        continue;
+      }
       if (!cancelJob || cancelJob.status === "CANCELED") {
         jobCancelSettled = true;
         break;
       }
-      // Only an upcoming visit can be canceled from the emailed link — a
-      // completed (billed, legally reported) or in-progress/terminal visit
-      // must never be flipped by a late click.
+      // The visit started or finished BETWEEN the up-front gate and here —
+      // the money already moved, so this is a Finance conflict to OWN, never
+      // a thrown error that would wedge the booking BOOKED with a refund
+      // out and nobody told. The terminal record stands untouched.
       if (cancelJob.status !== "SCHEDULED" && cancelJob.status !== "UNSCHEDULED") {
-        throw new HttpError(409, {
-          error:
-            cancelJob.status === "IN_PROGRESS"
-              ? `Your technician is already on this visit — call us at ${SUPPORT_PHONE} and we'll help right away.`
-              : `This visit has already taken place, so it can't be canceled online — if something's wrong, call us at ${SUPPORT_PHONE}.`,
-        });
+        await openOwnedWork({
+          kind: "VISIT_CHANGE_RECOVERY",
+          dedupeKey: `completed-after-cancel:${booking.jobId}`,
+          title: `A customer's cancel crossed the visit being performed: ${booking.name ?? booking.email ?? booking.id}`,
+          detail: `While booking ${booking.id}'s cancellation was processing${refundable ? " (full refund issued)" : ""}, visit ${booking.jobId} went ${cancelJob.status}. The visit record stands. Reconcile the money: a refund may have been issued for work that was performed.`,
+          customerId: booking.customerId ?? undefined,
+          relatedId: booking.jobId,
+          sourceUrl: booking.customerId
+            ? `/customers/${booking.customerId}`
+            : `/schedule`,
+          resolutionAction:
+            "Compare the refund against the visit's recorded outcome and settle the invoice one way — then close this.",
+          ownerTeam: "FINANCE",
+        }).catch(() => undefined);
+        jobCancelSettled = true;
+        break;
       }
       const published = await casGuardedUpdate(
         "Job",
