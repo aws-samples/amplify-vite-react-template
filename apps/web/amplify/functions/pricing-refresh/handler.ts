@@ -18,6 +18,7 @@ import {
   enqueueRateResearch,
   parseNotify,
   pickLiveRow,
+  readPricingRollback,
   researchAndCacheRate,
   REFRESH_AFTER_MS,
   type MarketRateService,
@@ -198,10 +199,13 @@ type RateRow = {
   priceCents: number;
   basis?: string | null;
   researchedAt?: string | null;
+  createdAt?: string | null;
   active: boolean;
   pinned?: boolean | null;
   prevPriceCents?: number | null;
   prevResearchedAt?: string | null;
+  editedBy?: string | null;
+  editReason?: string | null;
 };
 
 type Lister = {
@@ -577,10 +581,45 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
   const counters = await readDayCounters(now);
   const day = now.toISOString().slice(0, 10);
   const nowMs = now.getTime();
+  const rollback = await readPricingRollback();
 
   const cachedToday = rates
-    .filter((r) => r.active && (r.researchedAt ?? "").startsWith(day))
+    .filter(
+      (r) =>
+        r.active &&
+        ((r.researchedAt ?? "").startsWith(day) ||
+          // Office pins carry no researchedAt of their own — their creation
+          // time is the change time.
+          (Boolean(r.pinned) && (r.createdAt ?? "").startsWith(day)))
+    )
     .sort((a, b) => (a.rateKey < b.rateKey ? -1 : 1));
+
+  // GL-16: every live change (AI or office pin) enters the shared queue for
+  // its one-business-day review — visibility with a recorded reviewer, never
+  // a publication gate. One deduplicated item per day carries them all.
+  if (cachedToday.length > 0) {
+    await openOwnedWork({
+      kind: "PRICING_CHANGE_REVIEW",
+      dedupeKey: `pricing-changes:${day}`,
+      title: `Review today's ${cachedToday.length} live rate change${cachedToday.length === 1 ? "" : "s"}`,
+      detail: `These sheets went live today (already quoting — review, don't approve):\n${cachedToday
+        .slice(0, 30)
+        .map(
+          (r) =>
+            `- ${rateLabel(r)}: ${
+              r.prevPriceCents != null && r.prevPriceCents !== r.priceCents
+                ? `${money(r.prevPriceCents)} → ${money(r.priceCents)}`
+                : `${money(r.priceCents)}${r.prevPriceCents != null ? " (unchanged)" : " (new)"}`
+            }${r.pinned ? ` — office pin${r.editedBy ? ` by ${r.editedBy}` : ""}${r.editReason ? ` (${r.editReason})` : ""}` : ""}`
+        )
+        .join("\n")}${cachedToday.length > 30 ? `\n…and ${cachedToday.length - 30} more (see Market Rates).` : ""}\nAnything that looks wrong: edit it on Market Rates (pins the row) or use the OWNER catalog rollback.`,
+      relatedId: `pricing-changes:${day}`,
+      sourceUrl: "/market-rates",
+      resolutionAction:
+        "Open Market Rates, scan today's changes, correct anything wrong, then confirm the review.",
+      ownerTeam: "OPS",
+    });
+  }
   const activeCov = coverage.filter((c) => c.active);
   const live = liveRowsByKey(rates);
   const queueDepth = selectWork(coverage, live, nowMs).length;
@@ -593,6 +632,11 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
   const spendEstimate = (counters.attempts * COST_PER_RESEARCH_USD).toFixed(2);
 
   const bodyHtml = `<p>Today's AI pricing run, consolidated. Every sheet below is <strong>already live and quoting</strong> — this is visibility, not an approval queue. Override any line on <a href="${process.env.CRM_APP_URL ?? ""}/market-rates">Market Rates</a>; an edit pins the row.</p>
+    ${
+      rollback
+        ? `<p style="background:#fef3c7;border-radius:8px;padding:10px;"><strong>Catalog rolled back</strong> to ${esc(rollback.cutoffIso)} by ${esc(rollback.actor ?? "OWNER")} (${esc(rollback.reason ?? "no reason recorded")}). Quotes serve the prior sheet, research is paused, and clearing the rollback resumes both.</p>`
+        : ""
+    }
     ${section(
       `Rates cached today (${cachedToday.length})`,
       cachedToday.map(
@@ -824,6 +868,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
       succeeded: 0,
       failed: 0,
       budgetExhausted: false,
+      rolledBack: false,
       notified: 0,
       digested: false,
       reported: false,
@@ -864,19 +909,28 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
       await settleCoverageRow(cov.id, nonce, { leaseUntil: null });
     }
 
+    // GL-16 rollback: while the catalog is rolled back, quoting serves the
+    // prior sheet and research PUBLICATION pauses — a refresh from the same
+    // suspect prompt would immediately supersede the restored sheet. The
+    // work-list, leases, and notify retries keep running; research resumes
+    // the moment the rollback is cleared.
+    const rollback = await readPricingRollback();
+
     // A targeted wake-up researches ONLY its miss — and only when the combo
     // genuinely has no live sheet (fresh, pinned, exhausted, leased, and
     // backing-off rows are never re-researched by a wake-up either).
     const targetedRow = targetedRateKey
       ? (coverage.find((row) => row.id === targetedRateKey) ?? null)
       : null;
-    const queue = targetedRateKey
-      ? targetedRow &&
-        !live.has(targetedRateKey) &&
-        researchable(targetedRow, startedAt)
-        ? [targetedRow]
-        : []
-      : selectWork(coverage, live, startedAt);
+    const queue = rollback
+      ? []
+      : targetedRateKey
+        ? targetedRow &&
+          !live.has(targetedRateKey) &&
+          researchable(targetedRow, startedAt)
+          ? [targetedRow]
+          : []
+        : selectWork(coverage, live, startedAt);
 
     let attempted = 0;
     let succeeded = 0;
@@ -920,6 +974,9 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
             city: cov.city,
             state: cov.state,
             sqft: cov.band ?? undefined,
+            // The drain nonce is the run identity every row this run caches
+            // records for the audit.
+            runId: nonce,
           });
           if (res) {
             succeeded++;
@@ -990,6 +1047,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
       succeeded,
       failed,
       budgetExhausted,
+      rolledBack: Boolean(rollback),
       notified,
       digested,
       reported,

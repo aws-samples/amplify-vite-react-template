@@ -227,6 +227,9 @@ export const schema = a.schema({
     "OBLIGATION_RECOVERY",
     // GL-16: a combo exhausted its AI-research attempts and is parked.
     "PRICING_RESEARCH_EXHAUSTED",
+    // GL-16: the day's live rate changes (AI + office pins) await their
+    // one-business-day review — visibility, never a publication gate.
+    "PRICING_CHANGE_REVIEW",
     // GL-06: a bank debit failed AFTER the visit was performed — the invoice
     // is a balance due and the shared queue owns collection.
     "BALANCE_COLLECTION",
@@ -1031,6 +1034,22 @@ export const schema = a.schema({
       // prev vs current to rank price moves.
       prevPriceCents: a.integer(),
       prevResearchedAt: a.datetime(),
+      // GL-16: the designed pricing prompt is versioned business policy —
+      // every AI row records exactly which prompt/model produced it from
+      // which inputs, with the raw structured result, so any live price can
+      // be explained and reproduced. Rows are immutable versions: a refresh
+      // or office edit creates a NEW row and retires (never edits) this one.
+      promptVersion: a.string(),
+      promptHash: a.string(),
+      model: a.string(),
+      inputsJson: a.json(),
+      rawResult: a.string(),
+      runId: a.string(),
+      // GL-16: a manual/pinned row's provenance — who pinned it and the
+      // controlled reason. Office edits share the same version/change record
+      // as AI research; they can never erase AI history.
+      editedBy: a.string(),
+      editReason: a.string(),
     })
     .secondaryIndexes((index) => [index("rateKey")])
     .authorization((allow) => [
@@ -1091,7 +1110,7 @@ export const schema = a.schema({
   // worker writes them (via guarded DynamoDB writes).
   PricingControl: a
     .model({
-      kind: a.string().required(), // DRAIN | DAY
+      kind: a.string().required(), // DRAIN | DAY | ROLLBACK
       holderNonce: a.string(),
       leaseUntil: a.datetime(),
       attempts: a.integer(),
@@ -1099,6 +1118,19 @@ export const schema = a.schema({
       succeeded: a.integer(),
       failed: a.integer(),
       digestSentAt: a.datetime(),
+      // GL-16 rollback (row id "catalog-rollback"): while rollbackCutoff is
+      // set, quoting serves the freshest AI row researched AT OR BEFORE the
+      // cutoff (pinned office rows still win — the office's word stands),
+      // and research publication pauses. One atomic write flips the whole
+      // catalog back coherently; clearing it (also one write) resumes.
+      // OWNER-only via the rollbackPricing/clearPricingRollback mutations —
+      // browsers cannot write this model directly.
+      rollbackCutoff: a.datetime(),
+      rollbackReason: a.string(),
+      rollbackActor: a.string(),
+      rollbackAppliedAt: a.datetime(),
+      rollbackClearedBy: a.string(),
+      rollbackClearedAt: a.datetime(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
@@ -3171,6 +3203,35 @@ export const schema = a.schema({
     .arguments({ contentType: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmPricing)),
+
+  /**
+   * GL-16 — the one reasoned, authorized catalog rollback. One atomic write
+   * restores the complete prior compatible rate sheet (every quote and CRM
+   * read immediately serves the freshest AI row at or before the cutoff;
+   * pinned office rows still win) without editing history or mixing
+   * catalogs, and pauses research publication until cleared. OWNER-only:
+   * price authority stays role-controlled.
+   */
+  rollbackPricing: a
+    .mutation()
+    .arguments({
+      /** Serve the catalog as it stood at this instant (ISO datetime). */
+      cutoffIso: a.string().required(),
+      /** Controlled reason code (BAD_PROMPT_RESULT | MODEL_ERROR | BULK_MISTAKE | OTHER). */
+      reasonCode: a.string().required(),
+      note: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmPricing)),
+
+  /** GL-16 — end a rollback: research resumes and the newest rows serve again. */
+  clearPricingRollback: a
+    .mutation()
+    .arguments({ note: a.string() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmPricing)),
 
   /**

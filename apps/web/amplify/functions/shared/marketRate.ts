@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { createHash } from "node:crypto";
 import { dataClient } from "./dataClient";
 import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
 
@@ -60,6 +61,15 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  * office sees, not a serve deadline.
  */
 export const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * GL-16 — the designed pricing prompt is versioned business policy. Bump the
+ * human-readable version on any deliberate prompt change; the hash is
+ * computed from the actual spec content so an ad-hoc edit can never ship
+ * unversioned (the recorded hash changes even when the label forgot to).
+ */
+export const PRICING_PROMPT_VERSION = "2026-07-19.1";
+export const PRICING_MODEL = "claude-opus-4-8";
 
 export type MarketRateService =
   | "GENERAL_PEST"
@@ -250,6 +260,11 @@ export function rateKeyFor(
  * always wins; otherwise the freshest research does. Expiry does not
  * disqualify anything — serve-last-known-good. Shared with the cron so
  * "the row that serves" and "the row that refreshes" are the same row.
+ *
+ * GL-16 rollback: with a `cutoffIso` set (the catalog-rollback state), AI
+ * rows researched AFTER the cutoff are excluded, so the whole catalog serves
+ * the prior coherent sheet in one flip. Pinned office rows still win — an
+ * explicit office price is never silently rolled back.
  */
 export function pickLiveRow<
   T extends {
@@ -257,16 +272,70 @@ export function pickLiveRow<
     pinned?: boolean | null;
     researchedAt?: string | null;
   },
->(rows: T[]): T | null {
+>(rows: T[], cutoffIso?: string | null): T | null {
   const live = rows.filter((r) => r.active);
+  const eligible = cutoffIso
+    ? live.filter((r) => r.pinned || (r.researchedAt ?? "") <= cutoffIso)
+    : live;
   return (
-    live.find((r) => r.pinned) ??
-    live.reduce<T | null>(
+    eligible.find((r) => r.pinned) ??
+    eligible.reduce<T | null>(
       (best, r) =>
         !best || (r.researchedAt ?? "") > (best.researchedAt ?? "") ? r : best,
       null
     )
   );
+}
+
+// ------------------------------------------------------- rollback state
+
+export type PricingRollback = {
+  cutoffIso: string;
+  reason?: string | null;
+  actor?: string | null;
+  appliedAt?: string | null;
+};
+
+let rollbackMemo: { at: number; value: PricingRollback | null } | null = null;
+
+/**
+ * The live catalog-rollback state (PricingControl "catalog-rollback"),
+ * memoized briefly per container — every quote read consults it. Null when
+ * no rollback is active, and null on any read fault (serving the newest
+ * sheet is the normal state; a rollback is an explicit operator action whose
+ * screen confirms it took effect).
+ */
+export async function readPricingRollback(): Promise<PricingRollback | null> {
+  if (rollbackMemo && Date.now() - rollbackMemo.at < 60_000) {
+    return rollbackMemo.value;
+  }
+  let value: PricingRollback | null = null;
+  try {
+    const client = await dataClient();
+    if ("PricingControl" in client.models) {
+      const { data } = await client.models.PricingControl.get({
+        id: "catalog-rollback",
+      });
+      if (data?.rollbackCutoff) {
+        value = {
+          cutoffIso: data.rollbackCutoff,
+          reason: data.rollbackReason,
+          actor: data.rollbackActor,
+          appliedAt: data.rollbackAppliedAt,
+        };
+      }
+    }
+  } catch {
+    value = null;
+  }
+  rollbackMemo = { at: Date.now(), value };
+  return value;
+}
+
+/** Tests (and the rollback mutation itself) reset the memo so a state change
+ *  is visible without waiting out the container cache. */
+export function _resetRollbackMemoForTests(): void {
+  rollbackMemo = null;
 }
 
 /**
@@ -290,7 +359,9 @@ export async function getCachedRate(opts: {
   const client = await dataClient();
   const { data: existing } =
     await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
-  const live = pickLiveRow(existing);
+  // GL-16: an active rollback serves the prior coherent sheet everywhere.
+  const rollback = await readPricingRollback();
+  const live = pickLiveRow(existing, rollback?.cutoffIso ?? null);
   if (!live) return null;
 
   const stored = parseSheet(live.ratesJson);
@@ -462,6 +533,8 @@ export async function researchAndCacheRate(opts: {
   city: string;
   state: string;
   sqft?: number;
+  /** GL-16: the drain run's identity, recorded on the row for the audit. */
+  runId?: string;
 }): Promise<RefreshResult | null> {
   const { anthropicKey, service, city, state, sqft } = opts;
   if (!anthropicKey) return null;
@@ -503,6 +576,20 @@ export async function researchAndCacheRate(opts: {
     pinned: false,
     prevPriceCents: prevPriceCents ?? undefined,
     prevResearchedAt: prevResearchedAt ?? undefined,
+    // GL-16 audit: exactly which versioned prompt/model produced this row
+    // from which normalized inputs, the raw structured result, and the run
+    // that paid for it — the live price is explainable and reproducible.
+    promptVersion: PRICING_PROMPT_VERSION,
+    promptHash: pricingPromptHash(),
+    model: PRICING_MODEL,
+    inputsJson: JSON.stringify({
+      service,
+      city: city.trim(),
+      state: state.trim().toUpperCase(),
+      sqftBucket: bucket,
+    }),
+    rawResult: researched.rawText.slice(0, 8000),
+    runId: opts.runId ?? undefined,
   });
 
   // Retire the superseded rows so one live row serves per combo. Pinned
@@ -693,18 +780,47 @@ function parseUsdLine(text: string, label: string): number | null {
   return Math.round(dollars * 100);
 }
 
+/**
+ * GL-16 — the content hash of the designed prompt policy: every spec's ask
+ * template and required label set, plus the shared line instruction and
+ * model. Recorded on every row; a prompt edit changes it even when the
+ * version label was forgotten.
+ */
+let promptHashMemo: string | null = null;
+export function pricingPromptHash(): string {
+  if (!promptHashMemo) {
+    const material = JSON.stringify([
+      PRICING_MODEL,
+      LINE_INSTRUCTION,
+      Object.entries(RESEARCH_SPECS).map(([kind, spec]) => [
+        kind,
+        spec.lines,
+        spec.tidyLines ?? true,
+        spec.ask("{city}", "{state}", 2000),
+      ]),
+    ]);
+    promptHashMemo = createHash("sha256").update(material).digest("hex").slice(0, 16);
+  }
+  return promptHashMemo;
+}
+
 async function research(
   apiKey: string,
   service: MarketRateService,
   city: string,
   state: string,
   bucket: number | null
-): Promise<{ sheet: RateSheet; basis: string; sources: string } | null> {
+): Promise<{
+  sheet: RateSheet;
+  basis: string;
+  sources: string;
+  rawText: string;
+} | null> {
   const spec = RESEARCH_SPECS[service];
   const anthropic = new Anthropic({ apiKey, timeout: 55_000, maxRetries: 0 });
   try {
     const researchMsg = await anthropic.messages.create({
-      model: "claude-opus-4-8",
+      model: PRICING_MODEL,
       max_tokens: 3000,
       tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 4 }],
       messages: [{ role: "user", content: spec.ask(city, state, bucket) }],
@@ -731,6 +847,7 @@ async function research(
       sheet: spec.assemble(cents),
       basis: basisLine,
       sources: text.slice(0, 1000),
+      rawText: text,
     };
   } catch (err) {
     // Authentication, credits, model access and request-shape failures used

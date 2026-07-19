@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
+import { _resetRollbackMemoForTests } from "../shared/marketRate";
 
 /**
  * The pricing-refresh worker — the only place research runs.
@@ -271,6 +272,7 @@ beforeEach(() => {
   covTable.clear();
   controlTable.clear();
   workItems.clear();
+  _resetRollbackMemoForTests();
   rateRows.length = 0;
   createdRates.length = 0;
   customers.length = 0;
@@ -1016,5 +1018,72 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
     expect(
       officeEmails.filter((e) => e.template === "ops-pricing-weekly-report")
     ).toHaveLength(0);
+  });
+});
+
+describe("GL-16 — rollback pause and the daily change review", () => {
+  it("an active catalog rollback pauses research — the queue holds, nothing is spent", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+    controlTable.set("catalog-rollback", {
+      id: "catalog-rollback",
+      kind: "ROLLBACK",
+      rollbackCutoff: iso(2 * 3600_000),
+      rollbackReason: "BAD_PROMPT_RESULT",
+    });
+    _resetRollbackMemoForTests();
+
+    const summary = await handler();
+
+    expect(summary.rolledBack).toBe(true);
+    expect(summary.attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
+    expect(dayCounters()?.attempts ?? 0).toBe(0);
+  });
+
+  it("the digest enters the day's live changes (AI + office pins) into the queue for recorded review", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow()); // one AI change will cache today
+    rateRows.push({
+      id: "office-pin",
+      rateKey: "RODENT#ware-ma#2500",
+      service: "RODENT",
+      areaKey: "ware-ma",
+      priceCents: 45900,
+      active: true,
+      pinned: true,
+      createdAt: new Date().toISOString(),
+      editedBy: "jake@getgim.com",
+      editReason: "MATCH_COMPETITOR",
+      prevPriceCents: 39900,
+    } as RateRow & { createdAt: string; editedBy: string; editReason: string });
+    vi.setSystemTime(new Date("2026-07-15T21:02:00Z"));
+
+    await handler();
+
+    const review = [...workItems.values()].find(
+      (w) => w.kind === "PRICING_CHANGE_REVIEW"
+    )!;
+    expect(review).toBeTruthy();
+    expect(String(review.title)).toContain("2 live rate changes");
+    expect(String(review.detail)).toContain("TERMITE · springfield-ma");
+    expect(String(review.detail)).toContain("office pin by jake@getgim.com");
+    expect(String(review.detail)).toContain("$399 → $459");
+    // Review, never a gate: the sheets cached and served without waiting.
+    expect(createdRates.length).toBeGreaterThan(0);
+  });
+
+  it("no changes today → no review item to busy the queue", async () => {
+    await seedOnly();
+    quietAll();
+    vi.setSystemTime(new Date("2026-07-15T21:02:00Z"));
+
+    await handler();
+
+    expect(
+      [...workItems.values()].some((w) => w.kind === "PRICING_CHANGE_REVIEW")
+    ).toBe(false);
   });
 });

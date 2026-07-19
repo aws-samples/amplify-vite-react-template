@@ -25,6 +25,7 @@ import {
   type RateStatus,
 } from "../lib/marketRates";
 import { fmtDate, money } from "../lib/format";
+import { useRoles } from "../lib/auth";
 import {
   Badge,
   Button,
@@ -216,6 +217,7 @@ export default function MarketRates() {
   const [rates, setRates] = useState<MarketRate[] | null>(null);
   const [coverage, setCoverage] = useState<RateCoverage[]>([]);
   const [control, setControl] = useState<PricingControl | null>(null);
+  const [rollback, setRollback] = useState<PricingControl | null>(null);
   const [editing, setEditing] = useState<MarketRate | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -240,6 +242,10 @@ export default function MarketRates() {
         const dayId = `day#${new Date().toISOString().slice(0, 10)}`;
         const { data } = await api().models.PricingControl.get({ id: dayId });
         setControl(data ?? null);
+        const { data: rb } = await api().models.PricingControl.get({
+          id: "catalog-rollback",
+        });
+        setRollback(rb ?? null);
       } catch {
         /* engine stats unavailable — rates remain editable */
       }
@@ -255,6 +261,7 @@ export default function MarketRates() {
   return (
     <Page title="Market rates" back="/more">
       <ErrorNote error={error} />
+      <RollbackPanel rollback={rollback} onChanged={load} />
       {rates !== null ? (
         <EnginePanel
           coverage={coverage}
@@ -330,6 +337,17 @@ const toCents = (dollars: string): number | null => {
   return Number.isFinite(cents) && cents >= 0 ? cents : NaN;
 };
 
+/** GL-16 — the controlled reason an office edit records. No free-text-only
+ *  escape hatch: the note elaborates, the code classifies. */
+const EDIT_REASONS = [
+  { code: "TOO_HIGH", label: "Researched price too high for us" },
+  { code: "TOO_LOW", label: "Researched price too low (margin)" },
+  { code: "MATCH_COMPETITOR", label: "Match a specific competitor" },
+  { code: "PROMOTION", label: "Promotion / negotiated rate" },
+  { code: "CORRECTION", label: "Correcting a bad research result" },
+  { code: "OTHER", label: "Other (explain in the note)" },
+] as const;
+
 function RateForm({
   rate,
   onDone,
@@ -337,6 +355,7 @@ function RateForm({
   rate: MarketRate;
   onDone: () => Promise<void>;
 }) {
+  const roles = useRoles();
   const sheet = sheetOf(rate);
   const status = rateStatus(rate);
 
@@ -367,6 +386,8 @@ function RateForm({
     }
   );
   const [active, setActive] = useState(rate.active);
+  const [editReason, setEditReason] = useState("");
+  const [editNote, setEditNote] = useState("");
   const [busy, setBusy] = useState<null | "save" | "unpin">(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -427,6 +448,14 @@ function RateForm({
       }
       hoaEdits = out;
     }
+    if (active && !editReason) {
+      setError("Pick the reason for this price change");
+      return;
+    }
+    if (active && editReason === "OTHER" && !editNote.trim()) {
+      setError("Explain the change in the note");
+      return;
+    }
     setBusy("save");
     setError(null);
     try {
@@ -436,18 +465,38 @@ function RateForm({
         plans: hasPlans ? planEdits : undefined,
         hoaPerUnitMonthly: hoaEdits,
       });
-      unwrap(
-        await updateMarketRate({
-          id: rate.id,
-          priceCents: merged.priceCents,
-          ratesJson: merged.ratesJson,
-          active,
-          // An office-edited rate is pinned: served forever, never
-          // re-researched, until explicitly un-pinned. A retired row isn't
-          // pinned to anything — it forces fresh research on the next quote.
-          pinned: active,
-        })
-      );
+      if (active) {
+        // GL-16: an office edit is a NEW pinned VERSION with a controlled
+        // reason — it retires (never edits) the AI row, so the exact history
+        // behind every price stays intact and the change shares the same
+        // durable current-versus-prior record as AI research.
+        const reasonLabel =
+          EDIT_REASONS.find((r) => r.code === editReason)?.label ?? editReason;
+        unwrap(
+          await api().models.MarketRate.create({
+            rateKey: rate.rateKey,
+            service: rate.service,
+            areaKey: rate.areaKey,
+            priceCents: merged.priceCents,
+            ratesJson: merged.ratesJson,
+            basis: `Office edit — ${reasonLabel}${editNote.trim() ? `: ${editNote.trim()}` : ""}`,
+            active: true,
+            pinned: true,
+            prevPriceCents: rate.priceCents,
+            prevResearchedAt: rate.researchedAt ?? undefined,
+            editedBy: roles.email ?? undefined,
+            editReason,
+          } as Parameters<ReturnType<typeof api>["models"]["MarketRate"]["create"]>[0])
+        );
+        unwrap(
+          await updateMarketRate({ id: rate.id, active: false, pinned: false })
+        );
+      } else {
+        // Retiring ends this row's service — a state change, not a version.
+        unwrap(
+          await updateMarketRate({ id: rate.id, active: false, pinned: false })
+        );
+      }
       await onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save");
@@ -588,6 +637,41 @@ function RateForm({
         </>
       ) : null}
 
+      {active ? (
+        <Field
+          label="Why is this price changing?"
+          hint="Recorded on the new pinned version — the AI row and its history stay intact"
+        >
+          <select
+            value={editReason}
+            onChange={(e) => setEditReason(e.target.value)}
+          >
+            <option value="">Pick a reason…</option>
+            {EDIT_REASONS.map((r) => (
+              <option key={r.code} value={r.code}>
+                {r.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      ) : null}
+      {active ? (
+        <Field label="Note (optional unless Other)">
+          <input
+            value={editNote}
+            onChange={(e) => setEditNote(e.target.value)}
+            placeholder="e.g. GreenHow quotes $249 for this"
+          />
+        </Field>
+      ) : null}
+      {rate.pinned && (rate.editedBy || rate.editReason) ? (
+        <p className="muted small">
+          Pinned{rate.editedBy ? ` by ${rate.editedBy}` : ""}
+          {rate.editReason
+            ? ` — ${EDIT_REASONS.find((r) => r.code === rate.editReason)?.label ?? rate.editReason}`
+            : ""}
+        </p>
+      ) : null}
       <Field label="Active" hint="Retire to stop serving this rate — the refresh cron researches a replacement">
         <SegControl
           options={[
@@ -618,5 +702,174 @@ function RateForm({
         </Button>
       ) : null}
     </div>
+  );
+}
+
+/** GL-16 — the controlled rollback reasons (no free-text-only escape hatch). */
+const ROLLBACK_REASONS = [
+  { code: "BAD_PROMPT_RESULT", label: "A prompt/model run produced bad prices" },
+  { code: "MODEL_ERROR", label: "Model or provider malfunction" },
+  { code: "BULK_MISTAKE", label: "A bulk change was a mistake" },
+  { code: "OTHER", label: "Other (explain in the note)" },
+] as const;
+
+/**
+ * GL-16 — the one reasoned, authorized recovery from a bad model/prompt
+ * result: an OWNER rolls the WHOLE catalog back to how it stood at a chosen
+ * moment in one atomic action. Quotes immediately serve that prior coherent
+ * sheet (office-pinned rows still win), research pauses, history is
+ * untouched, and clearing the rollback resumes everything.
+ */
+function RollbackPanel({
+  rollback,
+  onChanged,
+}: {
+  rollback: PricingControl | null;
+  onChanged: () => Promise<void>;
+}) {
+  const roles = useRoles();
+  const [open, setOpen] = useState(false);
+  const [cutoffLocal, setCutoffLocal] = useState("");
+  const [reason, setReason] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState<null | "apply" | "clear">(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const active = Boolean(rollback?.rollbackCutoff);
+  if (!active && !roles.owner) return null;
+
+  const apply = async () => {
+    if (!cutoffLocal) {
+      setError("Pick the moment to roll back to");
+      return;
+    }
+    if (!reason) {
+      setError("Pick a rollback reason");
+      return;
+    }
+    if (reason === "OTHER" && !note.trim()) {
+      setError("Explain the rollback in the note");
+      return;
+    }
+    setBusy("apply");
+    setError(null);
+    try {
+      unwrap(
+        await api().mutations.rollbackPricing({
+          cutoffIso: new Date(cutoffLocal).toISOString(),
+          reasonCode: reason,
+          note: note.trim() || undefined,
+        })
+      );
+      setOpen(false);
+      setCutoffLocal("");
+      setReason("");
+      setNote("");
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rollback failed — nothing changed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const clear = async () => {
+    if (
+      !window.confirm(
+        "Clear the rollback? The newest rate rows serve again immediately and AI research resumes."
+      )
+    ) {
+      return;
+    }
+    setBusy("clear");
+    setError(null);
+    try {
+      unwrap(await api().mutations.clearPricingRollback({}));
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not clear the rollback");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="row-split">
+        <strong>Catalog rollback</strong>
+        <Badge tone={active ? "warn" : "muted"}>
+          {active ? "ROLLED BACK" : "not active"}
+        </Badge>
+      </div>
+      {active ? (
+        <>
+          <p className="small" style={{ margin: "6px 0 0" }}>
+            Quoting the catalog as it stood at{" "}
+            <strong>{fmtDate(rollback!.rollbackCutoff!, true)}</strong>
+            {rollback?.rollbackActor ? ` — by ${rollback.rollbackActor}` : ""}
+            {rollback?.rollbackReason ? ` (${rollback.rollbackReason})` : ""}.
+            Office-pinned rows still serve; AI research is paused until this is
+            cleared.
+          </p>
+          {roles.owner ? (
+            <Button
+              small
+              loading={busy === "clear"}
+              onClick={() => void clear()}
+            >
+              Clear rollback — serve newest rates again
+            </Button>
+          ) : (
+            <p className="muted small">Only an owner can clear the rollback.</p>
+          )}
+        </>
+      ) : open ? (
+        <>
+          <Field
+            label="Serve the catalog as it stood at"
+            hint="Every AI rate researched after this moment stops serving; pinned office rates still win"
+          >
+            <input
+              type="datetime-local"
+              value={cutoffLocal}
+              onChange={(e) => setCutoffLocal(e.target.value)}
+            />
+          </Field>
+          <Field label="Why?">
+            <select value={reason} onChange={(e) => setReason(e.target.value)}>
+              <option value="">Pick a reason…</option>
+              {ROLLBACK_REASONS.map((r) => (
+                <option key={r.code} value={r.code}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Note (optional unless Other)">
+            <input value={note} onChange={(e) => setNote(e.target.value)} />
+          </Field>
+          <div className="row-split">
+            <Button small variant="ghost" onClick={() => setOpen(false)}>
+              Never mind
+            </Button>
+            <Button small loading={busy === "apply"} onClick={() => void apply()}>
+              Roll the catalog back
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="muted small" style={{ margin: "6px 0 0" }}>
+            If a research run published bad prices, roll the whole catalog back
+            to a moment before it — one action, immediately live, fully
+            reversible.
+          </p>
+          <Button small variant="ghost" onClick={() => setOpen(true)}>
+            Roll back the catalog…
+          </Button>
+        </>
+      )}
+      <ErrorNote error={error} />
+    </Card>
   );
 }

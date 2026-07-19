@@ -22,12 +22,35 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const pricingRuns: Record<string, unknown>[] = [];
+// GL-16: the rollback mutations read/write the PricingControl control row.
+const controlRows = new Map<string, Record<string, unknown>>();
 const fakeDataClient = {
   models: {
     LeadPricingRun: {
       create: async (input: Record<string, unknown>) => {
         pricingRuns.push(input);
         return { data: { id: "run_1", ...input } };
+      },
+    },
+    PricingControl: {
+      get: async ({ id }: { id: string }) => ({
+        data: controlRows.get(id) ?? null,
+      }),
+      create: async (input: Record<string, unknown> & { id: string }) => {
+        if (controlRows.has(input.id)) {
+          return { data: null, errors: [{ message: "exists" }] };
+        }
+        controlRows.set(input.id, { ...input });
+        return { data: controlRows.get(input.id) };
+      },
+      update: async (patch: Record<string, unknown> & { id: string }) => {
+        const row = controlRows.get(patch.id);
+        if (!row) return { data: null, errors: [{ message: "no row" }] };
+        for (const [k, v] of Object.entries(patch)) {
+          if (v === null) delete row[k];
+          else row[k] = v;
+        }
+        return { data: { ...row } };
       },
     },
   },
@@ -152,6 +175,7 @@ const baseExtraction = {
 };
 
 beforeEach(() => {
+  controlRows.clear();
   pricingRuns.length = 0;
   leadEscalations.length = 0;
   messagesCreate.mockClear();
@@ -681,5 +705,74 @@ describe("the composed reply's next step is the funnel too", () => {
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(String(run.replyText)).toContain(FUNNEL);
+  });
+});
+
+describe("GL-16 — the one reasoned, authorized catalog rollback", () => {
+  const rollback = async (
+    args: Record<string, unknown>,
+    groups: string[] = ["OWNER"]
+  ) =>
+    (await handler({
+      arguments: args,
+      identity: { sub: "u1", groups },
+      fieldName: "rollbackPricing",
+    } as never)) as Record<string, unknown>;
+  const clear = async (groups: string[] = ["OWNER"]) =>
+    (await handler({
+      arguments: {},
+      identity: { sub: "u1", groups },
+      fieldName: "clearPricingRollback",
+    } as never)) as Record<string, unknown>;
+
+  it("an OWNER rolls the catalog back in one write, with actor/reason/time recorded", async () => {
+    const res = await rollback({
+      cutoffIso: "2026-07-18T00:00:00.000Z",
+      reasonCode: "BAD_PROMPT_RESULT",
+      note: "Friday's run tripled HOA rates",
+    });
+
+    expect(res).toMatchObject({ ok: true, cutoffIso: "2026-07-18T00:00:00.000Z" });
+    const row = controlRows.get("catalog-rollback")!;
+    expect(row.rollbackCutoff).toBe("2026-07-18T00:00:00.000Z");
+    expect(String(row.rollbackReason)).toContain("BAD_PROMPT_RESULT");
+    expect(String(row.rollbackReason)).toContain("tripled HOA rates");
+    expect(row.rollbackAppliedAt).toBeTruthy();
+  });
+
+  it("price authority stays role-controlled — OFFICE cannot roll back or clear", async () => {
+    await expect(
+      rollback(
+        { cutoffIso: "2026-07-18T00:00:00.000Z", reasonCode: "OTHER", note: "x" },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/Owner role required/);
+    await expect(clear(["OFFICE"])).rejects.toThrow(/Owner role required/);
+    expect(controlRows.has("catalog-rollback")).toBe(false);
+  });
+
+  it("refuses an uncontrolled reason and a future cutoff — nothing changes", async () => {
+    await expect(
+      rollback({ cutoffIso: "2026-07-18T00:00:00.000Z", reasonCode: "FELT_LIKE_IT" })
+    ).rejects.toThrow(/controlled rollback reason/);
+    await expect(
+      rollback({ cutoffIso: "2099-01-01T00:00:00.000Z", reasonCode: "OTHER", note: "x" })
+    ).rejects.toThrow(/must be in the past/);
+    expect(controlRows.has("catalog-rollback")).toBe(false);
+  });
+
+  it("clearing resumes the newest rates and records who cleared; clearing twice is harmless", async () => {
+    await rollback({
+      cutoffIso: "2026-07-18T00:00:00.000Z",
+      reasonCode: "MODEL_ERROR",
+    });
+
+    const res = await clear();
+    expect(res).toMatchObject({ ok: true });
+    const row = controlRows.get("catalog-rollback")!;
+    expect(row.rollbackCutoff).toBeUndefined();
+    expect(row.rollbackClearedAt).toBeTruthy();
+
+    await expect(clear()).resolves.toMatchObject({ ok: true });
   });
 });

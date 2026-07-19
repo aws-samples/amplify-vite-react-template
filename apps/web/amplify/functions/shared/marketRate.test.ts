@@ -41,6 +41,7 @@ type CovRow = Record<string, unknown> & {
 const rows: Row[] = [];
 const created: Row[] = [];
 const covRows: CovRow[] = [];
+const controlRows = new Map<string, Record<string, unknown>>();
 let covGetThrows = false;
 
 const fakeDataClient = {
@@ -60,6 +61,12 @@ const fakeDataClient = {
         if (row) Object.assign(row, input);
         return { data: row ?? null };
       },
+    },
+    // GL-16: the catalog-rollback state getCachedRate consults.
+    PricingControl: {
+      get: async ({ id }: { id: string }) => ({
+        data: controlRows.get(id) ?? null,
+      }),
     },
     RateCoverage: {
       get: async ({ id }: { id: string }) => {
@@ -106,10 +113,15 @@ vi.mock("@anthropic-ai/sdk", () => ({
 }));
 
 const {
+  _resetRollbackMemoForTests,
   enqueueRateResearch,
   getCachedRate,
   hoaBandFor,
   NOTIFY_CAP,
+  pickLiveRow,
+  pricingPromptHash,
+  PRICING_MODEL,
+  PRICING_PROMPT_VERSION,
   researchAndCacheRate,
 } = await import("./marketRate");
 
@@ -138,6 +150,8 @@ beforeEach(() => {
   rows.length = 0;
   created.length = 0;
   covRows.length = 0;
+  controlRows.clear();
+  _resetRollbackMemoForTests();
   covGetThrows = false;
   officeEmails.length = 0;
   messagesCreate.mockClear();
@@ -798,5 +812,76 @@ describe("visibility, not a gate — one daily digest, never one email per rate 
     expect(String(created[0].basis)).toContain(
       "floored at Zone-A variable cost"
     );
+  });
+});
+
+describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
+  it("every cached row records the versioned prompt, model, inputs, raw result, and run identity", async () => {
+    await researchAndCacheRate({
+      anthropicKey: "test-key",
+      ...gpArgs,
+      runId: "run-abc",
+    });
+
+    const row = created[0];
+    expect(row.promptVersion).toBe(PRICING_PROMPT_VERSION);
+    expect(row.promptHash).toBe(pricingPromptHash());
+    expect(row.model).toBe(PRICING_MODEL);
+    expect(JSON.parse(String(row.inputsJson))).toEqual({
+      service: "GENERAL_PEST",
+      city: "Ware",
+      state: "MA",
+      sqftBucket: 2000,
+    });
+    expect(String(row.rawResult)).toContain("ONE_TIME_USD: 320");
+    expect(row.runId).toBe("run-abc");
+    // The hash is stable content-addressing, not a per-run random.
+    expect(pricingPromptHash()).toBe(pricingPromptHash());
+  });
+
+  it("pickLiveRow with a cutoff serves the prior sheet; pinned office rows still win", () => {
+    const older = {
+      id: "old",
+      active: true,
+      researchedAt: "2026-07-17T10:00:00.000Z",
+    };
+    const newer = {
+      id: "new",
+      active: true,
+      researchedAt: "2026-07-19T10:00:00.000Z",
+    };
+    // Normal serving: freshest wins.
+    expect(pickLiveRow([older, newer])?.id).toBe("new");
+    // Rolled back to the 18th: the suspect newer row stops serving.
+    expect(pickLiveRow([older, newer], "2026-07-18T00:00:00.000Z")?.id).toBe("old");
+    // A pinned office row is the office's word — never silently rolled back.
+    const pinned = { id: "pin", active: true, pinned: true, researchedAt: "2026-07-19T12:00:00.000Z" };
+    expect(
+      pickLiveRow([older, newer, pinned], "2026-07-18T00:00:00.000Z")?.id
+    ).toBe("pin");
+  });
+
+  it("getCachedRate under an active rollback serves the prior coherent sheet in one flip", async () => {
+    await gpResearch(); // the good sheet (older)
+    rows[0].researchedAt = "2026-07-17T10:00:00.000Z";
+    researchText = GP_TEXT.replace("ONE_TIME_USD: 320", "ONE_TIME_USD: 990");
+    await gpResearch(); // the suspect refresh (newer, $999 after tidy)
+    rows[1].researchedAt = "2026-07-19T10:00:00.000Z";
+    rows[0].active = true; // both retained — versions, not edits
+
+    expect((await gpRead())?.priceCents).toBe(98900); // newest serves normally
+
+    controlRows.set("catalog-rollback", {
+      id: "catalog-rollback",
+      kind: "ROLLBACK",
+      rollbackCutoff: "2026-07-18T00:00:00.000Z",
+    });
+    _resetRollbackMemoForTests();
+
+    expect((await gpRead())?.priceCents).toBe(31900); // the prior sheet, everywhere
+
+    controlRows.delete("catalog-rollback");
+    _resetRollbackMemoForTests();
+    expect((await gpRead())?.priceCents).toBe(98900); // clearing restores atomically
   });
 });

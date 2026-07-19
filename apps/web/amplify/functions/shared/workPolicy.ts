@@ -46,6 +46,7 @@ export type WorkKind =
   | "DISPATCH_NOT_READY"
   | "OBLIGATION_RECOVERY"
   | "PRICING_RESEARCH_EXHAUSTED"
+  | "PRICING_CHANGE_REVIEW"
   | "BALANCE_COLLECTION"
   | "PAYMENT_PROCESSING_OVERDUE";
 
@@ -500,6 +501,23 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "RESEARCH_RETRIED", label: "Research retried from Market Rates" },
       { code: "PRICE_SET_MANUALLY", label: "Price set by hand (row pinned)" },
       { code: "COMBO_RETIRED", label: "Combo retired — not offered here" },
+      OTHER,
+    ],
+  },
+  PRICING_CHANGE_REVIEW: {
+    severity: "ROUTINE",
+    // GL-16: the day's live rate changes (AI research + office pins), already
+    // quoting — the CEO-accepted control is a recorded one-business-day
+    // review, never preapproval. Anything wrong is corrected on Market Rates
+    // (pins the row) or by the OWNER catalog rollback.
+    customerImpact:
+      "New live prices are quoting to customers and await their recorded daily review.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "REVIEWED_OK", label: "Reviewed — prices stand" },
+      { code: "REVIEWED_CORRECTED", label: "Reviewed — corrected on Market Rates" },
+      { code: "REVIEWED_ROLLED_BACK", label: "Reviewed — catalog rolled back" },
       OTHER,
     ],
   },

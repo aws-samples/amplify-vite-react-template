@@ -10,7 +10,7 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
-import { callerIsOffice } from "../shared/authz";
+import { callerEmail, callerIsOffice, callerIsOwner } from "../shared/authz";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { notifyLeads } from "../shared/email";
 import { openOwnedWork } from "../shared/ownedWork";
@@ -28,6 +28,7 @@ import {
   type Zone,
 } from "./rateCards";
 import {
+  _resetRollbackMemoForTests,
   enqueueRateResearch,
   getCachedRate,
   hoaBandFor,
@@ -61,6 +62,9 @@ type Args = {
   customerId?: string | null;
   leadFeeCents?: number | null;
   contentType?: string;
+  cutoffIso?: string;
+  reasonCode?: string;
+  note?: string | null;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -70,10 +74,114 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return priceLead(event.arguments);
     case "getPricingUploadUrl":
       return getPricingUploadUrl(event.arguments.contentType!);
+    case "rollbackPricing":
+      // GL-16: price authority stays role-controlled — OWNER only, checked
+      // server-side on top of the schema's group rule.
+      if (!callerIsOwner(event.identity)) throw new Error("Owner role required");
+      return rollbackPricing(event.arguments, callerEmail(event.identity));
+    case "clearPricingRollback":
+      if (!callerIsOwner(event.identity)) throw new Error("Owner role required");
+      return clearPricingRollback(event.arguments, callerEmail(event.identity));
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);
   }
 };
+
+// ------------------------------------------------- GL-16 catalog rollback
+
+const ROLLBACK_REASONS = new Set([
+  "BAD_PROMPT_RESULT",
+  "MODEL_ERROR",
+  "BULK_MISTAKE",
+  "OTHER",
+]);
+
+/**
+ * ONE atomic write flips the whole catalog back to the sheet that served at
+ * the cutoff (pinned office rows still win), pauses research publication,
+ * and records who/why/when. History is untouched — nothing is edited or
+ * deleted, so clearing the rollback restores the newest rows just as
+ * atomically.
+ */
+async function rollbackPricing(
+  args: Args,
+  actor: string | null
+): Promise<{ ok: true; cutoffIso: string }> {
+  const cutoffIso = String(args.cutoffIso ?? "");
+  const reasonCode = String(args.reasonCode ?? "");
+  if (Number.isNaN(Date.parse(cutoffIso))) {
+    throw new Error("A valid cutoff date/time is required");
+  }
+  if (Date.parse(cutoffIso) > Date.now()) {
+    throw new Error("The cutoff must be in the past");
+  }
+  if (!ROLLBACK_REASONS.has(reasonCode)) {
+    throw new Error("A controlled rollback reason is required");
+  }
+  const reason = `${reasonCode}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}`;
+  const client = await dataClient();
+  const nowIso = new Date().toISOString();
+  const sets = {
+    id: "catalog-rollback",
+    kind: "ROLLBACK",
+    rollbackCutoff: cutoffIso,
+    rollbackReason: reason.slice(0, 500),
+    rollbackActor: actor ?? "OWNER",
+    rollbackAppliedAt: nowIso,
+    rollbackClearedBy: null,
+    rollbackClearedAt: null,
+  };
+  const { data: existing } = await client.models.PricingControl.get({
+    id: "catalog-rollback",
+  });
+  if (existing) {
+    const { data, errors } = await client.models.PricingControl.update(sets);
+    if (!data || errors?.length) {
+      throw new Error("The rollback could not be recorded — nothing changed");
+    }
+  } else {
+    const { data, errors } = await client.models.PricingControl.create(sets);
+    if (!data || errors?.length) {
+      throw new Error("The rollback could not be recorded — nothing changed");
+    }
+  }
+  _resetRollbackMemoForTests();
+  await notifyLeads({
+    subject: `PRICING ROLLED BACK to ${cutoffIso}`,
+    heading: "AI pricing catalog rolled back",
+    template: "ops-pricing-rollback",
+    bodyHtml: `<p>${actor ?? "An owner"} rolled the rate catalog back to <strong>${cutoffIso}</strong> (${reason}). Quotes now serve the sheet as it stood then (office-pinned rows still win), and AI research is paused until the rollback is cleared from Market Rates.</p>`,
+  }).catch(() => undefined);
+  return { ok: true, cutoffIso };
+}
+
+async function clearPricingRollback(
+  args: Args,
+  actor: string | null
+): Promise<{ ok: true }> {
+  const client = await dataClient();
+  const { data: existing } = await client.models.PricingControl.get({
+    id: "catalog-rollback",
+  });
+  if (!existing?.rollbackCutoff) return { ok: true }; // idempotent
+  const { data, errors } = await client.models.PricingControl.update({
+    id: "catalog-rollback",
+    rollbackCutoff: null,
+    rollbackClearedBy: `${actor ?? "OWNER"}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}`.slice(0, 500),
+    rollbackClearedAt: new Date().toISOString(),
+  });
+  if (!data || errors?.length) {
+    throw new Error("The rollback could not be cleared — it is still active");
+  }
+  _resetRollbackMemoForTests();
+  await notifyLeads({
+    subject: "Pricing rollback cleared — newest rates serve again",
+    heading: "AI pricing rollback cleared",
+    template: "ops-pricing-rollback",
+    bodyHtml: `<p>${actor ?? "An owner"} cleared the catalog rollback. The newest rate rows serve again and AI research resumes on the next refresh run.</p>`,
+  }).catch(() => undefined);
+  return { ok: true };
+}
 
 // ---------- secrets (runtime SSM; cached per container) ----------
 

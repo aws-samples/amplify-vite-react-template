@@ -75,6 +75,9 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-16: a combo exhausted its research attempts — quotes for it fall to
   // the callback path until the office retries, pins, or retires it.
   PRICING_RESEARCH_EXHAUSTED: 24 * 60,
+  // GL-16: the day's live rate changes get their recorded review within the
+  // common one-business-day commitment — publication is never delayed.
+  PRICING_CHANGE_REVIEW: 24 * 60,
   // GL-06: work performed, bank debit failed after — collection is money-
   // critical but the customer was noticed; the common one-business-day clock.
   BALANCE_COLLECTION: 24 * 60,
