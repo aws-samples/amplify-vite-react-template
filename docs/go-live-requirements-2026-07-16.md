@@ -2,14 +2,14 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 18 commits after `f70e621`, from `3717092` through `5b2fb76`; newest
-implementation commit `5b2fb76`
+**Latest commit review:** 20 commits after `f70e621`, from `3717092` through `f6a34a8`; newest
+implementation commit `f6a34a8`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 111 business requirements**, ordered by launch priority and expected impact
+**Remaining:** **23 gates / 103 business requirements**, ordered by launch priority and expected impact
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **45.0%**
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **42.5%**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
@@ -187,7 +187,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-09 | Lifecycle policy sign-off + history export — engineering closed (`82f5fbf`) | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **10% — Very low (sign-off; export rides GL-19)** |
 | P0 | GL-08 | 72-hour copy + refund-workflow sign-off — engineering closed (`2556438`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
 | P0 | GL-07 | Copy sign-off; atomic capacity rides GL-04 — engineering closed (`5b2fb76`) | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **12% — Very low (sign-offs + GL-04 tie)** |
-| P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **72% — High** |
+| P0 | GL-18 | Override-authority + queue-ops sign-off — engineering closed (`f6a34a8`) | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-04/GL-23 ties)** |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **82% — High** |
 | P0 | GL-06 | Finish honest, race-safe processing and failed payments | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **80% — High** |
 | P0 | GL-16 | Prompt-governed AI pricing with rollback | CEO + Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **78% — High** |
@@ -434,88 +434,36 @@ wording, and the "Account credit applied" close reason are removed.
 
 **Pass owner:** Head of Operations; Finance approves money dispositions.
 
-### GL-18 — Finish truthful, usable exception resolution
+### GL-18 — Truthful, usable exception resolution
 
 **Business outcome:** A case turns green only after the exact customer, money, access, or operating
 obligation is true, while a routine employee can complete ordinary recovery work without CEO-level
 authority or an invented workaround.
 
-**Why this is still a gate:** A paid-cancellation case currently counts a canceled visit as money
-settled even when a paid invoice has not been refunded, voided, or given its approved retained-fee or
-offline-money disposition. Its manual menu still offers **Account credit applied** even though the launch
-decision removed credit and no real credit ledger exists. A missing-contact case closes when an email
-address merely exists, not when the missed notice is delivered. An unstaffed visit closes for any
-technician ID without proving that person is active,
-qualified, available, and valid for the service. All paid-booking exceptions show the same retry action
-even though some represent an orphan payment, duplicate record, provider outage, or amount mismatch
-that cannot be fixed by retrying a booking. An unpaid visit stranded by a plan cancel is still filed as
-**Paid cancellation**, whose instructions are about settling money, and the plan-level schedule-read
-failure is not linked to a job its normal verifier can inspect. The new plan-cancellation verifier can
-count a partial refund as full settlement, ignores final customer delivery and unresolved paid/in-progress
-visits, and its resume action cannot repair residual work after the plan reads CANCELED. Visit-change
-recovery also has no verifier: its resume action becomes a no-op after cancellation, refuses reschedule,
-cannot reconstruct a missing audit, and never automatically resolves its case after a repaired outcome.
-Lifecycle recovery can likewise close after only the portal or missing audit row is handled. Eleven of
-the seventeen exception types have no verified normal completion path. The lead-follow-up type is one:
-it can be manually closed as **contacted**, **booking sent**, **lost**, or **do-not-contact** without
-verifying the corresponding lead fact, and the automatic path can resolve it after a swallowed activity
-or state-write failure. Callbacks, delivery failures, duplicate leads, portal failures, pricing decisions,
-location reviews, and staff-access recovery likewise depend on an OWNER manual override. For email
-failures, the instruction says to correct, unsuppress, and resend, but the case provides no bounded action
-to do those things or identify every message the customer missed. That turns routine work into an
-executive bottleneck and treats a normal completion as an exception to policy. Claim and close actions
-also have no single-winner control, so two employees can act on the same case.
+**Status:** engineering closed (`f6a34a8`, with the GL-07/GL-08/GL-09 closures supplying the repaired
+resume/verifier substrate). Verified closes now prove the exact obligation: per-visit money reconciles
+EVERY invoice to one durable disposition (full refund, void, or the recorded 72-hour retained-fee
+outcome — canceled-visit and partial-refund shortcuts are gone); visit-change recovery has a verified
+close covering money + schedule + accepted notice + audit; missing-contact requires an unsuppressed
+working address AND an accepted message since the case opened; staffing checks weekday + route
+capacity on top of active/licensed/route-agreement; plan settlement includes the customer's final
+word; mis-filed cases (unpaid stranded visits, plan-level read failures) now carry kinds whose
+verifiers can inspect them. Routine staff have bounded actions: claim/RELEASE/reassign, the
+consent-evidenced suppression lift (recorded SUPPRESSION_LIFTED event), cause-fit paid-booking
+actions (no Retry on orphan/outage rows), and the resume actions from GL-07/08/09. Money-verified
+closes are Finance/Owner-gated. Claim, resolve, rollback, and offboarding-release are single-winner
+guarded writes — two employees can never both own or both complete one case. The "Account credit
+applied" close reason is removed. Lead follow-ups close only on a verifiably landed lead fact.
 
 **Remaining requirements:**
 
-- A paid-cancellation case remains open until the full amount owed has one durable disposition: provider-
-  confirmed refund, successfully voided unpaid invoice, or approved retained-fee/offline-money outcome.
-  Canceling the visit alone never proves the money is settled; partial refunds and multiple invoices
-  reconcile to the exact amount owed. The unsupported account-credit close reason and promise are removed
-  from both policy definitions and every employee/customer surface.
-- A missing-contact or delivery case lists every affected message and remains open until each specific
-  notice is delivered or has an approved alternate-contact outcome. A permitted business role can correct
-  the address, release suppression when consent and address validity support it, resend the exact message,
-  and see the new terminal result without developer tools. Merely adding an address does not satisfy a
-  promise to send a confirmation, report, amendment, cancellation notice, or other customer document.
-- An unstaffed case closes only when the assignment passes the same launch-approved dispatch rule used
-  everywhere else: active technician, valid license/scope, working availability, territory/capacity, and
-  a scheduled route disposition. An ID in the technician field is not proof that the visit can occur.
-- Each paid-booking exception shows only an action that fits its actual cause and records the resulting
-  money and booking state. Orphan payments, duplicate payments/records, amount mismatches, and provider
-  outages must not offer a misleading **Retry finalization** action.
-- Plan-cancellation cases and actions match the actual remaining obligation. The plan-level verifier
-  confirms provider and CRM stop, the exact full refund of every affected invoice, every paid/unpaid/
-  in-progress visit decision, and final customer delivery. Its resume action repairs those residuals even
-  after the plan is CANCELED; an unpaid stranded visit is not presented as a refund case; and a plan-level
-  schedule-read failure cannot close before the schedule is actually read (**GL-08**).
-- A visit-change case stays open until every affected invoice/provider payment, job/route/staffing fact,
-  final customer delivery, and audit row is verified. **Resume visit change** repairs both cancellation
-  and reschedule after the job has already changed, and successful re-verification automatically resolves
-  the linked case. Each cause has a bounded action for an appropriate routine role; owner-only manual
-  close is not the normal path (**GL-07**).
-- A lifecycle-recovery case stays open until the intended transition is verified across provider billing,
-  CRM plans and status, all paid/unpaid/in-progress visits and routes, portal login/groups, outstanding
-  balance disposition, customer notice, and immutable audit. Portal-only or audit-only closure cannot
-  turn a mixed customer green; each missing transition remains separately visible and recoverable
-  (**GL-09**).
-- A lead-follow-up case closes only after the matching durable lead fact exists: recorded attempt and its
-  actual outcome, confirmed booking-link send, controlled lost decision, do-not-contact decision, or paid
-  conversion. Closing today's task must also leave the next approved action and due time visible; a free-
-  text/manual close cannot make an open lead disappear from follow-up.
-- Every ordinary exception enters one shared Office queue with age, impact, evidence, one common
-  one-business-day response deadline, and a bounded normal action that an authorized routine employee can
-  claim, release, reassign, and complete. The queue has no critical/high/routine response classes. Callback,
-  delivery, merge, portal-recovery, pricing, and staff-recovery outcomes do not depend on a permanently
-  named person or OWNER access; a manual override remains reserved for a genuine exception.
-- The CEO approves which role may override each exception class. Finance separately approves money-case
-  authority. Every override has a controlled reason, meaningful evidence, and an accountable review path;
-  the policy shown to employees is the same policy enforced when they act.
-- Claiming, resolving, reopening, and releasing a case has one winner. Concurrent employees cannot both
-  own or complete the same customer or money action; offboarding cannot overwrite a newer claim; and the
-  ownership change plus immutable history are one recoverable outcome rather than a release that succeeds
-  before its history fails. The staffed Office queue, business-day calendar, common response commitment,
-  and shift handoffs are established in GL-23.
+- CEO approves the per-class override-authority map (today: manual overrides are OWNER-only
+  everywhere; money-verified closes are Finance/Owner). If leadership wants specific classes delegated
+  below OWNER, name them — the enforcement point is one table.
+- Finance ratifies its money-close authority boundary (which was CEO+Finance approval per the locked
+  rule); Operations ratifies the release/reassign flow as the queue norm.
+- PTO/holiday/closure calendars join the staffing verifier when GL-04's capacity model lands; the
+  staffed Office queue, business-day calendar, and shift handoffs are established in GL-23.
 
 **Pass owner:** Head of Operations; Finance approves money outcomes and the CEO approves override
 authority.
