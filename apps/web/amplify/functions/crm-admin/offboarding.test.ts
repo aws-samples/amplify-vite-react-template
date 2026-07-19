@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  _setLockStoreForTests,
+  memoryLockStore,
+} from "../shared/atomicLock";
 
 /**
  * Staff identity, linking, and offboarding — the Cognito + data side of GL-14.
@@ -410,6 +414,14 @@ const FUTURE_LICENSE = "2099-12-31";
 let testKeyCounter = 0;
 
 beforeEach(() => {
+  // CAS store over the SAME maps the fake models use, so stale-lease takeover
+  // and fenced writes behave exactly like production DynamoDB conditions.
+  _setLockStoreForTests(
+    memoryLockStore({
+      StaffAccessCommand: staffCommands,
+      OwnerChangeSerial: ownerSerial,
+    })
+  );
   sends.length = 0;
   timeline.length = 0;
   userGroups = [];

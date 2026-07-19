@@ -121,15 +121,25 @@ export type DispatchRouteProof = {
 /**
  * The routability proof: the same Google Routes source capacity uses, attached
  * to the dispatch decision. A null result (unroutable address / no coverage)
- * REFUSES dispatch with the office fix named. Skipped (returns null proof)
- * only when no API key is configured — local/dev environments.
+ * REFUSES dispatch with the office fix named.
+ *
+ * A missing GOOGLE_ROUTES_API_KEY FAILS CLOSED: dispatch is refused with the
+ * configuration named, because a silently skipped proof would let every
+ * unroutable address through exactly when the safety net is down. The ONLY
+ * exception is the explicit local-dev escape hatch ALLOW_UNVERIFIED_ROUTES
+ * ("true"), which production must never set.
  */
 export async function proveRoutable(
   routesApiKey: string | undefined,
   originAddress: string,
   customer: DispatchCustomer
 ): Promise<DispatchRouteProof | null> {
-  if (!routesApiKey) return null;
+  if (!routesApiKey) {
+    if (process.env.ALLOW_UNVERIFIED_ROUTES === "true") return null;
+    throw new Error(
+      "Dispatch routability can't be verified: GOOGLE_ROUTES_API_KEY isn't configured. Fix the configuration (or, in local dev only, set ALLOW_UNVERIFIED_ROUTES=true) — visits are not assigned on an unverified address."
+    );
+  }
   const address = [
     customer.serviceStreet,
     customer.serviceCity,

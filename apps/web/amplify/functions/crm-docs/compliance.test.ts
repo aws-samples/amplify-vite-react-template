@@ -314,11 +314,40 @@ beforeEach(() => {
   vi.mocked(sendEmail).mockResolvedValue(true);
   // On-site-presence distance check is off unless a test opts in with a key.
   delete process.env.GOOGLE_ROUTES_API_KEY;
+  // GL-12: a missing Routes key now FAILS dispatch CLOSED. Tests that are not
+  // about routability opt into the explicit local-dev escape hatch; the
+  // fail-closed behavior itself is asserted in its own test below.
+  process.env.ALLOW_UNVERIFIED_ROUTES = "true";
   vi.mocked(drivingDistanceMetersFromPoint).mockReset();
   vi.mocked(drivingDistanceMetersFromPoint).mockResolvedValue(null);
 });
 
 describe("regulated assignment", () => {
+  it("GL-12: refuses to assign when routability cannot be verified (no key, no escape hatch)", async () => {
+    jobs[0].status = "UNSCHEDULED";
+    routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
+    delete process.env.ALLOW_UNVERIFIED_ROUTES;
+    try {
+      await expect(
+        call(
+          "updateJobSchedule",
+          {
+            jobId: "j1",
+            operation: "ASSIGN",
+            technicianId: "t1",
+            routeId: "r1",
+            routeOrder: 1,
+            scheduledDate: "2026-07-20",
+          },
+          ["OFFICE"]
+        )
+      ).rejects.toThrow(/GOOGLE_ROUTES_API_KEY/);
+      expect(jobs[0].status).toBe("UNSCHEDULED");
+    } finally {
+      process.env.ALLOW_UNVERIFIED_ROUTES = "true";
+    }
+  });
+
   it("refuses to assign an active technician whose license data is incomplete", async () => {
     jobs[0].status = "UNSCHEDULED";
     technician.licenseNumber = null;

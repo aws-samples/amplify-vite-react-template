@@ -9,12 +9,17 @@ import { hasCurrentLicense } from "./compliance";
  *    only authority (Compliance controls their status). The legacy
  *    Technician.licenseNumber/licenseExpiresOn fields are consulted only for
  *    technicians with zero records — the migration fallback.
+ *  - A licence-record READ FAILURE fails CLOSED: the technician reads as not
+ *    currently licensed (source ERROR), never as whatever the legacy fields
+ *    say — an outage must not resurrect a revoked number or hide a lapse.
  *  - "Current now / on a work date": a record whose status is CURRENT and
  *    whose expiration is on-or-after the date.
  *  - "Valid on a historical date" (report authorship): a CURRENT or EXPIRED
  *    record that had not yet expired on that date — a later renewal or expiry
  *    never rewrites who was licensed when the application happened. REVOKED
- *    records never validate anything.
+ *    records never validate anything, and once records exist the legacy
+ *    number is never consulted — a revoked/invalid history cannot fall back
+ *    to a stale single field.
  */
 
 export type LicenseRecordLike = {
@@ -30,7 +35,10 @@ export type LicenseFacts = {
   current: boolean;
   number: string | null;
   expiresOn: string | null;
-  source: "RECORDS" | "LEGACY";
+  /** RECORDS — the one-to-many records decided; LEGACY — zero records, the
+   *  migration single-fields decided; ERROR — the records could NOT be read,
+   *  and the answer failed closed (current: false). */
+  source: "RECORDS" | "LEGACY" | "ERROR";
 };
 
 type TechnicianLike = {
@@ -74,7 +82,10 @@ export function licenseFactsFromRecords(
   };
 }
 
-/** Which record (if any) was VALID on a historical date — for authorship. */
+/** Which record (if any) was VALID on a historical date — for authorship.
+ *  Once ANY records exist they are the only authority: no valid record on
+ *  that date means NO number, never the legacy single field (which may be
+ *  the very number Compliance revoked). */
 export function licenseValidOnDate(
   records: LicenseRecordLike[],
   technician: TechnicianLike,
@@ -89,15 +100,15 @@ export function licenseValidOnDate(
       (!r.expiresOn || r.expiresOn >= onDate)
   );
   valid.sort((a, b) => (b.expiresOn ?? "9999").localeCompare(a.expiresOn ?? "9999"));
-  return { number: valid[0]?.number ?? technician.licenseNumber ?? null };
+  return { number: valid[0]?.number ?? null };
 }
 
-/** Load a technician's licence records. Empty on any read failure — the caller
- *  then falls back to legacy fields, which errs toward the old behavior rather
- *  than locking the field out on an outage. */
+/** Load a technician's licence records. NULL on any read failure — the caller
+ *  must fail CLOSED (treat as unlicensed), never fall back to the legacy
+ *  fields, which an outage could use to resurrect a revoked number. */
 export async function licenseRecordsFor(
   technicianId: string
-): Promise<LicenseRecordLike[]> {
+): Promise<LicenseRecordLike[] | null> {
   try {
     const client = await dataClient();
     if (!("TechnicianLicense" in client.models)) return [];
@@ -115,16 +126,20 @@ export async function licenseRecordsFor(
     return out;
   } catch (err) {
     console.error("licenseRecordsFor failed", technicianId, err);
-    return [];
+    return null;
   }
 }
 
 /** The one call every enforcement point uses: is this technician licensed on
- *  `onDate` (default today), and under which number? */
+ *  `onDate` (default today), and under which number? A records read failure
+ *  fails CLOSED: current=false, source ERROR. */
 export async function licenseFactsFor(
   technician: TechnicianLike,
   onDate?: string
 ): Promise<LicenseFacts> {
   const records = await licenseRecordsFor(technician.id);
+  if (records === null) {
+    return { current: false, number: null, expiresOn: null, source: "ERROR" };
+  }
   return licenseFactsFromRecords(records, technician, onDate);
 }

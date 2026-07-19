@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
+import { casTakeover, casFencedUpdate, casFencedDelete } from "./atomicLock";
 import type { StaffAccessActor } from "./staffAccessLog";
 
 /**
@@ -14,11 +15,14 @@ import type { StaffAccessActor } from "./staffAccessLog";
  * handed the same persisted progress/outcome instead of starting a second
  * change.
  *
- * The command carries an exclusive resume lease (leaseUntil + leaseNonce). A
- * retry of a stuck command may take over only after the lease expires, and the
- * takeover is verified by reading the nonce back — so two stale-claim reclaims
- * cannot both believe they own the resume. Terminal commands are never deleted:
- * the row IS the persisted outcome the screens read back.
+ * The command carries an exclusive resume lease (leaseUntil + leaseNonce).
+ * Takeover of an expired lease is ONE atomic conditional update (atomicLock)
+ * guarded by "no live lease AND not settled" — never delete-then-create, which
+ * would let a second reclaimer delete the first winner's row and also start.
+ * Every progress and terminal write is fenced on the holder's nonce, so a
+ * worker that lost its lease cannot overwrite the new holder's progress.
+ * Terminal commands are never deleted: the row IS the persisted outcome the
+ * screens read back.
  */
 
 export type StaffCommandStage =
@@ -54,7 +58,14 @@ export type StaffCommandRow = {
 };
 
 export type ClaimResult =
-  | { claimed: true; resumedFromStage: StaffCommandStage | null; attempt: number }
+  | {
+      claimed: true;
+      resumedFromStage: StaffCommandStage | null;
+      attempt: number;
+      /** The exclusive holder nonce — every progress/terminal write and the
+       *  release must present it. */
+      nonce: string;
+    }
   | { claimed: false; state: "IN_FLIGHT"; command: StaffCommandRow }
   | { claimed: false; state: "DONE"; command: StaffCommandRow };
 
@@ -79,10 +90,13 @@ function isTerminal(stage: string | null | undefined): boolean {
  *  - IN_FLIGHT  — another attempt holds a live lease; do not act.
  *  - claimed    — this caller owns the (new or stale-reclaimed) command.
  *
- * A stale reclaim (lease expired, non-terminal stage) deletes the old row and
- * conditionally re-creates it carrying the prior stage forward, then verifies
- * its own nonce read back — the conditional create makes exactly one reclaimer
- * win, and the nonce read-back catches the losing delete/create interleave.
+ * A stale reclaim (lease expired, non-terminal stage) is ONE conditional
+ * update installing this caller's nonce + fresh lease, guarded server-side by
+ * the lease still being expired and the stage still being unsettled — so two
+ * concurrent reclaimers cannot both win, and a settled command can never be
+ * reopened by a late reclaimer. When CAS wiring is unavailable (unit-test
+ * fakes without an injected store, a container straddling a deploy) takeover
+ * is REFUSED — blocked-until-lease-logic-deploys is safe; two winners is not.
  */
 export async function claimStaffAccessCommand(
   input: ClaimInput
@@ -113,14 +127,15 @@ export async function claimStaffAccessCommand(
     attemptCount: 1,
   });
   if (created) {
-    return { claimed: true, resumedFromStage: null, attempt: 1 };
+    return { claimed: true, resumedFromStage: null, attempt: 1, nonce };
   }
 
   // Lost the create — someone else holds (or held) this key. Read the truth.
   const { data: existing } = await client.models.StaffAccessCommand.get({ id });
   if (!existing) {
-    // Extremely narrow window (row deleted between create and get). Treat as
-    // in-flight; the caller reports "try again" rather than acting blind.
+    // Extremely narrow window (row settled and vanished between create and
+    // get). Treat as in-flight; the caller reports "try again" rather than
+    // acting blind.
     return {
       claimed: false,
       state: "IN_FLIGHT",
@@ -153,56 +168,57 @@ export async function claimStaffAccessCommand(
     return { claimed: false, state: "IN_FLIGHT", command: row };
   }
 
-  // Stale, non-terminal command: reclaim it. Delete + conditional create keeps
-  // exactly one winner; carrying the stage forward keeps the resume honest.
-  const priorStage = (existing.stage as StaffCommandStage) ?? "REQUESTED";
-  const attempt = (existing.attemptCount ?? 1) + 1;
-  await client.models.StaffAccessCommand.delete({ id }).catch(() => undefined);
-  const { data: reclaimed } = await client.models.StaffAccessCommand.create({
-    id,
-    ...fields,
-    // Preserve the original request identity; this attempt only refreshes the
-    // lease and attempt count.
-    reasonCode: existing.reasonCode ?? input.reasonCode,
-    reason: existing.reason ?? input.reason ?? undefined,
-    requestedRoles:
-      existing.requestedRoles ??
-      ((input.requestedRoles ?? []).join(", ") || undefined),
-    priorRoles: existing.priorRoles ?? undefined,
-    subjectSub: existing.subjectSub ?? undefined,
-    stage: priorStage,
-    requestedAt: existing.requestedAt,
-    attemptCount: attempt,
-    lastError: existing.lastError ?? undefined,
-    effects: existing.effects ?? undefined,
+  // Stale, non-terminal command: seize the lease with ONE atomic guarded
+  // update. Exactly one racer's condition ("lease not live AND stage not
+  // settled") passes; the loser is told IN_FLIGHT and stands down.
+  const takeover = await casTakeover("StaffAccessCommand", id, {
+    nonceField: "leaseNonce",
+    nonce,
+    leaseField: "leaseUntil",
+    leaseMs: LEASE_MS,
+    bumpField: "attemptCount",
+    refuseStages: { field: "stage", values: TERMINAL_STAGES },
   });
-  if (!reclaimed) {
+  if (!takeover.ok) {
     return { claimed: false, state: "IN_FLIGHT", command: row };
   }
-  // Verify the nonce read back — if a racing reclaimer's delete/create landed
-  // after ours, the row is theirs and this caller must stand down.
-  const { data: verify } = await client.models.StaffAccessCommand.get({ id });
-  if (verify?.leaseNonce !== nonce) {
-    return {
-      claimed: false,
-      state: "IN_FLIGHT",
-      command: row,
-    };
-  }
-  return { claimed: true, resumedFromStage: priorStage, attempt };
+  const priorStage =
+    ((takeover.prior.stage as StaffCommandStage) ?? existing.stage ?? "REQUESTED");
+  const attempt = (Number(takeover.prior.attemptCount) || 1) + 1;
+  return { claimed: true, resumedFromStage: priorStage, attempt, nonce };
 }
 
 /**
- * Record confirmed step progress on the command. Verified: returns true only
- * when the write persisted (read back), so callers can treat "progress
- * recorded" as a fact, not a hope.
+ * Record confirmed step progress on the command. With the holder's nonce the
+ * write is a single fenced conditional update — it lands only while the nonce
+ * is still ours, so "true" is a fact, and a worker whose lease was taken over
+ * can never scribble on the new holder's progress. Without CAS wiring it
+ * falls back to a verified plain write (safe there: takeover is disabled, so
+ * a single holder exists).
  */
 export async function recordCommandStage(
   id: string,
   stage: StaffCommandStage,
-  patch?: { priorRoles?: string[]; subjectSub?: string; effects?: string; lastError?: string | null }
+  patch?: { priorRoles?: string[]; subjectSub?: string; effects?: string; lastError?: string | null },
+  fence?: { nonce: string }
 ): Promise<boolean> {
   try {
+    const sets: Record<string, string | null> = { stage };
+    if (patch?.priorRoles) sets.priorRoles = patch.priorRoles.join(", ");
+    if (patch?.subjectSub) sets.subjectSub = patch.subjectSub;
+    if (patch?.effects) sets.effects = patch.effects;
+    if (patch?.lastError) sets.lastError = patch.lastError;
+    if (fence) {
+      const fenced = await casFencedUpdate(
+        "StaffAccessCommand",
+        id,
+        { field: "leaseNonce", nonce: fence.nonce },
+        sets
+      );
+      if (fenced.ok) return true;
+      if (fenced.reason === "LOST") return false;
+      // UNSUPPORTED — fall through to the verified plain write.
+    }
     const client = await dataClient();
     const { data } = await client.models.StaffAccessCommand.update({
       id,
@@ -223,9 +239,10 @@ export async function recordCommandStage(
 
 /**
  * Write the command's terminal outcome (COMPLETE | PARTIAL | FAILED) with the
- * persisted result the screens read back. Returns whether the terminal write
- * itself durably persisted — a false means the change's effects stand but the
- * command still reads unfinished, and the caller must report PARTIAL.
+ * persisted result the screens read back. Fenced on the holder's nonce like
+ * every progress write. Returns whether the terminal write itself durably
+ * persisted — a false means the change's effects stand but the command still
+ * reads unfinished, and the caller must report PARTIAL.
  */
 export async function finishCommand(
   id: string,
@@ -235,9 +252,30 @@ export async function finishCommand(
     effects: string;
     lastError?: string | null;
     result?: Record<string, unknown>;
-  }
+  },
+  fence?: { nonce: string }
 ): Promise<boolean> {
   try {
+    if (fence) {
+      const fenced = await casFencedUpdate(
+        "StaffAccessCommand",
+        id,
+        { field: "leaseNonce", nonce: fence.nonce },
+        {
+          stage: terminal.stage,
+          outcome: terminal.outcome,
+          effects: terminal.effects,
+          ...(terminal.lastError ? { lastError: terminal.lastError } : {}),
+          ...(terminal.result
+            ? { resultJson: JSON.stringify(terminal.result) }
+            : {}),
+          // A terminal command holds no lease (PARTIAL resumes immediately).
+          leaseUntil: null,
+        }
+      );
+      if (fenced.ok) return true;
+      if (fenced.reason === "LOST") return false;
+    }
     const client = await dataClient();
     const { data } = await client.models.StaffAccessCommand.update({
       id,
@@ -248,7 +286,6 @@ export async function finishCommand(
       resultJson: terminal.result
         ? JSON.stringify(terminal.result)
         : undefined,
-      // A terminal command holds no lease.
       leaseUntil: null,
     });
     if (!data) return false;
@@ -270,20 +307,19 @@ const OWNER_SERIAL_LEASE_MS = 2 * 60_000;
  * concurrent owner demotions/offboardings cannot both pass a point-in-time
  * count and then need a fallible rollback. Returns false when another owner
  * change is in flight — the caller refuses safely, having changed nothing.
- * A crashed holder's row is reclaimed after its lease expires.
+ * A crashed holder's expired lease is seized with ONE conditional update
+ * (never delete-then-create), and release is fenced on the holder value so an
+ * expired worker can never delete a newer worker's mutex.
  */
 export async function acquireOwnerSerial(holder: string): Promise<boolean> {
   const client = await dataClient();
   const now = Date.now();
-  const attempt = async () => {
-    const { data } = await client.models.OwnerChangeSerial.create({
-      id: OWNER_SERIAL_ID,
-      holder,
-      leaseUntil: new Date(now + OWNER_SERIAL_LEASE_MS).toISOString(),
-    });
-    return Boolean(data);
-  };
-  if (await attempt()) return true;
+  const { data: created } = await client.models.OwnerChangeSerial.create({
+    id: OWNER_SERIAL_ID,
+    holder,
+    leaseUntil: new Date(now + OWNER_SERIAL_LEASE_MS).toISOString(),
+  });
+  if (created) return true;
   const { data: existing } = await client.models.OwnerChangeSerial.get({
     id: OWNER_SERIAL_ID,
   });
@@ -293,20 +329,36 @@ export async function acquireOwnerSerial(holder: string): Promise<boolean> {
   ) {
     return false;
   }
-  // Stale — reclaim. The conditional re-create keeps exactly one winner.
-  await client.models.OwnerChangeSerial.delete({ id: OWNER_SERIAL_ID }).catch(
-    () => undefined
-  );
-  if (!(await attempt())) return false;
-  const { data: verify } = await client.models.OwnerChangeSerial.get({
-    id: OWNER_SERIAL_ID,
+  if (!existing) {
+    // Released between our create and get — one more conditional create.
+    const { data: retried } = await client.models.OwnerChangeSerial.create({
+      id: OWNER_SERIAL_ID,
+      holder,
+      leaseUntil: new Date(now + OWNER_SERIAL_LEASE_MS).toISOString(),
+    });
+    return Boolean(retried);
+  }
+  // Stale — seize it atomically. Exactly one concurrent reclaimer wins.
+  const takeover = await casTakeover("OwnerChangeSerial", OWNER_SERIAL_ID, {
+    nonceField: "holder",
+    nonce: holder,
+    leaseField: "leaseUntil",
+    leaseMs: OWNER_SERIAL_LEASE_MS,
   });
-  return verify?.holder === holder;
+  return takeover.ok;
 }
 
-/** Release the owner-change mutex. Idempotent; a failure only delays the next
- *  owner change until the lease expires — it never corrupts state. */
-export async function releaseOwnerSerial(): Promise<void> {
+/** Release the owner-change mutex — fenced on the holder, so a worker whose
+ *  lease was taken over cannot release the new holder's lock. Idempotent; a
+ *  failure only delays the next owner change until the lease expires. */
+export async function releaseOwnerSerial(holder: string): Promise<void> {
+  const released = await casFencedDelete("OwnerChangeSerial", OWNER_SERIAL_ID, {
+    field: "holder",
+    nonce: holder,
+    allowMissingFence: true,
+  });
+  if (released !== "UNSUPPORTED") return;
+  // No CAS wiring (takeover disabled there, so this holder is the only one).
   const client = await dataClient();
   await client.models.OwnerChangeSerial.delete({ id: OWNER_SERIAL_ID }).catch(
     () => undefined

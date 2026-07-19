@@ -133,16 +133,21 @@ export async function buildDayMatrix(opts: {
   // eligible technicians means zero sellable dates (no floor of one: a day
   // nobody can legally work is not for sale).
   const activeTechs = techsRes.data.filter((t) => t.active);
-  const recordsByTech = new Map<string, LicenseRecordLike[]>();
+  const recordsByTech = new Map<string, LicenseRecordLike[] | null>();
   await Promise.all(
     activeTechs.map(async (t) => {
       recordsByTech.set(t.id, await licenseRecordsFor(t.id));
     })
   );
   const licensedCountOn = (date: string): number =>
-    activeTechs.filter(
-      (t) => licenseFactsFromRecords(recordsByTech.get(t.id) ?? [], t, date).current
-    ).length;
+    activeTechs.filter((t) => {
+      const records = recordsByTech.get(t.id) ?? null;
+      // GL-17: a licence-records read failure fails CLOSED — that technician
+      // sells no capacity, rather than the legacy fields resurrecting a
+      // possibly-revoked number during an outage.
+      if (records === null) return false;
+      return licenseFactsFromRecords(records, t, date).current;
+    }).length;
   const capacityOn = (date: string): number =>
     licensedCountOn(date) * STOPS_PER_TECH;
 

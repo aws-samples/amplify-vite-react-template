@@ -221,6 +221,7 @@ export const schema = a.schema({
     "SCOPE_MISMATCH",
     "PREP_MISSING",
     "DISPATCH_NOT_READY",
+    "OBLIGATION_RECOVERY",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -559,8 +560,13 @@ export const schema = a.schema({
   BookingFinalization: a
     .model({
       note: a.string(),
+      /** Exclusive holder + lease: stale takeover is one conditional write
+       *  against these (atomicLock), never delete-then-create. Browser roles
+       *  cannot delete an operational lock. */
+      holder: a.string(),
+      leaseUntil: a.datetime(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
 
   /**
    * GL-05 — the outbox claim for one booking communication (id =
@@ -574,8 +580,10 @@ export const schema = a.schema({
   BookingCommsSend: a
     .model({
       requestedAt: a.datetime(),
+      holder: a.string(),
+      leaseUntil: a.datetime(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
 
   // GL-08: the durable, single-winner claim for a customer plan cancellation
   // (id = servicePlanId). An atomic create is taken BEFORE the Stripe call, so
@@ -601,9 +609,13 @@ export const schema = a.schema({
       attemptCount: a.integer(),
       lastError: a.string(),
       recoveryWorkItemId: a.string(),
+      /** Exclusive drive lease: only the nonce holder may write progress or
+       *  delete on terminal; takeover of an expired lease is one CAS write. */
+      leaseNonce: a.string(),
+      leaseUntil: a.datetime(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
     ]),
 
   /**
@@ -638,9 +650,11 @@ export const schema = a.schema({
       refundedCents: a.integer(),
       invoiceVoided: a.boolean(),
       newScheduledDate: a.string(),
+      leaseNonce: a.string(),
+      leaseUntil: a.datetime(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
     ]),
 
   /**
@@ -658,11 +672,13 @@ export const schema = a.schema({
       action: a.string(),
       requestedAt: a.datetime(),
       /** GL-09: a crashed process may no longer block transitions forever — a
-       *  claim older than its lease is reclaimable. */
+       *  claim older than its lease is reclaimable (one CAS write). */
       leaseUntil: a.datetime(),
+      /** The holder's nonce; release and progress are fenced on it. */
+      holder: a.string(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
+      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
     ]),
 
   /**
@@ -759,7 +775,7 @@ export const schema = a.schema({
       holder: a.string(),
       leaseUntil: a.datetime(),
     })
-    .authorization((allow) => [allow.groups(["OWNER"]).to(["read", "delete"])]),
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   /**
    * GL-15 — the single-winner claim for finalizing one service report
@@ -772,9 +788,11 @@ export const schema = a.schema({
   ServiceReportFinalizeClaim: a
     .model({
       requestedAt: a.datetime(),
+      holder: a.string(),
+      leaseUntil: a.datetime(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
     ]),
 
   // Best-effort per-IP throttle for the public quote endpoint (id =
@@ -785,7 +803,7 @@ export const schema = a.schema({
       count: a.integer().required(),
       windowStart: a.datetime(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
 
   /**
    * GL-17 — one visible treatment obligation per in-season calendar month of a

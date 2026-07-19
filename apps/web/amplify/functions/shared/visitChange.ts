@@ -1,10 +1,18 @@
 import type Stripe from "stripe";
+import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
+import {
+  casTakeover,
+  casFencedUpdate,
+  casFencedDelete,
+  casGuardedDelete,
+} from "./atomicLock";
 import { emailShell, sendEmail } from "./email";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
 import { refundInvoice, refundableRemaining } from "./refund";
 import { assertTechnicianCompliance } from "./compliance";
 import { licenseFactsFor } from "./licenses";
+import { releaseMonthForJob } from "./obligations";
 import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
@@ -14,6 +22,9 @@ import {
  *  never set), belongs to a dead attempt the reconcile sweep or a retry may
  *  resume. */
 const VISIT_CHANGE_ORPHAN_MS = 10 * 60_000;
+
+/** How long one attempt may hold the visit-change command's exclusive lease. */
+const VISIT_CHANGE_LEASE_MS = 5 * 60_000;
 /** After a failed attempt the sweep won't auto-resume before this. */
 const VISIT_CHANGE_RETRY_MS = 15 * 60_000;
 /** After this many failed AUTO resumes the sweep stops re-driving and leaves it
@@ -444,6 +455,7 @@ export async function cancelVisit(
   }
 
   // R1: take the single-winner durable command BEFORE any money/schedule change.
+  let nonce: string = randomUUID();
   const { data: claim } = await client.models.VisitChangeClaim.create({
     id: job.id,
     action: "CANCEL",
@@ -454,18 +466,23 @@ export async function cancelVisit(
     requestedAt: new Date().toISOString(),
     attemptCount: 0,
     customerId: job.customerId,
+    leaseNonce: nonce,
+    leaseUntil: new Date(Date.now() + VISIT_CHANGE_LEASE_MS).toISOString(),
   });
   if (!claim) {
-    // A live attempt holds the command — reclaim it only if orphaned, else report
-    // in-progress rather than driving a second refund.
+    // A live attempt holds the command — seize it only if its lease is dead
+    // (ONE guarded update; exactly one racer wins), else report in-progress
+    // rather than driving a second refund.
     const reclaimed = await reclaimOrphanedVisitChange(job.id);
-    if (!reclaimed) return inProgressCancelOutcome(job.id, args.decision);
+    if (!reclaimed.won) return inProgressCancelOutcome(job.id, args.decision);
+    nonce = reclaimed.nonce;
   }
 
   return driveHeldVisitCancel(stripe, job as JobRow, {
     decision: args.decision,
     reason,
     actor: args.actor,
+    nonce,
   });
 }
 
@@ -481,11 +498,17 @@ export async function cancelVisit(
 async function driveHeldVisitCancel(
   stripe: Stripe,
   job: JobRow,
-  args: { decision: CancelDecision; reason: string; actor: VisitChangeActor }
+  args: {
+    decision: CancelDecision;
+    reason: string;
+    actor: VisitChangeActor;
+    /** The exclusive holder nonce — every command write below is fenced on it. */
+    nonce: string;
+  }
 ): Promise<VisitCancelOutcome> {
   const client = await dataClient();
   const jobId = job.id;
-  const { decision, reason, actor } = args;
+  const { decision, reason, actor, nonce } = args;
   const { data: claim } = await client.models.VisitChangeClaim.get({ id: jobId });
   const attemptCount = claim?.attemptCount ?? 0;
   const moneyDone = ["MONEY_DONE", "VOIDED", "CANCELED"].includes(
@@ -529,17 +552,19 @@ async function driveHeldVisitCancel(
     stage: string,
     error: string,
     workId: string | null,
-    extra: Record<string, unknown> = {}
+    extra: Record<string, string | number | boolean | null> = {}
   ) => {
-    await client.models.VisitChangeClaim.update({
-      id: jobId,
+    await writeVisitChangeClaim(jobId, nonce, {
       stage,
       lastError: error,
       attemptCount: attemptCount + 1,
       nextAttemptAt: new Date(Date.now() + VISIT_CHANGE_RETRY_MS).toISOString(),
       ...(workId ? { recoveryWorkItemId: workId } : {}),
       ...extra,
-    }).catch(() => undefined);
+      // Release the lease with the failure recorded, so a resume reclaims at
+      // nextAttemptAt instead of waiting out a dead holder's lease.
+      leaseUntil: null,
+    });
   };
 
   // 1. Money first — skipped on a resume where it already went out.
@@ -608,12 +633,11 @@ async function driveHeldVisitCancel(
       );
     }
     // Checkpoint: money is done and durably recorded so a resume never re-refunds.
-    await client.models.VisitChangeClaim.update({
-      id: jobId,
+    await writeVisitChangeClaim(jobId, nonce, {
       stage: "MONEY_DONE",
       refundedCents,
       ...(refundStripeId ? { refundStripeId } : {}),
-    }).catch(() => undefined);
+    });
   }
 
   // 2. Void the open/unpaid invoice. R3: never COMPLETE while a charge is still
@@ -708,11 +732,10 @@ async function driveHeldVisitCancel(
       }
     }
     if (invoiceVoided) {
-      await client.models.VisitChangeClaim.update({
-        id: jobId,
+      await writeVisitChangeClaim(jobId, nonce, {
         stage: "VOIDED",
         invoiceVoided: true,
-      }).catch(() => undefined);
+      });
     }
   }
 
@@ -761,10 +784,21 @@ async function driveHeldVisitCancel(
       `${refundedCents > 0 ? `A ${usd(refundedCents)} refund was issued, but ` : ""}the visit could not be canceled (${detail}) — an operations case was opened.`
     );
   }
-  await client.models.VisitChangeClaim.update({
-    id: jobId,
+  await writeVisitChangeClaim(jobId, nonce, {
     stage: moneyPending ? "PENDING" : "CANCELED",
-  }).catch(() => undefined);
+  });
+
+  // GL-17: a canceled seasonal visit gives its month back (SCHEDULED → DUE),
+  // guarded on the month still belonging to THIS job — the month can be
+  // re-booked without tripping the one-visit-per-month mutex.
+  if (job.servicePlanId && job.scheduledDate) {
+    await releaseMonthForJob({
+      servicePlanId: job.servicePlanId,
+      monthKey: job.scheduledDate.slice(0, 7),
+      jobId,
+      note: "Visit canceled — the month is owed again.",
+    }).catch(() => undefined);
+  }
 
   // 4. Notify the customer — the truthful money state (R3: pending vs final).
   const moneyLine = moneyPending
@@ -839,7 +873,7 @@ async function driveHeldVisitCancel(
   // Terminal: the visit is canceled, so the CANCEL command is done — delete it so
   // a later legitimate change to this visit can re-acquire. A processing charge is
   // owned by the finance case above, not by keeping the command open forever.
-  await releaseVisitChangeClaim(jobId);
+  await releaseVisitChangeClaim(jobId, nonce);
 
   return {
     jobId,
@@ -867,8 +901,11 @@ async function driveHeldVisitCancel(
 /** Steal a stuck visit-change command so this caller can resume it. A command
  *  whose next-attempt time hasn't arrived still belongs to a live/paced attempt;
  *  an old or overdue one is fair game. Returns whether we now hold it. */
-async function reclaimOrphanedVisitChange(jobId: string): Promise<boolean> {
+async function reclaimOrphanedVisitChange(
+  jobId: string
+): Promise<{ won: true; nonce: string } | { won: false }> {
   const client = await dataClient();
+  const nonce = randomUUID();
   const { data: held } = await client.models.VisitChangeClaim.get({ id: jobId });
   if (!held) {
     const { data } = await client.models.VisitChangeClaim.create({
@@ -877,22 +914,81 @@ async function reclaimOrphanedVisitChange(jobId: string): Promise<boolean> {
       ownerTeam: "FINANCE",
       requestedAt: new Date().toISOString(),
       attemptCount: 0,
+      leaseNonce: nonce,
+      leaseUntil: new Date(Date.now() + VISIT_CHANGE_LEASE_MS).toISOString(),
     });
-    return Boolean(data);
+    return data ? { won: true, nonce } : { won: false };
   }
   const stampedMs = held.createdAt ? new Date(held.createdAt).getTime() : NaN;
   const readyMs = held.nextAttemptAt ? new Date(held.nextAttemptAt).getTime() : NaN;
   const nextArrived = Number.isNaN(readyMs) ? false : Date.now() >= readyMs;
   const old =
     Number.isNaN(stampedMs) || Date.now() - stampedMs >= VISIT_CHANGE_ORPHAN_MS;
-  return old || nextArrived;
+  if (!old && !nextArrived) return { won: false };
+  // "Looks orphaned" is advisory; the actual steal is ONE guarded update
+  // conditioned on no live lease — exactly one concurrent reclaimer wins, and
+  // a live holder's command can never be stolen. Legacy pre-lease rows carry
+  // no leaseUntil, which the guard treats as not-live (the age checks above
+  // already refused young rows).
+  const takeover = await casTakeover("VisitChangeClaim", jobId, {
+    nonceField: "leaseNonce",
+    nonce,
+    leaseField: "leaseUntil",
+    leaseMs: VISIT_CHANGE_LEASE_MS,
+  });
+  return takeover.ok ? { won: true, nonce } : { won: false };
 }
 
-/** Release the command on a terminal outcome. Idempotent; swallows its own
- *  failure (a lingering command only delays the next change, never corrupts). */
-async function releaseVisitChangeClaim(jobId: string): Promise<void> {
+/** A fenced command write: lands only while the nonce is still ours. Without
+ *  CAS wiring (unit fakes / deploy straddling) takeover is disabled, so the
+ *  plain single-holder write is the safe fallback. */
+async function writeVisitChangeClaim(
+  jobId: string,
+  nonce: string,
+  sets: Record<string, string | number | boolean | null>
+): Promise<void> {
+  const res = await casFencedUpdate(
+    "VisitChangeClaim",
+    jobId,
+    { field: "leaseNonce", nonce },
+    sets
+  );
+  if (res.ok || res.reason === "LOST") return;
+  const client = await dataClient();
+  await client.models.VisitChangeClaim
+    .update({ id: jobId, ...sets } as never)
+    .catch(() => undefined);
+}
+
+/** Release the command on a terminal outcome — fenced on the holder nonce, so
+ *  an expired worker can never delete a newer attempt's command. Idempotent;
+ *  swallows its own failure (a lingering command only delays the next change,
+ *  never corrupts). */
+async function releaseVisitChangeClaim(
+  jobId: string,
+  nonce: string
+): Promise<void> {
+  const released = await casFencedDelete("VisitChangeClaim", jobId, {
+    field: "leaseNonce",
+    nonce,
+    allowMissingFence: true,
+  });
+  if (released !== "UNSUPPORTED") return;
   const client = await dataClient();
   await client.models.VisitChangeClaim.delete({ id: jobId }).catch(() => undefined);
+}
+
+/** Cleanup of a command nobody owns (e.g. the visit is already canceled):
+ *  delete only while NO live lease exists, so a holder mid-drive keeps its
+ *  command. */
+async function sweepUnheldVisitChangeClaim(jobId: string): Promise<void> {
+  const swept = await casGuardedDelete("VisitChangeClaim", jobId, [
+    { kind: "notLiveLease", field: "leaseUntil", nowIso: new Date().toISOString() },
+  ]);
+  if (swept === "UNSUPPORTED") {
+    const client = await dataClient();
+    await client.models.VisitChangeClaim.delete({ id: jobId }).catch(() => undefined);
+  }
 }
 
 /** The newest visit-change audit row for a job, for the R7 stored-outcome replay. */
@@ -996,7 +1092,7 @@ export async function resumeVisitChange(
 
   // Nothing to resume, or the visit is already canceled — clean up and report.
   if (job.status === "CANCELED") {
-    if (existing) await releaseVisitChangeClaim(jobId);
+    if (existing) await sweepUnheldVisitChangeClaim(jobId);
     return storedCancelOutcome(jobId, (existing?.decision ?? "CANCEL_REFUND") as CancelDecision);
   }
   if (!existing) {
@@ -1023,10 +1119,33 @@ export async function resumeVisitChange(
     return inProgressCancelOutcome(jobId, "CANCEL_REFUND");
   }
 
+  // A resume is an exclusive holder like any other attempt: seize the lease
+  // with ONE guarded update. While another attempt's lease is live this loses
+  // and reports in-progress — never two concurrent drives of one visit change.
+  let nonce: string = randomUUID();
+  const takeover = await casTakeover("VisitChangeClaim", jobId, {
+    nonceField: "leaseNonce",
+    nonce,
+    leaseField: "leaseUntil",
+    leaseMs: VISIT_CHANGE_LEASE_MS,
+  });
+  if (!takeover.ok) {
+    if (takeover.reason === "LOST") {
+      return inProgressCancelOutcome(
+        jobId,
+        (existing.decision ?? "CANCEL_REFUND") as CancelDecision
+      );
+    }
+    // UNSUPPORTED: takeover is impossible for everyone, so the pacing checks
+    // above are the only serialization — keep the legacy single-holder nonce.
+    nonce = existing.leaseNonce ?? nonce;
+  }
+
   return driveHeldVisitCancel(stripe, job as JobRow, {
     decision: (existing.decision ?? "CANCEL_REFUND") as CancelDecision,
     reason: existing.reason ?? "Resumed cancellation",
     actor: { sub: null, email: "system", isOwner: true },
+    nonce,
   });
 }
 
@@ -1080,6 +1199,7 @@ export async function rescheduleVisit(args: {
   if (!reason) throw new Error("A reason is required to reschedule a visit.");
 
   // R1: single-winner command so concurrent reschedules converge on one result.
+  let rescheduleNonce: string = randomUUID();
   const { data: claim } = await client.models.VisitChangeClaim.create({
     id: job.id,
     action: "RESCHEDULE",
@@ -1089,14 +1209,17 @@ export async function rescheduleVisit(args: {
     requestedAt: new Date().toISOString(),
     attemptCount: 0,
     customerId: job.customerId,
+    leaseNonce: rescheduleNonce,
+    leaseUntil: new Date(Date.now() + VISIT_CHANGE_LEASE_MS).toISOString(),
   });
   if (!claim) {
     const reclaimed = await reclaimOrphanedVisitChange(job.id);
-    if (!reclaimed) {
+    if (!reclaimed.won) {
       throw new Error(
         "This visit's reschedule is already in progress — refresh in a moment to see the result."
       );
     }
+    rescheduleNonce = reclaimed.nonce;
   }
 
   const wantsAssignment = Boolean(args.technicianId && args.routeId && newDate);
@@ -1125,6 +1248,11 @@ export async function rescheduleVisit(args: {
     {
       const facts = await licenseFactsFor(technician, newDate!);
       if (!facts.current) {
+        if (facts.source === "ERROR") {
+          throw new Error(
+            `${technician.name ?? "This technician"}'s licence records could not be read just now — try again in a moment.`
+          );
+        }
         if (facts.source === "LEGACY") {
           assertTechnicianCompliance(technician, {
             requireActive: true,
@@ -1270,8 +1398,9 @@ export async function rescheduleVisit(args: {
     outcome,
   });
 
-  // Terminal: the reschedule is applied, so release the single-winner command.
-  await releaseVisitChangeClaim(job.id);
+  // Terminal: the reschedule is applied, so release the single-winner command
+  // (fenced — an expired attempt can never delete a newer holder's command).
+  await releaseVisitChangeClaim(job.id, rescheduleNonce);
 
   return {
     jobId: job.id,

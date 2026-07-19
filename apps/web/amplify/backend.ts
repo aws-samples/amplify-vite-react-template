@@ -81,6 +81,43 @@ backend.auth.resources.cfnResources.cfnUserPoolClient.tokenValidityUnits = {
   refreshToken: "days",
 };
 
+// Atomic-lease CAS writes (shared/atomicLock.ts): the operational locks and
+// durable commands need conditional DynamoDB updates/deletes that AppSync's
+// generated mutations cannot express — stale-lease takeover, nonce-fenced
+// progress writes, and holder-fenced releases must each be ONE conditional
+// write or two workers can both believe they own a resume. Granted by table
+// NAME PATTERN (Amplify Gen2 tables are `<Model>-<apiId>-NONE`) rather than
+// table object references, which would cycle the data stack (it references
+// these functions as schema handlers) with the function stacks. The functions
+// derive the exact table names at runtime from their data-client config.
+const LOCK_MODELS = [
+  "StaffAccessCommand",
+  "OwnerChangeSerial",
+  "CustomerLifecycleClaim",
+  "CustomerLifecycleCommand",
+  "PlanCancellationClaim",
+  "VisitChangeClaim",
+  "BookingFinalization",
+  "BookingCommsSend",
+  "ServiceReportFinalizeClaim",
+  "TreatmentObligation",
+] as const;
+const lockTablePolicy = new PolicyStatement({
+  actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+  resources: LOCK_MODELS.map(
+    (m) => `arn:aws:dynamodb:us-east-1:*:table/${m}-*`
+  ),
+});
+for (const fn of [
+  backend.crmAdmin,
+  backend.crmBilling,
+  backend.crmDocs,
+  backend.dailyReminders,
+  backend.stripeWebhook,
+]) {
+  fn.resources.lambda.addToRolePolicy(lockTablePolicy);
+}
+
 // Public Function URL for the contact-form proxy. CORS is locked to the
 // production + staging origins (and localhost for dev). Auth is NONE
 // because the form is unauthenticated — protection comes from CORS +

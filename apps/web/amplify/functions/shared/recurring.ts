@@ -1,6 +1,6 @@
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
-import { ensureObligation, markObligation } from "./obligations";
+import { claimMonthForJob, markObligation } from "./obligations";
 import {
   firstWeekdayOf,
   monthKeyAfter,
@@ -140,6 +140,28 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       dueDate = toWeekday(firstWeekdayOf(nextMonthKey));
     }
 
+    // GL-17: for a seasonal plan, CLAIM the target month BEFORE creating the
+    // visit — the obligation row is the month's mutex, so a month that already
+    // has a scheduled (or satisfied) visit refuses and no second visit is ever
+    // queued into it. Idempotent for this deterministic job id.
+    if (seasonal && nextMonthKey) {
+      const monthClaim = await claimMonthForJob({
+        servicePlanId: job.servicePlanId,
+        monthKey: nextMonthKey,
+        jobId: `next-${job.id}`,
+        customerId: job.customerId,
+        accessGroups: customerAccessGroups(
+          job.customerId,
+          customer?.groupId ?? undefined
+        ),
+      });
+      if (!monthClaim.ok) {
+        console.log(
+          `scheduleNextRecurringVisit: ${nextMonthKey} already ${monthClaim.status ?? "held"} for plan ${job.servicePlanId} — no second visit queued`
+        );
+        return;
+      }
+    }
     await client.models.Job.create({
       // GL-15: deterministic id derived from the completed job, so the create
       // is CONDITIONAL — two concurrent finalizes (or a resumed retry) collapse
@@ -161,19 +183,6 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
         customer?.groupId ?? undefined
       ),
     });
-    if (seasonal && nextMonthKey) {
-      await ensureObligation({
-        servicePlanId: job.servicePlanId,
-        customerId: job.customerId,
-        monthKey: nextMonthKey,
-        status: "SCHEDULED",
-        jobId: `next-${job.id}`,
-        accessGroups: customerAccessGroups(
-          job.customerId,
-          customer?.groupId ?? undefined
-        ),
-      });
-    }
     console.log(
       `Queued next ${plan.serviceFrequency} visit for plan ${job.servicePlanId} on ${dueDate}`
     );

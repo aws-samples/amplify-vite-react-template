@@ -105,4 +105,31 @@ describe("licence records (GL-17)", () => {
       ).number
     ).toBeNull();
   });
+
+  it("once records exist, historical lookup NEVER falls back to the legacy number", () => {
+    // The legacy single field may be the very number Compliance revoked — a
+    // record set with no valid entry on the date resolves to NO number.
+    expect(
+      licenseValidOnDate(
+        [{ number: "BAD", status: "REVOKED", expiresOn: "2099-01-01" }],
+        { id: "t1", licenseNumber: "LEGACY-123", licenseExpiresOn: "2099-01-01" },
+        "2026-05-10"
+      ).number
+    ).toBeNull();
+    expect(
+      licenseValidOnDate(
+        [{ number: "GONE", status: "EXPIRED", expiresOn: "2026-01-31" }],
+        { id: "t1", licenseNumber: "LEGACY-123", licenseExpiresOn: "2099-01-01" },
+        "2026-05-10"
+      ).number
+    ).toBeNull();
+    // Zero records: the migration fallback still answers.
+    expect(
+      licenseValidOnDate(
+        [],
+        { id: "t1", licenseNumber: "LEGACY-123", licenseExpiresOn: "2099-01-01" },
+        "2026-05-10"
+      ).number
+    ).toBe("LEGACY-123");
+  });
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
+import { casTakeover, casFencedUpdate } from "./atomicLock";
 import type { LifecycleActor } from "./lifecycleLog";
 
 /**
@@ -9,8 +10,11 @@ import type { LifecycleActor } from "./lifecycleLog";
  *  - the command is CLAIMED (conditional create, id = caller idempotency key)
  *    BEFORE any billing, schedule, access, status, audit, or message change;
  *  - a duplicate submission is handed the persisted progress/outcome;
- *  - a stale non-terminal command is reclaimed under an exclusive
- *    nonce-verified lease and resumed from its last confirmed stage;
+ *  - a stale non-terminal command is seized with ONE atomic conditional
+ *    update guarded by "lease not live AND stage not settled" — never
+ *    delete-then-create — so two reclaimers cannot both win;
+ *  - every progress/terminal write is fenced on the holder's nonce, so a
+ *    worker that lost its lease cannot overwrite the new holder's progress;
  *  - PARTIAL is resumable with the same key; COMPLETE/FAILED are settled;
  *  - an OPPOSITE request while a non-terminal command exists is refused with
  *    that command's state — a serialized reversal, never a fresh
@@ -47,7 +51,13 @@ export type LifecycleCommandRow = {
 };
 
 export type LifecycleClaimResult =
-  | { claimed: true; resumedFromStage: LifecycleStage | null; attempt: number }
+  | {
+      claimed: true;
+      resumedFromStage: LifecycleStage | null;
+      attempt: number;
+      /** The exclusive holder nonce every subsequent command write presents. */
+      nonce: string;
+    }
   | { claimed: false; state: "IN_FLIGHT" | "DONE" | "OPPOSITE_IN_FLIGHT"; command: LifecycleCommandRow };
 
 function isSettled(stage: string | null | undefined): boolean {
@@ -71,10 +81,11 @@ export async function claimLifecycleCommand(input: {
   const id = input.idempotencyKey.trim();
   if (!id) throw new Error("An idempotency key is required");
   const client = await dataClient();
+  const nonce = randomUUID();
   // A fake or a container straddling a schema deploy: proceed as the claimant
   // (the per-customer lock still serializes) rather than blocking transitions.
   if (!("CustomerLifecycleCommand" in client.models)) {
-    return { claimed: true, resumedFromStage: null, attempt: 1 };
+    return { claimed: true, resumedFromStage: null, attempt: 1, nonce };
   }
 
   // Serialized reversal: any non-terminal command for this customer (either
@@ -101,7 +112,6 @@ export async function claimLifecycleCommand(input: {
     console.error("claimLifecycleCommand: open-command scan failed", err);
   }
 
-  const nonce = randomUUID();
   const now = Date.now();
   const fields = {
     customerId: input.customerId,
@@ -123,7 +133,7 @@ export async function claimLifecycleCommand(input: {
     requestedAt: new Date(now).toISOString(),
     attemptCount: 1,
   });
-  if (created) return { claimed: true, resumedFromStage: null, attempt: 1 };
+  if (created) return { claimed: true, resumedFromStage: null, attempt: 1, nonce };
 
   const { data: existing } = await client.models.CustomerLifecycleCommand.get({
     id,
@@ -148,38 +158,29 @@ export async function claimLifecycleCommand(input: {
     existing.leaseUntil && Date.parse(existing.leaseUntil) > now;
   if (leaseLive) return { claimed: false, state: "IN_FLIGHT", command: row };
 
-  // Stale non-terminal (including resumable PARTIAL): reclaim, carrying the
-  // recorded stage forward so the resume re-drives only what is missing.
-  const priorStage = (existing.stage as LifecycleStage) ?? "REQUESTED";
-  const attempt = (existing.attemptCount ?? 1) + 1;
-  await client.models.CustomerLifecycleCommand.delete({ id }).catch(
-    () => undefined
-  );
-  const { data: reclaimed } = await client.models.CustomerLifecycleCommand.create({
-    id,
-    ...fields,
-    reasonCode: existing.reasonCode ?? input.reasonCode,
-    reason: existing.reason ?? input.reason ?? undefined,
-    priorStatus: existing.priorStatus ?? input.priorStatus ?? undefined,
-    stage: priorStage,
-    requestedAt: existing.requestedAt,
-    attemptCount: attempt,
-    inventoryJson: existing.inventoryJson ?? undefined,
-    lastError: existing.lastError ?? undefined,
-    effects: existing.effects ?? undefined,
-    noticeMessageId: existing.noticeMessageId ?? undefined,
+  // Stale non-terminal (including resumable PARTIAL): seize the lease with ONE
+  // guarded update — exactly one racer wins; the loser stands down. When CAS
+  // wiring is unavailable, takeover is refused: blocked is safe, two winners
+  // is not.
+  const takeover = await casTakeover("CustomerLifecycleCommand", id, {
+    nonceField: "leaseNonce",
+    nonce,
+    leaseField: "leaseUntil",
+    leaseMs: LEASE_MS,
+    bumpField: "attemptCount",
+    refuseStages: { field: "stage", values: SETTLED },
   });
-  if (!reclaimed) return { claimed: false, state: "IN_FLIGHT", command: row };
-  const { data: verify } = await client.models.CustomerLifecycleCommand.get({
-    id,
-  });
-  if (verify?.leaseNonce !== nonce) {
+  if (!takeover.ok) {
     return { claimed: false, state: "IN_FLIGHT", command: row };
   }
-  return { claimed: true, resumedFromStage: priorStage, attempt };
+  const priorStage =
+    ((takeover.prior.stage as LifecycleStage) ?? existing.stage ?? "REQUESTED");
+  const attempt = (Number(takeover.prior.attemptCount) || 1) + 1;
+  return { claimed: true, resumedFromStage: priorStage, attempt, nonce };
 }
 
-/** Record confirmed step progress. True only when the write persisted. */
+/** Record confirmed step progress, fenced on the holder's nonce. True only
+ *  when the guarded write landed while we still held the lease. */
 export async function recordLifecycleStage(
   id: string,
   stage: LifecycleStage,
@@ -188,11 +189,29 @@ export async function recordLifecycleStage(
     effects?: string;
     lastError?: string | null;
     noticeMessageId?: string;
-  }
+  },
+  fence?: { nonce: string }
 ): Promise<boolean> {
   try {
     const client = await dataClient();
     if (!("CustomerLifecycleCommand" in client.models)) return true;
+    if (fence) {
+      const sets: Record<string, string | null> = { stage };
+      if (patch?.inventoryJson) sets.inventoryJson = patch.inventoryJson;
+      if (patch?.effects) sets.effects = patch.effects;
+      if (patch?.lastError) sets.lastError = patch.lastError;
+      if (patch?.noticeMessageId) sets.noticeMessageId = patch.noticeMessageId;
+      const fenced = await casFencedUpdate(
+        "CustomerLifecycleCommand",
+        id,
+        { field: "leaseNonce", nonce: fence.nonce },
+        sets
+      );
+      if (fenced.ok) return true;
+      if (fenced.reason === "LOST") return false;
+      // UNSUPPORTED — verified plain write (takeover is disabled there, so a
+      // single holder exists).
+    }
     const { data } = await client.models.CustomerLifecycleCommand.update({
       id,
       stage,
@@ -212,8 +231,9 @@ export async function recordLifecycleStage(
   }
 }
 
-/** Write the terminal outcome. False = effects stand but the durable command
- *  still reads unfinished; the caller must report PARTIAL. */
+/** Write the terminal outcome, fenced like every progress write. False = the
+ *  effects stand but the durable command still reads unfinished; the caller
+ *  must report PARTIAL. */
 export async function finishLifecycleCommand(
   id: string,
   terminal: {
@@ -222,11 +242,32 @@ export async function finishLifecycleCommand(
     effects: string;
     lastError?: string | null;
     result?: Record<string, unknown>;
-  }
+  },
+  fence?: { nonce: string }
 ): Promise<boolean> {
   try {
     const client = await dataClient();
     if (!("CustomerLifecycleCommand" in client.models)) return true;
+    if (fence) {
+      const fenced = await casFencedUpdate(
+        "CustomerLifecycleCommand",
+        id,
+        { field: "leaseNonce", nonce: fence.nonce },
+        {
+          stage: terminal.stage,
+          outcome: terminal.outcome,
+          effects: terminal.effects,
+          ...(terminal.lastError ? { lastError: terminal.lastError } : {}),
+          ...(terminal.result
+            ? { resultJson: JSON.stringify(terminal.result) }
+            : {}),
+          // A terminal command holds no lease (PARTIAL resumes immediately).
+          leaseUntil: null,
+        }
+      );
+      if (fenced.ok) return true;
+      if (fenced.reason === "LOST") return false;
+    }
     const { data } = await client.models.CustomerLifecycleCommand.update({
       id,
       stage: terminal.stage,

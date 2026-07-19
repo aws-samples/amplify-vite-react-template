@@ -1,5 +1,12 @@
 import type Stripe from "stripe";
+import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
+import {
+  casTakeover,
+  casFencedUpdate,
+  casFencedDelete,
+  casGuardedDelete,
+} from "./atomicLock";
 import { emailShell, notifyOffice, sendEmail } from "./email";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
 import { cancelPlanBilling, type QueuedVisitsResolution } from "./subscription";
@@ -256,6 +263,9 @@ const alreadyCanceledOutcome = (): CustomerCancelOutcome => ({
  *  never set), belongs to a dead attempt — the reconcile sweep or the customer's
  *  own retry may resume it rather than being told "pending" forever. */
 const CANCELLATION_ORPHAN_MS = 10 * 60_000;
+
+/** How long one drive attempt may hold the command's exclusive lease. */
+const CANCELLATION_LEASE_MS = 5 * 60_000;
 /** After a failed attempt the sweep won't auto-resume before this — paces retries. */
 const CANCELLATION_RETRY_MS = 15 * 60_000;
 /** After this many failed AUTO resumes the sweep stops re-driving and leaves it
@@ -378,7 +388,13 @@ async function listPlanInvoices(servicePlanId: string): Promise<
 async function driveHeldCancellation(
   stripe: Stripe,
   plan: CancellablePlan,
-  ctx: { requestedAt: string; reason: string | null; attemptCount: number }
+  ctx: {
+    requestedAt: string;
+    reason: string | null;
+    attemptCount: number;
+    /** The exclusive holder nonce — every command write below is fenced on it. */
+    nonce: string;
+  }
 ): Promise<CustomerCancelOutcome> {
   const client = await dataClient();
   const servicePlanId = plan.id;
@@ -424,21 +440,41 @@ async function driveHeldCancellation(
     // The claim IS the durable command — do NOT delete it. Record the failure and
     // when to auto-resume, so the sweep re-drives it and the customer never has
     // to retry.
-    await client.models.PlanCancellationClaim.update({
-      id: servicePlanId,
-      stage: "FAILED",
-      lastError: message,
-      attemptCount: ctx.attemptCount + 1,
-      nextAttemptAt: new Date(Date.now() + CANCELLATION_RETRY_MS).toISOString(),
-      customerId: plan.customerId,
-      ownerTeam: "FINANCE",
-      ...(workId ? { recoveryWorkItemId: workId } : {}),
-    }).catch((updateErr) =>
-      console.error(
-        `driveHeldCancellation: could not update the cancellation command on ${servicePlanId}`,
-        updateErr
-      )
+    const kept = await casFencedUpdate(
+      "PlanCancellationClaim",
+      servicePlanId,
+      { field: "leaseNonce", nonce: ctx.nonce },
+      {
+        stage: "FAILED",
+        lastError: message,
+        attemptCount: ctx.attemptCount + 1,
+        nextAttemptAt: new Date(Date.now() + CANCELLATION_RETRY_MS).toISOString(),
+        customerId: plan.customerId,
+        ownerTeam: "FINANCE",
+        ...(workId ? { recoveryWorkItemId: workId } : {}),
+        // Release the lease with the failure recorded, so the sweep's resume
+        // reclaims at nextAttemptAt instead of waiting out a dead lease.
+        leaseUntil: null,
+      }
     );
+    if (!kept.ok && kept.reason === "UNSUPPORTED") {
+      await client.models.PlanCancellationClaim.update({
+        id: servicePlanId,
+        stage: "FAILED",
+        lastError: message,
+        attemptCount: ctx.attemptCount + 1,
+        nextAttemptAt: new Date(Date.now() + CANCELLATION_RETRY_MS).toISOString(),
+        customerId: plan.customerId,
+        ownerTeam: "FINANCE",
+        leaseUntil: null,
+        ...(workId ? { recoveryWorkItemId: workId } : {}),
+      }).catch((updateErr) =>
+        console.error(
+          `driveHeldCancellation: could not update the cancellation command on ${servicePlanId}`,
+          updateErr
+        )
+      );
+    }
 
     const { data: customer } = await client.models.Customer.get({
       id: plan.customerId,
@@ -497,10 +533,9 @@ async function driveHeldCancellation(
     }).catch(() => undefined);
   }
 
-  // Terminal: the command is done, delete it.
-  await client.models.PlanCancellationClaim.delete({ id: servicePlanId }).catch(
-    () => undefined
-  );
+  // Terminal: the command is done, delete it — fenced on the holder nonce so
+  // a stale worker waking up late can never delete a newer attempt's command.
+  await releaseCancellationCommand(servicePlanId, ctx.nonce);
 
   // GL-08 R3: every claim in the message is derived from the real resolution —
   // "visits stopped" only when none failed, the kept-paid line only when one
@@ -546,6 +581,7 @@ export async function cancelPlanForCustomer(
   // drive a cancel. The loser does NOT just return pending: it tries to reclaim
   // an orphaned command (a prior attempt died mid-flight) so the customer's own
   // retry can finish the job rather than wedging on a stale claim forever.
+  let nonce: string = randomUUID();
   const { data: claim } = await client.models.PlanCancellationClaim.create({
     id: servicePlanId,
     requestedAt,
@@ -554,6 +590,8 @@ export async function cancelPlanForCustomer(
     attemptCount: 0,
     customerId: plan.customerId,
     note: reason ?? undefined,
+    leaseNonce: nonce,
+    leaseUntil: new Date(Date.now() + CANCELLATION_LEASE_MS).toISOString(),
   });
   let attemptCount = 0;
   if (!claim) {
@@ -568,6 +606,7 @@ export async function cancelPlanForCustomer(
       return { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
     }
     attemptCount = reclaimed.attemptCount;
+    nonce = reclaimed.nonce;
   }
 
   // Close the tiny window where another request flipped the plan CANCELED
@@ -576,13 +615,16 @@ export async function cancelPlanForCustomer(
     id: servicePlanId,
   });
   if (afterClaim?.status === "CANCELED") {
-    await client.models.PlanCancellationClaim.delete({ id: servicePlanId }).catch(
-      () => undefined
-    );
+    await releaseCancellationCommand(servicePlanId, nonce);
     return alreadyCanceledOutcome();
   }
 
-  return driveHeldCancellation(stripe, plan, { requestedAt, reason, attemptCount });
+  return driveHeldCancellation(stripe, plan, {
+    requestedAt,
+    reason,
+    attemptCount,
+    nonce,
+  });
 }
 
 /**
@@ -594,8 +636,11 @@ export async function cancelPlanForCustomer(
  */
 async function reclaimOrphanedCancellationClaim(
   servicePlanId: string
-): Promise<{ won: boolean; attemptCount: number }> {
+): Promise<
+  { won: true; attemptCount: number; nonce: string } | { won: false; attemptCount: number }
+> {
   const client = await dataClient();
+  const nonce = randomUUID();
   const { data: held } = await client.models.PlanCancellationClaim.get({
     id: servicePlanId,
   });
@@ -606,8 +651,12 @@ async function reclaimOrphanedCancellationClaim(
       stage: "REQUESTED",
       ownerTeam: "FINANCE",
       attemptCount: 0,
+      leaseNonce: nonce,
+      leaseUntil: new Date(Date.now() + CANCELLATION_LEASE_MS).toISOString(),
     });
-    return { won: Boolean(data), attemptCount: 0 };
+    return data
+      ? { won: true, attemptCount: 0, nonce }
+      : { won: false, attemptCount: 0 };
   }
   const stampedMs = held.createdAt ? new Date(held.createdAt).getTime() : NaN;
   const readyMs = held.nextAttemptAt
@@ -618,7 +667,39 @@ async function reclaimOrphanedCancellationClaim(
     Number.isNaN(stampedMs) || Date.now() - stampedMs >= CANCELLATION_ORPHAN_MS;
   // A young command whose retry time hasn't come belongs to a live attempt.
   if (!old && !nextArrived) return { won: false, attemptCount: held.attemptCount ?? 0 };
-  return { won: true, attemptCount: held.attemptCount ?? 0 };
+  // The actual steal is ONE guarded update conditioned on "no live lease" —
+  // deciding "it looks orphaned" is advisory; only the CAS write makes exactly
+  // one concurrent reclaimer the winner. A legacy pre-lease row has no
+  // leaseUntil, which the guard treats as not-live, and the age checks above
+  // already refused young rows.
+  const takeover = await casTakeover("PlanCancellationClaim", servicePlanId, {
+    nonceField: "leaseNonce",
+    nonce,
+    leaseField: "leaseUntil",
+    leaseMs: CANCELLATION_LEASE_MS,
+  });
+  return takeover.ok
+    ? { won: true, attemptCount: held.attemptCount ?? 0, nonce }
+    : { won: false, attemptCount: held.attemptCount ?? 0 };
+}
+
+/** Fenced terminal release of the cancellation command. An expired worker can
+ *  never delete a newer attempt's command; without CAS wiring (unit fakes)
+ *  takeover is disabled, so the plain delete is single-holder-safe. */
+async function releaseCancellationCommand(
+  servicePlanId: string,
+  nonce: string
+): Promise<void> {
+  const released = await casFencedDelete("PlanCancellationClaim", servicePlanId, {
+    field: "leaseNonce",
+    nonce,
+    allowMissingFence: true,
+  });
+  if (released !== "UNSUPPORTED") return;
+  const client = await dataClient();
+  await client.models.PlanCancellationClaim.delete({ id: servicePlanId }).catch(
+    () => undefined
+  );
 }
 
 /**
@@ -657,9 +738,20 @@ export async function resumePlanCancellation(
         dedupeKey: servicePlanId,
         note: "Cancellation already complete on resume — nothing left to do.",
       }).catch(() => undefined);
-      await client.models.PlanCancellationClaim.delete({
-        id: servicePlanId,
-      }).catch(() => undefined);
+      // Cleanup, not a release we own: delete only while NO live lease exists,
+      // so a holder mid-drive keeps its command.
+      const swept = await casGuardedDelete("PlanCancellationClaim", servicePlanId, [
+        {
+          kind: "notLiveLease",
+          field: "leaseUntil",
+          nowIso: new Date().toISOString(),
+        },
+      ]);
+      if (swept === "UNSUPPORTED") {
+        await client.models.PlanCancellationClaim.delete({
+          id: servicePlanId,
+        }).catch(() => undefined);
+      }
     }
     return alreadyCanceledOutcome();
   }
@@ -674,26 +766,54 @@ export async function resumePlanCancellation(
     plan.cancellationRequestedAt ??
     new Date().toISOString();
 
+  let nonce: string = randomUUID();
   if (!existing) {
-    await client.models.PlanCancellationClaim.create({
+    const { data: freshClaim } = await client.models.PlanCancellationClaim.create({
       id: servicePlanId,
       requestedAt,
       stage: "REQUESTED",
       ownerTeam: "FINANCE",
       attemptCount,
       customerId: plan.customerId,
-    }).catch(() => undefined);
-  } else if (opts.auto) {
-    // Auto-resume pacing: don't re-drive before the next-attempt time, and stop
-    // auto-retrying past the cap (the FINANCE case is already open for a human).
-    const readyMs = existing.nextAttemptAt
-      ? new Date(existing.nextAttemptAt).getTime()
-      : 0;
-    if (Number.isFinite(readyMs) && Date.now() < readyMs) {
+      leaseNonce: nonce,
+      leaseUntil: new Date(Date.now() + CANCELLATION_LEASE_MS).toISOString(),
+    }).catch(() => ({ data: null }));
+    if (!freshClaim) {
+      // Lost the create to a racing attempt — it owns the drive now.
       return { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
     }
-    if (attemptCount >= MAX_CANCELLATION_RESUME_ATTEMPTS) {
-      return { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
+  } else {
+    if (opts.auto) {
+      // Auto-resume pacing: don't re-drive before the next-attempt time, and stop
+      // auto-retrying past the cap (the FINANCE case is already open for a human).
+      const readyMs = existing.nextAttemptAt
+        ? new Date(existing.nextAttemptAt).getTime()
+        : 0;
+      if (Number.isFinite(readyMs) && Date.now() < readyMs) {
+        return { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
+      }
+      if (attemptCount >= MAX_CANCELLATION_RESUME_ATTEMPTS) {
+        return { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
+      }
+    }
+    // A resume is an exclusive holder like any other attempt: seize the lease
+    // with ONE guarded update. While another attempt's lease is live (including
+    // a human racing the sweep) this loses and reports pending — never two
+    // concurrent drives of the same cancellation.
+    const takeover = await casTakeover("PlanCancellationClaim", servicePlanId, {
+      nonceField: "leaseNonce",
+      nonce,
+      leaseField: "leaseUntil",
+      leaseMs: CANCELLATION_LEASE_MS,
+    });
+    if (!takeover.ok) {
+      if (takeover.reason === "LOST") {
+        return { status: "PENDING", requestedAt, message: PENDING_CANCEL_MESSAGE };
+      }
+      // UNSUPPORTED (unit fakes / straddling): takeover is impossible for
+      // everyone, so the pacing checks above are the only serialization — keep
+      // the legacy single-holder assumption there.
+      nonce = existing.leaseNonce ?? nonce;
     }
   }
 
@@ -701,6 +821,7 @@ export async function resumePlanCancellation(
     requestedAt,
     reason: plan.cancellationReason ?? existing?.note ?? null,
     attemptCount,
+    nonce,
   });
 }
 

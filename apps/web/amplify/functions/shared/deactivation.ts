@@ -136,8 +136,8 @@ export async function deactivateCustomer(
   // R5: single-winner claim. A racing deactivate or an interleaving reactivate
   // loses the claim and reports the current state rather than driving a second,
   // mixed-state transition.
-  const won = await acquireLifecycleClaim(customerId, "DEACTIVATE");
-  if (!won) {
+  const claimHandle = await acquireLifecycleClaim(customerId, "DEACTIVATE");
+  if (!claimHandle.won) {
     const { data: current } = await client.models.Customer.get({
       id: customerId,
     });
@@ -178,7 +178,7 @@ export async function deactivateCustomer(
     priorStatus,
   });
   if (!commandClaim.claimed) {
-    await releaseLifecycleClaim(customerId);
+    await releaseLifecycleClaim(customerId, claimHandle.holder);
     const c = commandClaim.command;
     if (commandClaim.state === "DONE") {
       return {
@@ -214,6 +214,10 @@ export async function deactivateCustomer(
     };
   }
 
+  // Every command write below is fenced on the claim's exclusive nonce — a
+  // worker that lost its lease can never overwrite the new holder's progress.
+  const fence = { nonce: commandClaim.nonce };
+
   try {
     // Idempotent re-run: already INACTIVE. Re-assert the portal revoke to heal
     // any drift (the exact INACTIVE-with-live-login bug this gate closes), but
@@ -222,11 +226,15 @@ export async function deactivateCustomer(
       const heal = opts.revokePortalAccess
         ? await opts.revokePortalAccess().catch(() => ({ revoked: false }))
         : { revoked: false };
-      await finishLifecycleCommand(commandKey, {
-        stage: "COMPLETE",
-        outcome: "COMPLETE",
-        effects: "Already inactive; portal access re-asserted to heal drift.",
-      });
+      await finishLifecycleCommand(
+        commandKey,
+        {
+          stage: "COMPLETE",
+          outcome: "COMPLETE",
+          effects: "Already inactive; portal access re-asserted to heal drift.",
+        },
+        fence
+      );
       return {
         plansCanceled: 0,
         visitsResolved: 0,
@@ -246,9 +254,12 @@ export async function deactivateCustomer(
     // on the command BEFORE any provider effect — the resume and the employee
     // preview both read the same facts.
     const inventory = await buildLifecycleInventory(customerId);
-    await recordLifecycleStage(commandKey, "INVENTORIED", {
-      inventoryJson: JSON.stringify(inventory),
-    });
+    await recordLifecycleStage(
+      commandKey,
+      "INVENTORIED",
+      { inventoryJson: JSON.stringify(inventory) },
+      fence
+    );
 
     // a. Stop the money first. cancelPlanBilling cancels the Stripe subscription
     //    AND resolves that plan's queued visits; it throws only when the Stripe
@@ -275,9 +286,14 @@ export async function deactivateCustomer(
     const outstandingBalanceCents = await outstandingBalance(customerId);
 
     if (failedPlans.length === 0) {
-      await recordLifecycleStage(commandKey, "BILLING_STOPPED", {
-        effects: `${plansCanceled} plan(s) stopped, ${visitsResolved} queued visit(s) resolved.`,
-      });
+      await recordLifecycleStage(
+        commandKey,
+        "BILLING_STOPPED",
+        {
+          effects: `${plansCanceled} plan(s) stopped, ${visitsResolved} queued visit(s) resolved.`,
+        },
+        fence
+      );
     }
 
     // A plan is still billing. Do NOT flip INACTIVE — that would hide the live
@@ -297,12 +313,16 @@ export async function deactivateCustomer(
           "Cancel the plan by hand from the customer's page, then re-run the deactivation (idempotent).",
         ownerTeam: "FINANCE",
       });
-      await finishLifecycleCommand(commandKey, {
-        stage: "PARTIAL",
-        outcome: "PARTIAL",
-        effects: `Billing could not be fully stopped (${failedPlans.length} plan(s) live). Customer left ACTIVE. Recovery case ${caseId ? "opened" : "COULD NOT BE OPENED — escalate"}.`,
-        lastError: failedPlans.map((p) => p.message).join("; "),
-      });
+      await finishLifecycleCommand(
+        commandKey,
+        {
+          stage: "PARTIAL",
+          outcome: "PARTIAL",
+          effects: `Billing could not be fully stopped (${failedPlans.length} plan(s) live). Customer left ACTIVE. Recovery case ${caseId ? "opened" : "COULD NOT BE OPENED — escalate"}.`,
+          lastError: failedPlans.map((p) => p.message).join("; "),
+        },
+        fence
+      );
       await notifyOffice({
         subject: `ACTION REQUIRED — deactivation left a plan still billing: ${customer.displayName}`,
         heading: "A customer deactivation could not stop the billing",
@@ -341,9 +361,14 @@ export async function deactivateCustomer(
     const sweep = await sweepRemainingFutureJobs(customerId, customer.displayName);
     const jobsCanceled = sweep.canceled;
     if (sweep.failed === 0 && sweep.caseWriteFailed === 0) {
-      await recordLifecycleStage(commandKey, "SCHEDULE_CLEARED", {
-        effects: `${jobsCanceled} upcoming visit(s) canceled; ${sweep.paidDecisions} paid and ${sweep.inProgressDecisions} in-progress visit(s) put in owned decisions.`,
-      });
+      await recordLifecycleStage(
+        commandKey,
+        "SCHEDULE_CLEARED",
+        {
+          effects: `${jobsCanceled} upcoming visit(s) canceled; ${sweep.paidDecisions} paid and ${sweep.inProgressDecisions} in-progress visit(s) put in owned decisions.`,
+        },
+        fence
+      );
     }
 
     // c. ACCESS before STATUS (R1). If the portal revoke fails, the money is
@@ -383,13 +408,17 @@ export async function deactivateCustomer(
              <p style="color:#666;font-size:13px;">Error: ${message}</p>
              <p><strong>End their portal access, then deactivate them again.</strong></p>`,
         });
-        await finishLifecycleCommand(commandKey, {
-          stage: "PARTIAL",
-          outcome: "PARTIAL",
-          effects:
-            "Billing stopped and schedule cleared, but the portal login could not be ended. Customer left ACTIVE; owned recovery is open.",
-          lastError: message,
-        });
+        await finishLifecycleCommand(
+          commandKey,
+          {
+            stage: "PARTIAL",
+            outcome: "PARTIAL",
+            effects:
+              "Billing stopped and schedule cleared, but the portal login could not be ended. Customer left ACTIVE; owned recovery is open.",
+            lastError: message,
+          },
+          fence
+        );
         return {
           plansCanceled,
           visitsResolved,
@@ -406,7 +435,7 @@ export async function deactivateCustomer(
         };
       }
     }
-    await recordLifecycleStage(commandKey, "ACCESS_DONE");
+    await recordLifecycleStage(commandKey, "ACCESS_DONE", undefined, fence);
 
     // d. INACTIVE last, with a read-back (R4). A silently-failed status write
     //    must not report success — if the flip did not persist, open blocking
@@ -428,12 +457,16 @@ export async function deactivateCustomer(
           "Re-run the deactivation to re-assert INACTIVE — it is idempotent — and confirm the record reads inactive.",
         ownerTeam: "OPS",
       });
-      await finishLifecycleCommand(commandKey, {
-        stage: "PARTIAL",
-        outcome: "PARTIAL",
-        effects:
-          "Everything stopped but the INACTIVE status write did not persist. Owned recovery is open.",
-      });
+      await finishLifecycleCommand(
+        commandKey,
+        {
+          stage: "PARTIAL",
+          outcome: "PARTIAL",
+          effects:
+            "Everything stopped but the INACTIVE status write did not persist. Owned recovery is open.",
+        },
+        fence
+      );
       return {
         plansCanceled,
         visitsResolved,
@@ -449,7 +482,7 @@ export async function deactivateCustomer(
           "The INACTIVE status did not stick. It's owned and will be re-asserted; re-running is safe.",
       };
     }
-    await recordLifecycleStage(commandKey, "STATUS_DONE");
+    await recordLifecycleStage(commandKey, "STATUS_DONE", undefined, fence);
 
     // e. Record the transition for leadership (R3/R4). The audit write is
     //    blocking-on-failure inside recordCustomerLifecycleEvent (a lost row
@@ -468,7 +501,7 @@ export async function deactivateCustomer(
       }.`,
     });
 
-    if (recorded) await recordLifecycleStage(commandKey, "AUDITED");
+    if (recorded) await recordLifecycleStage(commandKey, "AUDITED", undefined, fence);
 
     // GL-09: the tracked final customer notice — the approved per-reason
     // wording with effective date, disposition, balance next step, portal
@@ -488,9 +521,12 @@ export async function deactivateCustomer(
       sweep,
     });
     if (notice.outcome !== "FAILED") {
-      await recordLifecycleStage(commandKey, "NOTICE_SENT", {
-        effects: `Customer notice: ${notice.outcome}.`,
-      });
+      await recordLifecycleStage(
+        commandKey,
+        "NOTICE_SENT",
+        { effects: `Customer notice: ${notice.outcome}.` },
+        fence
+      );
     }
 
     const sweepClean = sweep.failed === 0 && sweep.caseWriteFailed === 0;
@@ -502,11 +538,15 @@ export async function deactivateCustomer(
     )} ${reasonPolicy("DEACTIVATE", reasonCode).balanceHandling.toLowerCase().replace(/_/g, " ")} (policy ${LIFECYCLE_POLICY_VERSION}). Portal ${
       portalRevoked ? "ended" : "n/a"
     }. Notice: ${notice.outcome}.`;
-    await finishLifecycleCommand(commandKey, {
-      stage: finalPartial ? "PARTIAL" : "COMPLETE",
-      outcome: finalPartial ? "PARTIAL" : "COMPLETE",
-      effects: effectsSummary,
-    });
+    await finishLifecycleCommand(
+      commandKey,
+      {
+        stage: finalPartial ? "PARTIAL" : "COMPLETE",
+        outcome: finalPartial ? "PARTIAL" : "COMPLETE",
+        effects: effectsSummary,
+      },
+      fence
+    );
 
     return {
       plansCanceled,
@@ -527,7 +567,7 @@ export async function deactivateCustomer(
     // Whatever the outcome (clean, partial, or a throw), release the claim so a
     // retry or the opposite transition can proceed. Only reached when we won the
     // claim above, so we never delete another request's live claim.
-    await releaseLifecycleClaim(customerId);
+    await releaseLifecycleClaim(customerId, claimHandle.holder);
   }
 }
 

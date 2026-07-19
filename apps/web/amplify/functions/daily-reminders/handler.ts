@@ -314,6 +314,12 @@ export async function sweepLicenseLapses() {
         if (!tech.active) continue;
         const factsNow = await licenseFactsFor(tech, today);
         const factsAtWarn = await licenseFactsFor(tech, warnDate);
+        // A records READ FAILURE is not a lapse: enforcement (dispatch,
+        // capacity, reads) already fails closed on ERROR — fabricating a
+        // "licence lapsed" case out of an outage would be a false record.
+        if (factsNow.source === "ERROR" || factsAtWarn.source === "ERROR") {
+          continue;
+        }
         if (factsNow.current && factsAtWarn.current) continue;
         const expiresOn = factsNow.expiresOn ?? "unknown";
         if (factsNow.current && !factsAtWarn.current) {

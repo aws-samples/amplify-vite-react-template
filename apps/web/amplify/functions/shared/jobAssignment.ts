@@ -97,6 +97,13 @@ export async function assertCanActOnJob(
   }
   const licenseFacts = await licenseFactsFor(tech, job.scheduledDate ?? undefined);
   if (!licenseFacts.current) {
+    if (licenseFacts.source === "ERROR") {
+      // GL-17: fail CLOSED on a records read failure — and say so, rather than
+      // claiming the technician is unlicensed.
+      throw new Error(
+        "The licence check couldn't be completed just now — try again in a moment. Regulated work is blocked until it succeeds."
+      );
+    }
     if (licenseFacts.source === "LEGACY") {
       // No records yet — the legacy single-field check names exactly which
       // fact is missing/expired (better fix-it message than a generic one).

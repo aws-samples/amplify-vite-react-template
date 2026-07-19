@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
 import type Stripe from "stripe";
 import type { QueuedVisitsResolution } from "./subscription";
 
@@ -172,6 +173,7 @@ const resolution = (
 });
 
 beforeEach(() => {
+  _setLockStoreForTests(memoryLockStore({ PlanCancellationClaim: claims }));
   plans.clear();
   jobs.clear();
   invoices.clear();

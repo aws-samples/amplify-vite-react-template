@@ -68,6 +68,9 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   PREP_MISSING: 4 * 60,
   // GL-12: tomorrow's visit is missing a dispatch fact — same-day fix.
   DISPATCH_NOT_READY: 4 * 60,
+  // GL-17: the seasonal monthly-treatment ledger failed a write — routine
+  // correction clock.
+  OBLIGATION_RECOVERY: 24 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

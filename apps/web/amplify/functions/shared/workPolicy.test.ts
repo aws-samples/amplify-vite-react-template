@@ -36,6 +36,7 @@ const ALL_KINDS: WorkKind[] = [
   "SCOPE_MISMATCH",
   "PREP_MISSING",
   "DISPATCH_NOT_READY",
+  "OBLIGATION_RECOVERY",
 ];
 
 describe("GL-18 work policy registry", () => {

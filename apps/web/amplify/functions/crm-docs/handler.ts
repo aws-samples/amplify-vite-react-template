@@ -1,7 +1,8 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AppSyncIdentity, AppSyncResolverEvent } from "aws-lambda";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { casTakeover, casFencedDelete } from "../shared/atomicLock";
 import { dataClient } from "../shared/dataClient";
 import {
   assertApplicationWithinLabel,
@@ -65,7 +66,10 @@ import {
   onsiteMinutesFor,
   proveRoutable,
 } from "../shared/dispatchReadiness";
-import { ensureObligation } from "../shared/obligations";
+import {
+  claimMonthForJob,
+  releaseMonthForJob,
+} from "../shared/obligations";
 import {
   openMissingContactWork,
   openOwnedWork,
@@ -1226,6 +1230,11 @@ async function createOfficeJob(args: Args) {
       serviceType,
     });
   }
+  let seasonalClaim: {
+    servicePlanId: string;
+    monthKey: string;
+    jobId: string;
+  } | null = null;
   if (args.servicePlanId) {
     const { data: plan } = await client.models.ServicePlan.get({
       id: args.servicePlanId,
@@ -1243,20 +1252,30 @@ async function createOfficeJob(args: Args) {
           "This plan's treatments run April–October. Pick an in-season month — November–March has no routine treatment (the plan still bills monthly year-round)."
         );
       }
-      const { status } = await ensureObligation({
+      // Claim the month ATOMICALLY with a pre-minted job id — the obligation
+      // row is the mutex, so two concurrent creates cannot both land a visit
+      // in one month (checking only SATISFIED would allow two SCHEDULED).
+      seasonalClaim = {
         servicePlanId: plan.id,
-        customerId,
         monthKey,
+        jobId: randomUUID(),
+      };
+      const monthClaim = await claimMonthForJob({
+        ...seasonalClaim,
+        customerId,
       });
-      if (status === "SATISFIED") {
+      if (!monthClaim.ok) {
         throw new Error(
-          `This plan's ${monthKey} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+          monthClaim.status === "SATISFIED"
+            ? `This plan's ${monthKey} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+            : `This plan already has its ${monthKey} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
         );
       }
     }
   }
 
   const { data: created, errors } = await client.models.Job.create({
+    ...(seasonalClaim ? { id: seasonalClaim.jobId } : {}),
     customerId,
     servicePlanId: args.servicePlanId || undefined,
     type: args.servicePlanId ? "RECURRING" : "ONE_TIME",
@@ -1274,6 +1293,8 @@ async function createOfficeJob(args: Args) {
     accessGroups: customerAccessGroups(customerId, customer.groupId),
   });
   if (!created) {
+    // The month claim must not outlive a job that was never born.
+    if (seasonalClaim) await releaseMonthForJob(seasonalClaim);
     throw new Error(
       `Could not create the job: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
     );
@@ -1523,6 +1544,13 @@ async function updateJobSchedule(
     {
       const facts = await licenseFactsFor(technician, args.scheduledDate);
       if (!facts.current) {
+        if (facts.source === "ERROR") {
+          // GL-17: fail CLOSED on a records read failure — and say so, rather
+          // than claiming the technician is unlicensed.
+          throw new Error(
+            `${technician.name ?? "This technician"}'s licence records could not be read just now — try again in a moment. Regulated work can't be assigned until the licence check succeeds.`
+          );
+        }
         if (facts.source === "LEGACY") {
           // No records yet — the legacy check names the exact missing fact.
           assertTechnicianCompliance(technician, {
@@ -1535,15 +1563,44 @@ async function updateJobSchedule(
         );
       }
     }
-    // GL-17: a seasonal plan's visit may only land in an in-season month.
+    // GL-17: a seasonal plan's visit may only land in an in-season month, and
+    // the month is claimed ATOMICALLY — the obligation row is the mutex, so
+    // two concurrent assigns cannot both put a visit in the same month.
     if (job.servicePlanId) {
       const { data: plan } = await client.models.ServicePlan.get({
         id: job.servicePlanId,
       });
-      if (plan?.seasonal && !isServiceMonth(plan, args.scheduledDate.slice(0, 7))) {
-        throw new Error(
-          "This plan's treatments run April–October — pick an in-season date (the plan still bills monthly year-round)."
-        );
+      if (plan?.seasonal) {
+        const targetMonth = args.scheduledDate.slice(0, 7);
+        if (!isServiceMonth(plan, targetMonth)) {
+          throw new Error(
+            "This plan's treatments run April–October — pick an in-season date (the plan still bills monthly year-round)."
+          );
+        }
+        const priorMonth = job.scheduledDate?.slice(0, 7) ?? null;
+        if (priorMonth !== targetMonth) {
+          const monthClaim = await claimMonthForJob({
+            servicePlanId: plan.id,
+            monthKey: targetMonth,
+            jobId: job.id,
+            customerId: job.customerId,
+          });
+          if (!monthClaim.ok) {
+            throw new Error(
+              monthClaim.status === "SATISFIED"
+                ? `This plan's ${targetMonth} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+                : `This plan already has its ${targetMonth} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
+            );
+          }
+          if (priorMonth) {
+            await releaseMonthForJob({
+              servicePlanId: plan.id,
+              monthKey: priorMonth,
+              jobId: job.id,
+              note: "Visit moved to a different month.",
+            });
+          }
+        }
       }
     }
     if (
@@ -1628,6 +1685,16 @@ async function updateJobSchedule(
 
   if (operation === "CANCEL") {
     assertJobCanBeScheduled(job);
+    // GL-17: a canceled seasonal visit gives its month back (guarded on the
+    // month still belonging to this job).
+    if (job.servicePlanId && job.scheduledDate) {
+      await releaseMonthForJob({
+        servicePlanId: job.servicePlanId,
+        monthKey: job.scheduledDate.slice(0, 7),
+        jobId: job.id,
+        note: "Visit canceled — the month is owed again.",
+      }).catch(() => undefined);
+    }
     const { data, errors } = await client.models.Job.update({
       id: job.id,
       status: "CANCELED",
@@ -2647,16 +2714,21 @@ const FINALIZE_CLAIM_STALE_MS = 5 * 60_000;
  * Returns true when this caller owns finalization; false when another attempt
  * holds a fresh claim. A stale claim (crashed holder) is reclaimed.
  */
-async function acquireFinalizeClaim(reportId: string): Promise<boolean> {
+async function acquireFinalizeClaim(
+  reportId: string
+): Promise<{ won: true; holder: string } | { won: false }> {
   const client = await dataClient();
+  const holder = randomUUID();
   const attempt = async () => {
     const { data } = await client.models.ServiceReportFinalizeClaim.create({
       id: reportId,
       requestedAt: new Date().toISOString(),
+      holder,
+      leaseUntil: new Date(Date.now() + FINALIZE_CLAIM_STALE_MS).toISOString(),
     });
     return Boolean(data);
   };
-  if (await attempt()) return true;
+  if (await attempt()) return { won: true, holder };
   const { data: held } = await client.models.ServiceReportFinalizeClaim.get({
     id: reportId,
   });
@@ -2664,15 +2736,43 @@ async function acquireFinalizeClaim(reportId: string): Promise<boolean> {
     held?.requestedAt &&
     Date.now() - Date.parse(held.requestedAt) < FINALIZE_CLAIM_STALE_MS
   ) {
-    return false;
+    return { won: false };
   }
+  if (!held) {
+    // Released between our create and get — one more conditional create.
+    return (await attempt()) ? { won: true, holder } : { won: false };
+  }
+  // Stale: seize the claim with ONE guarded update conditioned on "no live
+  // lease" — never delete-then-create, which would let two reclaimers both
+  // believe they own finalization and both bill, schedule, and email.
+  const takeover = await casTakeover("ServiceReportFinalizeClaim", reportId, {
+    nonceField: "holder",
+    nonce: holder,
+    leaseField: "leaseUntil",
+    leaseMs: FINALIZE_CLAIM_STALE_MS,
+  });
+  if (takeover.ok) return { won: true, holder };
+  if (takeover.reason === "LOST") return { won: false };
+  // UNSUPPORTED (unit fakes / deploy straddling): takeover impossible for
+  // every racer — fall back to the age-gated conditional create.
   await client.models.ServiceReportFinalizeClaim.delete({ id: reportId }).catch(
     () => undefined
   );
-  return attempt();
+  return (await attempt()) ? { won: true, holder } : { won: false };
 }
 
-async function releaseFinalizeClaim(reportId: string): Promise<void> {
+/** Fenced release — an expired finalize attempt waking up late can never
+ *  delete the claim out from under the newer holder. */
+async function releaseFinalizeClaim(
+  reportId: string,
+  holder: string
+): Promise<void> {
+  const released = await casFencedDelete(
+    "ServiceReportFinalizeClaim",
+    reportId,
+    { field: "holder", nonce: holder, allowMissingFence: true }
+  );
+  if (released !== "UNSUPPORTED") return;
   const client = await dataClient();
   await client.models.ServiceReportFinalizeClaim.delete({ id: reportId }).catch(
     () => undefined
@@ -2689,7 +2789,8 @@ async function finalizeServiceReport(reportId: string) {
   // GL-15: one winner. Two simultaneous finalizes must not both see
   // "not finalized" and both bill, schedule, and email — the loser reports the
   // honest in-progress state instead of proceeding.
-  if (!(await acquireFinalizeClaim(reportId))) {
+  const finalizeClaim = await acquireFinalizeClaim(reportId);
+  if (!finalizeClaim.won) {
     return {
       inProgress: true,
       emailed: false,
@@ -2702,7 +2803,7 @@ async function finalizeServiceReport(reportId: string) {
   try {
     return await runFinalize();
   } finally {
-    await releaseFinalizeClaim(reportId);
+    await releaseFinalizeClaim(reportId, finalizeClaim.holder);
   }
 
   async function runFinalize() {
@@ -2785,13 +2886,20 @@ async function finalizeServiceReport(reportId: string) {
 
     // GL-17: the record prints the licence that was valid ON THE APPLICATION
     // DATE — a later renewal, expiry, or revocation never rewrites authorship.
-    const authorship = technician
-      ? licenseValidOnDate(
-          await licenseRecordsFor(technician.id),
-          technician,
-          applicationStartIso.slice(0, 10)
-        )
-      : { number: null };
+    let authorship: { number: string | null } = { number: null };
+    if (technician) {
+      const authorRecords = await licenseRecordsFor(technician.id);
+      // A records read failure fails closed: print NO licence number rather
+      // than let the legacy field resurrect a possibly-revoked one.
+      authorship =
+        authorRecords === null
+          ? { number: null }
+          : licenseValidOnDate(
+              authorRecords,
+              technician,
+              applicationStartIso.slice(0, 10)
+            );
+    }
     pdf = await renderServiceReportPdf({
       reportId,
       customerName: customer.displayName,

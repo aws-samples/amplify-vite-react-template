@@ -43,7 +43,8 @@ export type WorkKind =
   | "LICENSE_LAPSE"
   | "SCOPE_MISMATCH"
   | "PREP_MISSING"
-  | "DISPATCH_NOT_READY";
+  | "DISPATCH_NOT_READY"
+  | "OBLIGATION_RECOVERY";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -461,6 +462,23 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     manualReasons: [
       { code: "RESCHEDULED", label: "Rescheduled with the customer" },
       { code: "CANCELED_WITH_CUSTOMER", label: "Canceled with the customer" },
+      OTHER,
+    ],
+  },
+  OBLIGATION_RECOVERY: {
+    severity: "HIGH",
+    // GL-17: a seasonal plan's monthly-treatment ledger could not be written
+    // (an obligation row failed to create/advance). The promise ("one
+    // treatment each month, Apr–Oct") exists whether or not the bookkeeping
+    // landed — so the failure is OWNED, not swallowed, until the ledger reads
+    // true again.
+    customerImpact:
+      "A seasonal plan's monthly-treatment record could not be written — the promised-visit ledger is out of step with reality until it's fixed.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "LEDGER_CORRECTED", label: "Obligation record corrected by hand" },
+      { code: "PLAN_CANCELED", label: "Plan canceled — no obligation remains" },
       OTHER,
     ],
   },

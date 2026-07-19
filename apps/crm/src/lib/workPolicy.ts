@@ -345,6 +345,18 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  OBLIGATION_RECOVERY: {
+    label: "Seasonal ledger write failed",
+    severity: "HIGH",
+    customerImpact:
+      "A seasonal plan's monthly-treatment record could not be written — the promised-visit ledger is out of step with reality until it's fixed.",
+    verified: [],
+    manualReasons: [
+      { code: "LEDGER_CORRECTED", label: "Obligation record corrected by hand" },
+      { code: "PLAN_CANCELED", label: "Plan canceled — no obligation remains" },
+      OTHER,
+    ],
+  },
   DISPATCH_NOT_READY: {
     label: "Not dispatch-ready",
     severity: "HIGH",

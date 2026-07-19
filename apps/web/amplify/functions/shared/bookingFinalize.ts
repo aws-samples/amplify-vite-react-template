@@ -1,6 +1,8 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
+import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
+import { casTakeover, casFencedDelete } from "./atomicLock";
 import { isSeasonalPlanName, monthKeyOf, isServiceMonth, SEASONAL_SERVICE_MONTHS } from "./season";
 import { ensureObligation } from "./obligations";
 import { customerAccessGroups } from "./dynamicGroups";
@@ -162,9 +164,12 @@ export async function finalizeBooking(opts: {
   // Stripe retry (or the office Retry button) can pick the work back up. The
   // steps inside are individually idempotent, so "pick it up" means resume the
   // same transaction, not start a second one.
+  let claimHolder: string = randomUUID();
   const { data: claim } = await client.models.BookingFinalization.create({
     id: opts.bookingRequestId,
     note: `pi ${opts.paymentIntentId}`,
+    holder: claimHolder,
+    leaseUntil: new Date(Date.now() + ORPHAN_CLAIM_MS).toISOString(),
   });
   if (!claim) {
     // A claim already exists. Usually a live concurrent delivery — but a run
@@ -174,7 +179,8 @@ export async function finalizeBooking(opts: {
     // at QUOTED with money captured and nothing in any queue. The webhook Lambda
     // times out at 30s, so a claim older than that cannot be a live holder.
     const reclaimed = await reclaimOrphanedClaim(opts.bookingRequestId);
-    if (!reclaimed) return; // a genuinely live delivery owns it
+    if (!reclaimed.won) return; // a genuinely live delivery owns it
+    claimHolder = reclaimed.holder;
   }
 
   try {
@@ -209,9 +215,18 @@ export async function finalizeBooking(opts: {
         "Use “Retry finalization” on this item — it re-confirms the Stripe payment and finishes the same booking. If it keeps failing, escalate to engineering, or refund the payment in Stripe and tell the customer.",
       ownerTeam: "FINANCE",
     });
-    await client.models.BookingFinalization.delete({
-      id: opts.bookingRequestId,
-    });
+    // Fenced release: a hung prior attempt waking up late can never delete the
+    // claim out from under the newer holder.
+    const released = await casFencedDelete(
+      "BookingFinalization",
+      opts.bookingRequestId,
+      { field: "holder", nonce: claimHolder, allowMissingFence: true }
+    );
+    if (released === "UNSUPPORTED") {
+      await client.models.BookingFinalization.delete({
+        id: opts.bookingRequestId,
+      });
+    }
     throw err;
   }
 }
@@ -284,8 +299,11 @@ const ORPHAN_CLAIM_MS = 60_000;
  * Distinguish a live claim holder from a dead one and, if dead, steal the claim
  * so this delivery can resume. Returns whether this caller now owns the claim.
  */
-async function reclaimOrphanedClaim(id: string): Promise<boolean> {
+async function reclaimOrphanedClaim(
+  id: string
+): Promise<{ won: true; holder: string } | { won: false }> {
   const client = await dataClient();
+  const holder = randomUUID();
   const { data: held } = await client.models.BookingFinalization.get({ id });
   if (!held) {
     // Vanished between the failed create and this get (the holder finished and
@@ -293,20 +311,38 @@ async function reclaimOrphanedClaim(id: string): Promise<boolean> {
     const { data } = await client.models.BookingFinalization.create({
       id,
       note: "reclaim",
+      holder,
+      leaseUntil: new Date(Date.now() + ORPHAN_CLAIM_MS).toISOString(),
     });
-    return Boolean(data);
+    return data ? { won: true, holder } : { won: false };
   }
   const createdMs = held.createdAt ? new Date(held.createdAt).getTime() : NaN;
   if (Number.isNaN(createdMs) || Date.now() - createdMs < ORPHAN_CLAIM_MS) {
-    return false; // young claim — a live delivery still owns it
+    return { won: false }; // young claim — a live delivery still owns it
   }
-  // Orphaned: the holder was killed before it could release. Steal it.
+  // Orphaned: the holder was killed before it could release. The steal is ONE
+  // guarded update conditioned on "no live lease" — never delete-then-create,
+  // which would let two reclaimers both believe they own the finalization and
+  // both drive it. A legacy pre-lease row has no leaseUntil, which the guard
+  // treats as not-live (the age check above already refused young rows).
+  const takeover = await casTakeover("BookingFinalization", id, {
+    nonceField: "holder",
+    nonce: holder,
+    leaseField: "leaseUntil",
+    leaseMs: ORPHAN_CLAIM_MS,
+  });
+  if (takeover.ok) return { won: true, holder };
+  if (takeover.reason === "LOST") return { won: false };
+  // UNSUPPORTED (unit fakes / deploy straddling): takeover is impossible for
+  // every racer, so the age check above is the only gate — matching the
+  // pre-lease behavior where the conditional create was the serializer.
   await client.models.BookingFinalization.delete({ id });
   const { data } = await client.models.BookingFinalization.create({
     id,
     note: "reclaimed orphan",
+    holder,
   });
-  return Boolean(data);
+  return data ? { won: true, holder } : { won: false };
 }
 
 /**
@@ -1151,19 +1187,22 @@ const COMMS_CLAIM_STALE_MS = 90_000;
  */
 async function claimCommsSend(
   claimId: string
-): Promise<"WON" | "HELD" | "RECLAIMED"> {
+): Promise<{ state: "WON" | "HELD" | "RECLAIMED"; holder: string }> {
   const client = await dataClient();
+  const holder = randomUUID();
   // A fake or a container straddling a schema deploy may lack the model; the
   // marker + EmailLog checks still bound the duplicate risk to the old level.
-  if (!("BookingCommsSend" in client.models)) return "WON";
+  if (!("BookingCommsSend" in client.models)) return { state: "WON", holder };
   const attempt = async () => {
     const { data } = await client.models.BookingCommsSend.create({
       id: claimId,
       requestedAt: new Date().toISOString(),
+      holder,
+      leaseUntil: new Date(Date.now() + COMMS_CLAIM_STALE_MS).toISOString(),
     });
     return Boolean(data);
   };
-  if (await attempt()) return "WON";
+  if (await attempt()) return { state: "WON", holder };
   const { data: held } = await client.models.BookingCommsSend.get({
     id: claimId,
   });
@@ -1171,15 +1210,44 @@ async function claimCommsSend(
     held?.requestedAt &&
     Date.now() - Date.parse(held.requestedAt) < COMMS_CLAIM_STALE_MS
   ) {
-    return "HELD";
+    return { state: "HELD", holder };
   }
+  if (!held) {
+    // Released between our create and get — one more conditional create.
+    return (await attempt())
+      ? { state: "RECLAIMED", holder }
+      : { state: "HELD", holder };
+  }
+  // Stale: seize the claim with ONE guarded update — never delete-then-create,
+  // which would let two reclaimers both "win" and both email the customer.
+  const takeover = await casTakeover("BookingCommsSend", claimId, {
+    nonceField: "holder",
+    nonce: holder,
+    leaseField: "leaseUntil",
+    leaseMs: COMMS_CLAIM_STALE_MS,
+  });
+  if (takeover.ok) return { state: "RECLAIMED", holder };
+  if (takeover.reason === "LOST") return { state: "HELD", holder };
+  // UNSUPPORTED: takeover impossible for every racer; the requestedAt age gate
+  // above plus the EmailLog adoption check bound the duplicate risk to the
+  // pre-lease level.
   await client.models.BookingCommsSend.delete({ id: claimId }).catch(
     () => undefined
   );
-  return (await attempt()) ? "RECLAIMED" : "HELD";
+  return (await attempt())
+    ? { state: "RECLAIMED", holder }
+    : { state: "HELD", holder };
 }
 
-async function releaseCommsSend(claimId: string): Promise<void> {
+/** Fenced release — an expired sender waking up late can never delete a newer
+ *  sender's outbox claim. */
+async function releaseCommsSend(claimId: string, holder: string): Promise<void> {
+  const released = await casFencedDelete("BookingCommsSend", claimId, {
+    field: "holder",
+    nonce: holder,
+    allowMissingFence: true,
+  });
+  if (released !== "UNSUPPORTED") return;
   const client = await dataClient();
   if (!("BookingCommsSend" in client.models)) return;
   await client.models.BookingCommsSend.delete({ id: claimId }).catch(
@@ -1272,13 +1340,13 @@ async function deliverBookingComms(
     // adopts a proven send instead of duplicating.
     const claimId = `confirm:${booking.id}`;
     const claim = await claimCommsSend(claimId);
-    if (claim === "HELD") return;
+    if (claim.state === "HELD") return;
     if (
-      claim === "RECLAIMED" &&
+      claim.state === "RECLAIMED" &&
       (await priorAcceptedBookingSend(booking.id, "booking-confirmation"))
     ) {
       await stampCommsMarker(booking, "confirmationSentAt");
-      await releaseCommsSend(claimId);
+      await releaseCommsSend(claimId, claim.holder);
     } else {
     let sent = false;
     try {
@@ -1340,7 +1408,7 @@ async function deliverBookingComms(
         ownerTeam: "OPS",
       });
     }
-    await releaseCommsSend(claimId);
+    await releaseCommsSend(claimId, claim.holder);
     }
   }
 

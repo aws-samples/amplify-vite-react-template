@@ -1019,8 +1019,8 @@ async function reactivateCustomer(
   // R5: single-winner claim, shared with deactivation, so an interleaving
   // deactivate cannot race this into mixed state. The loser reports the current
   // fact instead of driving a second transition.
-  const won = await acquireLifecycleClaim(customerId, "REACTIVATE");
-  if (!won) {
+  const claimHandle = await acquireLifecycleClaim(customerId, "REACTIVATE");
+  if (!claimHandle.won) {
     const { data: current } = await client.models.Customer.get({
       id: customerId,
     });
@@ -1053,7 +1053,7 @@ async function reactivateCustomer(
     priorStatus: customer.status,
   });
   if (!commandClaim.claimed) {
-    await releaseLifecycleClaim(customerId);
+    await releaseLifecycleClaim(customerId, claimHandle.holder);
     const c = commandClaim.command;
     return {
       customerId,
@@ -1072,14 +1072,21 @@ async function reactivateCustomer(
     };
   }
 
+  // Every command write below is fenced on the claim's exclusive nonce.
+  const fence = { nonce: commandClaim.nonce };
+
   try {
     if (customer.status === "ACTIVE") {
       const restore = await restorePortalAccess(customerId);
-      await finishLifecycleCommand(commandKey, {
-        stage: "COMPLETE",
-        outcome: "COMPLETE",
-        effects: "Already active; portal access re-asserted to heal drift.",
-      });
+      await finishLifecycleCommand(
+        commandKey,
+        {
+          stage: "COMPLETE",
+          outcome: "COMPLETE",
+          effects: "Already active; portal access re-asserted to heal drift.",
+        },
+        fence
+      );
       return {
         customerId,
         reactivated: false,
@@ -1097,7 +1104,7 @@ async function reactivateCustomer(
     let restore: { restored: boolean; groupsAdded: string[] };
     try {
       restore = await restorePortalAccess(customerId);
-      await recordLifecycleStage(commandKey, "ACCESS_DONE");
+      await recordLifecycleStage(commandKey, "ACCESS_DONE", undefined, fence);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const caseId = await openOwnedWork({
@@ -1112,12 +1119,16 @@ async function reactivateCustomer(
           "Re-run the reactivation (idempotent) — it re-asserts the portal groups and the ACTIVE status.",
         ownerTeam: "OPS",
       });
-      await finishLifecycleCommand(commandKey, {
-        stage: "PARTIAL",
-        outcome: "PARTIAL",
-        effects: `Portal restore failed partway; customer left INACTIVE. Recovery case ${caseId ? "opened" : "COULD NOT BE OPENED — escalate"}.`,
-        lastError: message,
-      });
+      await finishLifecycleCommand(
+        commandKey,
+        {
+          stage: "PARTIAL",
+          outcome: "PARTIAL",
+          effects: `Portal restore failed partway; customer left INACTIVE. Recovery case ${caseId ? "opened" : "COULD NOT BE OPENED — escalate"}.`,
+          lastError: message,
+        },
+        fence
+      );
       return {
         customerId,
         reactivated: false,
@@ -1163,7 +1174,7 @@ async function reactivateCustomer(
       };
     }
 
-    await recordLifecycleStage(commandKey, "STATUS_DONE");
+    await recordLifecycleStage(commandKey, "STATUS_DONE", undefined, fence);
     const { recorded } = await recordCustomerLifecycleEvent({
       customerId,
       action: "REACTIVATE",
@@ -1177,7 +1188,8 @@ async function reactivateCustomer(
           )}). Canceled plans left canceled; customer re-subscribes through a new booking.`
         : "No portal login to re-enable. Canceled plans left canceled.",
     });
-    if (recorded) await recordLifecycleStage(commandKey, "AUDITED");
+    if (recorded)
+      await recordLifecycleStage(commandKey, "AUDITED", undefined, fence);
 
     // GL-09: the tracked final customer notice for the reactivation.
     const notice = await sendLifecycleNotice({
@@ -1192,15 +1204,19 @@ async function reactivateCustomer(
       outstandingBalanceCents: 0,
     });
     if (notice.outcome !== "FAILED") {
-      await recordLifecycleStage(commandKey, "NOTICE_SENT");
+      await recordLifecycleStage(commandKey, "NOTICE_SENT", undefined, fence);
     }
 
     const partial = !recorded || notice.outcome === "FAILED";
-    await finishLifecycleCommand(commandKey, {
-      stage: partial ? "PARTIAL" : "COMPLETE",
-      outcome: partial ? "PARTIAL" : "COMPLETE",
-      effects: `Reactivated. Portal ${restore.restored ? "restored" : "n/a"}; audit ${recorded ? "recorded" : "MISSING (owned)"}; notice ${notice.outcome}.`,
-    });
+    await finishLifecycleCommand(
+      commandKey,
+      {
+        stage: partial ? "PARTIAL" : "COMPLETE",
+        outcome: partial ? "PARTIAL" : "COMPLETE",
+        effects: `Reactivated. Portal ${restore.restored ? "restored" : "n/a"}; audit ${recorded ? "recorded" : "MISSING (owned)"}; notice ${notice.outcome}.`,
+      },
+      fence
+    );
 
     return {
       customerId,
@@ -1213,7 +1229,7 @@ async function reactivateCustomer(
       noticeOutcome: notice.outcome,
     };
   } finally {
-    await releaseLifecycleClaim(customerId);
+    await releaseLifecycleClaim(customerId, claimHandle.holder);
   }
 }
 
@@ -1516,6 +1532,7 @@ async function deactivateTechnician(
   });
   const dup = dedupedCommandResult(claim, tech.email ?? tech.name);
   if (dup) return dup;
+  const fence = claim.claimed ? { nonce: claim.nonce } : undefined;
 
   const { jobsUnassigned, jobsFailed, inProgress } = await reassignFutureJobs(
     technicianId,
@@ -1647,12 +1664,16 @@ async function deactivateTechnician(
         ? null
         : "Re-run Deactivate for this technician — it is idempotent and finishes what remains.",
   };
-  const commandRecorded = await finishCommand(key, {
-    stage: outcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
-    outcome,
-    effects,
-    result,
-  });
+  const commandRecorded = await finishCommand(
+    key,
+    {
+      stage: outcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+      outcome,
+      effects,
+      result,
+    },
+    fence
+  );
   return { ...result, outcome: commandRecorded ? outcome : "PARTIAL" };
 }
 
@@ -1902,6 +1923,11 @@ async function changeStaffRoles(
   });
   const dup = dedupedCommandResult(claim, email);
   if (dup) return dup;
+  // The exclusive holder nonce: every command write below is fenced on it, and
+  // it doubles as the owner-serial holder so a crashed prior attempt with the
+  // same key can never release THIS attempt's mutex.
+  const fence = claim.claimed ? { nonce: claim.nonce } : undefined;
+  const serialHolder = fence?.nonce ?? key;
 
   // From here the command owns the request: a validation refusal lands in a
   // terminal FAILED (nothing changed, safe to retry with a fresh key), and any
@@ -1920,7 +1946,7 @@ async function changeStaffRoles(
       // last-owner check and the change makes the check authoritative — two
       // concurrent demotions can no longer both pass a point-in-time count and
       // then depend on a fallible rollback to keep one owner alive.
-      ownerSerialHeld = await acquireOwnerSerial(key);
+      ownerSerialHeld = await acquireOwnerSerial(serialHolder);
       if (!ownerSerialHeld) {
         throw new Error(
           "Another owner change is being applied right now. Wait a moment, then retry."
@@ -1957,10 +1983,12 @@ async function changeStaffRoles(
       }
     }
 
-    await recordCommandStage(key, "VALIDATED", {
-      priorRoles: have,
-      subjectSub: target.sub,
-    });
+    await recordCommandStage(
+      key,
+      "VALIDATED",
+      { priorRoles: have, subjectSub: target.sub },
+      fence
+    );
 
     const toAdd = want.filter((r) => !have.includes(r));
     const toRemove = have.filter((r) => !want.includes(r));
@@ -2142,25 +2170,33 @@ async function changeStaffRoles(
       added: toAdd,
       removed: toRemove,
     };
-    const commandRecorded = await finishCommand(key, {
-      stage: outcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
-      outcome,
-      effects,
-      lastError: opFailures.join("; ") || null,
-      result,
-    });
+    const commandRecorded = await finishCommand(
+      key,
+      {
+        stage: outcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+        outcome,
+        effects,
+        lastError: opFailures.join("; ") || null,
+        result,
+      },
+      fence
+    );
     return { ...result, outcome: commandRecorded ? outcome : "PARTIAL" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (!mutated) {
       // Refused before anything changed — terminal, truthful, safe to retry
       // with a fresh key once the blocker is fixed.
-      await finishCommand(key, {
-        stage: "FAILED",
-        outcome: "REFUSED",
-        effects: "Nothing was changed.",
-        lastError: message,
-      });
+      await finishCommand(
+        key,
+        {
+          stage: "FAILED",
+          outcome: "REFUSED",
+          effects: "Nothing was changed.",
+          lastError: message,
+        },
+        fence
+      );
       throw err;
     }
     // Failed after mutation began (e.g. the Cognito read-back itself threw).
@@ -2183,12 +2219,16 @@ async function changeStaffRoles(
       effects: `Stopped partway: ${message}`,
       outcome: "PARTIAL",
     });
-    await finishCommand(key, {
-      stage: "PARTIAL",
-      outcome: "PARTIAL",
-      effects: `Stopped partway: ${message}`,
-      lastError: message,
-    });
+    await finishCommand(
+      key,
+      {
+        stage: "PARTIAL",
+        outcome: "PARTIAL",
+        effects: `Stopped partway: ${message}`,
+        lastError: message,
+      },
+      fence
+    );
     return {
       email,
       outcome: "PARTIAL",
@@ -2200,7 +2240,7 @@ async function changeStaffRoles(
         "Resume the role change — re-running the same change applies only what is still missing.",
     };
   } finally {
-    if (ownerSerialHeld) await releaseOwnerSerial();
+    if (ownerSerialHeld) await releaseOwnerSerial(serialHolder);
   }
 }
 
@@ -2257,6 +2297,8 @@ async function offboardStaff(
   });
   const dup = dedupedCommandResult(claim, email);
   if (dup) return dup;
+  const fence = claim.claimed ? { nonce: claim.nonce } : undefined;
+  const serialHolder = fence?.nonce ?? key;
 
   let mutated =
     claim.claimed &&
@@ -2268,12 +2310,16 @@ async function offboardStaff(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (!mutated) {
-      await finishCommand(key, {
-        stage: "FAILED",
-        outcome: "REFUSED",
-        effects: "Nothing was changed.",
-        lastError: message,
-      });
+      await finishCommand(
+        key,
+        {
+          stage: "FAILED",
+          outcome: "REFUSED",
+          effects: "Nothing was changed.",
+          lastError: message,
+        },
+        fence
+      );
       throw err;
     }
     // Stopped after access changes began. killLogin already opened (and
@@ -2292,12 +2338,16 @@ async function offboardStaff(
       effects: `Stopped partway: ${message}`,
       outcome: "PARTIAL",
     });
-    await finishCommand(key, {
-      stage: "PARTIAL",
-      outcome: "PARTIAL",
-      effects: `Stopped partway: ${message}`,
-      lastError: message,
-    });
+    await finishCommand(
+      key,
+      {
+        stage: "PARTIAL",
+        outcome: "PARTIAL",
+        effects: `Stopped partway: ${message}`,
+        lastError: message,
+      },
+      fence
+    );
     return {
       email,
       outcome: "PARTIAL",
@@ -2309,7 +2359,7 @@ async function offboardStaff(
         "Re-run Offboard with the same request — every step is idempotent and it continues from where it stopped.",
     };
   } finally {
-    if (ownerSerialHeld) await releaseOwnerSerial();
+    if (ownerSerialHeld) await releaseOwnerSerial(serialHolder);
   }
 
   async function runOffboard() {
@@ -2332,7 +2382,7 @@ async function offboardStaff(
     // GL-14: owner-set changes are serialized — the mutex is held across the
     // last-owner check AND the removal, so the check is authoritative and no
     // fallible rollback is needed to preserve an owner.
-    ownerSerialHeld = await acquireOwnerSerial(key);
+    ownerSerialHeld = await acquireOwnerSerial(serialHolder);
     if (!ownerSerialHeld) {
       throw new Error(
         "Another owner change is being applied right now. Wait a moment, then retry."
@@ -2345,10 +2395,12 @@ async function offboardStaff(
     });
   }
 
-  await recordCommandStage(key, "VALIDATED", {
-    priorRoles: target.roles,
-    subjectSub: target.sub,
-  });
+  await recordCommandStage(
+    key,
+    "VALIDATED",
+    { priorRoles: target.roles, subjectSub: target.sub },
+    fence
+  );
 
   // 1. Revoke access first: disable + global sign-out, THEN drop groups. A
   //    failure at any step opens a durable STAFF_SECURITY case and throws, so
@@ -2376,11 +2428,16 @@ async function offboardStaff(
     );
   }
 
-  await recordCommandStage(key, "ACCESS_DONE", {
-    effects: `Login disabled and signed out; groups removed: ${
-      groupsRemoved.join(", ") || "none"
-    }.`,
-  });
+  await recordCommandStage(
+    key,
+    "ACCESS_DONE",
+    {
+      effects: `Login disabled and signed out; groups removed: ${
+        groupsRemoved.join(", ") || "none"
+      }.`,
+    },
+    fence
+  );
 
   // 2. Downstream effects — fail-safe, because access is already gone.
   let jobsUnassigned = 0;
@@ -2514,7 +2571,7 @@ async function offboardStaff(
     if (!opened) caseWriteFailed = true;
   }
 
-  await recordCommandStage(key, "HANDOFF_DONE");
+  await recordCommandStage(key, "HANDOFF_DONE", undefined, fence);
 
   const outcome =
     downstreamError ||
@@ -2640,12 +2697,16 @@ async function offboardStaff(
   // The terminal command write is itself part of "complete": if it cannot be
   // recorded, the effects stand but the durable command still reads unfinished,
   // so the caller is told PARTIAL and the resume path stays live.
-  const commandRecorded = await finishCommand(key, {
-    stage: finalOutcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
-    outcome: finalOutcome,
-    effects: effectsSummary,
-    result,
-  });
+  const commandRecorded = await finishCommand(
+    key,
+    {
+      stage: finalOutcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+      outcome: finalOutcome,
+      effects: effectsSummary,
+      result,
+    },
+    fence
+  );
   return { ...result, outcome: commandRecorded ? finalOutcome : "PARTIAL" };
   }
 }
