@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `1228822`; newest
-implementation commit `1228822`
+**Latest commit review:** every commit after `f70e621` through `41020a6`; newest
+implementation commit `41020a6`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 81 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 77 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -195,7 +195,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-18 | Override-authority + queue-ops sign-off — engineering closed (`f6a34a8`) | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-04/GL-23 ties)** |
 | P0 | GL-04 | Travel-model calibration + data entry — engineering closed (`dc39f74`) | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
 | P0 | GL-06 | Copy + recovery-workflow sign-offs — engineering closed (`1228822`) | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **12% — Very low (sign-offs)** |
-| P0 | GL-16 | Prompt-governed AI pricing with rollback | CEO + Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **78% — High** |
+| P0 | GL-16 | Operating-value ratification — engineering closed (`41020a6`) | CEO + Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **12% — Very low (sign-offs)** |
 | P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented | **52% — Medium** |
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
 | P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money | **38% — Low** |
@@ -451,32 +451,20 @@ view. Only the items below remain; they are sign-offs — not software this repo
 **Business outcome:** The approved pricing prompt can publish researched prices without clamps or
 preapproval, while leadership can see what changed and safely recover from a bad model/prompt result.
 
-**Why this is still a gate:** AI-researched rows become active immediately, but the business cannot
-reconstruct the exact prompt/model/input/source evidence behind every live value, receive a durable alert
-for every material change, complete the one-business-day review, or restore a coherent prior rate sheet.
-The CEO accepts the absence of price clamps and preapproval; the remaining control is visibility and
-rollback, not silently changing the model's result.
+**Engineering:** closed (`41020a6`, cost-incident controls `d990d07`). Every AI row records the versioned
+prompt (label + content hash), model, inputs, raw result, sources, and run identity; rows are immutable
+versions (office edits create a new pinned row with a controlled reason, never editing AI history); the
+day's live changes enter the shared queue as a recorded one-business-day review; an OWNER-only audited
+rollback flips the whole catalog to a prior coherent moment in one write (pinned rows still win) and back;
+invalid execution fails closed into owned exhaustion work; budget, backoff, digest, and the Market Rates
+engine/rollback panels are live. Only the item below remains.
 
 **Remaining requirements:**
 
-- Treat the designed pricing prompt as versioned business policy. Every research run and resulting rate
-  records prompt version/hash, model, normalized inputs, sources/evidence date, raw structured result,
-  derived live values, affected catalog/version, run identity, and effective time so the exact price can be
-  explained and reproduced.
-- Fail closed only for invalid execution—not for a high or low valid price. Missing required inputs,
-  malformed/non-numeric output, absent source evidence, model/provider failure, or a result that cannot map
-  to the approved catalog becomes shared-Office work; it does not publish a guessed/default value. No
-  minimum/maximum clamp or human preapproval is added.
-- Every live AI or manual/pinned change creates durable current-versus-prior visibility and enters the
-  shared Office queue for review within one business day. The review records who saw it and any action but
-  does not delay publication. Repeated refresh failures, stale research, or an unexplained catalog gap is
-  visible to leadership and reconciliation.
-- Preserve immutable rate-sheet versions and provide one reasoned, authorized rollback that atomically
-  restores the complete prior compatible sheet without editing history or producing a mixed catalog. The
-  customer-facing quote and CRM immediately read the restored version, and rollback itself is audited.
-- Manual Office edits/pins cannot erase AI history or bypass the same version/change/rollback record.
-  Access remains role-controlled, every edit has a controlled reason, and unpinning returns the row to the
-  designed prompt on its next refresh.
+- CEO/Finance ratify the recorded operating values now live: the daily change-review cadence (one
+  claimable review item per day of changes), the controlled office-edit and rollback reason vocabularies,
+  OWNER as the sole rollback authority, and the accepted no-clamp/no-preapproval posture the mechanism
+  encodes.
 
 **Pass owner:** CEO and Finance lead jointly.
 
