@@ -18,14 +18,19 @@ headings below — sub-clauses inside one bullet are not counted separately.
 **Business policy inputs approved:** 18–19 July 2026
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The newest commits close GL-06's engineering
-(`1228822` — pending bank debits are real "Payment pending" commitments under one conditional payment
-state machine, with exactly-once failure/settlement/cancel paths, a daily Stripe reconcile, durable
-returning-customer states, and the office payments-in-flight view) and remediate the GL-16 production
-cost incident (`d990d07` — one research drainer at a time, atomic per-day budget reserved before every
-provider call, bounded backoff with owned exhaustion, seeding that cannot regenerate retired work, one
-daily digest instead of per-rate emails, and the Market Rates engine panel; GL-16's audit/rollback
-requirements remain open below). The prior commits close GL-09's engineering (`82f5fbf`)
+implementation detail, and proof-only tasks. The newest commits close five gates' engineering:
+GL-06 (`1228822` — pending bank debits are real "Payment pending" commitments under one conditional
+payment state machine, exactly-once failure/settlement/cancel paths, daily Stripe reconcile, durable
+returning-customer states, office payments-in-flight view), GL-16 (`d990d07` cost-incident controls —
+one drainer, atomic budget, bounded backoff/exhaustion, daily digest; `41020a6` — versioned prompt
+audit on every row, immutable versions with controlled office-edit reasons, recorded daily change
+review, OWNER-only atomic catalog rollback), GL-01 (`abcb908` — the one versioned service catalog
+driving funnel/labels/plans/seasonal/pricing sources, immutable serviceCode+version on every job and
+plan, controlled office selection with owned catalog decisions, and the CRM catalog + public-conflict
+screen), and GL-22 (`041f939` — alarms that open/auto-resolve owned INFRA_ALERT items, honest failed
+scheduled runs, never-acked-unrecorded email events with a visible DLQ, PITR + document versioning,
+the OWNER pause switchboard, and the seven incident playbooks). The prior commits close GL-09's
+engineering (`82f5fbf`)
 and land a systemic remediation (`d546c10`) that every earlier "single-winner" closure claim depended
 on: stale-lease takeover on every operational lock and durable command (staff access, owner serial,
 lifecycle claim/command, plan cancellation, visit change, booking finalization, booking communications,
