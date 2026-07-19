@@ -2,8 +2,8 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 9 commits after `f70e621`, from `3717092` through `5c8c6ef`; newest
-implementation commit `5c8c6ef`
+**Latest commit review:** 11 commits after `f70e621`, from `3717092` through `cc76773`; newest
+implementation commit `cc76773`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
@@ -173,7 +173,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-15 | Compliance sign-off of encoded rules — engineering closed (`bbcf0c3`) | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **15% — Very low (sign-off + SES wiring)** |
 | P0 | GL-17 | Mosquito sale-path decision — engineering closed (`580d71c`) | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **20% — Low (product decision + ratification)** |
 | P0 | GL-12 | Copy/vocabulary approvals — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (approvals + backfill)** |
-| P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **72% — High** |
+| P0 | GL-05 | Copy sign-off + policy definitions — engineering closed (`cc76773`) | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (sign-offs)** |
 | P0 | GL-09 | Finish failure-safe customer lifecycle transitions | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **66% — Medium** |
 | P0 | GL-08 | Finish exact, terminal customer plan cancellation | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **76% — High** |
 | P0 | GL-07 | Finish terminal office cancel/reschedule | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **74% — High** |
@@ -361,32 +361,27 @@ technician notification.
 customer commitment or one visible, verified refund/recovery case — even when execution stops between
 steps.
 
+**Engineering closed (commit `cc76773`):** the checkout shows **Payment received — finalizing** and
+renders **You're booked** only from the server-confirmed /booking-status readback; the URL carries the
+booking identifiers so reload and redirect return to the same durable outcome, and a finalization that
+needs a human shows the owned recovery state with one safe next step (never "pay again"). The
+confirmation send takes a conditional outbox claim before the provider call — the
+accepted-but-marker-not-stored window now resumes by adopting the proven send from the email log
+instead of duplicating — and a marker that cannot be stored is visible owned work. The booking carries
+its confirmation's true delivery state: a mailbox delivery upgrades it, a bounce/complaint corrects it
+and reopens the communication as owned work with a booking-shaped resend/alternate path, terminal-
+guarded. Reconciliation validates relationships (customer/job/plan/agreement/invoice ownership, amount,
+plan linkage, committed date) — a cross-linked child cannot count healthy — and a truncated provider
+scan opens owned Finance work, auto-resolves nothing, and reports not-ok.
+
 **Remaining requirements:**
 
-- **The checkout calls a succeeded payment “booked” before the booking exists.** The browser switches to
-  **You're booked** from Stripe's payment status without waiting for the server to confirm the customer,
-  job, agreement, invoice, and booking transition. A succeeded payment must show a truthful
-  **Payment received — finalizing** state until the complete commitment is read back. Finalization failure
-  or delay shows the owned recovery/refund state and one safe next step; reload and redirect return to the
-  same durable outcome rather than relying on browser memory.
-- **The confirmation email itself can still duplicate.** The marker prevents re-*booking*, but the send
-  has no provider idempotency key, so a crash between provider acceptance and the marker write re-sends
-  the customer confirmation on retry. And a *failed* marker write is only logged, not turned into owned
-  work — so "sent but not recorded" is invisible. Delivery must use a provider idempotency key (or
-  equivalent outbox) covering that window, and a failed marker write must be visible owned work.
-- **The booking still treats provider acceptance as confirmation delivered.** A later bounce/complaint is
-  visible only in the general email log and does not correct the booking's communication marker or the
-  finalization outcome. The booking must remain linked to the exact send through pending, mailbox-provider
-  delivery, bounce/complaint/suppression, failed/unknown, and approved alternate delivery; every non-
-  delivered outcome has an owner, deadline, and safe resend/alternate-contact path (**see X3**).
-- **Reconciliation checks existence and amount, not full ownership.** It confirms a child record resolves
-  and a paid invoice for the payment exists, but does not verify the customer, job, plan, agreement,
-  service, and date all belong to the *same* booking. A cross-linked (wrong-owner) child would not be
-  flagged. Reconciliation must validate the relationships, not merely that records exist.
-- **A truncated scan can still report green.** The provider scan stops at a page cap and then reconciles
-  against the truncated set, able to return "ok" and auto-resolve healthy cases. A truncated, expired,
-  or timed-out run must create an owned Finance/Engineering failure and leave prior state visible — it
-  cannot report green or auto-resolve.
+- CEO sign-off on the new at-payment customer copy ("Payment received — finalizing", the recovery
+  wording) before merge to main — it changes what is promised at the moment of payment.
+- Finance/Operations define who may record an "approved alternate delivery" for a bounced
+  confirmation and what counts (the mechanism is live).
+- Finance confirms the reconciliation window (45 days) vs expected production volume; the truncation
+  alarm covers the gap either way.
 
 **Pass owner:** CEO and Engineering lead jointly; Finance owns reconciliation and recovery approval.
 
