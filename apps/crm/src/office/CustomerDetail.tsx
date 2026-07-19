@@ -27,6 +27,7 @@ import {
   type ServiceReport,
   type ServiceReportAmendment,
 } from "../lib/api";
+import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import { bookingFunnelSpoken, bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { daysPastDue } from "../lib/aging";
@@ -1768,11 +1769,15 @@ export default function CustomerDetail() {
         <JobForm
           plans={plans}
           onSubmit={async (v) => {
-            opResult(
+            const result = opResult<{
+              catalogDecisionOpened?: boolean;
+              message?: string;
+            }>(
               await api().mutations.createOfficeJob({
                 customerId: customer.id,
                 servicePlanId: v.servicePlanId || undefined,
                 serviceType: v.serviceType,
+                serviceCode: v.serviceCode,
                 priceCents: v.priceCents ?? undefined,
                 scheduledDate: v.scheduledDate || undefined,
                 timeWindow: v.timeWindow || undefined,
@@ -1785,6 +1790,14 @@ export default function CustomerDetail() {
                 paymentExpectation: v.packet.paymentExpectation || undefined,
               })
             );
+            if (result?.catalogDecisionOpened) {
+              // GL-01: no job exists — the request is an owned catalog
+              // decision with the one-business-day clock.
+              window.alert(
+                result.message ??
+                  "That service isn't in the catalog — the request is now an owned catalog decision. No job was created."
+              );
+            }
             setSheet(null);
             await load();
           }}
@@ -2791,6 +2804,7 @@ function JobForm({
   plans: ServicePlan[];
   onSubmit: (v: {
     serviceType: string;
+    serviceCode: string;
     priceCents: number | null;
     scheduledDate: string;
     timeWindow: string;
@@ -2798,7 +2812,11 @@ function JobForm({
     packet: PacketValues;
   }) => Promise<void>;
 }) {
-  const [serviceType, setServiceType] = useState("General Pest Treatment");
+  // GL-01: the service is a CONTROLLED catalog selection — no free text can
+  // invent work the business cannot price, staff, or document. "Something
+  // else…" routes to an owned catalog decision instead of creating a job.
+  const [serviceCode, setServiceCode] = useState("GENERAL_PEST");
+  const [otherText, setOtherText] = useState("");
   const [price, setPrice] = useState("");
   const [scheduledDate, setScheduledDate] = useState("");
   const [timeWindow, setTimeWindow] = useState("");
@@ -2807,12 +2825,40 @@ function JobForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activePlans = plans.filter((p) => p.status === "ACTIVE");
+  const notInCatalog = serviceCode === "NOT_IN_CATALOG";
+  const serviceType = notInCatalog
+    ? otherText
+    : (Object.values(SERVICE_CATALOG).find((e) => e.id === serviceCode)?.label ??
+      serviceCode);
 
   return (
     <div className="form-grid">
-      <Field label="Service type">
-        <input value={serviceType} onChange={(e) => setServiceType(e.target.value)} />
+      <Field label="Service">
+        <select
+          value={serviceCode}
+          onChange={(e) => setServiceCode(e.target.value)}
+        >
+          {Object.values(SERVICE_CATALOG).map((e) => (
+            <option key={e.id} value={e.id}>
+              {e.label}
+              {e.seasonal ? " — seasonal Apr–Oct" : ""}
+            </option>
+          ))}
+          <option value="NOT_IN_CATALOG">Something else…</option>
+        </select>
       </Field>
+      {notInCatalog ? (
+        <Field
+          label="What did the customer ask for?"
+          hint="This opens a catalog decision (answered within one business day) — it does not create a job"
+        >
+          <input
+            value={otherText}
+            onChange={(e) => setOtherText(e.target.value)}
+            placeholder="e.g. attic insulation restoration"
+          />
+        </Field>
+      ) : null}
       {activePlans.length ? (
         <Field label="Part of plan" hint="Visits under a plan are covered by the monthly price">
           <select value={planId} onChange={(e) => setPlanId(e.target.value)}>
@@ -2843,7 +2889,11 @@ function JobForm({
         loading={busy}
         onClick={() => {
           if (!serviceType.trim()) {
-            setError("Service type is required");
+            setError(
+              notInCatalog
+                ? "Describe what the customer asked for"
+                : "Pick a service"
+            );
             return;
           }
           const cents = price ? Math.round(parseFloat(price) * 100) : null;
@@ -2854,6 +2904,7 @@ function JobForm({
           setBusy(true);
           onSubmit({
             serviceType: serviceType.trim(),
+            serviceCode,
             priceCents: planId ? null : cents,
             scheduledDate,
             timeWindow: timeWindow.trim(),
@@ -2865,7 +2916,7 @@ function JobForm({
           });
         }}
       >
-        Create job
+        {notInCatalog ? "Send to catalog decision" : "Create job"}
       </Button>
     </div>
   );

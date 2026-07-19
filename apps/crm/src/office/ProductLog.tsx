@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, opResult, unwrap, type Product } from "../lib/api";
+import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import {
   Badge,
   Button,
@@ -375,11 +376,20 @@ function ProductForm({
           onChange={(e) => setRulePests(e.target.value)}
           placeholder="Allowed pests, comma-separated (optional)"
         />
+        {/* GL-01: service types come from the ONE catalog — the datalist
+            offers the canonical labels so a typo can't silently disagree
+            with what jobs actually record. */}
         <input
+          list="catalog-service-labels"
           value={ruleServiceTypes}
           onChange={(e) => setRuleServiceTypes(e.target.value)}
           placeholder="Allowed service types, comma-separated (optional)"
         />
+        <datalist id="catalog-service-labels">
+          {Object.values(SERVICE_CATALOG).map((s) => (
+            <option key={s.id} value={s.label} />
+          ))}
+        </datalist>
         <div className="form-row-2">
           <input
             value={ruleQtyMin}

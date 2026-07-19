@@ -230,6 +230,9 @@ export const schema = a.schema({
     // GL-16: the day's live rate changes (AI + office pins) await their
     // one-business-day review — visibility, never a publication gate.
     "PRICING_CHANGE_REVIEW",
+    // GL-01: someone asked for work outside the service catalog — a catalog
+    // decision (add it / decline it), never a silently invented job.
+    "SERVICE_CATALOG_DECISION",
     // GL-06: a bank debit failed AFTER the visit was performed — the invoice
     // is a balance due and the shared queue owns collection.
     "BALANCE_COLLECTION",
@@ -399,6 +402,9 @@ export const schema = a.schema({
       customerId: a.id().required(),
       customer: a.belongsTo("Customer", "customerId"),
       planName: a.string().required(),
+      // GL-01: the catalog service this plan sells, immutably versioned.
+      serviceCode: a.string(),
+      catalogVersion: a.string(),
       priceCents: a.integer().required(),
       serviceFrequency: a.ref("ServiceFrequency").required(),
       status: a.ref("ServicePlanStatus").required(),
@@ -1235,6 +1241,11 @@ export const schema = a.schema({
       servicePlan: a.belongsTo("ServicePlan", "servicePlanId"),
       type: a.ref("JobType").required(),
       serviceType: a.string().required(),
+      // GL-01: the immutable catalog reference the visit was sold under —
+      // serviceType stays the display label; the code + version are the
+      // durable meaning (a later catalog edit never re-defines old work).
+      serviceCode: a.string(),
+      catalogVersion: a.string(),
       description: a.string(),
       priceCents: a.integer(),
       status: a.ref("JobStatus").required(),
@@ -2470,6 +2481,9 @@ export const schema = a.schema({
       customerId: a.string().required(),
       servicePlanId: a.string(),
       serviceType: a.string().required(),
+      // GL-01: the controlled catalog selection. "NOT_IN_CATALOG" routes the
+      // request to an owned catalog decision instead of creating a job.
+      serviceCode: a.string(),
       priceCents: a.integer(),
       scheduledDate: a.date(),
       timeWindow: a.string(),

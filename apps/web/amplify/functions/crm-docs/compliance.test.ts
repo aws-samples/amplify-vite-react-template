@@ -1918,3 +1918,71 @@ describe("GL-12 — the honest one-tap exits and the versioned packet", () => {
     delete process.env.GOOGLE_ROUTES_API_KEY;
   });
 });
+
+describe("GL-01 — office jobs are controlled catalog selections", () => {
+  it("stamps the immutable catalog reference on a created job", async () => {
+    const res = (await call(
+      "createOfficeJob",
+      { customerId: "c1", serviceType: "General pest control", serviceCode: "GENERAL_PEST" },
+      ["OFFICE"]
+    )) as { jobId: string };
+
+    const created = jobs.find((j) => j.id === res.jobId)!;
+    expect(created.serviceCode).toBe("GENERAL_PEST");
+    expect(created.catalogVersion).toBeTruthy();
+    expect(created.serviceType).toBe("General pest control");
+  });
+
+  it("resolves a legacy typed label to its catalog entry — never an uncataloged job", async () => {
+    const res = (await call(
+      "createOfficeJob",
+      { customerId: "c1", serviceType: "General Pest Treatment" },
+      ["OFFICE"]
+    )) as { jobId: string };
+
+    const created = jobs.find((j) => j.id === res.jobId)!;
+    expect(created.serviceCode).toBe("GENERAL_PEST");
+  });
+
+  it("refuses an unknown catalog code outright", async () => {
+    await expect(
+      call(
+        "createOfficeJob",
+        { customerId: "c1", serviceType: "Whatever", serviceCode: "SNAKE_CHARMING" },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/Unknown catalog service/);
+  });
+
+  it("refuses unresolvable free text — jobs are never invented outside the catalog", async () => {
+    const before = jobs.length;
+    await expect(
+      call(
+        "createOfficeJob",
+        { customerId: "c1", serviceType: "attic insulation restoration" },
+        ["OFFICE"]
+      )
+    ).rejects.toThrow(/doesn't match a catalog service/);
+    expect(jobs).toHaveLength(before);
+  });
+
+  it("\"Something else…\" opens an owned catalog decision and creates NO job", async () => {
+    const before = jobs.length;
+    const res = (await call(
+      "createOfficeJob",
+      {
+        customerId: "c1",
+        serviceType: "attic insulation restoration",
+        serviceCode: "NOT_IN_CATALOG",
+      },
+      ["OFFICE"]
+    )) as { catalogDecisionOpened?: boolean };
+
+    expect(res.catalogDecisionOpened).toBe(true);
+    expect(jobs).toHaveLength(before); // no invented job
+    const decision = workItems.find((w) => w.kind === "SERVICE_CATALOG_DECISION")!;
+    expect(decision).toBeTruthy();
+    expect(String(decision.detail)).toContain("attic insulation restoration");
+    expect(String(decision.detail)).toContain("No job was created");
+  });
+});

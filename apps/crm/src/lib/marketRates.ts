@@ -7,6 +7,7 @@ import type {
   RateSheet,
 } from "../../../web/amplify/functions/shared/marketRate";
 import type { MarketRate } from "./api";
+import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 
 /**
  * Client-side view of the AI market-rate engine
@@ -39,18 +40,15 @@ export const PLAN_CADENCES: PlanCadence[] = [
   "QUARTERLY",
 ];
 
-export const SERVICE_LABEL: Record<string, string> = {
-  GENERAL_PEST: "General pest",
-  WASP_NEST: "Wasp/hornet nest",
-  RODENT: "Rodent treatment",
-  ROACH: "Specialized roach",
-  // One-time-only sqft-banded kinds, priced like rodent/roach.
-  TERMITE: "Termite treatment",
-  WILDLIFE: "Wildlife removal",
-  // Sqft-banded one-time + plans, priced like general pest.
-  COMMERCIAL: "Commercial pest",
-  HOA: "Association / HOA",
-};
+// GL-01: engine-service labels derive from the ONE service catalog (a pure
+// data module — the only VALUE import this file takes from apps/web, by
+// design: labels are runtime data, and duplicating them is how the five
+// taxonomies drifted apart in the first place).
+export const SERVICE_LABEL: Record<string, string> = Object.fromEntries(
+  Object.values(SERVICE_CATALOG)
+    .filter((e) => e.engineService)
+    .map((e) => [e.engineService as string, e.label])
+);
 
 export const CADENCE_LABEL: Record<PlanCadence, string> = {
   MONTHLY: "monthly",

@@ -65,6 +65,11 @@ export default function More() {
             subtitle="Every AI-researched base price — review, override, pin"
             onClick={() => navigate("/market-rates")}
           />
+          <ListRow
+            title="Service catalog"
+            subtitle="What BuzzKill sells, and public-site conflicts awaiting the CEO"
+            onClick={() => navigate("/catalog")}
+          />
           {/* Staff management (roster, roles, invites, offboarding) is OWNER-only
               server-side — it is what keeps the role split real. Non-owners get
               the honest line, not a row that errors on tap. */}

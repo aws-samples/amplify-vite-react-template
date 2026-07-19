@@ -39,6 +39,10 @@ import { provisionPortalLogin } from "./portalProvision";
 import { renderAgreementPdf } from "./pdf";
 import { stripeClient } from "./stripeClient";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
+import {
+  entryForLabel,
+  SERVICE_CATALOG_VERSION,
+} from "./serviceCatalog";
 
 const s3 = new S3Client();
 
@@ -968,6 +972,10 @@ async function finalizeClaimed(
     } | null;
   };
   const serviceLabel = stored.serviceLabel ?? "Pest control service";
+  // GL-01: the catalog entry this sale means — recorded immutably (id +
+  // catalog version) on the plan and job so later catalog edits never
+  // re-define old work. The label resolver covers every historical string.
+  const catalogService = entryForLabel(serviceLabel);
   const windowLabel =
     WINDOW_LABEL[booking.selectedWindow ?? ""] ??
     booking.selectedWindow?.toLowerCase() ??
@@ -1213,6 +1221,8 @@ async function finalizeClaimed(
           id: planId,
           customerId: customer.id,
           planName: serviceLabel.replace(/ — .*$/, "") + " plan",
+          serviceCode: catalogService?.id ?? undefined,
+          catalogVersion: catalogService ? SERVICE_CATALOG_VERSION : undefined,
           priceCents: offer.monthlyCents,
           serviceFrequency: offer.frequency as
             | "MONTHLY"
@@ -1224,7 +1234,7 @@ async function finalizeClaimed(
           // offer — mosquito / mosquito+tick bills monthly year-round and owes
           // one treatment per month April–October. Billing starts immediately
           // even off-season; the first in-season treatment satisfies its month.
-          ...(isSeasonalPlanName(serviceLabel)
+          ...((catalogService?.seasonal ?? isSeasonalPlanName(serviceLabel))
             ? { seasonal: true, serviceMonths: [...SEASONAL_SERVICE_MONTHS] }
             : {}),
           notes: "Booked online via the website funnel",
@@ -1236,7 +1246,7 @@ async function finalizeClaimed(
     // treatment obligation (SCHEDULED now, SATISFIED when it completes). An
     // off-season enrollment creates no obligation — billing starts now, the
     // first obligation is next April, created when its visit is queued.
-    if (isSeasonalPlanName(serviceLabel) && booking.selectedDate && plan?.id) {
+    if ((catalogService?.seasonal ?? isSeasonalPlanName(serviceLabel)) && booking.selectedDate && plan?.id) {
       const monthKey = booking.selectedDate.slice(0, 7);
       if (isServiceMonth({ seasonal: true }, monthKey)) {
         await ensureObligation({
@@ -1264,7 +1274,7 @@ async function finalizeClaimed(
   // assignment, and the office owns confirming the real date with the
   // customer.
   const offSeasonFirstVisit = Boolean(
-    isSeasonalPlanName(serviceLabel) &&
+    (catalogService?.seasonal ?? isSeasonalPlanName(serviceLabel)) &&
       plan?.id &&
       booking.selectedDate &&
       !isServiceMonth({ seasonal: true }, booking.selectedDate.slice(0, 7))
@@ -1283,6 +1293,8 @@ async function finalizeClaimed(
         servicePlanId,
         type: booking.recurring ? "RECURRING" : "ONE_TIME",
         serviceType: serviceLabel,
+        serviceCode: catalogService?.id ?? undefined,
+        catalogVersion: catalogService ? SERVICE_CATALOG_VERSION : undefined,
         scheduledDate: firstVisitDate,
         timeWindow: windowLabel,
         // GL-04: the visit's locked on-site class rides on the job — the

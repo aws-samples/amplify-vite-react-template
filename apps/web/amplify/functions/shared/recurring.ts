@@ -1,5 +1,6 @@
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
+import { entryForLabel, SERVICE_CATALOG_VERSION } from "./serviceCatalog";
 import {
   claimMonthForJob,
   markObligation,
@@ -179,6 +180,15 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       servicePlanId: job.servicePlanId,
       type: "RECURRING",
       serviceType: plan.planName,
+      // GL-01: the next visit carries the plan's immutable catalog
+      // reference (resolved from the plan name for pre-catalog plans).
+      serviceCode:
+        (plan as { serviceCode?: string | null }).serviceCode ??
+        entryForLabel(plan.planName)?.id ??
+        undefined,
+      catalogVersion:
+        (plan as { catalogVersion?: string | null }).catalogVersion ??
+        (entryForLabel(plan.planName) ? SERVICE_CATALOG_VERSION : undefined),
       // Plan-covered visits carry no per-visit price (the plan bills
       // separately); plan.priceCents is a monthly figure, not a visit price.
       priceCents: null,

@@ -13,6 +13,7 @@ import type {
   ServiceCode,
   WindowCode,
 } from "./bookingApi";
+import { funnelCatalog } from "../../amplify/functions/shared/serviceCatalog";
 
 // ── Service catalog ─────────────────────────────────────────────────
 
@@ -24,16 +25,16 @@ export type ServiceOption = {
   offersRecurring: boolean;
 };
 
-export const SERVICE_OPTIONS: ServiceOption[] = [
-  { code: "GENERAL_PEST", label: "General pest control", needsSqft: true, needsNestCount: false, offersRecurring: true },
-  { code: "WASP_NEST", label: "Wasp / hornet nest removal", needsSqft: false, needsNestCount: true, offersRecurring: false },
-  { code: "RODENT", label: "Rodent treatment", needsSqft: true, needsNestCount: false, offersRecurring: false },
-  { code: "ROACH", label: "Roach treatment", needsSqft: true, needsNestCount: false, offersRecurring: false },
-  // Termite and wildlife are sqft-banded day-priced services like
-  // rodent/roach — every service on this form prices instantly.
-  { code: "TERMITE", label: "Termite inspection & treatment", needsSqft: true, needsNestCount: false, offersRecurring: false },
-  { code: "WILDLIFE", label: "Wildlife removal", needsSqft: true, needsNestCount: false, offersRecurring: false },
-];
+// GL-01: the dropdown derives from the ONE versioned service catalog — the
+// funnel can never offer a service the catalog cannot price, staff, and
+// document. (serviceCatalog is a pure data module; nothing AWS ships here.)
+export const SERVICE_OPTIONS: ServiceOption[] = funnelCatalog().map((e) => ({
+  code: e.id as ServiceCode,
+  label: e.funnelLabel ?? e.label,
+  needsSqft: e.needsSqft,
+  needsNestCount: e.needsNestCount,
+  offersRecurring: e.offersRecurring,
+}));
 
 export function serviceOption(code: string): ServiceOption | undefined {
   return SERVICE_OPTIONS.find((s) => s.code === code);

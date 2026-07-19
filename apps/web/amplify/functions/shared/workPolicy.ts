@@ -47,6 +47,7 @@ export type WorkKind =
   | "OBLIGATION_RECOVERY"
   | "PRICING_RESEARCH_EXHAUSTED"
   | "PRICING_CHANGE_REVIEW"
+  | "SERVICE_CATALOG_DECISION"
   | "BALANCE_COLLECTION"
   | "PAYMENT_PROCESSING_OVERDUE";
 
@@ -518,6 +519,23 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "REVIEWED_OK", label: "Reviewed — prices stand" },
       { code: "REVIEWED_CORRECTED", label: "Reviewed — corrected on Market Rates" },
       { code: "REVIEWED_ROLLED_BACK", label: "Reviewed — catalog rolled back" },
+      OTHER,
+    ],
+  },
+  SERVICE_CATALOG_DECISION: {
+    severity: "HIGH",
+    // GL-01: someone asked for work the service catalog does not sell. The
+    // customer is waiting on an answer, so the decision (add it to the
+    // catalog / decline and tell them) carries the common one-business-day
+    // clock; a job is never silently invented around the catalog.
+    customerImpact:
+      "A customer asked for a service outside the catalog — they are waiting on whether BuzzKill sells it.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "ADDED_TO_CATALOG", label: "Added to the catalog (engineering change) and customer scheduled" },
+      { code: "MAPPED_TO_EXISTING", label: "It maps to an existing catalog service — job created" },
+      { code: "DECLINED_TOLD_CUSTOMER", label: "Declined — customer told we don't offer it" },
       OTHER,
     ],
   },

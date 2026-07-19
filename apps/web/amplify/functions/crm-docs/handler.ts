@@ -94,6 +94,11 @@ import {
 } from "../shared/obligations";
 import { listAllLifecycleCommands } from "../shared/lifecycleCommand";
 import {
+  catalogEntry,
+  entryForLabel,
+  SERVICE_CATALOG_VERSION,
+} from "../shared/serviceCatalog";
+import {
   defaultWorkOwner,
   openMissingContactWork,
   openOwnedWork,
@@ -1631,13 +1636,55 @@ function packetFields(args: Args) {
 /** Jobs created by the office always start unassigned. */
 async function createOfficeJob(args: Args) {
   const customerId = args.customerId?.trim() ?? "";
-  const serviceType = args.serviceType?.trim() ?? "";
+  let serviceType = args.serviceType?.trim() ?? "";
   if (!customerId) throw new Error("Customer is required");
   if (!serviceType) throw new Error("Service type is required");
 
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({ id: customerId });
   if (!customer) throw new Error(`Customer ${customerId} not found`);
+
+  // GL-01: every office visit is a CONTROLLED catalog selection — free text
+  // cannot invent a service. "NOT_IN_CATALOG" routes the request to an owned
+  // catalog decision (add it / map it / decline it) and creates NO job; an
+  // unrecognized legacy string is refused the same way rather than silently
+  // becoming work the business cannot price, staff, or document.
+  const requestedCode = (args as { serviceCode?: string | null }).serviceCode?.trim();
+  if (requestedCode === "NOT_IN_CATALOG") {
+    await openOwnedWork({
+      kind: "SERVICE_CATALOG_DECISION",
+      dedupeKey: `catalog:${customerId}:${serviceType.toLowerCase()}`,
+      title: `Catalog decision needed: "${serviceType}"`,
+      detail: `The office asked to schedule "${serviceType}" for ${customer.displayName ?? customerId}, which is not a catalog service. No job was created. Decide within one business day: add it to the catalog (engineering change), map it to an existing service and schedule that, or decline and tell the customer.`,
+      customerId,
+      relatedId: customerId,
+      sourceUrl: `/customers/${customerId}`,
+      resolutionAction:
+        "Decide the catalog question, then either create the job under the right catalog service or tell the customer we don't offer it.",
+      ownerTeam: "OPS",
+    });
+    return {
+      catalogDecisionOpened: true,
+      message:
+        "That service isn't in the catalog. The request is now an owned catalog decision (one business day) — no job was created.",
+    };
+  }
+  const catalogService = requestedCode
+    ? catalogEntry(requestedCode)
+    : entryForLabel(serviceType);
+  if (requestedCode && !catalogService) {
+    throw new Error(
+      `Unknown catalog service "${requestedCode}" — pick a service from the catalog, or use "Something else…" to request a catalog decision.`
+    );
+  }
+  if (!catalogService) {
+    throw new Error(
+      `"${serviceType}" doesn't match a catalog service. Pick one from the list, or use "Something else…" to request a catalog decision — jobs are never created outside the catalog.`
+    );
+  }
+  // The stored label is the catalog's canonical root unless a more specific
+  // catalog-derived label was passed (funnel labels carry size/nest facts).
+  if (requestedCode) serviceType = catalogService.label;
   // A job created with a service date is already dispatch-bound — it lands
   // SCHEDULED and shows up on the board to be routed. Hold it to the same
   // dispatch facts as assignment (routable MA/RI address, no placeholders,
@@ -1702,6 +1749,9 @@ async function createOfficeJob(args: Args) {
     servicePlanId: args.servicePlanId || undefined,
     type: args.servicePlanId ? "RECURRING" : "ONE_TIME",
     serviceType,
+    // GL-01: the immutable catalog reference this visit was created under.
+    serviceCode: catalogService.id,
+    catalogVersion: SERVICE_CATALOG_VERSION,
     priceCents: args.priceCents ?? undefined,
     status: args.scheduledDate ? "SCHEDULED" : "UNSCHEDULED",
     scheduledDate: args.scheduledDate || undefined,

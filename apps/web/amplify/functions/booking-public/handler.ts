@@ -43,6 +43,7 @@ import {
   type MarketRateService,
   type PlanCadence,
 } from "../shared/marketRate";
+import { serviceLabelFor } from "../shared/serviceCatalog";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -1037,7 +1038,7 @@ async function quote(
     if (priceZone === "B") monthly += ZONE_B[freq];
     baseCents = monthly;
     planOnly = true;
-    serviceLabel = `Community common-area pest control — ${units} units`;
+    serviceLabel = serviceLabelFor("HOA_COMMON_AREA", { units });
     recurringOffer = {
       frequency: freq,
       monthlyCents: monthly,
@@ -1057,7 +1058,9 @@ async function quote(
     const plan = rate?.sheet.plans?.[freq];
     if (!rate || !plan) return contactForPrice("COMMERCIAL", input.sqft!);
     baseCents = rate.priceCents;
-    serviceLabel = `Commercial pest control — up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`;
+    serviceLabel = serviceLabelFor("COMMERCIAL_PEST", {
+      sqftBucket: sqftBucket(input.sqft!),
+    });
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
     recurringOffer = {
       frequency: freq,
@@ -1076,7 +1079,7 @@ async function quote(
     const plan = rate?.sheet.plans?.[freq];
     if (!rate || !plan) return contactForPrice("GENERAL_PEST", input.sqft!);
     baseCents = rate.priceCents;
-    serviceLabel = "General pest control — one-time treatment";
+    serviceLabel = serviceLabelFor("GENERAL_PEST");
     // R60: the same deterministic Zone B travel adders the rate cards
     // carried — an 89-minute drive must not price like a 10-minute one.
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
@@ -1102,7 +1105,9 @@ async function quote(
     baseCents =
       rate.priceCents + extraNests * (rate.sheet.extraNestCents ?? 0);
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
-    serviceLabel = `Wasp / hornet nest removal${(input.nestCount ?? 1) > 1 ? ` — ${input.nestCount} nests` : ""}`;
+    serviceLabel = serviceLabelFor("WASP_NEST", {
+      nestCount: input.nestCount ?? 1,
+    });
   } else {
     // RODENT / ROACH / TERMITE / WILDLIFE — one-time treatments priced from
     // their sqft-banded sheets.
@@ -1116,13 +1121,10 @@ async function quote(
     if (!rate) return contactForPrice(engineService, input.sqft!);
     baseCents = rate.priceCents;
     if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
-    const sizeLabel = `up to ${sqftBucket(input.sqft!).toLocaleString()} sqft`;
-    serviceLabel = {
-      RODENT: `Rodent treatment — ${sizeLabel}`,
-      ROACH: `Specialized roach treatment — ${sizeLabel}`,
-      TERMITE: `Termite treatment — ${sizeLabel}`,
-      WILDLIFE: `Wildlife exclusion and removal — ${sizeLabel}`,
-    }[service]!;
+    // GL-01: the label is the catalog's, not a local map.
+    serviceLabel = serviceLabelFor(engineService, {
+      sqftBucket: sqftBucket(input.sqft!),
+    });
   }
 
   // Day-priced availability from the live schedule. The on-site duration is
