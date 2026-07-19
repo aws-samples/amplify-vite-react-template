@@ -1238,6 +1238,13 @@ async function book(
     zone:
       booking.zone === "A" || booking.zone === "B" ? booking.zone : undefined,
     onlyDate: date,
+    // The LOCKED property-class on-site rule — the re-check must count a
+    // commercial/community stop at 60 minutes, same as the quote did.
+    onsiteMinutes:
+      booking.propertyKind === "COMMERCIAL" ||
+      booking.propertyKind === "COMMUNITY"
+        ? 60
+        : 30,
   });
   if (!liveDay.some((d) => d.date === date && d.windows.includes(window))) {
     // A stale open intent must not stay chargeable for a day we just said no to.
@@ -1260,6 +1267,47 @@ async function book(
       booking.selectedWindow === window &&
       existing.client_secret
     ) {
+      // GL-04: the cached intent is returned ONLY with a live hold behind
+      // it. claimWindowSlot extends a live same-slot claim and re-reserves
+      // after an expiry sweep; a slot that meanwhile sold out refuses the
+      // retry instead of handing back a chargeable secret that holds nothing.
+      const liveDayQuote0 = liveDay.find((d) => d.date === date);
+      const slot0 = liveDayQuote0?.slots?.[window as CapacityWindow];
+      if (!slot0) {
+        try {
+          await s.paymentIntents.cancel(existing.id);
+        } catch {
+          /* already canceled/expired — fine */
+        }
+        throw new HttpError(409, {
+          error: "That window just sold out — pick another from a fresh quote.",
+        });
+      }
+      const reclaimed = await claimWindowSlot({
+        claimKey: booking.id,
+        date,
+        window: window as CapacityWindow,
+        technicianId: slot0.technicianId,
+        minutes: slot0.claimMinutes,
+        holdReason: `checkout for ${booking.email}`,
+      });
+      if (!reclaimed.ok) {
+        try {
+          await s.paymentIntents.cancel(existing.id);
+        } catch {
+          /* already canceled/expired — fine */
+        }
+        throw new HttpError(409, {
+          error: reclaimed.soldOut
+            ? "That window just sold out — pick another from a fresh quote."
+            : reclaimed.message,
+        });
+      }
+      await client.models.BookingRequest.update({
+        id: booking.id,
+        capacityTechnicianId: slot0.technicianId,
+        capacityMinutes: slot0.claimMinutes,
+      }).catch(() => undefined);
       return {
         clientSecret: existing.client_secret,
         amountCents,
@@ -1356,6 +1404,11 @@ async function book(
     status: "QUOTED",
     selectedDate: date,
     selectedWindow: window,
+    // GL-04: the checkout claim's slot facts survive the claim row — if the
+    // hold expires before the payment lands, finalize re-reserves from THESE
+    // instead of booking a visit that holds nothing.
+    capacityTechnicianId: slot.technicianId,
+    capacityMinutes: slot.claimMinutes,
     recurring,
     amountCents,
     stripeCustomerId: customerId,

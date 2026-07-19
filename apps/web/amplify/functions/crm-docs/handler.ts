@@ -67,6 +67,7 @@ import {
   makeLegResolver,
   notePoolMinutes,
   onsiteMinutes as slotOnsiteMinutes,
+  releaseJobCapacity,
   releasePoolMinutes,
   releaseSlot,
   reserveSlot,
@@ -90,6 +91,7 @@ import {
   claimMonthForJob,
   releaseMonthForJob,
 } from "../shared/obligations";
+import { listAllLifecycleCommands } from "../shared/lifecycleCommand";
 import {
   defaultWorkOwner,
   openMissingContactWork,
@@ -842,12 +844,13 @@ async function runWorkVerifier(
         } while (jobToken);
       }
       if ("CustomerLifecycleCommand" in client.models) {
-        const { data: cmds } =
-          await client.models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
-            { customerId: cust.id },
-            { limit: 50 }
-          );
-        const unfinished = (cmds ?? []).filter(
+        // Paginated to exhaustion — a settled verdict computed over one page
+        // can hide the non-settled command it exists to catch.
+        const cmds = await listAllLifecycleCommands(
+          client as unknown as { models: Record<string, unknown> },
+          cust.id
+        );
+        const unfinished = cmds.filter(
           (c) => c.stage !== "COMPLETE" && c.stage !== "FAILED"
         );
         if (unfinished.length) {
@@ -1702,6 +1705,18 @@ async function createOfficeJob(args: Args) {
     status: args.scheduledDate ? "SCHEDULED" : "UNSCHEDULED",
     scheduledDate: args.scheduledDate || undefined,
     timeWindow: args.timeWindow?.trim() || undefined,
+    // GL-04: pool facts are STAMPED at birth so the one canonical release
+    // path can give exactly these minutes back exactly once.
+    ...(args.scheduledDate
+      ? {
+          capacityWindow: windowOfTimeWindow(args.timeWindow ?? null),
+          capacityMinutes: slotOnsiteMinutes(
+            normalizePropertyClass(
+              (args as { propertyClass?: string | null }).propertyClass
+            )
+          ),
+        }
+      : {}),
     ...packetFields(args),
     propertyClass:
       normalizePropertyClass(
@@ -2036,26 +2051,33 @@ async function updateJobSchedule(
           );
         }
         const priorMonth = job.scheduledDate?.slice(0, 7) ?? null;
-        if (priorMonth !== targetMonth) {
-          const monthClaim = await claimMonthForJob({
-            servicePlanId: plan.id,
-            monthKey: targetMonth,
-            jobId: job.id,
-            customerId: job.customerId,
-          });
-          if (!monthClaim.ok) {
-            throw new Error(
-              monthClaim.unavailable
-                ? "The seasonal-month ledger can't be verified right now — nothing was changed. Try again in a moment."
-                : monthClaim.status === "SATISFIED"
-                  ? `This plan's ${targetMonth} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
-                  : `This plan already has its ${targetMonth} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
-            );
-          }
-          seasonalPlanId = plan.id;
-          claimedTargetMonth = targetMonth;
-          priorMonthToRelease = priorMonth;
+        // The ledger is ALWAYS consulted — even when the job's current date
+        // already sits in the target month. scheduledDate is not proof of
+        // ledger ownership (a reschedule can move the date without the
+        // month), so trusting it would dispatch into a month another job
+        // holds. claimMonthForJob is idempotent for the rightful holder.
+        const monthClaim = await claimMonthForJob({
+          servicePlanId: plan.id,
+          monthKey: targetMonth,
+          jobId: job.id,
+          customerId: job.customerId,
+        });
+        if (!monthClaim.ok) {
+          throw new Error(
+            monthClaim.unavailable
+              ? "The seasonal-month ledger can't be verified right now — nothing was changed. Try again in a moment."
+              : monthClaim.status === "SATISFIED"
+                ? `This plan's ${targetMonth} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+                : `This plan already has its ${targetMonth} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
+          );
         }
+        seasonalPlanId = plan.id;
+        // A month the job ALREADY owned is not rolled back on failure — the
+        // job stays scheduled in it, so releasing would let a second visit in.
+        if (!("alreadyThisJob" in monthClaim && monthClaim.alreadyThisJob)) {
+          claimedTargetMonth = targetMonth;
+        }
+        priorMonthToRelease = priorMonth !== targetMonth ? priorMonth : null;
       }
     }
     const compensateMonth = async () => {
@@ -2102,6 +2124,9 @@ async function updateJobSchedule(
       status: "SCHEDULED",
       capacityWindow: targetWindow,
       capacityMinutes: slotMinutes,
+      // A real assignment supersedes the checkout-time hold — the release
+      // below gives that hold back from the pre-update row.
+      capacityTechnicianId: null,
       ...(routeProof
         ? {
             dispatchDriveMinutes: routeProof.driveMinutes,
@@ -2128,25 +2153,9 @@ async function updateJobSchedule(
         note: "Visit moved to a different month.",
       }).catch(() => undefined);
     }
-    if (priorDate) {
-      const priorWindow =
-        (job.capacityWindow as CapacityWindow | null) ??
-        windowOfTimeWindow(job.timeWindow);
-      const priorMinutes =
-        job.capacityMinutes ?? slotOnsiteMinutes(job.propertyClass);
-      if (job.technicianId) {
-        await releaseSlot(
-          priorDate,
-          priorWindow,
-          job.technicianId,
-          priorMinutes
-        ).catch(() => undefined);
-      } else {
-        await releasePoolMinutes(priorDate, priorWindow, priorMinutes).catch(
-          () => undefined
-        );
-      }
-    }
+    // The prior hold — technician slot, checkout-time funnel hold, or pool
+    // note — comes back strictly from the pre-update stamps.
+    await releaseJobCapacity(job);
     return finish(
       { jobId: data.id },
       {
@@ -2160,14 +2169,30 @@ async function updateJobSchedule(
 
   if (operation === "UNASSIGN") {
     assertJobCanBeScheduled(job);
+    // GL-04: unassigning ENDS the technician-window hold ASSIGN reserved.
+    // The write clears the assignment and restamps pending-assignment pool
+    // facts in the SAME update; the old hold is released from the pre-update
+    // row, so a repeated unassign cannot double-release, and a later
+    // re-assign releases pool facts — never the stale technician stamp.
+    const poolWindow = windowOfTimeWindow(job.timeWindow);
+    const poolMinutes = slotOnsiteMinutes(job.propertyClass);
     const { data, errors } = await client.models.Job.update({
       id: job.id,
       routeId: null,
       technicianId: null,
       routeOrder: null,
       status: "UNSCHEDULED",
+      capacityWindow: job.scheduledDate ? poolWindow : null,
+      capacityMinutes: job.scheduledDate ? poolMinutes : null,
+      capacityTechnicianId: null,
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not unassign job");
+    await releaseJobCapacity(job);
+    if (job.scheduledDate) {
+      await notePoolMinutes(job.scheduledDate, poolWindow, poolMinutes).catch(
+        () => undefined
+      );
+    }
     return finish(
       { jobId: data.id },
       {
@@ -2207,6 +2232,20 @@ async function updateJobSchedule(
 
   if (operation === "CANCEL") {
     assertJobCanBeScheduled(job);
+    // The cancel WRITE comes first and clears the capacity stamps in the same
+    // update; the releases below read the pre-update row. A retried cancel
+    // re-reads a job with no stamps and releases nothing — exactly once.
+    const { data, errors } = await client.models.Job.update({
+      id: job.id,
+      status: "CANCELED",
+      routeId: null,
+      technicianId: null,
+      routeOrder: null,
+      capacityWindow: null,
+      capacityMinutes: null,
+      capacityTechnicianId: null,
+    });
+    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not cancel job");
     // GL-17: a canceled seasonal visit gives its month back (guarded on the
     // month still belonging to this job).
     if (job.servicePlanId && job.scheduledDate) {
@@ -2218,36 +2257,8 @@ async function updateJobSchedule(
       }).catch(() => undefined);
     }
     // GL-04: the canceled visit's minutes go back to its technician-window
-    // slot (or the pool accounting slot when it was never assigned).
-    if (job.scheduledDate) {
-      const cancelWindow =
-        (job.capacityWindow as CapacityWindow | null) ??
-        windowOfTimeWindow(job.timeWindow);
-      const cancelMinutes =
-        job.capacityMinutes ?? slotOnsiteMinutes(job.propertyClass);
-      if (job.technicianId) {
-        await releaseSlot(
-          job.scheduledDate,
-          cancelWindow,
-          job.technicianId,
-          cancelMinutes
-        ).catch(() => undefined);
-      } else {
-        await releasePoolMinutes(
-          job.scheduledDate,
-          cancelWindow,
-          cancelMinutes
-        ).catch(() => undefined);
-      }
-    }
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      status: "CANCELED",
-      routeId: null,
-      technicianId: null,
-      routeOrder: null,
-    });
-    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not cancel job");
+    // slot (or the pool accounting slot) — strictly from its stamps.
+    await releaseJobCapacity(job);
     return finish(
       { jobId: data.id },
       {
@@ -2263,16 +2274,146 @@ async function updateJobSchedule(
     assertJobCanBeScheduled(job);
     const date = args.scheduledDate || null;
     const dateChanged = date !== (job.scheduledDate ?? null);
+    const newWindow = date
+      ? windowOfTimeWindow(args.timeWindow?.trim() || null)
+      : null;
+
+    // GL-17: a date move on a seasonal plan is a MONTH move — the ledger is
+    // consulted BEFORE publishing, in-season enforced, and a claim taken for
+    // a publish that never lands is rolled back.
+    let claimedTargetMonth: string | null = null;
+    if (date && job.servicePlanId) {
+      const { data: plan } = await client.models.ServicePlan.get({
+        id: job.servicePlanId,
+      });
+      if (!plan) {
+        throw new Error(
+          "The visit's plan could not be read just now — the move was refused rather than risking the one-treatment-per-month rule. Try again in a moment."
+        );
+      }
+      if (plan.seasonal) {
+        const targetMonth = date.slice(0, 7);
+        if (!isServiceMonth(plan, targetMonth)) {
+          throw new Error(
+            "This plan's treatments run April–October — pick an in-season date (the plan still bills monthly year-round)."
+          );
+        }
+        const monthClaim = await claimMonthForJob({
+          servicePlanId: plan.id,
+          monthKey: targetMonth,
+          jobId: job.id,
+          customerId: job.customerId,
+        });
+        if (!monthClaim.ok) {
+          throw new Error(
+            monthClaim.unavailable
+              ? "The seasonal-month ledger can't be verified right now — nothing was changed. Try again in a moment."
+              : monthClaim.status === "SATISFIED"
+                ? `This plan's ${targetMonth} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+                : `This plan already has its ${targetMonth} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
+          );
+        }
+        if (!("alreadyThisJob" in monthClaim && monthClaim.alreadyThisJob)) {
+          claimedTargetMonth = targetMonth;
+        }
+      }
+    }
+    const rollbackMonth = async () => {
+      if (claimedTargetMonth && job.servicePlanId) {
+        await releaseMonthForJob({
+          servicePlanId: job.servicePlanId,
+          monthKey: claimedTargetMonth,
+          jobId: job.id,
+          note: "Reschedule failed before publishing — the month claim was rolled back.",
+        }).catch(() => undefined);
+      }
+    };
+
+    // GL-04: capacity moves WITH the visit. A date change drops the
+    // assignment, so accounting moves to the pool for the new date. A
+    // window-only change on an ASSIGNED visit must fit the technician's
+    // OTHER window first — refused when it doesn't.
+    const keptTech = !dateChanged ? (job.technicianId ?? null) : null;
+    const windowChanged =
+      !dateChanged &&
+      date != null &&
+      newWindow != null &&
+      (job.capacityWindow ?? windowOfTimeWindow(job.timeWindow)) !== newWindow;
+    let stamped: { window: CapacityWindow; minutes: number } | null = null;
+    if (date) {
+      if (keptTech && windowChanged && job.capacityMinutes != null) {
+        const movedRes = await reserveSlot(
+          date,
+          newWindow!,
+          keptTech,
+          job.capacityMinutes
+        );
+        if (!movedRes.ok) {
+          await rollbackMonth();
+          throw new Error(movedRes.message);
+        }
+        stamped = { window: newWindow!, minutes: job.capacityMinutes };
+      } else if (keptTech) {
+        // Same slot (or an unstamped legacy hold): stamps carry over.
+        stamped =
+          job.capacityWindow && job.capacityMinutes != null
+            ? {
+                window: job.capacityWindow as CapacityWindow,
+                minutes: job.capacityMinutes,
+              }
+            : null;
+      } else {
+        stamped = {
+          window: newWindow!,
+          minutes: slotOnsiteMinutes(job.propertyClass),
+        };
+      }
+    }
     const { data, errors } = await client.models.Job.update({
       id: job.id,
       scheduledDate: date,
       timeWindow: args.timeWindow?.trim() || null,
       status: date ? "SCHEDULED" : "UNSCHEDULED",
+      capacityWindow: stamped?.window ?? null,
+      capacityMinutes: stamped?.minutes ?? null,
       ...(dateChanged
-        ? { routeId: null, technicianId: null, routeOrder: null }
+        ? { routeId: null, technicianId: null, routeOrder: null, capacityTechnicianId: null }
         : {}),
     });
-    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not reschedule job");
+    if (!data) {
+      await rollbackMonth();
+      if (keptTech && windowChanged && job.capacityMinutes != null && date) {
+        await releaseSlot(date, newWindow!, keptTech, job.capacityMinutes).catch(
+          () => undefined
+        );
+      }
+      throw new Error(errors?.map((e) => e.message).join("; ") || "Could not reschedule job");
+    }
+    // Publish landed: the PRIOR hold and month come back, from the
+    // pre-update row — a retry re-reads fresh stamps and cannot double-release.
+    const capacityMoved =
+      dateChanged || windowChanged || (!keptTech && date != null) || !date;
+    if (capacityMoved) {
+      await releaseJobCapacity(job);
+    }
+    if (date && !keptTech) {
+      await notePoolMinutes(
+        date,
+        newWindow!,
+        slotOnsiteMinutes(job.propertyClass)
+      ).catch(() => undefined);
+    }
+    if (job.servicePlanId && job.scheduledDate) {
+      const priorMonth = job.scheduledDate.slice(0, 7);
+      if (!date || priorMonth !== date.slice(0, 7)) {
+        await releaseMonthForJob({
+          servicePlanId: job.servicePlanId,
+          monthKey: priorMonth,
+          jobId: job.id,
+          note: "Visit moved out of the month.",
+        }).catch(() => undefined);
+      }
+    }
     return finish(
       { jobId: data.id },
       {

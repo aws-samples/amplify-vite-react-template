@@ -3,7 +3,14 @@ import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
 import { casTakeover, casFencedDelete } from "./atomicLock";
-import { consumeCapacityClaim } from "./capacity";
+import {
+  consumeCapacityClaim,
+  notePoolMinutes,
+  onsiteMinutes,
+  POOL_TECH,
+  reserveSlot,
+  type CapacityWindow,
+} from "./capacity";
 import { isSeasonalPlanName, monthKeyOf, isServiceMonth, SEASONAL_SERVICE_MONTHS } from "./season";
 import { ensureObligation } from "./obligations";
 import { customerAccessGroups } from "./dynamicGroups";
@@ -191,15 +198,76 @@ export async function finalizeBooking(opts: {
       opts.paymentMethodId ?? null
     );
     // GL-04: the checkout's capacity claim is CONSUMED into the booked job —
-    // the scheduled visit carries the claim's slot facts (window + minutes)
-    // from here on, so the claim row goes away without giving them back.
-    const consumedSlot = await consumeCapacityClaim(opts.bookingRequestId);
+    // the scheduled visit carries the claim's slot facts (window, technician,
+    // minutes) from here on, so the claim row goes away without giving them
+    // back. If the hold expired and was swept before the payment landed, the
+    // booking's stamped facts re-reserve the slot NOW; a slot that meanwhile
+    // sold out books onto the pool ledger and opens an owned case — the money
+    // is real either way, but the schedule never silently oversells.
+    let consumedSlot = await consumeCapacityClaim(opts.bookingRequestId);
+    const stampedTech = (booking as { capacityTechnicianId?: string | null })
+      .capacityTechnicianId;
+    const stampedMinutes = (booking as { capacityMinutes?: number | null })
+      .capacityMinutes;
+    const slotWindow = (booking.selectedWindow ?? "MORNING") as CapacityWindow;
+    if (
+      !consumedSlot &&
+      booking.selectedDate &&
+      stampedTech &&
+      stampedMinutes != null
+    ) {
+      const rereserved = await reserveSlot(
+        booking.selectedDate,
+        slotWindow,
+        stampedTech,
+        stampedMinutes
+      );
+      if (rereserved.ok) {
+        consumedSlot = {
+          window: slotWindow,
+          technicianId: stampedTech,
+          minutes: stampedMinutes,
+        };
+      } else {
+        const poolMinutes = onsiteMinutes(
+          (booking as { propertyKind?: string | null }).propertyKind
+        );
+        await notePoolMinutes(
+          booking.selectedDate,
+          slotWindow,
+          poolMinutes
+        ).catch(() => undefined);
+        consumedSlot = {
+          window: slotWindow,
+          technicianId: POOL_TECH,
+          minutes: poolMinutes,
+        };
+        await openOwnedWork({
+          kind: "UNSTAFFED_VISIT",
+          dedupeKey: `booking-slot-lost:${booking.id}`,
+          title: `Re-place a paid booking whose held slot expired: ${booking.name ?? booking.email ?? booking.id}`,
+          detail: `The payment for booking ${booking.id} landed after its 45-minute slot hold expired, and the ${booking.selectedDate} ${slotWindow.toLowerCase()} window no longer has room. The visit is booked and counted on the pool ledger — assign a technician (any day/window that fits) or agree a new time with the customer. Do not leave it unassigned.`,
+          customerId: booking.customerId ?? undefined,
+          relatedId: booking.jobId ?? booking.id,
+          sourceUrl: `/schedule`,
+          resolutionAction:
+            "Assign a validated technician to this visit (or reschedule it with the customer).",
+          ownerTeam: "OPS",
+        });
+      }
+    }
     if (consumedSlot && booking.jobId) {
       await client.models.Job.update({
         id: booking.jobId,
         capacityWindow: consumedSlot.window,
         capacityMinutes: consumedSlot.minutes,
-      }).catch(() => undefined);
+        // The slot's technician holds these minutes until the office assigns
+        // for real — the rebuild keys on this, so the hold survives nightly.
+        capacityTechnicianId:
+          consumedSlot.technicianId === POOL_TECH
+            ? null
+            : consumedSlot.technicianId,
+      } as never).catch(() => undefined);
     }
     // The booking is whole. If a prior attempt had opened the paid-not-finalized
     // exception, this success closes it — the queue must not keep showing a
@@ -1021,6 +1089,12 @@ async function finalizeClaimed(
         serviceType: serviceLabel,
         scheduledDate: booking.selectedDate ?? undefined,
         timeWindow: windowLabel,
+        // GL-04: the visit's locked on-site class rides on the job — the
+        // nightly rebuild and office assignment count commercial/community
+        // stops at 60 minutes only if the class is recorded here.
+        propertyClass:
+          (booking as { propertyKind?: string | null }).propertyKind ??
+          "RESIDENTIAL",
         priceCents: booking.amountCents ?? undefined,
         status: "SCHEDULED",
         paidAt: booking.amountCents ? paidAtIso : undefined,

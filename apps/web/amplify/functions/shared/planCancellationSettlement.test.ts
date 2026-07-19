@@ -119,6 +119,7 @@ vi.mock("./ownedWork", () => ({
 vi.mock("./capacity", () => ({
   releaseSlot: vi.fn(async () => undefined),
   releasePoolMinutes: vi.fn(async () => undefined),
+  releaseJobCapacity: vi.fn(async () => undefined),
   onsiteMinutes: () => 30,
   windowOfTimeWindow: () => "MORNING",
 }));
@@ -257,6 +258,39 @@ describe("GL-08 cross-module: real cancel → real settlement", () => {
       ...invoices.get("i1")!,
       status: "REFUNDED",
       refundedAmountCents: 12000,
+    });
+    settled = await planCancellationSettled("p1", { stripe });
+    expect(settled.settled).toBe(true);
+  });
+
+  it("an OFFICE/deactivation cancel is anchored too: a charge that posts AFTER it cannot settle unrefunded", async () => {
+    const stripe = makeStripe({ sub_live_1: "active" });
+    // The office button / GL-09 sweep path: bare cancelPlanBilling, no portal
+    // request stamp, no PlanCancellationClaim.
+    await cancelPlanBilling(stripe, "p1");
+    expect(plans.get("p1")).toMatchObject({ status: "CANCELED" });
+    // The real path must have anchored the accepted-cancellation time.
+    expect(plans.get("p1")!.cancellationRequestedAt).toBeTruthy();
+
+    // An in-flight ACH debit posts PAID two days after the cancel — a
+    // subscription charge with no visit behind it and no refund.
+    invoices.set("late-1", {
+      id: "late-1",
+      servicePlanId: "p1",
+      status: "PAID",
+      amountCents: 4500,
+      refundedAmountCents: 0,
+      paidAt: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+      issuedAt: new Date().toISOString(),
+    });
+    let settled = await planCancellationSettled("p1", { stripe });
+    expect(settled.settled).toBe(false);
+    expect(settled.reason).toMatch(/after the cancellation/i);
+
+    // Only the FULL refund settles it.
+    invoices.set("late-1", {
+      ...invoices.get("late-1")!,
+      refundedAmountCents: 4500,
     });
     settled = await planCancellationSettled("p1", { stripe });
     expect(settled.settled).toBe(true);

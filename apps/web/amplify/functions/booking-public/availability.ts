@@ -117,10 +117,10 @@ export async function buildDayMatrix(opts: {
     .filter((d) => !opts.onlyDate || d === opts.onlyDate);
 
   // GL-04: the locked on-site durations by PROPERTY CLASS — residential 30,
-  // commercial/community 60. No service-based constants.
-  const onsite =
-    opts.onsiteMinutes ??
-    (service === "COMMERCIAL" || service === "COMMUNITY" ? 60 : 30);
+  // commercial/community 60. The class lives on propertyKind, never on the
+  // pest-service enum, so callers MUST derive and pass it; the bare fallback
+  // is the residential floor.
+  const onsite = opts.onsiteMinutes ?? 30;
 
   // GL-04: per-day eligibility (weekday, closures, PTO, licences, roster —
   // every read failure sells zero) with each technician's PRIVATE base (or

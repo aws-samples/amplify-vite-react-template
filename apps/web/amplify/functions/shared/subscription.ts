@@ -4,13 +4,7 @@ import { notifyOffice } from "./email";
 import { openOwnedWork } from "./ownedWork";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { computeVisitCancellationPolicy } from "./cancellationPolicy";
-import {
-  onsiteMinutes,
-  releasePoolMinutes,
-  releaseSlot,
-  windowOfTimeWindow,
-  type CapacityWindow,
-} from "./capacity";
+import { releaseJobCapacity } from "./capacity";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -337,6 +331,11 @@ export async function cancelQueuedPlanVisits(
           status: "CANCELED",
           routeId: null,
           routeOrder: null,
+          // Stamps end WITH the hold — the release below reads the pre-update
+          // row, and a re-driven sweep finds nothing left to give back.
+          capacityWindow: null,
+          capacityMinutes: null,
+          capacityTechnicianId: null,
           cancelDisposition: disposition,
           cancelDispositionCents:
             disposition === "AWAIT_SETTLEMENT"
@@ -357,28 +356,9 @@ export async function cancelQueuedPlanVisits(
       }
       resolution.canceled.push(visit);
       // GL-04: the canceled visit's minutes go back to its technician-window
-      // slot (or the pool accounting slot when it was never assigned).
-      if (job.scheduledDate) {
-        const jobWindow =
-          ((job as { capacityWindow?: string | null }).capacityWindow as
-            | CapacityWindow
-            | null) ?? windowOfTimeWindow(job.timeWindow);
-        const minutes =
-          (job as { capacityMinutes?: number | null }).capacityMinutes ??
-          onsiteMinutes(job.propertyClass);
-        if (job.technicianId) {
-          await releaseSlot(
-            job.scheduledDate,
-            jobWindow,
-            job.technicianId,
-            minutes
-          ).catch(() => undefined);
-        } else {
-          await releasePoolMinutes(job.scheduledDate, jobWindow, minutes).catch(
-            () => undefined
-          );
-        }
-      }
+      // slot (or the pool accounting slot) — strictly from its stamps, via
+      // the one canonical release path.
+      await releaseJobCapacity(job);
 
       if (paidCents > 0 && policy.withinFreeWindow) {
         // >72h: the refund is owed in full — the case PRESCRIBES the exact
@@ -541,6 +521,13 @@ export async function cancelPlanBilling(
           .canceledStripeSubscriptionId ??
         undefined,
       canceledAt: new Date().toISOString(),
+      // GL-08 R3: EVERY cancel path anchors the accepted-cancellation time —
+      // the office button and the deactivation sweep included, not just the
+      // customer portal. Without this stamp a charge that posts after the
+      // cancel is judged pre-request and escapes the full-refund gate.
+      cancellationRequestedAt:
+        (plan as { cancellationRequestedAt?: string | null })
+          .cancellationRequestedAt ?? new Date().toISOString(),
     });
   if (!canceledPlan) {
     throw new Error(

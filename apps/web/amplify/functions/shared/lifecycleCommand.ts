@@ -69,6 +69,50 @@ function isSettled(stage: string | null | undefined): boolean {
 }
 
 /**
+ * EVERY lifecycle command row for a customer — paginated to exhaustion.
+ * Command rows are never pruned, so a single page can silently hide the one
+ * non-settled command that must block a new transition. Any page failure
+ * throws: an unverifiable scan is a refusal, never a green light.
+ */
+export async function listAllLifecycleCommands(
+  client: { models: Record<string, unknown> },
+  customerId: string
+): Promise<LifecycleCommandRow[]> {
+  const model = (
+    client.models as unknown as {
+      CustomerLifecycleCommand: {
+        listCustomerLifecycleCommandByCustomerIdAndRequestedAt: (
+          key: { customerId: string },
+          opts: { limit: number; nextToken?: string | null }
+        ) => Promise<{
+          data: LifecycleCommandRow[] | null;
+          nextToken?: string | null;
+          errors?: { message: string }[];
+        }>;
+      };
+    }
+  ).CustomerLifecycleCommand;
+  const all: LifecycleCommandRow[] = [];
+  let nextToken: string | null | undefined = undefined;
+  do {
+    const page: {
+      data: LifecycleCommandRow[] | null;
+      nextToken?: string | null;
+      errors?: { message: string }[];
+    } = await model.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
+      { customerId },
+      { limit: 200, nextToken }
+    );
+    if (page.errors?.length) {
+      throw new Error(page.errors.map((e) => e.message).join("; "));
+    }
+    all.push(...(page.data ?? []));
+    nextToken = page.nextToken;
+  } while (nextToken);
+  return all;
+}
+
+/**
  * Claim the lifecycle command for this idempotency key. Also refuses when the
  * OPPOSITE action holds a non-terminal command on the same customer — the
  * reversal is serialized behind finishing (or recovering) the first.
@@ -110,14 +154,14 @@ export async function claimLifecycleCommand(input: {
   // key. A PARTIAL customer is mid-transition; a fresh different-key command
   // would reinterpret partially-changed state.
   try {
-    const { data: existing } =
-      await client.models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
-        { customerId: input.customerId },
-        { limit: 50 }
-      );
-    const open = (existing ?? []).find(
-      (c) => c.id !== id && !isSettled(c.stage)
+    // Paginated to exhaustion — rows accumulate forever, and the one open
+    // PARTIAL hiding beyond the first page is exactly the command this scan
+    // exists to find.
+    const existing = await listAllLifecycleCommands(
+      client as unknown as { models: Record<string, unknown> },
+      input.customerId
     );
+    const open = existing.find((c) => c.id !== id && !isSettled(c.stage));
     if (open) {
       return {
         claimed: false,

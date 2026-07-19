@@ -10,10 +10,12 @@ import { finalizeBooking } from "../shared/bookingFinalize";
 import { applyRefundToInvoice } from "../shared/refund";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
+  claimWindowSlot,
   extendCapacityClaim,
   releaseCapacityClaim,
   consumeCapacityClaim,
   PROCESSING_CLAIM_MS,
+  type CapacityWindow,
 } from "../shared/capacity";
 import {
   escapeHtml,
@@ -85,10 +87,35 @@ export const handler = async (
       case "payment_intent.processing": {
         const pi = stripeEvent.data.object;
         if (pi.metadata?.bookingRequestId) {
-          await extendCapacityClaim(
+          const extended = await extendCapacityClaim(
             pi.metadata.bookingRequestId,
             PROCESSING_CLAIM_MS
           );
+          if (!extended) {
+            // The hold expired and was swept before the debit was reported —
+            // RE-CLAIM from the booking's stamped slot facts. A slot that
+            // meanwhile sold out is left unclaimed here; finalize owns the
+            // truthful fallback (pool ledger + owned re-place case).
+            const client = await dataClient();
+            const { data: bk } = await client.models.BookingRequest.get({
+              id: pi.metadata.bookingRequestId,
+            }).catch(() => ({ data: null }));
+            const tech = (bk as { capacityTechnicianId?: string | null } | null)
+              ?.capacityTechnicianId;
+            const minutes = (bk as { capacityMinutes?: number | null } | null)
+              ?.capacityMinutes;
+            if (bk?.selectedDate && bk.selectedWindow && tech && minutes != null) {
+              await claimWindowSlot({
+                claimKey: bk.id,
+                date: bk.selectedDate,
+                window: bk.selectedWindow as CapacityWindow,
+                technicianId: tech,
+                minutes,
+                holdMs: PROCESSING_CLAIM_MS,
+                holdReason: `pending bank debit for ${bk.email ?? bk.id}`,
+              }).catch(() => undefined);
+            }
+          }
         }
         await onFunnelPaymentProcessing(pi);
         break;
@@ -456,6 +483,13 @@ async function onPaidSubscriptionCharge(opts: {
     }).catch(() => ({ data: null }));
     requestedAt = claim?.requestedAt ?? null;
   }
+  // Office/deactivation/dashboard cancels stamp canceledAt at the moment
+  // billing stopped — without this fallback their post-cancel charges read
+  // as ordinary receipts and nothing owns the refund.
+  if (!requestedAt) {
+    requestedAt =
+      (plan as { canceledAt?: string | null } | null)?.canceledAt ?? null;
+  }
   const postCancellation =
     Boolean(requestedAt) &&
     opts.paidAtUnix * 1000 >= new Date(requestedAt as string).getTime();
@@ -619,6 +653,10 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     // GL-08 R3: keep the durable reference for the settlement readback.
     canceledStripeSubscriptionId: stripeSub.id,
     canceledAt: new Date().toISOString(),
+    // A dashboard cancel is an accepted cancellation too — anchor it so
+    // later charges are judged against the real cancel moment.
+    cancellationRequestedAt:
+      sub.cancellationRequestedAt ?? new Date().toISOString(),
   });
 
   // Nothing below may throw: the plan is now CANCELED, so a Stripe retry of

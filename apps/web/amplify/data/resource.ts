@@ -513,6 +513,12 @@ export const schema = a.schema({
       quoteJson: a.json(),
       selectedDate: a.date(),
       selectedWindow: a.string(),
+      // GL-04: the checkout claim's slot facts, stamped when the hold is
+      // taken. If the claim row is gone by the time payment lands (expired
+      // hold, swept row), finalize re-reserves from THESE instead of booking
+      // a visit that holds nothing.
+      capacityTechnicianId: a.string(),
+      capacityMinutes: a.integer(),
       recurring: a.boolean(),
       amountCents: a.integer(),
       monthlyCents: a.integer(),
@@ -1194,6 +1200,12 @@ export const schema = a.schema({
        *  cancel/move releases exactly what was reserved. */
       capacityMinutes: a.integer(),
       capacityWindow: a.string(),
+      // GL-04: the technician-window slot the visit's minutes are HELD on,
+      // even before an office assignment exists (a funnel booking reserves a
+      // specific technician's window at checkout). The nightly rebuild and
+      // every release path key on technicianId ?? capacityTechnicianId, so a
+      // paid unassigned visit's hold survives reconciliation.
+      capacityTechnicianId: a.string(),
       notPerformedAt: a.datetime(),
       notPerformedNote: a.string(),
       notPerformedPhotoKey: a.string(),

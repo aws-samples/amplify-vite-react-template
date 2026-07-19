@@ -184,6 +184,10 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       priceCents: null,
       status: "UNSCHEDULED",
       scheduledDate: dueDate, // target date — office confirms the slot
+      // GL-04: pool facts stamped at birth — the canonical release path
+      // gives exactly these minutes back exactly once on cancel/sweep.
+      capacityWindow: "MORNING",
+      capacityMinutes: onsiteMinutes(null),
       notes: `Auto-queued ${plan.serviceFrequency.toLowerCase()} visit after job ${job.id}.`,
       accessGroups: customerAccessGroups(
         job.customerId,

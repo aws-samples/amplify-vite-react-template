@@ -994,18 +994,31 @@ export async function listLifecycleCommands(customerId: string): Promise<
     CustomerLifecycleCommand?: {
       listCustomerLifecycleCommandByCustomerIdAndRequestedAt: (
         q: { customerId: string },
-        o: { limit: number }
-      ) => Promise<{ data: Record<string, unknown>[] }>;
+        o: { limit: number; nextToken?: string | null }
+      ) => Promise<{
+        data: Record<string, unknown>[];
+        nextToken?: string | null;
+      }>;
     };
   };
   if (!models.CustomerLifecycleCommand) return [];
   try {
-    const res =
-      await models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
+    // Paginated to exhaustion: the resumable PARTIAL the banner exists to
+    // surface is the NEWEST row — exactly the one a single page can hide.
+    const all: Record<string, unknown>[] = [];
+    let nextToken: string | null | undefined = undefined;
+    do {
+      const res: {
+        data: Record<string, unknown>[];
+        nextToken?: string | null;
+      } = await models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
         { customerId },
-        { limit: 50 }
+        { limit: 200, nextToken }
       );
-    return (res.data ?? []) as never[];
+      all.push(...(res.data ?? []));
+      nextToken = res.nextToken;
+    } while (nextToken);
+    return all as never[];
   } catch {
     return [];
   }

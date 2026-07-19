@@ -3,6 +3,8 @@ import { dataClient } from "./dataClient";
 import { notifyOffice } from "./email";
 import { openMissingContactWork, openOwnedWork } from "./ownedWork";
 import { cancelPlanBilling } from "./subscription";
+import { releaseJobCapacity } from "./capacity";
+import { releaseMonthForJob } from "./obligations";
 import {
   recordCustomerLifecycleEvent,
   type LifecycleActor,
@@ -765,10 +767,28 @@ async function sweepRemainingFutureJobs(
             routeId: null,
             routeOrder: null,
             technicianId: null,
+            // Stamps end WITH the hold: the release below reads the
+            // pre-update row, so a resumed sweep cannot release twice.
+            capacityWindow: null,
+            capacityMinutes: null,
+            capacityTechnicianId: null,
             notes: job.notes ? `${job.notes}\n${note}` : note,
           });
-          if (updated) out.canceled++;
-          else out.failed++;
+          if (updated) {
+            out.canceled++;
+            // GL-04: a swept visit's technician-window (or pool) minutes go
+            // back — a deactivation must not strand sold capacity.
+            await releaseJobCapacity(job);
+            // GL-17: a swept seasonal visit gives its month back too.
+            if (job.servicePlanId && job.scheduledDate) {
+              await releaseMonthForJob({
+                servicePlanId: job.servicePlanId,
+                monthKey: job.scheduledDate.slice(0, 7),
+                jobId: job.id,
+                note: "Visit canceled by deactivation — the month is owed again.",
+              }).catch(() => undefined);
+            }
+          } else out.failed++;
         } catch (err) {
           console.error("sweepRemainingFutureJobs: job failed", job.id, err);
           out.failed++;

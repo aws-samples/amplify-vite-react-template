@@ -460,10 +460,16 @@ export async function planCancellationSettled(
       reason: "A charge is still in flight — refund or void it before closing.",
     };
   }
-  // The accepted cancellation time: the mutable plan stamp, with the durable
-  // command's requestedAt as the fallback when that write was lost.
+  // The accepted cancellation time: the mutable plan stamp, the durable
+  // command's requestedAt, then canceledAt — the provider-stop moment every
+  // cancel path stamps. Office/deactivation/dashboard cancels predate the
+  // cancellationRequestedAt stamp, so canceledAt keeps their late charges
+  // inside the full-refund gate instead of silently skipping it.
   const requestedAt =
-    plan.cancellationRequestedAt ?? commandRow?.requestedAt ?? null;
+    plan.cancellationRequestedAt ??
+    commandRow?.requestedAt ??
+    (plan as { canceledAt?: string | null }).canceledAt ??
+    null;
   if (requestedAt) {
     // GL-08 R3: judged by PAYMENT time (paidAt; issuedAt only as fallback),
     // and a late charge is settled only by a FULL refund — a partial refund
@@ -1109,9 +1115,14 @@ export async function resumePlanCancellation(
     id: servicePlanId,
   });
   const attemptCount = existing?.attemptCount ?? 0;
+  // Backfill order matters: canceledAt (stamped when billing actually
+  // stopped) comes before "now" — resuming days later must not re-date the
+  // cancellation to AFTER a charge that already posted, or that charge is
+  // judged pre-request forever and never refunded.
   const requestedAt =
     existing?.requestedAt ??
     plan.cancellationRequestedAt ??
+    (plan as { canceledAt?: string | null }).canceledAt ??
     new Date().toISOString();
 
   let nonce: string = randomUUID();

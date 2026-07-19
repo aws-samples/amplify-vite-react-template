@@ -535,11 +535,60 @@ export async function claimWindowSlot(input: {
       id: input.claimKey,
     });
     if (existing && String(existing.expiresAt) > new Date().toISOString()) {
-      // The same attempt retrying — its claim is live; extend the hold.
-      await client.models.CapacityClaim.update({
+      const sameSlot =
+        existing.date === input.date &&
+        existing.window === input.window &&
+        existing.technicianId === input.technicianId &&
+        (existing.minutes ?? 0) === input.minutes;
+      if (sameSlot) {
+        // The same attempt retrying — its claim is live; extend the hold.
+        await client.models.CapacityClaim.update({
+          id: input.claimKey,
+          expiresAt,
+        }).catch(() => undefined);
+        return { ok: true };
+      }
+      // The SAME attempt changed its selection. The old short-circuit said
+      // "ok" while reserving NOTHING on the new slot — an oversell. Order:
+      // reserve the new slot, move the row, then give the old slot back; a
+      // crash between steps leaves only an over-hold that expiry and the
+      // nightly rebuild release.
+      const takenNew = await reserveSlot(
+        input.date,
+        input.window,
+        input.technicianId,
+        input.minutes
+      );
+      if (!takenNew.ok) return takenNew;
+      const { data: moved } = await client.models.CapacityClaim.update({
         id: input.claimKey,
+        date: input.date,
+        window: input.window,
+        technicianId: input.technicianId,
+        minutes: input.minutes,
+        address: input.address ?? undefined,
         expiresAt,
-      }).catch(() => undefined);
+        holdReason: input.holdReason,
+      }).catch(() => ({ data: null }));
+      if (!moved) {
+        await releaseSlot(
+          input.date,
+          input.window,
+          input.technicianId,
+          input.minutes
+        ).catch(() => undefined);
+        return {
+          ok: false,
+          soldOut: false,
+          message: "The slot hold could not be moved — try again.",
+        };
+      }
+      await releaseSlot(
+        String(existing.date),
+        (existing.window as CapacityWindow) ?? "MORNING",
+        existing.technicianId ?? POOL_TECH,
+        existing.minutes ?? 0
+      ).catch(() => undefined);
       return { ok: true };
     }
     if (existing) await releaseCapacityClaim(input.claimKey);
@@ -579,17 +628,19 @@ export async function claimWindowSlot(input: {
 }
 
 /** Extend a live claim (an accepted pending bank debit keeps its slot while
- *  the money settles). */
+ *  the money settles). Returns false when there was no row to extend — the
+ *  hold expired and was swept; the caller must RE-CLAIM, not assume. */
 export async function extendCapacityClaim(
   claimKey: string,
   holdMs: number
-): Promise<void> {
+): Promise<boolean> {
   const client = await dataClient();
-  if (!("CapacityClaim" in client.models)) return;
-  await client.models.CapacityClaim.update({
+  if (!("CapacityClaim" in client.models)) return false;
+  const { data } = await client.models.CapacityClaim.update({
     id: claimKey,
     expiresAt: new Date(Date.now() + holdMs).toISOString(),
-  }).catch(() => undefined);
+  }).catch(() => ({ data: null }));
+  return Boolean(data);
 }
 
 /** Release a claim: the attempt failed or was abandoned — the slot minutes
@@ -611,6 +662,60 @@ export async function releaseCapacityClaim(claimKey: string): Promise<void> {
     claim.technicianId ?? POOL_TECH,
     claim.minutes ?? 0
   );
+}
+
+/** The slot a job's minutes are HELD on — strictly from its stamps. A job
+ *  without stamps holds nothing (its creation path never reserved), so there
+ *  is nothing to release; that strictness is what makes every release
+ *  idempotent: the cancel write clears the stamps in the same update, and a
+ *  re-drive finds nothing left to give back. */
+export function jobCapacityFacts(job: {
+  scheduledDate?: string | null;
+  capacityWindow?: string | null;
+  capacityMinutes?: number | null;
+  technicianId?: string | null;
+  capacityTechnicianId?: string | null;
+}): {
+  date: string;
+  window: CapacityWindow;
+  minutes: number;
+  technicianId: string | null;
+} | null {
+  if (!job.scheduledDate) return null;
+  if (job.capacityMinutes == null || !job.capacityWindow) return null;
+  return {
+    date: job.scheduledDate,
+    window: job.capacityWindow as CapacityWindow,
+    minutes: job.capacityMinutes,
+    technicianId: job.technicianId ?? job.capacityTechnicianId ?? null,
+  };
+}
+
+/** Give a job's held slot (or pool) minutes back — the ONE release path every
+ *  cancel/unassign/sweep uses. Callers must clear the job's capacity stamps
+ *  in the same write that ends the hold, so a resumed drive cannot release
+ *  twice. */
+export async function releaseJobCapacity(job: {
+  scheduledDate?: string | null;
+  capacityWindow?: string | null;
+  capacityMinutes?: number | null;
+  technicianId?: string | null;
+  capacityTechnicianId?: string | null;
+}): Promise<void> {
+  const facts = jobCapacityFacts(job);
+  if (!facts || facts.minutes <= 0) return;
+  if (facts.technicianId && facts.technicianId !== POOL_TECH) {
+    await releaseSlot(
+      facts.date,
+      facts.window,
+      facts.technicianId,
+      facts.minutes
+    ).catch(() => undefined);
+  } else {
+    await releasePoolMinutes(facts.date, facts.window, facts.minutes).catch(
+      () => undefined
+    );
+  }
 }
 
 /** Consume a claim into a booked visit: the row goes away WITHOUT giving the
@@ -738,7 +843,12 @@ export async function stopsBySlotOn(
     );
     for (const job of page.data ?? []) {
       if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
-      if (!job.technicianId) continue;
+      const stopTechId =
+        job.technicianId ??
+        (job as { capacityTechnicianId?: string | null })
+          .capacityTechnicianId ??
+        null;
+      if (!stopTechId) continue;
       const window =
         (job.capacityWindow as CapacityWindow | null) ??
         windowOfTimeWindow(job.timeWindow);
@@ -755,7 +865,7 @@ export async function stopsBySlotOn(
             .filter(Boolean)
             .join(", ")
         : null;
-      push(slotId(date, window, job.technicianId), address);
+      push(slotId(date, window, stopTechId), address);
     }
     token = page.nextToken;
   } while (token);
@@ -823,11 +933,29 @@ export async function reconcileCapacityDay(
       { limit: 200, nextToken: token }
     );
     for (const job of page.data ?? []) {
-      if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
+      // Pending-assignment visits (UNSCHEDULED with a target date — office
+      // moves, auto-queued recurrences) stay on the POOL readout; the rebuild
+      // must not wipe what the pool notes recorded.
+      const pendingAssignment =
+        job.status === "UNSCHEDULED" && Boolean(job.scheduledDate);
+      if (
+        job.status !== "SCHEDULED" &&
+        job.status !== "IN_PROGRESS" &&
+        !pendingAssignment
+      )
+        continue;
       const window =
         (job.capacityWindow as CapacityWindow | null) ??
         windowOfTimeWindow(job.timeWindow);
-      const techId = job.technicianId ?? POOL_TECH;
+      // A paid funnel booking holds a SPECIFIC technician's window before any
+      // office assignment exists — the rebuild must keep that hold, not
+      // reclassify it to the non-blocking pool.
+      const techId = pendingAssignment
+        ? POOL_TECH
+        : (job.technicianId ??
+          (job as { capacityTechnicianId?: string | null })
+            .capacityTechnicianId ??
+          POOL_TECH);
       const key = slotId(date, window, techId);
       const { data: customer } = await client.models.Customer.get({
         id: job.customerId,

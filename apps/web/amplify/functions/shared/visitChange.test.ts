@@ -21,6 +21,7 @@ const jobs = new Map<string, Row>();
 const customers = new Map<string, Row>();
 const invoices = new Map<string, Row>();
 const plans = new Map<string, Row>();
+const obligations = new Map<string, Row>();
 const routes = new Map<string, Row>();
 const technicians = new Map<string, Row>();
 const visitEvents: Row[] = [];
@@ -73,6 +74,22 @@ const fakeDataClient = {
       get: async ({ id }: { id: string }) => ({ data: plans.get(id) ?? null }),
       // Present so a test can prove canceling a visit never calls it.
       update: vi.fn(async (patch: Row) => ({ data: patch })),
+    },
+    TreatmentObligation: {
+      create: async (input: Row) => {
+        if (obligations.has(input.id as string)) return { data: null };
+        obligations.set(input.id as string, { ...input });
+        return { data: { ...input } };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: obligations.has(id) ? { ...obligations.get(id)! } : null,
+      }),
+      update: async (input: Row) => {
+        const row = obligations.get(input.id as string);
+        if (!row) return { data: null };
+        for (const [k, v] of Object.entries(input)) if (v !== undefined) row[k] = v;
+        return { data: { ...row } };
+      },
     },
     Route: {
       get: async ({ id }: { id: string }) => ({ data: routes.get(id) ?? null }),
@@ -216,8 +233,10 @@ beforeEach(() => {
       VisitChangeClaim: visitClaims,
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
+      TreatmentObligation: obligations,
     })
   );
+  obligations.clear();
   jobs.clear();
   customers.clear();
   invoices.clear();
@@ -520,6 +539,99 @@ describe("rescheduleVisit", () => {
     expect(jobs.get("j1")).toMatchObject({ scheduledDate: newDate, routeId: "r-new" });
     expect(sendEmail).toHaveBeenCalledOnce();
     expect(visitEvents[0]).toMatchObject({ action: "RESCHEDULE", outcome: "COMPLETE" });
+  });
+
+  it("GL-17: a cross-month reschedule claims the target month and releases the prior month", async () => {
+    seedForReschedule("2026-09-10");
+    jobs.set("j1", { ...jobs.get("j1")!, scheduledDate: "2026-08-05", servicePlanId: "p1" });
+    plans.set("p1", { id: "p1", planName: "Mosquito", seasonal: true });
+    obligations.set("p1#2026-08", {
+      id: "p1#2026-08",
+      servicePlanId: "p1",
+      monthKey: "2026-08",
+      status: "SCHEDULED",
+      jobId: "j1",
+    });
+    const res = await rescheduleVisit({
+      jobId: "j1",
+      scheduledDate: "2026-09-10",
+      technicianId: "t1",
+      routeId: "r-new",
+      reason: "customer request",
+      actor: OFFICE,
+    });
+    expect(res.assignedToRoute).toBe(true);
+    expect(obligations.get("p1#2026-09")).toMatchObject({
+      status: "SCHEDULED",
+      jobId: "j1",
+    });
+    // The prior month is owed again — not stranded SCHEDULED forever.
+    expect(obligations.get("p1#2026-08")).toMatchObject({ status: "DUE" });
+  });
+
+  it("GL-17: refuses to move a seasonal visit into a month another visit already holds", async () => {
+    seedForReschedule("2026-09-10");
+    jobs.set("j1", { ...jobs.get("j1")!, scheduledDate: "2026-08-05", servicePlanId: "p1" });
+    plans.set("p1", { id: "p1", planName: "Mosquito", seasonal: true });
+    obligations.set("p1#2026-09", {
+      id: "p1#2026-09",
+      servicePlanId: "p1",
+      monthKey: "2026-09",
+      status: "SCHEDULED",
+      jobId: "OTHER-JOB",
+    });
+    await expect(
+      rescheduleVisit({
+        jobId: "j1",
+        scheduledDate: "2026-09-10",
+        technicianId: "t1",
+        routeId: "r-new",
+        reason: "customer request",
+        actor: OFFICE,
+      })
+    ).rejects.toThrow(/already has its 2026-09 visit/);
+    // Nothing moved, and the holder kept its month.
+    expect(jobs.get("j1")).toMatchObject({ scheduledDate: "2026-08-05" });
+    expect(obligations.get("p1#2026-09")).toMatchObject({ jobId: "OTHER-JOB" });
+  });
+
+  it("GL-17: refuses an off-season date for a seasonal plan", async () => {
+    seedForReschedule("2026-11-10");
+    jobs.set("j1", { ...jobs.get("j1")!, scheduledDate: "2026-08-05", servicePlanId: "p1" });
+    plans.set("p1", { id: "p1", planName: "Mosquito", seasonal: true });
+    await expect(
+      rescheduleVisit({
+        jobId: "j1",
+        scheduledDate: "2026-11-10",
+        technicianId: "t1",
+        routeId: "r-new",
+        reason: "customer request",
+        actor: OFFICE,
+      })
+    ).rejects.toThrow(/April–October/);
+    expect(jobs.get("j1")).toMatchObject({ scheduledDate: "2026-08-05" });
+  });
+
+  it("GL-17: a month claimed for a move that fails validation is rolled back", async () => {
+    seedForReschedule("2026-09-10");
+    jobs.set("j1", { ...jobs.get("j1")!, scheduledDate: "2026-08-05", servicePlanId: "p1" });
+    plans.set("p1", { id: "p1", planName: "Mosquito", seasonal: true });
+    // The route belongs to a DIFFERENT technician — validation fails AFTER
+    // the month claim is taken.
+    routes.set("r-new", { id: "r-new", technicianId: "someone-else", date: "2026-09-10" });
+    await expect(
+      rescheduleVisit({
+        jobId: "j1",
+        scheduledDate: "2026-09-10",
+        technicianId: "t1",
+        routeId: "r-new",
+        reason: "customer request",
+        actor: OFFICE,
+      })
+    ).rejects.toThrow(/doesn't belong/);
+    // The claimed target month was rolled back — not stranded on j1.
+    const sept = obligations.get("p1#2026-09");
+    expect(sept?.jobId ?? null).not.toBe("j1");
   });
 
   it("refuses a route whose technician's license is expired for the new date", async () => {

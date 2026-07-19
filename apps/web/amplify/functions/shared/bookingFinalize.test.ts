@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
+import { capacityFixtureModels } from "./capacityTestFixture";
 
 /**
  * Lead conversion at booking finalization.
@@ -77,6 +79,12 @@ function statefulModel(name: keyof typeof store, created?: Row[]) {
       return { data: row };
     },
     get: async ({ id }: { id: string }) => ({ data: store[name].get(id) ?? null }),
+    update: async (patch: Row) => {
+      const row = store[name].get(patch.id as string);
+      if (!row) return { data: null, errors: [{ message: "no row" }] };
+      for (const [k, v] of Object.entries(patch)) if (v !== undefined) row[k] = v;
+      return { data: { ...row } };
+    },
     delete: async ({ id }: { id: string }) => {
       store[name].delete(id);
       return { data: null };
@@ -160,6 +168,34 @@ const fakeDataClient = {
     Agreement: statefulModel("Agreement"),
   },
 };
+// GL-04: real capacity models for the expired-hold fallback tests.
+const capacityFixture = capacityFixtureModels();
+Object.assign(fakeDataClient.models, capacityFixture.models, {
+  Technician: {
+    list: async () => ({
+      data: [
+        {
+          id: "t1",
+          name: "Sam",
+          active: true,
+          baseStreet: "5 Base Rd",
+          baseCity: "Ware",
+          baseState: "MA",
+          baseZip: "01082",
+        },
+      ],
+      nextToken: null,
+    }),
+  },
+});
+(fakeDataClient.models.Job as Record<string, unknown>).listJobByScheduledDate =
+  async ({ scheduledDate }: { scheduledDate: string }) => ({
+    data: [...store.Job.values()].filter(
+      (j) => j.scheduledDate === scheduledDate
+    ),
+    nextToken: null,
+  });
+
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 vi.mock("./email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
@@ -290,6 +326,8 @@ beforeEach(() => {
   portalLinkSent = true;
   workOpened.length = 0;
   workResolved.length = 0;
+  capacityFixture.maps.capacityDays.clear();
+  capacityFixture.maps.capacityClaims.clear();
   store.ServicePlan.clear();
   store.Job.clear();
   store.Invoice.clear();
@@ -1101,5 +1139,66 @@ describe("GL-05 — finalization is idempotent and resumable under failure", () 
     // The booking itself was not touched.
     expect(booking.status).toBe("QUOTED");
     expect(customersCreated).toHaveLength(0);
+  });
+});
+
+describe("GL-04: a payment landing after the slot hold expired never books a visit that holds nothing", () => {
+  const slotKey = "2026-07-22#MORNING#t1";
+  beforeEach(() => {
+    _setLockStoreForTests(
+      memoryLockStore({
+        CapacityDay: capacityFixture.maps.capacityDays,
+        CapacityClaim: capacityFixture.maps.capacityClaims,
+      })
+    );
+    booking.capacityTechnicianId = "t1";
+    booking.capacityMinutes = 60;
+    // NO CapacityClaim row exists — the 45-minute hold expired and the sweep
+    // released it before the payment was reported.
+  });
+
+  it("re-reserves the booking's stamped slot when it still fits, and stamps the job with the hold", async () => {
+    capacityFixture.maps.capacityDays.set(slotKey, {
+      id: slotKey,
+      date: "2026-07-22",
+      window: "MORNING",
+      technicianId: "t1",
+      committedMinutes: 0,
+    });
+    await finalize();
+    expect(booking.status).toBe("BOOKED");
+    expect(
+      capacityFixture.maps.capacityDays.get(slotKey)!.committedMinutes
+    ).toBe(60);
+    const job = [...store.Job.values()][0];
+    expect(job).toMatchObject({
+      capacityWindow: "MORNING",
+      capacityMinutes: 60,
+      capacityTechnicianId: "t1",
+    });
+  });
+
+  it("a slot that meanwhile SOLD OUT books onto the pool ledger and opens an owned re-place case", async () => {
+    capacityFixture.maps.capacityDays.set(slotKey, {
+      id: slotKey,
+      date: "2026-07-22",
+      window: "MORNING",
+      technicianId: "t1",
+      committedMinutes: 240, // full — someone else bought the window
+    });
+    await finalize();
+    expect(booking.status).toBe("BOOKED"); // the money is real either way
+    // The sold-out slot was NOT force-oversold.
+    expect(
+      capacityFixture.maps.capacityDays.get(slotKey)!.committedMinutes
+    ).toBe(240);
+    const job = [...store.Job.values()][0];
+    expect(job).toMatchObject({ capacityWindow: "MORNING" });
+    expect(job.capacityTechnicianId ?? null).toBeNull(); // pool, not a lie
+    expect(
+      workOpened.some(
+        (w) => (w as Record<string, unknown>).kind === "UNSTAFFED_VISIT"
+      )
+    ).toBe(true);
   });
 });

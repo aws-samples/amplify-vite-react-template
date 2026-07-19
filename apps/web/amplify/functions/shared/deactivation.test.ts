@@ -110,16 +110,24 @@ const fakeDataClient = {
         }
         return { data: { ...row } };
       },
-      listCustomerLifecycleCommandByCustomerIdAndRequestedAt: async ({
-        customerId,
-      }: {
-        customerId: string;
-      }) => ({
-        data: [...lifecycleCommands.values()].filter(
-          (c) => c.customerId === customerId
-        ),
-        nextToken: null,
-      }),
+      // Real index semantics: requestedAt ASCENDING, limit honored, nextToken
+      // pages — the single-page scan bug hid the NEWEST open command exactly
+      // this way, so the fake must be able to reproduce it.
+      listCustomerLifecycleCommandByCustomerIdAndRequestedAt: async (
+        { customerId }: { customerId: string },
+        opts?: { limit?: number; nextToken?: string | null }
+      ) => {
+        const all = [...lifecycleCommands.values()]
+          .filter((c) => c.customerId === customerId)
+          .sort((a, b) =>
+            String(a.requestedAt ?? "").localeCompare(String(b.requestedAt ?? ""))
+          );
+        const start = opts?.nextToken ? Number(opts.nextToken) : 0;
+        const limit = opts?.limit ?? all.length;
+        const page = all.slice(start, start + limit);
+        const next = start + limit < all.length ? String(start + limit) : null;
+        return { data: page, nextToken: next };
+      },
     },
     CustomerLifecycleClaim: {
       get: async ({ id }: { id: string }) => ({ data: claims.get(id) ?? null }),
@@ -529,6 +537,36 @@ describe("GL-09 serialization — adversarial", () => {
     expect(out.status).toBe("ACTIVE");
     expect(out.message).toMatch(/unfinished|in progress/i);
     // No provider effect ran.
+    expect(cancelPlanBilling).not.toHaveBeenCalled();
+  });
+
+  it("a PARTIAL hidden beyond the first index page still blocks a different-key transition", async () => {
+    // 60 settled rows FIRST (ascending requestedAt puts them on page one of a
+    // limit-50 read), then the open PARTIAL as the newest row — the exact
+    // state the unpaginated scan used to wave through.
+    for (let i = 0; i < 60; i++) {
+      const ts = new Date(Date.now() - (100 - i) * 60_000).toISOString();
+      lifecycleCommands.set(`settled-${i}`, {
+        id: `settled-${i}`,
+        customerId: "c1",
+        action: "DEACTIVATE",
+        stage: "COMPLETE",
+        requestedAt: ts,
+      });
+    }
+    lifecycleCommands.set("newest-partial", {
+      id: "newest-partial",
+      customerId: "c1",
+      action: "DEACTIVATE",
+      stage: "PARTIAL",
+      requestedAt: new Date().toISOString(),
+    });
+    const out = await deactivateCustomer(stripe, "c1", actor, {
+      ...opts(),
+      idempotencyKey: "fresh-key-2",
+    });
+    expect(out.partial).toBe(true);
+    expect(out.status).toBe("ACTIVE");
     expect(cancelPlanBilling).not.toHaveBeenCalled();
   });
 

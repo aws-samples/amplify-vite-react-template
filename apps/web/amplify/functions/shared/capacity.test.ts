@@ -76,10 +76,12 @@ const {
   claimWindowSlot,
   consumeCapacityClaim,
   dayEligibility,
+  extendCapacityClaim,
   makeLegResolver,
   onsiteMinutes,
   reconcileCapacityDay,
   releaseCapacityClaim,
+  releaseJobCapacity,
   reserveSlot,
   slotId,
   slotStates,
@@ -307,6 +309,135 @@ describe("per-window atomicity — two buyers, one slot", () => {
     expect(
       capacityDays.get(slotId(WED, "AFTERNOON", "t1"))!.committedMinutes
     ).toBe(75);
+  });
+});
+
+describe("claim moves + strict releases — adversarial", () => {
+  const seedSlot = (window: string, tech: string, committed = 0) => {
+    capacityDays.set(slotId(WED, window as never, tech), {
+      id: slotId(WED, window as never, tech),
+      date: WED,
+      window,
+      technicianId: tech,
+      committedMinutes: committed,
+    });
+  };
+
+  it("a same-key claim with a CHANGED slot moves the reservation — never ok-with-nothing-held", async () => {
+    seedSlot("MORNING", "t1");
+    seedSlot("AFTERNOON", "t2");
+    const first = await claimWindowSlot({
+      claimKey: "bk-1",
+      date: WED,
+      window: "MORNING",
+      technicianId: "t1",
+      minutes: 60,
+    });
+    expect(first.ok).toBe(true);
+    // The customer switches selection under the SAME booking id.
+    const moved = await claimWindowSlot({
+      claimKey: "bk-1",
+      date: WED,
+      window: "AFTERNOON",
+      technicianId: "t2",
+      minutes: 90,
+    });
+    expect(moved.ok).toBe(true);
+    // Old slot released, new slot held, row carries the NEW facts.
+    expect(capacityDays.get(slotId(WED, "MORNING", "t1"))!.committedMinutes).toBe(0);
+    expect(capacityDays.get(slotId(WED, "AFTERNOON", "t2"))!.committedMinutes).toBe(90);
+    expect(capacityClaims.get("bk-1")).toMatchObject({
+      window: "AFTERNOON",
+      technicianId: "t2",
+      minutes: 90,
+    });
+  });
+
+  it("a same-key move into a FULL slot refuses and keeps the original hold intact", async () => {
+    seedSlot("MORNING", "t1");
+    seedSlot("AFTERNOON", "t2", WINDOW_MINUTES.AFTERNOON);
+    await claimWindowSlot({
+      claimKey: "bk-1",
+      date: WED,
+      window: "MORNING",
+      technicianId: "t1",
+      minutes: 60,
+    });
+    const moved = await claimWindowSlot({
+      claimKey: "bk-1",
+      date: WED,
+      window: "AFTERNOON",
+      technicianId: "t2",
+      minutes: 90,
+    });
+    expect(moved.ok).toBe(false);
+    expect(capacityDays.get(slotId(WED, "MORNING", "t1"))!.committedMinutes).toBe(60);
+    expect(capacityClaims.get("bk-1")).toMatchObject({
+      window: "MORNING",
+      technicianId: "t1",
+    });
+  });
+
+  it("extending a swept (missing) claim reports false — the caller must re-claim", async () => {
+    expect(await extendCapacityClaim("gone-key", 60_000)).toBe(false);
+    seedSlot("MORNING", "t1");
+    await claimWindowSlot({
+      claimKey: "bk-live",
+      date: WED,
+      window: "MORNING",
+      technicianId: "t1",
+      minutes: 30,
+    });
+    expect(await extendCapacityClaim("bk-live", 60_000)).toBe(true);
+  });
+
+  it("releaseJobCapacity releases ONLY stamped facts — an unstamped job gives nothing back", async () => {
+    seedSlot("MORNING", "t1", 120);
+    // Unstamped (legacy) job: nothing to release, ledger untouched.
+    await releaseJobCapacity({
+      scheduledDate: WED,
+      technicianId: "t1",
+    });
+    expect(capacityDays.get(slotId(WED, "MORNING", "t1"))!.committedMinutes).toBe(120);
+    // A funnel-held job (capacityTechnicianId, NO office assignment) releases
+    // the TECHNICIAN slot its checkout reserved.
+    await releaseJobCapacity({
+      scheduledDate: WED,
+      capacityWindow: "MORNING",
+      capacityMinutes: 45,
+      technicianId: null,
+      capacityTechnicianId: "t1",
+    });
+    expect(capacityDays.get(slotId(WED, "MORNING", "t1"))!.committedMinutes).toBe(75);
+  });
+
+  it("the nightly rebuild KEEPS a paid unassigned funnel booking on its held technician slot", async () => {
+    jobs.set("j-funnel", {
+      id: "j-funnel",
+      customerId: "c1",
+      status: "SCHEDULED",
+      scheduledDate: WED,
+      timeWindow: "MORNING",
+      capacityWindow: "MORNING",
+      capacityMinutes: 60,
+      capacityTechnicianId: "t1",
+      technicianId: null,
+      propertyClass: "RESIDENTIAL",
+    });
+    customers.set("c1", {
+      id: "c1",
+      serviceStreet: "9 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
+    await reconcileCapacityDay(WED, "key");
+    const slot = capacityDays.get(slotId(WED, "MORNING", "t1"));
+    // base → stop (15) + onsite 30 + stop → base (15) = 60, on tech t1 — NOT
+    // reclassified to the non-blocking pool.
+    expect(slot).toBeTruthy();
+    expect(slot!.committedMinutes).toBe(60);
+    expect(capacityDays.get(slotId(WED, "MORNING", "POOL"))?.committedMinutes ?? 0).toBe(0);
   });
 });
 
