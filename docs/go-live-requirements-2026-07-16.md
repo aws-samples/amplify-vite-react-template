@@ -2,8 +2,8 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 7 commits after `f70e621`, from `3717092` through `580d71c`; newest
-implementation commit `580d71c`
+**Latest commit review:** 9 commits after `f70e621`, from `3717092` through `5c8c6ef`; newest
+implementation commit `5c8c6ef`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
@@ -172,7 +172,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-13 | Policy-vocabulary approvals — engineering closed (`27ca1fb`) | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **12% — Very low (approvals only)** |
 | P0 | GL-15 | Compliance sign-off of encoded rules — engineering closed (`bbcf0c3`) | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **15% — Very low (sign-off + SES wiring)** |
 | P0 | GL-17 | Mosquito sale-path decision — engineering closed (`580d71c`) | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **20% — Low (product decision + ratification)** |
-| P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched | **74% — High** |
+| P0 | GL-12 | Copy/vocabulary approvals — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (approvals + backfill)** |
 | P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **72% — High** |
 | P0 | GL-09 | Finish failure-safe customer lifecycle transitions | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **66% — Medium** |
 | P0 | GL-08 | Finish exact, terminal customer plan cancellation | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **76% — High** |
@@ -327,21 +327,31 @@ application date, so later changes never rewrite authorship. No state-by-service
 **Business outcome:** A technician is dispatched only with the service-specific facts and approved scope
 needed to complete the visit safely, and can exit an unperformable visit without inventing a workaround.
 
+**Engineering closed (commit `5c8c6ef`):** the dispatch gate proves a routable MA/RI address (placeholder
+tokens refused, the exact office fix named) and an explicit property classification carrying the locked
+30/60-minute durations, and attaches the same Google Routes result capacity uses to the assignment
+decision; a day-before sweep opens owned DISPATCH_NOT_READY work with a verified re-check close. The
+field packet carries prior treatment findings from finalized reports, the visit's rebook/callback
+lineage, and the on-site duration. **Scope does not match** and **required prep missing** are dedicated
+one-tap terminal outcomes that never start or complete service, free capacity, preserve the money
+facts, open owned Operations cases, and send the approved customer next step (one-business-day promise,
+missing-contact fallback); rebooking creates a new linked visit and auto-resolves the case. Every
+post-assignment packet change is versioned with an immutable change record, is brought to the assigned
+technician's attention (Start blocks until the new version is acknowledged, by their own identity
+only), and a material change after service starts requires a recorded manager reason with mid-visit
+technician notification.
+
 **Remaining requirements:**
 
-- **Readiness is still free-text based.** The dispatch gate only checks that address fields are non-blank;
-  it does not prove a routable MA/RI address or enforce the catalog's 30-minute residential and 60-minute
-  commercial/community/common-area duration; required prep and instructions; current-license
-  requirement; and product/constraint minimums. Nonblank placeholders must not count as a valid address or
-  complete packet, and the same Google Routes result used for capacity must be attached to the decision.
-- The field packet must include the service's approved product/scope constraints and relevant prior
-  treatment findings and callback lineage — not only the status of earlier visits.
-- **Scope does not match** and **required prep missing** must be dedicated one-tap field outcomes that do
-  not falsely start or complete service, open an owned Operations case, preserve the capacity and money
-  facts, and send the approved customer next step. None exist today.
-- Any safety/access/scope/prep change after assignment is versioned and brought to the assigned
-  technician's attention; after service starts, a material change requires an audited manager action and
-  technician acknowledgement. No packet versioning or acknowledgement exists today.
+- Head of Operations / CEO approve the launch wording of the scope-mismatch and prep-missing customer
+  next-step emails (draft copy is live), the controlled reason vocabularies, and which office roles
+  count as "manager" for post-start packet changes (today: any office user, with the reason recorded).
+- Existing SCHEDULED visits created before this commit carry no property classification; the day-before
+  sweep flags each as DISPATCH_NOT_READY until the office sets it (a deliberate visible backfill, not a
+  silent default). Compliance signs the dispatch rule as a whole.
+- Approved per-service product/scope constraint sets ride on the GL-15 label rules and the GL-01
+  catalog; the packet shows what was sold plus the catalog constraints once GL-01 lands the single
+  catalog.
 
 **Pass owner:** Head of Operations, with Compliance sign-off.
 
