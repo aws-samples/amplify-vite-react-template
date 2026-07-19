@@ -2,14 +2,14 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 14 commits after `f70e621`, from `3717092` through `d546c10`; newest
-implementation commit `d546c10`
+**Latest commit review:** 16 commits after `f70e621`, from `3717092` through `2556438`; newest
+implementation commit `2556438`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 119 business requirements**, ordered by launch priority and expected impact
+**Remaining:** **23 gates / 115 business requirements**, ordered by launch priority and expected impact
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **50.5%**
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **47.7%**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
@@ -185,7 +185,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-12 | Copy/vocabulary approvals — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (approvals + backfill)** |
 | P0 | GL-05 | Copy sign-off + policy definitions — engineering closed (`cc76773`) | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (sign-offs)** |
 | P0 | GL-09 | Lifecycle policy sign-off + history export — engineering closed (`82f5fbf`) | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **10% — Very low (sign-off; export rides GL-19)** |
-| P0 | GL-08 | Finish exact, terminal customer plan cancellation | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **76% — High** |
+| P0 | GL-08 | 72-hour copy + refund-workflow sign-off — engineering closed (`2556438`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
 | P0 | GL-07 | Finish terminal office cancel/reschedule | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **74% — High** |
 | P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **72% — High** |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **82% — High** |
@@ -369,66 +369,35 @@ notice keeps the command PARTIAL. Remaining items are non-software plus one expo
 **Pass owner:** Head of Operations; Finance and CEO approve protected fields, transition policy, and
 recovery policy.
 
-### GL-08 — Finish exact, terminal customer plan cancellation
+### GL-08 — Exact, terminal customer plan cancellation
 
 **Business outcome:** A customer's online cancellation is a durable instruction, and every customer
 message matches the actual billing, plan, schedule, and delivery state.
 
-**Why this is still a gate:** The `d546c10` remediation made the command exclusively held — stale
-reclaim is one atomic takeover, every initial action and resume conditionally acquires the lease, its
-writes are fenced, and the browser can no longer raw-delete it. What remains is the phase model and the
-truth of settlement: the command records no completed phases and is deleted after the provider/CRM
-cancel even when visits, a full refund, or the final notice remain unresolved. If a process stops after
-the plan becomes CANCELED but before schedule or notice work finishes, every later resume bypasses
-those steps; the sweep reports the command complete even while leaving it stuck and may never open a
-case.
-
-The new settlement check can also report green too early. It trusts CRM status without confirming the
-subscription is inactive at the provider, treats any nonzero refund as settling a full late charge, and
-does not require a paid/in-progress visit decision or the promised final notice. Late-charge detection
-uses when an invoice was created rather than when payment actually posted, so an invoice created before
-the request but charged afterward receives an ordinary receipt and no refund case. If the mutable plan's
-request-time write failed, the webhook ignores the durable command's timestamp. A customer can be told a
-refund is coming before the recovery case is confirmed, and failure to create that case is swallowed.
-The preview also overstates an outstanding balance after partial refunds, while centralized policy copy
-still conflicts with the approved rule that cancellation is immediate, future recurring billing stops,
-and each affected visit independently receives the 72-hour money outcome.
+**Status:** engineering closed (`2556438`, on the `d546c10` exclusive-lease remediation). The command
+owns the request through phases to a PERSISTED terminal (the row is the readable outcome, never
+deleted); a CANCELED-but-unsettled plan is repaired — residual visits swept, the confirmation re-sent
+or adopted from the per-plan outbox, settlement re-proved — never short-circuited, from both entry
+points, the resume, and the (now truthfully-counting) daily sweep. Settled is proved against BOTH
+Stripe and CRM (provider subscription actually canceled, fail closed when unverifiable), every late
+charge must be refunded IN FULL, the late-charge window is judged by payment time with the durable
+command's requestedAt fallback, and no refund is promised before the Finance case that guarantees it
+durably exists. Every future visit cancels immediately with the server-calculated 72-hour money
+outcome (>72h: full original-method refund via a Finance case that PRESCRIBES the exact amount; ≤72h:
+no refund, named to the customer; in-flight payments get their own prescribed case) — no keep-or-refund
+choice and no account credit anywhere in preview, email, message, or office alert; balances are net of
+refunds. The public /cancel link routes through the same durable command.
 
 **Remaining requirements:**
 
-- One cancellation command owns the accepted request and every phase through **terminal** completion:
-  provider stop, CRM state, each visit, every post-request charge/refund, final customer delivery, and
-  immutable outcome. (The exclusive lease, atomic stale recovery, and no-raw-delete are done —
-  `d546c10`.) The command cannot be marked complete while any phase or confirmed recovery owner is
-  missing.
-- Resume from the last confirmed phase after every process stop. A plan already marked CANCELED must still
-  repair unread/failed schedule work, paid and in-progress decisions, refund work, and final notice rather
-  than short-circuiting. Failure to write the pending flag, command progress, or recovery case remains
-  discoverable from the accepted request, and the recovery cadence and escalation meet the approved
-  customer promise rather than depending on a once-daily log-only pass.
-- **Settled** is proved against both Stripe and CRM: the provider subscription is inactive, CRM plan state
-  agrees, and every future recurring charge is stopped. Each scheduled visit is evaluated from the first
-  accepted cancellation time: strictly more than 72 hours away receives a full original-method refund,
-  while exactly 72 hours or less receives no refund. Detection uses payment time and the durable request
-  when the plan timestamp is absent; every affected invoice and pending bank debit remains visible until
-  its exact refund, canceled-payment, failed-payment, or approved no-refund outcome is confirmed once.
-  Partial refunds remain open, and no refund promise is sent unless the command or Finance case that
-  guarantees it is durably confirmed.
-- Every unpaid, prepaid, pending-bank, and in-progress visit reaches the server-calculated 72-hour
-  disposition with an Operations owner, one-business-day response deadline, schedule readback, and
-  customer contact. Cancellation takes effect immediately even when money recovery continues; no save
-  offer, provider delay, or exception postpones it. The command remains open until the exact refunds or
-  no-refund outcomes and cancellation notice reach terminal outcomes. **Resume cancellation** repairs
-  each residual; an unpaid schedule failure cannot be mislabeled as a paid-money case (**GL-18**).
-- Customer, employee, and leadership views use the persisted terminal result. Outstanding balance is net
-  of refunds; pending and success distinguish provider stop, schedule work, refunds, and message
-  delivery; provider acceptance is not called customer delivery; and the immutable history retains who
-  requested the cancellation, when, every provider/money/service effect, notices, and final resolution
-  (**GL-03** and **GL-19**).
-- Accepted terms, preview, pending state, staff recovery, reconciliation, and every customer notice enforce
-  and version the approved policy: cancellation is immediate; future recurring billing stops immediately;
-  each visit receives the non-overridable 72-hour refund/no-refund result; no account credit exists; and
-  every resulting Office item receives the common one-business-day response commitment.
+- CEO/Finance/Operations sign off the changed customer-facing copy and workflow now live: the per-visit
+  72-hour outcomes in the preview, confirmation email, and success message (this replaces the previous
+  "keep it or refund it, your choice" promise for paid visits), and the prescribed-full-refund Finance
+  case flow (Finance issues the exact refund; no discretionary disposition).
+- Leadership's cancellation history/reconciliation view rides GL-19; the persisted command rows,
+  owned cases, and per-plan email log are the durable inputs it reads.
+- The `PAID_VISIT_CANCELLATION` manual close reason "Account credit applied" must be removed with
+  GL-18's close-reason pass (no credit ledger exists; the disposition contradicts the locked rule).
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
 
