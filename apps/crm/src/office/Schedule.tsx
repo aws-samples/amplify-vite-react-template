@@ -484,13 +484,22 @@ function AvailabilityPanel({
   date: string;
   techs: Technician[];
 }) {
+  type WindowFacts = {
+    window: string;
+    technicians: {
+      technicianId: string;
+      technicianName: string;
+      committedMinutes: number;
+      windowMinutes: number;
+      verified: boolean;
+    }[];
+    poolMinutes: number;
+    sellable: boolean;
+  };
   type DayFacts = {
-    capMinutes: number;
     eligibleTechs: number;
-    committedMinutes: number;
-    scheduledVisits: number;
+    windows: WindowFacts[];
     liveCheckoutClaims: number;
-    remainingMinutes: number;
     sellable: boolean;
     reasons: string[];
   };
@@ -576,17 +585,34 @@ function AvailabilityPanel({
           <p>
             <strong>{facts.sellable ? "Sellable" : "NOT sellable"}.</strong>{" "}
             {facts.eligibleTechs} eligible technician
-            {facts.eligibleTechs === 1 ? "" : "s"} ·{" "}
-            {facts.committedMinutes} of {facts.capMinutes} minutes committed (
-            {facts.scheduledVisits} visit
-            {facts.scheduledVisits === 1 ? "" : "s"}
+            {facts.eligibleTechs === 1 ? "" : "s"}
             {facts.liveCheckoutClaims
-              ? `, ${facts.liveCheckoutClaims} live checkout hold${
+              ? ` · ${facts.liveCheckoutClaims} live checkout hold${
                   facts.liveCheckoutClaims === 1 ? "" : "s"
                 }`
               : ""}
-            ) · {facts.remainingMinutes} minutes left.
+            .
           </p>
+          {facts.windows.map((w) => (
+            <p key={w.window} className="small">
+              <strong>
+                {w.window === "MORNING" ? "Morning (8–12)" : "Afternoon (12–5)"}:
+              </strong>{" "}
+              {w.technicians.length === 0
+                ? "no eligible technician"
+                : w.technicians
+                    .map(
+                      (t) =>
+                        `${t.technicianName} ${t.committedMinutes}/${t.windowMinutes} min${
+                          t.verified ? "" : " (UNVERIFIED — sells nothing until the nightly Routes check passes)"
+                        }`
+                    )
+                    .join(" · ")}
+              {w.poolMinutes
+                ? ` · pool (awaiting assignment): ${w.poolMinutes} min`
+                : ""}
+            </p>
+          ))}
           {facts.reasons.length ? (
             <ul className="muted small">
               {facts.reasons.map((r, i) => (
@@ -916,6 +942,20 @@ function TechForm({
   const [licenseExpiresOn, setLicenseExpiresOn] = useState(
     existing?.licenseExpiresOn ?? ""
   );
+  // GL-04: the technician's PRIVATE travel base (office-only; the field app
+  // never sees it). Empty = routes from HQ.
+  const [baseStreet, setBaseStreet] = useState(
+    (existing as { baseStreet?: string | null } | null | undefined)?.baseStreet ?? ""
+  );
+  const [baseCity, setBaseCity] = useState(
+    (existing as { baseCity?: string | null } | null | undefined)?.baseCity ?? ""
+  );
+  const [baseState, setBaseState] = useState(
+    (existing as { baseState?: string | null } | null | undefined)?.baseState ?? ""
+  );
+  const [baseZip, setBaseZip] = useState(
+    (existing as { baseZip?: string | null } | null | undefined)?.baseZip ?? ""
+  );
   const [invite, setInvite] = useState(!existing);
   // A technician saved on an earlier attempt whose invite then failed — reused
   // on retry so every attempt doesn't leave another Technician record behind.
@@ -1022,6 +1062,35 @@ function TechForm({
           />
         </Field>
       </div>
+      <Field
+        label="Travel base (private)"
+        hint="Where their day starts and ends — drives capacity and routing. Office-only; blank = HQ."
+      >
+        <div className="form-row-2">
+          <input
+            placeholder="Street"
+            value={baseStreet}
+            onChange={(e) => setBaseStreet(e.target.value)}
+          />
+          <input
+            placeholder="City"
+            value={baseCity}
+            onChange={(e) => setBaseCity(e.target.value)}
+          />
+        </div>
+        <div className="form-row-2">
+          <input
+            placeholder="State (MA/RI)"
+            value={baseState}
+            onChange={(e) => setBaseState(e.target.value)}
+          />
+          <input
+            placeholder="ZIP"
+            value={baseZip}
+            onChange={(e) => setBaseZip(e.target.value)}
+          />
+        </div>
+      </Field>
       {!existing ? (
         roles.owner ? (
           <label className="row-split" style={{ fontSize: 14 }}>
@@ -1071,6 +1140,10 @@ function TechForm({
                   active: true,
                   licenseNumber: licenseNumber.trim(),
                   licenseExpiresOn,
+                  baseStreet: baseStreet.trim() || undefined,
+                  baseCity: baseCity.trim() || undefined,
+                  baseState: baseState.trim() || undefined,
+                  baseZip: baseZip.trim() || undefined,
                 })
               );
               await onDone();
@@ -1089,6 +1162,10 @@ function TechForm({
                   active: true,
                   licenseNumber: licenseNumber.trim(),
                   licenseExpiresOn,
+                  baseStreet: baseStreet.trim() || undefined,
+                  baseCity: baseCity.trim() || undefined,
+                  baseState: baseState.trim() || undefined,
+                  baseZip: baseZip.trim() || undefined,
                 })
               );
             } else {
@@ -1100,6 +1177,10 @@ function TechForm({
                   active: true,
                   licenseNumber: licenseNumber.trim(),
                   licenseExpiresOn,
+                  baseStreet: baseStreet.trim() || undefined,
+                  baseCity: baseCity.trim() || undefined,
+                  baseState: baseState.trim() || undefined,
+                  baseZip: baseZip.trim() || undefined,
                 })
               );
               technicianId = saved?.technicianId ?? null;
