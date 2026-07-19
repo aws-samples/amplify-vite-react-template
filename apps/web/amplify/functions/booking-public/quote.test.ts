@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
+import { capacityFixtureModels } from "../shared/capacityTestFixture";
 import {
   BOOKING_TERMS_TEXT,
   BOOKING_TERMS_VERSION,
@@ -39,6 +41,8 @@ const pricingRuns: Record<string, unknown>[] = [];
 /** Scheduled stops returned for EVERY day — 8 fills a one-tech schedule. */
 let stopsEveryDay: { customerId: string; serviceType: string; status: string }[] =
   [];
+
+const capacityFixture = capacityFixtureModels();
 
 const fakeDataClient = {
   models: {
@@ -106,6 +110,7 @@ const fakeDataClient = {
 let customersByLinkToken: Record<string, { id: string } | { id: string }[]> =
   {};
 const leadLookups: string[] = [];
+Object.assign(fakeDataClient.models, capacityFixture.models);
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
 // R80: the two quote-path lead alerts (ops-booking-contact, ops-booking-rate-
@@ -247,6 +252,16 @@ const rodentInput = {
 };
 
 beforeEach(() => {
+  capacityFixture.maps.capacityDays.clear();
+  capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.closures.clear();
+  capacityFixture.maps.exceptions.clear();
+  _setLockStoreForTests(
+    memoryLockStore({
+      CapacityDay: capacityFixture.maps.capacityDays,
+      CapacityClaim: capacityFixture.maps.capacityClaims,
+    })
+  );
   bookings.length = 0;
   pricingRuns.length = 0;
   leadEmails.length = 0;
@@ -869,11 +884,20 @@ describe("the only surviving CONTACT outcomes", () => {
   });
 
   it("a fully-booked month falls to the callback path", async () => {
-    stopsEveryDay = Array.from({ length: 8 }, (_, i) => ({
-      customerId: `c${i}`,
-      serviceType: "GENERAL_PEST",
-      status: "SCHEDULED",
-    }));
+    // GL-04: "fully booked" means every technician-window LEDGER holds its
+    // minutes — fill t1's slots for every weekday in the sellable window.
+    for (let i = 1; i <= 40; i++) {
+      const d = new Date(Date.now() + i * 86_400_000).toISOString().slice(0, 10);
+      for (const w of ["MORNING", "AFTERNOON"] as const) {
+        capacityFixture.maps.capacityDays.set(`${d}#${w}#t1`, {
+          id: `${d}#${w}#t1`,
+          date: d,
+          window: w,
+          technicianId: "t1",
+          committedMinutes: w === "MORNING" ? 240 : 300,
+        });
+      }
+    }
 
     const res = await postQuote(rodentInput);
 

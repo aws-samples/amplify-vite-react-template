@@ -180,6 +180,37 @@ export async function deactivateCustomer(
   if (!commandClaim.claimed) {
     await releaseLifecycleClaim(customerId, claimHandle.holder);
     const c = commandClaim.command;
+    if (commandClaim.state === "UNVERIFIED") {
+      // FAIL CLOSED (GL-09): the command store or the open-command scan could
+      // not be verified — no provider effect may run, and the refusal itself
+      // is OWNED so it can't dissolve into a retry loop nobody sees.
+      await openOwnedWork({
+        kind: "LIFECYCLE_RECOVERY",
+        dedupeKey: `lifecycle-cmd-store:${customerId}`,
+        title: `A deactivation was refused — lifecycle commands unverifiable: ${customer.displayName}`,
+        detail: `Deactivating ${customer.displayName} was refused BEFORE any change: ${c.lastError ?? "the lifecycle command store could not be read"}. Nothing was changed.`,
+        customerId,
+        relatedId: customerId,
+        sourceUrl: `/customers/${customerId}`,
+        resolutionAction:
+          "Retry the deactivation once reads recover — it is idempotent and nothing has been changed yet.",
+        ownerTeam: "OPS",
+      }).catch(() => undefined);
+      return {
+        plansCanceled: 0,
+        visitsResolved: 0,
+        jobsCanceled: 0,
+        outstandingBalanceCents: 0,
+        portalUserSub: customer.portalUserSub ?? null,
+        portalRevoked: false,
+        status: priorStatus,
+        partial: true,
+        alreadyInactive: false,
+        audited: false,
+        message:
+          "Nothing was changed: open lifecycle commands could not be verified right now. The refusal is owned — retry in a moment.",
+      };
+    }
     if (commandClaim.state === "DONE") {
       return {
         plansCanceled: 0,
@@ -254,6 +285,47 @@ export async function deactivateCustomer(
     // on the command BEFORE any provider effect — the resume and the employee
     // preview both read the same facts.
     const inventory = await buildLifecycleInventory(customerId);
+    if (inventory.readFailures.length > 0) {
+      // FAIL CLOSED (GL-09): an incomplete inventory means the transition
+      // would act on records it couldn't see. STOP before any provider
+      // effect, own the recovery, and leave the command resumable.
+      const caseId = await openOwnedWork({
+        kind: "LIFECYCLE_RECOVERY",
+        dedupeKey: `lifecycle-inventory:${customerId}`,
+        title: `A deactivation stopped — the inventory could not be read: ${customer.displayName}`,
+        detail: `Deactivating ${customer.displayName} stopped BEFORE any change because these could not be read: ${inventory.readFailures.join(", ")}. Acting on a partial inventory could skip a plan, a paid visit, or a login.`,
+        customerId,
+        relatedId: customerId,
+        sourceUrl: `/customers/${customerId}`,
+        resolutionAction:
+          "Re-run the deactivation with the same request (idempotent) once reads recover — nothing has been changed yet.",
+        ownerTeam: "OPS",
+      });
+      await finishLifecycleCommand(
+        commandKey,
+        {
+          stage: "PARTIAL",
+          outcome: "PARTIAL",
+          effects: `Stopped before any change: inventory reads failed (${inventory.readFailures.join(", ")}). Recovery case ${caseId ? "opened" : "COULD NOT BE OPENED — escalate"}.`,
+          lastError: `Inventory read failures: ${inventory.readFailures.join(", ")}`,
+        },
+        fence
+      );
+      return {
+        plansCanceled: 0,
+        visitsResolved: 0,
+        jobsCanceled: 0,
+        outstandingBalanceCents: 0,
+        portalUserSub: customer.portalUserSub ?? null,
+        portalRevoked: false,
+        status: priorStatus,
+        partial: true,
+        alreadyInactive: false,
+        audited: false,
+        message:
+          "Nothing was changed: parts of this customer's records could not be read, so the transition stopped before touching billing or access. It's owned — resume once reads recover.",
+      };
+    }
     await recordLifecycleStage(
       commandKey,
       "INVENTORIED",

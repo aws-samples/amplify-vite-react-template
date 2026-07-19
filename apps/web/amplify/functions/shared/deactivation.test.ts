@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
 import type Stripe from "stripe";
 
 /**
@@ -44,6 +45,7 @@ const jobs = new Map<string, Job>();
 const invoices = new Map<string, Invoice>();
 /** The single-winner lifecycle claim store (id = customerId). */
 const claims = new Map<string, Record<string, unknown>>();
+const lifecycleCommands = new Map<string, Record<string, unknown>>();
 
 /** Ordered log of the side effects, so we can prove the sequence:
  *  money → work → portal → INACTIVE(last). */
@@ -91,6 +93,34 @@ const fakeDataClient = {
     },
     // The lifecycle claim: create is conditional on the id not existing, exactly
     // like the real single-winner lock. A second create loses (data: null).
+    CustomerLifecycleCommand: {
+      create: async (input: { id: string } & Record<string, unknown>) => {
+        if (lifecycleCommands.has(input.id)) return { data: null };
+        lifecycleCommands.set(input.id, { ...input });
+        return { data: { ...input } };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: lifecycleCommands.get(id) ?? null,
+      }),
+      update: async (input: { id: string } & Record<string, unknown>) => {
+        const row = lifecycleCommands.get(input.id);
+        if (!row) return { data: null };
+        for (const [k, v] of Object.entries(input)) {
+          if (v !== undefined) row[k] = v;
+        }
+        return { data: { ...row } };
+      },
+      listCustomerLifecycleCommandByCustomerIdAndRequestedAt: async ({
+        customerId,
+      }: {
+        customerId: string;
+      }) => ({
+        data: [...lifecycleCommands.values()].filter(
+          (c) => c.customerId === customerId
+        ),
+        nextToken: null,
+      }),
+    },
     CustomerLifecycleClaim: {
       get: async ({ id }: { id: string }) => ({ data: claims.get(id) ?? null }),
       create: async (input: { id: string }) => {
@@ -171,6 +201,13 @@ const revokePortal = vi.fn(async () => {
 const opts = () => ({ reason: "CUSTOMER_REQUEST", revokePortalAccess: revokePortal });
 
 beforeEach(() => {
+  lifecycleCommands.clear();
+  _setLockStoreForTests(
+    memoryLockStore({
+      CustomerLifecycleCommand: lifecycleCommands,
+      CustomerLifecycleClaim: claims,
+    })
+  );
   customers.clear();
   plans.clear();
   jobs.clear();
@@ -462,14 +499,103 @@ describe("deactivateCustomer", () => {
   it("releases the claim on a clean deactivation so a later transition can proceed", async () => {
     seedPlan({ id: "p1" });
     await deactivateCustomer(stripe, "c1", actor, opts());
+    // The release is a FENCED CAS delete (atomicLock), not the AppSync model
+    // delete — the proof is the row being gone, not the fake's event log.
     expect(claims.has("c1")).toBe(false);
     expect(events).toContain("claim:acquire:c1");
-    expect(events).toContain("claim:release:c1");
   });
 
   it("throws on a missing customer rather than reporting a deactivation it did not do", async () => {
     await expect(
       deactivateCustomer(stripe, "nope", actor, opts())
     ).rejects.toThrow(/not found/);
+  });
+});
+
+describe("GL-09 serialization — adversarial", () => {
+  it("a resumable PARTIAL blocks every DIFFERENT-key transition (both directions)", async () => {
+    lifecycleCommands.set("old-partial", {
+      id: "old-partial",
+      customerId: "c1",
+      action: "DEACTIVATE",
+      stage: "PARTIAL",
+      requestedAt: new Date().toISOString(),
+    });
+    const out = await deactivateCustomer(stripe, "c1", actor, {
+      ...opts(),
+      idempotencyKey: "fresh-key",
+    });
+    expect(out.partial).toBe(true);
+    expect(out.status).toBe("ACTIVE");
+    expect(out.message).toMatch(/unfinished|in progress/i);
+    // No provider effect ran.
+    expect(cancelPlanBilling).not.toHaveBeenCalled();
+  });
+
+  it("the SAME key resumes a PARTIAL (never blocked by itself)", async () => {
+    lifecycleCommands.set("resume-key", {
+      id: "resume-key",
+      customerId: "c1",
+      action: "DEACTIVATE",
+      stage: "PARTIAL",
+      requestedAt: new Date().toISOString(),
+      attemptCount: 1,
+    });
+    const out = await deactivateCustomer(stripe, "c1", actor, {
+      ...opts(),
+      idempotencyKey: "resume-key",
+    });
+    expect(out.status).toBe("INACTIVE");
+  });
+
+  it("an open-command scan failure FAILS CLOSED: refuses before any change, owned", async () => {
+    const model = fakeDataClient.models.CustomerLifecycleCommand as Record<
+      string,
+      unknown
+    >;
+    const orig = model.listCustomerLifecycleCommandByCustomerIdAndRequestedAt;
+    model.listCustomerLifecycleCommandByCustomerIdAndRequestedAt = async () => {
+      throw new Error("throttled");
+    };
+    try {
+      const out = await deactivateCustomer(stripe, "c1", actor, {
+        ...opts(),
+        idempotencyKey: "k-scan-fail",
+      });
+      expect(out.partial).toBe(true);
+      expect(out.status).toBe("ACTIVE");
+      expect(cancelPlanBilling).not.toHaveBeenCalled();
+      expect(openOwnedWork).toHaveBeenCalledWith(
+        expect.objectContaining({ dedupeKey: "lifecycle-cmd-store:c1" })
+      );
+    } finally {
+      model.listCustomerLifecycleCommandByCustomerIdAndRequestedAt = orig;
+    }
+  });
+
+  it("an inventory read failure STOPS provider effects and owns the recovery", async () => {
+    seedPlan({ id: "p1" });
+    const model = fakeDataClient.models.ServicePlan as Record<string, unknown>;
+    const orig = model.list;
+    model.list = async () => {
+      throw new Error("throttled");
+    };
+    try {
+      const out = await deactivateCustomer(stripe, "c1", actor, {
+        ...opts(),
+        idempotencyKey: "k-inv-fail",
+      });
+      expect(out.partial).toBe(true);
+      expect(out.status).toBe("ACTIVE");
+      expect(cancelPlanBilling).not.toHaveBeenCalled();
+      expect(openOwnedWork).toHaveBeenCalledWith(
+        expect.objectContaining({ dedupeKey: "lifecycle-inventory:c1" })
+      );
+      expect(lifecycleCommands.get("k-inv-fail")).toMatchObject({
+        stage: "PARTIAL",
+      });
+    } finally {
+      model.list = orig;
+    }
   });
 });

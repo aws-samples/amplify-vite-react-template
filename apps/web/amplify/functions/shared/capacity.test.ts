@@ -1,116 +1,125 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
+import { capacityFixtureModels } from "./capacityTestFixture";
 
 /**
- * GL-04 — the one minute-based capacity rule and its ATOMIC day ledger. The
- * memory lock store models DynamoDB's per-item conditional atomicity, so the
- * two-buyers-one-slot race here deterministically proves exactly one winner.
+ * GL-04 — per-technician, per-window capacity, adversarially. The memory
+ * lock store models DynamoDB's conditional atomicity, so the races here
+ * deterministically prove one winner; every missing fact (models, CAS,
+ * closures, licences, Routes legs) must FAIL CLOSED.
  */
 
 type Row = Record<string, unknown>;
 const technicians = new Map<string, Row>();
 const licenses = new Map<string, Row[]>();
-const exceptions = new Map<string, Row>();
-const closures = new Map<string, Row>();
 const jobs = new Map<string, Row>();
-const capacityDays = new Map<string, Row>();
-const capacityClaims = new Map<string, Row>();
+const customers = new Map<string, Row>();
+const capacityFixture = capacityFixtureModels();
+const { capacityDays, capacityClaims, closures, exceptions } =
+  capacityFixture.maps;
 
-function model(table: Map<string, Row>, opts: { conditional?: boolean } = {}) {
-  return {
-    create: vi.fn(async (input: Row) => {
-      const id = String(input.id ?? `${table.size + 1}`);
-      if (opts.conditional !== false && table.has(id)) return { data: null };
-      table.set(id, { ...input, id });
-      return { data: { ...table.get(id)! } };
-    }),
-    get: vi.fn(async ({ id }: { id: string }) => ({
-      data: table.has(id) ? { ...table.get(id)! } : null,
+let modelsPresent = true;
+
+const baseModels = {
+  Technician: {
+    list: vi.fn(async () => ({
+      data: [...technicians.values()],
+      nextToken: null,
     })),
-    update: vi.fn(async (input: Row) => {
-      const row = table.get(String(input.id));
-      if (!row) return { data: null };
-      for (const [k, v] of Object.entries(input)) if (v !== undefined) row[k] = v;
-      return { data: { ...row } };
-    }),
-    delete: vi.fn(async ({ id }: { id: string }) => {
-      const existed = table.get(id) ?? null;
-      table.delete(id);
-      return { data: existed };
-    }),
-    list: vi.fn(async () => ({ data: [...table.values()], nextToken: null })),
-  };
-}
-
-const fakeClient = {
-  models: {
-    Technician: {
-      ...model(technicians),
-      list: vi.fn(async () => ({ data: [...technicians.values()], nextToken: null })),
-    },
-    TechnicianLicense: {
-      listTechnicianLicenseByTechnicianId: vi.fn(
-        async ({ technicianId }: { technicianId: string }) => ({
-          data: licenses.get(technicianId) ?? [],
-          nextToken: null,
-        })
-      ),
-    },
-    TechnicianDayException: {
-      ...model(exceptions),
-      listTechnicianDayExceptionByDate: vi.fn(async ({ date }: { date: string }) => ({
-        data: [...exceptions.values()].filter((e) => e.date === date),
+  },
+  TechnicianLicense: {
+    listTechnicianLicenseByTechnicianId: vi.fn(
+      async ({ technicianId }: { technicianId: string }) => ({
+        data: licenses.get(technicianId) ?? [],
         nextToken: null,
-      })),
-    },
-    CompanyClosure: model(closures),
-    Job: {
-      listJobByScheduledDate: vi.fn(async ({ scheduledDate }: { scheduledDate: string }) => ({
-        data: [...jobs.values()].filter((j) => j.scheduledDate === scheduledDate),
+      })
+    ),
+  },
+  Job: {
+    listJobByScheduledDate: vi.fn(
+      async ({ scheduledDate }: { scheduledDate: string }) => ({
+        data: [...jobs.values()].filter(
+          (j) => j.scheduledDate === scheduledDate
+        ),
         nextToken: null,
-      })),
-    },
-    CapacityDay: model(capacityDays),
-    CapacityClaim: {
-      ...model(capacityClaims),
-      listCapacityClaimByDate: vi.fn(async ({ date }: { date: string }) => ({
-        data: [...capacityClaims.values()].filter((c) => c.date === date),
-        nextToken: null,
-      })),
-    },
+      })
+    ),
+  },
+  Customer: {
+    get: vi.fn(async ({ id }: { id: string }) => ({
+      data: customers.get(id) ?? null,
+    })),
   },
 };
 
-vi.mock("./dataClient", () => ({ dataClient: async () => fakeClient }));
+vi.mock("./dataClient", () => ({
+  dataClient: async () => ({
+    models: modelsPresent
+      ? { ...baseModels, ...capacityFixture.models }
+      : { ...baseModels },
+  }),
+}));
+
+const driveMinutesBetween = vi.fn(
+  async (_k: string, _from: string, _to: string): Promise<number | null> => 15
+);
+vi.mock("./driveTime", () => ({
+  HQ_ADDRESS: "81 Greenwich Rd, Ware, MA 01082",
+  driveMinutesBetween: (...a: unknown[]) =>
+    (driveMinutesBetween as unknown as (...x: unknown[]) => Promise<number | null>)(
+      ...a
+    ),
+}));
 
 const {
-  claimCapacity,
-  committedMinutesOn,
+  bestSlotFor,
+  claimWindowSlot,
   consumeCapacityClaim,
-  dayCapacityMinutes,
+  dayEligibility,
+  makeLegResolver,
+  onsiteMinutes,
   reconcileCapacityDay,
   releaseCapacityClaim,
-  reserveScheduledMinutes,
-  visitMinutes,
-  WORKDAY_MINUTES,
+  reserveSlot,
+  slotId,
+  slotStates,
+  stopsBySlotOn,
+  windowOfTimeWindow,
+  WINDOW_MINUTES,
 } = await import("./capacity");
 
-// 2026-08-05 is a Wednesday.
+// 2026-08-05 is a Wednesday; 2026-08-08 a Saturday.
 const WED = "2026-08-05";
 const SAT = "2026-08-08";
 
 beforeEach(() => {
-  for (const t of [technicians, exceptions, closures, jobs, capacityDays, capacityClaims]) {
+  for (const t of [
+    technicians,
+    jobs,
+    customers,
+    capacityDays,
+    capacityClaims,
+    closures,
+    exceptions,
+  ]) {
     t.clear();
   }
   licenses.clear();
+  modelsPresent = true;
+  driveMinutesBetween.mockClear();
+  driveMinutesBetween.mockImplementation(async () => 15);
   _setLockStoreForTests(
-    memoryLockStore({
-      CapacityDay: capacityDays,
-      CapacityClaim: capacityClaims,
-    })
+    memoryLockStore({ CapacityDay: capacityDays, CapacityClaim: capacityClaims })
   );
-  technicians.set("t1", { id: "t1", name: "Sam", active: true });
+  technicians.set("t1", {
+    id: "t1",
+    name: "Sam",
+    active: true,
+    baseStreet: "5 Base Rd",
+    baseCity: "Ware",
+    baseState: "MA",
+    baseZip: "01082",
+  });
   licenses.set("t1", [
     { id: "l1", number: "MA-1", status: "CURRENT", expiresOn: "2099-01-01" },
   ]);
@@ -118,141 +127,345 @@ beforeEach(() => {
 
 afterEach(() => _setLockStoreForTests(null));
 
-describe("dayCapacityMinutes — the one rule", () => {
-  it("gives an eligible technician a Monday–Friday 8–5 day (540 minutes)", async () => {
-    const cap = await dayCapacityMinutes(WED);
-    expect(cap.capMinutes).toBe(WORKDAY_MINUTES);
-    expect(cap.eligibleTechs).toBe(1);
+describe("locked durations + windows", () => {
+  it("on-site minutes come from PROPERTY CLASS only: residential 30, commercial/community 60", () => {
+    expect(onsiteMinutes("RESIDENTIAL")).toBe(30);
+    expect(onsiteMinutes(null)).toBe(30);
+    expect(onsiteMinutes("COMMERCIAL")).toBe(60);
+    expect(onsiteMinutes("COMMUNITY")).toBe(60);
   });
 
-  it("sells nothing on weekends, closures, PTO, or with zero eligible technicians — no floor of one", async () => {
-    expect((await dayCapacityMinutes(SAT)).capMinutes).toBe(0);
+  it("time windows resolve to the two sold windows (8–12 / 12–5)", () => {
+    expect(windowOfTimeWindow("MORNING")).toBe("MORNING");
+    expect(windowOfTimeWindow("8-10am")).toBe("MORNING");
+    expect(windowOfTimeWindow("1-3pm")).toBe("AFTERNOON");
+    expect(WINDOW_MINUTES.MORNING).toBe(240);
+    expect(WINDOW_MINUTES.AFTERNOON).toBe(300);
+  });
+});
 
-    closures.set(WED, { id: WED, date: WED, reason: "July company outing" });
-    expect((await dayCapacityMinutes(WED)).capMinutes).toBe(0);
+describe("eligibility — every missing fact sells zero", () => {
+  it("uses the technician's private base, and a day override wins over it", async () => {
+    let day = await dayEligibility(WED);
+    expect(day.techs).toHaveLength(1);
+    expect(day.techs[0].baseAddress).toBe("5 Base Rd, Ware, MA, 01082");
+    exceptions.set("e1", {
+      id: "e1",
+      technicianId: "t1",
+      date: WED,
+      kind: "BASE_OVERRIDE",
+      reason: "Starting from the depot",
+      overrideStreet: "9 Depot St",
+      overrideCity: "Palmer",
+      overrideState: "MA",
+      overrideZip: "01069",
+    });
+    day = await dayEligibility(WED);
+    expect(day.techs[0].baseAddress).toBe("9 Depot St, Palmer, MA, 01069");
+  });
+
+  it("weekends, closures, PTO, inactive, and unreadable licences sell zero", async () => {
+    expect((await dayEligibility(SAT)).techs).toHaveLength(0);
+
+    closures.set(WED, { id: WED, date: WED, reason: "Company outing" });
+    expect((await dayEligibility(WED)).techs).toHaveLength(0);
     closures.clear();
 
-    exceptions.set("e1", { id: "e1", technicianId: "t1", date: WED, kind: "PTO", reason: "Vacation" });
-    const pto = await dayCapacityMinutes(WED);
-    expect(pto.capMinutes).toBe(0);
-    expect(pto.reasons.join(" ")).toMatch(/PTO/);
+    exceptions.set("e1", {
+      id: "e1",
+      technicianId: "t1",
+      date: WED,
+      kind: "PTO",
+      reason: "Vacation",
+    });
+    expect((await dayEligibility(WED)).techs).toHaveLength(0);
     exceptions.clear();
 
-    technicians.set("t1", { id: "t1", name: "Sam", active: false });
-    expect((await dayCapacityMinutes(WED)).capMinutes).toBe(0);
-  });
-
-  it("fails CLOSED: an expired licence or an unreadable record sells no capacity", async () => {
-    licenses.set("t1", [
-      { id: "l1", number: "MA-1", status: "CURRENT", expiresOn: "2026-08-01" },
-    ]);
-    const expired = await dayCapacityMinutes(WED);
-    expect(expired.capMinutes).toBe(0);
-    expect(expired.reasons.join(" ")).toMatch(/no current licence/);
-
-    fakeClient.models.TechnicianLicense.listTechnicianLicenseByTechnicianId.mockRejectedValueOnce(
+    baseModels.TechnicianLicense.listTechnicianLicenseByTechnicianId.mockRejectedValueOnce(
       new Error("throttled")
     );
-    const unreadable = await dayCapacityMinutes(WED);
-    expect(unreadable.capMinutes).toBe(0);
+    const unreadable = await dayEligibility(WED);
+    expect(unreadable.techs).toHaveLength(0);
     expect(unreadable.reasons.join(" ")).toMatch(/fail closed/i);
   });
-});
 
-describe("visitMinutes", () => {
-  it("locked on-site durations + the Routes proof (or the default allowance)", () => {
-    expect(visitMinutes({ propertyClass: "RESIDENTIAL", dispatchDriveMinutes: 22 })).toBe(52);
-    expect(visitMinutes({ propertyClass: "COMMERCIAL", dispatchDriveMinutes: null })).toBe(90);
-    expect(visitMinutes({ propertyClass: null, dispatchDriveMinutes: null })).toBe(60);
+  it("a CLOSURE-CALENDAR read failure sells zero — never treated as no closure", async () => {
+    (capacityFixture.models.CompanyClosure as { get: unknown }).get =
+      async () => {
+        throw new Error("throttled");
+      };
+    try {
+      const day = await dayEligibility(WED);
+      expect(day.techs).toHaveLength(0);
+      expect(day.reasons.join(" ")).toMatch(/closure calendar could not be read/i);
+    } finally {
+      const rebuilt = capacityFixtureModels();
+      (capacityFixture.models.CompanyClosure as { get: unknown }).get = (
+        rebuilt.models.CompanyClosure as { get: unknown }
+      ).get;
+    }
+  });
+
+  it("MISSING capacity models sell zero — never permissive success", async () => {
+    modelsPresent = false;
+    const day = await dayEligibility(WED);
+    expect(day.techs).toHaveLength(0);
+    const reserved = await reserveSlot(WED, "MORNING", "t1", 60);
+    expect(reserved.ok).toBe(false);
+    if (reserved.ok) throw new Error("unreachable");
+    expect(reserved.unavailable).toBe(true);
+  });
+
+  it("CAS UNSUPPORTED refuses a reserve — never the read-then-write race", async () => {
+    _setLockStoreForTests(memoryLockStore({})); // models exist; CAS wiring gone
+    const reserved = await reserveSlot(WED, "MORNING", "t1", 60);
+    expect(reserved.ok).toBe(false);
+    if (reserved.ok) throw new Error("unreachable");
+    expect(reserved.unavailable).toBe(true);
   });
 });
 
-describe("the atomic day ledger — two buyers, one slot", () => {
-  it("two concurrent checkout claims for the last minutes: exactly one wins", async () => {
-    // One tech = 540 minutes; 480 already committed; a 60-minute visit fits
-    // once. Two concurrent claims race the guarded add — one must lose.
-    capacityDays.set(WED, { id: WED, date: WED, committedMinutes: 480 });
+describe("per-window atomicity — two buyers, one slot", () => {
+  it("two concurrent claims for a slot's last minutes: exactly one wins", async () => {
+    capacityDays.set(slotId(WED, "MORNING", "t1"), {
+      id: slotId(WED, "MORNING", "t1"),
+      date: WED,
+      window: "MORNING",
+      technicianId: "t1",
+      committedMinutes: 180,
+    });
     const [a, b] = await Promise.all([
-      claimCapacity({ claimKey: "booking-A", date: WED, minutes: 60 }),
-      claimCapacity({ claimKey: "booking-B", date: WED, minutes: 60 }),
+      claimWindowSlot({
+        claimKey: "bk-A",
+        date: WED,
+        window: "MORNING",
+        technicianId: "t1",
+        minutes: 60,
+      }),
+      claimWindowSlot({
+        claimKey: "bk-B",
+        date: WED,
+        window: "MORNING",
+        technicianId: "t1",
+        minutes: 60,
+      }),
     ]);
     expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
-    // The loser's claim row is gone — a refused claim never lies about holding.
-    const live = [...capacityClaims.values()];
-    expect(live).toHaveLength(1);
-    expect(capacityDays.get(WED)!.committedMinutes).toBe(540);
+    expect(capacityClaims.size).toBe(1); // the loser's row is gone
+    expect(
+      capacityDays.get(slotId(WED, "MORNING", "t1"))!.committedMinutes
+    ).toBe(240);
   });
 
-  it("two concurrent office moves cannot both take the last minutes", async () => {
-    capacityDays.set(WED, { id: WED, date: WED, committedMinutes: 500 });
-    const [a, b] = await Promise.all([
-      reserveScheduledMinutes(WED, 40),
-      reserveScheduledMinutes(WED, 40),
-    ]);
-    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
-    expect(capacityDays.get(WED)!.committedMinutes).toBe(540);
+  it("MORNING and AFTERNOON are protected independently", async () => {
+    capacityDays.set(slotId(WED, "MORNING", "t1"), {
+      id: slotId(WED, "MORNING", "t1"),
+      date: WED,
+      window: "MORNING",
+      technicianId: "t1",
+      committedMinutes: 240, // morning full
+    });
+    const morning = await reserveSlot(WED, "MORNING", "t1", 30);
+    expect(morning.ok).toBe(false);
+    const afternoon = await reserveSlot(WED, "AFTERNOON", "t1", 30);
+    expect(afternoon.ok).toBe(true);
   });
 
-  it("a released claim gives its minutes back; a consumed claim does not", async () => {
-    await claimCapacity({ claimKey: "bk-1", date: WED, minutes: 60 });
-    expect(capacityDays.get(WED)!.committedMinutes).toBe(60);
+  it("release gives the slot's minutes back; consume keeps them and returns the slot facts", async () => {
+    await claimWindowSlot({
+      claimKey: "bk-1",
+      date: WED,
+      window: "AFTERNOON",
+      technicianId: "t1",
+      minutes: 75,
+    });
+    expect(
+      capacityDays.get(slotId(WED, "AFTERNOON", "t1"))!.committedMinutes
+    ).toBe(75);
     await releaseCapacityClaim("bk-1");
-    expect(capacityDays.get(WED)!.committedMinutes).toBe(0);
-    expect(capacityClaims.size).toBe(0);
+    expect(
+      capacityDays.get(slotId(WED, "AFTERNOON", "t1"))!.committedMinutes
+    ).toBe(0);
 
-    await claimCapacity({ claimKey: "bk-2", date: WED, minutes: 60 });
-    await consumeCapacityClaim("bk-2");
-    // The minutes stay committed — the booked job carries them now.
-    expect(capacityDays.get(WED)!.committedMinutes).toBe(60);
-    expect(capacityClaims.size).toBe(0);
-    // A double release after consume is a no-op.
-    await releaseCapacityClaim("bk-2");
-    expect(capacityDays.get(WED)!.committedMinutes).toBe(60);
-  });
-
-  it("a claim refused for capacity reports sold out with zero-capacity days named", async () => {
-    technicians.set("t1", { id: "t1", name: "Sam", active: false });
-    const res = await claimCapacity({ claimKey: "bk-3", date: WED, minutes: 60 });
-    expect(res.ok).toBe(false);
-    if (res.ok) throw new Error("unreachable");
-    expect(res.soldOut).toBe(true);
+    await claimWindowSlot({
+      claimKey: "bk-2",
+      date: WED,
+      window: "AFTERNOON",
+      technicianId: "t1",
+      minutes: 75,
+    });
+    const consumed = await consumeCapacityClaim("bk-2");
+    expect(consumed).toMatchObject({
+      window: "AFTERNOON",
+      technicianId: "t1",
+      minutes: 75,
+    });
+    expect(
+      capacityDays.get(slotId(WED, "AFTERNOON", "t1"))!.committedMinutes
+    ).toBe(75);
+    await releaseCapacityClaim("bk-2"); // double release = no-op
+    expect(
+      capacityDays.get(slotId(WED, "AFTERNOON", "t1"))!.committedMinutes
+    ).toBe(75);
   });
 });
 
-describe("reconcileCapacityDay — the self-healing ledger", () => {
-  it("recomputes the counter from jobs + live claims and expires dead checkouts", async () => {
+describe("feasibility — REAL Routes legs, fail closed", () => {
+  it("an empty slot pays base → candidate → base with real legs; no Routes key means no capacity", async () => {
+    const eligibility = await dayEligibility(WED);
+    const best = await bestSlotFor({
+      date: WED,
+      window: "MORNING",
+      onsite: 30,
+      eligibility,
+      slots: await slotStates(WED),
+      stopsBySlot: new Map(),
+      legMinutes: makeLegResolver("routes-key"),
+      candidateAddress: "12 Beacon St, Ware, MA",
+    });
+    // 30 on-site + 15 out + 15 back.
+    expect(best).toMatchObject({ technicianId: "t1", claimMinutes: 60 });
+
+    const noKey = await bestSlotFor({
+      date: WED,
+      window: "MORNING",
+      onsite: 30,
+      eligibility,
+      slots: await slotStates(WED),
+      stopsBySlot: new Map(),
+      legMinutes: makeLegResolver(null),
+      candidateAddress: "12 Beacon St, Ware, MA",
+    });
+    expect(noKey).toBeNull();
+  });
+
+  it("a leg Routes cannot produce makes the slot infeasible", async () => {
+    driveMinutesBetween.mockImplementation(async () => null);
+    const best = await bestSlotFor({
+      date: WED,
+      window: "MORNING",
+      onsite: 30,
+      eligibility: await dayEligibility(WED),
+      slots: await slotStates(WED),
+      stopsBySlot: new Map(),
+      legMinutes: makeLegResolver("routes-key"),
+      candidateAddress: "12 Beacon St, Ware, MA",
+    });
+    expect(best).toBeNull();
+  });
+
+  it("an UNVERIFIED slot (failed nightly Routes rebuild) sells nothing", async () => {
+    capacityDays.set(slotId(WED, "MORNING", "t1"), {
+      id: slotId(WED, "MORNING", "t1"),
+      date: WED,
+      window: "MORNING",
+      technicianId: "t1",
+      committedMinutes: 0,
+      verified: false,
+    });
+    const best = await bestSlotFor({
+      date: WED,
+      window: "MORNING",
+      onsite: 30,
+      eligibility: await dayEligibility(WED),
+      slots: await slotStates(WED),
+      stopsBySlot: new Map(),
+      legMinutes: makeLegResolver("routes-key"),
+      candidateAddress: "12 Beacon St, Ware, MA",
+    });
+    expect(best).toBeNull();
+  });
+});
+
+describe("nightly rebuild — base → stops → base with real legs", () => {
+  it("rebuilds a slot from its jobs in route order and expires dead claims", async () => {
+    customers.set("c1", {
+      id: "c1",
+      serviceStreet: "9 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
     jobs.set("j1", {
       id: "j1",
+      customerId: "c1",
       scheduledDate: WED,
       status: "SCHEDULED",
+      technicianId: "t1",
+      timeWindow: "MORNING",
+      routeOrder: 1,
       propertyClass: "RESIDENTIAL",
-      dispatchDriveMinutes: 20,
     });
     capacityClaims.set("dead", {
       id: "dead",
       date: WED,
+      window: "MORNING",
+      technicianId: "t1",
       minutes: 60,
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const res = await reconcileCapacityDay(WED, "routes-key");
+    expect(res.expiredClaims).toBe(1);
+    // base→stop 15 + onsite 30 + stop→base 15 = 60.
+    const slot = capacityDays.get(slotId(WED, "MORNING", "t1"))!;
+    expect(slot.committedMinutes).toBe(60);
+    expect(slot.verified).toBe(true);
+  });
+
+  it("a slot whose legs cannot be verified is marked unverified and holds the full window", async () => {
+    customers.set("c1", {
+      id: "c1",
+      serviceStreet: "9 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
+    jobs.set("j1", {
+      id: "j1",
+      customerId: "c1",
+      scheduledDate: WED,
+      status: "SCHEDULED",
+      technicianId: "t1",
+      timeWindow: "MORNING",
+      routeOrder: 1,
+    });
+    driveMinutesBetween.mockImplementation(async () => null);
+    const res = await reconcileCapacityDay(WED, "routes-key");
+    expect(res.unverified).toBe(1);
+    const slot = capacityDays.get(slotId(WED, "MORNING", "t1"))!;
+    expect(slot.verified).toBe(false);
+    expect(slot.committedMinutes).toBe(WINDOW_MINUTES.MORNING);
+  });
+
+  it("stopsBySlotOn joins jobs and live claims into their tech-window slots", async () => {
+    customers.set("c1", {
+      id: "c1",
+      serviceStreet: "9 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
+    jobs.set("j1", {
+      id: "j1",
+      customerId: "c1",
+      scheduledDate: WED,
+      status: "SCHEDULED",
+      technicianId: "t1",
+      timeWindow: "AFTERNOON",
     });
     capacityClaims.set("live", {
       id: "live",
       date: WED,
+      window: "AFTERNOON",
+      technicianId: "t1",
+      address: "3 Oak St, Ware, MA",
       minutes: 45,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
-    capacityDays.set(WED, { id: WED, date: WED, committedMinutes: 999 });
-
-    const res = await reconcileCapacityDay(WED);
-    expect(res.expiredClaims).toBe(1);
-    // job (30 onsite + 20 travel) + live claim 45 = 95.
-    expect(res.committedMinutes).toBe(95);
-    expect(capacityDays.get(WED)!.committedMinutes).toBe(95);
-    expect(capacityClaims.has("dead")).toBe(false);
-  });
-
-  it("committedMinutesOn counts pending-assignment (UNSCHEDULED-dated) visits too", async () => {
-    jobs.set("j1", { id: "j1", scheduledDate: WED, status: "UNSCHEDULED" });
-    const res = await committedMinutesOn(WED);
-    expect(res.minutes).toBe(60);
+    const stops = await stopsBySlotOn(WED);
+    expect(stops.get(slotId(WED, "AFTERNOON", "t1"))).toEqual([
+      "9 Elm St, Ware, MA, 01082",
+      "3 Oak St, Ware, MA",
+    ]);
   });
 });

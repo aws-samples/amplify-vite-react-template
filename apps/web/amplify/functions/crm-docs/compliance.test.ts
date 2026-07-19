@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
+import { capacityFixtureModels } from "../shared/capacityTestFixture";
 
 /**
  * The pesticide record, and the technician's honest exit.
@@ -39,6 +41,8 @@ let emailLogRows: Record<string, unknown>[] = [];
  *  marker survives a lost case write. */
 let workItemCreateFails = false;
 
+const capacityFixture = capacityFixtureModels();
+
 const fakeDataClient = {
   models: {
     JobPacketEvent: {
@@ -67,6 +71,16 @@ const fakeDataClient = {
     Job: {
       get: async ({ id }: { id: string }) => ({
         data: jobs.find((j) => j.id === id) ?? null,
+      }),
+      listJobByScheduledDate: async ({
+        scheduledDate,
+      }: {
+        scheduledDate: string;
+      }) => ({
+        data: jobs.filter(
+          (j) => (j as { scheduledDate?: string }).scheduledDate === scheduledDate
+        ),
+        nextToken: null,
       }),
       update: async (patch: Job) => {
         const i = jobs.findIndex((j) => j.id === patch.id);
@@ -168,6 +182,7 @@ const fakeDataClient = {
     },
   },
 };
+Object.assign(fakeDataClient.models, capacityFixture.models);
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
@@ -269,6 +284,17 @@ const validReport = (over: Partial<Report> = {}): Report => ({
 });
 
 beforeEach(() => {
+  capacityFixture.maps.capacityDays.clear();
+  capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.closures.clear();
+  capacityFixture.maps.exceptions.clear();
+  _setLockStoreForTests(
+    memoryLockStore({
+      CapacityDay: capacityFixture.maps.capacityDays,
+      CapacityClaim: capacityFixture.maps.capacityClaims,
+      TreatmentObligation: new Map(),
+    })
+  );
   finalizeClaims.clear();
   packetEvents = [];
   emailLogRows = [];

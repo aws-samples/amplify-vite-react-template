@@ -1072,6 +1072,34 @@ async function reactivateCustomer(
   if (!commandClaim.claimed) {
     await releaseLifecycleClaim(customerId, claimHandle.holder);
     const c = commandClaim.command;
+    if (commandClaim.state === "UNVERIFIED") {
+      // FAIL CLOSED (GL-09): unverifiable command state runs nothing, and the
+      // refusal is owned.
+      await openOwnedWork({
+        kind: "LIFECYCLE_RECOVERY",
+        dedupeKey: `lifecycle-cmd-store:${customerId}`,
+        title: `A reactivation was refused — lifecycle commands unverifiable: ${customer.displayName}`,
+        detail: `Reactivating ${customer.displayName} was refused BEFORE any change: ${c.lastError ?? "the lifecycle command store could not be read"}. Nothing was changed.`,
+        customerId,
+        relatedId: customerId,
+        sourceUrl: `/customers/${customerId}`,
+        resolutionAction:
+          "Retry the reactivation once reads recover — it is idempotent and nothing has been changed yet.",
+        ownerTeam: "OPS",
+      }).catch(() => undefined);
+      return {
+        customerId,
+        reactivated: false,
+        alreadyActive: false,
+        portalRestored: false,
+        status: customer.status,
+        inProgress: false,
+        partial: true,
+        audited: false,
+        message:
+          "Nothing was changed: open lifecycle commands could not be verified right now. The refusal is owned — retry in a moment.",
+      };
+    }
     return {
       customerId,
       reactivated: false,
@@ -1082,7 +1110,7 @@ async function reactivateCustomer(
       audited: true,
       message:
         commandClaim.state === "OPPOSITE_IN_FLIGHT"
-          ? `A deactivation of this customer is still unfinished (${c.stage}). Finish or recover it first — nothing was changed.`
+          ? `A deactivation of this customer is still unfinished (${c.stage}). Finish or recover it — a resumable PARTIAL resumes under its own Resume button; nothing was changed here.`
           : commandClaim.state === "DONE"
             ? `This request already ran: ${c.outcome ?? c.stage}.`
             : "This transition is already in progress — refresh in a moment.",

@@ -62,11 +62,20 @@ import {
 } from "../shared/planCancellation";
 import { resumeVisitChange, STOPS_PER_TECH } from "../shared/visitChange";
 import {
-  committedMinutesOn,
-  dayCapacityMinutes,
-  releaseScheduledMinutes,
-  reserveScheduledMinutes,
-  visitMinutes,
+  dayEligibility,
+  liveClaimsOn,
+  makeLegResolver,
+  notePoolMinutes,
+  onsiteMinutes as slotOnsiteMinutes,
+  releasePoolMinutes,
+  releaseSlot,
+  reserveSlot,
+  slotStates,
+  techBaseFor,
+  windowOfTimeWindow,
+  WINDOWS,
+  WINDOW_MINUTES,
+  type CapacityWindow,
 } from "../shared/capacity";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
@@ -390,25 +399,62 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         auto: false,
       });
     }
+    case "recordNoticeAlternateDelivery": {
+      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
+        throw new Error("Office role required");
+      }
+      const altArgs = event.arguments as unknown as {
+        relatedId?: string;
+        template?: string;
+        note?: string;
+      };
+      return recordNoticeAlternateDelivery(
+        {
+          relatedId: String(altArgs.relatedId ?? ""),
+          template: String(altArgs.template ?? ""),
+          note: String(altArgs.note ?? ""),
+        },
+        { sub: callerSub(event.identity), email: callerEmail(event.identity) }
+      );
+    }
     case "capacityDayFacts": {
       if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
         throw new Error("Office role required");
       }
       const date = String(event.arguments.date ?? "");
-      const [cap, committed] = await Promise.all([
-        dayCapacityMinutes(date),
-        committedMinutesOn(date),
+      const [eligibility, slots, claims] = await Promise.all([
+        dayEligibility(date),
+        slotStates(date),
+        liveClaimsOn(date),
       ]);
+      const windowFacts = WINDOWS.map((window) => {
+        const perTech = eligibility.techs.map((t) => {
+          const state = slots.get(`${date}#${window}#${t.id}`);
+          return {
+            technicianId: t.id,
+            technicianName: t.name,
+            committedMinutes: state?.committedMinutes ?? 0,
+            windowMinutes: WINDOW_MINUTES[window],
+            verified: state?.verified !== false,
+          };
+        });
+        const pool = slots.get(`${date}#${window}#POOL`);
+        return {
+          window,
+          technicians: perTech,
+          poolMinutes: pool?.committedMinutes ?? 0,
+          sellable: perTech.some(
+            (t) => t.verified && t.committedMinutes < t.windowMinutes
+          ),
+        };
+      });
       return {
         date,
-        capMinutes: cap.capMinutes,
-        eligibleTechs: cap.eligibleTechs,
-        committedMinutes: committed.minutes,
-        scheduledVisits: committed.jobs,
-        liveCheckoutClaims: committed.claims,
-        remainingMinutes: Math.max(0, cap.capMinutes - committed.minutes),
-        sellable: cap.capMinutes > committed.minutes,
-        reasons: cap.reasons,
+        eligibleTechs: eligibility.techs.length,
+        windows: windowFacts,
+        liveCheckoutClaims: claims.length,
+        sellable: windowFacts.some((w) => w.sellable),
+        reasons: eligibility.reasons,
       };
     }
     case "updateOwnedWork": {
@@ -1636,9 +1682,11 @@ async function createOfficeJob(args: Args) {
       });
       if (!monthClaim.ok) {
         throw new Error(
-          monthClaim.status === "SATISFIED"
-            ? `This plan's ${monthKey} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
-            : `This plan already has its ${monthKey} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
+          monthClaim.unavailable
+            ? "The seasonal-month ledger can't be verified right now — nothing was changed. Try again in a moment."
+            : monthClaim.status === "SATISFIED"
+              ? `This plan's ${monthKey} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+              : `This plan already has its ${monthKey} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
         );
       }
     }
@@ -1668,6 +1716,19 @@ async function createOfficeJob(args: Args) {
     throw new Error(
       `Could not create the job: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
     );
+  }
+  // GL-04: a dated office-created visit shows on the POOL accounting slot
+  // until its real technician-window claim happens at assignment.
+  if (args.scheduledDate) {
+    await notePoolMinutes(
+      args.scheduledDate,
+      windowOfTimeWindow(args.timeWindow ?? null),
+      slotOnsiteMinutes(
+        normalizePropertyClass(
+          (args as { propertyClass?: string | null }).propertyClass
+        )
+      )
+    ).catch(() => undefined);
   }
   return { jobId: created.id };
 }
@@ -1898,11 +1959,6 @@ async function updateJobSchedule(
       propertyClass: job.propertyClass,
       serviceType: job.serviceType,
     });
-    const routeProof = await proveRoutable(
-      process.env.GOOGLE_ROUTES_API_KEY,
-      HQ_ADDRESS,
-      customer
-    );
     if (!technician) throw new Error(`Technician ${args.technicianId} not found`);
     if (!technician.active) {
       throw new Error(
@@ -1933,9 +1989,41 @@ async function updateJobSchedule(
         );
       }
     }
+    // GL-04: the routability proof is measured from the ASSIGNED technician's
+    // private base (or that day's reasoned override) — the leg that actually
+    // gets driven — never a fixed HQ constant. An unavailable base (PTO,
+    // closure, weekend, or unverifiable availability facts) fails the
+    // assignment closed.
+    const assignBase = await techBaseFor(technician.id, args.scheduledDate);
+    if (!assignBase) {
+      throw new Error(
+        `${technician.name ?? "This technician"} isn't available on ${args.scheduledDate} (PTO, closure, weekend, or unverifiable availability facts) — pick another technician or day.`
+      );
+    }
+    const routeProof = await proveRoutable(
+      process.env.GOOGLE_ROUTES_API_KEY,
+      assignBase,
+      customer
+    );
+    // Every pure validation runs BEFORE any mutex is taken, so a refusal can
+    // never strand a claimed month or reserved minutes.
+    if (
+      !route ||
+      route.technicianId !== technician.id ||
+      route.date !== args.scheduledDate
+    ) {
+      throw new Error("The selected route does not belong to that technician and date");
+    }
     // GL-17: a seasonal plan's visit may only land in an in-season month, and
     // the month is claimed ATOMICALLY — the obligation row is the mutex, so
-    // two concurrent assigns cannot both put a visit in the same month.
+    // two concurrent assigns cannot both put a visit in the same month. The
+    // PRIOR month is released only AFTER the schedule write actually lands,
+    // and a failed publish rolls the fresh claim back (compensation) — a
+    // failure can never leave both months held or the old month freed early.
+    const priorDate = job.scheduledDate ?? null;
+    let seasonalPlanId: string | null = null;
+    let claimedTargetMonth: string | null = null;
+    let priorMonthToRelease: string | null = null;
     if (job.servicePlanId) {
       const { data: plan } = await client.models.ServicePlan.get({
         id: job.servicePlanId,
@@ -1957,41 +2045,53 @@ async function updateJobSchedule(
           });
           if (!monthClaim.ok) {
             throw new Error(
-              monthClaim.status === "SATISFIED"
-                ? `This plan's ${targetMonth} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
-                : `This plan already has its ${targetMonth} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
+              monthClaim.unavailable
+                ? "The seasonal-month ledger can't be verified right now — nothing was changed. Try again in a moment."
+                : monthClaim.status === "SATISFIED"
+                  ? `This plan's ${targetMonth} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+                  : `This plan already has its ${targetMonth} visit scheduled — a seasonal plan gets exactly one treatment per month. Pick a different month, or reschedule the existing visit.`
             );
           }
-          if (priorMonth) {
-            await releaseMonthForJob({
-              servicePlanId: plan.id,
-              monthKey: priorMonth,
-              jobId: job.id,
-              note: "Visit moved to a different month.",
-            });
-          }
+          seasonalPlanId = plan.id;
+          claimedTargetMonth = targetMonth;
+          priorMonthToRelease = priorMonth;
         }
       }
     }
-    if (
-      !route ||
-      route.technicianId !== technician.id ||
-      route.date !== args.scheduledDate
-    ) {
-      throw new Error("The selected route does not belong to that technician and date");
-    }
-    // GL-04: ONE atomic day claim on the shared minute ledger — two
-    // simultaneous assigns cannot both take the day's last minutes.
-    const priorDate = job.scheduledDate ?? null;
-    if (args.scheduledDate !== priorDate) {
-      const reserved = await reserveScheduledMinutes(
-        args.scheduledDate,
-        visitMinutes({
-          propertyClass: job.propertyClass,
-          dispatchDriveMinutes: routeProof?.driveMinutes ?? job.dispatchDriveMinutes,
-        })
-      );
-      if (!reserved.ok) throw new Error(reserved.message);
+    const compensateMonth = async () => {
+      if (seasonalPlanId && claimedTargetMonth) {
+        await releaseMonthForJob({
+          servicePlanId: seasonalPlanId,
+          monthKey: claimedTargetMonth,
+          jobId: job.id,
+          note: "Assignment failed — the month claim was rolled back.",
+        }).catch(() => undefined);
+      }
+    };
+    // GL-04: ONE atomic technician-WINDOW slot claim. The minutes are the
+    // locked on-site duration + the REAL Routes leg from the assigned
+    // technician's private base (routeProof is measured from that base) —
+    // round trip. No proof ⇒ no claim ⇒ no assignment (fail closed). Two
+    // simultaneous assigns cannot both take a slot's last minutes.
+    const targetWindow = windowOfTimeWindow(
+      args.timeWindow ?? job.timeWindow ?? null
+    );
+    // proveRoutable THROWS when the key exists but the address won't route,
+    // and when no key exists without the explicit dev escape — so a null
+    // proof here can only be the ALLOW_UNVERIFIED_ROUTES local-dev path,
+    // which schedules on the locked on-site minutes alone.
+    const slotMinutes =
+      slotOnsiteMinutes(job.propertyClass) +
+      (routeProof ? routeProof.driveMinutes * 2 : 0);
+    const reserved = await reserveSlot(
+      args.scheduledDate,
+      targetWindow,
+      technician.id,
+      slotMinutes
+    );
+    if (!reserved.ok) {
+      await compensateMonth();
+      throw new Error(reserved.message);
     }
     const { data, errors } = await client.models.Job.update({
       id: job.id,
@@ -2000,6 +2100,8 @@ async function updateJobSchedule(
       routeOrder: args.routeOrder ?? 1,
       scheduledDate: args.scheduledDate,
       status: "SCHEDULED",
+      capacityWindow: targetWindow,
+      capacityMinutes: slotMinutes,
       ...(routeProof
         ? {
             dispatchDriveMinutes: routeProof.driveMinutes,
@@ -2007,12 +2109,43 @@ async function updateJobSchedule(
           }
         : {}),
     });
-    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
-    if (priorDate && args.scheduledDate !== priorDate) {
-      await releaseScheduledMinutes(
-        priorDate,
-        visitMinutes(job)
+    if (!data) {
+      await compensateMonth();
+      await releaseSlot(
+        args.scheduledDate,
+        targetWindow,
+        technician.id,
+        slotMinutes
       ).catch(() => undefined);
+      throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
+    }
+    // Publish landed: NOW the prior month/slot are given back.
+    if (priorMonthToRelease && seasonalPlanId) {
+      await releaseMonthForJob({
+        servicePlanId: seasonalPlanId,
+        monthKey: priorMonthToRelease,
+        jobId: job.id,
+        note: "Visit moved to a different month.",
+      }).catch(() => undefined);
+    }
+    if (priorDate) {
+      const priorWindow =
+        (job.capacityWindow as CapacityWindow | null) ??
+        windowOfTimeWindow(job.timeWindow);
+      const priorMinutes =
+        job.capacityMinutes ?? slotOnsiteMinutes(job.propertyClass);
+      if (job.technicianId) {
+        await releaseSlot(
+          priorDate,
+          priorWindow,
+          job.technicianId,
+          priorMinutes
+        ).catch(() => undefined);
+      } else {
+        await releasePoolMinutes(priorDate, priorWindow, priorMinutes).catch(
+          () => undefined
+        );
+      }
     }
     return finish(
       { jobId: data.id },
@@ -2084,12 +2217,28 @@ async function updateJobSchedule(
         note: "Visit canceled — the month is owed again.",
       }).catch(() => undefined);
     }
-    // GL-04: the canceled visit's minutes go back to the shared day ledger.
+    // GL-04: the canceled visit's minutes go back to its technician-window
+    // slot (or the pool accounting slot when it was never assigned).
     if (job.scheduledDate) {
-      await releaseScheduledMinutes(
-        job.scheduledDate,
-        visitMinutes(job)
-      ).catch(() => undefined);
+      const cancelWindow =
+        (job.capacityWindow as CapacityWindow | null) ??
+        windowOfTimeWindow(job.timeWindow);
+      const cancelMinutes =
+        job.capacityMinutes ?? slotOnsiteMinutes(job.propertyClass);
+      if (job.technicianId) {
+        await releaseSlot(
+          job.scheduledDate,
+          cancelWindow,
+          job.technicianId,
+          cancelMinutes
+        ).catch(() => undefined);
+      } else {
+        await releasePoolMinutes(
+          job.scheduledDate,
+          cancelWindow,
+          cancelMinutes
+        ).catch(() => undefined);
+      }
     }
     const { data, errors } = await client.models.Job.update({
       id: job.id,
@@ -4455,3 +4604,62 @@ async function getDocumentUrl(
   );
   return { url, expiresInSeconds: 900 };
 }
+
+/**
+ * GL-08/GL-18 — the office reached the customer another way (phone, in
+ * person) and records HOW. Marks the newest matching EmailLog row
+ * ALTERNATE_DELIVERED with the evidence note appended, verified by
+ * read-back — settlement can then read a terminal delivery outcome. A
+ * bounced row may be superseded this way; a mailbox-DELIVERED row needs no
+ * alternate and is left alone.
+ */
+async function recordNoticeAlternateDelivery(
+  args: { relatedId: string; template: string; note: string },
+  actor: { sub: string | null; email: string | null }
+): Promise<{ recorded: boolean; message: string }> {
+  if (!args.relatedId || !args.template) {
+    throw new Error("The notice's record id and template are required.");
+  }
+  if (!args.note.trim()) {
+    throw new Error(
+      "A short note is required — how was the customer actually reached?"
+    );
+  }
+  const client = await dataClient();
+  if (!("EmailLog" in client.models)) {
+    throw new Error("The email log is unavailable here.");
+  }
+  const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
+    { relatedId: args.relatedId },
+    { limit: 50 }
+  );
+  const rows = (logs ?? [])
+    .filter((l) => l.template === args.template)
+    .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
+  const target = rows[0];
+  if (!target) {
+    throw new Error(
+      "No send of that notice exists to mark — re-send it first (or check the template)."
+    );
+  }
+  if (target.deliveryStatus === "DELIVERED") {
+    return {
+      recorded: true,
+      message: "The mailbox already confirmed delivery — nothing to record.",
+    };
+  }
+  await client.models.EmailLog.update({
+    id: target.id,
+    deliveryStatus: "ALTERNATE_DELIVERED",
+    error: `Alternate delivery recorded by ${actor.email ?? actor.sub ?? "staff"}: ${args.note.trim()}`,
+  });
+  const { data: verify } = await client.models.EmailLog.get({ id: target.id });
+  if (verify?.deliveryStatus !== "ALTERNATE_DELIVERED") {
+    throw new Error("The alternate delivery could not be recorded — try again.");
+  }
+  return {
+    recorded: true,
+    message: "Alternate delivery recorded — the notice now reads as reached.",
+  };
+}
+

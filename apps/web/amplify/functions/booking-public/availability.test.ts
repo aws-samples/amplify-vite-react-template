@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
+import { capacityFixtureModels } from "../shared/capacityTestFixture";
 
 /**
  * Day pricing floors (R62) and the single-day re-check (R29).
@@ -8,7 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * drive + labor + materials. Discounts must floor at variable cost.
  */
 
-type Stop = { customerId: string; serviceType: string; status: string };
+type Stop = {
+  customerId: string;
+  serviceType: string;
+  status: string;
+  technicianId?: string;
+  timeWindow?: string;
+};
 
 let stopsByDate: Record<string, Stop[]>;
 const listJobByScheduledDate = vi.fn(
@@ -16,6 +24,8 @@ const listJobByScheduledDate = vi.fn(
     data: stopsByDate[scheduledDate] ?? [],
   })
 );
+
+const capacityFixture = capacityFixtureModels();
 
 const fakeDataClient = {
   models: {
@@ -45,6 +55,7 @@ const fakeDataClient = {
     },
   },
 };
+Object.assign(fakeDataClient.models, capacityFixture.models);
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
 /** One existing stop 10 minutes away → route-density discount applies. */
@@ -67,12 +78,28 @@ const freezeEastern = (isoDate: string) =>
 const QUIET_NEARBY_DAY = "2026-07-28";
 
 beforeEach(() => {
+  capacityFixture.maps.capacityDays.clear();
+  capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.closures.clear();
+  capacityFixture.maps.exceptions.clear();
+  _setLockStoreForTests(
+    memoryLockStore({
+      CapacityDay: capacityFixture.maps.capacityDays,
+      CapacityClaim: capacityFixture.maps.capacityClaims,
+    })
+  );
   vi.useFakeTimers();
   freezeEastern("2026-07-16");
   listJobByScheduledDate.mockClear();
   stopsByDate = {
     [QUIET_NEARBY_DAY]: [
-      { customerId: "c9", serviceType: "GENERAL_PEST", status: "SCHEDULED" },
+      {
+        customerId: "c9",
+        serviceType: "GENERAL_PEST",
+        status: "SCHEDULED",
+        technicianId: "t1",
+        timeWindow: "MORNING",
+      },
     ],
   };
 });

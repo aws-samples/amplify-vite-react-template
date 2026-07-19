@@ -327,8 +327,8 @@ export async function planCancellationSettled(
   servicePlanId: string,
   opts: {
     /** GL-08 R3: settled is proved against the PROVIDER, not only CRM state.
-     *  Pass a Stripe client; without one, a plan that still has a provider
-     *  subscription id cannot read settled (fail closed, never assumed). */
+     *  Pass a Stripe client; without one, a plan that ever had a provider
+     *  subscription cannot read settled (fail closed, never assumed). */
     stripe?: Stripe | null;
   } = {}
 ): Promise<{ settled: boolean; reason: string }> {
@@ -349,9 +349,29 @@ export async function planCancellationSettled(
       reason: "The cancellation is still finishing — let it complete or resume it first.",
     };
   }
-  // Provider proof: the CRM saying CANCELED is not evidence the subscription
-  // stopped charging. The provider record must agree.
-  if (plan.stripeSubscriptionId) {
+  // The durable command carries the provider reference and the accepted
+  // request time — read it once for both.
+  let commandRow: {
+    requestedAt?: string | null;
+    stripeSubscriptionId?: string | null;
+  } | null = null;
+  if ("PlanCancellationClaim" in client.models) {
+    const { data } = await client.models.PlanCancellationClaim.get({
+      id: servicePlanId,
+    }).catch(() => ({ data: null }));
+    commandRow = data;
+  }
+  // Provider proof (GL-08 R3): the CRM saying CANCELED is not evidence the
+  // subscription stopped charging. The reference SURVIVES cancellation
+  // (canceledStripeSubscriptionId / the command), so the REAL cancel path —
+  // which clears stripeSubscriptionId — still gets the Stripe readback.
+  const providerRef =
+    plan.stripeSubscriptionId ??
+    (plan as { canceledStripeSubscriptionId?: string | null })
+      .canceledStripeSubscriptionId ??
+    commandRow?.stripeSubscriptionId ??
+    null;
+  if (providerRef) {
     if (!opts.stripe) {
       return {
         settled: false,
@@ -360,9 +380,7 @@ export async function planCancellationSettled(
       };
     }
     try {
-      const sub = await opts.stripe.subscriptions.retrieve(
-        plan.stripeSubscriptionId
-      );
+      const sub = await opts.stripe.subscriptions.retrieve(providerRef);
       if (sub.status !== "canceled") {
         return {
           settled: false,
@@ -389,6 +407,49 @@ export async function planCancellationSettled(
       reason: `${stillOn} recurring visit(s) still need to come off the schedule.`,
     };
   }
+  // GL-08 R4 (exact terminal settlement): every visit the cancellation
+  // touched must have reached its FINAL outcome — including visits that are
+  // already CANCELED and therefore invisible to the schedule check above,
+  // and payments made BEFORE the request. The stamped cancelDisposition is
+  // the policy outcome; the invoices prove the money actually moved.
+  {
+    let jobToken: string | null | undefined;
+    do {
+      const page = await client.models.Job.listJobByServicePlanId(
+        { servicePlanId },
+        { limit: 200, nextToken: jobToken }
+      );
+      for (const job of page.data ?? []) {
+        if (job.status === "IN_PROGRESS") {
+          return {
+            settled: false,
+            reason: `A technician is on site for visit ${job.id} — its final outcome must be recorded before the cancellation can settle.`,
+          };
+        }
+        if (job.status !== "CANCELED") continue;
+        const facts = await jobInvoiceFacts(job.id);
+        if (facts.inFlightCents > 0) {
+          return {
+            settled: false,
+            reason: `A payment is still in motion on canceled visit ${job.id} — it must settle to its exact 72-hour outcome first.`,
+          };
+        }
+        const disposition = (job as { cancelDisposition?: string | null })
+          .cancelDisposition;
+        if (disposition === "FEE_RETAINED") continue; // the recorded policy outcome
+        if (facts.paidRemainingCents > 0) {
+          // REFUND_OWED, AWAIT_SETTLEMENT, or an unstamped legacy cancel with
+          // money still held: not settled until the exact refund posts (or a
+          // recorded retained outcome exists).
+          return {
+            settled: false,
+            reason: `Canceled visit ${job.id} still holds $${(facts.paidRemainingCents / 100).toFixed(2)} with no full refund and no recorded retained-fee outcome.`,
+          };
+        }
+      }
+      jobToken = page.nextToken;
+    } while (jobToken);
+  }
   const invoices = await listPlanInvoices(servicePlanId);
   const liveCharge = invoices.some(
     (i) => i.status === "OPEN" && Boolean(i.stripePaymentIntentId)
@@ -401,13 +462,8 @@ export async function planCancellationSettled(
   }
   // The accepted cancellation time: the mutable plan stamp, with the durable
   // command's requestedAt as the fallback when that write was lost.
-  let requestedAt = plan.cancellationRequestedAt ?? null;
-  if (!requestedAt && "PlanCancellationClaim" in client.models) {
-    const { data: claim } = await client.models.PlanCancellationClaim.get({
-      id: servicePlanId,
-    }).catch(() => ({ data: null }));
-    requestedAt = claim?.requestedAt ?? null;
-  }
+  const requestedAt =
+    plan.cancellationRequestedAt ?? commandRow?.requestedAt ?? null;
   if (requestedAt) {
     // GL-08 R3: judged by PAYMENT time (paidAt; issuedAt only as fallback),
     // and a late charge is settled only by a FULL refund — a partial refund
@@ -415,7 +471,7 @@ export async function planCancellationSettled(
     const lateUnrefunded = invoices.some(
       (i) =>
         i.status === "PAID" &&
-        (i.paidAt ?? i.issuedAt ?? "") >= requestedAt! &&
+        (i.paidAt ?? i.issuedAt ?? "") >= requestedAt &&
         (i.refundedAmountCents ?? 0) < (i.amountCents ?? 0)
     );
     if (lateUnrefunded) {
@@ -426,9 +482,11 @@ export async function planCancellationSettled(
       };
     }
   }
-  // GL-18 R5: final customer delivery is part of settled. When the customer
-  // is reachable, the plan-canceled confirmation must be provider-accepted;
-  // with no address on file, the MISSING_CONTACT case owns the alternate path.
+  // GL-08 R5: final customer delivery is part of settled — DELIVERED (mailbox
+  // confirmed) or a RECORDED approved alternate-contact outcome; provider
+  // acceptance (SENT) is not customer delivery. A notice-history READ FAILURE
+  // fails CLOSED. With no address on file, the MISSING_CONTACT case owns the
+  // alternate path.
   try {
     const { data: cust } = await client.models.Customer.get({
       id: plan.customerId,
@@ -438,27 +496,67 @@ export async function planCancellationSettled(
         { relatedId: servicePlanId },
         { limit: 50 }
       );
-      const accepted = (logs ?? []).some(
+      const delivered = (logs ?? []).some(
         (l) =>
           l.template === "plan-canceled" &&
-          (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+          (l.deliveryStatus === "DELIVERED" ||
+            l.deliveryStatus === "ALTERNATE_DELIVERED")
       );
-      if (!accepted) {
+      if (!delivered) {
+        const accepted = (logs ?? []).some(
+          (l) => l.template === "plan-canceled" && l.deliveryStatus === "SENT"
+        );
         return {
           settled: false,
-          reason:
-            "The cancellation confirmation hasn't gone out — resume the cancellation (it re-sends or adopts the notice).",
+          reason: accepted
+            ? "The cancellation confirmation was accepted by the provider but not yet DELIVERED — wait for the delivery event, or record an approved alternate delivery."
+            : "The cancellation confirmation hasn't reached the customer — resume the cancellation (it re-sends or adopts the notice), or record an approved alternate delivery.",
         };
       }
     }
   } catch (err) {
     console.error("planCancellationSettled: notice check failed", err);
+    return {
+      settled: false,
+      reason:
+        "The customer-notice history could not be read — settlement can't be confirmed right now.",
+    };
   }
   return {
     settled: true,
     reason:
-      "Provider subscription stopped, plan canceled, visits cleared, every late charge fully refunded, and the customer notified.",
+      "Provider subscription stopped, plan canceled, every visit at its exact money outcome, every late charge fully refunded, and the customer's final word delivered.",
   };
+}
+
+/** The money still attached to one visit, for the settlement check. */
+async function jobInvoiceFacts(jobId: string): Promise<{
+  paidRemainingCents: number;
+  inFlightCents: number;
+}> {
+  const client = await dataClient();
+  let paidRemainingCents = 0;
+  let inFlightCents = 0;
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.Invoice.list({
+      filter: { jobId: { eq: jobId } },
+      limit: 200,
+      nextToken: token,
+    });
+    for (const inv of page.data ?? []) {
+      if (inv.status === "PAID" || inv.status === "REFUNDED") {
+        paidRemainingCents += Math.max(
+          0,
+          (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0)
+        );
+      } else if (inv.status === "OPEN" && inv.stripePaymentIntentId) {
+        inFlightCents += inv.amountCents ?? 0;
+      }
+    }
+    token = page.nextToken;
+  } while (token);
+  return { paidRemainingCents, inFlightCents };
 }
 
 /** Every invoice on a plan (paged), for the settlement check and preview. */
@@ -815,6 +913,9 @@ export async function cancelPlanForCustomer(
     attemptCount: 0,
     customerId: plan.customerId,
     note: reason ?? undefined,
+    // GL-08 R3: the provider reference rides the durable command, so the
+    // settlement readback survives the plan clearing its own id.
+    stripeSubscriptionId: plan.stripeSubscriptionId ?? undefined,
     leaseNonce: nonce,
     leaseUntil: new Date(Date.now() + CANCELLATION_LEASE_MS).toISOString(),
   });
@@ -1022,6 +1123,11 @@ export async function resumePlanCancellation(
       ownerTeam: "FINANCE",
       attemptCount,
       customerId: plan.customerId,
+      stripeSubscriptionId:
+        plan.stripeSubscriptionId ??
+        (plan as { canceledStripeSubscriptionId?: string | null })
+          .canceledStripeSubscriptionId ??
+        undefined,
       leaseNonce: nonce,
       leaseUntil: new Date(Date.now() + CANCELLATION_LEASE_MS).toISOString(),
     }).catch(() => ({ data: null }));

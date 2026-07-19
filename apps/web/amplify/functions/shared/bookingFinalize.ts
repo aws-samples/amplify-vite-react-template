@@ -191,9 +191,16 @@ export async function finalizeBooking(opts: {
       opts.paymentMethodId ?? null
     );
     // GL-04: the checkout's capacity claim is CONSUMED into the booked job —
-    // the scheduled visit carries the minutes from here on, so the claim row
-    // goes away without giving them back.
-    await consumeCapacityClaim(opts.bookingRequestId);
+    // the scheduled visit carries the claim's slot facts (window + minutes)
+    // from here on, so the claim row goes away without giving them back.
+    const consumedSlot = await consumeCapacityClaim(opts.bookingRequestId);
+    if (consumedSlot && booking.jobId) {
+      await client.models.Job.update({
+        id: booking.jobId,
+        capacityWindow: consumedSlot.window,
+        capacityMinutes: consumedSlot.minutes,
+      }).catch(() => undefined);
+    }
     // The booking is whole. If a prior attempt had opened the paid-not-finalized
     // exception, this success closes it — the queue must not keep showing a
     // problem the retry already solved.

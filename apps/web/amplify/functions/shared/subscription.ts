@@ -4,7 +4,13 @@ import { notifyOffice } from "./email";
 import { openOwnedWork } from "./ownedWork";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { computeVisitCancellationPolicy } from "./cancellationPolicy";
-import { releaseScheduledMinutes, visitMinutes } from "./capacity";
+import {
+  onsiteMinutes,
+  releasePoolMinutes,
+  releaseSlot,
+  windowOfTimeWindow,
+  type CapacityWindow,
+} from "./capacity";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -313,6 +319,17 @@ export async function cancelQueuedPlanVisits(
             : ` Paid ${(paidCents / 100).toFixed(2)} — retained per the ${CANCEL_FULL_REFUND_DAYS * 24}-hour policy.`
           : " Taken off the schedule so it cannot dispatch unbilled."
       }`;
+      // The MACHINE-READABLE disposition rides the cancel write itself, so
+      // settlement verifies the exact policy outcome later — never inferring
+      // it from schedule rows that no longer list (GL-08 R4).
+      const disposition =
+        money.inFlightCents > 0
+          ? "AWAIT_SETTLEMENT"
+          : paidCents > 0
+            ? policy.withinFreeWindow
+              ? "REFUND_OWED"
+              : "FEE_RETAINED"
+            : "NONE";
       let canceled = false;
       try {
         const { data: updated } = await client.models.Job.update({
@@ -320,6 +337,11 @@ export async function cancelQueuedPlanVisits(
           status: "CANCELED",
           routeId: null,
           routeOrder: null,
+          cancelDisposition: disposition,
+          cancelDispositionCents:
+            disposition === "AWAIT_SETTLEMENT"
+              ? money.inFlightCents
+              : paidCents,
           notes: job.notes ? `${job.notes}\n${note}` : note,
         });
         canceled = Boolean(updated);
@@ -334,12 +356,28 @@ export async function cancelQueuedPlanVisits(
         continue;
       }
       resolution.canceled.push(visit);
-      // GL-04: the canceled visit's minutes go back to the day's ledger.
+      // GL-04: the canceled visit's minutes go back to its technician-window
+      // slot (or the pool accounting slot when it was never assigned).
       if (job.scheduledDate) {
-        await releaseScheduledMinutes(
-          job.scheduledDate,
-          visitMinutes(job as { propertyClass?: string | null; dispatchDriveMinutes?: number | null })
-        ).catch(() => undefined);
+        const jobWindow =
+          ((job as { capacityWindow?: string | null }).capacityWindow as
+            | CapacityWindow
+            | null) ?? windowOfTimeWindow(job.timeWindow);
+        const minutes =
+          (job as { capacityMinutes?: number | null }).capacityMinutes ??
+          onsiteMinutes(job.propertyClass);
+        if (job.technicianId) {
+          await releaseSlot(
+            job.scheduledDate,
+            jobWindow,
+            job.technicianId,
+            minutes
+          ).catch(() => undefined);
+        } else {
+          await releasePoolMinutes(job.scheduledDate, jobWindow, minutes).catch(
+            () => undefined
+          );
+        }
       }
 
       if (paidCents > 0 && policy.withinFreeWindow) {
@@ -495,6 +533,13 @@ export async function cancelPlanBilling(
       id: servicePlanId,
       status: "CANCELED",
       stripeSubscriptionId: null,
+      // GL-08 R3: the provider reference survives the clear, so settlement can
+      // RE-PROVE against Stripe that this subscription really reads canceled.
+      canceledStripeSubscriptionId:
+        plan.stripeSubscriptionId ??
+        (plan as { canceledStripeSubscriptionId?: string | null })
+          .canceledStripeSubscriptionId ??
+        undefined,
       canceledAt: new Date().toISOString(),
     });
   if (!canceledPlan) {

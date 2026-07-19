@@ -10,6 +10,7 @@ import {
   type WorkEvent,
   type WorkItem,
   liftEmailSuppression,
+  recordNoticeAlternateDelivery,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
@@ -165,6 +166,38 @@ export default function WorkQueue() {
       } catch (err) {
         setError(
           err instanceof Error ? err.message : "Could not lift the suppression"
+        );
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load]
+  );
+
+  // GL-08/GL-18: the office reached the customer by phone/in person — record
+  // how, so the notice reads terminally delivered without a mailbox event.
+  const recordAlternate = useCallback(
+    async (item: WorkItem, template: string) => {
+      const note = window.prompt(
+        "How was the customer actually reached? (required — recorded on the notice)"
+      );
+      if (!note) return;
+      setBusyId(item.id);
+      setError(null);
+      try {
+        const result = opResult<{ recorded: boolean; message: string }>(
+          await recordNoticeAlternateDelivery({
+            relatedId: item.relatedId ?? "",
+            template,
+            note,
+          })
+        );
+        if (!result) throw new Error("The alternate delivery did not record");
+        window.alert(result.message);
+        await load();
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Could not record the delivery"
         );
       } finally {
         setBusyId(null);
@@ -477,6 +510,18 @@ export default function WorkQueue() {
                     onClick={() => void liftSuppression(item)}
                   >
                     Lift email suppression…
+                  </Button>
+                ) : null}
+                {item.status === "OPEN" &&
+                item.kind === "PLAN_CANCELLATION_RECOVERY" &&
+                (roles.office || roles.finance) ? (
+                  <Button
+                    small
+                    variant="subtle"
+                    loading={busyId === item.id}
+                    onClick={() => void recordAlternate(item, "plan-canceled")}
+                  >
+                    Record alternate delivery…
                   </Button>
                 ) : null}
 

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
+import { capacityFixtureModels } from "../shared/capacityTestFixture";
 import {
   BOOKING_TERMS_TEXT,
   BOOKING_TERMS_VERSION,
@@ -23,6 +25,8 @@ type Stop = { customerId: string; serviceType: string; status: string };
 let booking: Record<string, unknown>;
 let stopsOnDay: Stop[];
 const bookingUpdates: Record<string, unknown>[] = [];
+
+const capacityFixture = capacityFixtureModels();
 
 const fakeDataClient = {
   models: {
@@ -62,6 +66,7 @@ const fakeDataClient = {
     },
   },
 };
+Object.assign(fakeDataClient.models, capacityFixture.models);
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
 vi.mock("../shared/email", () => ({
@@ -138,7 +143,32 @@ const gpcStop = (n: number): Stop => ({
   status: "SCHEDULED",
 });
 
+/** GL-04: "full" now means the technician-window LEDGERS hold the minutes —
+ *  slot rows, not a stop count. `headroom` leaves that many minutes free. */
+const fillSlots = (date: string, headroom = 0) => {
+  for (const w of ["MORNING", "AFTERNOON"] as const) {
+    const max = w === "MORNING" ? 240 : 300;
+    capacityFixture.maps.capacityDays.set(`${date}#${w}#t1`, {
+      id: `${date}#${w}#t1`,
+      date,
+      window: w,
+      technicianId: "t1",
+      committedMinutes: max - headroom,
+    });
+  }
+};
+
 beforeEach(() => {
+  capacityFixture.maps.capacityDays.clear();
+  capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.closures.clear();
+  capacityFixture.maps.exceptions.clear();
+  _setLockStoreForTests(
+    memoryLockStore({
+      CapacityDay: capacityFixture.maps.capacityDays,
+      CapacityClaim: capacityFixture.maps.capacityClaims,
+    })
+  );
   vi.useFakeTimers();
   freezeEastern("2026-07-16");
   bookingUpdates.length = 0;
@@ -205,7 +235,7 @@ describe("booking re-checks live availability (R29)", () => {
   });
 
   it("refuses when the day filled up after the quote", async () => {
-    stopsOnDay = Array.from({ length: 8 }, (_, i) => gpcStop(i)); // at capacity
+    fillSlots("2026-07-22"); // every technician-window ledger is full
 
     const res = await bookIt();
 
@@ -215,9 +245,9 @@ describe("booking re-checks live availability (R29)", () => {
   });
 
   it("refuses when the day no longer fits the route minutes", async () => {
-    // 7 stops leave stop-count headroom, but 7×(90+20) + 90 onsite + insertion
-    // overruns the 480-minute workday — the feasibility block must hold.
-    stopsOnDay = Array.from({ length: 7 }, (_, i) => gpcStop(i));
+    // 20 minutes of headroom can't absorb 30 on-site + real Routes legs —
+    // the per-slot feasibility must hold even though the ledger isn't full.
+    fillSlots("2026-07-22", 20);
 
     const res = await bookIt();
 
@@ -233,7 +263,7 @@ describe("booking re-checks live availability (R29)", () => {
       amount: 31300,
       client_secret: "cs_old",
     };
-    stopsOnDay = Array.from({ length: 8 }, (_, i) => gpcStop(i));
+    fillSlots("2026-07-22");
 
     const res = await bookIt();
 

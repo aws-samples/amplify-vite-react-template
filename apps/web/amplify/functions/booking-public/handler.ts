@@ -19,16 +19,13 @@ import {
   type Zone,
 } from "../crm-pricing/rateCards";
 import { cancelPlanForCustomer } from "../shared/planCancellation";
-import {
-  claimCapacity,
-  DEFAULT_TRAVEL_MINUTES,
-} from "../shared/capacity";
+import { claimWindowSlot, type CapacityWindow } from "../shared/capacity";
 import {
   BOOKING_TERMS_TEXT,
   BOOKING_TERMS_VERSION,
   CANCEL_FULL_REFUND_DAYS,
 } from "../shared/bookingTerms";
-import { buildDayMatrix, ONSITE_MINUTES, type DayQuote } from "./availability";
+import { buildDayMatrix, type DayQuote } from "./availability";
 import {
   enqueueRateResearch,
   areaKeyFor,
@@ -1277,17 +1274,44 @@ async function book(
     }
   }
 
-  // GL-04 R1: atomically CLAIM the day's minutes for THIS payment attempt
-  // BEFORE any chargeable intent exists. Exactly one of two concurrent
-  // checkouts for the last minutes wins; the loser is told the day sold out
-  // before their card is ever chargeable. The claim is durable — success
-  // consumes it into the booked job, a pending bank debit extends it, and
-  // failure/abandonment releases it (the sweep owns crashed checkouts).
-  const onsiteMinutes = ONSITE_MINUTES[booking.service ?? ""] ?? 60;
-  const capacityClaim = await claimCapacity({
+  // GL-04 R1: atomically CLAIM the chosen technician-WINDOW slot for THIS
+  // payment attempt BEFORE any chargeable intent exists. The slot and its
+  // minutes (locked on-site + real Routes legs) come from the SAME
+  // feasibility the live re-check just computed; exactly one of two
+  // concurrent checkouts for a slot's last minutes wins, and the loser is
+  // told before their card is ever chargeable. The claim is durable —
+  // success consumes it into the booked job, a pending bank debit extends
+  // it, and failure/abandonment releases it (the sweep owns crashed
+  // checkouts).
+  const liveDayQuote = liveDay.find((d) => d.date === date);
+  const slot = liveDayQuote?.slots?.[window as CapacityWindow];
+  if (!slot) {
+    if (existing) {
+      try {
+        await s.paymentIntents.cancel(existing.id);
+      } catch {
+        /* already canceled/expired — fine */
+      }
+    }
+    throw new HttpError(409, {
+      error: "That window just sold out — pick another from a fresh quote.",
+    });
+  }
+  const candidateAddress = [
+    booking.street,
+    booking.city,
+    booking.state,
+    booking.zip,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const capacityClaim = await claimWindowSlot({
     claimKey: booking.id,
     date,
-    minutes: onsiteMinutes + DEFAULT_TRAVEL_MINUTES,
+    window: window as CapacityWindow,
+    technicianId: slot.technicianId,
+    minutes: slot.claimMinutes,
+    address: candidateAddress,
     holdReason: `checkout for ${booking.email}`,
   });
   if (!capacityClaim.ok) {
@@ -1300,7 +1324,7 @@ async function book(
     }
     throw new HttpError(409, {
       error: capacityClaim.soldOut
-        ? "That day just sold out — pick another day from a fresh quote."
+        ? "That window just sold out — pick another from a fresh quote."
         : capacityClaim.message,
     });
   }

@@ -256,6 +256,16 @@ export function liftEmailSuppression(input: {
   return api().mutations.liftEmailSuppression(input);
 }
 
+/** GL-08/GL-18: record that a notice reached the customer another way — the
+ *  approved terminal alternative to a mailbox DELIVERED. */
+export function recordNoticeAlternateDelivery(input: {
+  relatedId: string;
+  template: string;
+  note: string;
+}): OpResult {
+  return api().mutations.recordNoticeAlternateDelivery(input);
+}
+
 /**
  * Recovery-lifecycle contract boundary (R02/R31/R52/R78), same shape as the
  * MarketRate boundary below: the backend wave landing alongside this one adds

@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
+import { capacityFixtureModels } from "./capacityTestFixture";
 
 /**
  * GL-07 — the office cancel/reschedule engine.
@@ -29,9 +31,15 @@ function listBy(map: Map<string, Row>, field: string, value: unknown): Row[] {
   return [...map.values()].filter((r) => r[field] === value);
 }
 
+const capacityFixture = capacityFixtureModels();
+
 const fakeDataClient = {
   models: {
     Job: {
+      listJobByScheduledDate: async ({ scheduledDate }: { scheduledDate: string }) => ({
+        data: [...jobs.values()].filter((j) => j.scheduledDate === scheduledDate),
+        nextToken: null,
+      }),
       get: async ({ id }: { id: string }) => ({ data: jobs.get(id) ?? null }),
       update: async (patch: Row) => {
         if (!jobs.has(patch.id)) return { data: null, errors: [{ message: "no job" }] };
@@ -71,6 +79,7 @@ const fakeDataClient = {
     },
     Technician: {
       get: async ({ id }: { id: string }) => ({ data: technicians.get(id) ?? null }),
+      list: async () => ({ data: [...technicians.values()], nextToken: null }),
     },
     VisitChangeEvent: {
       create: async (row: Row) => {
@@ -111,6 +120,7 @@ const fakeDataClient = {
     },
   },
 };
+Object.assign(fakeDataClient.models, capacityFixture.models);
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
 const sendEmail = vi.fn(async (opts: unknown) => {
@@ -157,7 +167,12 @@ const {
 const FUTURE_LICENSE = "2099-12-31";
 // "Today" for the policy is real-time eastern; pick visit dates relative to it.
 const daysFromNow = (n: number): string => {
+  // Always lands on a WEEKDAY: the capacity rule sells nothing on weekends,
+  // so date fixtures roll forward off Saturday/Sunday.
   const d = new Date(Date.now() + n * 86_400_000);
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
   return d.toISOString().slice(0, 10);
 };
 
@@ -192,6 +207,17 @@ function seedPaidVisit(overrides: Partial<Row> = {}) {
 }
 
 beforeEach(() => {
+  process.env.ALLOW_UNVERIFIED_ROUTES = "true";
+  delete process.env.GOOGLE_ROUTES_API_KEY;
+  capacityFixture.maps.capacityDays.clear();
+  capacityFixture.maps.capacityClaims.clear();
+  _setLockStoreForTests(
+    memoryLockStore({
+      VisitChangeClaim: visitClaims,
+      CapacityDay: capacityFixture.maps.capacityDays,
+      CapacityClaim: capacityFixture.maps.capacityClaims,
+    })
+  );
   jobs.clear();
   customers.clear();
   invoices.clear();

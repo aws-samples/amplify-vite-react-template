@@ -152,6 +152,9 @@ export const schema = a.schema({
     "COMPLAINED",
     "SUPPRESSED",
     "FAILED",
+    // GL-08/GL-18: the office reached the customer another way and recorded
+    // how — the approved terminal alternative to a mailbox DELIVERED.
+    "ALTERNATE_DELIVERED",
   ]),
   WorkKind: a.enum([
     "NO_ACCESS",
@@ -389,6 +392,11 @@ export const schema = a.schema({
       serviceFrequency: a.ref("ServiceFrequency").required(),
       status: a.ref("ServicePlanStatus").required(),
       stripeSubscriptionId: a.string(),
+      /** GL-08 R3: the durable provider reference AFTER cancellation clears
+       *  stripeSubscriptionId — settlement re-proves the subscription against
+       *  Stripe using this, so the real cancel path never skips the provider
+       *  readback. */
+      canceledStripeSubscriptionId: a.string(),
       startDate: a.date(),
       canceledAt: a.datetime(),
       // GL-08 customer self-cancellation. A cancel the customer confirmed but
@@ -620,6 +628,9 @@ export const schema = a.schema({
        *  COMPLETE + outcome + resultJson ARE the readable settled record. */
       outcome: a.string(),
       resultJson: a.json(),
+      /** The provider subscription this command stops — the settlement
+       *  readback's fallback when the plan's own references are lost. */
+      stripeSubscriptionId: a.string(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
@@ -857,7 +868,15 @@ export const schema = a.schema({
   CapacityDay: a
     .model({
       date: a.date().required(),
+      /** GL-04: one ledger row per technician-WINDOW (id =
+       *  `date#WINDOW#technicianId`) — morning and afternoon are protected
+       *  independently, per technician, never as one day-wide pool. */
+      window: a.string(),
+      technicianId: a.string(),
       committedMinutes: a.integer(),
+      /** False ⇒ the nightly Routes rebuild could not verify this slot's
+       *  travel legs — it sells NOTHING until it verifies (fail closed). */
+      verified: a.boolean(),
       reconciledAt: a.datetime(),
     })
     .secondaryIndexes((index) => [index("date")])
@@ -876,6 +895,11 @@ export const schema = a.schema({
   CapacityClaim: a
     .model({
       date: a.date().required(),
+      /** GL-04: the claim binds a SPECIFIC technician-window slot, and keeps
+       *  the stop's address so later feasibility routes around it. */
+      window: a.string().required(),
+      technicianId: a.string().required(),
+      address: a.string(),
       minutes: a.integer().required(),
       expiresAt: a.datetime().required(),
       holdReason: a.string(),
@@ -1159,6 +1183,17 @@ export const schema = a.schema({
       // what the technician found, when, an optional site photo. Mirrors the
       // noAccess* block; the status says which exit it was.
       notPerformedReason: a.string(),
+      /** GL-08 R4: the server-calculated money outcome stamped when THIS visit
+       *  was canceled — REFUND_OWED | FEE_RETAINED | AWAIT_SETTLEMENT | NONE —
+       *  with the amount, so settlement verifies the exact policy disposition
+       *  instead of inferring it from vanished schedule rows. */
+      cancelDisposition: a.string(),
+      cancelDispositionCents: a.integer(),
+      /** GL-04: the minutes this visit holds on its technician-window slot
+       *  (on-site + real Routes legs), stamped when the slot was taken so a
+       *  cancel/move releases exactly what was reserved. */
+      capacityMinutes: a.integer(),
+      capacityWindow: a.string(),
       notPerformedAt: a.datetime(),
       notPerformedNote: a.string(),
       notPerformedPhotoKey: a.string(),
@@ -2182,6 +2217,24 @@ export const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-08/GL-18 — record that a customer notice reached its customer by an
+   * APPROVED alternate route (phone call, in person). Marks the newest
+   * matching EmailLog row ALTERNATE_DELIVERED with the required how-note, so
+   * settlement can read a terminal delivery outcome instead of waiting on a
+   * mailbox event that will never come.
+   */
+  recordNoticeAlternateDelivery: a
+    .mutation()
+    .arguments({
+      relatedId: a.string().required(),
+      template: a.string().required(),
+      note: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
 
   deactivateTechnician: a
     .mutation()

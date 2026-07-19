@@ -58,7 +58,11 @@ export type LifecycleClaimResult =
       /** The exclusive holder nonce every subsequent command write presents. */
       nonce: string;
     }
-  | { claimed: false; state: "IN_FLIGHT" | "DONE" | "OPPOSITE_IN_FLIGHT"; command: LifecycleCommandRow };
+  | {
+      claimed: false;
+      state: "IN_FLIGHT" | "DONE" | "OPPOSITE_IN_FLIGHT" | "UNVERIFIED";
+      command: LifecycleCommandRow;
+    };
 
 function isSettled(stage: string | null | undefined): boolean {
   return SETTLED.includes((stage ?? "") as LifecycleStage);
@@ -82,15 +86,29 @@ export async function claimLifecycleCommand(input: {
   if (!id) throw new Error("An idempotency key is required");
   const client = await dataClient();
   const nonce = randomUUID();
-  // A fake or a container straddling a schema deploy: proceed as the claimant
-  // (the per-customer lock still serializes) rather than blocking transitions.
+  const unverified = (why: string): LifecycleClaimResult => ({
+    claimed: false,
+    state: "UNVERIFIED",
+    command: {
+      id,
+      customerId: input.customerId,
+      action: input.action,
+      stage: "REQUESTED",
+      lastError: why,
+    },
+  });
+  // FAIL CLOSED: without the durable command store there is no serialization,
+  // no persisted progress, and no resumability — a transition must not touch
+  // the provider on hope. The caller owns the refusal (owned recovery).
   if (!("CustomerLifecycleCommand" in client.models)) {
-    return { claimed: true, resumedFromStage: null, attempt: 1, nonce };
+    return unverified("The lifecycle command store is unavailable.");
   }
 
-  // Serialized reversal: any non-terminal command for this customer (either
-  // direction, different key) blocks a NEW command until it settles or is
-  // resumed to completion.
+  // Serialized reversal: any non-terminal command for this customer — either
+  // direction, ANY different key, INCLUDING a resumable PARTIAL — blocks a
+  // NEW command until it settles or is resumed to completion under its own
+  // key. A PARTIAL customer is mid-transition; a fresh different-key command
+  // would reinterpret partially-changed state.
   try {
     const { data: existing } =
       await client.models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
@@ -98,7 +116,7 @@ export async function claimLifecycleCommand(input: {
         { limit: 50 }
       );
     const open = (existing ?? []).find(
-      (c) => c.id !== id && !isSettled(c.stage) && c.stage !== "PARTIAL"
+      (c) => c.id !== id && !isSettled(c.stage)
     );
     if (open) {
       return {
@@ -109,7 +127,12 @@ export async function claimLifecycleCommand(input: {
       };
     }
   } catch (err) {
+    // FAIL CLOSED: an unverifiable open-command scan must not run a
+    // transition that might interleave with an unfinished one.
     console.error("claimLifecycleCommand: open-command scan failed", err);
+    return unverified(
+      "Open lifecycle commands could not be verified (read failure)."
+    );
   }
 
   const now = Date.now();

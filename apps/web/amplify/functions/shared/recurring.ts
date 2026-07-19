@@ -1,7 +1,11 @@
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
-import { claimMonthForJob, markObligation } from "./obligations";
-import { noteScheduledMinutes, visitMinutes } from "./capacity";
+import {
+  claimMonthForJob,
+  markObligation,
+  releaseMonthForJob,
+} from "./obligations";
+import { notePoolMinutes, onsiteMinutes } from "./capacity";
 import {
   firstWeekdayOf,
   monthKeyAfter,
@@ -158,12 +162,14 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       });
       if (!monthClaim.ok) {
         console.log(
-          `scheduleNextRecurringVisit: ${nextMonthKey} already ${monthClaim.status ?? "held"} for plan ${job.servicePlanId} — no second visit queued`
+          monthClaim.unavailable
+            ? `scheduleNextRecurringVisit: month ledger unavailable for plan ${job.servicePlanId} — visit NOT queued (fail closed; the obligation sweep re-attempts)`
+            : `scheduleNextRecurringVisit: ${nextMonthKey} already ${monthClaim.status ?? "held"} for plan ${job.servicePlanId} — no second visit queued`
         );
         return;
       }
     }
-    await client.models.Job.create({
+    const { data: createdNext } = await client.models.Job.create({
       // GL-15: deterministic id derived from the completed job, so the create
       // is CONDITIONAL — two concurrent finalizes (or a resumed retry) collapse
       // onto one next visit instead of both passing the scan above and creating
@@ -184,13 +190,35 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
         customer?.groupId ?? undefined
       ),
     });
-    // GL-04: the auto-queued visit occupies its target day on the shared
-    // minute ledger (system-created — never refused; overload shows on the
-    // Operations readout and the reconcile keeps the ledger honest).
-    await noteScheduledMinutes(
-      dueDate,
-      visitMinutes({ propertyClass: null, dispatchDriveMinutes: null })
-    ).catch(() => undefined);
+    if (!createdNext) {
+      // Conflict (the deterministic id already exists) is already-queued
+      // success; anything else is a REAL failure — the month claim must not
+      // outlive a visit that was never born.
+      const { data: existingNext } = await client.models.Job.get({
+        id: `next-${job.id}`,
+      });
+      if (!existingNext) {
+        if (seasonal && nextMonthKey) {
+          await releaseMonthForJob({
+            servicePlanId: job.servicePlanId,
+            monthKey: nextMonthKey,
+            jobId: `next-${job.id}`,
+            note: "Next-visit create failed — the month claim was rolled back.",
+          }).catch(() => undefined);
+        }
+        console.error(
+          `scheduleNextRecurringVisit: Job.create failed for plan ${job.servicePlanId}`
+        );
+        return;
+      }
+    }
+    // GL-04: the auto-queued visit shows on the POOL accounting slot for its
+    // target day (system-created — never refused, never blocking a real
+    // slot; it becomes a commitment only through the assign claim, and the
+    // nightly rebuild keeps this honest).
+    await notePoolMinutes(dueDate, "MORNING", onsiteMinutes(null)).catch(
+      () => undefined
+    );
     console.log(
       `Queued next ${plan.serviceFrequency} visit for plan ${job.servicePlanId} on ${dueDate}`
     );

@@ -14,9 +14,15 @@ import { assertTechnicianCompliance } from "./compliance";
 import { licenseFactsFor } from "./licenses";
 import { releaseMonthForJob } from "./obligations";
 import {
-  releaseScheduledMinutes,
-  reserveScheduledMinutes,
-  visitMinutes,
+  makeLegResolver,
+  notePoolMinutes,
+  onsiteMinutes as slotOnsiteMinutes,
+  releasePoolMinutes,
+  releaseSlot,
+  reserveSlot,
+  techBaseFor,
+  windowOfTimeWindow,
+  type CapacityWindow,
 } from "./capacity";
 import {
   computeVisitCancellationPolicy,
@@ -154,6 +160,50 @@ function amountPaidFor(job: JobRow, paidList: InvoiceRow[]): number {
 }
 
 const CHANGEABLE = new Set(["SCHEDULED", "UNSCHEDULED"]);
+
+/** The slot a visit currently holds, for releases: stamped facts first,
+ *  falling back to the parsed window + locked on-site duration. */
+function jobSlotFacts(job: {
+  timeWindow?: string | null;
+  propertyClass?: string | null;
+  capacityWindow?: string | null;
+  capacityMinutes?: number | null;
+  technicianId?: string | null;
+}): { window: CapacityWindow; minutes: number; technicianId: string | null } {
+  return {
+    window:
+      (job.capacityWindow as CapacityWindow | null) ??
+      windowOfTimeWindow(job.timeWindow),
+    minutes: job.capacityMinutes ?? slotOnsiteMinutes(job.propertyClass),
+    technicianId: job.technicianId ?? null,
+  };
+}
+
+async function releaseJobSlot(job: {
+  scheduledDate?: string | null;
+  timeWindow?: string | null;
+  propertyClass?: string | null;
+  capacityWindow?: string | null;
+  capacityMinutes?: number | null;
+  technicianId?: string | null;
+}): Promise<void> {
+  if (!job.scheduledDate) return;
+  const facts = jobSlotFacts(job);
+  if (facts.technicianId) {
+    await releaseSlot(
+      job.scheduledDate,
+      facts.window,
+      facts.technicianId,
+      facts.minutes
+    ).catch(() => undefined);
+  } else {
+    await releasePoolMinutes(
+      job.scheduledDate,
+      facts.window,
+      facts.minutes
+    ).catch(() => undefined);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Preview
@@ -777,13 +827,25 @@ async function driveHeldVisitCancel(
     }
   }
 
-  // 3. Flip the visit CANCELED and off its route.
+  // 3. Flip the visit CANCELED and off its route — with the machine-readable
+  // money disposition, so settlement verifies the exact policy outcome.
   const { data: canceled, errors } = await client.models.Job.update({
     id: jobId,
     status: "CANCELED",
     routeId: null,
     technicianId: null,
     routeOrder: null,
+    cancelDisposition: moneyPending
+      ? "AWAIT_SETTLEMENT"
+      : disposition === "REFUND"
+        ? refundedCents >= refundTarget
+          ? "REFUNDED"
+          : "REFUND_OWED"
+        : disposition === "FEE_RETAINED"
+          ? "FEE_RETAINED"
+          : "NONE",
+    cancelDispositionCents:
+      disposition === "REFUND" ? refundedCents : policy.feeCents,
   });
   if (!canceled) {
     const detail = errors?.map((e) => e.message).join("; ") ?? "unknown error";
@@ -826,13 +888,9 @@ async function driveHeldVisitCancel(
     stage: moneyPending ? "PENDING" : "CANCELED",
   });
 
-  // GL-04: a canceled visit gives its day's minutes back to the shared
-  // capacity ledger.
-  if (job.scheduledDate) {
-    await releaseScheduledMinutes(job.scheduledDate, visitMinutes(job)).catch(
-      () => undefined
-    );
-  }
+  // GL-04: a canceled visit gives its technician-window slot (or pool
+  // accounting) minutes back.
+  await releaseJobSlot(job);
 
   // GL-17: a canceled seasonal visit gives its month back (SCHEDULED → DUE),
   // guarded on the month still belonging to THIS job — the month can be
@@ -1479,17 +1537,58 @@ export async function rescheduleVisit(args: {
         `That route is full (${stops} of ${STOPS_PER_TECH} stops). Pick another day or technician.`
       );
     }
-    // GL-04: the ATOMIC day claim — one guarded add on the shared minute
-    // ledger; two simultaneous office moves cannot both take the last
-    // minutes (the stop count above is a coarse secondary bound).
-    if (newDate !== priorScheduledDate) {
-      const reserved = await reserveScheduledMinutes(
-        newDate!,
-        visitMinutes(job)
+    // GL-04: the ATOMIC technician-window slot claim. The minutes are the
+    // locked on-site duration + REAL Routes legs measured from the assigned
+    // technician's private base (or that day's override); a base or Routes
+    // answer that can't be produced refuses the move (fail closed). Two
+    // simultaneous office moves cannot both take a slot's last minutes.
+    const targetWindow = windowOfTimeWindow(
+      args.timeWindow ?? job.timeWindow ?? null
+    );
+    const techBase = await techBaseFor(technician.id, newDate!);
+    if (!techBase) {
+      throw new Error(
+        `${technician.name ?? "This technician"} isn't available on ${newDate} (PTO, closure, or unverifiable facts) — pick another technician or day.`
       );
-      if (!reserved.ok) {
-        throw new Error(reserved.message);
+    }
+    const { data: moveCustomer } = await client.models.Customer.get({
+      id: job.customerId,
+    });
+    const stopAddress = moveCustomer
+      ? [
+          moveCustomer.serviceStreet,
+          moveCustomer.serviceCity,
+          moveCustomer.serviceState,
+          moveCustomer.serviceZip,
+        ]
+          .filter(Boolean)
+          .join(", ")
+      : "";
+    const routesKey = process.env.GOOGLE_ROUTES_API_KEY ?? null;
+    let slotMinutes: number;
+    if (!routesKey && process.env.ALLOW_UNVERIFIED_ROUTES === "true") {
+      // The explicit LOCAL-DEV escape only: schedule on the locked on-site
+      // minutes. Production has the key and takes the hard Routes path.
+      slotMinutes = slotOnsiteMinutes(job.propertyClass);
+    } else {
+      const legs = makeLegResolver(routesKey);
+      const legOut = await legs(techBase, stopAddress);
+      const legBack = await legs(stopAddress, techBase);
+      if (legOut == null || legBack == null) {
+        throw new Error(
+          "The drive from the technician's base can't be verified with Google Routes right now — the move was refused rather than scheduled on guessed travel."
+        );
       }
+      slotMinutes = slotOnsiteMinutes(job.propertyClass) + legOut + legBack;
+    }
+    const reserved = await reserveSlot(
+      newDate!,
+      targetWindow,
+      technician.id,
+      slotMinutes
+    );
+    if (!reserved.ok) {
+      throw new Error(reserved.message);
     }
 
     const { data, errors } = await client.models.Job.update({
@@ -1508,11 +1607,13 @@ export async function rescheduleVisit(args: {
     }
     mutated = true;
     assignedToRoute = true;
-    if (priorScheduledDate && newDate !== priorScheduledDate) {
-      await releaseScheduledMinutes(priorScheduledDate, visitMinutes(job)).catch(
-        () => undefined
-      );
-    }
+    await client.models.Job.update({
+      id: job.id,
+      capacityWindow: targetWindow,
+      capacityMinutes: slotMinutes,
+    }).catch(() => undefined);
+    // The OLD slot's minutes come back only after the move landed.
+    await releaseJobSlot(job);
   } else {
     // GL-07 R4: a dated move with no technician is NEVER published as a clean
     // SCHEDULED — the owned staffing case is CONFIRMED FIRST (a case that
@@ -1559,25 +1660,26 @@ export async function rescheduleVisit(args: {
       );
     }
     mutated = true;
-    // A pool move still occupies its target day (pending assignment counts —
-    // the customer was promised the date window). Atomic reserve + release of
-    // the prior day, mirroring the assignment path.
-    if (newDate && newDate !== priorScheduledDate) {
-      const reserved = await reserveScheduledMinutes(newDate, visitMinutes(job));
-      if (!reserved.ok) {
-        // The schedule already moved — surface, don't strand: the UNSTAFFED
-        // case owns the day fit as part of assignment.
-        console.warn(
-          `rescheduleVisit: pool move to ${newDate} exceeds the day's minutes`,
-          job.id
-        );
-      }
+    // A pending-assignment move shows on the POOL accounting slot (visible on
+    // the Operations readout, never blocking a real slot) — the real
+    // technician-window claim happens at assignment, which is also where the
+    // customer's window becomes a confirmed commitment.
+    if (newDate) {
+      await notePoolMinutes(
+        newDate,
+        windowOfTimeWindow(args.timeWindow ?? job.timeWindow ?? null),
+        slotOnsiteMinutes(job.propertyClass)
+      ).catch(() => undefined);
+      await client.models.Job.update({
+        id: job.id,
+        capacityWindow: windowOfTimeWindow(
+          args.timeWindow ?? job.timeWindow ?? null
+        ),
+        capacityMinutes: slotOnsiteMinutes(job.propertyClass),
+      }).catch(() => undefined);
     }
-    if (priorScheduledDate && newDate !== priorScheduledDate) {
-      await releaseScheduledMinutes(priorScheduledDate, visitMinutes(job)).catch(
-        () => undefined
-      );
-    }
+    // The prior slot's minutes come back after the move landed.
+    await releaseJobSlot(job);
   }
 
   const { data: customer } = await client.models.Customer.get({

@@ -187,7 +187,14 @@ export type MonthClaimOutcome =
   /** The month already has this very job — an idempotent re-run. */
   | { ok: true; alreadyThisJob: true }
   /** The month is taken (another scheduled visit, or already satisfied). */
-  | { ok: false; status: ObligationStatus | null; holderJobId: string | null };
+  | {
+      ok: false;
+      status: ObligationStatus | null;
+      holderJobId: string | null;
+      /** True when the ledger/CAS was UNAVAILABLE (fail closed) rather than
+       *  the month being genuinely taken. */
+      unavailable?: boolean;
+    };
 
 /**
  * GL-17 — atomically claim a seasonal plan-month for ONE visit. The obligation
@@ -205,7 +212,16 @@ export async function claimMonthForJob(input: {
   accessGroups?: string[];
 }): Promise<MonthClaimOutcome> {
   const client = await dataClient();
-  if (!("TreatmentObligation" in client.models)) return { ok: true };
+  // FAIL CLOSED: without the obligation ledger there is no month mutex — a
+  // seasonal visit must not be scheduled on hope of exclusivity.
+  if (!("TreatmentObligation" in client.models)) {
+    return {
+      ok: false,
+      status: null,
+      holderJobId: null,
+      unavailable: true,
+    };
+  }
   const id = obligationId(input.servicePlanId, input.monthKey);
 
   const { data: created } = await client.models.TreatmentObligation.create({
@@ -234,16 +250,14 @@ export async function claimMonthForJob(input: {
     return { ok: true, alreadyThisJob: true };
   }
   if (!guarded.ok && guarded.reason === "UNSUPPORTED") {
-    // No CAS wiring (unit fakes / deploy straddling): fall back to the
-    // read-then-write the guard replaces — still refusing anything but DUE.
-    if (existing?.status === "DUE") {
-      const { data: updated } = await client.models.TreatmentObligation.update({
-        id,
-        status: "SCHEDULED",
-        jobId: input.jobId,
-      });
-      if (updated) return { ok: true };
-    }
+    // FAIL CLOSED: without CAS the DUE → SCHEDULED transition is a
+    // read-then-write race two schedulers can both pass — refuse instead.
+    return {
+      ok: false,
+      status: ((existing?.status ?? null) as ObligationStatus | null),
+      holderJobId: existing?.jobId ?? null,
+      unavailable: true,
+    };
   }
   return {
     ok: false,
@@ -277,15 +291,8 @@ export async function releaseMonthForJob(input: {
     ]
   );
   if (guarded.ok) return;
-  if (!guarded.ok && guarded.reason === "UNSUPPORTED") {
-    const { data: existing } = await client.models.TreatmentObligation.get({ id });
-    if (existing?.status === "SCHEDULED" && existing.jobId === input.jobId) {
-      await client.models.TreatmentObligation.update({
-        id,
-        status: "DUE",
-        jobId: null,
-        note: input.note ?? existing.note ?? undefined,
-      }).catch(() => undefined);
-    }
-  }
+  // FAIL CLOSED on UNSUPPORTED too: an unguarded release could clobber a
+  // month a different visit just claimed. A held month that should have been
+  // released is the safe error (no double-booking); the daily obligation
+  // sweep and the office ledger correction own the leftover.
 }

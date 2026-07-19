@@ -616,6 +616,8 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     // Clear the id too, so "the plan has a subscription id" always means a live
     // one — a cancelled plan holding a dead id reads as healthy everywhere.
     stripeSubscriptionId: null,
+    // GL-08 R3: keep the durable reference for the settlement readback.
+    canceledStripeSubscriptionId: stripeSub.id,
     canceledAt: new Date().toISOString(),
   });
 

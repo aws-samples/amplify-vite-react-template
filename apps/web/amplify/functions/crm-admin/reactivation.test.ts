@@ -64,6 +64,7 @@ type Customer = {
 const customers = new Map<string, Customer>();
 /** The single-winner lifecycle claim store (id = customerId). */
 const claims = new Map<string, Record<string, unknown>>();
+const lifecycleCommands = new Map<string, Record<string, unknown>>();
 
 /** Records every field written to a Customer, so a test can assert exactly
  *  which columns updateCustomerContact touched. */
@@ -81,6 +82,34 @@ const fakeDataClient = {
       },
     },
     // The lifecycle claim: create is conditional on the id not existing.
+    CustomerLifecycleCommand: {
+      create: async (input: { id: string } & Record<string, unknown>) => {
+        if (lifecycleCommands.has(input.id)) return { data: null };
+        lifecycleCommands.set(input.id, { ...input });
+        return { data: { ...input } };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: lifecycleCommands.get(id) ?? null,
+      }),
+      update: async (input: { id: string } & Record<string, unknown>) => {
+        const row = lifecycleCommands.get(input.id);
+        if (!row) return { data: null };
+        for (const [k, v] of Object.entries(input)) {
+          if (v !== undefined) row[k] = v;
+        }
+        return { data: { ...row } };
+      },
+      listCustomerLifecycleCommandByCustomerIdAndRequestedAt: async ({
+        customerId,
+      }: {
+        customerId: string;
+      }) => ({
+        data: [...lifecycleCommands.values()].filter(
+          (c) => c.customerId === customerId
+        ),
+        nextToken: null,
+      }),
+    },
     CustomerLifecycleClaim: {
       create: async (input: { id: string }) => {
         if (claims.has(input.id)) return { data: null };
@@ -140,6 +169,7 @@ const call = (field: string, args: Record<string, unknown>) =>
   });
 
 beforeEach(() => {
+  lifecycleCommands.clear();
   events = [];
   customers.clear();
   claims.clear();

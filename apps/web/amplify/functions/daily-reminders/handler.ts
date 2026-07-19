@@ -646,6 +646,7 @@ export async function reconcilePlanCancellations() {
 export async function reconcileCapacity() {
   let reconciled = 0;
   let expired = 0;
+  let unverified = 0;
   try {
     const today = new Date();
     for (let i = 0; i < 45; i++) {
@@ -653,14 +654,23 @@ export async function reconcileCapacity() {
         .toISOString()
         .slice(0, 10);
       if (!isWeekday(date)) continue;
-      const res = await reconcileCapacityDay(date);
+      const res = await reconcileCapacityDay(
+        date,
+        process.env.GOOGLE_ROUTES_API_KEY ?? null
+      );
       reconciled++;
       expired += res.expiredClaims;
+      unverified += res.unverified;
     }
   } catch (err) {
     console.error("reconcileCapacity failed", err);
   }
-  return { task: "reconcile-capacity" as const, reconciled, expiredClaims: expired };
+  return {
+    task: "reconcile-capacity" as const,
+    reconciled,
+    expiredClaims: expired,
+    unverifiedSlots: unverified,
+  };
 }
 
 /**

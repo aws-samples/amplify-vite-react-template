@@ -1,6 +1,15 @@
 import { dataClient } from "../shared/dataClient";
-import { dayCapacityMap } from "../shared/capacity";
-import { driveMatrixFrom } from "../shared/driveTime";
+import {
+  bestSlotFor,
+  dayEligibilityMap,
+  makeLegResolver,
+  slotStates,
+  stopsBySlotOn,
+  WINDOWS,
+  WINDOW_MINUTES,
+  type CapacityWindow,
+  type SlotFeasibility,
+} from "../shared/capacity";
 import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
 
 /**
@@ -20,19 +29,13 @@ import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
  * Identical inputs (same schedule state) → identical prices, always.
  */
 
-const STOPS_PER_TECH = 8;
-const WORKDAY_MINUTES = 8 * 60;
-const AVG_HOP_MINUTES = 20; // typical drive between consecutive stops
-export const ONSITE_MINUTES: Record<string, number> = {
-  GENERAL_PEST: 90,
-  WASP_NEST: 60,
-  RODENT: 90,
-  ROACH: 90,
-};
-
 export type DayQuote = {
   date: string;
   windows: string[];
+  /** GL-04: the feasibility behind each offered window — which technician's
+   *  slot absorbs the stop and for how many minutes (on-site + real Routes
+   *  legs). Checkout claims exactly this. */
+  slots?: Partial<Record<CapacityWindow, SlotFeasibility>>;
   priceCents: number;
   factors: string[]; // audit trail persisted with the quote
 };
@@ -91,8 +94,6 @@ export async function buildDayMatrix(opts: {
   onlyDate?: string;
 }): Promise<DayQuote[]> {
   const { routesKey, candidateAddress, service, baseCents, zone } = opts;
-  const onsite =
-    opts.onsiteMinutes ?? ONSITE_MINUTES[service] ?? 90;
 
   // R62: a discount must never take a day below its variable cost. A Zone B
   // rodent quote at the $199 clamp floor used to discount to $169 against
@@ -115,120 +116,72 @@ export async function buildDayMatrix(opts: {
     // have offered must not become bookable through the re-check.
     .filter((d) => !opts.onlyDate || d === opts.onlyDate);
 
-  const [techsRes, ...jobPages] = await Promise.all([
-    client.models.Technician.list({ limit: 200 }),
-    ...days.map((date) =>
-      client.models.Job.listJobByScheduledDate(
-        { scheduledDate: date },
-        { limit: 200 }
-      )
-    ),
-  ]);
-  // GL-04: the ONE shared capacity rule — minute-based Monday–Friday 8–5
-  // Eastern per eligible technician, with weekends, company closures, PTO,
-  // inactive status, and licence problems (fail closed) all removing
-  // capacity. Zero eligible technicians = zero sellable dates (no floor).
-  void techsRes;
-  const capacityFacts = await dayCapacityMap(days);
-  const capMinutesOn = (date: string): number =>
-    capacityFacts.get(date)?.capMinutes ?? 0;
-  // The stops-per-tech ceiling remains as a coarse secondary bound so a day
-  // of zero-travel stops still cannot exceed a workable route length.
-  const capacityOn = (date: string): number =>
-    (capacityFacts.get(date)?.eligibleTechs ?? 0) * STOPS_PER_TECH;
+  // GL-04: the locked on-site durations by PROPERTY CLASS — residential 30,
+  // commercial/community 60. No service-based constants.
+  const onsite =
+    opts.onsiteMinutes ??
+    (service === "COMMERCIAL" || service === "COMMUNITY" ? 60 : 30);
 
-  type Stop = { customerId: string; serviceType: string };
-  const stopsByDay = new Map<string, Stop[]>();
-  days.forEach((date, i) => {
-    stopsByDay.set(
-      date,
-      jobPages[i].data.filter(
-        (j) => j.status === "SCHEDULED" || j.status === "IN_PROGRESS"
-      )
-    );
-  });
+  // GL-04: per-day eligibility (weekday, closures, PTO, licences, roster —
+  // every read failure sells zero) with each technician's PRIVATE base (or
+  // that day's override). One roster/licence read for the whole window.
+  const eligibilityByDate = await dayEligibilityMap(days);
 
-  // One matrix call: candidate → every distinct stop address in the window
-  // (soonest days first — those are the ones density discounts care about).
-  const addrByCustomer = new Map<string, string>();
-  outer: for (const date of days) {
-    for (const stop of stopsByDay.get(date) ?? []) {
-      if (addrByCustomer.size >= 50) break outer;
-      if (addrByCustomer.has(stop.customerId)) continue;
-      addrByCustomer.set(stop.customerId, "");
-    }
-  }
-  if (addrByCustomer.size > 0) {
-    const customers = await Promise.all(
-      [...addrByCustomer.keys()].map((id) =>
-        client.models.Customer.get({ id })
-      )
-    );
-    for (const { data: c } of customers) {
-      if (!c) continue;
-      const addr = [c.serviceStreet, c.serviceCity, c.serviceState, c.serviceZip]
-        .filter(Boolean)
-        .join(", ");
-      if (addr) addrByCustomer.set(c.id, addr);
-    }
-  }
-  const matrixCustomers = [...addrByCustomer.entries()].filter(([, a]) => a);
-  const minutesByCustomer = new Map<string, number>();
-  if (routesKey && matrixCustomers.length > 0) {
-    const minutes = await driveMatrixFrom(
-      routesKey,
-      candidateAddress,
-      matrixCustomers.map(([, a]) => a)
-    );
-    matrixCustomers.forEach(([id], i) => {
-      const m = minutes[i];
-      if (m != null) minutesByCustomer.set(id, m);
-    });
-  }
-
-  // Live checkout claims hold real minutes against their day (GL-04 R1).
-  const claimedMinutesOn = new Map<string, number>();
-  if ("CapacityClaim" in client.models) {
-    const nowIso = new Date().toISOString();
-    for (const date of days) {
-      let claimed = 0;
-      let token: string | null | undefined;
-      do {
-        const page = await client.models.CapacityClaim.listCapacityClaimByDate(
-          { date },
-          { limit: 200, nextToken: token }
-        );
-        for (const c of page.data ?? []) {
-          if (String(c.expiresAt) > nowIso) claimed += c.minutes ?? 0;
-        }
-        token = page.nextToken;
-      } while (token);
-      if (claimed > 0) claimedMinutesOn.set(date, claimed);
-    }
-  }
+  // ONE memoized Routes resolver for the whole calendar: base ↔ candidate
+  // legs are computed once per technician, candidate → stop legs once per
+  // unique stop address. No key ⇒ every leg is null ⇒ zero sellable days
+  // (fail closed — capacity is never sold on guessed travel).
+  const legMinutes = makeLegResolver(routesKey);
 
   const out: DayQuote[] = [];
   for (const date of days) {
-    const stops = stopsByDay.get(date) ?? [];
-    const capacity = capacityOn(date);
-    if (capMinutesOn(date) <= 0 || capacity <= 0 || stops.length >= capacity) {
-      continue;
-    }
+    const eligibility = eligibilityByDate.get(date) ?? {
+      techs: [],
+      reasons: ["Unknown date."],
+    };
+    if (eligibility.techs.length === 0) continue;
 
-    // Minute feasibility against the shared rule: existing onsite time +
-    // hops + live checkout claims + this job must fit the day's minutes.
-    const existingMinutes =
-      stops.reduce(
-        (sum, s) => sum + (ONSITE_MINUTES[s.serviceType] ?? 60) + AVG_HOP_MINUTES,
-        0
-      ) + (claimedMinutesOn.get(date) ?? 0);
-    const nearest = stops.reduce<number | null>((best, s) => {
-      const m = minutesByCustomer.get(s.customerId);
-      return m != null && (best === null || m < best) ? m : best;
-    }, null);
-    const insertion = nearest != null ? nearest * 2 : AVG_HOP_MINUTES * 2;
-    if (existingMinutes + onsite + insertion > capMinutesOn(date)) {
-      continue;
+    const slots = await slotStates(date);
+    const stops = await stopsBySlotOn(date);
+
+    // Per-window feasibility: MORNING and AFTERNOON are protected
+    // independently — each window offers only if some technician's slot can
+    // absorb this stop's on-site + real marginal Routes legs.
+    const windowSlots: Partial<Record<CapacityWindow, SlotFeasibility>> = {};
+    for (const window of WINDOWS) {
+      const best = await bestSlotFor({
+        date,
+        window,
+        onsite,
+        eligibility,
+        slots,
+        stopsBySlot: stops,
+        legMinutes,
+        candidateAddress,
+      });
+      if (best) windowSlots[window] = best;
+    }
+    const windows = Object.keys(windowSlots);
+    if (windows.length === 0) continue;
+
+    // Pricing modifiers, from the day's real load and proximity.
+    let stopCount = 0;
+    let committed = 0;
+    let capacity = 0;
+    for (const t of eligibility.techs) {
+      for (const window of WINDOWS) {
+        capacity += WINDOW_MINUTES[window];
+        const state = slots.get(`${date}#${window}#${t.id}`);
+        committed += state?.committedMinutes ?? 0;
+        stopCount += (stops.get(`${date}#${window}#${t.id}`) ?? []).length;
+      }
+    }
+    let nearest: number | null = null;
+    for (const list of stops.values()) {
+      for (const stop of list) {
+        const leg = await legMinutes(candidateAddress, stop);
+        if (leg != null && (nearest === null || leg < nearest)) nearest = leg;
+      }
     }
 
     let factor = 1;
@@ -237,7 +190,8 @@ export async function buildDayMatrix(opts: {
       factor -= 0.1;
       factors.push(`route-density −10% (stop ${nearest} min away)`);
     }
-    const load = stops.length / capacityOn(date);
+    const load = capacity > 0 ? committed / capacity : 1;
+    void stopCount;
     if (load < 0.5) {
       factor -= 0.05;
       factors.push("quiet-day −5%");
@@ -266,7 +220,8 @@ export async function buildDayMatrix(opts: {
     const priceCents = tidyDollars(floored);
     out.push({
       date,
-      windows: ["MORNING", "AFTERNOON"],
+      windows,
+      slots: windowSlots,
       priceCents,
       factors,
     });
