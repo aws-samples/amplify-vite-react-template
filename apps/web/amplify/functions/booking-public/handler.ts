@@ -1618,6 +1618,17 @@ async function cancel(body: Record<string, unknown>) {
         id: booking.jobId,
       });
       if (!cancelJob || cancelJob.status === "CANCELED") break;
+      // Only an upcoming visit can be canceled from the emailed link — a
+      // completed (billed, legally reported) or in-progress/terminal visit
+      // must never be flipped by a late click.
+      if (cancelJob.status !== "SCHEDULED" && cancelJob.status !== "UNSCHEDULED") {
+        throw new HttpError(409, {
+          error:
+            cancelJob.status === "IN_PROGRESS"
+              ? `Your technician is already on this visit — call us at ${SUPPORT_PHONE} and we'll help right away.`
+              : `This visit has already taken place, so it can't be canceled online — if something's wrong, call us at ${SUPPORT_PHONE}.`,
+        });
+      }
       const published = await casGuardedUpdate(
         "Job",
         booking.jobId,

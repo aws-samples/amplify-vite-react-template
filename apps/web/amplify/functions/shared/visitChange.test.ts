@@ -413,6 +413,35 @@ describe("cancelVisit — fail-safe", () => {
     expect(visitClaims.get("j1")).toMatchObject({ stage: "REQUESTED" });
   });
 
+  it("a resumed cancel that finds the visit COMPLETED stops, owns the money conflict, and never flips it", async () => {
+    // The cancel stalled after its refund; meanwhile the technician finished
+    // the visit. The resume must NOT cancel the completed, billed record.
+    seedPaidVisit({ status: "COMPLETED", scheduledDate: daysFromNow(1) });
+    visitClaims.set("j1", {
+      id: "j1",
+      action: "CANCEL",
+      stage: "MONEY_DONE",
+      decision: "CANCEL_REFUND",
+      reason: "customer moving",
+      requestedAt: new Date().toISOString(),
+      attemptCount: 1,
+    });
+    const res = await resumeVisitChange(fakeStripe, "j1", { auto: false });
+    if (res.action !== "CANCEL") throw new Error("expected a cancel outcome");
+    expect(res.outcome).toBe("FAILED");
+    expect(res.canceled).toBe(false);
+    expect(jobs.get("j1")!.status).toBe("COMPLETED");
+    // Finance owns reconciling the refund-vs-performed-work conflict.
+    const conflict = openOwnedWork.mock.calls.find((c) =>
+      String((c[0] as { dedupeKey?: string }).dedupeKey ?? "").startsWith(
+        "completed-after-cancel:"
+      )
+    );
+    expect(conflict).toBeDefined();
+    // The command is settled — the sweep will not re-drive it forever.
+    expect(visitClaims.has("j1")).toBe(false);
+  });
+
   it("resumes a stuck cancel from the recorded stage and never refunds twice", async () => {
     seedPaidVisit({ scheduledDate: daysFromNow(10) });
     // First attempt: refund succeeds, but the CANCELED flip fails (the

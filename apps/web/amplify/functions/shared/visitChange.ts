@@ -428,8 +428,10 @@ export type VisitCancelOutcome = {
   communicationResult: "SENT" | "FAILED" | "NO_EMAIL" | "PENDING";
   /** COMPLETE — done and the customer was told. PARTIAL — done but the notice is
    *  owned. PENDING — a charge is still processing, so the money state is not yet
-   *  final and the visit change is owned through settlement (R3). */
-  outcome: "COMPLETE" | "PARTIAL" | "PENDING";
+   *  final and the visit change is owned through settlement (R3). FAILED — the
+   *  visit reached a conflicting terminal outcome first; a Finance case owns
+   *  reconciling any money this command already moved. */
+  outcome: "COMPLETE" | "PARTIAL" | "PENDING" | "FAILED";
   message: string;
 };
 
@@ -520,6 +522,50 @@ async function driveHeldVisitCancel(
   const client = await dataClient();
   const jobId = job.id;
   const { decision, reason, actor, nonce } = args;
+  // A resumed cancel that finds the visit COMPLETED (or another terminal
+  // outcome) must NOT flip it: the work happened while the command was
+  // stalled. The command settles FAILED, and a Finance case owns the real
+  // conflict — a refund may already have been issued against a performed,
+  // legally-reported visit. (A CANCELED job is the resume's own prior
+  // progress and is handled by the caller.)
+  if (
+    job.status === "COMPLETED" ||
+    job.status === "NO_ACCESS" ||
+    job.status === "SCOPE_MISMATCH" ||
+    job.status === "PREP_MISSING"
+  ) {
+    await openOwnedWork({
+      kind: "VISIT_CHANGE_RECOVERY",
+      dedupeKey: `completed-after-cancel:${jobId}`,
+      title: `A stalled cancel found the visit already ${job.status.toLowerCase().replace(/_/g, " ")}`,
+      detail: `The cancel command for job ${jobId} stalled part-way (its refund step may have already run), and by the time it resumed the visit was ${job.status}. The visit record stands; compare any refund this command issued against the recorded outcome and settle the invoice one way.`,
+      customerId: job.customerId,
+      relatedId: jobId,
+      sourceUrl: `/customers/${job.customerId}`,
+      resolutionAction:
+        "Reconcile the money: if a refund was issued for work that was performed, re-invoice or record the goodwill decision — then close this.",
+      ownerTeam: "FINANCE",
+    });
+    await writeVisitChangeClaim(jobId, args.nonce, {
+      stage: "FAILED",
+      lastError: `Resume found the visit ${job.status} — conflict owned by Finance.`,
+      leaseUntil: null,
+    });
+    await releaseVisitChangeClaim(jobId, args.nonce);
+    return {
+      jobId,
+      action: "CANCEL",
+      canceled: false,
+      alreadyCanceled: false,
+      decision,
+      disposition: "NONE",
+      refundedCents: 0,
+      invoiceVoided: false,
+      communicationResult: "NO_EMAIL",
+      outcome: "FAILED",
+      message: `The visit was ${job.status.toLowerCase().replace(/_/g, " ")} before this cancel finished — a Finance case now owns reconciling the money.`,
+    };
+  }
   const { data: claim } = await client.models.VisitChangeClaim.get({ id: jobId });
   const attemptCount = claim?.attemptCount ?? 0;
   const moneyDone = ["MONEY_DONE", "VOIDED", "CANCELED"].includes(

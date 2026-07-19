@@ -372,14 +372,50 @@ async function onSubscriptionInvoice(
 
   // The PaymentIntent behind the invoice charge — WITHOUT it a refund can
   // only be recorded as offline (no Stripe money movement) and a dashboard
-  // refund can't find this row. Both make "refunded" a lie.
-  const invoicePi = (
+  // refund can't find this row. Both make "refunded" a lie. On the current
+  // Stripe API (basil+) the invoice has NO top-level payment_intent — the
+  // mapping lives on InvoicePayments, in the payload when included and via
+  // the API otherwise.
+  const paymentsOnPayload = (
     stripeInvoice as unknown as {
-      payment_intent?: string | { id: string } | null;
+      payments?: {
+        data?: {
+          payment?: { payment_intent?: string | { id: string } | null };
+        }[];
+      };
     }
-  ).payment_intent;
-  const stripePaymentIntentId =
-    typeof invoicePi === "string" ? invoicePi : (invoicePi?.id ?? undefined);
+  ).payments?.data;
+  let stripePaymentIntentId: string | undefined;
+  for (const p of paymentsOnPayload ?? []) {
+    const pi = p.payment?.payment_intent;
+    const id = typeof pi === "string" ? pi : pi?.id;
+    if (id) {
+      stripePaymentIntentId = id;
+      break;
+    }
+  }
+  if (!stripePaymentIntentId && status === "PAID") {
+    try {
+      const { data: invoicePayments } = await stripeClient().invoicePayments.list({
+        invoice: stripeInvoice.id,
+        status: "paid",
+        limit: 3,
+      });
+      for (const p of invoicePayments) {
+        const pi = p.payment?.payment_intent;
+        const id = typeof pi === "string" ? pi : pi?.id;
+        if (id) {
+          stripePaymentIntentId = id;
+          break;
+        }
+      }
+    } catch (err) {
+      console.error(
+        `invoice.paid: could not resolve the PaymentIntent for ${stripeInvoice.id} — a refund of this row would be recorded offline`,
+        err
+      );
+    }
+  }
 
   if (existing[0]) {
     // Already in this state: a replayed webhook. Do nothing so it never
@@ -666,15 +702,25 @@ async function onChargeRefunded(charge: Stripe.Charge) {
     typeof charge.payment_intent === "string"
       ? charge.payment_intent
       : charge.payment_intent?.id;
-  const chargeInvoice = (
-    charge as unknown as { invoice?: string | { id: string } | null }
-  ).invoice;
-  const stripeInvoiceId =
-    typeof chargeInvoice === "string" ? chargeInvoice : chargeInvoice?.id;
-  if (!paymentIntentId && !stripeInvoiceId) return;
+  if (!paymentIntentId) return;
+  // charge.invoice no longer exists on the current Stripe API (basil+) — a
+  // subscription-invoice charge maps to its invoice via InvoicePayments.
+  // Resolving it here lets a dashboard refund land on a CRM row that predates
+  // PI stamping instead of leaving refundedAmountCents at 0 forever.
+  let stripeInvoiceId: string | null = null;
+  try {
+    const { data: invoicePayments } = await stripeClient().invoicePayments.list({
+      payment: { type: "payment_intent", payment_intent: paymentIntentId },
+      limit: 1,
+    });
+    const inv = invoicePayments[0]?.invoice;
+    stripeInvoiceId = typeof inv === "string" ? inv : (inv?.id ?? null);
+  } catch {
+    /* one-time charges have no invoice payment — the PI lookup owns those */
+  }
   await applyRefundToInvoice({
-    paymentIntentId: paymentIntentId ?? null,
-    stripeInvoiceId: stripeInvoiceId ?? null,
+    paymentIntentId,
+    stripeInvoiceId,
     amountRefundedCents: charge.amount_refunded,
     refundId: charge.refunds?.data?.[0]?.id,
   });

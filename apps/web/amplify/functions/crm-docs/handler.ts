@@ -3714,18 +3714,26 @@ async function finalizeServiceReport(reportId: string) {
   // they run on every pass and safely resume whichever a prior attempt missed.
   if (job.status !== "COMPLETED") {
     const completedAt = new Date().toISOString();
-    // GUARDED on the snapshot this finalization read. If a cancel (with its
-    // refund) landed while the technician was on site, the flip LOSES: the
-    // canceled record stands, billing/next-visit are NOT run, and a Finance
-    // case owns the real conflict — service was performed on a visit the
-    // customer concurrently canceled. The finalized report itself is already
-    // durable either way (it is the legal application record).
-    let completedRes = await casGuardedUpdate(
-      "Job",
-      report.jobId,
-      { status: "COMPLETED", completedAt },
-      jobScheduleGuards(job)
-    );
+    // A job that is ALREADY canceled when this (possibly resumed) pass reads
+    // it must not be resurrected by a guard pinned to its own canceled
+    // snapshot — it takes the same Finance-conflict branch a mid-flight
+    // cancel does.
+    let completedRes: Awaited<ReturnType<typeof casGuardedUpdate>> =
+      job.status === "CANCELED"
+        ? { ok: false, reason: "LOST" }
+        : // GUARDED on the snapshot this finalization read. If a cancel (with
+          // its refund) landed while the technician was on site, the flip
+          // LOSES: the canceled record stands, billing/next-visit are NOT
+          // run, and a Finance case owns the real conflict — service was
+          // performed on a visit the customer concurrently canceled. The
+          // finalized report itself is already durable either way (it is the
+          // legal application record).
+          await casGuardedUpdate(
+            "Job",
+            report.jobId,
+            { status: "COMPLETED", completedAt },
+            jobScheduleGuards(job)
+          );
     if (!completedRes.ok && completedRes.reason === "LOST") {
       const { data: freshJob } = await client.models.Job.get({
         id: report.jobId,
