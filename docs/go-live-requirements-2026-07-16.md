@@ -2,8 +2,8 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 1 commit after `f70e621`: `3717092`; newest
-implementation commit `3717092`
+**Latest commit review:** 3 commits after `f70e621`, from `3717092` through `27ca1fb`; newest
+implementation commit `27ca1fb`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
@@ -16,14 +16,17 @@ implementation commit `3717092`
 **Business policy inputs approved:** 18–19 July 2026
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commit affects GL-14 and the
-staff-recovery portion of GL-18. Completed durable pre-change access commands (required idempotency
-key, single-winner claim, exclusive-lease resume, persisted outcomes), fail-safe role reduction with
-confirmed security cases, serialized owner changes, condition-checked and read-back-verified
-job/work/lead handoff with per-item failure accounting and history-before-ownership ordering, and the
-reasoned Schedule entrance with persisted Complete/Partial outcomes have been removed from GL-14. That
-gate now contains only the production two-owner operating setup. The other gates remain because the new
-commit did not close them. An omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The latest implementation commits affect GL-14, GL-13,
+and the staff/dispatch-verifier portions of GL-18. Completed and removed from GL-14: durable
+pre-change access commands (required idempotency key, single-winner claim, exclusive-lease resume,
+persisted outcomes), fail-safe role reduction with confirmed security cases, serialized owner changes,
+condition-checked and read-back-verified job/work/lead handoff, and the reasoned Schedule entrance.
+Completed and removed from GL-13: per-job assignment checks in the day view with owned mismatch work,
+employment/licence-bound reads, owner-bound purged local drafts with recorded stale-draft dispositions,
+the seven-year personally-authored document scope, the immutable reassignment audit, and reason-gated,
+reviewed, non-impersonating office field access. GL-14 now carries only the production two-owner
+operating setup; GL-13 only its policy-vocabulary approvals. The other gates remain because the new
+commits did not close them. An omitted item is not a request to rebuild it.
 
 The approved business-policy pass in this revision removes decision-only work for launch scope, payment
 methods, visit refunds, technician availability/base routing, seasonal treatment, callback eligibility,
@@ -166,7 +169,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed | Opus 4.8 / Ultracode likelihood |
 |---|---|---|---|---|---|
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
-| P0 | GL-13 | Finish technician session, route, and historical-data boundaries | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **73% — High** |
+| P0 | GL-13 | Policy-vocabulary approvals — engineering closed (`27ca1fb`) | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **12% — Very low (approvals only)** |
 | P0 | GL-15 | Finish regulated-report durability and compliance sign-off | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **58% — Medium** |
 | P0 | GL-17 | Finish seasonal plans and technician license controls | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **75% — High** |
 | P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched | **74% — High** |
@@ -225,32 +228,31 @@ serialized through a mutex held across the last-owner check and the change.
 **Business outcome:** A technician sees only the minimum data for legitimate current or
 business-approved historical work, and access disappears when assignment or employment ends.
 
+**Engineering closed (commit `27ca1fb`):** the day view now checks every stop against the assignment
+(the route is not the authority); a mismatch is withheld from the technician, its customer never loads,
+and it becomes owned ROUTE_MISMATCH Operations work while showing flagged to the office. Every read
+requires an active technician at the code layer — an offboarded person's unexpired session gets no day,
+job, or document link, and the app receives an explicit access-ended state it uses to purge local
+drafts; a licence-lapsed technician is limited to their own COMPLETED work (own reports only, no
+other-visit history, no current/future route). Local drafts are bound to the signed-in identity and
+purged on sign-out, on access-ended, and on a per-job refusal; a visit that leaves its technician with
+an unsent DRAFT report gets a recorded disposition (owned STALE_DRAFT review) from both the schedule
+surface and the offboarding sweep. Document links are proven per document — personally authored or on a
+currently assigned job, inside the seven-year record period; agreements are never technician documents.
+Every scheduling change writes one immutable JobAssignmentEvent (actor, controlled reason, former/new
+technician and route, effective time, draft disposition, outcome; a failed write is owned, visible
+work). Office use of a technician field action requires a recorded reason, is ledgered before the
+action runs (fail closed), and opens a routine review case; office edits of a technician's draft are
+refused, so the record stays the applicator's own words. Access/id token validity dropped to 15
+minutes.
+
 **Remaining requirements:**
 
-- **The day view still trusts the route, not the assignment.** The technician's day is built by pulling
-  every job carrying that route's ID, with no per-job check that the job is still assigned to the
-  signed-in technician. A partial or inconsistent reassignment therefore exposes another technician's job
-  and customer — the exact leak this gate names. Each day-view job must be checked
-  the same way a single job is; a route/job mismatch is withheld and becomes owned Operations work.
-- **Reads do not require an active technician.** A read only matches the caller to a technician record;
-  it does not confirm the technician is still active. A deactivated employee with an unexpired session
-  can still read their day, jobs, and unlocked customer documents at the code layer (today only the
-  offboarding sign-out stops them). An offboarded or inactive person must receive no field data or
-  document links even with an unexpired session. A still-employed technician with no current license may
-  review only completed work they personally performed; they receive no current/future route, new customer
-  context, or assignment until a current license is restored.
-- **Locally stored drafts and customer context survive reassignment/deactivation.** An unsent report
-  draft and cached customer data remain on the device after access is removed. Reassignment or
-  deactivation must render cached job/customer/report data and local drafts unreadable on the next app
-  interaction, and record the approved disposition of a former technician's unsent draft.
-- **Historical access has no time or scope bound.** A single assignment currently grants indefinite
-  customer context. Enforce the approved seven-year record period while limiting an employed technician to
-  the completed jobs/reports/photos they personally authored or performed. That history does not grant
-  access to later visits or every future customer document; deactivation removes all technician access.
-- Reassignment records actor, controlled reason, former/new technician, effective time, route effects,
-  affected in-progress work, stale-draft disposition, and final access result. Office/owner emergency
-  field access requires an approved purpose and reason, is reviewed, and cannot silently impersonate the
-  assigned applicator.
+- Operations approves the controlled reassignment-reason vocabulary (ROUTING, CUSTOMER_REQUEST,
+  TECH_UNAVAILABLE, WORKLOAD_BALANCE, CORRECTION, OTHER+note) and the stale-draft dispositions
+  (new-tech re-files / office completes / discard); Compliance approves the office field-action reason
+  practice and its routine review cadence. The vocabularies are live in code today — approval either
+  ratifies or renames them; no behavior is waiting on it.
 
 **Pass owner:** CEO, with Compliance and Operations verification.
 
