@@ -29,6 +29,9 @@ const ALL_KINDS: WorkKind[] = [
   "LIFECYCLE_RECOVERY",
   "PLAN_CANCELLATION_RECOVERY",
   "VISIT_CHANGE_RECOVERY",
+  "ROUTE_MISMATCH",
+  "STALE_DRAFT",
+  "OFFICE_FIELD_REVIEW",
 ];
 
 describe("GL-18 work policy registry", () => {

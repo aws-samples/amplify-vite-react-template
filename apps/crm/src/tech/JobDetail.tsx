@@ -151,6 +151,16 @@ export default function TechJob() {
       );
       setError(null);
     } catch (err) {
+      // GL-13: the server refusing this job (reassignment, deactivation, or a
+      // lapsed licence) makes the locally cached draft unreadable on this very
+      // interaction — the device does not keep another assignee's customer data.
+      if (
+        !isConnectivityError(err) &&
+        err instanceof Error &&
+        /not authorized/i.test(err.message)
+      ) {
+        clearDraft(jobId);
+      }
       setError(
         isConnectivityError(err)
           ? "No connection — couldn't load this job. It will load when signal returns."
@@ -354,7 +364,11 @@ export default function TechJob() {
           customer a pesticide record, arms the charge, and advances the plan.
           The tech was never being dishonest; the app routed them there. */}
       {job.status === "SCHEDULED" || job.status === "IN_PROGRESS" ? (
-        <NoAccessCard job={job} onDone={load} />
+        <NoAccessCard
+          job={job}
+          ownerSub={techRecord?.userSub ?? null}
+          onDone={load}
+        />
       ) : null}
 
       {report?.status === "FINALIZED" ? (
@@ -412,7 +426,15 @@ const NO_ACCESS_LABEL: Record<string, string> = {
  * no-access billing decision turns on, and what protects the technician from
  * being told they never went.
  */
-function NoAccessCard({ job, onDone }: { job: Job; onDone: () => Promise<void> }) {
+function NoAccessCard({
+  job,
+  ownerSub,
+  onDone,
+}: {
+  job: Job;
+  ownerSub: string | null;
+  onDone: () => Promise<void>;
+}) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
   const [note, setNote] = useState("");
@@ -462,7 +484,7 @@ function NoAccessCard({ job, onDone }: { job: Job; onDone: () => Promise<void> }
       );
       // The visit is over and no report will be filed for it — a lingering
       // draft would only restore stale words into a future rebooked visit.
-      clearDraft(job.id);
+      clearDraft(job.id, localStorage, ownerSub);
       await onDone();
     } catch (err) {
       setError(
@@ -585,11 +607,14 @@ function ReportForm({
           }
         : null,
   });
+  // GL-13: drafts are bound to the signed-in identity (the caller's own
+  // technician record), so another login on this device can never restore them.
+  const ownerSub = technician?.userSub ?? null;
   const [restored] = useState(() => {
-    const d = loadDraft<DraftFields>(job.id);
+    const d = loadDraft<DraftFields>(job.id, localStorage, ownerSub);
     if (!d) return null;
     if (JSON.stringify(d.fields) === JSON.stringify(serverCopyFields())) {
-      clearDraft(job.id);
+      clearDraft(job.id, localStorage, ownerSub);
       return null;
     }
     return d;
@@ -681,9 +706,10 @@ function ReportForm({
     lastMirrored.current = snapshot;
     editGen.current += 1;
     setDirty(true);
-    setPersisted(saveDraft(job.id, fields));
+    setPersisted(saveDraft(job.id, fields, localStorage, ownerSub));
   }, [
     job.id,
+    ownerSub,
     servicesPerformed,
     targetPests,
     areasTreated,
@@ -800,7 +826,7 @@ function ReportForm({
     setSendFailed(false);
     setRestoredNote(null);
     if (editGen.current === gen) {
-      clearDraft(job.id);
+      clearDraft(job.id, localStorage, ownerSub);
       setDirty(false);
     }
   };

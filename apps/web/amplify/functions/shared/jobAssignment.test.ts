@@ -23,10 +23,22 @@ type Job = {
   customerId: string;
   technicianId?: string | null;
   scheduledDate?: string | null;
+  status?: string | null;
+};
+type Report = {
+  id: string;
+  jobId: string;
+  customerId: string;
+  technicianId?: string | null;
+  serviceDate?: string | null;
+  status?: string | null;
+  pdfKey?: string | null;
+  photoKeys?: string[] | null;
 };
 
 const techs = new Map<string, Tech>();
 const jobs = new Map<string, Job>();
+const reports = new Map<string, Report>();
 
 const fakeDataClient = {
   models: {
@@ -53,11 +65,22 @@ const fakeDataClient = {
     ServiceReport: {
       get: async ({ id }: { id: string }) => ({
         data:
-          id === "rep_a"
+          reports.get(id) ??
+          (id === "rep_a"
             ? { id: "rep_a", jobId: "job_a" }
             : id === "rep_b"
               ? { id: "rep_b", jobId: "job_b" }
-              : null,
+              : null),
+      }),
+      list: async ({
+        filter,
+      }: {
+        filter?: { customerId?: { eq: string } };
+      }) => ({
+        data: [...reports.values()].filter(
+          (r) => !filter?.customerId || r.customerId === filter.customerId.eq
+        ),
+        nextToken: null,
       }),
     },
   },
@@ -68,8 +91,9 @@ vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 const {
   assertCanActOnJobId,
   assertCanActOnReportId,
+  assertCanReadJob,
+  technicianDocumentAllowed,
   technicianForCaller,
-  technicianServesCustomer,
 } = await import("./jobAssignment");
 
 const identity = (sub: string | null, groups: string[]): AppSyncIdentity =>
@@ -83,6 +107,7 @@ const UNLINKED = identity("sub-nobody", ["TECH"]);
 beforeEach(() => {
   techs.clear();
   jobs.clear();
+  reports.clear();
   techs.set("t_a", {
     id: "t_a",
     name: "Ana",
@@ -191,17 +216,127 @@ describe("assertCanActOnReportId", () => {
   });
 });
 
-describe("technicianServesCustomer", () => {
-  it("is true for a customer the technician has a job with", async () => {
-    expect(await technicianServesCustomer(TECH_A, "cust_a")).toBe(true);
+describe("technicianDocumentAllowed (GL-13 per-document proof)", () => {
+  const OWN_PDF = "reports/cust_a/own.pdf";
+  const OTHER_PDF = "reports/cust_a/other.pdf";
+  beforeEach(() => {
+    // Ana's own finalized report at cust_a, plus another tech's report at the
+    // SAME customer — the shared-customer case the old predicate over-granted.
+    reports.set("rep_own", {
+      id: "rep_own",
+      jobId: "job_a",
+      customerId: "cust_a",
+      technicianId: "t_a",
+      serviceDate: "2026-06-01T00:00:00.000Z",
+      status: "FINALIZED",
+      pdfKey: OWN_PDF,
+    });
+    reports.set("rep_other", {
+      id: "rep_other",
+      jobId: "job_other",
+      customerId: "cust_a",
+      technicianId: "t_b",
+      serviceDate: "2026-06-01T00:00:00.000Z",
+      status: "FINALIZED",
+      pdfKey: OTHER_PDF,
+    });
   });
 
-  it("is false for a customer served only by another technician", async () => {
-    expect(await technicianServesCustomer(TECH_A, "cust_b")).toBe(false);
+  it("allows a technician's personally authored report", async () => {
+    expect(await technicianDocumentAllowed(TECH_A, OWN_PDF)).toBe(true);
+  });
+
+  it("refuses another technician's report at a SHARED customer", async () => {
+    expect(await technicianDocumentAllowed(TECH_A, OTHER_PDF)).toBe(false);
+  });
+
+  it("allows report photos by report id when personally authored", async () => {
+    expect(
+      await technicianDocumentAllowed(
+        TECH_A,
+        "reports/cust_a/photos/rep_own/1.jpg"
+      )
+    ).toBe(true);
+    expect(
+      await technicianDocumentAllowed(
+        TECH_A,
+        "reports/cust_a/photos/rep_other/1.jpg"
+      )
+    ).toBe(false);
+  });
+
+  it("never allows agreements for a technician", async () => {
+    expect(
+      await technicianDocumentAllowed(TECH_A, "agreements/cust_a/contract.pdf")
+    ).toBe(false);
+  });
+
+  it("refuses a report older than the seven-year record period", async () => {
+    reports.set("rep_own", {
+      ...reports.get("rep_own")!,
+      serviceDate: "2018-01-01T00:00:00.000Z",
+    });
+    expect(await technicianDocumentAllowed(TECH_A, OWN_PDF)).toBe(false);
+  });
+
+  it("refuses everything for an inactive technician, even their own report", async () => {
+    techs.set("t_a", { ...techs.get("t_a")!, active: false });
+    expect(await technicianDocumentAllowed(TECH_A, OWN_PDF)).toBe(false);
   });
 
   it("is false for an unlinked login", async () => {
-    expect(await technicianServesCustomer(UNLINKED, "cust_a")).toBe(false);
+    expect(await technicianDocumentAllowed(UNLINKED, OWN_PDF)).toBe(false);
+  });
+
+  it("allows a report on a job currently assigned to the caller (live work context)", async () => {
+    reports.set("rep_ctx", {
+      id: "rep_ctx",
+      jobId: "job_a",
+      customerId: "cust_a",
+      technicianId: "t_b",
+      serviceDate: "2026-06-01T00:00:00.000Z",
+      status: "FINALIZED",
+      pdfKey: "reports/cust_a/ctx.pdf",
+    });
+    // job_a is currently assigned to Ana, so the prior report travels with the
+    // live work context.
+    expect(
+      await technicianDocumentAllowed(TECH_A, "reports/cust_a/ctx.pdf")
+    ).toBe(true);
+    // ...but not once her licence lapses (no new customer context).
+    techs.set("t_a", { ...techs.get("t_a")!, licenseExpiresOn: "2020-01-01" });
+    expect(
+      await technicianDocumentAllowed(TECH_A, "reports/cust_a/ctx.pdf")
+    ).toBe(false);
+  });
+});
+
+describe("assertCanReadJob boundaries (GL-13)", () => {
+  it("refuses every read for an inactive technician with a live session", async () => {
+    techs.set("t_a", { ...techs.get("t_a")!, active: false });
+    await expect(
+      assertCanReadJob(TECH_A, jobs.get("job_a"))
+    ).rejects.toThrow(/not authorized/i);
+  });
+
+  it("limits a lapsed-licence technician to their own COMPLETED work", async () => {
+    techs.set("t_a", { ...techs.get("t_a")!, licenseExpiresOn: "2020-01-01" });
+    jobs.set("job_done", {
+      id: "job_done",
+      customerId: "cust_a",
+      technicianId: "t_a",
+      scheduledDate: "2026-01-10",
+      status: "COMPLETED",
+    });
+    // Own completed work: allowed.
+    await expect(
+      assertCanReadJob(TECH_A, jobs.get("job_done"))
+    ).resolves.toBeUndefined();
+    // Own SCHEDULED (current/future) work: refused.
+    jobs.set("job_a", { ...jobs.get("job_a")!, status: "SCHEDULED" });
+    await expect(
+      assertCanReadJob(TECH_A, jobs.get("job_a"))
+    ).rejects.toThrow(/not authorized/i);
   });
 });
 

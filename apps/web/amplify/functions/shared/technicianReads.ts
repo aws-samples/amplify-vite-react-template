@@ -1,7 +1,9 @@
 import type { AppSyncIdentity } from "aws-lambda";
 import { callerIsOffice } from "./authz";
+import { hasCurrentLicense } from "./compliance";
 import { dataClient } from "./dataClient";
 import { assertCanReadJob, technicianForCaller } from "./jobAssignment";
+import { openOwnedWork } from "./ownedWork";
 
 /**
  * GL-13 row-scoping — the technician read surface.
@@ -71,6 +73,12 @@ export type TechnicianDayResult = {
   /** A TECH login nobody linked to a Technician record — the client shows the
    *  "ask the office to link you" empty state instead of a broken day. */
   unlinked?: boolean;
+  /** The caller's technician record is INACTIVE — access has ended. The client
+   *  shows "access ended — talk to the office" and purges local drafts. */
+  accessEnded?: boolean;
+  /** Employed but no current licence: no current/future route or new customer
+   *  context is served; completed personal history stays reviewable. */
+  licenseLapsed?: boolean;
   technicianId: string | null;
   technicianName: string | null;
   /** Office may pick another technician's day; a TECH cannot. */
@@ -116,6 +124,23 @@ export async function buildTechnicianDay(
     // A TECH is pinned to their own record; any technicianId argument is ignored.
     const tech = await technicianForCaller(identity);
     if (!tech) return emptyDay({ unlinked: true, canPick: false });
+    // GL-13: an inactive (offboarded/deactivated) technician receives no field
+    // data at the code layer, even while a token is still unexpired — not
+    // merely an empty route, an explicit access-ended state the client uses to
+    // purge its local cache.
+    if (!tech.active) {
+      return emptyDay({ accessEnded: true, canPick: false });
+    }
+    // Employed but no current licence: no current/future route or new customer
+    // context. Their own completed jobs stay reviewable via technicianJob.
+    if (!hasCurrentLicense(tech)) {
+      return emptyDay({
+        licenseLapsed: true,
+        technicianId: tech.id,
+        technicianName: tech.name ?? null,
+        canPick: false,
+      });
+    }
     technicianId = tech.id;
     technicianName = tech.name ?? null;
   }
@@ -144,7 +169,39 @@ export async function buildTechnicianDay(
       nextToken,
     })
   );
-  const jobs = (jobRows as AnyRecord[])
+
+  // GL-13: the day is built from the route, but the route is not the authority
+  // — the ASSIGNMENT is. Each stop gets the same per-job check a single job
+  // read gets (job.technicianId === the day's technician). A mismatched job —
+  // a partial or inconsistent reassignment — is WITHHELD from a technician
+  // caller (it may be another technician's customer) and becomes owned
+  // Operations work; office sees it flagged, since they own the fix.
+  const matched: AnyRecord[] = [];
+  const mismatched: AnyRecord[] = [];
+  for (const j of jobRows as AnyRecord[]) {
+    if (String(j.technicianId ?? "") === String(technicianId)) matched.push(j);
+    else mismatched.push(j);
+  }
+  for (const j of mismatched) {
+    await openOwnedWork({
+      kind: "ROUTE_MISMATCH",
+      dedupeKey: `route-mismatch:${String(j.id)}`,
+      title: "A visit's route and assigned technician disagree",
+      detail: `Job ${String(j.id)}${j.scheduledDate ? ` (${String(j.scheduledDate)})` : ""} sits on route ${String(route.id)} (${technicianName ?? technicianId}), but its assigned technician is ${j.technicianId ? String(j.technicianId) : "nobody"}. The stop was withheld from the technician's day until the route and assignment agree.`,
+      relatedId: String(j.id),
+      sourceUrl: "/schedule",
+      resolutionAction:
+        "On the Schedule board, re-assign the visit so its route and technician agree (or unassign it back to the pool), then confirm it appears on the right day.",
+      ownerTeam: "OPS",
+    });
+  }
+  const visible: AnyRecord[] = office
+    ? [
+        ...matched,
+        ...mismatched.map((j): AnyRecord => ({ ...j, assignmentMismatch: true })),
+      ]
+    : matched;
+  const jobs = visible
     .slice()
     .sort((a, b) => Number(a.routeOrder ?? 0) - Number(b.routeOrder ?? 0))
     .map(pickJob);
@@ -177,6 +234,8 @@ export async function buildTechnicianDay(
 
 function emptyDay(opts: {
   unlinked?: boolean;
+  accessEnded?: boolean;
+  licenseLapsed?: boolean;
   technicianId?: string | null;
   technicianName?: string | null;
   canPick: boolean;
@@ -184,6 +243,8 @@ function emptyDay(opts: {
 }): TechnicianDayResult {
   return {
     unlinked: opts.unlinked,
+    accessEnded: opts.accessEnded,
+    licenseLapsed: opts.licenseLapsed,
     technicianId: opts.technicianId ?? null,
     technicianName: opts.technicianName ?? null,
     canPickTechnician: opts.canPick,
@@ -237,15 +298,24 @@ export async function buildTechnicianJob(
 
   const tech = await technicianForCaller(identity);
 
-  const priorVisits = ((priorRes.data as AnyRecord[]) ?? [])
-    .filter((v) => v.id !== j.id)
-    .map((v) => ({
-      id: v.id,
-      status: v.status,
-      serviceType: v.serviceType ?? null,
-      scheduledDate: v.scheduledDate ?? null,
-      noAccessReason: v.noAccessReason ?? null,
-    }));
+  // GL-13: a still-employed technician with NO current licence is reviewing
+  // their own completed record (assertCanReadJob already restricted them to
+  // their own COMPLETED jobs). That review does not grant NEW customer context:
+  // no other-visit history, and only the reports they personally authored.
+  const lapsedReview =
+    !callerIsOffice(identity) && tech != null && !hasCurrentLicense(tech);
+
+  const priorVisits = lapsedReview
+    ? []
+    : ((priorRes.data as AnyRecord[]) ?? [])
+        .filter((v) => v.id !== j.id)
+        .map((v) => ({
+          id: v.id,
+          status: v.status,
+          serviceType: v.serviceType ?? null,
+          scheduledDate: v.scheduledDate ?? null,
+          noAccessReason: v.noAccessReason ?? null,
+        }));
 
   const catalog = ((catalogRes.data as AnyRecord[]) ?? []).filter(
     (p) =>
@@ -258,10 +328,16 @@ export async function buildTechnicianJob(
       p.reEntryHours != null
   );
 
+  const reports = lapsedReview
+    ? ((reportsRes.data as AnyRecord[]) ?? []).filter(
+        (r) => String(r.technicianId ?? "") === String(tech?.id ?? "")
+      )
+    : ((reportsRes.data as AnyRecord[]) ?? []);
+
   return {
     job: pickJob(j),
     customer: pickCustomer((customerRes as { data?: AnyRecord | null }).data),
-    reports: (reportsRes.data as AnyRecord[]) ?? [],
+    reports,
     technician: tech
       ? {
           id: tech.id,

@@ -33,6 +33,7 @@ import {
   openOwnedWork,
   releaseOwnedWorkForSub,
 } from "../shared/ownedWork";
+import { disposeStaleDrafts } from "../shared/jobAssignment";
 import { callerEmail, callerSub } from "../shared/authz";
 import {
   assignLeadOwner,
@@ -1002,8 +1003,17 @@ async function reassignFutureJobs(
             technicianId: null,
             notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
           });
-          if (updated) jobsUnassigned++;
-          else jobsFailed++;
+          if (updated) {
+            jobsUnassigned++;
+            // GL-13: an unsent draft on a swept job gets a recorded office
+            // disposition; a failed case write keeps the offboard PARTIAL.
+            const { caseConfirmed } = await disposeStaleDrafts(
+              job.id,
+              technicianId,
+              null
+            );
+            if (!caseConfirmed) jobsFailed++;
+          } else jobsFailed++;
         } catch {
           jobsFailed++;
         }

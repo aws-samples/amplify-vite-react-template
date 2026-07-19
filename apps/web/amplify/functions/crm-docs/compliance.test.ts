@@ -189,16 +189,23 @@ const call = (
   args: Record<string, unknown>,
   groups: string[] = ["TECH"],
   claims: Record<string, unknown> = {}
-) =>
-  (handler as unknown as (e: never) => Promise<unknown>)({
+) => {
+  // GL-13: scheduling changes carry a controlled reason. Default one in for the
+  // many tests that aren't about the reason itself.
+  const arguments_ =
+    field === "updateJobSchedule" && args.reasonCode === undefined
+      ? { ...args, reasonCode: "ROUTING" }
+      : args;
+  return (handler as unknown as (e: never) => Promise<unknown>)({
     info: { fieldName: field },
-    arguments: args,
+    arguments: arguments_,
     identity: {
       sub: "sub-tech",
       groups,
       claims: { email: "marco@x.com", ...claims },
     },
   } as never);
+};
 
 /** A report that satisfies every rule, so each test can break exactly one. */
 const validReport = (over: Partial<Report> = {}): Report => ({

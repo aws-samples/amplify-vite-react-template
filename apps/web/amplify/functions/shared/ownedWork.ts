@@ -49,6 +49,16 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-07: a visit cancel/reschedule didn't fully finish — a refund may be issued
   // while the visit stayed scheduled, or the audit didn't write. Money-critical.
   VISIT_CHANGE_RECOVERY: 60,
+  // GL-13: a stop's route and its assigned technician disagree; the stop is
+  // withheld from the field day until the office repairs it. Prompt — a
+  // customer's visit is effectively unstaffed while it lasts.
+  ROUTE_MISMATCH: 60,
+  // GL-13: a former technician's unsent draft report needs an office
+  // disposition after a reassignment/cancel. Routine review clock.
+  STALE_DRAFT: 24 * 60,
+  // GL-13: an office member used emergency field access with a reason —
+  // reviewed on the routine clock.
+  OFFICE_FIELD_REVIEW: 24 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

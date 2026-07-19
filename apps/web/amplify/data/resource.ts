@@ -176,6 +176,15 @@ export const schema = a.schema({
     // its immutable audit row failed to write. A critical recovery case whose
     // resume is a safe re-run of the idempotent visit-change command.
     "VISIT_CHANGE_RECOVERY",
+    // GL-13: a stop's route and its assigned technician disagree — withheld
+    // from the field day until the office repairs the assignment.
+    "ROUTE_MISMATCH",
+    // GL-13: a reassigned/canceled visit still holds the former technician's
+    // unsent DRAFT report; the office decides its disposition.
+    "STALE_DRAFT",
+    // GL-13: an office member performed a technician field action with a
+    // recorded reason; reviewed on the routine clock.
+    "OFFICE_FIELD_REVIEW",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -1476,6 +1485,43 @@ export const schema = a.schema({
     ]),
 
   /**
+   * GL-13 — the assignment/route audit trail. One immutable row per scheduling
+   * change (ASSIGN | UNASSIGN | REORDER | CANCEL | RESCHEDULE) and per
+   * office/owner emergency field action (OFFICE_FIELD_ACTION): who did it, the
+   * controlled reason, former/new technician and route, effective time, any
+   * stale draft-report disposition, and the read-back result. This is the
+   * record that answers "who moved this visit, why, and what happened to the
+   * former technician's unsent draft" without engineering pulling logs.
+   * Lambda-written as IAM; office-read; no browser writes and no delete.
+   */
+  JobAssignmentEvent: a
+    .model({
+      jobId: a.id().required(),
+      customerId: a.id(),
+      action: a.string().required(),
+      actorSub: a.string(),
+      actorEmail: a.string().required(),
+      reasonCode: a.string(),
+      reason: a.string(),
+      priorTechnicianId: a.string(),
+      newTechnicianId: a.string(),
+      priorRouteId: a.string(),
+      newRouteId: a.string(),
+      priorScheduledDate: a.string(),
+      newScheduledDate: a.string(),
+      /** What happened to a former technician's unsent DRAFT report(s):
+       *  OFFICE_REVIEW (owned case opened) | NONE. */
+      draftDisposition: a.string(),
+      effects: a.string(),
+      outcome: a.string().required(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [index("jobId").sortKeys(["occurredAt"])])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
+  /**
    * Provision a Cognito login for staff (roles OWNER/OFFICE/FINANCE/TECH —
    * combinations are simply multiple roles) or a customer (roles
    * ["CUSTOMER"] + customerId). Optionally links a Technician record via
@@ -1864,6 +1910,11 @@ export const schema = a.schema({
       routeOrder: a.integer(),
       otherJobId: a.string(),
       otherRouteOrder: a.integer(),
+      // GL-13: a controlled reason (required server-side for every operation
+      // that changes the assignment or date; REORDER defaults to ROUTING) and
+      // an optional note for OTHER. Recorded in the immutable assignment audit.
+      reasonCode: a.string(),
+      note: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2360,6 +2411,10 @@ export const schema = a.schema({
       reason: a.string().required(),
       note: a.string(),
       photoKey: a.string(),
+      // GL-13: required when an office/owner (not the assigned technician)
+      // performs this field action — emergency access carries a reason and is
+      // audited + reviewed.
+      officeReason: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
@@ -2371,6 +2426,7 @@ export const schema = a.schema({
     .arguments({
       jobId: a.string().required(),
       contentType: a.string().required(),
+      officeReason: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
@@ -2386,7 +2442,7 @@ export const schema = a.schema({
    */
   startJob: a
     .mutation()
-    .arguments({ jobId: a.string().required() })
+    .arguments({ jobId: a.string().required(), officeReason: a.string() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
     .handler(a.handler.function(crmDocs)),
@@ -2399,7 +2455,7 @@ export const schema = a.schema({
    */
   endApplication: a
     .mutation()
-    .arguments({ jobId: a.string().required() })
+    .arguments({ jobId: a.string().required(), officeReason: a.string() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
     .handler(a.handler.function(crmDocs)),

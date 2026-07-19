@@ -72,3 +72,46 @@ export function visitChangeReasonSummary(
   const trimmed = (note ?? "").trim();
   return trimmed ? `${reasonCode} — ${trimmed}` : reasonCode;
 }
+
+/**
+ * GL-13 — the controlled reasons a scheduling/assignment change can carry.
+ * ASSIGN/UNASSIGN move who is entitled to a customer's data and doorstep;
+ * REORDER only rearranges one route (ROUTING is its implied default).
+ */
+export const JOB_SCHEDULE_REASONS = [
+  "ROUTING",
+  "CUSTOMER_REQUEST",
+  "TECH_UNAVAILABLE",
+  "WORKLOAD_BALANCE",
+  "CORRECTION",
+  "OTHER",
+] as const;
+
+/**
+ * Validate the controlled reason for a scheduling/assignment change. REORDER
+ * may omit it (defaults to ROUTING); every other operation must carry one, and
+ * OTHER needs a note — a silent assignment change is exactly what the audit
+ * exists to prevent.
+ */
+export function assertScheduleReason(
+  operation: string,
+  reasonCode: string | null | undefined,
+  note: string | null | undefined
+): string {
+  const code = (reasonCode ?? "").trim().toUpperCase();
+  if (!code && operation === "REORDER") return "ROUTING";
+  if (!code) {
+    throw new Error(
+      `A reason is required. Choose one of: ${JOB_SCHEDULE_REASONS.join(", ")}.`
+    );
+  }
+  if (!(JOB_SCHEDULE_REASONS as readonly string[]).includes(code)) {
+    throw new Error(
+      `"${reasonCode}" isn't a valid reason for a schedule change. Choose one of: ${JOB_SCHEDULE_REASONS.join(", ")}.`
+    );
+  }
+  if (code === "OTHER" && !(note ?? "").trim()) {
+    throw new Error("Choosing 'Other' needs a short written note saying why.");
+  }
+  return code;
+}

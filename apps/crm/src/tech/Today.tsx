@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { technicianDay, type Job, type TechnicianDay } from "../lib/api";
+import { clearAllDrafts } from "../lib/reportDraft";
 import { addDays, prettyWeekday, todayEastern } from "../lib/format";
 import {
   Button,
@@ -50,6 +51,32 @@ export default function TechToday() {
         <EmptyState
           title="No technician profile linked"
           body="Ask the office to link your login to your technician record (More → Technicians)."
+        />
+      </Page>
+    );
+  }
+
+  // GL-13: the server says this login's field access has ended (deactivation /
+  // offboarding). Purge every cached draft on the spot — the device keeps no
+  // customer data past the end of access — and say so plainly.
+  if (day?.accessEnded) {
+    clearAllDrafts();
+    return (
+      <Page title="My day">
+        <EmptyState
+          title="Access has ended"
+          body="This login no longer has field access. Talk to the office if you believe this is a mistake."
+        />
+      </Page>
+    );
+  }
+
+  if (day?.licenseLapsed) {
+    return (
+      <Page title="My day">
+        <EmptyState
+          title="No current applicator licence on file"
+          body="You can review your own completed work, but no route or new visits until the office records a current licence."
         />
       </Page>
     );

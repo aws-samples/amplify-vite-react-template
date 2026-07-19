@@ -67,6 +67,19 @@ backend.auth.resources.cfnResources.cfnUserPoolClient.writeAttributes = [
   "email",
   "name",
 ];
+// GL-13/GL-14: a global sign-out revokes refresh tokens, but access/id tokens
+// already issued stay valid until they expire — that window is the residual
+// exposure after a demotion, offboarding, or technician deactivation. Shorten
+// it from Cognito's 60-minute default to 15 minutes so "signed out now" means
+// minutes, not an hour. (The code-layer active checks close the data reads
+// regardless; this closes the token itself.)
+backend.auth.resources.cfnResources.cfnUserPoolClient.accessTokenValidity = 15;
+backend.auth.resources.cfnResources.cfnUserPoolClient.idTokenValidity = 15;
+backend.auth.resources.cfnResources.cfnUserPoolClient.tokenValidityUnits = {
+  accessToken: "minutes",
+  idToken: "minutes",
+  refreshToken: "days",
+};
 
 // Public Function URL for the contact-form proxy. CORS is locked to the
 // production + staging origins (and localhost for dev). Auth is NONE

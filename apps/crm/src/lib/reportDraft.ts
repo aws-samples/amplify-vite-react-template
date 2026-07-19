@@ -19,12 +19,20 @@ export type DraftStore = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 const KEY_PREFIX = "bk-report-draft-";
 
-export function draftKey(jobId: string): string {
-  return KEY_PREFIX + jobId;
+/**
+ * GL-13: drafts are bound to the signed-in identity. The key carries the
+ * owner's sub, and the payload records it — so after a reassignment or
+ * deactivation, a different login on the same device can never restore another
+ * person's report words, and a purge can target everything at once.
+ */
+export function draftKey(jobId: string, ownerSub?: string | null): string {
+  return ownerSub ? `${KEY_PREFIX}${ownerSub}-${jobId}` : KEY_PREFIX + jobId;
 }
 
 export type ReportDraft<F> = {
   jobId: string;
+  /** The signed-in user the draft belongs to (GL-13). */
+  ownerSub?: string | null;
   /** When the tech last typed (ISO) — compared against the server copy's updatedAt. */
   savedAt: string;
   fields: F;
@@ -38,15 +46,17 @@ export type ReportDraft<F> = {
 export function saveDraft<F>(
   jobId: string,
   fields: F,
-  store: DraftStore = localStorage
+  store: DraftStore = localStorage,
+  ownerSub?: string | null
 ): boolean {
   const draft: ReportDraft<F> = {
     jobId,
+    ownerSub: ownerSub ?? null,
     savedAt: new Date().toISOString(),
     fields,
   };
   try {
-    store.setItem(draftKey(jobId), JSON.stringify(draft));
+    store.setItem(draftKey(jobId, ownerSub), JSON.stringify(draft));
     return true;
   } catch {
     return false;
@@ -56,10 +66,14 @@ export function saveDraft<F>(
 /** Read a draft back; anything missing, corrupt, or mislabeled is null, never a throw. */
 export function loadDraft<F>(
   jobId: string,
-  store: DraftStore = localStorage
+  store: DraftStore = localStorage,
+  ownerSub?: string | null
 ): ReportDraft<F> | null {
   try {
-    const raw = store.getItem(draftKey(jobId));
+    // Owner-keyed first; the legacy unkeyed slot is honored only when it
+    // carries no other owner's sub (pre-GL-13 drafts had none).
+    const raw =
+      store.getItem(draftKey(jobId, ownerSub)) ?? store.getItem(draftKey(jobId));
     if (!raw) return null;
     const v: unknown = JSON.parse(raw);
     if (
@@ -71,17 +85,44 @@ export function loadDraft<F>(
     ) {
       return null;
     }
+    const owner = (v as ReportDraft<F>).ownerSub ?? null;
+    // Another login's draft is unreadable here — GL-13.
+    if (owner && ownerSub && owner !== ownerSub) return null;
     return v as ReportDraft<F>;
   } catch {
     return null;
   }
 }
 
-export function clearDraft(jobId: string, store: DraftStore = localStorage): void {
+export function clearDraft(
+  jobId: string,
+  store: DraftStore = localStorage,
+  ownerSub?: string | null
+): void {
   try {
+    store.removeItem(draftKey(jobId, ownerSub));
     store.removeItem(draftKey(jobId));
   } catch {
     /* a failed clear only means a stale draft that loses the newer-than check */
+  }
+}
+
+/**
+ * GL-13 — render every cached draft unreadable at once: on sign-out, and when
+ * the server says the caller's field access ended (reassignment/deactivation).
+ * Works on any Storage-shaped store that also exposes key/length (localStorage
+ * does); silently does nothing where enumeration is unavailable.
+ */
+export function clearAllDrafts(store: Storage = localStorage): void {
+  try {
+    const doomed: string[] = [];
+    for (let i = 0; i < store.length; i++) {
+      const k = store.key(i);
+      if (k && k.startsWith(KEY_PREFIX)) doomed.push(k);
+    }
+    for (const k of doomed) store.removeItem(k);
+  } catch {
+    /* best effort — the owner-keying still prevents cross-login reads */
   }
 }
 

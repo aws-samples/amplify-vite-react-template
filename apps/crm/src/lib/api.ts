@@ -156,6 +156,10 @@ export function listLeadActivity(customerId: string): Promise<{
  */
 export type TechnicianDay = {
   unlinked?: boolean;
+  /** GL-13: this login's field access has ended (deactivation/offboarding). */
+  accessEnded?: boolean;
+  /** GL-13: employed, but no current licence — no route or new visits. */
+  licenseLapsed?: boolean;
   technicianId: string | null;
   technicianName: string | null;
   canPickTechnician: boolean;

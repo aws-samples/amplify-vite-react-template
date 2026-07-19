@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { confirmResetPassword, resetPassword, signOut } from "aws-amplify/auth";
+import { clearAllDrafts } from "../lib/reportDraft";
 import { api, unwrap } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
@@ -99,7 +100,15 @@ export default function More() {
         </Card>
       ) : null}
 
-      <Button block variant="ghost" onClick={() => void signOut().then(() => window.location.assign("/"))}>
+      <Button
+        block
+        variant="ghost"
+        onClick={() => {
+          // GL-13: cached drafts die with the session.
+          clearAllDrafts();
+          void signOut().then(() => window.location.assign("/"));
+        }}
+      >
         Sign out
       </Button>
 

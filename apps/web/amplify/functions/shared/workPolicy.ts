@@ -36,7 +36,10 @@ export type WorkKind =
   | "LEAD_FOLLOWUP"
   | "LIFECYCLE_RECOVERY"
   | "PLAN_CANCELLATION_RECOVERY"
-  | "VISIT_CHANGE_RECOVERY";
+  | "VISIT_CHANGE_RECOVERY"
+  | "ROUTE_MISMATCH"
+  | "STALE_DRAFT"
+  | "OFFICE_FIELD_REVIEW";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -347,6 +350,61 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "SETTLED_OFFLINE", label: "Fully settled with the customer offline" },
       { code: "REFUNDED_ELSEWHERE", label: "Late charge refunded another way" },
       { code: "NO_REFUND_OWED", label: "Reviewed — no refund was owed" },
+      OTHER,
+    ],
+  },
+  ROUTE_MISMATCH: {
+    severity: "CRITICAL",
+    // A stop's route and its assigned technician disagree — the wrong
+    // technician could be shown (or sent to) the job and its customer. The
+    // stop is withheld from the field day until the two agree, so the exposure
+    // becomes a scheduling gap the office must fix.
+    customerImpact:
+      "A visit's route and its assigned technician disagree — it is withheld from the field day until the office repairs the assignment.",
+    ownerTeam: "OPS",
+    verified: [
+      {
+        id: "ASSIGNMENT_AGREES",
+        label: "Confirm the visit is staffed and its route agrees",
+        verifier: "JOB_STAFFED",
+      },
+    ],
+    manualReasons: [
+      { code: "UNASSIGNED_TO_POOL", label: "Returned the visit to the pool" },
+      { code: "CANCELED_WITH_CUSTOMER", label: "Canceled with the customer" },
+      OTHER,
+    ],
+  },
+  STALE_DRAFT: {
+    severity: "ROUTINE",
+    // A visit changed hands (reassignment, offboarding, cancel) while its
+    // former technician had an unsent DRAFT report. The draft is a regulated
+    // record in the making — the office decides its disposition rather than
+    // letting it silently rot or be silently reused.
+    customerImpact:
+      "A reassigned or canceled visit still has the former technician's unsent draft report — the office must decide what happens to it.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "NEW_TECH_REWROTE", label: "New technician filed their own report" },
+      { code: "DRAFT_DISCARDED", label: "Draft reviewed and discarded" },
+      { code: "OFFICE_FILED", label: "Office completed the record via amendment/report" },
+      OTHER,
+    ],
+  },
+  OFFICE_FIELD_REVIEW: {
+    severity: "ROUTINE",
+    // An office/owner performed a technician's field action (start, end,
+    // no-access) with a recorded reason. Reviewed after the fact so emergency
+    // access stays an exception, not a habit — and never silently impersonates
+    // the applicator.
+    customerImpact:
+      "An office member performed a technician's field action — the reasoned use is recorded and needs a routine review.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "REVIEWED_APPROPRIATE", label: "Reviewed — appropriate use" },
+      { code: "REVIEWED_COACHED", label: "Reviewed — coached the employee" },
       OTHER,
     ],
   },

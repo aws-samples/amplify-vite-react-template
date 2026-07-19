@@ -64,6 +64,23 @@ export function assertTechnicianCanBeSaved(
 }
 
 /**
+ * Non-throwing licence predicate (GL-13): does this technician hold a current
+ * applicator licence on `onDate` (default today)? This is THE single point that
+ * decides licence currency for read-scoping — when GL-17 introduces
+ * one-to-many licence records, only this predicate is re-pointed.
+ */
+export function hasCurrentLicense(
+  technician: TechnicianCompliance,
+  onDate?: string
+): boolean {
+  if (!technician.licenseNumber?.trim()) return false;
+  const expiresOn = isoDate(technician.licenseExpiresOn);
+  if (!expiresOn) return false;
+  const date = isoDate(onDate) ?? new Date().toISOString().slice(0, 10);
+  return expiresOn >= date;
+}
+
+/**
  * Inactive products may remain as catalog history. An active product is a
  * technician-facing label source, so every fact needed at application time
  * must have been reviewed and approved first.

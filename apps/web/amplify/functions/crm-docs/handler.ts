@@ -8,6 +8,7 @@ import {
   assertProductCanBeSaved,
   assertTechnicianCompliance,
   EPA_REGISTRATION_RE,
+  hasCurrentLicense,
 } from "../shared/compliance";
 import { retryBookingFinalization } from "../shared/bookingFinalize";
 import { opFieldName } from "../shared/opEvent";
@@ -24,7 +25,9 @@ import { cusGroup, customerAccessGroups, grpGroup } from "../shared/dynamicGroup
 import {
   assertCanActOnJobId,
   assertCanActOnReportId,
-  technicianServesCustomer,
+  disposeStaleDrafts,
+  technicianDocumentAllowed,
+  technicianForCaller,
 } from "../shared/jobAssignment";
 import {
   buildTechnicianDay,
@@ -64,6 +67,7 @@ import {
   type VerifierId,
 } from "../shared/workPolicy";
 import { appendLeadActivity } from "../shared/leadLifecycle";
+import { assertScheduleReason } from "../shared/visitChangeReasons";
 
 const s3 = new S3Client();
 const BUCKET = () => {
@@ -128,6 +132,7 @@ type Args = {
   scheduledDate?: string;
   timeWindow?: string;
   operation?: string;
+  officeReason?: string;
   technicianId?: string;
   date?: string;
   routeId?: string;
@@ -152,7 +157,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       // Must own the job being reported on; editing an existing report is
       // additionally checked against that report inside the function.
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
-      return saveServiceReportDraft(callerSub(event.identity), {
+      return saveServiceReportDraft(event.identity, {
         jobId: event.arguments.jobId!,
         reportId: event.arguments.reportId,
         servicesPerformed: event.arguments.servicesPerformed,
@@ -180,6 +185,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "reportNoAccess": {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      await assertOfficeFieldAccess(
+        event.identity,
+        "reportNoAccess",
+        event.arguments.jobId!,
+        event.arguments.officeReason
+      );
       return reportNoAccess({
         jobId: event.arguments.jobId!,
         reason: event.arguments.reason ?? "",
@@ -189,6 +200,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "getNoAccessPhotoUploadUrl": {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      await assertOfficeFieldAccess(
+        event.identity,
+        "getNoAccessPhotoUploadUrl",
+        event.arguments.jobId!,
+        event.arguments.officeReason
+      );
       return getNoAccessPhotoUploadUrl(
         event.arguments.jobId!,
         event.arguments.contentType!
@@ -196,10 +213,22 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "startJob": {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      await assertOfficeFieldAccess(
+        event.identity,
+        "startJob",
+        event.arguments.jobId!,
+        event.arguments.officeReason
+      );
       return startJob(event.arguments.jobId!);
     }
     case "endApplication": {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      await assertOfficeFieldAccess(
+        event.identity,
+        "endApplication",
+        event.arguments.jobId!,
+        event.arguments.officeReason
+      );
       return endApplication(event.arguments.jobId!);
     }
     case "completeJob": {
@@ -234,8 +263,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return createOfficeJob(event.arguments);
     }
     case "updateJobSchedule": {
+      // GL-13: the actor and controlled reason travel with the change into the
+      // immutable assignment audit.
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
-      return updateJobSchedule(event.arguments);
+      return updateJobSchedule(event.identity, event.arguments);
     }
     case "updateJobPacket": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
@@ -355,15 +386,53 @@ async function runWorkVerifier(
       };
     }
     case "JOB_STAFFED": {
+      // "Staffed" is verified against the dispatch facts, not the presence of
+      // an ID (GL-13/GL-18): a real, active, currently-licensed technician,
+      // and a route that agrees with the assignment and date.
       const { data: job } = await client.models.Job.get({ id: item.relatedId });
-      const staffed =
-        Boolean(job?.technicianId) &&
-        (job?.status === "SCHEDULED" || job?.status === "IN_PROGRESS");
-      return {
-        ok: staffed,
-        message:
-          "Assign a technician and put the visit on the schedule first — then confirm it's staffed.",
-      };
+      if (
+        !job?.technicianId ||
+        (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS")
+      ) {
+        return {
+          ok: false,
+          message:
+            "Assign a technician and put the visit on the schedule first — then confirm it's staffed.",
+        };
+      }
+      const { data: tech } = await client.models.Technician.get({
+        id: job.technicianId,
+      });
+      if (!tech?.active || !hasCurrentLicense(tech, job.scheduledDate ?? undefined)) {
+        return {
+          ok: false,
+          message:
+            "The assigned technician must be active with a current licence on the service date — reassign the visit, then confirm.",
+        };
+      }
+      if (job.routeId) {
+        const { data: route } = await client.models.Route.get({
+          id: job.routeId,
+        });
+        if (
+          !route ||
+          route.technicianId !== job.technicianId ||
+          route.date !== job.scheduledDate
+        ) {
+          return {
+            ok: false,
+            message:
+              "The visit's route and its assigned technician/date disagree — fix the assignment on the Schedule board, then confirm.",
+          };
+        }
+      } else if (job.status === "SCHEDULED") {
+        return {
+          ok: false,
+          message:
+            "A scheduled visit needs a route — assign it on the Schedule board, then confirm.",
+        };
+      }
+      return { ok: true, message: "" };
     }
     case "VISIT_MONEY_SETTLED": {
       const { data: job } = await client.models.Job.get({ id: item.relatedId });
@@ -849,14 +918,185 @@ function assertJobCanBeScheduled(job: { status?: string | null }) {
 }
 
 /**
+ * GL-13 — write one immutable assignment-audit row. Returns whether the row
+ * durably persisted (data read back non-null); a false is a real gap the
+ * caller must surface, never hide.
+ */
+async function recordAssignmentEvent(input: {
+  jobId: string;
+  customerId?: string | null;
+  action: string;
+  actor: { sub: string | null; email: string | null };
+  reasonCode?: string | null;
+  reason?: string | null;
+  priorTechnicianId?: string | null;
+  newTechnicianId?: string | null;
+  priorRouteId?: string | null;
+  newRouteId?: string | null;
+  priorScheduledDate?: string | null;
+  newScheduledDate?: string | null;
+  draftDisposition?: string | null;
+  effects?: string | null;
+  outcome: string;
+}): Promise<boolean> {
+  try {
+    const client = await dataClient();
+    if (!("JobAssignmentEvent" in client.models)) return false;
+    const { data } = await client.models.JobAssignmentEvent.create({
+      jobId: input.jobId,
+      customerId: input.customerId ?? undefined,
+      action: input.action,
+      actorSub: input.actor.sub ?? undefined,
+      actorEmail: input.actor.email ?? "system",
+      reasonCode: input.reasonCode ?? undefined,
+      reason: input.reason ?? undefined,
+      priorTechnicianId: input.priorTechnicianId ?? undefined,
+      newTechnicianId: input.newTechnicianId ?? undefined,
+      priorRouteId: input.priorRouteId ?? undefined,
+      newRouteId: input.newRouteId ?? undefined,
+      priorScheduledDate: input.priorScheduledDate ?? undefined,
+      newScheduledDate: input.newScheduledDate ?? undefined,
+      draftDisposition: input.draftDisposition ?? undefined,
+      effects: input.effects ?? undefined,
+      outcome: input.outcome,
+      occurredAt: new Date().toISOString(),
+    });
+    return Boolean(data);
+  } catch (err) {
+    console.error("recordAssignmentEvent failed", input.jobId, input.action, err);
+    return false;
+  }
+}
+
+/**
+ * GL-13 — office/owner emergency use of a technician field action. The
+ * assigned technician (an owner who is also the linked tech) passes untouched;
+ * any other office caller must carry a reason, the use is written to the
+ * immutable assignment ledger BEFORE the action runs (fail-closed: no record,
+ * no action), and a routine review case is opened. Emergency access can
+ * therefore never be silent — and the action itself still records under the
+ * signed-in identity, never the applicator's.
+ */
+async function assertOfficeFieldAccess(
+  identity: AppSyncIdentity | undefined | null,
+  action: string,
+  jobId: string,
+  officeReason?: string | null
+): Promise<void> {
+  if (!callerIsOffice(identity)) return;
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  const tech = await technicianForCaller(identity);
+  if (tech && job?.technicianId === tech.id) return;
+  const reason = officeReason?.trim();
+  if (!reason) {
+    throw new Error(
+      "Doing a technician's field action from the office needs a short reason — it is recorded and reviewed. Add the reason and try again."
+    );
+  }
+  const recorded = await recordAssignmentEvent({
+    jobId,
+    customerId: job?.customerId ?? null,
+    action: "OFFICE_FIELD_ACTION",
+    actor: { sub: callerSub(identity), email: callerEmail(identity) },
+    reason: `${action}: ${reason}`,
+    priorTechnicianId: job?.technicianId ?? null,
+    newTechnicianId: job?.technicianId ?? null,
+    effects: `Office performed ${action} on the visit with a recorded reason.`,
+    outcome: "RECORDED",
+  });
+  if (!recorded) {
+    throw new Error(
+      "Could not record the office field-action audit — nothing was done. Try again."
+    );
+  }
+  await openOwnedWork({
+    kind: "OFFICE_FIELD_REVIEW",
+    dedupeKey: `office-field:${jobId}:${new Date().toISOString().slice(0, 10)}`,
+    title: "Office field action needs review",
+    detail: `${callerEmail(identity) ?? "An office member"} performed ${action} on visit ${jobId}: ${reason}`,
+    relatedId: jobId,
+    sourceUrl: "/work",
+    resolutionAction:
+      "Review the recorded reason and close with the matching review outcome.",
+    ownerTeam: "OPS",
+  });
+}
+
+/**
  * Narrow scheduling command surface. No caller can use it to write completion
  * or pesticide-record timestamps, and ASSIGN cannot store an ineligible tech.
+ * Every operation that moves the assignment or date carries a controlled
+ * reason and lands one immutable audit row with the actor, former/new
+ * technician and route, effective time, any stale-draft disposition, and the
+ * result (GL-13).
  */
-async function updateJobSchedule(args: Args) {
+async function updateJobSchedule(
+  identity: AppSyncIdentity | undefined | null,
+  args: Args
+) {
   const client = await dataClient();
   const { data: job } = await client.models.Job.get({ id: args.jobId! });
   if (!job) throw new Error(`Job ${args.jobId} not found`);
   const operation = args.operation?.trim().toUpperCase();
+  const reasonCode = assertScheduleReason(
+    operation ?? "",
+    (args as { reasonCode?: string | null }).reasonCode,
+    (args as { note?: string | null }).note
+  );
+  const actor = { sub: callerSub(identity), email: callerEmail(identity) };
+  const prior = {
+    technicianId: job.technicianId ?? null,
+    routeId: job.routeId ?? null,
+    scheduledDate: job.scheduledDate ?? null,
+  };
+
+  /** Audit + stale-draft disposition after a successful operation. A failed
+   *  audit write cannot be silent: it opens an owned case and is reported in
+   *  the result, so a schedule change with no record is visible work. */
+  const finish = async (result: Record<string, unknown>, after: {
+    technicianId?: string | null;
+    routeId?: string | null;
+    scheduledDate?: string | null;
+    effects: string;
+  }) => {
+    const { draftDisposition, caseConfirmed } = await disposeStaleDrafts(
+      String(job.id),
+      prior.technicianId,
+      after.technicianId ?? null
+    );
+    const auditRecorded = await recordAssignmentEvent({
+      jobId: String(job.id),
+      customerId: job.customerId,
+      action: operation ?? "UNKNOWN",
+      actor,
+      reasonCode,
+      reason: (args as { note?: string | null }).note ?? null,
+      priorTechnicianId: prior.technicianId,
+      newTechnicianId: after.technicianId ?? null,
+      priorRouteId: prior.routeId,
+      newRouteId: after.routeId ?? null,
+      priorScheduledDate: prior.scheduledDate,
+      newScheduledDate: after.scheduledDate ?? null,
+      draftDisposition,
+      effects: after.effects,
+      outcome: caseConfirmed ? "COMPLETE" : "PARTIAL",
+    });
+    if (!auditRecorded) {
+      await openOwnedWork({
+        kind: "ROUTE_MISMATCH",
+        dedupeKey: `assign-audit:${String(job.id)}`,
+        title: "A schedule change could not write its audit record",
+        detail: `${operation} on visit ${String(job.id)} by ${actor.email ?? "office"} succeeded, but its immutable assignment-audit row could not be written. The change stands; the proof does not.`,
+        relatedId: String(job.id),
+        sourceUrl: "/schedule",
+        resolutionAction:
+          "Reconstruct the assignment history for this visit from this case (actor, reason, former/new technician) so the record is complete.",
+        ownerTeam: "OPS",
+      });
+    }
+    return { ...result, auditRecorded, draftDisposition };
+  };
 
   if (operation === "ASSIGN") {
     assertJobCanBeScheduled(job);
@@ -895,7 +1135,15 @@ async function updateJobSchedule(args: Args) {
       status: "SCHEDULED",
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
-    return { jobId: data.id };
+    return finish(
+      { jobId: data.id },
+      {
+        technicianId: technician.id,
+        routeId: route.id,
+        scheduledDate: args.scheduledDate,
+        effects: `Assigned to ${technician.name ?? technician.id} on route ${route.id} for ${args.scheduledDate}.`,
+      }
+    );
   }
 
   if (operation === "UNASSIGN") {
@@ -908,7 +1156,15 @@ async function updateJobSchedule(args: Args) {
       status: "UNSCHEDULED",
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not unassign job");
-    return { jobId: data.id };
+    return finish(
+      { jobId: data.id },
+      {
+        technicianId: null,
+        routeId: null,
+        scheduledDate: job.scheduledDate ?? null,
+        effects: "Returned to the unscheduled pool.",
+      }
+    );
   }
 
   if (operation === "REORDER") {
@@ -926,7 +1182,15 @@ async function updateJobSchedule(args: Args) {
       client.models.Job.update({ id: other.id, routeOrder: args.otherRouteOrder }),
     ]);
     if (!first.data || !second.data) throw new Error("Could not reorder the route");
-    return { jobId: job.id, otherJobId: other.id };
+    return finish(
+      { jobId: job.id, otherJobId: other.id },
+      {
+        technicianId: prior.technicianId,
+        routeId: prior.routeId,
+        scheduledDate: prior.scheduledDate,
+        effects: `Route order swapped with stop ${other.id} (${args.routeOrder} ↔ ${args.otherRouteOrder}).`,
+      }
+    );
   }
 
   if (operation === "CANCEL") {
@@ -939,7 +1203,15 @@ async function updateJobSchedule(args: Args) {
       routeOrder: null,
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not cancel job");
-    return { jobId: data.id };
+    return finish(
+      { jobId: data.id },
+      {
+        technicianId: null,
+        routeId: null,
+        scheduledDate: prior.scheduledDate,
+        effects: "Visit canceled and taken off its route.",
+      }
+    );
   }
 
   if (operation === "RESCHEDULE") {
@@ -956,7 +1228,17 @@ async function updateJobSchedule(args: Args) {
         : {}),
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not reschedule job");
-    return { jobId: data.id };
+    return finish(
+      { jobId: data.id },
+      {
+        technicianId: dateChanged ? null : prior.technicianId,
+        routeId: dateChanged ? null : prior.routeId,
+        scheduledDate: date,
+        effects: dateChanged
+          ? `Rescheduled to ${date ?? "no date"}; assignment cleared for re-routing.`
+          : `Time window updated for ${date ?? "no date"}.`,
+      }
+    );
   }
 
   throw new Error(`Unknown scheduling operation: ${args.operation ?? ""}`);
@@ -2267,7 +2549,7 @@ const PHOTO_TYPES: Record<string, string> = {
  * issuance is worse evidence than no record at all.
  */
 async function saveServiceReportDraft(
-  actorSub: string | null,
+  identity: AppSyncIdentity | undefined | null,
   args: {
     jobId: string;
     reportId?: string | null;
@@ -2320,6 +2602,18 @@ async function saveServiceReportDraft(
         "This report has been finalized and sent to the customer — it is the record of the application and cannot be changed. Ask the office to issue an amendment."
       );
     }
+    // GL-13: a draft is the applicator's own words. Only the technician who is
+    // writing it may edit it — an office (or any other) caller is refused, so
+    // an office edit can never be indistinguishable from the applicator's own
+    // record. Corrections to a finalized report go through amendments; a
+    // takeover goes through reassignment (which routes the draft to owned
+    // office review).
+    const callerTech = await technicianForCaller(identity);
+    if (!callerTech || callerTech.id !== existing.technicianId) {
+      throw new Error(
+        "Only the technician writing this draft can edit it. To take over the visit, reassign it on the Schedule board (the draft goes to office review); to correct a finalized report, issue an amendment."
+      );
+    }
     const { data: updated, errors } = await client.models.ServiceReport.update({
       id: args.reportId,
       ...fields,
@@ -2334,8 +2628,7 @@ async function saveServiceReportDraft(
 
   // Identity comes from the token, not the request: the technician on the
   // record is whoever is signed in.
-  const { data: techs } = await client.models.Technician.list({ limit: 200 });
-  const technician = techs.find((t) => t.userSub === actorSub);
+  const technician = await technicianForCaller(identity);
   if (!technician) {
     throw new Error(
       "Your login isn't linked to a technician record — ask the office to link it before filing a report"
@@ -2548,10 +2841,12 @@ async function getDocumentUrl(
   const customerId = match[2];
   const groups = callerGroups(identity);
 
-  // Office/owner may pull any document. A TECH is NOT blanket-entitled the way
-  // "any staff" was: they may only pull documents for a customer they actually
-  // serve (an assigned job), so a job/report id for another technician's
-  // customer yields no link. The customer's own portal access is unchanged.
+  // Office/owner may pull any document. A TECH is proven against the SPECIFIC
+  // document (GL-13): active technician, report personally authored or on a job
+  // currently assigned to them, inside the seven-year record period; agreements
+  // are never technician documents. A once-served customer no longer entitles a
+  // technician to other workers' reports or every future document. The
+  // customer's own portal access is unchanged.
   if (!callerIsOffice(identity)) {
     let allowed = groups.includes(cusGroup(customerId));
     if (!allowed) {
@@ -2564,7 +2859,7 @@ async function getDocumentUrl(
       );
     }
     if (!allowed && groups.includes("TECH")) {
-      allowed = await technicianServesCustomer(identity, customerId);
+      allowed = await technicianDocumentAllowed(identity, key);
     }
     if (!allowed) throw new Error("Not authorized for this document");
   }

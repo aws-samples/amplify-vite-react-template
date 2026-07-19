@@ -160,6 +160,8 @@ export default function Schedule() {
           technicianId,
           routeOrder: order,
           scheduledDate: date,
+          // The board is the routing surface — its controlled reason IS routing.
+          reasonCode: "ROUTING",
         })
       );
       setAssigning(null);
@@ -210,6 +212,7 @@ export default function Schedule() {
         await api().mutations.updateJobSchedule({
           jobId: job.id,
           operation: "UNASSIGN",
+          reasonCode: "ROUTING",
         })
       );
       await load();

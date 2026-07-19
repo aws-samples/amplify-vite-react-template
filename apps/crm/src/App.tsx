@@ -13,6 +13,7 @@ import { Button, EmptyState, Spinner } from "./ui/kit";
 import { Icon, type IconName } from "./ui/icons";
 import InstallBanner from "./components/InstallBanner";
 import { confirmSignIn, signIn, signOut } from "aws-amplify/auth";
+import { clearAllDrafts } from "./lib/reportDraft";
 
 import Dashboard from "./office/Dashboard";
 import WorkQueue from "./office/Work";
@@ -172,7 +173,14 @@ function Shell() {
           title="Account not set up yet"
           body="Your login works, but no role has been assigned. Ask the BuzzKill office to finish setting up your account."
           action={
-            <Button variant="ghost" onClick={() => void signOut()}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                // GL-13: cached drafts die with the session.
+                clearAllDrafts();
+                void signOut();
+              }}
+            >
               Sign out
             </Button>
           }

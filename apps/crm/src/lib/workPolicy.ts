@@ -266,6 +266,48 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  ROUTE_MISMATCH: {
+    label: "Route / assignment mismatch",
+    severity: "CRITICAL",
+    customerImpact:
+      "A visit's route and its assigned technician disagree — it is withheld from the field day until the office repairs the assignment.",
+    verified: [
+      {
+        id: "ASSIGNMENT_AGREES",
+        label: "Confirm the visit is staffed and its route agrees",
+      },
+    ],
+    manualReasons: [
+      { code: "UNASSIGNED_TO_POOL", label: "Returned the visit to the pool" },
+      { code: "CANCELED_WITH_CUSTOMER", label: "Canceled with the customer" },
+      OTHER,
+    ],
+  },
+  STALE_DRAFT: {
+    label: "Unsent draft report",
+    severity: "ROUTINE",
+    customerImpact:
+      "A reassigned or canceled visit still has the former technician's unsent draft report — decide what happens to it.",
+    verified: [],
+    manualReasons: [
+      { code: "NEW_TECH_REWROTE", label: "New technician filed their own report" },
+      { code: "DRAFT_DISCARDED", label: "Draft reviewed and discarded" },
+      { code: "OFFICE_FILED", label: "Office completed the record via amendment/report" },
+      OTHER,
+    ],
+  },
+  OFFICE_FIELD_REVIEW: {
+    label: "Office field-action review",
+    severity: "ROUTINE",
+    customerImpact:
+      "An office member performed a technician's field action — the reasoned use is recorded and needs a routine review.",
+    verified: [],
+    manualReasons: [
+      { code: "REVIEWED_APPROPRIATE", label: "Reviewed — appropriate use" },
+      { code: "REVIEWED_COACHED", label: "Reviewed — coached the employee" },
+      OTHER,
+    ],
+  },
 };
 
 export function workPolicy(kind: string | null | undefined): CrmWorkPolicy | null {
