@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `abcb908`; newest
-implementation commit `abcb908`
+**Latest commit review:** every commit after `f70e621` through `041f939`; newest
+implementation commit `041f939`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 75 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 72 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -199,7 +199,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-01 | Catalog ratification + conflict decisions — engineering closed (`abcb908`) | CEO | An advertised service cannot be quoted, staffed, or documented | **15% — Very low (sign-offs)** |
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
 | P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money | **38% — Low** |
-| P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **58% — Medium** |
+| P0 | GL-22 | Playbook/retention sign-off + restore drill — engineering closed (`041f939`) | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **15% — Very low (sign-offs + drill)** |
 | P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning | **70% — High** |
 | P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **82% — High** |
 | P1 | GL-03 | Finish durable fallback promises and email recovery | Head of Sales + Head of Operations | A promised follow-up disappears, or an undelivered message remains falsely complete | **68% — Medium** |
@@ -566,38 +566,22 @@ or unconfigured provider event.
 **Business outcome:** A background failure is noticed before the customer reports it, and business records
 can be restored after human or provider error.
 
+**Engineering:** closed (`041f939`). CloudWatch Errors + did-not-run + dead-letter alarms feed the
+ops-alerts bridge, which opens/auto-resolves ONE deduplicated shared-Office INFRA_ALERT per alarm on the
+common one-business-day clock; the daily run isolates subtasks, records an incomplete-run item, and fails
+the invocation when any subtask failed; ses-events never acknowledges an unrecorded event (throw → retry
+→ visible DLQ; malformed → owned work; terminal bounce guard tested); PITR is enabled on every business
+table and the documents bucket is versioned; the OWNER-only pause switchboard (bookings / dispatch /
+billing initiation) is enforced server-side and visible on the Dashboard; docs/incident-playbooks-2026-07.md
+carries the seven one-page playbooks and the deletion/retention policy. Only the items below remain.
+
 **Remaining requirements:**
 
-- **There is still no actionable infrastructure alerting.** The new SES topic transports delivery events;
-  it does not page an operator. There are no CloudWatch alarms or business-impact metric thresholds, so a
-  silent Lambda crash, scheduled job that never fired, or run of email-send failures would page no one.
-  The plan-cancellation and visit-change resumers likewise log pending/failed counts but return successful
-  scheduled runs instead of paging Finance, Operations, or Engineering.
-  Alerts must cover booking/quote/webhook errors and throttles, scheduled jobs that did not run, email
-  failures, stale plan-cancellation, visit-change, or lifecycle commands/claims, cancellation/lifecycle
-  promises and processing-refund commitments nearing or missing deadline, mixed customer status/billing/
-  access/schedule state, a lead sweep that stopped partway or missed its promised first-response window,
-  access/offboarding partial outcomes or missing
-  recovery cases, reconciliation mismatches, capacity anomalies, document generation/storage failure,
-  and growing/overdue exception queues. Every alert creates or updates a deduplicated shared-Office item
-  with a one-business-day response deadline, current on-duty visibility, and escalation when unclaimed or
-  overdue; it does not depend on a permanently named primary or use critical/high/routine response classes.
-  A subtask that catches its own failure and returns success is not a healthy scheduled run.
-- **A failed email-delivery event can be permanently acknowledged.** The event consumer catches malformed
-  messages and database/work-queue failures and then returns success; there is no retained failure queue
-  or operator alert. Every provider event must be retried until its email state, suppression decision, and
-  owned recovery action are durably recorded, or be held in a visible dead-letter queue with a named owner.
-  Duplicate or out-of-order events cannot move a bounced/complained message back to delivered (**see X3**).
-- **There is no point-in-time recovery and no document backup/versioning configured.** Point-in-time
-  database recovery and versioned/retained document backup must be enabled for the seven-year
-  legal/financial retention period, and recovery must restore the complete customer/job/plan/invoice
-  relationship, accepted agreement, service report, photos, and audit history as usable records.
-- Double charge, paid-no-job, unauthorized data exposure, unlicensed dispatch, outage, lost report, and
-  email/provider outage each have a one-page response playbook and the same one-business-day owned-response
-  commitment. Impact facts may drive different containment actions, but not a different response class or
-  deadline. Authorized incident owners can pause CRM/approved lead-form booking, prevent new dispatch,
-  stop/reconcile billing, post approved customer messaging, preserve evidence, and authorize restart. A
-  deletion/retention policy covers customer requests without deleting records the business must retain.
+- CEO/Compliance approve the written playbooks and the seven-year deletion/retention policy; Operations
+  runs one verified restore drill (an S3 object version restore and an engineering-assisted PITR
+  side-table restore proving the complete customer/job/plan/invoice/report relationship comes back
+  usable); production alarm delivery is verified end-to-end once real traffic exists (alarms → queue
+  item + office email), which rides GL-21's production SES enablement.
 
 **Pass owner:** CEO and Engineering lead jointly; Compliance approves retention.
 
