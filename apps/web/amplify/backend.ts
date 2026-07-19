@@ -111,6 +111,14 @@ const LOCK_MODELS = [
   // GL-08: the post-cancellation notice's send-once marker is claimed with
   // a guarded update on the Invoice row.
   "Invoice",
+  // GL-06: booking payment-state transitions are one conditional state
+  // machine — duplicate/stale/out-of-order webhook events cannot regress
+  // BOOKED or overwrite a later business decision.
+  "BookingRequest",
+  // GL-16: the pricing engine's single-drainer lease + atomic daily budget
+  // counters, and the per-combo research lease/notify claims.
+  "PricingControl",
+  "RateCoverage",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
@@ -126,6 +134,8 @@ for (const fn of [
   backend.stripeWebhook,
   // GL-04: the public funnel takes the atomic capacity claim at checkout.
   backend.bookingPublic,
+  // GL-16: the pricing drain lease, budget counters, and research-row leases.
+  backend.pricingRefresh,
 ]) {
   fn.resources.lambda.addToRolePolicy(lockTablePolicy);
 }

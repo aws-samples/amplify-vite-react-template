@@ -72,6 +72,9 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-17: the seasonal monthly-treatment ledger failed a write — routine
   // correction clock.
   OBLIGATION_RECOVERY: 24 * 60,
+  // GL-16: a combo exhausted its research attempts — quotes for it fall to
+  // the callback path until the office retries, pins, or retires it.
+  PRICING_RESEARCH_EXHAUSTED: 24 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

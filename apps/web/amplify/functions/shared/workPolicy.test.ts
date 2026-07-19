@@ -12,6 +12,7 @@ import {
 // new kind is added, this list must grow too — that is the point: a kind can
 // never ship without a severity, an owner, and a controlled way to close it.
 const ALL_KINDS: WorkKind[] = [
+  "PRICING_RESEARCH_EXHAUSTED",
   "NO_ACCESS",
   "EMAIL_FAILURE",
   "CALLBACK_PROMISE",

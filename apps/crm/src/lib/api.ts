@@ -28,6 +28,10 @@ export type Product = Schema["Product"]["type"];
 export type WorkItem = Schema["WorkItem"]["type"];
 export type WorkEvent = Schema["WorkEvent"]["type"];
 export type LeadActivity = Schema["LeadActivity"]["type"];
+// GL-16 — the AI pricing engine's work-list and control rows, read by the
+// Market Rates screen's engine panel.
+export type RateCoverage = Schema["RateCoverage"]["type"];
+export type PricingControl = Schema["PricingControl"]["type"];
 
 /** GL-02 — controlled lead vocabularies (mirror the server validators). */
 export const LEAD_LOST_REASONS = [

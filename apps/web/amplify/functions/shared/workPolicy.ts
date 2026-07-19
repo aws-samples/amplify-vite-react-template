@@ -44,7 +44,8 @@ export type WorkKind =
   | "SCOPE_MISMATCH"
   | "PREP_MISSING"
   | "DISPATCH_NOT_READY"
-  | "OBLIGATION_RECOVERY";
+  | "OBLIGATION_RECOVERY"
+  | "PRICING_RESEARCH_EXHAUSTED";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -479,6 +480,24 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     manualReasons: [
       { code: "LEDGER_CORRECTED", label: "Obligation record corrected by hand" },
       { code: "PLAN_CANCELED", label: "Plan canceled — no obligation remains" },
+      OTHER,
+    ],
+  },
+  PRICING_RESEARCH_EXHAUSTED: {
+    severity: "HIGH",
+    // GL-16: a service+area combo failed AI research MAX_RESEARCH_ATTEMPTS
+    // times in a row and is parked — quotes for it fall to the honest
+    // callback path (never an invented price) until the office acts. The
+    // safe next actions live on the Market Rates screen: retry the
+    // research, set the price by hand (pins the row), or retire the combo.
+    customerImpact:
+      "AI pricing repeatedly failed for a service + area, so those quotes fall back to a callback instead of an instant price.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "RESEARCH_RETRIED", label: "Research retried from Market Rates" },
+      { code: "PRICE_SET_MANUALLY", label: "Price set by hand (row pinned)" },
+      { code: "COMBO_RETIRED", label: "Combo retired — not offered here" },
       OTHER,
     ],
   },

@@ -225,6 +225,8 @@ export const schema = a.schema({
     "PREP_MISSING",
     "DISPATCH_NOT_READY",
     "OBLIGATION_RECOVERY",
+    // GL-16: a combo exhausted its AI-research attempts and is parked.
+    "PRICING_RESEARCH_EXHAUSTED",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -519,6 +521,14 @@ export const schema = a.schema({
       // a visit that holds nothing.
       capacityTechnicianId: a.string(),
       capacityMinutes: a.integer(),
+      // GL-06: durable PROCESSING facts — when the pending bank debit
+      // started, when the reconcile sweep should next re-read Stripe, when
+      // the provider result is expected (a business day past this raises
+      // owned work), and the customer-facing method label.
+      processingStartedAt: a.datetime(),
+      processingNextCheckAt: a.datetime(),
+      processingExpectedBy: a.date(),
+      processingMethodLabel: a.string(),
       recurring: a.boolean(),
       amountCents: a.integer(),
       monthlyCents: a.integer(),
@@ -1041,12 +1051,47 @@ export const schema = a.schema({
       lastSuccessAt: a.datetime(),
       failCount: a.integer(),
       active: a.boolean().required(),
+      // GL-16: the research lease — the drain worker CAS-claims a row before
+      // spending provider budget on it, so an overlapping invocation (or a
+      // stale-lease takeover mid-research) can never research the same combo
+      // twice concurrently.
+      leaseUntil: a.datetime(),
+      leaseNonce: a.string(),
+      // GL-16: bounded retry — a failed combo backs off exponentially and,
+      // at MAX_RESEARCH_ATTEMPTS straight failures, is EXHAUSTED: visibly
+      // parked with an owned Office work item instead of looping the queue.
+      nextEligibleAt: a.datetime(),
+      exhaustedAt: a.datetime(),
       // Waiting leads to email when this combo's sheet lands:
       // [{email, bookingRequestId?}], capped at NOTIFY_CAP (5).
       notify: a.json(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+    ]),
+
+  // GL-16: the pricing engine's control rows — ONE drain lease (id "drain",
+  // exactly one invocation researches at a time) and one row per UTC day
+  // (id "day#YYYY-MM-DD") whose counters are ATOMIC across overlapping
+  // Lambda invocations: budget is reserved with a conditional increment
+  // BEFORE each provider request, so failures, retries, and timeouts all
+  // consume it and the schedule can never exceed the shared caps. The day
+  // row also carries the once-only daily-digest claim. Office/OWNER read
+  // these for the Market Rates screen's engine panel; only the refresh
+  // worker writes them (via guarded DynamoDB writes).
+  PricingControl: a
+    .model({
+      kind: a.string().required(), // DRAIN | DAY
+      holderNonce: a.string(),
+      leaseUntil: a.datetime(),
+      attempts: a.integer(),
+      demandAttempts: a.integer(),
+      succeeded: a.integer(),
+      failed: a.integer(),
+      digestSentAt: a.datetime(),
+    })
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
     ]),
 
   LeadPricingRun: a
@@ -1200,6 +1245,11 @@ export const schema = a.schema({
        *  cancel/move releases exactly what was reserved. */
       capacityMinutes: a.integer(),
       capacityWindow: a.string(),
+      // GL-06: set while a bank debit for this visit is still clearing — the
+      // visit is REAL and dispatchable, and every surface says "Payment
+      // pending" instead of paid or unpaid. Cleared when the debit settles
+      // or fails.
+      paymentPendingIntentId: a.string(),
       // GL-04: the technician-window slot the visit's minutes are HELD on,
       // even before an office assignment exists (a funnel booking reserves a
       // specific technician's window at checkout). The nightly rebuild and

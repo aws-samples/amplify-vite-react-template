@@ -5,6 +5,8 @@ import {
   unwrap,
   updateMarketRate,
   type MarketRate,
+  type PricingControl,
+  type RateCoverage,
 } from "../lib/api";
 import {
   CADENCE_LABEL,
@@ -74,8 +76,146 @@ function scopeOf(rate: MarketRate): string {
   return `${SERVICE_LABEL[rate.service] ?? rate.service} · ${rate.areaKey}${band ? ` · ${band}` : ""}`;
 }
 
+/** Mirrors the engine's per-research cost estimate (pricing-refresh's
+ *  COST_PER_RESEARCH_USD) — an estimate for leadership, not billing truth. */
+const COST_PER_RESEARCH_USD = 0.35;
+/** Mirrors the engine's daily cap (pricing-refresh's RESEARCH_PER_DAY). */
+const RESEARCH_PER_DAY = 150;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function covScope(c: RateCoverage): string {
+  return `${SERVICE_LABEL[c.service] ?? c.service} · ${c.areaKey}${c.band ? ` · up to ${c.band.toLocaleString()} sqft` : ""}`;
+}
+
+/**
+ * GL-16 — the engine panel: what the AI pricer is doing with the budget,
+ * what is queued, and every parked (exhausted) combo with its one safe
+ * next action. Data: the RateCoverage work-list plus today's atomic
+ * PricingControl day counters (written by the refresh worker itself, so
+ * this screen never needs an engineering query).
+ */
+function EnginePanel({
+  coverage,
+  rates,
+  control,
+  onChanged,
+}: {
+  coverage: RateCoverage[];
+  rates: MarketRate[];
+  control: PricingControl | null;
+  onChanged: () => Promise<void>;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const now = Date.now();
+
+  const liveKeys = new Set(
+    rates.filter((r) => r.active).map((r) => r.rateKey)
+  );
+  const active = coverage.filter((c) => c.active);
+  const exhausted = active.filter((c) => c.exhaustedAt);
+  const backingOff = active
+    .filter(
+      (c) =>
+        !c.exhaustedAt &&
+        c.nextEligibleAt &&
+        Date.parse(c.nextEligibleAt) > now
+    )
+    .sort((a, b) => (a.nextEligibleAt ?? "").localeCompare(b.nextEligibleAt ?? ""));
+  const waiting = active.filter(
+    (c) =>
+      !c.exhaustedAt &&
+      !liveKeys.has(c.id) &&
+      !(c.nextEligibleAt && Date.parse(c.nextEligibleAt) > now)
+  );
+  const dueRefresh = rates.filter(
+    (r) =>
+      r.active &&
+      !r.pinned &&
+      r.researchedAt &&
+      now - Date.parse(r.researchedAt) > WEEK_MS
+  );
+
+  const attempts = control?.attempts ?? 0;
+  const succeeded = control?.succeeded ?? 0;
+  const failed = control?.failed ?? 0;
+  const demand = control?.demandAttempts ?? 0;
+  const spend = (attempts * COST_PER_RESEARCH_USD).toFixed(2);
+
+  const retry = async (c: RateCoverage) => {
+    setBusyId(c.id);
+    setError(null);
+    try {
+      // Re-arm the combo: the next refresh run researches it again with a
+      // clean attempt count. The parked state (and its owned work item) is
+      // the office's to clear — this is that one safe action.
+      unwrap(
+        await api().models.RateCoverage.update({
+          id: c.id,
+          exhaustedAt: null,
+          nextEligibleAt: null,
+          failCount: 0,
+        })
+      );
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not retry research");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="row-split">
+        <strong>AI research engine — today</strong>
+        <Badge tone={exhausted.length ? "warn" : "ok"}>
+          {exhausted.length ? `${exhausted.length} parked` : "healthy"}
+        </Badge>
+      </div>
+      <p className="small" style={{ margin: "6px 0 0" }}>
+        {attempts} research attempts ({succeeded} succeeded, {failed} failed,{" "}
+        {demand} for waiting leads) · estimated spend ~${spend} · daily cap{" "}
+        {RESEARCH_PER_DAY}
+      </p>
+      <p className="muted small" style={{ margin: "4px 0 0" }}>
+        Queue: {waiting.length} waiting for research · {dueRefresh.length} due
+        a weekly refresh · {backingOff.length} backing off after a failure ·{" "}
+        {active.length} combos covered
+      </p>
+      <ErrorNote error={error} />
+      {exhausted.map((c) => (
+        <ListRow
+          key={c.id}
+          title={covScope(c)}
+          subtitle={`Gave up after ${c.failCount ?? 0} straight failures — quotes fall back to a callback until this is retried, priced by hand, or retired`}
+          meta={
+            <Button
+              small
+              loading={busyId === c.id}
+              onClick={() => void retry(c)}
+            >
+              Retry research
+            </Button>
+          }
+        />
+      ))}
+      {backingOff.slice(0, 5).map((c) => (
+        <ListRow
+          key={c.id}
+          title={covScope(c)}
+          subtitle={`${c.failCount ?? 0} failure${(c.failCount ?? 0) === 1 ? "" : "s"} — next automatic retry ${fmtDate(c.nextEligibleAt!, true)}`}
+          meta={<Badge tone="muted">backing off</Badge>}
+        />
+      ))}
+    </Card>
+  );
+}
+
 export default function MarketRates() {
   const [rates, setRates] = useState<MarketRate[] | null>(null);
+  const [coverage, setCoverage] = useState<RateCoverage[]>([]);
+  const [control, setControl] = useState<PricingControl | null>(null);
   const [editing, setEditing] = useState<MarketRate | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -89,6 +229,20 @@ export default function MarketRates() {
           (b.researchedAt ?? "").localeCompare(a.researchedAt ?? "")
         )
       );
+      // The engine panel's inputs: the work-list plus today's day counters.
+      // Their absence must not blank the pricing console itself.
+      try {
+        setCoverage(
+          await listAll<RateCoverage>((t) =>
+            api().models.RateCoverage.list({ limit: 500, nextToken: t })
+          )
+        );
+        const dayId = `day#${new Date().toISOString().slice(0, 10)}`;
+        const { data } = await api().models.PricingControl.get({ id: dayId });
+        setControl(data ?? null);
+      } catch {
+        /* engine stats unavailable — rates remain editable */
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load market rates");
     }
@@ -101,6 +255,14 @@ export default function MarketRates() {
   return (
     <Page title="Market rates" back="/more">
       <ErrorNote error={error} />
+      {rates !== null ? (
+        <EnginePanel
+          coverage={coverage}
+          rates={rates}
+          control={control}
+          onChanged={load}
+        />
+      ) : null}
       {rates === null ? (
         <Spinner />
       ) : rates.length === 0 ? (

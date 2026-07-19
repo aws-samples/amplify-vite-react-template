@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
 
 /**
- * The pricing-refresh worker — the only place research runs now. It wakes
- * immediately for a live quote miss and every five minutes for recovery.
+ * The pricing-refresh worker — the only place research runs.
  *
- * Every run: idempotent coverage seeding (curated towns + combos derived
- * from rates/customers/bookings), then drain due work under the caps —
- * DEMAND misses first (self-heal ≤1h with a "your prices are ready" email
- * to the waiting lead), then never-researched gaps, then sheets past the
- * weekly refresh, skipping pinned. Failures increment failCount and never
- * crash the run. Monday 10:00 UTC also emails the office the weekly
- * report — visibility, not a gate.
+ * GL-16 (the July cost incident): every run first takes the SINGLE drain
+ * lease, so overlapping invocations can never double-research the queue;
+ * every provider request reserves ATOMIC daily budget before the call, so
+ * failures/timeouts consume it too; failures back off exponentially and
+ * exhaust into an owned Office item after MAX_RESEARCH_ATTEMPTS; office
+ * visibility is a daily digest + Monday report, never one email per rate;
+ * and waiting-lead emails are claim-based so replays cannot double-send.
  */
 
 type CovRow = Record<string, unknown> & {
@@ -25,6 +25,10 @@ type CovRow = Record<string, unknown> & {
   failCount?: number;
   lastAttemptAt?: string;
   lastSuccessAt?: string;
+  leaseUntil?: string;
+  leaseNonce?: string;
+  nextEligibleAt?: string;
+  exhaustedAt?: string;
   notify?: string;
 };
 
@@ -41,11 +45,20 @@ type RateRow = Record<string, unknown> & {
   prevPriceCents?: number;
 };
 
-const covRows: CovRow[] = [];
+// RateCoverage and PricingControl live in Maps shared between the fake
+// AppSync client and the CAS lock store, so guarded writes and model reads
+// see one truth — exactly the production arrangement.
+const covTable = new Map<string, CovRow>();
+const controlTable = new Map<string, Record<string, unknown>>();
 const rateRows: RateRow[] = [];
 const createdRates: RateRow[] = [];
 const customers: Record<string, unknown>[] = [];
 const bookings: Record<string, unknown>[] = [];
+const workItems = new Map<string, Record<string, unknown>>();
+
+const covs = () => [...covTable.values()];
+const cov = (id: string) => covTable.get(id);
+const addCov = (row: CovRow) => covTable.set(row.id, row);
 
 const fakeDataClient = {
   models: {
@@ -67,22 +80,33 @@ const fakeDataClient = {
       },
     },
     RateCoverage: {
-      list: async () => ({ data: [...covRows] }),
-      get: async ({ id }: { id: string }) => ({
-        data: covRows.find((r) => r.id === id) ?? null,
-      }),
+      list: async () => ({ data: covs() }),
+      get: async ({ id }: { id: string }) => ({ data: cov(id) ?? null }),
       create: async (input: Record<string, unknown> & { id: string }) => {
-        if (covRows.some((r) => r.id === input.id)) {
+        if (covTable.has(input.id)) {
           return { data: null, errors: [{ message: "conditional check failed" }] };
         }
         const row = { ...input } as CovRow;
-        covRows.push(row);
+        covTable.set(row.id, row);
         return { data: row };
       },
       update: async (input: Record<string, unknown> & { id: string }) => {
-        const row = covRows.find((r) => r.id === input.id);
+        const row = cov(input.id);
         if (row) Object.assign(row, input);
         return { data: row ?? null };
+      },
+    },
+    PricingControl: {
+      list: async () => ({ data: [...controlTable.values()] }),
+      get: async ({ id }: { id: string }) => ({
+        data: controlTable.get(id) ?? null,
+      }),
+      create: async (input: Record<string, unknown> & { id: string }) => {
+        if (controlTable.has(input.id)) {
+          return { data: null, errors: [{ message: "conditional check failed" }] };
+        }
+        controlTable.set(input.id, { ...input });
+        return { data: controlTable.get(input.id) };
       },
     },
     Customer: { list: async () => ({ data: [...customers] }) },
@@ -91,6 +115,21 @@ const fakeDataClient = {
       get: async ({ id }: { id: string }) => ({
         data: bookings.find((b) => b.id === id) ?? null,
       }),
+    },
+    WorkItem: {
+      get: async ({ id }: { id: string }) => ({ data: workItems.get(id) ?? null }),
+      create: async (input: Record<string, unknown> & { id: string }) => {
+        workItems.set(input.id, { ...input });
+        return { data: workItems.get(input.id) };
+      },
+      update: async (input: Record<string, unknown> & { id: string }) => {
+        const row = workItems.get(input.id);
+        if (row) Object.assign(row, input);
+        return { data: row ?? null };
+      },
+    },
+    WorkEvent: {
+      create: async (input: Record<string, unknown>) => ({ data: { ...input } }),
     },
   },
 };
@@ -157,14 +196,37 @@ vi.mock("@anthropic-ai/sdk", () => ({
   },
 }));
 
-const { handler, RESEARCH_PER_DAY, RESEARCH_PER_RUN, SEED_TOWNS, SEED_SQFT_BUCKETS } =
-  await import("./handler");
+const {
+  handler,
+  BACKOFF_BASE_MS,
+  DEMAND_RESEARCH_PER_DAY,
+  MAX_RESEARCH_ATTEMPTS,
+  RESEARCH_PER_DAY,
+  RESEARCH_PER_RUN,
+  SEED_TOWNS,
+  SEED_SQFT_BUCKETS,
+} = await import("./handler");
 
 /** 6 sqft-banded services × the seed buckets + WASP_NEST + HOA, per town. */
 const COMBOS_PER_TOWN = 6 * SEED_SQFT_BUCKETS.length + 2;
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 const DAY = 24 * 3600_000;
+
+const dayKey = () => `day#${new Date().toISOString().slice(0, 10)}`;
+const dayCounters = () => controlTable.get(dayKey());
+
+/** Pre-set the day row as if earlier runs already reserved this much. */
+function spendBudget(attempts: number, demandAttempts = 0) {
+  controlTable.set(dayKey(), {
+    id: dayKey(),
+    kind: "DAY",
+    attempts,
+    demandAttempts,
+    succeeded: attempts,
+    failed: 0,
+  });
+}
 
 /** Run the handler with no API key: seeding happens, research cannot. */
 async function seedOnly() {
@@ -176,14 +238,14 @@ async function seedOnly() {
 
 /** Quiet the queue: every covered combo has a fresh sheet, nothing due. */
 function quietAll() {
-  for (const cov of covRows) {
-    cov.lastSuccessAt = iso(2 * DAY);
-    cov.lastAttemptAt = iso(2 * DAY);
+  for (const c of covs()) {
+    c.lastSuccessAt = iso(2 * DAY);
+    c.lastAttemptAt = iso(2 * DAY);
     rateRows.push({
-      id: `seed-${cov.id}`,
-      rateKey: cov.id,
-      service: cov.service,
-      areaKey: cov.areaKey,
+      id: `seed-${c.id}`,
+      rateKey: c.id,
+      service: c.service,
+      areaKey: c.areaKey,
       priceCents: 19900,
       active: true,
       researchedAt: iso(2 * DAY),
@@ -191,8 +253,24 @@ function quietAll() {
   }
 }
 
+const demandRow = (over: Partial<CovRow> = {}): CovRow => ({
+  id: "TERMITE#springfield-ma#3000",
+  service: "TERMITE",
+  areaKey: "springfield-ma",
+  city: "Springfield",
+  state: "MA",
+  band: 3000,
+  source: "DEMAND",
+  active: true,
+  failCount: 0,
+  notify: "[]",
+  ...over,
+});
+
 beforeEach(() => {
-  covRows.length = 0;
+  covTable.clear();
+  controlTable.clear();
+  workItems.clear();
   rateRows.length = 0;
   createdRates.length = 0;
   customers.length = 0;
@@ -208,42 +286,113 @@ beforeEach(() => {
   process.env.ANTHROPIC_API_KEY = "test-key";
   process.env.CRM_APP_URL = "https://crm.example.test";
   process.env.MARKETING_URL = "https://staging.example.test";
-  // A Wednesday, well away from the Monday-10:00-UTC report slot.
+  // The CAS store and the fake client share these Maps — guarded writes and
+  // model reads see one truth, like DynamoDB under AppSync.
+  _setLockStoreForTests(
+    memoryLockStore({
+      RateCoverage: covTable as unknown as Map<string, Record<string, unknown>>,
+      PricingControl: controlTable,
+    })
+  );
+  // A Wednesday, well away from the Monday report and the 21:00 digest slot.
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-07-15T14:00:00Z"));
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  _setLockStoreForTests(null);
   delete process.env.ANTHROPIC_API_KEY;
+});
+
+describe("the drain lease — exactly one invocation researches at a time", () => {
+  it("an overlapping invocation exits without selecting or spending anything", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+    // First research hangs mid-flight; later calls resolve instantly.
+    let releaseResearch!: () => void;
+    messagesCreate.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseResearch = () =>
+            resolve({ content: [{ type: "text", text: MEGA_TEXT }] });
+        })
+    );
+
+    const runA = handler();
+    // Let A reach its provider call (it now holds the drain lease).
+    while (messagesCreate.mock.calls.length === 0) await Promise.resolve();
+
+    const summaryB = await handler();
+    expect(summaryB).toMatchObject({ skipped: "drain-lease-held" });
+
+    releaseResearch();
+    const summaryA = await runA;
+    expect(summaryA.attempted).toBe(1);
+    // ONE research, ONE budget reservation, ONE cached rate — no double spend.
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
+    expect(dayCounters()?.attempts).toBe(1);
+    expect(createdRates).toHaveLength(1);
+  });
+
+  it("a live drain lease held by another worker is respected", async () => {
+    addCov(demandRow());
+    controlTable.set("pricing-drain", {
+      id: "pricing-drain",
+      kind: "DRAIN",
+      holderNonce: "someone-else",
+      leaseUntil: iso(-10 * 60_000), // 10 minutes in the future
+    });
+
+    const summary = await handler();
+
+    expect(summary).toMatchObject({ skipped: "drain-lease-held" });
+    expect(messagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("a crashed run's EXPIRED lease is taken over atomically and the queue drains", async () => {
+    vi.setSystemTime(new Date("2026-07-15T14:07:00Z")); // off the hour — no seeding
+    addCov(demandRow());
+    controlTable.set("pricing-drain", {
+      id: "pricing-drain",
+      kind: "DRAIN",
+      holderNonce: "dead-worker",
+      leaseUntil: iso(60_000), // expired a minute ago
+    });
+
+    const summary = await handler();
+
+    expect(summary.attempted).toBe(1);
+    expect(createdRates).toHaveLength(1);
+    // The lease is released at the end of the run — the next cron isn't blocked.
+    expect(controlTable.get("pricing-drain")?.leaseUntil).toBeUndefined();
+  });
+
+  it("a coverage row another worker holds a live research lease on is never re-researched", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow({ leaseUntil: iso(-2 * 60_000), leaseNonce: "other" }));
+
+    const summary = await handler();
+
+    expect(summary.attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
+  });
 });
 
 describe("coverage seeding — top of the hour only, demand drains every run", () => {
   it("skips seeding off the top of the hour, but still drains a waiting DEMAND miss", async () => {
-    // Seed once at the top of an hour (beforeEach is 14:00), then run again
-    // mid-hour: no re-seed, but the lead waiting since the seed still gets
-    // priced — the 5-minute self-heal the every-5-min cadence exists for.
     await seedOnly();
     quietAll(); // every seeded combo has a fresh sheet — nothing due
-    const seededCount = covRows.length;
-    covRows.push({
-      id: "TERMITE#springfield-ma#3000",
-      service: "TERMITE",
-      areaKey: "springfield-ma",
-      city: "Springfield",
-      state: "MA",
-      band: 3000,
-      source: "DEMAND",
-      active: true,
-      failCount: 0,
-      notify: "[]",
-    });
+    const seededCount = covTable.size;
+    addCov(demandRow());
     vi.setSystemTime(new Date("2026-07-15T14:05:00Z")); // 5 past — off the hour
 
     const summary = await handler();
 
     expect(summary.seeded).toBe(0); // no re-scan mid-hour
-    expect(covRows).toHaveLength(seededCount + 1); // only the demand row we added
+    expect(covTable.size).toBe(seededCount + 1); // only the demand row we added
     expect(summary.attempted).toBe(1); // the demand miss still drained
     expect(createdRates[0].rateKey).toBe("TERMITE#springfield-ma#3000");
   });
@@ -251,15 +400,15 @@ describe("coverage seeding — top of the hour only, demand drains every run", (
   it("seeds the curated town list across every service kind and common band", async () => {
     await seedOnly();
 
-    expect(covRows).toHaveLength(SEED_TOWNS.length * COMBOS_PER_TOWN);
-    expect(covRows.find((c) => c.id === "GENERAL_PEST#ware-ma#2000")).toMatchObject({
+    expect(covTable.size).toBe(SEED_TOWNS.length * COMBOS_PER_TOWN);
+    expect(cov("GENERAL_PEST#ware-ma#2000")).toMatchObject({
       source: "SEED",
       city: "Ware",
       state: "MA",
       band: 2000,
       active: true,
     });
-    expect(covRows.find((c) => c.id === "HOA#ware-ma")).toMatchObject({
+    expect(cov("HOA#ware-ma")).toMatchObject({
       band: null,
       source: "SEED",
     });
@@ -267,11 +416,42 @@ describe("coverage seeding — top of the hour only, demand drains every run", (
 
   it("is idempotent — a second run creates nothing new", async () => {
     await seedOnly();
-    const count = covRows.length;
+    const count = covTable.size;
 
     await seedOnly();
 
-    expect(covRows).toHaveLength(count);
+    expect(covTable.size).toBe(count);
+  });
+
+  it("cannot resurrect a combo the office retired", async () => {
+    await seedOnly();
+    const retired = cov("GENERAL_PEST#ware-ma#2000")!;
+    retired.active = false;
+
+    await seedOnly();
+
+    expect(cov("GENERAL_PEST#ware-ma#2000")!.active).toBe(false);
+  });
+
+  it("cannot re-arm an exhausted combo — only the office's explicit retry does", async () => {
+    await seedOnly();
+    const parked = cov("GENERAL_PEST#ware-ma#2000")!;
+    parked.exhaustedAt = iso(DAY);
+    parked.failCount = MAX_RESEARCH_ATTEMPTS;
+
+    await seedOnly();
+    const summary = await handler();
+
+    expect(cov("GENERAL_PEST#ware-ma#2000")).toMatchObject({
+      exhaustedAt: parked.exhaustedAt,
+      failCount: MAX_RESEARCH_ATTEMPTS,
+    });
+    // ...and the drain never touched it either.
+    expect(
+      messagesCreate.mock.calls.length === 0 ||
+        createdRates.every((r) => r.rateKey !== "GENERAL_PEST#ware-ma#2000")
+    ).toBe(true);
+    expect(summary.attempted).toBeLessThanOrEqual(RESEARCH_PER_RUN);
   });
 
   it("derives SERVED combos from existing rates, customer towns, and booking requests", async () => {
@@ -296,19 +476,17 @@ describe("coverage seeding — top of the hour only, demand drains every run", (
     await seedOnly();
 
     // The pre-existing sheet's exact combo joins the refresh cycle.
-    expect(covRows.find((c) => c.id === "RODENT#springfield-ma#2000")).toMatchObject({
+    expect(cov("RODENT#springfield-ma#2000")).toMatchObject({
       source: "SERVED",
       city: "springfield",
       band: 2000,
     });
     // Customer and booking towns get the full service × band cross.
-    expect(covRows.find((c) => c.id === "GENERAL_PEST#amherst-ma#1500")).toMatchObject(
-      { source: "SERVED" }
-    );
-    // A community booking maps to the HOA kind (no band).
-    expect(covRows.find((c) => c.id === "HOA#granby-ma")).toMatchObject({
+    expect(cov("GENERAL_PEST#amherst-ma#1500")).toMatchObject({
       source: "SERVED",
     });
+    // A community booking maps to the HOA kind (no band).
+    expect(cov("HOA#granby-ma")).toMatchObject({ source: "SERVED" });
   });
 });
 
@@ -316,22 +494,9 @@ describe("work selection — demand first, then gaps, then weekly-due; pinned ne
   it("a DEMAND miss is researched before a sheet due for weekly refresh", async () => {
     await seedOnly();
     quietAll();
-    // A sheet past its weekly refresh...
     const due = rateRows.find((r) => r.rateKey === "RODENT#ware-ma#2000")!;
     due.researchedAt = iso(8 * DAY);
-    // ...and a lead waiting on a combo with no sheet at all.
-    covRows.push({
-      id: "TERMITE#springfield-ma#3000",
-      service: "TERMITE",
-      areaKey: "springfield-ma",
-      city: "Springfield",
-      state: "MA",
-      band: 3000,
-      source: "DEMAND",
-      active: true,
-      failCount: 0,
-      notify: "[]",
-    });
+    addCov(demandRow());
 
     const summary = await handler();
 
@@ -364,7 +529,7 @@ describe("work selection — demand first, then gaps, then weekly-due; pinned ne
   });
 });
 
-describe("the caps — the cron's whole research budget", () => {
+describe("the atomic budget — reserved before every provider call", () => {
   it(`a deep queue drains at most RESEARCH_PER_RUN (${RESEARCH_PER_RUN}) per run`, async () => {
     await seedOnly(); // hundreds of never-researched gap rows
 
@@ -372,31 +537,144 @@ describe("the caps — the cron's whole research budget", () => {
 
     expect(summary.attempted).toBe(RESEARCH_PER_RUN);
     expect(messagesCreate).toHaveBeenCalledTimes(RESEARCH_PER_RUN);
+    expect(dayCounters()?.attempts).toBe(RESEARCH_PER_RUN);
   });
 
-  it(`stops at RESEARCH_PER_DAY (${RESEARCH_PER_DAY}) across a day's runs`, async () => {
+  it(`stops at RESEARCH_PER_DAY (${RESEARCH_PER_DAY}) across a day's runs — the counter, not a guess`, async () => {
     await seedOnly();
-    // A busy day so far: 140 combos already attempted within 24h.
-    for (const cov of covRows.slice(0, RESEARCH_PER_DAY - 10)) {
-      cov.lastAttemptAt = iso(3600_000);
-    }
+    spendBudget(RESEARCH_PER_DAY - 10);
 
     const summary = await handler();
 
-    expect(summary.budget).toBe(10);
     expect(summary.attempted).toBe(10);
+    expect(summary.budgetExhausted).toBe(true);
+    expect(dayCounters()?.attempts).toBe(RESEARCH_PER_DAY);
   });
 
   it("a spent daily budget researches nothing — the queue holds for tomorrow", async () => {
     await seedOnly();
-    for (const cov of covRows.slice(0, RESEARCH_PER_DAY)) {
-      cov.lastAttemptAt = iso(3600_000);
-    }
+    spendBudget(RESEARCH_PER_DAY);
 
     const summary = await handler();
 
     expect(summary.attempted).toBe(0);
     expect(messagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("the budget resets at the UTC day boundary — yesterday's spend never blocks today", async () => {
+    await seedOnly();
+    quietAll();
+    spendBudget(RESEARCH_PER_DAY); // today is fully spent...
+    vi.setSystemTime(new Date("2026-07-16T00:02:00Z")); // ...then midnight passes
+    addCov(demandRow());
+
+    const summary = await handler();
+
+    expect(summary.attempted).toBe(1);
+    expect(controlTable.get("day#2026-07-16")?.attempts).toBe(1);
+    // Yesterday's row is untouched history.
+    expect(controlTable.get("day#2026-07-15")?.attempts).toBe(RESEARCH_PER_DAY);
+  });
+
+  it("a FAILED research consumes budget exactly like a success", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+    researchText = "No conclusive pricing found."; // junk → research refuses
+
+    await handler();
+
+    expect(dayCounters()).toMatchObject({ attempts: 1, failed: 1, succeeded: 0 });
+  });
+
+  it("a THROWN provider call (timeout, overload) consumes budget too", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+    messagesCreate.mockRejectedValue(new Error("Request timed out"));
+
+    const summary = await handler();
+
+    expect(summary.failed).toBe(1);
+    expect(dayCounters()).toMatchObject({ attempts: 1, failed: 1 });
+  });
+});
+
+describe("failure backoff and exhaustion — one bad combo can never loop the queue", () => {
+  it("failures increment failCount, set a bounded backoff, and never crash the run", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow({ id: "TERMITE#nowhere-ma#2000", areaKey: "nowhere-ma", city: "Nowhere", band: 2000, failCount: 1 }));
+    researchText = "No conclusive pricing found.";
+
+    const summary = await handler();
+
+    expect(summary.failed).toBe(1);
+    const row = cov("TERMITE#nowhere-ma#2000")!;
+    expect(row.failCount).toBe(2);
+    expect(row.lastSuccessAt).toBeUndefined();
+    // Second failure → 2^1 × base backoff.
+    expect(Date.parse(row.nextEligibleAt!)).toBe(Date.now() + 2 * BACKOFF_BASE_MS);
+    expect(createdRates).toHaveLength(0);
+  });
+
+  it("a combo inside its backoff window is not retried; past it, it is", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow({ failCount: 1, nextEligibleAt: iso(-BACKOFF_BASE_MS) }));
+
+    const early = await handler();
+    expect(early.attempted).toBe(0);
+
+    vi.setSystemTime(new Date(Date.now() + BACKOFF_BASE_MS + 60_000));
+    const late = await handler();
+    expect(late.attempted).toBe(1);
+    expect(createdRates).toHaveLength(1);
+  });
+
+  it(`the ${MAX_RESEARCH_ATTEMPTS}th straight failure parks the combo with an owned Office item`, async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow({ failCount: MAX_RESEARCH_ATTEMPTS - 1 }));
+    researchText = "Still nothing usable.";
+
+    await handler();
+
+    const row = cov("TERMITE#springfield-ma#3000")!;
+    expect(row.exhaustedAt).toBeTruthy();
+    expect(row.failCount).toBe(MAX_RESEARCH_ATTEMPTS);
+    expect(row.nextEligibleAt).toBeUndefined();
+    const items = [...workItems.values()];
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "PRICING_RESEARCH_EXHAUSTED",
+      status: "OPEN",
+      relatedId: "TERMITE#springfield-ma#3000",
+    });
+
+    // Parked means parked: the next run spends nothing on it.
+    messagesCreate.mockClear();
+    const next = await handler();
+    expect(next.attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("the office's explicit retry (clearing exhaustedAt) re-enters the queue cleanly", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(
+      demandRow({ failCount: MAX_RESEARCH_ATTEMPTS, exhaustedAt: iso(DAY) })
+    );
+    // The Market Rates screen's one safe action:
+    const row = cov("TERMITE#springfield-ma#3000")!;
+    delete row.exhaustedAt;
+    row.failCount = 0;
+
+    const summary = await handler();
+
+    expect(summary.attempted).toBe(1);
+    expect(createdRates).toHaveLength(1);
+    expect(cov("TERMITE#springfield-ma#3000")!.failCount).toBe(0);
   });
 });
 
@@ -419,83 +697,144 @@ describe("refresh bookkeeping", () => {
       active: true,
     });
     expect(due.active).toBe(false);
-    const cov = covRows.find((c) => c.id === "WASP_NEST#ware-ma")!;
-    expect(cov.failCount).toBe(0);
-    expect(cov.lastSuccessAt).toBeTruthy();
+    const c = cov("WASP_NEST#ware-ma")!;
+    expect(c.failCount).toBe(0);
+    expect(c.lastSuccessAt).toBeTruthy();
+    expect(c.leaseUntil).toBeUndefined(); // the research lease was released
   });
 
-  it("failures increment failCount and never crash the run", async () => {
+  it("caching a rate does NOT email the office per rate — visibility rides the digest", async () => {
     await seedOnly();
     quietAll();
-    covRows.push({
-      id: "TERMITE#nowhere-ma#2000",
-      service: "TERMITE",
-      areaKey: "nowhere-ma",
-      city: "Nowhere",
-      state: "MA",
-      band: 2000,
-      source: "DEMAND",
-      active: true,
-      failCount: 1,
-      notify: "[]",
-    });
-    researchText = "No conclusive pricing found."; // junk → research refuses
+    addCov(demandRow());
 
-    const summary = await handler();
+    await handler();
 
-    expect(summary.failed).toBe(1);
-    const cov = covRows.find((c) => c.id === "TERMITE#nowhere-ma#2000")!;
-    expect(cov.failCount).toBe(2);
-    expect(cov.lastSuccessAt).toBeUndefined();
-    expect(createdRates).toHaveLength(0);
-  });
-
-  it("the Anthropic call throwing is a counted failure, not a crash", async () => {
-    await seedOnly();
-    quietAll();
-    covRows.push({
-      id: "ROACH#nowhere-ma#2000",
-      service: "ROACH",
-      areaKey: "nowhere-ma",
-      city: "Nowhere",
-      state: "MA",
-      band: 2000,
-      source: "DEMAND",
-      active: true,
-      failCount: 0,
-      notify: "[]",
-    });
-    messagesCreate.mockRejectedValue(new Error("overloaded"));
-
-    const summary = await handler();
-
-    expect(summary.failed).toBe(1);
-    expect(covRows.find((c) => c.id === "ROACH#nowhere-ma#2000")!.failCount).toBe(1);
+    expect(createdRates).toHaveLength(1);
+    expect(officeEmails).toHaveLength(0);
   });
 });
 
-describe("the self-heal email — a waiting lead hears the moment prices exist", () => {
-  const demandRow = (): CovRow => ({
-    id: "GENERAL_PEST#springfield-ma#2000",
-    service: "GENERAL_PEST",
-    areaKey: "springfield-ma",
-    city: "Springfield",
-    state: "MA",
-    band: 2000,
-    source: "DEMAND",
-    active: true,
-    failCount: 0,
-    notify: JSON.stringify([
-      { email: "lead1@x.com", bookingRequestId: "bk1" },
-      { email: "lead2@x.com", bookingRequestId: "bk2" },
-    ]),
+describe("the daily digest — one consolidated email, never one per rate", () => {
+  it("the 21:00 UTC hour sends ONE digest with the day's spend, results, and queue state", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+    addCov(
+      demandRow({
+        id: "ROACH#nowhere-ma#2000",
+        service: "ROACH",
+        areaKey: "nowhere-ma",
+        city: "Nowhere",
+        band: 2000,
+        failCount: MAX_RESEARCH_ATTEMPTS,
+        exhaustedAt: iso(DAY),
+      })
+    );
+    vi.setSystemTime(new Date("2026-07-15T21:02:00Z"));
+
+    await handler();
+
+    const digests = officeEmails.filter(
+      (e) => e.template === "ops-pricing-daily-digest"
+    );
+    expect(digests).toHaveLength(1);
+    const body = digests[0].bodyHtml;
+    expect(body).toContain("TERMITE · springfield-ma · up to 3,000 sqft");
+    expect(body).toContain("already live and quoting");
+    expect(body).toContain("estimated spend");
+    expect(body).toContain("ROACH · nowhere-ma"); // the exhausted combo is surfaced
+    expect(digests[0].subject).toContain("AI pricing daily digest");
+
+    // A second run in the same hour claims nothing — exactly one digest a day.
+    vi.setSystemTime(new Date("2026-07-15T21:07:00Z"));
+    await handler();
+    expect(
+      officeEmails.filter((e) => e.template === "ops-pricing-daily-digest")
+    ).toHaveLength(1);
   });
+
+  it("outside the digest hour, no digest is sent", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+
+    await handler();
+
+    expect(
+      officeEmails.filter((e) => e.template === "ops-pricing-daily-digest")
+    ).toHaveLength(0);
+  });
+});
+
+describe("the targeted quote wake-up — one miss, the demand reserve, no re-research", () => {
+  it("researches exactly its miss from the DEMAND reserve", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+    spendBudget(RESEARCH_PER_DAY); // the general budget is gone...
+
+    const summary = await handler({
+      rateKey: "TERMITE#springfield-ma#3000",
+      source: "quote",
+    });
+
+    // ...but the waiting lead still gets priced from the demand reserve.
+    expect(summary.attempted).toBe(1);
+    expect(createdRates[0].rateKey).toBe("TERMITE#springfield-ma#3000");
+    expect(dayCounters()?.demandAttempts).toBe(1);
+  });
+
+  it(`the demand reserve is capped at ${DEMAND_RESEARCH_PER_DAY}/day`, async () => {
+    addCov(demandRow());
+    spendBudget(RESEARCH_PER_DAY, DEMAND_RESEARCH_PER_DAY);
+
+    const summary = await handler({
+      rateKey: "TERMITE#springfield-ma#3000",
+      source: "quote",
+    });
+
+    expect(summary.attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("a combo that already has a live sheet is NOT re-researched by a wake-up", async () => {
+    const demand = demandRow();
+    addCov(demand);
+    rateRows.push({
+      id: "live-sheet",
+      rateKey: demand.id,
+      service: demand.service,
+      areaKey: demand.areaKey,
+      priceCents: 32000,
+      active: true,
+      researchedAt: iso(60_000),
+    });
+
+    const summary = await handler({ rateKey: demand.id, source: "quote" });
+
+    expect(summary.attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("the self-heal email — a waiting lead hears exactly once", () => {
+  const waitingRow = (): CovRow =>
+    demandRow({
+      id: "GENERAL_PEST#springfield-ma#2000",
+      service: "GENERAL_PEST",
+      band: 2000,
+      notify: JSON.stringify([
+        { email: "lead1@x.com", bookingRequestId: "bk1" },
+        { email: "lead2@x.com", bookingRequestId: "bk2" },
+      ]),
+    });
 
   it("emails every waiting lead once, then clears the notify list", async () => {
     await seedOnly();
     quietAll();
     bookings.push({ id: "bk1", cancelToken: "resume-token-1" });
-    covRows.push(demandRow());
+    addCov(waitingRow());
 
     await handler();
 
@@ -505,10 +844,10 @@ describe("the self-heal email — a waiting lead hears the moment prices exist",
     expect(ready[0].html).toContain(
       "https://staging.example.test/quote#request=bk1&token=resume-token-1"
     );
-    const cov = covRows.find((c) => c.id === "GENERAL_PEST#springfield-ma#2000")!;
-    expect(JSON.parse(cov.notify!)).toEqual([]);
+    const c = cov("GENERAL_PEST#springfield-ma#2000")!;
+    expect(JSON.parse(c.notify!)).toEqual([]);
 
-    // Next hour: the sheet exists, the combo is not due — nobody re-emailed.
+    // Replay: the sheet exists, the combo is not due — nobody re-emailed.
     sentEmails.length = 0;
     await handler();
     expect(sentEmails.filter((e) => e.template === "booking-rate-ready")).toHaveLength(0);
@@ -517,13 +856,13 @@ describe("the self-heal email — a waiting lead hears the moment prices exist",
   it("keeps a failed delivery queued and retries it without researching again", async () => {
     await seedOnly();
     quietAll();
-    covRows.push(demandRow());
+    addCov(waitingRow());
     emailsThatFail.add("lead2@x.com");
 
     await handler();
 
-    const cov = covRows.find((c) => c.id === "GENERAL_PEST#springfield-ma#2000")!;
-    expect(JSON.parse(cov.notify!)).toEqual([
+    const c = cov("GENERAL_PEST#springfield-ma#2000")!;
+    expect(JSON.parse(c.notify!)).toEqual([
       { email: "lead2@x.com", bookingRequestId: "bk2", ready: true },
     ]);
 
@@ -534,14 +873,14 @@ describe("the self-heal email — a waiting lead hears the moment prices exist",
     expect(messagesCreate).toHaveBeenCalledTimes(1); // first run only
     expect(sentEmails.filter((e) => e.template === "booking-rate-ready").map((e) => e.to))
       .toEqual(["lead2@x.com"]);
-    expect(JSON.parse(cov.notify!)).toEqual([]);
+    expect(JSON.parse(c.notify!)).toEqual([]);
   });
 
   it("does not announce ready when a live partial sheet still needs research", async () => {
     await seedOnly();
     quietAll();
-    const demand = demandRow();
-    covRows.push(demand);
+    const demand = waitingRow();
+    addCov(demand);
     rateRows.push({
       id: "partial-sheet",
       rateKey: demand.id,
@@ -557,20 +896,20 @@ describe("the self-heal email — a waiting lead hears the moment prices exist",
     expect(summary.attempted).toBe(0);
     expect(sentEmails.filter((e) => e.template === "booking-rate-ready"))
       .toHaveLength(0);
-    expect(JSON.parse(demand.notify!)).toHaveLength(2);
+    expect(JSON.parse(cov(demand.id)!.notify!)).toHaveLength(2);
   });
 
   it("sends nothing when research fails — the lead is emailed only with real prices", async () => {
     await seedOnly();
     quietAll();
-    covRows.push(demandRow());
+    addCov(waitingRow());
     researchText = "Could not price this.";
 
     await handler();
 
     expect(sentEmails.filter((e) => e.template === "booking-rate-ready")).toHaveLength(0);
-    const cov = covRows.find((c) => c.id === "GENERAL_PEST#springfield-ma#2000")!;
-    expect(JSON.parse(cov.notify!)).toHaveLength(2); // still waiting
+    const c = cov("GENERAL_PEST#springfield-ma#2000")!;
+    expect(JSON.parse(c.notify!)).toHaveLength(2); // still waiting
   });
 });
 
@@ -594,13 +933,16 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
     const floored = rateRows.find((r) => r.rateKey === "ROACH#ware-ma#2000")!;
     floored.basis = "junk ads · one-time floored at Zone-A variable cost $155.00";
     floored.researchedAt = iso(DAY);
-    // A combo failing research, and a stale one.
-    const failing = covRows.find((c) => c.id === "TERMITE#ware-ma#1500")!;
+    // A combo failing research, a stale one, and an exhausted one.
+    const failing = cov("TERMITE#ware-ma#1500")!;
     failing.failCount = 3;
-    const stale = covRows.find((c) => c.id === "WILDLIFE#ware-ma#1500")!;
+    const stale = cov("WILDLIFE#ware-ma#1500")!;
     stale.lastSuccessAt = iso(25 * DAY);
+    const parked = cov("ROACH#ware-ma#1500")!;
+    parked.exhaustedAt = iso(2 * DAY);
+    parked.failCount = MAX_RESEARCH_ATTEMPTS;
     // A coverage gap: never succeeded.
-    covRows.push({
+    addCov({
       id: "HOA#springfield-ma",
       service: "HOA",
       areaKey: "springfield-ma",
@@ -618,7 +960,7 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
     officeEmails.length = 0;
   }
 
-  it("emails one report with ranked moves, floors, failures, stale rows, gaps and counts", async () => {
+  it("emails one report with ranked moves, floors, failures, exhausted, stale rows, gaps and counts", async () => {
     vi.setSystemTime(new Date("2026-07-20T10:00:00Z")); // Monday 10:00 UTC
     await reportFixtures();
 
@@ -636,9 +978,11 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
     // Floors that bound.
     expect(body).toContain("shipped at the Zone-A floor");
     expect(body).toContain("ROACH · ware-ma");
-    // Failing, stale, gaps.
+    // Failing, exhausted, stale, gaps.
     expect(body).toContain("TERMITE · ware-ma · up to 1,500 sqft");
     expect(body).toContain("3 straight failures");
+    expect(body).toContain("ROACH · ware-ma · up to 1,500 sqft");
+    expect(body).toContain("retry, pin a price, or retire it");
     expect(body).toContain("WILDLIFE · ware-ma · up to 1,500 sqft");
     expect(body).toContain("last success 25d ago");
     expect(body).toContain("HOA · springfield-ma");
@@ -662,8 +1006,6 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
   });
 
   it("fires once, not twelve times — the 10:05 run in the same hour sends nothing", async () => {
-    // The cron now fires every 5 minutes; only the top-of-hour run may report.
-    // Seed + build fixtures at the top of the hour, then run again 5 past.
     vi.setSystemTime(new Date("2026-07-20T10:00:00Z")); // Monday 10:00 UTC
     await reportFixtures();
     vi.setSystemTime(new Date("2026-07-20T10:05:00Z")); // 5 past — off the hour

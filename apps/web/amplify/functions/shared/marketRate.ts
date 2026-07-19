@@ -1,6 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "./dataClient";
-import { notifyOffice } from "./email";
 import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
 
 /**
@@ -403,13 +402,18 @@ export async function enqueueRateResearch(opts: {
       if (!existing) return;
     }
 
+    // GL-16: a retired coverage row is the office's decision and STAYS
+    // retired — seeding and quote misses must not regenerate work the
+    // office removed. (The office reactivates from the Market Rates
+    // screen.) The lead already received the honest callback fallback.
+    if (!existing.active) return;
+
     const patch: Record<string, unknown> = {};
     // A real customer miss promotes a seeded row so it jumps the refresh
     // queue (self-heal within the hour). Never demote the other way.
     if (source === "DEMAND" && existing.source !== "DEMAND") {
       patch.source = "DEMAND";
     }
-    if (!existing.active) patch.active = true;
     if (entry) {
       const list = parseNotify(existing.notify);
       const dup = list.some(
@@ -509,10 +513,8 @@ export async function researchAndCacheRate(opts: {
     }
   }
 
-  // Visibility, not a gate: the office hears about every new sheet and can
-  // override it, but the sheet quotes immediately.
-  await notifyNewRate({ service, areaKey, bucket, sheet, floorNotes });
-
+  // Visibility rides the daily digest (GL-16: one consolidated email per
+  // day, never one per rate) — the sheet quotes immediately either way.
   return {
     priceCents,
     sheet,
@@ -745,56 +747,3 @@ async function research(
   }
 }
 
-// -------------------------------------------------------------- visibility
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-async function notifyNewRate(opts: {
-  service: MarketRateService;
-  areaKey: string;
-  bucket: number | null;
-  sheet: RateSheet;
-  floorNotes: string[];
-}): Promise<void> {
-  const { service, areaKey, bucket, sheet, floorNotes } = opts;
-  const rows: string[] = [];
-  if (sheet.oneTimeCents != null) {
-    rows.push(`One-time: <strong>${money(sheet.oneTimeCents)}</strong>`);
-  }
-  if (sheet.extraNestCents != null) {
-    rows.push(`Each extra nest: <strong>${money(sheet.extraNestCents)}</strong>`);
-  }
-  if (sheet.plans) {
-    for (const cadence of PLAN_CADENCES) {
-      const plan = sheet.plans[cadence];
-      rows.push(
-        `${cadence.toLowerCase()} plan: <strong>${money(plan.monthlyCents)}/mo</strong> + ${money(plan.initialFeeCents)} initial`
-      );
-    }
-  }
-  if (sheet.hoaPerUnitMonthly) {
-    for (const band of HOA_BANDS) {
-      const rates = sheet.hoaPerUnitMonthly[band];
-      rows.push(
-        `${band.replace("UNITS_", "").replace("_PLUS", "+").replace("_", "–")} units: <strong>${money(rates.MONTHLY)}/unit/mo</strong> monthly · ${money(rates.BIMONTHLY)} bi-monthly · ${money(rates.QUARTERLY)} quarterly`
-      );
-    }
-  }
-  const scope = `${service} · ${areaKey}${bucket ? ` · up to ${bucket.toLocaleString()} sqft` : ""}`;
-  const crmUrl = process.env.CRM_APP_URL ?? "";
-  await notifyOffice({
-    subject: `New AI rate cached — ${scope}`,
-    heading: "New AI market rate cached",
-    template: "ops-market-rate-cached",
-    bodyHtml: `<p>The pricing engine researched and cached a new market rate for <strong>${escapeHtml(scope)}</strong>. It is already quoting from this sheet — nothing is blocked on you.</p>
-     <ul>${rows.map((r) => `<li>${r}</li>`).join("")}</ul>
-     ${floorNotes.length ? `<p style="color:#666;font-size:13px;">${floorNotes.map(escapeHtml).join("<br/>")}</p>` : ""}
-     <p><a href="${crmUrl}/market-rates">Open Market Rates</a> to review or override it.</p>`,
-  });
-}

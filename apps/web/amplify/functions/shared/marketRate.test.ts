@@ -350,13 +350,15 @@ describe("demand-enqueue — an idempotent RateCoverage upsert per combo", () =>
     expect(covRows[0].source).toBe("DEMAND");
   });
 
-  it("reactivates a deactivated combo when somebody needs it again", async () => {
+  it("GL-16: a retired combo STAYS retired — a miss cannot regenerate work the office removed", async () => {
     await miss();
     covRows[0].active = false;
+    const before = { ...covRows[0] };
 
-    await miss();
+    await miss({ notifyEmail: "late@x.com" });
 
-    expect(covRows[0].active).toBe(true);
+    expect(covRows[0].active).toBe(false);
+    expect(covRows[0].notify).toBe(before.notify); // not even a notify append
   });
 
   it("never throws — losing a miss record must never fail a quote", async () => {
@@ -666,19 +668,6 @@ QUARTERLY_PLAN_INITIAL_FEE_USD: 180`;
     expect(basis).toContain("plan prices carry no variable-cost floor");
   });
 
-  it("the new-rate office email renders the commercial shape", async () => {
-    researchText = COMMERCIAL_TEXT;
-
-    await commercialResearch();
-
-    expect(officeEmails).toHaveLength(1);
-    expect(officeEmails[0].subject).toBe(
-      "New AI rate cached — COMMERCIAL · ware-ma · up to 5,000 sqft"
-    );
-    expect(officeEmails[0].bodyHtml).toContain("$399");
-    expect(officeEmails[0].bodyHtml).toContain("$149/mo");
-    expect(officeEmails[0].bodyHtml).toContain("$179");
-  });
 });
 
 describe("HOA — per-unit monthly rates by unit-count band", () => {
@@ -779,19 +768,11 @@ UNITS_101_PLUS_QUARTERLY_PER_UNIT_USD: 2.75`;
   });
 });
 
-describe("visibility, not a gate", () => {
-  it("emails the office once when a NEW sheet is cached — with the sheet and the screen to override it", async () => {
+describe("visibility, not a gate — one daily digest, never one email per rate (GL-16)", () => {
+  it("caching a NEW sheet sends NO per-rate email — the refresh worker's daily digest carries visibility", async () => {
     await gpResearch();
 
-    expect(officeEmails).toHaveLength(1);
-    expect(officeEmails[0].subject).toBe(
-      "New AI rate cached — GENERAL_PEST · ware-ma · up to 2,000 sqft"
-    );
-    expect(officeEmails[0].bodyHtml).toContain("$319");
-    expect(officeEmails[0].bodyHtml).toContain("$99/mo");
-    expect(officeEmails[0].bodyHtml).toContain(
-      "https://crm.example.test/market-rates"
-    );
+    expect(officeEmails).toHaveLength(0);
   });
 
   it("does not email on a read", async () => {
@@ -803,7 +784,7 @@ describe("visibility, not a gate", () => {
     expect(officeEmails).toHaveLength(0);
   });
 
-  it("mentions the floor when it was applied", async () => {
+  it("records an applied floor on the row's basis for the digest and report to surface", async () => {
     researchText = "Cut-rate operators advertise $80.\nONE_TIME_USD: 80";
 
     await researchAndCacheRate({
@@ -814,6 +795,8 @@ describe("visibility, not a gate", () => {
       sqft: 2000,
     });
 
-    expect(officeEmails[0].bodyHtml).toContain("floored at Zone-A variable cost");
+    expect(String(created[0].basis)).toContain(
+      "floored at Zone-A variable cost"
+    );
   });
 });
