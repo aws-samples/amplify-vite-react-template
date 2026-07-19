@@ -45,7 +45,9 @@ export type WorkKind =
   | "PREP_MISSING"
   | "DISPATCH_NOT_READY"
   | "OBLIGATION_RECOVERY"
-  | "PRICING_RESEARCH_EXHAUSTED";
+  | "PRICING_RESEARCH_EXHAUSTED"
+  | "BALANCE_COLLECTION"
+  | "PAYMENT_PROCESSING_OVERDUE";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -498,6 +500,46 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "RESEARCH_RETRIED", label: "Research retried from Market Rates" },
       { code: "PRICE_SET_MANUALLY", label: "Price set by hand (row pinned)" },
       { code: "COMBO_RETIRED", label: "Combo retired — not offered here" },
+      OTHER,
+    ],
+  },
+  BALANCE_COLLECTION: {
+    severity: "CRITICAL",
+    // GL-06: the work was performed; the bank debit then failed. The invoice
+    // is the outstanding balance — the case turns green only when the money
+    // is verifiably settled, never on a note.
+    customerImpact:
+      "The visit was completed but the customer's bank payment failed afterward — the invoice is an unpaid balance.",
+    ownerTeam: "FINANCE",
+    verified: [
+      {
+        id: "BALANCE_SETTLED",
+        label: "Confirm the balance is settled",
+        verifier: "VISIT_MONEY_SETTLED",
+      },
+    ],
+    manualReasons: [
+      { code: "WRITTEN_OFF", label: "Balance written off (Finance approval)" },
+      OTHER,
+    ],
+  },
+  PAYMENT_PROCESSING_OVERDUE: {
+    severity: "HIGH",
+    // GL-06: a pending bank debit passed its expected settlement date with no
+    // provider result. The visit may be approaching (or done) on money that
+    // never arrived — reconcile with Stripe before it becomes a surprise.
+    customerImpact:
+      "A customer's bank payment has been processing longer than expected — the scheduled visit is riding on money that hasn't settled.",
+    ownerTeam: "FINANCE",
+    verified: [
+      {
+        id: "PAYMENT_RESOLVED",
+        label: "Confirm the payment reached a final state",
+        verifier: "VISIT_MONEY_SETTLED",
+      },
+    ],
+    manualReasons: [
+      { code: "PROVIDER_CONFIRMED_PENDING", label: "Stripe confirms it is still processing normally" },
       OTHER,
     ],
   },

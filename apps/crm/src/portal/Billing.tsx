@@ -158,7 +158,14 @@ export default function PortalBilling() {
           <p className="muted small">No invoices yet.</p>
         ) : (
           invoices.map((i) => {
-            const payable = i.status === "OPEN" || i.status === "FAILED";
+            // GL-06: an in-flight bank debit is not payable — offering "Pay
+            // now" while it clears would charge the customer twice.
+            const debitClearing = Boolean(
+              (i as { pendingDebitIntentId?: string | null })
+                .pendingDebitIntentId
+            );
+            const payable =
+              (i.status === "OPEN" || i.status === "FAILED") && !debitClearing;
             const summary = pm[i.customerId];
             const hasCard = summary?.hasPaymentMethod ?? false;
             const today = todayEastern();
@@ -183,6 +190,13 @@ export default function PortalBilling() {
                         Card declined
                         {i.failureReason ? ` — ${i.failureReason}` : ""}. Please
                         pay below or update your card.
+                      </span>
+                    ) : null}
+                    {debitClearing ? (
+                      <span className="nested-line">
+                        Your bank payment is processing — this can take a few
+                        business days. No action needed, and please don&rsquo;t
+                        pay again.
                       </span>
                     ) : null}
                   </>

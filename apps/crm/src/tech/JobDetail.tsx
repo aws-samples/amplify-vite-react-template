@@ -507,6 +507,11 @@ export default function TechJob() {
  */
 function paymentExpectationLabel(job: Job): string {
   if (job.paidAt) return "Already paid — collect nothing";
+  // GL-06: the bank debit is clearing — the visit proceeds; the technician
+  // never collects or discusses payment state at the door.
+  if (job.paymentPendingIntentId) {
+    return "Payment processing online — collect nothing";
+  }
   return job.paymentExpectation === "COLLECT_NOTHING"
     ? "Collect nothing"
     : "Collect nothing — office bills afterward";

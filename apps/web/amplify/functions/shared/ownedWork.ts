@@ -75,6 +75,12 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-16: a combo exhausted its research attempts — quotes for it fall to
   // the callback path until the office retries, pins, or retires it.
   PRICING_RESEARCH_EXHAUSTED: 24 * 60,
+  // GL-06: work performed, bank debit failed after — collection is money-
+  // critical but the customer was noticed; the common one-business-day clock.
+  BALANCE_COLLECTION: 24 * 60,
+  // GL-06: a pending debit past its expected settlement date — reconcile with
+  // the provider within the common one-business-day commitment.
+  PAYMENT_PROCESSING_OVERDUE: 24 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CANCEL_FULL_REFUND_DAYS } from "../shared/bookingTerms";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
 
 /**
  * R17 (single-source half) — the cancellation policy a customer reads in the
@@ -34,6 +35,13 @@ vi.mock("../shared/stripeClient", () => ({
 
 let booking: Record<string, unknown>;
 const customers: Record<string, unknown>[] = [];
+
+// GL-06: finalization's BOOKED write is a guarded CAS transition — give the
+// lock store a Map-shaped view over the single booking fixture.
+const bookingLockTable = {
+  get: (id: string) => (booking && booking.id === id ? booking : undefined),
+  delete: () => false,
+} as unknown as Map<string, Record<string, unknown>>;
 
 const fakeDataClient = {
   models: {
@@ -91,6 +99,7 @@ vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient 
 const { finalizeBooking } = await import("../shared/bookingFinalize");
 
 beforeEach(() => {
+  _setLockStoreForTests(memoryLockStore({ BookingRequest: bookingLockTable }));
   emails.length = 0;
   pdfBodies.length = 0;
   customers.length = 0;

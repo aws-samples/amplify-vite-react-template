@@ -69,6 +69,11 @@ export default function BookPage() {
   const [recoveryMsg, setRecoveryMsg] = useState<string | null>(null);
   const [statusToken, setStatusToken] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  // GL-06: once the pending bank debit's real scheduled commitment exists,
+  // the server confirms it and this page shows "visit scheduled — payment
+  // processing" with the expected settlement date.
+  const [processingInfo, setProcessingInfo] =
+    useState<BookingStatusResponse | null>(null);
 
   const stripePromise = useMemo(
     () => (publishableKey ? loadStripe(publishableKey) : null),
@@ -105,7 +110,28 @@ export default function BookPage() {
     void pollBookingStatus(bookingId, token);
   }
 
-  async function pollBookingStatus(bookingId: string, token: string) {
+  /** GL-06: an async debit reported `processing` — the server is creating the
+   *  real scheduled commitment. Show the truthful processing state and poll
+   *  until the server confirms the visit is scheduled (or the debit already
+   *  resolved). */
+  function enterProcessing(bookingId: string, token: string) {
+    window.history.replaceState(
+      null,
+      "",
+      `/book?booking=${encodeURIComponent(bookingId)}&t=${encodeURIComponent(token)}`
+    );
+    setStatusToken(token);
+    setProcessing(true);
+    clearFunnelState(window.sessionStorage);
+    void pollBookingStatus(bookingId, token, "processing");
+  }
+
+  async function pollBookingStatus(
+    bookingId: string,
+    token: string,
+    mode: "finalize" | "processing" = "finalize"
+  ) {
+    let sawProcessing = mode === "processing";
     for (let attempt = 0; attempt < 24; attempt++) {
       const res = await checkBookingStatus({ bookingId, statusToken: token });
       if (res.ok) {
@@ -113,8 +139,24 @@ export default function BookPage() {
         if (body.state === "BOOKED") {
           setBooked(body);
           setFinalizing(false);
+          setProcessing(false);
           clearFunnelState(window.sessionStorage);
           return;
+        }
+        if (body.state === "PROCESSING_SCHEDULED") {
+          // The pending debit's commitment exists — a terminal, truthful
+          // screen: scheduled visit, payment pending, don't pay again.
+          setProcessingInfo(body);
+          setProcessing(true);
+          setFinalizing(false);
+          clearFunnelState(window.sessionStorage);
+          return;
+        }
+        if (body.state === "PROCESSING") {
+          // Still building the commitment — keep polling.
+          sawProcessing = true;
+          setProcessing(true);
+          setFinalizing(false);
         }
         if (body.state === "RECOVERY") {
           setRecoveryMsg(
@@ -126,6 +168,7 @@ export default function BookPage() {
         }
         if (body.state === "PAYMENT_FAILED") {
           setFinalizing(false);
+          setProcessing(false);
           setError(
             body.reason ??
               "Your payment wasn't completed — no charge was made. You can try again."
@@ -134,6 +177,7 @@ export default function BookPage() {
         }
         if (body.state === "CANCELED") {
           setFinalizing(false);
+          setProcessing(false);
           setFatal({
             message: "This booking was canceled.",
             offerFreshQuote: true,
@@ -142,6 +186,11 @@ export default function BookPage() {
         }
       }
       await new Promise((r) => setTimeout(r, 2500));
+    }
+    if (sawProcessing) {
+      // GL-06: the processing screen is already truthful (visit scheduling in
+      // motion, don't pay again, confirmation email coming) — leave it up.
+      return;
     }
     // Poll budget exhausted: the money moved; the booking is being completed.
     // Owned, honest copy — never an invitation to pay again.
@@ -204,8 +253,17 @@ export default function BookPage() {
         }
       } else if (paymentIntent.status === "processing") {
         setChargedAmountCents(paymentIntent.amount);
-        setProcessing(true);
-        clearFunnelState(window.sessionStorage);
+        // GL-06: the pending debit books the visit — confirm it server-side
+        // and show the scheduled-with-payment-pending truth.
+        const stored = loadFunnelState(window.sessionStorage);
+        const bookingId = urlBookingRef?.bookingId ?? stored?.quote.bookingId;
+        const token = urlBookingRef?.t ?? stored?.quote.statusToken;
+        if (bookingId && token) {
+          enterProcessing(bookingId, token);
+        } else {
+          setProcessing(true);
+          clearFunnelState(window.sessionStorage);
+        }
       } else {
         setError(
           "Your payment wasn't completed — no charge was made. You can try again below."
@@ -354,40 +412,78 @@ export default function BookPage() {
   }
 
   if (processing) {
+    const scheduled = processingInfo?.state === "PROCESSING_SCHEDULED";
+    const dateShown = processingInfo?.selectedDate ?? selection?.date ?? null;
+    const windowShown =
+      processingInfo?.selectedWindow ?? selection?.window ?? null;
     return (
       <Shell>
         <div className="bk-confirm">
           <div className="bk-form-success-icon" aria-hidden="true">
             <CheckIcon />
           </div>
-          {/* GL-06: a processing payment is NOT a booking and NOT paid. Say so. */}
+          {/* GL-06: a pending bank debit is a REAL scheduled visit with
+              payment pending — say exactly that, never "paid" and never
+              "no money moved". */}
           <div className="bk-eyebrow">Payment processing</div>
-          <h1 className="bk-h2">Your slot is held.</h1>
-          {quote && selection && (
+          <h1 className="bk-h2">
+            {scheduled
+              ? "Your visit is scheduled — payment processing."
+              : "We're scheduling your visit."}
+          </h1>
+          {(processingInfo || (quote && selection)) && (
             <div className="bk-quote-card">
               <div className="bk-quote-card__label">Your visit</div>
               <div className="bk-quote-card__price">
-                {formatDay(selection.date)}
-                <span className="bk-quote-card__per">
-                  {" "}
-                  &bull; {windowLabel(selection.window)}
-                </span>
+                {dateShown ? formatDay(dateShown) : "Scheduling"}
+                {windowShown ? (
+                  <span className="bk-quote-card__per">
+                    {" "}
+                    &bull; {windowLabel(windowShown)}
+                  </span>
+                ) : null}
               </div>
               <div className="bk-quote-card__meta">
-                {quote.service}
-                {amountCents != null ? (
-                  <> &bull; {money(amountCents)} processing</>
+                {quote?.service ?? "Pest control service"}
+                {(processingInfo?.amountCents ?? amountCents) != null ? (
+                  <>
+                    {" "}
+                    &bull; {money((processingInfo?.amountCents ?? amountCents)!)}{" "}
+                    processing
+                  </>
                 ) : null}
               </div>
             </div>
           )}
           <p className="bk-body-lead">
-            Your payment is still processing and your slot is held while it
-            clears. Nothing is confirmed yet and you have not been charged. As
-            soon as it completes, we&rsquo;ll email your confirmation, receipt,
-            and cancellation link. If the payment doesn&rsquo;t go through,
-            we&rsquo;ll email you, no charge will be made, and the slot
-            won&rsquo;t be booked.
+            {scheduled ? (
+              <>
+                Your bank payment of{" "}
+                {processingInfo?.amountCents != null
+                  ? money(processingInfo.amountCents)
+                  : "the quoted amount"}{" "}
+                is processing — a bank debit can take a few business days
+                {processingInfo?.expectedBy
+                  ? ` (expected by ${processingInfo.expectedBy})`
+                  : ""}
+                . Your visit is scheduled and{" "}
+                <strong>you don&rsquo;t need to do anything — please
+                don&rsquo;t pay again</strong>. We&rsquo;ve emailed your
+                scheduling confirmation, and we&rsquo;ll email again the moment
+                the payment clears. If it doesn&rsquo;t go through, we&rsquo;ll
+                tell you right away with what happens next.
+              </>
+            ) : (
+              <>
+                Your bank payment was submitted and is processing — a bank
+                debit can take a few business days to settle. We&rsquo;re
+                scheduling your visit right now and will email your
+                confirmation within a few minutes.{" "}
+                <strong>Please don&rsquo;t pay again.</strong> If the payment
+                doesn&rsquo;t go through, we&rsquo;ll email you right away with
+                what happens next.
+              </>
+            )}
           </p>
         </div>
       </Shell>
@@ -607,8 +703,13 @@ export default function BookPage() {
                 }
               }}
               onProcessing={() => {
-                setProcessing(true);
-                clearFunnelState(window.sessionStorage);
+                const token = statusToken ?? quote?.statusToken;
+                if (quote && token) {
+                  enterProcessing(quote.bookingId, token);
+                } else {
+                  setProcessing(true);
+                  clearFunnelState(window.sessionStorage);
+                }
               }}
             />
           </Elements>

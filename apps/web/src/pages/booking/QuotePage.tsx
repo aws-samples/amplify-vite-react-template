@@ -239,6 +239,20 @@ export default function QuotePage() {
           window.scrollTo({ top: 0, behavior: "smooth" });
           return;
         }
+        if (
+          result.body.decision === "PROCESSING" ||
+          result.body.decision === "BOOKED" ||
+          result.body.decision === "PAYMENT_FAILED"
+        ) {
+          // GL-06: the booking already entered a payment state — show the
+          // durable truth (don't pay again / confirmed / failed with a
+          // rebook path) instead of a price board.
+          clearPendingQuote(window.sessionStorage);
+          setPending(null);
+          setBanner(result.body.message);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          return;
+        }
         setPending((current) =>
           current
             ? { ...current, quote: result.body as PendingQuote }
@@ -354,10 +368,16 @@ export default function QuotePage() {
         setPendingError(null);
         setWaitedMs(0);
         window.scrollTo({ top: 0, behavior: "smooth" });
-      } else {
+      } else if (result.body.decision === "CONTACT") {
         setContact(result.body);
         clearPendingQuote(window.sessionStorage);
         clearFunnelState(window.sessionStorage);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } else {
+        // GL-06: a fresh submission can't reach a payment state, but a
+        // replayed one can — show the durable truth.
+        setBanner(result.body.message);
+        clearPendingQuote(window.sessionStorage);
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
       return;

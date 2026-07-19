@@ -13,7 +13,7 @@ import {
   recordNoticeAlternateDelivery,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { fmtDateTime } from "../lib/format";
+import { fmtDateTime, money } from "../lib/format";
 import {
   isVerifiable,
   SEVERITY_LABEL,
@@ -27,6 +27,7 @@ import {
   EmptyState,
   ErrorNote,
   Field,
+  ListRow,
   Page,
   SegControl,
   Sheet,
@@ -393,6 +394,7 @@ export default function WorkQueue() {
 
   return (
     <Page title="Owned work" back={roles.office ? "/dashboard" : "/more"}>
+      <PaymentsInFlight />
       <SegControl
         options={[
           { value: "OPEN" as Tab, label: `Open (${items.filter((i) => i.status === "OPEN").length})` },
@@ -679,5 +681,143 @@ export default function WorkQueue() {
         ) : null}
       </Sheet>
     </Page>
+  );
+}
+
+/**
+ * GL-06 — the plain-language view of every payment still in flight or
+ * recently failed. A week-one office employee reads WHO, HOW MUCH, by WHAT
+ * method, WHICH slot, HOW LONG it has waited, what the provider last said,
+ * whether the customer was told, and the one safe next action — with no
+ * mental math and no way to bypass policy (collection and recovery happen
+ * only through the owned cases below).
+ */
+type InFlightBooking = {
+  id: string;
+  status?: string | null;
+  name?: string | null;
+  email?: string | null;
+  amountCents?: number | null;
+  selectedDate?: string | null;
+  selectedWindow?: string | null;
+  jobId?: string | null;
+  customerId?: string | null;
+  processingStartedAt?: string | null;
+  processingMethodLabel?: string | null;
+  processingExpectedBy?: string | null;
+  paymentFailedReason?: string | null;
+  paymentFailedNoticeSentAt?: string | null;
+  pendingConfirmationSentAt?: string | null;
+  updatedAt?: string | null;
+};
+
+function PaymentsInFlight() {
+  const [rows, setRows] = useState<InFlightBooking[] | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const data = await listAll<InFlightBooking>((t) =>
+          api().models.BookingRequest.list({
+            filter: {
+              or: [
+                { status: { eq: "PROCESSING" } },
+                { status: { eq: "PAYMENT_FAILED" } },
+              ],
+            },
+            limit: 500,
+            nextToken: t,
+          } as Parameters<ReturnType<typeof api>["models"]["BookingRequest"]["list"]>[0]) as Promise<{
+            data: InFlightBooking[];
+            nextToken?: string | null;
+            errors?: { message: string }[];
+          }>
+        );
+        // Failed attempts age out of this operating view after two weeks —
+        // their money consequences live on as owned cases either way.
+        const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+        setRows(
+          data
+            .filter(
+              (b) =>
+                b.status === "PROCESSING" ||
+                !b.updatedAt ||
+                Date.parse(b.updatedAt) > cutoff
+            )
+            .sort((a, b) =>
+              (a.processingStartedAt ?? a.updatedAt ?? "").localeCompare(
+                b.processingStartedAt ?? b.updatedAt ?? ""
+              )
+            )
+        );
+      } catch {
+        setRows([]);
+      }
+    })();
+  }, []);
+
+  if (!rows || rows.length === 0) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  const ageDays = (iso?: string | null) =>
+    iso ? Math.floor((Date.now() - Date.parse(iso)) / (24 * 60 * 60 * 1000)) : null;
+
+  return (
+    <Card>
+      <div className="row-split">
+        <strong>Payments in flight ({rows.length})</strong>
+        <Badge
+          tone={
+            rows.some(
+              (b) =>
+                b.status === "PROCESSING" &&
+                b.processingExpectedBy &&
+                b.processingExpectedBy < today
+            )
+              ? "warn"
+              : "info"
+          }
+        >
+          bank debits & failed payments
+        </Badge>
+      </div>
+      {rows.map((b) => {
+        const processing = b.status === "PROCESSING";
+        const overdue =
+          processing && b.processingExpectedBy && b.processingExpectedBy < today;
+        const age = ageDays(b.processingStartedAt ?? b.updatedAt);
+        const slot = b.selectedDate
+          ? `${b.selectedDate}${b.selectedWindow ? ` ${b.selectedWindow.toLowerCase()}` : ""}`
+          : "no slot";
+        const noticed = processing
+          ? b.pendingConfirmationSentAt
+            ? "customer confirmed (payment pending)"
+            : "customer confirmation not sent yet"
+          : b.paymentFailedNoticeSentAt
+            ? "customer told of the failure"
+            : "customer NOT yet told — the retry sweep will";
+        const nextAction = processing
+          ? overdue
+            ? "Overdue with the bank — a Finance case is open; check the payment in Stripe."
+            : "No action needed — the debit is clearing; the daily reconcile watches it."
+          : b.jobId
+            ? "See its owned case below — collection or rebooking runs from there."
+            : "Nothing to recover — the customer can simply book again.";
+        return (
+          <ListRow
+            key={b.id}
+            title={`${b.name ?? b.email ?? b.id} — ${money(b.amountCents ?? 0)} ${processing ? `by ${b.processingMethodLabel ?? "bank"}` : "failed"}`}
+            subtitle={
+              `${processing ? `Processing${age != null ? ` ${age}d` : ""}, expected by ${b.processingExpectedBy ?? "—"}` : `Failed${b.paymentFailedReason ? `: ${b.paymentFailedReason}` : ""}`}` +
+              ` · visit ${slot}${b.jobId ? " (scheduled)" : ""} · ${noticed} · ${nextAction}`
+            }
+            meta={
+              <Badge tone={processing ? (overdue ? "warn" : "info") : "danger"}>
+                {processing ? (overdue ? "overdue" : "processing") : "failed"}
+              </Badge>
+            }
+          />
+        );
+      })}
+    </Card>
   );
 }

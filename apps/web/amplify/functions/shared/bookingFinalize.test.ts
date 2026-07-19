@@ -30,10 +30,6 @@ const emails: { to: string; subject: string; html: string }[] = [];
 // R80: the new-booking-landed alert routes to sales@ via notifyLeads now.
 const leadAlerts: { subject: string; heading: string; bodyHtml: string; template: string }[] = [];
 let booking: Record<string, unknown>;
-// GL-05: force the QUOTED -> BOOKED write to not persist, the way a conditional
-// write or a throttled update would, so the "confirmation is never sent on an
-// unconfirmed BOOKED write" guard can be exercised.
-let bookedWriteFails = false;
 
 // GL-05: to prove finalization is idempotent, the fake persists rows keyed by
 // id and honors a deterministic-id create as conditional — a second create with
@@ -100,11 +96,6 @@ const fakeDataClient = {
       // BOOKED flip are visible to a subsequent retry — that visibility is the
       // whole point of the idempotency tests.
       update: async (patch: Row) => {
-        if (bookedWriteFails && patch.status === "BOOKED") {
-          // The write did not land: leave the booking as-is and report no row,
-          // exactly as a conditional/throttled update would.
-          return { data: null, errors: [{ message: "BOOKED write refused" }] };
-        }
         Object.assign(booking, patch);
         return { data: { ...booking } };
       },
@@ -277,6 +268,9 @@ vi.mock("./ownedWork", () => ({
 const { finalizeBooking, retryBookingFinalization } = await import(
   "./bookingFinalize"
 );
+// GL-06: the shared failure path (webhook + reconcile sweep) under the same
+// fakes — the pending-lifecycle tests drive it directly.
+const { recordFunnelPaymentFailure } = await import("./bookingPaymentFailure");
 
 const finalize = () =>
   finalizeBooking({
@@ -310,6 +304,22 @@ const seedLead = (over: Partial<Row> = {}): Row => {
 };
 
 beforeEach(() => {
+  // GL-06: the BOOKED flip is a guarded CAS write — back it with a live view
+  // over the shared booking object (mutated in place by the memory store).
+  _setLockStoreForTests(
+    memoryLockStore({
+      BookingRequest: {
+        get: (id: string) =>
+          booking && booking.id === id
+            ? (booking as Record<string, unknown>)
+            : undefined,
+      } as unknown as Map<string, Record<string, unknown>>,
+      Job: store.Job,
+      Invoice: store.Invoice,
+      CapacityDay: capacityFixture.maps.capacityDays,
+      CapacityClaim: capacityFixture.maps.capacityClaims,
+    })
+  );
   existingCustomers = [];
   pricingRuns = [];
   customerListError = null;
@@ -337,7 +347,6 @@ beforeEach(() => {
   failCreate.Job = false;
   failCreate.Invoice = false;
   failCreate.Agreement = false;
-  bookedWriteFails = false;
   delete process.env.DOCS_BUCKET; // skip the S3 write
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   booking = {
@@ -1008,14 +1017,34 @@ describe("GL-05 — finalization is idempotent and resumable under failure", () 
     // Every child record exists, but the status write is refused. The
     // confirmation must not go out claiming completion, and the paid customer
     // becomes a durable exception for the idempotent retry.
-    bookedWriteFails = true;
+    _setLockStoreForTests(
+      memoryLockStore({
+        Job: store.Job,
+        CapacityDay: capacityFixture.maps.capacityDays,
+        CapacityClaim: capacityFixture.maps.capacityClaims,
+        // No BookingRequest wiring: the guarded BOOKED flip fails closed,
+        // exactly as a refused conditional write would.
+      })
+    );
     await expect(finalize()).rejects.toThrow(/BOOKED/i);
     expect(booking.status).toBe("QUOTED");
     expect(emails).toHaveLength(0);
     expect(workOpened.find((w) => w.kind === "PAID_NOT_FINALIZED")).toBeDefined();
 
     // The write recovers: the retry resumes onto the same records and confirms.
-    bookedWriteFails = false;
+    _setLockStoreForTests(
+      memoryLockStore({
+        BookingRequest: {
+          get: (id: string) =>
+            booking && booking.id === id
+              ? (booking as Record<string, unknown>)
+              : undefined,
+        } as unknown as Map<string, Record<string, unknown>>,
+        Job: store.Job,
+        CapacityDay: capacityFixture.maps.capacityDays,
+        CapacityClaim: capacityFixture.maps.capacityClaims,
+      })
+    );
     await finalize();
     expect(booking.status).toBe("BOOKED");
     expect(jobsCreated).toHaveLength(1);
@@ -1150,6 +1179,12 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
         CapacityDay: capacityFixture.maps.capacityDays,
         CapacityClaim: capacityFixture.maps.capacityClaims,
         Job: store.Job,
+        BookingRequest: {
+          get: (id: string) =>
+            booking && booking.id === id
+              ? (booking as Record<string, unknown>)
+              : undefined,
+        } as unknown as Map<string, Record<string, unknown>>,
       })
     );
     booking.capacityTechnicianId = "t1";
@@ -1199,6 +1234,213 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
     expect(
       workOpened.some(
         (w) => (w as Record<string, unknown>).kind === "UNSTAFFED_VISIT"
+      )
+    ).toBe(true);
+  });
+});
+
+describe("GL-06 — a pending bank debit is a real commitment with honest state", () => {
+  const finalizePending = () =>
+    finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_1",
+      amountReceived: 31300,
+      paymentMethodId: "pm_bank",
+      pending: { methodLabel: "bank transfer (ACH)" },
+    });
+  const failDebit = (reason = "The bank account had insufficient funds.") =>
+    recordFunnelPaymentFailure({
+      bookingRequestId: "b1",
+      intentId: "pi_1",
+      reason,
+    });
+
+  it("creates the FULL commitment now — job, OPEN invoice, agreement — all saying payment pending, never paid", async () => {
+    await finalizePending();
+
+    expect(booking.status).toBe("PROCESSING");
+    expect(booking.jobId).toBe("job-b1");
+    expect(booking.customerId).toBeTruthy();
+    expect(booking.processingStartedAt).toBeTruthy();
+    expect(booking.processingExpectedBy).toBeTruthy();
+    expect(booking.processingMethodLabel).toBe("bank transfer (ACH)");
+
+    const job = store.Job.get("job-b1")!;
+    expect(job.status).toBe("SCHEDULED"); // real and dispatchable
+    expect(job.paidAt).toBeUndefined(); // NEVER described as paid
+    expect(job.paymentPendingIntentId).toBe("pi_1");
+
+    const invoice = store.Invoice.get("booking-b1")!;
+    expect(invoice.status).toBe("OPEN"); // owed, not settled
+    expect(invoice.method).toBe("BANK");
+    expect(invoice.pendingDebitIntentId).toBe("pi_1"); // not collectable while clearing
+    expect(invoice.paidAt).toBeUndefined();
+
+    const agreement = store.Agreement.get("agr-b1")!;
+    expect(String(agreement.bodyText)).toContain("authorized by bank debit");
+
+    // The customer hears "scheduled, payment processing" — not a receipt.
+    const confirmations = emails.filter((e) =>
+      e.subject.includes("payment processing")
+    );
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0].html).toContain("don't need to do anything");
+    expect(emails.some((e) => e.subject.startsWith("You're booked"))).toBe(false);
+    // The office alert says payment pending, not paid.
+    expect(leadAlerts).toHaveLength(1);
+    expect(leadAlerts[0].bodyHtml).toContain("payment pending");
+  });
+
+  it("a redelivered processing event resumes idempotently — one commitment, one email", async () => {
+    await finalizePending();
+    await finalizePending();
+
+    expect(jobsCreated).toHaveLength(1);
+    expect(store.Invoice.size).toBe(1);
+    expect(
+      emails.filter((e) => e.subject.includes("payment processing"))
+    ).toHaveLength(1);
+    expect(leadAlerts).toHaveLength(1);
+  });
+
+  it("the debit settling flips the SAME commitment paid — exactly once — and sends the receipt", async () => {
+    await finalizePending();
+    await finalize(); // the success webhook
+
+    expect(booking.status).toBe("BOOKED");
+    const job = store.Job.get("job-b1")!;
+    expect(job.paidAt).toBeTruthy();
+    expect(job.paymentPendingIntentId).toBeUndefined();
+    const invoice = store.Invoice.get("booking-b1")!;
+    expect(invoice.status).toBe("PAID");
+    expect(invoice.paidAt).toBeTruthy();
+    expect(invoice.pendingDebitIntentId).toBeUndefined();
+    expect(jobsCreated).toHaveLength(1); // the same records, never a second set
+    expect(emails.some((e) => e.subject.startsWith("You're booked"))).toBe(true);
+
+    // A duplicate success redelivery changes nothing and re-emails nobody.
+    const paidAt = invoice.paidAt;
+    const receipts = emails.filter((e) => e.subject.startsWith("You're booked"));
+    await finalize();
+    expect(store.Invoice.get("booking-b1")!.paidAt).toBe(paidAt);
+    expect(
+      emails.filter((e) => e.subject.startsWith("You're booked"))
+    ).toEqual(receipts);
+  });
+
+  it("failure BEFORE service cancels the visit exactly once, voids the invoice, and tells the customer the truth", async () => {
+    await finalizePending();
+    const outcome = await failDebit();
+
+    expect(outcome).toBe("HANDLED");
+    expect(booking.status).toBe("PAYMENT_FAILED");
+    const job = store.Job.get("job-b1")!;
+    expect(job.status).toBe("CANCELED");
+    expect(job.paymentPendingIntentId).toBeUndefined();
+    expect(store.Invoice.get("booking-b1")!.status).toBe("VOID");
+    const notices = emails.filter((e) =>
+      e.subject.includes("didn't go through")
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0].html).toContain("has been canceled");
+    expect(notices[0].html).toContain("no money was collected");
+
+    // Replay: nothing double-cancels, nothing re-emails.
+    await failDebit();
+    expect(
+      emails.filter((e) => e.subject.includes("didn't go through"))
+    ).toHaveLength(1);
+    expect(store.Job.get("job-b1")!.status).toBe("CANCELED");
+  });
+
+  it("failure AFTER service never erases the work — the invoice becomes the owed balance with Finance collection", async () => {
+    await finalizePending();
+    store.Job.get("job-b1")!.status = "COMPLETED";
+
+    const outcome = await failDebit();
+
+    expect(outcome).toBe("HANDLED");
+    expect(booking.status).toBe("PAYMENT_FAILED");
+    expect(store.Job.get("job-b1")!.status).toBe("COMPLETED"); // work stands
+    const invoice = store.Invoice.get("booking-b1")!;
+    expect(invoice.status).toBe("OPEN"); // balance due — owed for real now
+    expect(invoice.pendingDebitIntentId).toBeUndefined(); // collectable again
+    expect(String(invoice.failureReason)).toContain("insufficient funds");
+    expect(
+      workOpened.some(
+        (w) => w.kind === "BALANCE_COLLECTION" && w.dedupeKey === "balance:b1"
+      )
+    ).toBe(true);
+    const notices = emails.filter((e) => e.subject.includes("Action needed"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0].html).toContain("outstanding balance");
+  });
+
+  it("a LATE success applies exactly once to the post-service balance — never double-collects", async () => {
+    await finalizePending();
+    store.Job.get("job-b1")!.status = "COMPLETED";
+    await failDebit();
+
+    await finalize(); // the debit settled after all
+
+    expect(booking.status).toBe("BOOKED");
+    const invoice = store.Invoice.get("booking-b1")!;
+    expect(invoice.status).toBe("PAID");
+    expect(
+      workResolved.some(
+        (w) => w.kind === "BALANCE_COLLECTION" && w.dedupeKey === "balance:b1"
+      )
+    ).toBe(true);
+
+    const paidAt = invoice.paidAt;
+    await finalize(); // duplicate success event
+    expect(store.Invoice.get("booking-b1")!.paidAt).toBe(paidAt);
+  });
+
+  it("a LATE success after the pre-service cancel is a Finance decision — nothing silently resurrected", async () => {
+    await finalizePending();
+    await failDebit(); // canceled the visit, released the slot
+
+    await finalize(); // then the money landed anyway
+
+    expect(booking.status).toBe("PAYMENT_FAILED"); // not resurrected
+    expect(store.Job.get("job-b1")!.status).toBe("CANCELED");
+    expect(store.Invoice.get("booking-b1")!.status).toBe("VOID");
+    expect(
+      workOpened.some(
+        (w) =>
+          w.kind === "PAID_NOT_FINALIZED" &&
+          w.dedupeKey === "late-success:b1" &&
+          w.title.includes("settled AFTER")
+      )
+    ).toBe(true);
+  });
+
+  it("a stale processing event can never regress a BOOKED (or failed) booking", async () => {
+    await finalize(); // instant card success — BOOKED
+    const jobCount = jobsCreated.length;
+    const emailCount = emails.length;
+
+    await finalizePending(); // late/duplicate processing event
+
+    expect(booking.status).toBe("BOOKED");
+    expect(jobsCreated).toHaveLength(jobCount);
+    expect(emails).toHaveLength(emailCount);
+  });
+
+  it("a pending debit for the WRONG amount refuses the commitment and opens a Finance case", async () => {
+    await finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_1",
+      amountReceived: 100,
+      pending: { methodLabel: "bank transfer (ACH)" },
+    });
+
+    expect(booking.status).toBe("QUOTED"); // no commitment on wrong money
+    expect(store.Job.size).toBe(0);
+    expect(
+      workOpened.some((w) =>
+        w.title.includes("Pending bank debit does not match")
       )
     ).toBe(true);
   });

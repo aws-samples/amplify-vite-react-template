@@ -307,7 +307,7 @@ export default function Schedule() {
                 <ListRow
                   key={j.id}
                   title={customerName(j)}
-                  subtitle={`${j.serviceType}${j.scheduledDate && j.scheduledDate !== date ? ` · wants ${fmtDate(j.scheduledDate)}` : ""}${customerCity(j) ? ` · ${customerCity(j)}` : ""}`}
+                  subtitle={`${j.serviceType}${j.scheduledDate && j.scheduledDate !== date ? ` · wants ${fmtDate(j.scheduledDate)}` : ""}${customerCity(j) ? ` · ${customerCity(j)}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
                   meta={
                     j.status === "NO_ACCESS" ? (
                       <>
@@ -377,7 +377,7 @@ export default function Schedule() {
                         <ListRow
                           key={j.id}
                           title={`${i + 1}. ${customerName(j)}`}
-                          subtitle={`${j.serviceType}${j.timeWindow ? ` · ${j.timeWindow}` : ""}`}
+                          subtitle={`${j.serviceType}${j.timeWindow ? ` · ${j.timeWindow}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
                           meta={
                             <>
                               <StatusBadge status={j.status} />

@@ -447,7 +447,30 @@ async function bookingStatus(body: Record<string, unknown>) {
   if (booking.status === "CANCELED" || booking.status === "EXPIRED") {
     return { bookingId, state: "CANCELED" as const };
   }
-  if (booking.paymentFailedReason && booking.status !== "PROCESSING") {
+  // GL-06: a pending bank debit that already created its commitment is a
+  // scheduled visit with payment pending — a durable, truthful terminal
+  // screen (the customer is told not to pay again and what happens next).
+  if (booking.status === "PROCESSING") {
+    return {
+      bookingId,
+      state: booking.jobId
+        ? ("PROCESSING_SCHEDULED" as const)
+        : ("PROCESSING" as const),
+      selectedDate: booking.selectedDate ?? null,
+      selectedWindow: booking.selectedWindow ?? null,
+      amountCents: booking.amountCents ?? null,
+      methodLabel:
+        (booking as { processingMethodLabel?: string | null })
+          .processingMethodLabel ?? null,
+      expectedBy:
+        (booking as { processingExpectedBy?: string | null })
+          .processingExpectedBy ?? null,
+      email: booking.email ?? null,
+    };
+  }
+  // PROCESSING already returned above, so any remaining failure reason means
+  // the attempt genuinely failed (or its reset didn't finish) — say so.
+  if (booking.paymentFailedReason) {
     return {
       bookingId,
       state: "PAYMENT_FAILED" as const,
@@ -504,6 +527,39 @@ async function quoteStatus(
       message:
         parseStoredQuote(booking.quoteJson).contactMessage ??
         "A specialist is reviewing your request and will contact you shortly.",
+    };
+  }
+  // GL-06: a returning customer's poll retrieves the durable payment state —
+  // never a dead-end error that invites a second payment.
+  if (booking.status === "PROCESSING") {
+    return {
+      bookingId: booking.id,
+      decision: "PROCESSING" as const,
+      selectedDate: booking.selectedDate ?? null,
+      selectedWindow: booking.selectedWindow ?? null,
+      amountCents: booking.amountCents ?? null,
+      message: booking.jobId
+        ? `Your payment is still processing and your visit${booking.selectedDate ? ` on ${booking.selectedDate}` : ""} is scheduled — please don't pay again. We'll email you the moment it clears.`
+        : "Your payment is still processing — please don't pay again. We'll email your confirmation as soon as it clears.",
+    };
+  }
+  if (booking.status === "BOOKED") {
+    return {
+      bookingId: booking.id,
+      decision: "BOOKED" as const,
+      selectedDate: booking.selectedDate ?? null,
+      selectedWindow: booking.selectedWindow ?? null,
+      message:
+        "This booking is paid and confirmed — the details are in your confirmation email.",
+    };
+  }
+  if (booking.status === "PAYMENT_FAILED") {
+    return {
+      bookingId: booking.id,
+      decision: "PAYMENT_FAILED" as const,
+      reason: booking.paymentFailedReason ?? null,
+      message:
+        "Your payment didn't go through, so the booking was not completed. You can request a fresh quote and try again, or reply to our email and we'll help.",
     };
   }
   if (booking.status !== "PENDING") {
@@ -1181,7 +1237,45 @@ async function book(
   const { data: booking } = await client.models.BookingRequest.get({
     id: bookingId,
   });
-  if (!booking || booking.status !== "QUOTED") {
+  if (!booking) {
+    throw new HttpError(404, { error: "Quote not found — request a new one." });
+  }
+  // GL-06: a returning/refreshing/retrying customer retrieves the durable
+  // state — no payment state ever falls through to "Quote not found" or is
+  // invited to pay again without the truth about the prior attempt.
+  if (booking.status === "BOOKED") {
+    throw new HttpError(409, {
+      error:
+        "This booking is already paid — check your email for the confirmation.",
+    });
+  }
+  if (booking.status === "PROCESSING") {
+    throw new HttpError(409, {
+      error: booking.jobId
+        ? "Your payment is still processing and your visit is scheduled — please don't pay again. We'll email you the moment it clears, or right away if it doesn't go through."
+        : "Your payment is still processing — please don't pay again. We'll email your confirmation as soon as it clears, or let you know if it doesn't go through.",
+    });
+  }
+  if (booking.status === "PAYMENT_FAILED") {
+    // A pre-service failure canceled the pending visit — the customer may
+    // simply pay again (the flow below re-checks capacity and issues a fresh
+    // intent). A POST-service failure is an outstanding balance, not a new
+    // booking: paying "again" here would buy a second visit.
+    if (booking.jobId) {
+      const { data: failedJob } = await client.models.Job.get({
+        id: booking.jobId,
+      });
+      if (
+        failedJob &&
+        (failedJob.status === "COMPLETED" || failedJob.status === "IN_PROGRESS")
+      ) {
+        throw new HttpError(409, {
+          error:
+            "Your visit was completed but the payment didn't go through, so the amount is an outstanding balance. Reply to our email or call the office to settle it — please don't book a new visit to pay it.",
+        });
+      }
+    }
+  } else if (booking.status !== "QUOTED") {
     throw new HttpError(404, { error: "Quote not found — request a new one." });
   }
   if (booking.expiresAt && new Date(booking.expiresAt).getTime() < Date.now()) {
@@ -1317,6 +1411,12 @@ async function book(
         id: booking.id,
         capacityTechnicianId: slot0.technicianId,
         capacityMinutes: slot0.claimMinutes,
+        // GL-06: a retried attempt (after a pre-service failure) re-arms the
+        // state machine — the reused intent's webhooks only apply to QUOTED/
+        // PROCESSING, and a fresh failure must be able to notice again.
+        status: "QUOTED",
+        paymentFailedReason: null,
+        paymentFailedNoticeSentAt: null,
       }).catch(() => undefined);
       return {
         clientSecret: existing.client_secret,
@@ -1473,7 +1573,11 @@ async function cancel(body: Record<string, unknown>) {
       cancelToken: token,
     });
   const booking = matches[0];
-  if (!booking || booking.status !== "BOOKED") {
+  // GL-06: a pending bank debit's commitment is cancelable exactly like a
+  // paid one (its confirmation email carries this very link). The refund
+  // rule is unchanged; only its mechanics differ — see pendingDebit below.
+  const pendingDebit = booking?.status === "PROCESSING" && Boolean(booking.jobId);
+  if (!booking || !(booking.status === "BOOKED" || pendingDebit)) {
     throw new HttpError(404, { error: "Booking not found or already canceled." });
   }
 
@@ -1504,7 +1608,13 @@ async function cancel(body: Record<string, unknown>) {
       refund: refundable
         ? { kind: "FULL", amountCents: booking.amountCents }
         : { kind: "NONE", amountCents: 0 },
-      policy: `More than ${CANCEL_FULL_REFUND_DAYS} days before the visit = full refund; ${CANCEL_FULL_REFUND_DAYS} days or less = no refund.`,
+      policy: `More than ${CANCEL_FULL_REFUND_DAYS} days before the visit = full refund; ${CANCEL_FULL_REFUND_DAYS} days or less = no refund.${
+        pendingDebit
+          ? refundable
+            ? " Your bank payment is still processing — the refund completes to your bank account once it clears."
+            : " Your bank payment is still processing and will complete; per the policy it is not refundable at this notice."
+          : ""
+      }`,
     };
   }
 
@@ -1611,11 +1721,29 @@ async function cancel(body: Record<string, unknown>) {
     if (refundable && booking.stripePaymentIntentId) {
       const s = await stripeClient();
       // Keyed on the booking so a retry after a partial failure refunds once.
+      // GL-06: for a still-processing bank debit Stripe queues the refund and
+      // executes it after settlement — refund-to-original-method either way.
+      // If the debit later FAILS, Stripe cancels the queued refund itself
+      // (nothing to give back), and the failure webhook finds the booking
+      // already CANCELED and changes nothing.
       await s.refunds.create(
         { payment_intent: booking.stripePaymentIntentId },
         { idempotencyKey: `booking-refund-${booking.id}` }
       );
     }
+    if (pendingDebit && refundable) {
+      // The pending ledger row nets to zero (debit + queued refund) — VOID it
+      // conditionally so it never lingers as owed.
+      await casGuardedUpdate(
+        "Invoice",
+        `booking-${booking.id}`,
+        { status: "VOID", pendingDebitIntentId: null },
+        [{ kind: "fieldEquals", field: "status", value: "OPEN" }]
+      );
+    }
+    // A NON-refundable pending cancel keeps its OPEN invoice: the debit will
+    // settle and finalizeBooking's canceled-booking gate applies it exactly
+    // once — the nonrefundable amount is genuinely owed.
   } catch (err) {
     // The billing is still live and the appointment still stands. Say so —
     // "please try again" is false when the outage is ours, and retrying into a

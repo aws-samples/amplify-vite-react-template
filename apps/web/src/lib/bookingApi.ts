@@ -145,7 +145,24 @@ export type PendingQuote = {
   message: string;
 };
 
-export type QuoteResponse = PricedQuote | PendingQuote | ContactQuote;
+/** GL-06 — a resumed quote whose booking already entered a payment state.
+ *  The message is the durable truth (don't pay again / already booked /
+ *  failed with a rebook path); the page shows it instead of a price board. */
+export type PaymentStateQuote = {
+  bookingId: string;
+  decision: "PROCESSING" | "BOOKED" | "PAYMENT_FAILED";
+  message: string;
+  selectedDate?: string | null;
+  selectedWindow?: string | null;
+  amountCents?: number | null;
+  reason?: string | null;
+};
+
+export type QuoteResponse =
+  | PricedQuote
+  | PendingQuote
+  | ContactQuote
+  | PaymentStateQuote;
 
 export type BookRequest = {
   bookingId: string;
@@ -330,10 +347,19 @@ export function confirmCancel(token: string): Promise<ApiResult<CancelConfirmed>
 }
 
 
-/** GL-05 — the server-confirmed post-payment state. */
+/** GL-05/GL-06 — the server-confirmed post-payment state. PROCESSING_SCHEDULED
+ *  means the pending bank debit already created the real scheduled visit; the
+ *  customer must not pay again and needs no further action. */
 export type BookingStatusResponse = {
   bookingId: string;
-  state: "BOOKED" | "FINALIZING" | "RECOVERY" | "PAYMENT_FAILED" | "CANCELED";
+  state:
+    | "BOOKED"
+    | "FINALIZING"
+    | "RECOVERY"
+    | "PAYMENT_FAILED"
+    | "CANCELED"
+    | "PROCESSING"
+    | "PROCESSING_SCHEDULED";
   selectedDate?: string | null;
   selectedWindow?: string | null;
   amountCents?: number | null;
@@ -341,6 +367,8 @@ export type BookingStatusResponse = {
   recurring?: boolean;
   message?: string;
   reason?: string;
+  methodLabel?: string | null;
+  expectedBy?: string | null;
 };
 
 export function checkBookingStatus(input: {

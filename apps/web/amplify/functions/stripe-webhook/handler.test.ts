@@ -136,8 +136,12 @@ vi.mock("../shared/email", () => ({
 }));
 
 // Booking finalization drags in PDF rendering and S3 — not under test here.
+// settlePendingFailure is a no-op NOOP: these tests exercise the transition +
+// notice contract; the unwind/convert consequences are bookingFinalize's own
+// suite's to prove.
 vi.mock("../shared/bookingFinalize", () => ({
   finalizeBooking: vi.fn(async () => undefined),
+  settlePendingFailure: vi.fn(async () => "NOOP" as const),
 }));
 
 process.env.STRIPE_WEBHOOK_SECRET = "whsec_test";
@@ -182,8 +186,26 @@ const seedJob = (over: Partial<Job> = {}): Job => {
   return job;
 };
 
+// The invoice fixtures live in a reassignable array; the CAS store needs a
+// Map-shaped view over whatever array is current.
+const invoiceLockTable = {
+  get: (id: string) => invoices.find((i) => i.id === id),
+  delete: (id: string) => {
+    const at = invoices.findIndex((i) => i.id === id);
+    if (at < 0) return false;
+    invoices.splice(at, 1);
+    return true;
+  },
+} as unknown as Map<string, Record<string, unknown>>;
+
 beforeEach(() => {
-  _setLockStoreForTests(memoryLockStore({ Job: jobs }));
+  _setLockStoreForTests(
+    memoryLockStore({
+      Job: jobs,
+      BookingRequest: bookings,
+      Invoice: invoiceLockTable,
+    })
+  );
   plans.clear();
   jobs.clear();
   bookings.clear();
@@ -458,28 +480,30 @@ describe("GL-06 funnel processing / failed payments", () => {
     return booking;
   };
 
-  it("holds an async payment as PROCESSING, never a commitment", async () => {
+  it("a processing bank debit creates the FULL pending commitment via finalizeBooking", async () => {
     seedBooking();
 
     await invoke("payment_intent.processing", {
       id: "pi_funnel",
       metadata: { bookingRequestId: "bk1" },
+      amount: 31300,
+      payment_method_types: ["us_bank_account"],
     });
 
-    expect(bookings.get("bk1")?.status).toBe("PROCESSING");
-    // No confirmation is sent while it is only processing.
-    expect(sendEmail).not.toHaveBeenCalled();
-  });
-
-  it("does not downgrade a booking that already finalized", async () => {
-    seedBooking({ status: "BOOKED" });
-
-    await invoke("payment_intent.processing", {
-      id: "pi_funnel",
-      metadata: { bookingRequestId: "bk1" },
-    });
-
-    expect(bookings.get("bk1")?.status).toBe("BOOKED");
+    // GL-06: processing is sufficient to book — the same finalization runs in
+    // pending mode (job, capacity, OPEN invoice, truthful confirmation), and
+    // its own suite proves the pending semantics.
+    const { finalizeBooking } = await import("../shared/bookingFinalize");
+    expect(finalizeBooking).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bookingRequestId: "bk1",
+        paymentIntentId: "pi_funnel",
+        amountReceived: 31300,
+        pending: expect.objectContaining({
+          methodLabel: "bank transfer (ACH)",
+        }),
+      })
+    );
   });
 
   it("marks a funnel failure PAYMENT_FAILED and tells the customer once", async () => {

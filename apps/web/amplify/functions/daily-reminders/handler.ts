@@ -42,6 +42,9 @@ import {
   isLeadOpen,
   staleLeadReason,
 } from "../shared/leadStage";
+import { finalizeBooking } from "../shared/bookingFinalize";
+import { recordFunnelPaymentFailure } from "../shared/bookingPaymentFailure";
+import { stampProcessingNextCheck } from "../shared/bookingPayment";
 
 type OwedInvoice = {
   id: string;
@@ -124,6 +127,9 @@ export const handler = async () => {
   // GL-05: prove, against the real tables and Stripe, that every succeeded
   // booking payment has exactly one complete booking and vice versa.
   const reconciliation = await reconcilePaidBookings();
+  // GL-06: re-read Stripe for every booking still PROCESSING — a missed
+  // webhook can never leave a pending debit and its scheduled visit in limbo.
+  const processingPayments = await reconcileProcessingPayments();
   // GL-08: resume every plan cancellation a prior attempt could not finish, so
   // an accepted cancel can never sit Pending forever with billing still live.
   const cancellations = await reconcilePlanCancellations();
@@ -162,6 +168,7 @@ export const handler = async () => {
     disputes,
     overdueWork,
     reconciliation,
+    processingPayments,
     cancellations,
     capacity,
     visitChanges,
@@ -1374,6 +1381,10 @@ async function remindOpenInvoices() {
   let dueSoon = 0;
   let overdue = 0;
   for (const inv of open) {
+    // GL-06: an in-flight bank debit is not collectable — reminding (or any
+    // collection) while it clears would double-pay the customer.
+    if ((inv as { pendingDebitIntentId?: string | null }).pendingDebitIntentId)
+      continue;
     if (!inv.dueDate && !inv.issuedAt) continue;
     const days = daysPastDue({
       dueDate: inv.dueDate,
@@ -1421,7 +1432,12 @@ async function reportArAging() {
   const outstanding = [
     ...(await allInvoicesByStatus("OPEN")),
     ...(await allInvoicesByStatus("FAILED")),
-  ];
+    // GL-06: an in-flight bank debit is not receivable-late — it is money in
+    // transit, tracked by the processing-payments reconcile, not AR aging.
+  ].filter(
+    (inv) =>
+      !(inv as { pendingDebitIntentId?: string | null }).pendingDebitIntentId
+  );
   if (outstanding.length === 0) {
     console.log("AR aging: nothing outstanding");
     return { arOutstanding: 0, notified: false };
@@ -1542,6 +1558,198 @@ async function reportDisputeDeadlines() {
  * pure set logic lives in shared/bookingReconcile (unit-tested); this function
  * is the scheduled IO around it, run from the daily cron.
  */
+/**
+ * GL-06 — the processing-payment reconcile sweep. The webhook is the primary
+ * signal; this pass is the safety net that re-reads Stripe for every booking
+ * still PROCESSING, so a missed/undelivered webhook can never leave a pending
+ * debit (and its scheduled visit) in limbo:
+ *
+ *  - provider says succeeded → the normal success finalization resumes onto
+ *    the same records and flips them paid;
+ *  - provider says failed/canceled → the shared failure path unwinds or
+ *    converts the commitment and notices the customer, exactly once;
+ *  - still processing → the next-check stamp advances, and once the expected
+ *    settlement date passes, an owned Finance case (one business day) exists
+ *    until the provider result lands;
+ *  - a PROCESSING booking whose commitment never completed (no job yet)
+ *    resumes the idempotent pending finalization;
+ *  - an unreadable provider result is owned work, never a silent skip.
+ */
+export async function reconcileProcessingPayments() {
+  const client = await dataClient();
+  // Unit fakes (and a container straddling a deploy) may lack the model.
+  if (!("BookingRequest" in client.models)) return { processingPayments: 0 };
+  const now = new Date();
+  const rows: {
+    id: string;
+    jobId?: string | null;
+    stripePaymentIntentId?: string | null;
+    processingNextCheckAt?: string | null;
+    processingExpectedBy?: string | null;
+    processingMethodLabel?: string | null;
+    name?: string | null;
+    email?: string | null;
+    amountCents?: number | null;
+    selectedDate?: string | null;
+    customerId?: string | null;
+  }[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.BookingRequest.list({
+      filter: { status: { eq: "PROCESSING" } },
+      nextToken,
+      limit: 200,
+    });
+    // Belt-and-braces status filter — a lister that ignores the filter (unit
+    // fakes) must not make this pass reconcile settled bookings.
+    rows.push(
+      ...(page.data as unknown as (typeof rows[number] & {
+        status?: string | null;
+      })[]).filter((b) => b.status === "PROCESSING")
+    );
+    nextToken = page.nextToken;
+  } while (nextToken);
+  if (rows.length === 0) {
+    return { processingPayments: 0 };
+  }
+  let stripe: ReturnType<typeof stripeClient>;
+  try {
+    stripe = stripeClient();
+  } catch (err) {
+    // No provider access = no reconciliation — loud, never a silent all-clear.
+    console.error("reconcileProcessingPayments: no Stripe client", err);
+    await openOwnedWork({
+      kind: "PAYMENT_PROCESSING_OVERDUE",
+      dedupeKey: "processing-recon-stripe-unavailable",
+      title: "Processing-payment reconciliation could not reach Stripe",
+      detail: `${rows.length} booking(s) are PROCESSING but the daily reconcile has no Stripe access: ${err instanceof Error ? err.message : String(err)}.`,
+      relatedId: "reconciliation",
+      resolutionAction:
+        "Fix the STRIPE_SECRET_KEY configuration, then re-run the daily reconcile.",
+      ownerTeam: "FINANCE",
+    });
+    return { processingPayments: rows.length, skipped: "stripe-unavailable" };
+  }
+
+  let settled = 0;
+  let failed = 0;
+  let stillProcessing = 0;
+  let overdue = 0;
+  let resumedFinalize = 0;
+  let unreadable = 0;
+  for (const b of rows) {
+    try {
+      if (!b.stripePaymentIntentId) {
+        // Contradictory: PROCESSING with no payment attempt behind it.
+        unreadable++;
+        await openOwnedWork({
+          kind: "PAYMENT_PROCESSING_OVERDUE",
+          dedupeKey: b.id,
+          title: `Processing booking has no payment attempt: ${b.name ?? b.id}`,
+          detail: `Booking ${b.id} is PROCESSING but records no PaymentIntent, so its provider state cannot be read. Find the customer's payment in Stripe and reconcile by hand.`,
+          customerId: b.customerId ?? undefined,
+          relatedId: b.id,
+          resolutionAction:
+            "Search Stripe for this customer's payment. Reconcile the booking to the real payment state, then confirm the money state.",
+          ownerTeam: "FINANCE",
+        });
+        continue;
+      }
+      const pi = await stripe.paymentIntents.retrieve(b.stripePaymentIntentId);
+      if (pi.status === "succeeded") {
+        settled++;
+        await finalizeBooking({
+          bookingRequestId: b.id,
+          paymentIntentId: pi.id,
+          amountReceived: pi.amount_received,
+          paymentMethodId:
+            typeof pi.payment_method === "string"
+              ? pi.payment_method
+              : (pi.payment_method?.id ?? null),
+        });
+      } else if (
+        pi.status === "requires_payment_method" ||
+        pi.status === "canceled"
+      ) {
+        failed++;
+        await recordFunnelPaymentFailure({
+          bookingRequestId: b.id,
+          intentId: pi.id,
+          reason:
+            pi.last_payment_error?.message ??
+            (pi.status === "canceled"
+              ? "The payment was canceled before it completed."
+              : "The bank payment did not go through."),
+        });
+      } else {
+        // Still in flight. Resume an incomplete pending finalization first —
+        // a missed processing webhook must not leave the customer with a
+        // held debit and no scheduled commitment.
+        if (!b.jobId) {
+          resumedFinalize++;
+          await finalizeBooking({
+            bookingRequestId: b.id,
+            paymentIntentId: pi.id,
+            amountReceived: pi.amount,
+            paymentMethodId:
+              typeof pi.payment_method === "string"
+                ? pi.payment_method
+                : (pi.payment_method?.id ?? null),
+            pending: { methodLabel: b.processingMethodLabel ?? null },
+          });
+        }
+        stillProcessing++;
+        await stampProcessingNextCheck(
+          b.id,
+          new Date(now.getTime() + 6 * 60 * 60_000).toISOString()
+        );
+        if (
+          b.processingExpectedBy &&
+          now.toISOString().slice(0, 10) > b.processingExpectedBy
+        ) {
+          overdue++;
+          await openOwnedWork({
+            kind: "PAYMENT_PROCESSING_OVERDUE",
+            dedupeKey: b.id,
+            title: `Bank payment overdue: ${b.name ?? b.id}`,
+            detail: `The $${(((b.amountCents ?? 0) as number) / 100).toFixed(2)} bank debit for booking ${b.id} (${b.email ?? "no email"}, visit ${b.selectedDate ?? "unscheduled"}) was expected to settle by ${b.processingExpectedBy} and Stripe still reports it processing. The scheduled visit is riding on money that hasn't arrived.`,
+            customerId: b.customerId ?? undefined,
+            relatedId: b.id,
+            sourceUrl: b.customerId ? `/customers/${b.customerId}` : undefined,
+            resolutionAction:
+              "Check the PaymentIntent in Stripe. If it settled or failed, re-run the reconcile; if it is stuck, contact Stripe support and decide the visit with the customer.",
+            ownerTeam: "FINANCE",
+          });
+        }
+      }
+    } catch (err) {
+      // A provider read failure is owned, never a silent skip.
+      unreadable++;
+      console.error("reconcileProcessingPayments:", b.id, err);
+      await openOwnedWork({
+        kind: "PAYMENT_PROCESSING_OVERDUE",
+        dedupeKey: b.id,
+        title: `Could not reconcile a processing payment: ${b.name ?? b.id}`,
+        detail: `The daily processing-payment reconcile could not resolve booking ${b.id} against Stripe: ${err instanceof Error ? err.message : String(err)}. The booking remains PROCESSING and will be retried tomorrow; resolve sooner if the visit date is near.`,
+        customerId: b.customerId ?? undefined,
+        relatedId: b.id,
+        resolutionAction:
+          "Open the PaymentIntent in Stripe, confirm its real state, and re-run the reconcile (or finalize/fail the booking by hand).",
+        ownerTeam: "FINANCE",
+      });
+    }
+  }
+  return {
+    processingPayments: rows.length,
+    settled,
+    failed,
+    stillProcessing,
+    overdue,
+    resumedFinalize,
+    unreadable,
+  };
+}
+
 export async function reconcilePaidBookings() {
   const client = await dataClient();
 

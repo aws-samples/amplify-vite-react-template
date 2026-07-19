@@ -24,6 +24,7 @@ type Stop = { customerId: string; serviceType: string; status: string };
 
 let booking: Record<string, unknown>;
 let stopsOnDay: Stop[];
+let jobRow: Record<string, unknown> | null = null;
 const bookingUpdates: Record<string, unknown>[] = [];
 
 const capacityFixture = capacityFixtureModels();
@@ -52,6 +53,11 @@ const fakeDataClient = {
     },
     Job: {
       listJobByScheduledDate: async () => ({ data: stopsOnDay }),
+      // GL-06: the /book gate reads the failed booking's job to distinguish a
+      // re-payable pre-service failure from a post-service balance.
+      get: async ({ id }: { id: string }) => ({
+        data: jobRow && jobRow.id === id ? jobRow : null,
+      }),
     },
     Customer: {
       get: async ({ id }: { id: string }) => ({
@@ -177,6 +183,7 @@ beforeEach(() => {
   intentCreate.mockClear();
   intentRetrieve.mockClear();
   intentCancel.mockClear();
+  jobRow = null;
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   process.env.STRIPE_SECRET_KEY = "sk_test_x";
   process.env.GOOGLE_ROUTES_API_KEY = "test-routes-key";
@@ -393,5 +400,51 @@ describe("live-key branch guard", () => {
     expect(() => assertStripeKeyAllowed("sk_live_abc", "main")).not.toThrow();
     expect(() => assertStripeKeyAllowed("sk_test_abc", "staging")).not.toThrow();
     expect(() => assertStripeKeyAllowed("sk_test_abc", "main")).not.toThrow();
+  });
+});
+
+describe("GL-06 — /book retrieves the durable payment state, never a dead-end Quote not found", () => {
+  it("a PROCESSING booking with its scheduled commitment says don't pay again", async () => {
+    booking.status = "PROCESSING";
+    booking.jobId = "j1";
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("visit is scheduled");
+    expect(res.body.error).toContain("don't pay again");
+  });
+
+  it("a BOOKED booking says it is already paid", async () => {
+    booking.status = "BOOKED";
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("already paid");
+  });
+
+  it("a POST-service failure is a balance due — paying here would buy a second visit", async () => {
+    booking.status = "PAYMENT_FAILED";
+    booking.jobId = "j1";
+    jobRow = { id: "j1", status: "COMPLETED" };
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("outstanding balance");
+  });
+
+  it("a PRE-service failure is simply re-payable — the gate lets the retry through", async () => {
+    booking.status = "PAYMENT_FAILED";
+    booking.jobId = "j1";
+    jobRow = { id: "j1", status: "CANCELED" };
+
+    const res = await bookIt();
+
+    // Whatever the downstream capacity/payment result, the state gate must
+    // not dead-end the retry as "Quote not found".
+    expect(res.status).not.toBe(404);
+    expect(String(res.body.error ?? "")).not.toContain("Quote not found");
   });
 });

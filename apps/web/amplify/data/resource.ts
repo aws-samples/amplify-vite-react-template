@@ -227,6 +227,12 @@ export const schema = a.schema({
     "OBLIGATION_RECOVERY",
     // GL-16: a combo exhausted its AI-research attempts and is parked.
     "PRICING_RESEARCH_EXHAUSTED",
+    // GL-06: a bank debit failed AFTER the visit was performed — the invoice
+    // is a balance due and the shared queue owns collection.
+    "BALANCE_COLLECTION",
+    // GL-06: a pending bank debit is past its expected settlement date with
+    // no provider result — reconcile with Stripe within one business day.
+    "PAYMENT_PROCESSING_OVERDUE",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -574,6 +580,10 @@ export const schema = a.schema({
       // the "your payment didn't go through" notice.
       paymentFailedReason: a.string(),
       paymentFailedNoticeSentAt: a.datetime(),
+      // GL-06: the pending-commitment confirmation's outbox marker ("your
+      // visit is scheduled — payment pending"), separate from the paid
+      // confirmation so the receipt still goes out when the debit settles.
+      pendingConfirmationSentAt: a.datetime(),
     })
     .secondaryIndexes((index) => [index("cancelToken"), index("status")])
     .authorization((allow) => [
@@ -1530,6 +1540,11 @@ export const schema = a.schema({
       method: a.ref("PaymentMethodKind"),
       stripeInvoiceId: a.string(),
       stripePaymentIntentId: a.string(),
+      // GL-06: set while a bank debit for this OPEN invoice is still clearing.
+      // An in-flight debit is NOT collectable: reminders, dunning, AR aging,
+      // and the portal "Pay now" all skip it — collecting would double-pay.
+      // Cleared when the debit settles (PAID) or fails (owed for real).
+      pendingDebitIntentId: a.string(),
       // GL-08: send-once marker for the post-cancellation refund-promise
       // notice — claimed atomically so concurrently delivered webhooks
       // (invoice.paid + subscription.deleted rescan) can't both email.

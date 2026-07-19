@@ -53,15 +53,30 @@ const WINDOW_LABEL: Record<string, string> = {
 
 /**
  * Called by the Stripe webhook when a booking-funnel PaymentIntent
- * succeeds: creates the real CRM records (customer, scheduled job, plan if
- * recurring), turns the T&C acceptance into a signed agreement PDF, and
+ * succeeds — or (GL-06, `pending` set) when a bank debit enters
+ * `processing`: creates the real CRM records (customer, scheduled job, plan
+ * if recurring), turns the T&C acceptance into a signed agreement PDF, and
  * emails the confirmation. Idempotent via BookingRequest.status.
+ *
+ * GL-06 pending mode: a pending US bank debit is sufficient to book — the
+ * SAME complete commitment is created immediately (customer, agreement,
+ * job, capacity, plan), except the invoice is OPEN (not PAID), the job
+ * carries `paymentPendingIntentId`, the booking lands at PROCESSING with
+ * durable processing facts, and the customer confirmation says the visit is
+ * scheduled with payment pending — never that money settled. When the debit
+ * later succeeds, the normal success path resumes onto the same records and
+ * flips them paid; when it fails, `settlePendingFailure` unwinds or
+ * converts them exactly once.
  */
 export async function finalizeBooking(opts: {
   bookingRequestId: string;
   paymentIntentId: string;
+  /** Paid mode: Stripe's amount_received. Pending mode: the debit's
+   *  authorized amount (nothing has settled yet). */
   amountReceived: number;
   paymentMethodId?: string | null;
+  /** GL-06: set for a pending bank debit — commit now, describe honestly. */
+  pending?: { methodLabel: string | null };
 }): Promise<void> {
   const client = await dataClient();
   const { data: booking } = await client.models.BookingRequest.get({
@@ -70,8 +85,11 @@ export async function finalizeBooking(opts: {
 
   // A succeeded booking payment with no booking row behind it: the record was
   // deleted or the metadata points at a ghost. Money captured, nothing to
-  // finalize — a durable Finance case, never a silent return.
+  // finalize — a durable Finance case, never a silent return. (A PENDING
+  // debit with no booking has captured nothing yet; the later success or
+  // failure event is the one that owns the money question.)
   if (!booking) {
+    if (opts.pending) return;
     console.warn(
       `finalizeBooking: no booking ${opts.bookingRequestId} for succeeded PaymentIntent ${opts.paymentIntentId}`
     );
@@ -86,6 +104,27 @@ export async function finalizeBooking(opts: {
       ownerTeam: "FINANCE",
     });
     return;
+  }
+
+  // GL-06 pending mode gates. A stale/duplicate processing event must never
+  // regress a later truth: BOOKED means the money already settled; PAYMENT_
+  // FAILED means the debit already failed; CANCELED/EXPIRED pending events
+  // captured nothing. A PROCESSING booking whose commitment already exists
+  // (jobId checkpointed) only resumes its outbox — everything else falls
+  // through to the idempotent claim + finalize.
+  if (opts.pending) {
+    if (
+      booking.status === "BOOKED" ||
+      booking.status === "PAYMENT_FAILED" ||
+      booking.status === "CANCELED" ||
+      booking.status === "EXPIRED"
+    ) {
+      return;
+    }
+    if (booking.status === "PROCESSING" && booking.jobId) {
+      await deliverPendingComms(booking as unknown as BookingRecord, null);
+      return;
+    }
   }
 
   // Already whole. A hard kill can land between the BOOKED write and the
@@ -113,6 +152,50 @@ export async function finalizeBooking(opts: {
   // exception's), or a PENDING/CONTACT row that should never have a payment.
   // Either way the money succeeded, so it is a Finance case.
   if (booking.status !== "QUOTED" && booking.status !== "PROCESSING") {
+    // GL-06 pending mode: nothing has settled, so a processing event on any
+    // other status is stale noise, never a money case.
+    if (opts.pending) return;
+    // GL-06 late success: the debit failed first (commitment unwound or
+    // converted to a balance), and now the money actually landed. Apply it
+    // exactly once to that same obligation — never a second commitment, never
+    // a silent return, never a regressed failure.
+    if (
+      booking.status === "PAYMENT_FAILED" &&
+      booking.jobId &&
+      (!booking.stripePaymentIntentId ||
+        booking.stripePaymentIntentId === opts.paymentIntentId)
+    ) {
+      await applyLateSuccess(
+        booking as unknown as BookingRecord,
+        opts.paymentIntentId,
+        opts.amountReceived
+      );
+      return;
+    }
+    if (booking.status === "CANCELED" && booking.jobId) {
+      // GL-06: a NONREFUNDABLE pending-debit cancel keeps its OPEN invoice —
+      // the debit settling now pays that owed amount exactly once. (A
+      // refundable cancel already VOIDed the row, so this flip loses there,
+      // and the queued Stripe refund nets the money to zero.)
+      await casGuardedUpdate(
+        "Invoice",
+        `booking-${booking.id}`,
+        {
+          status: "PAID",
+          paidAt: new Date().toISOString(),
+          pendingDebitIntentId: null,
+        },
+        [
+          { kind: "fieldEquals", field: "status", value: "OPEN" },
+          {
+            kind: "fieldEqualsOrMissing",
+            field: "pendingDebitIntentId",
+            value: opts.paymentIntentId,
+          },
+        ]
+      );
+      return;
+    }
     if (booking.jobId) return; // finalized earlier, then canceled — not stuck-paid
     console.warn(
       `finalizeBooking: booking ${booking.id} is ${booking.status}, not QUOTED, for succeeded PaymentIntent ${opts.paymentIntentId}`
@@ -141,6 +224,9 @@ export async function finalizeBooking(opts: {
     booking.stripePaymentIntentId &&
     opts.paymentIntentId !== booking.stripePaymentIntentId
   ) {
+    // GL-06 pending mode: a superseded attempt's debit has captured nothing
+    // yet — its own later success/failure event owns any money question.
+    if (opts.pending) return;
     // Refusing to finalize on the stale PI is correct — but the money on it was
     // still captured, and it does not match this booking's current PaymentIntent.
     // A re-book that repointed the booking and lost the race to cancel the old
@@ -164,7 +250,26 @@ export async function finalizeBooking(opts: {
     });
     return;
   }
-  if (opts.amountReceived !== booking.amountCents) {
+  if (opts.pending && opts.amountReceived !== booking.amountCents) {
+    // A debit was initiated for an amount that is not the quote. No
+    // commitment is created on wrong money — Finance watches the debit.
+    console.error(
+      `finalizeBooking: pending amount mismatch for booking ${booking.id} — debit ${opts.amountReceived}, quoted ${booking.amountCents}`
+    );
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: booking.id,
+      title: `Pending bank debit does not match the quote: ${booking.name ?? "customer"}`,
+      detail: `A bank debit of $${((opts.amountReceived ?? 0) / 100).toFixed(2)} is processing on PaymentIntent ${opts.paymentIntentId} for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), but the booking was quoted $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)}. No visit was scheduled on the wrong amount. When the debit settles, reconcile or refund it and contact the customer.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      resolutionAction:
+        "Watch this PaymentIntent in Stripe. When it settles, refund or reconcile the difference, then rebook the customer at the correct price.",
+      ownerTeam: "FINANCE",
+    });
+    return;
+  }
+  if (!opts.pending && opts.amountReceived !== booking.amountCents) {
     // Refusing to finalize on a mismatched amount is correct — creating the
     // records for a price the customer did not pay would be worse. But the money
     // still moved, so it cannot exit through a log line: open a Finance case
@@ -215,7 +320,8 @@ export async function finalizeBooking(opts: {
     await finalizeClaimed(
       booking,
       opts.paymentIntentId,
-      opts.paymentMethodId ?? null
+      opts.paymentMethodId ?? null,
+      opts.pending ?? null
     );
     // GL-04: the checkout's capacity claim is CONSUMED into the booked job —
     // the scheduled visit carries the claim's slot facts (window, technician,
@@ -327,6 +433,19 @@ export async function finalizeBooking(opts: {
       dedupeKey: booking.id,
       note: "The booking finalized on a later attempt — customer, job, agreement and invoice all exist.",
     });
+    // GL-06: release the finalization claim on success too. A pending-mode
+    // pass leaves the booking at PROCESSING, and the debit's success event
+    // must be able to claim immediately — not wait out the orphan window.
+    const done = await casFencedDelete(
+      "BookingFinalization",
+      opts.bookingRequestId,
+      { field: "holder", nonce: claimHolder, allowMissingFence: true }
+    );
+    if (done === "UNSUPPORTED") {
+      await client.models.BookingFinalization.delete({
+        id: opts.bookingRequestId,
+      }).catch(() => undefined);
+    }
   } catch (err) {
     // GL-05: money is in Stripe with no complete booking behind it. Before the
     // claim is released for retry, leave a durable, office-visible exception —
@@ -336,8 +455,12 @@ export async function finalizeBooking(opts: {
     await openOwnedWork({
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: booking.id,
-      title: `Paid booking not finalized: ${booking.name ?? "customer"}`,
-      detail: `A booking-funnel payment of $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but finalization could not complete: ${step}. The money is in Stripe; the CRM records are incomplete.`,
+      title: opts.pending
+        ? `Pending-payment booking not completed: ${booking.name ?? "customer"}`
+        : `Paid booking not finalized: ${booking.name ?? "customer"}`,
+      detail: opts.pending
+        ? `A bank debit of $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} is processing for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but the scheduled-visit commitment could not be completed: ${step}. The debit is in flight; the CRM records are incomplete.`
+        : `A booking-funnel payment of $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but finalization could not complete: ${step}. The money is in Stripe; the CRM records are incomplete.`,
       customerId: booking.customerId ?? undefined,
       relatedId: booking.id,
       sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
@@ -538,6 +661,11 @@ type BookingRecord = {
   // it. Written only after a successful send.
   confirmationSentAt?: string | null;
   officeAlertSentAt?: string | null;
+  // GL-06: the pending-commitment confirmation's marker, plus the processing
+  // facts the resume path needs to describe the in-flight debit honestly.
+  pendingConfirmationSentAt?: string | null;
+  processingMethodLabel?: string | null;
+  processingExpectedBy?: string | null;
 };
 
 /** First-touch ad attribution as sanitized and stored at /quote. */
@@ -813,7 +941,8 @@ async function markPricingRunsWon(
 async function finalizeClaimed(
   booking: BookingRecord,
   paymentIntentId: string,
-  paymentMethodId: string | null
+  paymentMethodId: string | null,
+  pending: { methodLabel: string | null } | null = null
 ): Promise<void> {
   const client = await dataClient();
 
@@ -1164,15 +1293,70 @@ async function finalizeClaimed(
           "RESIDENTIAL",
         priceCents: booking.amountCents ?? undefined,
         status: offSeasonFirstVisit ? "UNSCHEDULED" : "SCHEDULED",
-        paidAt: booking.amountCents ? paidAtIso : undefined,
-        paidPaymentIntentId: booking.amountCents ? paymentIntentId : undefined,
+        // GL-06: a pending bank debit is a REAL, dispatchable visit — but it
+        // is never described as paid. Every surface derives "Payment
+        // pending" from paymentPendingIntentId until the debit settles.
+        paidAt: !pending && booking.amountCents ? paidAtIso : undefined,
+        paidPaymentIntentId:
+          !pending && booking.amountCents ? paymentIntentId : undefined,
+        paymentPendingIntentId: pending ? paymentIntentId : undefined,
         notes: offSeasonFirstVisit
-          ? `Website booking ${booking.id}. Paid up front (${paymentIntentId}). The selected date ${booking.selectedDate} is OFF-SEASON for this seasonal plan — the first treatment targets ${firstVisitDate}; confirm the date with the customer.`
-          : `Website booking ${booking.id}. Paid up front (${paymentIntentId}).`,
+          ? `Website booking ${booking.id}. ${pending ? `Bank debit processing (${paymentIntentId}) — payment pending.` : `Paid up front (${paymentIntentId}).`} The selected date ${booking.selectedDate} is OFF-SEASON for this seasonal plan — the first treatment targets ${firstVisitDate}; confirm the date with the customer.`
+          : `Website booking ${booking.id}. ${pending ? `Bank debit processing (${paymentIntentId}) — payment pending.` : `Paid up front (${paymentIntentId}).`}`,
         accessGroups,
       }),
     () => client.models.Job.get({ id: jobId })
   );
+  // Checkpoint the job id the instant it exists (like customerId above): if
+  // anything later in this pass races a failure event, the unwind can find
+  // the commitment it must release even though the status transition lost.
+  if (booking.jobId !== jobId && job.id) {
+    await client.models.BookingRequest.update({ id: booking.id, jobId });
+    booking.jobId = jobId;
+  }
+  const jobRow = job as {
+    id?: string | null;
+    status?: string | null;
+    paidAt?: string | null;
+  };
+  // GL-06 re-pay path: a prior pending attempt's failure canceled this job
+  // and released its capacity. A fresh (re)payment reinstates the SAME job
+  // onto the newly selected date — conditional, so an office action that
+  // already moved the job is never overwritten.
+  if (jobRow.status === "CANCELED") {
+    await casGuardedUpdate(
+      "Job",
+      jobId,
+      {
+        status: offSeasonFirstVisit ? "UNSCHEDULED" : "SCHEDULED",
+        scheduledDate: firstVisitDate ?? null,
+        timeWindow: windowLabel,
+        paymentPendingIntentId: pending ? paymentIntentId : null,
+        paidAt: !pending && booking.amountCents ? paidAtIso : null,
+        paidPaymentIntentId:
+          !pending && booking.amountCents ? paymentIntentId : null,
+        // The old attempt's capacity facts were released with the cancel —
+        // finalizeBooking's consume/stamp pass records the new claim's.
+        capacityWindow: null,
+        capacityMinutes: null,
+        capacityTechnicianId: null,
+      },
+      [{ kind: "fieldEquals", field: "status", value: "CANCELED" }]
+    );
+  } else if (!pending && !jobRow.paidAt && booking.amountCents) {
+    // The debit settled on a commitment created in pending mode: stamp the
+    // job paid exactly once and retire its "Payment pending" marker.
+    await casGuardedUpdate(
+      "Job",
+      jobId,
+      {
+        paidAt: paidAtIso,
+        paidPaymentIntentId: paymentIntentId,
+        paymentPendingIntentId: null,
+      },
+      [{ kind: "fieldMissingOrNull", field: "paidAt" }]
+    );
+  }
   if (offSeasonFirstVisit) {
     // The shifted first visit claims ITS month on the ledger — the month
     // mutex must see this pending treatment, or a second visit could be
@@ -1213,24 +1397,61 @@ async function finalizeClaimed(
     const invoiceId = `booking-${booking.id}`;
     const amountCents = booking.amountCents;
     invoice = await createOrGet(
-      "paid invoice",
+      pending ? "pending invoice" : "paid invoice",
       () =>
         client.models.Invoice.create({
           id: invoiceId,
           customerId: customer.id,
           jobId: job.id ?? undefined,
           servicePlanId,
-          description: `${serviceLabel} — paid online at booking`,
+          description: pending
+            ? `${serviceLabel} — bank debit processing (initiated at booking)`
+            : `${serviceLabel} — paid online at booking`,
           amountCents,
-          status: "PAID",
-          method: "CARD",
+          // GL-06: a pending debit's ledger row is OPEN — owed, not settled.
+          // It flips to PAID exactly once when the money lands. The in-flight
+          // marker keeps reminders/dunning/portal-pay off it (double-pay).
+          status: pending ? "OPEN" : "PAID",
+          method: pending ? "BANK" : "CARD",
           stripePaymentIntentId: paymentIntentId,
+          pendingDebitIntentId: pending ? paymentIntentId : undefined,
           issuedAt: paidAtIso,
-          paidAt: paidAtIso,
+          paidAt: pending ? undefined : paidAtIso,
           accessGroups,
         }),
       () => client.models.Invoice.get({ id: invoiceId })
     );
+    const invoiceRow = invoice as { id?: string | null; status?: string | null };
+    if (!pending && invoiceRow.status && invoiceRow.status !== "PAID") {
+      // Settling a commitment created in pending mode (OPEN), or re-paying a
+      // booking whose prior attempt voided/failed the ledger row. One
+      // conditional flip — a concurrent duplicate success cannot double-apply.
+      await casGuardedUpdate(
+        "Invoice",
+        invoiceId,
+        {
+          status: "PAID",
+          paidAt: paidAtIso,
+          stripePaymentIntentId: paymentIntentId,
+          pendingDebitIntentId: null,
+        },
+        [{ kind: "fieldIn", field: "status", values: ["OPEN", "VOID", "FAILED"] }]
+      );
+    } else if (pending && invoiceRow.status && invoiceRow.status === "VOID") {
+      // Re-pay by bank after a prior failure voided the row: it is owed again.
+      await casGuardedUpdate(
+        "Invoice",
+        invoiceId,
+        {
+          status: "OPEN",
+          method: "BANK",
+          stripePaymentIntentId: paymentIntentId,
+          pendingDebitIntentId: paymentIntentId,
+          description: `${serviceLabel} — bank debit processing (initiated at booking)`,
+        },
+        [{ kind: "fieldEquals", field: "status", value: "VOID" }]
+      );
+    }
   }
 
   // 4. T&C acceptance becomes the signed agreement + PDF on file.
@@ -1240,7 +1461,9 @@ async function finalizeClaimed(
     booking.recurring && stored.recurringOffer
       ? `RECURRING PLAN. After the initial visit, service continues ${stored.recurringOffer.frequency.toLowerCase()} at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed automatically. Cancel anytime.`
       : null,
-    `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid online at booking.`,
+    pending
+      ? `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} authorized by bank debit (ACH) at booking; the debit may take several business days to settle. If it does not settle before the visit, the visit is canceled and the customer notified; if it fails after service, the amount is an outstanding balance.`
+      : `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid online at booking.`,
     CANCEL_POLICY_TEXT,
     "ACCEPTANCE. The customer accepted these terms and the cancellation policy via checkbox at online checkout; that acceptance is recorded as the electronic signature below.",
   ]
@@ -1307,20 +1530,76 @@ async function finalizeClaimed(
     throw new Error("recurring plan did not persist");
   }
 
-  // The BOOKED write is the commitment. Trust its result, not the fact that we
-  // called update: if it did not persist, the child records exist but the
-  // booking is still QUOTED, so we must NOT send a confirmation that claims
-  // completion. Throwing here opens the paid-not-finalized exception and
-  // releases the claim; the retry resumes idempotently onto the same records.
-  const { data: booked } = await client.models.BookingRequest.update({
-    id: booking.id,
-    status: "BOOKED",
-    customerId: customer.id,
-    jobId: job.id,
-    servicePlanId,
-    agreementId: agreement.id,
-  });
-  if (!booked) throw new Error("booking did not transition to BOOKED");
+  // The status write is the commitment. Trust its result, not the fact that
+  // we called update: if it did not persist, the child records exist but the
+  // booking is unchanged, so we must NOT send a confirmation that claims
+  // completion. Throwing here opens the recovery exception and releases the
+  // claim; the retry resumes idempotently onto the same records.
+  // GL-06: the flip is a CONDITIONAL transition — only QUOTED or PROCESSING
+  // may advance, so a duplicate/late event can never regress or double-apply,
+  // and a booking the office/customer already canceled is never resurrected
+  // by a slow webhook.
+  if (pending) {
+    const now = new Date();
+    // Business-days approximation for the expected ACH settlement date.
+    const expected = new Date(now);
+    let remaining = 5;
+    while (remaining > 0) {
+      expected.setUTCDate(expected.getUTCDate() + 1);
+      if (expected.getUTCDay() !== 0 && expected.getUTCDay() !== 6) remaining--;
+    }
+    const processing = await casGuardedUpdate(
+      "BookingRequest",
+      booking.id,
+      {
+        status: "PROCESSING",
+        customerId: customer.id,
+        jobId: job.id,
+        servicePlanId: servicePlanId ?? null,
+        agreementId: agreement.id,
+        processingStartedAt: now.toISOString(),
+        processingNextCheckAt: new Date(
+          now.getTime() + 6 * 60 * 60_000
+        ).toISOString(),
+        processingExpectedBy: expected.toISOString().slice(0, 10),
+        processingMethodLabel: pending.methodLabel ?? "bank transfer (ACH)",
+      },
+      [{ kind: "fieldIn", field: "status", values: ["QUOTED", "PROCESSING"] }]
+    );
+    if (!processing.ok) {
+      throw new Error("booking did not transition to PROCESSING");
+    }
+    booking.status = "PROCESSING";
+    booking.customerId = customer.id;
+    booking.jobId = job.id ?? booking.jobId;
+    booking.agreementId = agreement.id ?? booking.agreementId;
+
+    await deliverPendingComms(booking, {
+      serviceLabel,
+      windowLabel,
+      recurringOffer: stored.recurringOffer ?? null,
+      methodLabel: pending.methodLabel,
+      matchFallbackReason,
+      pdf,
+      pdfKey,
+    });
+    return;
+  }
+
+  const booked = await casGuardedUpdate(
+    "BookingRequest",
+    booking.id,
+    {
+      status: "BOOKED",
+      customerId: customer.id,
+      jobId: job.id,
+      servicePlanId: servicePlanId ?? null,
+      agreementId: agreement.id,
+      processingNextCheckAt: null,
+    },
+    [{ kind: "fieldIn", field: "status", values: ["QUOTED", "PROCESSING"] }]
+  );
+  if (!booked.ok) throw new Error("booking did not transition to BOOKED");
   booking.status = "BOOKED";
   booking.customerId = customer.id;
   booking.jobId = job.id ?? booking.jobId;
@@ -1641,7 +1920,10 @@ async function deliverBookingComms(
  *  instantiation-depth ceiling. */
 async function stampCommsMarker(
   booking: BookingRecord,
-  field: "confirmationSentAt" | "officeAlertSentAt"
+  field:
+    | "confirmationSentAt"
+    | "officeAlertSentAt"
+    | "pendingConfirmationSentAt"
 ): Promise<void> {
   const nowIso = new Date().toISOString();
   booking[field] = nowIso;
@@ -1656,7 +1938,9 @@ async function stampCommsMarker(
             // corrects to BOUNCED/COMPLAINED (never presented as delivery).
             confirmationDeliveryStatus: "SENT",
           }
-        : { id: booking.id, officeAlertSentAt: nowIso }
+        : field === "pendingConfirmationSentAt"
+          ? { id: booking.id, pendingConfirmationSentAt: nowIso }
+          : { id: booking.id, officeAlertSentAt: nowIso }
     );
     return Boolean(data);
   };
@@ -1686,6 +1970,406 @@ async function stampCommsMarker(
       resolutionAction:
         "Check the email log for this booking. If the send is there, record the marker (re-run finalization adopts it); only resend if nothing was accepted.",
       ownerTeam: "OPS",
+    });
+  }
+}
+
+/**
+ * GL-06 — the pending-commitment outbox: "your visit is scheduled, payment
+ * pending". Same durable-marker + outbox-claim discipline as the paid
+ * confirmation, on its own marker (`pendingConfirmationSentAt`) so the paid
+ * receipt still goes out when the debit settles. The office alert shares the
+ * paid path's `officeAlertSentAt` — the office hears about a booking once,
+ * with the payment state stated honestly.
+ */
+async function deliverPendingComms(
+  booking: BookingRecord,
+  ctx: {
+    serviceLabel: string;
+    windowLabel: string;
+    recurringOffer: { frequency: string; monthlyCents: number } | null;
+    methodLabel: string | null;
+    matchFallbackReason: string | null;
+    pdf: Uint8Array;
+    pdfKey: string | undefined;
+  } | null
+): Promise<void> {
+  if (booking.pendingConfirmationSentAt && booking.officeAlertSentAt) return;
+
+  const marketingUrl = process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com";
+  const customerId = booking.customerId ?? undefined;
+
+  let serviceLabel: string;
+  let windowLabel: string;
+  let methodLabel: string | null;
+  let matchFallbackReason: string | null;
+  let pdf: Uint8Array | null;
+  let pdfKey: string | undefined;
+  let recurringOffer: { frequency: string; monthlyCents: number } | null;
+  if (ctx) {
+    ({ serviceLabel, windowLabel, recurringOffer, methodLabel, matchFallbackReason, pdf, pdfKey } = ctx);
+  } else {
+    const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
+      serviceLabel?: string;
+      recurringOffer?: { frequency: string; monthlyCents: number } | null;
+    };
+    serviceLabel = stored.serviceLabel ?? "Pest control service";
+    windowLabel =
+      WINDOW_LABEL[booking.selectedWindow ?? ""] ??
+      booking.selectedWindow?.toLowerCase() ??
+      "";
+    recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
+    methodLabel = booking.processingMethodLabel ?? null;
+    matchFallbackReason = null;
+    pdfKey =
+      process.env.DOCS_BUCKET && booking.customerId
+        ? `agreements/${booking.customerId}/booking-${booking.id}.pdf`
+        : undefined;
+    pdf = await loadAgreementPdf(pdfKey);
+  }
+
+  if (!booking.pendingConfirmationSentAt) {
+    const claimId = `confirm-pending:${booking.id}`;
+    const claim = await claimCommsSend(claimId);
+    if (claim.state === "HELD") return;
+    if (
+      claim.state === "RECLAIMED" &&
+      (await priorAcceptedBookingSend(booking.id, "booking-pending-confirmation"))
+    ) {
+      await stampCommsMarker(booking, "pendingConfirmationSentAt");
+      await releaseCommsSend(claimId, claim.holder);
+    } else {
+      let sent = false;
+      try {
+        sent = await sendEmail({
+          to: booking.email,
+          subject: `Your visit is scheduled: ${booking.selectedDate} — payment processing`,
+          template: "booking-pending-confirmation",
+          customerId,
+          relatedId: booking.id,
+          attachments:
+            pdfKey && pdf
+              ? [
+                  {
+                    filename: "BuzzKill-Service-Agreement.pdf",
+                    content: pdf,
+                    contentType: "application/pdf",
+                  },
+                ]
+              : undefined,
+          html: emailShell(
+            "Your visit is scheduled — payment processing",
+            `<p>Hi ${booking.name},</p>
+       <p><strong>${serviceLabel}</strong><br/>
+       ${booking.selectedDate} · ${windowLabel}<br/>
+       ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
+       <p>Your payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> by ${methodLabel ?? "bank transfer"} is <strong>still processing</strong> — a bank debit can take a few business days${booking.processingExpectedBy ? ` (expected by ${booking.processingExpectedBy})` : ""}. Your visit is scheduled and <strong>you don't need to do anything</strong>. Please don't pay again.</p>
+       <p>We'll email you the moment the payment clears${
+         booking.recurring && recurringOffer
+           ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+           : ""
+       }. If the payment doesn't go through, we'll let you know right away with what to do next.${pdfKey && pdf ? " Your service agreement is attached." : ""}</p>
+       <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than ${CANCEL_FULL_REFUND_DAYS} days out is a full refund; ${CANCEL_FULL_REFUND_DAYS} days or less is non-refundable.</p>`
+          ),
+        });
+      } catch (err) {
+        console.error("finalizeBooking: pending confirmation send threw", err);
+      }
+      if (sent) {
+        await stampCommsMarker(booking, "pendingConfirmationSentAt");
+      } else {
+        await openOwnedWork({
+          kind: "EMAIL_FAILURE",
+          dedupeKey: `booking-pending-confirmation:${booking.id}`,
+          title: `Pending-payment booking confirmation didn't send: ${booking.name}`,
+          detail: `The visit is scheduled with the bank debit still processing, but the "visit scheduled — payment processing" email to ${booking.email} did not send. It will be retried on the next webhook delivery or reconcile pass.`,
+          customerId,
+          relatedId: booking.id,
+          sourceUrl: customerId ? `/customers/${customerId}` : undefined,
+          resolutionAction:
+            "Resend the scheduled-visit (payment processing) confirmation to the customer, then verify it arrived.",
+          ownerTeam: "OPS",
+        });
+      }
+      await releaseCommsSend(claimId, claim.holder);
+    }
+  }
+
+  if (!booking.officeAlertSentAt) {
+    let sent = false;
+    try {
+      sent = await notifyLeads({
+        subject: `Website booking (payment pending): ${booking.name} — ${booking.selectedDate}`,
+        template: "office-booking-alert",
+        heading: "New website booking — payment pending",
+        customerId,
+        relatedId: booking.id,
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} by bank debit, <strong>payment pending</strong> (not settled yet). The visit is real and dispatchable; every screen shows "Payment pending" until the debit clears.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
+         <p>The job is on the Needs-scheduling board for route assignment.</p>${
+           matchFallbackReason
+             ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
+         <p style="color:#666;font-size:13px;">Reason: ${matchFallbackReason}</p>`
+             : ""
+         }`,
+      });
+    } catch (err) {
+      console.error("finalizeBooking: pending sales alert send threw", err);
+    }
+    if (sent) {
+      await stampCommsMarker(booking, "officeAlertSentAt");
+    } else {
+      await openOwnedWork({
+        kind: "EMAIL_FAILURE",
+        dedupeKey: `booking-sales-alert:${booking.id}`,
+        title: `Website-booking sales alert didn't send: ${booking.name}`,
+        detail: `The pending-payment booking is scheduled, but the sales@ new-booking alert did not send. The job is on the Needs-scheduling board; the alert will be retried on the next delivery.`,
+        customerId,
+        relatedId: booking.id,
+        sourceUrl: customerId ? `/customers/${customerId}` : undefined,
+        resolutionAction:
+          "Let sales know a new website booking landed (payment pending) and needs route assignment.",
+        ownerTeam: "SALES",
+      });
+    }
+  }
+}
+
+/**
+ * GL-06 — unwind or convert a pending commitment whose bank debit failed.
+ * Exactly-once by construction: every step is a conditional write, and the
+ * capacity release happens only for the caller that WINS the job's
+ * SCHEDULED→CANCELED transition. Safe to re-run on webhook redelivery or
+ * from the reconcile sweep after a partial crash.
+ *
+ * Returns which world we are in so the caller can word the customer notice:
+ *  - PRE_SERVICE: the visit had not happened — commitment canceled, capacity
+ *    released once, pending invoice voided, plan (if any) canceled.
+ *  - POST_SERVICE: the visit already happened — completed work is never
+ *    erased; the invoice is the outstanding balance and the shared queue
+ *    owns collection.
+ *  - NOOP: no commitment exists behind this booking.
+ */
+export async function settlePendingFailure(opts: {
+  bookingId: string;
+  intentId: string;
+  /** The provider's decline text — recorded on a post-service balance so the
+   *  invoice explains itself to the customer and the office. */
+  reason?: string;
+}): Promise<"PRE_SERVICE" | "POST_SERVICE" | "NOOP"> {
+  const client = await dataClient();
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: opts.bookingId,
+  });
+  if (!booking?.jobId) return "NOOP";
+  const { data: job } = await client.models.Job.get({ id: booking.jobId });
+  if (!job) return "NOOP";
+
+  const invoiceId = `booking-${booking.id}`;
+
+  if (job.status === "COMPLETED" || job.status === "IN_PROGRESS") {
+    // POST-SERVICE: the work stands. The pending markers come off (nothing is
+    // pending anymore — it is OWED for real), the OPEN invoice is the balance
+    // with the decline recorded, and collection is owned shared-queue work.
+    await casGuardedUpdate(
+      "Job",
+      booking.jobId,
+      { paymentPendingIntentId: null },
+      [
+        {
+          kind: "fieldEqualsOrMissing",
+          field: "paymentPendingIntentId",
+          value: opts.intentId,
+        },
+      ]
+    );
+    await casGuardedUpdate(
+      "Invoice",
+      invoiceId,
+      {
+        pendingDebitIntentId: null,
+        ...(opts.reason ? { failureReason: opts.reason } : {}),
+      },
+      [{ kind: "fieldEquals", field: "status", value: "OPEN" }]
+    );
+    await openOwnedWork({
+      kind: "BALANCE_COLLECTION",
+      dedupeKey: `balance:${booking.id}`,
+      title: `Bank payment failed after service: ${booking.name ?? "customer"}`,
+      detail: `The ${booking.selectedDate ?? ""} visit for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}) was performed, but the $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} bank debit failed afterward. Invoice ${invoiceId} is the outstanding balance. The customer has been sent a payment-retry notice; this case closes only when the money is verifiably settled.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: invoiceId,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
+      resolutionAction:
+        "Collect the balance: charge the customer's saved method or record their offline payment on the invoice, then confirm the balance is settled.",
+      ownerTeam: "FINANCE",
+    });
+    return "POST_SERVICE";
+  }
+
+  if (job.status !== "CANCELED") {
+    // PRE-SERVICE: cancel the commitment exactly once. Only the CAS winner
+    // releases the held capacity — a redelivered failure event finds the job
+    // already CANCELED and releases nothing twice.
+    const canceled = await casGuardedUpdate(
+      "Job",
+      booking.jobId,
+      {
+        status: "CANCELED",
+        paymentPendingIntentId: null,
+        notes: `${job.notes ?? ""}\nCanceled: the pending bank debit (${opts.intentId}) failed before service.`.trim(),
+      },
+      [
+        { kind: "fieldIn", field: "status", values: ["SCHEDULED", "UNSCHEDULED"] },
+        {
+          kind: "fieldEqualsOrMissing",
+          field: "paymentPendingIntentId",
+          value: opts.intentId,
+        },
+      ]
+    );
+    if (canceled.ok) {
+      const prior = canceled.prior as {
+        scheduledDate?: string | null;
+        capacityWindow?: string | null;
+        capacityMinutes?: number | null;
+        capacityTechnicianId?: string | null;
+      };
+      const date = prior.scheduledDate ?? booking.selectedDate ?? null;
+      const window = (prior.capacityWindow ?? booking.selectedWindow) as
+        | CapacityWindow
+        | null;
+      if (date && window && prior.capacityMinutes != null) {
+        if (prior.capacityTechnicianId) {
+          await releaseSlot(
+            date,
+            window,
+            prior.capacityTechnicianId,
+            prior.capacityMinutes
+          ).catch(() => undefined);
+        } else {
+          await releasePoolMinutes(date, window, prior.capacityMinutes).catch(
+            () => undefined
+          );
+        }
+      }
+    }
+  }
+
+  // The pending ledger row is voided (owed by nobody — no service happened).
+  await casGuardedUpdate(
+    "Invoice",
+    invoiceId,
+    { status: "VOID", pendingDebitIntentId: null },
+    [{ kind: "fieldEquals", field: "status", value: "OPEN" }]
+  );
+
+  // A recurring plan created with the pending booking never started billing
+  // (billing starts after the first visit) — retire it with the commitment.
+  if (booking.servicePlanId) {
+    try {
+      const { data: plan } = await client.models.ServicePlan.get({
+        id: booking.servicePlanId,
+      });
+      if (plan && plan.status === "ACTIVE") {
+        await client.models.ServicePlan.update({
+          id: plan.id,
+          status: "CANCELED",
+          notes: `${plan.notes ?? ""}\nCanceled: the booking's pending bank debit failed before the first visit.`.trim(),
+        });
+      }
+    } catch (err) {
+      console.error(
+        "settlePendingFailure: could not cancel the pending plan",
+        booking.servicePlanId,
+        err
+      );
+    }
+  }
+  return "PRE_SERVICE";
+}
+
+/**
+ * GL-06 — a bank debit SUCCEEDED after its failure was already recorded (an
+ * out-of-order or retried provider event, or a late settlement). The money
+ * applies exactly once to the same obligation:
+ *  - commitment canceled pre-service → the captured money has nothing to pay
+ *    for: a Finance case decides refund-or-reinstate; nothing is silently
+ *    resurrected.
+ *  - visit performed (balance due) → one conditional OPEN→PAID flip settles
+ *    the balance, the booking finishes BOOKED, and the collection case
+ *    resolves. A duplicate success finds the invoice already PAID and
+ *    changes nothing.
+ */
+async function applyLateSuccess(
+  booking: BookingRecord,
+  paymentIntentId: string,
+  amountReceived: number
+): Promise<void> {
+  const client = await dataClient();
+  const { data: job } = booking.jobId
+    ? await client.models.Job.get({ id: booking.jobId })
+    : { data: null };
+
+  if (!job || job.status === "CANCELED") {
+    await openOwnedWork({
+      kind: "PAID_NOT_FINALIZED",
+      dedupeKey: `late-success:${booking.id}`,
+      title: `Bank debit settled AFTER its booking was canceled: ${booking.name ?? "customer"}`,
+      detail: `The $${((amountReceived ?? 0) / 100).toFixed(2)} bank debit on PaymentIntent ${paymentIntentId} settled, but its booking ${booking.id} was already canceled when the debit was reported failed. The customer's money is captured with no scheduled service behind it. Decide with the customer: refund the payment, or rebook the visit and apply this payment to it.`,
+      customerId: booking.customerId ?? undefined,
+      relatedId: booking.id,
+      sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
+      resolutionAction:
+        "Contact the customer: refund the settled debit in Stripe, or rebook the visit and apply the payment. Then confirm the money state.",
+      ownerTeam: "FINANCE",
+    });
+    return;
+  }
+
+  const invoiceId = `booking-${booking.id}`;
+  const nowIso = new Date().toISOString();
+  const paid = await casGuardedUpdate(
+    "Invoice",
+    invoiceId,
+    {
+      status: "PAID",
+      paidAt: nowIso,
+      stripePaymentIntentId: paymentIntentId,
+      pendingDebitIntentId: null,
+    },
+    [{ kind: "fieldIn", field: "status", values: ["OPEN", "FAILED"] }]
+  );
+  // Winner or not, converge the rest — each step is conditional/idempotent.
+  await casGuardedUpdate(
+    "Job",
+    job.id,
+    {
+      paidAt: nowIso,
+      paidPaymentIntentId: paymentIntentId,
+      paymentPendingIntentId: null,
+    },
+    [{ kind: "fieldMissingOrNull", field: "paidAt" }]
+  );
+  await casGuardedUpdate(
+    "BookingRequest",
+    booking.id,
+    {
+      status: "BOOKED",
+      paymentFailedReason: null,
+      processingNextCheckAt: null,
+    },
+    [{ kind: "fieldEquals", field: "status", value: "PAYMENT_FAILED" }]
+  );
+  if (paid.ok) {
+    await resolveOwnedWork({
+      kind: "BALANCE_COLLECTION",
+      dedupeKey: `balance:${booking.id}`,
+      note: "The bank debit settled after all — the invoice is PAID and the balance is collected.",
+    });
+    await resolveOwnedWork({
+      kind: "PAYMENT_PROCESSING_OVERDUE",
+      dedupeKey: booking.id,
+      note: "The provider reported the late debit settled; the invoice is PAID.",
     });
   }
 }

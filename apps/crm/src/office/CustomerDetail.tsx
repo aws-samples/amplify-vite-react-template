@@ -823,6 +823,15 @@ export default function CustomerDetail() {
                           paid {j.priceCents ? money(j.priceCents) : ""} online
                         </Badge>
                       ) : null}
+                      {/* GL-06: a pending bank debit is a real, dispatchable
+                          visit — every screen says "Payment pending", never
+                          paid and never chargeable. */}
+                      {!j.paidAt && j.paymentPendingIntentId ? (
+                        <Badge tone="warn">
+                          payment pending
+                          {j.priceCents ? ` ${money(j.priceCents)}` : ""} (bank)
+                        </Badge>
+                      ) : null}
                       {/* Office completion is for defined administrative job
                           types only. Field/pesticide work is completed by the
                           technician's finalized report — the legal application

@@ -13,6 +13,8 @@ import {
 // never ship without a severity, an owner, and a controlled way to close it.
 const ALL_KINDS: WorkKind[] = [
   "PRICING_RESEARCH_EXHAUSTED",
+  "BALANCE_COLLECTION",
+  "PAYMENT_PROCESSING_OVERDUE",
   "NO_ACCESS",
   "EMAIL_FAILURE",
   "CALLBACK_PROMISE",

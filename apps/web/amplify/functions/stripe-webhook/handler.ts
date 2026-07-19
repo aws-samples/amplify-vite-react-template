@@ -7,6 +7,7 @@ import { dataClient } from "../shared/dataClient";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
 import { customerAccessGroups } from "../shared/dynamicGroups";
 import { finalizeBooking } from "../shared/bookingFinalize";
+import { recordFunnelPaymentFailure } from "../shared/bookingPaymentFailure";
 import { applyRefundToInvoice } from "../shared/refund";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
@@ -81,10 +82,12 @@ export const handler = async (
         }
         break;
       }
-      // GL-06: an async funnel payment (e.g. bank debit) is still clearing —
-      // hold the slot as PROCESSING, never a commitment, until it resolves.
-      // GL-04: the checkout's capacity claim is EXTENDED so "your slot is
-      // held" stays a counted fact while the money settles.
+      // GL-06: an async funnel payment (a pending US bank debit) is
+      // sufficient to book — the FULL commitment (customer, job, capacity,
+      // pending invoice, agreement, truthful confirmation) is created NOW,
+      // with every surface saying "Payment pending" until it settles.
+      // GL-04: the checkout's capacity claim is EXTENDED first so the slot
+      // stays a counted fact until finalize consumes it into the job.
       case "payment_intent.processing": {
         const pi = stripeEvent.data.object;
         if (pi.metadata?.bookingRequestId) {
@@ -124,15 +127,31 @@ export const handler = async (
       case "payment_intent.payment_failed": {
         const pi = stripeEvent.data.object;
         // GL-04: a failed funnel payment releases the checkout's capacity
-        // claim — the slot goes back on sale.
+        // claim — the slot goes back on sale. (A pending commitment's claim
+        // was already CONSUMED into its job; that capacity is released by
+        // settlePendingFailure's exactly-once job cancel instead.)
         if (pi.metadata?.bookingRequestId) {
           await releaseCapacityClaim(pi.metadata.bookingRequestId);
         }
-        // A funnel payment has no invoice yet (finalization never ran), so it is
-        // handled directly — the booking is marked failed and the customer told.
+        // A funnel payment that never finalized has no invoice, so it is
+        // handled directly — the booking is marked failed, any pending
+        // commitment is unwound or converted, and the customer told.
         // Everything else settles its invoice FAILED.
         const handledAsFunnel = await onFunnelPaymentFailed(pi);
         if (!handledAsFunnel) await settlePaymentIntent(pi, "FAILED");
+        break;
+      }
+      // GL-06: a canceled intent that was backing a pending commitment is the
+      // same business fact as a failed one — the money will never arrive.
+      case "payment_intent.canceled": {
+        const pi = stripeEvent.data.object;
+        if (pi.metadata?.bookingRequestId) {
+          await releaseCapacityClaim(pi.metadata.bookingRequestId);
+          await onFunnelPaymentFailed(
+            pi,
+            "The payment was canceled before it completed."
+          );
+        }
         break;
       }
       case "invoice.paid":
@@ -197,29 +216,29 @@ async function onSetupIntentSucceeded(intent: Stripe.SetupIntent) {
 
 /** One-time job charges: settle the Invoice created by chargeOneTimeJob. */
 /**
- * GL-06 — a funnel payment entered `processing` (an async method still clearing).
- * Mark the booking PROCESSING: the slot is held but it is NOT a commitment (no
- * job, no confirmation) until the money lands. Only advances from QUOTED, and
- * only for the intent the booking currently points at, so an out-of-order or
- * stale event can never downgrade a booking that already succeeded/finalized.
+ * GL-06 — a funnel payment entered `processing`: a pending bank debit is
+ * sufficient to book. The complete commitment is created immediately via
+ * finalizeBooking's pending mode — customer, agreement/mandate record,
+ * scheduled job (dispatchable), consumed capacity, OPEN invoice, and a
+ * truthful "visit scheduled — payment processing" confirmation. Idempotent
+ * and resumable: a thrown error leaves owned work and lets Stripe redeliver.
  */
 async function onFunnelPaymentProcessing(intent: Stripe.PaymentIntent) {
   const bookingRequestId = intent.metadata?.bookingRequestId;
   if (!bookingRequestId) return;
-  const client = await dataClient();
-  const { data: booking } = await client.models.BookingRequest.get({
-    id: bookingRequestId,
-  });
-  if (!booking || booking.status !== "QUOTED") return;
-  if (
-    booking.stripePaymentIntentId &&
-    booking.stripePaymentIntentId !== intent.id
-  ) {
-    return;
-  }
-  await client.models.BookingRequest.update({
-    id: booking.id,
-    status: "PROCESSING",
+  await finalizeBooking({
+    bookingRequestId,
+    paymentIntentId: intent.id,
+    amountReceived: intent.amount,
+    paymentMethodId:
+      typeof intent.payment_method === "string"
+        ? intent.payment_method
+        : (intent.payment_method?.id ?? null),
+    pending: {
+      methodLabel: intent.payment_method_types?.includes("us_bank_account")
+        ? "bank transfer (ACH)"
+        : (intent.payment_method_types?.[0] ?? null),
+    },
   });
 }
 
@@ -232,57 +251,23 @@ async function onFunnelPaymentProcessing(intent: Stripe.PaymentIntent) {
  * settlement), false otherwise.
  */
 async function onFunnelPaymentFailed(
-  intent: Stripe.PaymentIntent
+  intent: Stripe.PaymentIntent,
+  reasonOverride?: string
 ): Promise<boolean> {
   const bookingRequestId = intent.metadata?.bookingRequestId;
   if (!bookingRequestId) return false;
-  const client = await dataClient();
-  const { data: booking } = await client.models.BookingRequest.get({
-    id: bookingRequestId,
+  // The shared failure path (also driven by the daily reconcile sweep for
+  // failures whose webhook never arrived): conditional transition, exactly-
+  // once unwind/convert of any pending commitment, one truthful customer
+  // notice. Throws on UNSUPPORTED so Stripe redelivers.
+  await recordFunnelPaymentFailure({
+    bookingRequestId,
+    intentId: intent.id,
+    reason:
+      reasonOverride ??
+      intent.last_payment_error?.message ??
+      "The payment was declined.",
   });
-  if (!booking) return true;
-  // A booking that already succeeded is not un-booked by a stale failure event,
-  // and a repointed intent's failure is not this booking's.
-  if (booking.status === "BOOKED") return true;
-  if (
-    booking.stripePaymentIntentId &&
-    booking.stripePaymentIntentId !== intent.id
-  ) {
-    return true;
-  }
-  const reason = intent.last_payment_error?.message ?? "The payment was declined.";
-  await client.models.BookingRequest.update({
-    id: booking.id,
-    status: "PAYMENT_FAILED",
-    paymentFailedReason: reason,
-  });
-  // Tell the customer once — the marker keeps a replayed webhook from re-sending.
-  if (!booking.paymentFailedNoticeSentAt && booking.email) {
-    const marketingUrl = process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com";
-    const dateLine = booking.selectedDate
-      ? `${escapeHtml(booking.selectedDate)} `
-      : "";
-    const sent = await sendEmail({
-      to: booking.email,
-      subject: "Your BuzzKill booking didn't go through",
-      template: "booking-payment-failed",
-      relatedId: booking.id,
-      html: emailShell(
-        "Your payment didn't go through",
-        `<p>Hi ${escapeHtml(booking.name ?? "there")},</p>
-         <p>We couldn't complete the payment for your ${dateLine}pest control booking, so <strong>the booking was not completed and you have not been charged</strong>.</p>
-         <p>Your slot is still open. You can pick a time and try again here:</p>
-         <p><a href="${marketingUrl}/quote">Book your visit</a></p>
-         <p>If you keep having trouble, reply to this email or give us a call and we'll help.</p>`
-      ),
-    });
-    if (sent) {
-      await client.models.BookingRequest.update({
-        id: booking.id,
-        paymentFailedNoticeSentAt: new Date().toISOString(),
-      });
-    }
-  }
   return true;
 }
 

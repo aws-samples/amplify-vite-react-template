@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
 
 /**
  * Cancellation: the refund clock and the honest failure.
@@ -390,5 +391,70 @@ describe("cancellation failure", () => {
     await call({ token: "tok", confirm: true });
 
     expect(refundsCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("GL-06 — canceling a pending-debit booking (commitment exists, money still clearing)", () => {
+  const invoiceTable = new Map<string, Record<string, unknown>>();
+
+  beforeEach(() => {
+    invoiceTable.clear();
+    invoiceTable.set("booking-b1", {
+      id: "booking-b1",
+      status: "OPEN",
+      pendingDebitIntentId: "pi_1",
+      amountCents: 29900,
+    });
+    _setLockStoreForTests(memoryLockStore({ Invoice: invoiceTable }));
+    booking.status = "PROCESSING"; // debit clearing; jobId j1 = real commitment
+  });
+
+  afterEach(() => _setLockStoreForTests(null));
+
+  it("previews the same 72-hour policy with honest pending wording", async () => {
+    freezeEastern("2026-07-16"); // 4 days out — refundable
+    const res = await call({ token: "tok" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.refund).toMatchObject({ kind: "FULL", amountCents: 29900 });
+    expect(res.body.policy).toContain("still processing");
+  });
+
+  it("a refundable cancel queues the refund to the original method and voids the pending invoice", async () => {
+    freezeEastern("2026-07-16"); // 4 days out
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ canceled: true, refunded: true });
+    // Stripe queues the refund and completes it after the debit settles —
+    // refund-to-original-method either way, issued exactly once.
+    expect(refundsCreate).toHaveBeenCalledOnce();
+    expect(booking.status).toBe("CANCELED");
+    const invoice = invoiceTable.get("booking-b1")!;
+    expect(invoice.status).toBe("VOID"); // debit + queued refund net to zero
+    expect(invoice.pendingDebitIntentId).toBeUndefined();
+    expect(customerEmails.some((s) => s.includes("canceled"))).toBe(true);
+  });
+
+  it("a nonrefundable cancel keeps the OPEN invoice — the settling debit pays what is genuinely owed", async () => {
+    freezeEastern("2026-07-19"); // 1 day out — inside the window
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ canceled: true, refunded: false });
+    expect(refundsCreate).not.toHaveBeenCalled();
+    expect(booking.status).toBe("CANCELED");
+    const invoice = invoiceTable.get("booking-b1")!;
+    expect(invoice.status).toBe("OPEN");
+    expect(invoice.pendingDebitIntentId).toBe("pi_1");
+  });
+
+  it("a PROCESSING booking with no commitment yet is not cancelable from the link", async () => {
+    booking.jobId = null;
+    freezeEastern("2026-07-16");
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.status).toBe(404);
   });
 });
