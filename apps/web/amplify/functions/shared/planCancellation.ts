@@ -4,12 +4,16 @@ import { dataClient } from "./dataClient";
 import {
   casTakeover,
   casFencedUpdate,
-  casFencedDelete,
-  casGuardedDelete,
+  casGuardedUpdate,
 } from "./atomicLock";
 import { emailShell, notifyOffice, sendEmail } from "./email";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
-import { cancelPlanBilling, type QueuedVisitsResolution } from "./subscription";
+import {
+  cancelPlanBilling,
+  cancelQueuedPlanVisits,
+  type QueuedVisitsResolution,
+} from "./subscription";
+import { computeVisitCancellationPolicy } from "./cancellationPolicy";
 import {
   ALREADY_CANCELED_MESSAGE,
   coverageEndingDescription,
@@ -17,7 +21,7 @@ import {
   finalChargeDescription,
   pendingCancelMessage,
   planCanceledSuccessMessage,
-  refundOrCreditDescription,
+  refundOutcomeDescription,
   type VisitResolutionSummary,
 } from "./planCancellationPolicy";
 
@@ -62,7 +66,7 @@ export type PlanCancellationPreview = {
   /** Plain-language money outcome. Canceling stops future charges; the current
    *  period is already paid and is not refunded, and no new charge is made. */
   finalCharge: { amountCents: number; description: string };
-  refundOrCredit: { amountCents: number; description: string };
+  refundOutcome: { amountCents: number; description: string };
   /** Every queued visit and where cancellation leaves it. */
   queuedVisits: PreviewQueuedVisit[];
   visitsStopping: number;
@@ -105,7 +109,14 @@ async function outstandingBalanceForPlan(servicePlanId: string): Promise<number>
       limit: 200,
       nextToken: token,
     });
-    for (const inv of page.data) total += inv.amountCents ?? 0;
+    for (const inv of page.data) {
+      // Net of refunds — the schema's own rule for every revenue figure. A
+      // partially refunded bill is owed only its remainder.
+      total += Math.max(
+        0,
+        (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0)
+      );
+    }
     token = page.nextToken;
   } while (token);
   return total;
@@ -116,6 +127,19 @@ async function listQueuedVisits(
 ): Promise<PreviewQueuedVisit[]> {
   const client = await dataClient();
   const visits: PreviewQueuedVisit[] = [];
+  // One paged invoice read for the whole plan; net paid per visit drives the
+  // preview's per-visit 72-hour money outcome.
+  const invoices = await listPlanInvoices(servicePlanId);
+  const paidByJob = new Map<string, number>();
+  for (const inv of invoices) {
+    if (inv.status !== "PAID" || !inv.jobId) continue;
+    paidByJob.set(
+      inv.jobId,
+      (paidByJob.get(inv.jobId) ?? 0) +
+        Math.max(0, (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0))
+    );
+  }
+  const today = todayEastern();
   let token: string | null | undefined;
   do {
     const page = await client.models.Job.listJobByServicePlanId(
@@ -133,12 +157,23 @@ async function listQueuedVisits(
         continue;
       }
       if (job.status !== "UNSCHEDULED" && job.status !== "SCHEDULED") continue;
-      if (job.paidAt) {
+      const paidCents =
+        paidByJob.get(job.id) ?? (job.paidAt ? Math.max(0, job.priceCents ?? 0) : 0);
+      if (paidCents > 0) {
+        // GL-08 R6: the preview states the SERVER-calculated 72-hour outcome —
+        // never a keep-or-refund choice, never credit.
+        const policy = computeVisitCancellationPolicy({
+          scheduledDate: job.scheduledDate ?? null,
+          amountPaidCents: paidCents,
+          today,
+        });
         visits.push({
           jobId: job.id,
           scheduledDate: job.scheduledDate ?? null,
-          disposition: "REMAINS",
-          reason: "already paid for — we'll refund or keep it, your choice",
+          disposition: "STOPS",
+          reason: policy.withinFreeWindow
+            ? `paid — the $${(paidCents / 100).toFixed(2)} you paid will be refunded in full (it's more than 72 hours away)`
+            : `paid — it's within 72 hours, so per our cancellation policy the $${(paidCents / 100).toFixed(2)} paid isn't refunded`,
         });
         continue;
       }
@@ -191,9 +226,9 @@ export async function buildCancellationPreview(
       amountCents: 0,
       description: finalChargeDescription(outstandingBalanceCents),
     },
-    refundOrCredit: {
+    refundOutcome: {
       amountCents: 0,
-      description: refundOrCreditDescription(),
+      description: refundOutcomeDescription(),
     },
     queuedVisits,
     visitsStopping,
@@ -218,6 +253,10 @@ export type CustomerCancelOutcome =
       visitsStopped: number;
       visitsRemaining: number;
       confirmationEmailed: boolean;
+      /** GL-08 R3: provider + CRM both read settled. False = canceled but a
+       *  residual (visit, refund, in-flight payment, notice) is still owned
+       *  and open — the sweep must NOT count this as completed. */
+      settled?: boolean;
       message: string;
     }
   | {
@@ -249,13 +288,14 @@ export type CustomerCancelOutcome =
  */
 const PENDING_CANCEL_MESSAGE = pendingCancelMessage();
 
-const alreadyCanceledOutcome = (): CustomerCancelOutcome => ({
+const alreadyCanceledOutcome = (settled = true): CustomerCancelOutcome => ({
   status: "CANCELED",
   alreadyCanceled: true,
   stripeSubscriptionCanceled: false,
   visitsStopped: 0,
   visitsRemaining: 0,
   confirmationEmailed: false,
+  settled,
   message: ALREADY_CANCELED_MESSAGE,
 });
 
@@ -284,7 +324,13 @@ type CancellablePlan = { id: string; planName: string; customerId: string };
  * office button and the verifier can never disagree about "done".
  */
 export async function planCancellationSettled(
-  servicePlanId: string
+  servicePlanId: string,
+  opts: {
+    /** GL-08 R3: settled is proved against the PROVIDER, not only CRM state.
+     *  Pass a Stripe client; without one, a plan that still has a provider
+     *  subscription id cannot read settled (fail closed, never assumed). */
+    stripe?: Stripe | null;
+  } = {}
 ): Promise<{ settled: boolean; reason: string }> {
   const client = await dataClient();
   const { data: plan } = await client.models.ServicePlan.get({
@@ -302,6 +348,38 @@ export async function planCancellationSettled(
       settled: false,
       reason: "The cancellation is still finishing — let it complete or resume it first.",
     };
+  }
+  // Provider proof: the CRM saying CANCELED is not evidence the subscription
+  // stopped charging. The provider record must agree.
+  if (plan.stripeSubscriptionId) {
+    if (!opts.stripe) {
+      return {
+        settled: false,
+        reason:
+          "The provider subscription could not be verified from here — settle from a billing-enabled surface.",
+      };
+    }
+    try {
+      const sub = await opts.stripe.subscriptions.retrieve(
+        plan.stripeSubscriptionId
+      );
+      if (sub.status !== "canceled") {
+        return {
+          settled: false,
+          reason: `The Stripe subscription still reads ${sub.status} — future charges are NOT stopped. Cancel it at the provider first.`,
+        };
+      }
+    } catch (err) {
+      const code = (err as { code?: string; statusCode?: number }) ?? {};
+      // A missing subscription cannot charge anyone — that satisfies "stopped".
+      if (code.code !== "resource_missing" && code.statusCode !== 404) {
+        return {
+          settled: false,
+          reason:
+            "The provider subscription could not be read — settlement can't be confirmed right now.",
+        };
+      }
+    }
   }
   const queued = await listQueuedVisits(servicePlanId);
   const stillOn = queued.filter((v) => v.disposition === "STOPS").length;
@@ -321,44 +399,54 @@ export async function planCancellationSettled(
       reason: "A charge is still in flight — refund or void it before closing.",
     };
   }
-  const requestedAt = plan.cancellationRequestedAt;
+  // The accepted cancellation time: the mutable plan stamp, with the durable
+  // command's requestedAt as the fallback when that write was lost.
+  let requestedAt = plan.cancellationRequestedAt ?? null;
+  if (!requestedAt && "PlanCancellationClaim" in client.models) {
+    const { data: claim } = await client.models.PlanCancellationClaim.get({
+      id: servicePlanId,
+    }).catch(() => ({ data: null }));
+    requestedAt = claim?.requestedAt ?? null;
+  }
   if (requestedAt) {
+    // GL-08 R3: judged by PAYMENT time (paidAt; issuedAt only as fallback),
+    // and a late charge is settled only by a FULL refund — a partial refund
+    // does not settle a post-cancellation charge.
     const lateUnrefunded = invoices.some(
       (i) =>
         i.status === "PAID" &&
-        (i.issuedAt ?? "") >= requestedAt &&
-        (i.refundedAmountCents ?? 0) <= 0
+        (i.paidAt ?? i.issuedAt ?? "") >= requestedAt! &&
+        (i.refundedAmountCents ?? 0) < (i.amountCents ?? 0)
     );
     if (lateUnrefunded) {
       return {
         settled: false,
         reason:
-          "A charge posted after the cancellation and hasn't been refunded — refund it first.",
+          "A charge that posted after the cancellation hasn't been refunded in full — finish the refund first.",
       };
     }
   }
   return {
     settled: true,
-    reason: "Billing stopped, plan canceled, visits cleared, and any late charge refunded.",
+    reason:
+      "Provider subscription stopped, plan canceled, visits cleared, and every late charge fully refunded.",
   };
 }
 
-/** Every invoice on a plan (paged), for the settlement check. */
-async function listPlanInvoices(servicePlanId: string): Promise<
-  {
-    status: string | null;
-    stripePaymentIntentId?: string | null;
-    issuedAt?: string | null;
-    refundedAmountCents?: number | null;
-  }[]
-> {
+/** Every invoice on a plan (paged), for the settlement check and preview. */
+type PlanInvoiceRow = {
+  id?: string;
+  jobId?: string | null;
+  status: string | null;
+  amountCents?: number | null;
+  stripePaymentIntentId?: string | null;
+  issuedAt?: string | null;
+  paidAt?: string | null;
+  refundedAmountCents?: number | null;
+};
+async function listPlanInvoices(servicePlanId: string): Promise<PlanInvoiceRow[]> {
   const client = await dataClient();
-  const out: {
-    status: string | null;
-    stripePaymentIntentId?: string | null;
-    issuedAt?: string | null;
-    refundedAmountCents?: number | null;
-  }[] = [];
+  const out: PlanInvoiceRow[] = [];
   let token: string | null | undefined;
   do {
     const page = await client.models.Invoice.list({
@@ -494,7 +582,12 @@ async function driveHeldCancellation(
     return { status: "PENDING", requestedAt: ctx.requestedAt, message: PENDING_CANCEL_MESSAGE };
   }
 
-  // Canceled for real. Clear the pending flag and stamp the reason.
+  // Canceled at the provider + CRM. Record the confirmed phase on the durable
+  // command before the remaining phases, so a process stop resumes from here
+  // instead of re-running blind.
+  await writeCancellationCommand(servicePlanId, ctx.nonce, {
+    stage: "PROVIDER_STOPPED",
+  });
   try {
     await client.models.ServicePlan.update({
       id: servicePlanId,
@@ -509,52 +602,151 @@ async function driveHeldCancellation(
     );
   }
 
-  const visitsStopped = result.queuedVisits.canceled.length;
-  const failedCount = result.queuedVisits.failed.length;
-  const needsDecisionCount = result.queuedVisits.needsDecision.length;
-  const visitsRemaining = needsDecisionCount + failedCount;
+  return settleAfterDrive(stripe, plan, ctx, result.queuedVisits, {
+    stripeSubscriptionCanceled: result.stripeSubscriptionCanceled,
+    alreadyCanceled: false,
+  });
+}
+
+/** Build the customer-facing summary from the ACTUAL visit resolution. */
+function summaryOfResolution(r: QueuedVisitsResolution): VisitResolutionSummary {
+  return {
+    stopped: r.canceled.length,
+    failed: r.failed.length,
+    failedDates: r.failed.map((v) => v.scheduledDate ?? null),
+    refundsOwed: (r.refundsOwed ?? []).map((v) => ({
+      date: v.scheduledDate ?? null,
+      amountCents: v.amountCents,
+    })),
+    retained: (r.retained ?? []).map((v) => ({
+      date: v.scheduledDate ?? null,
+      amountCents: v.amountCents,
+    })),
+    pendingDecisions: r.needsDecision.length,
+  };
+}
+
+/**
+ * GL-08 — the shared back half of every drive/repair: send (or adopt) the
+ * confirmation, prove settlement against Stripe + CRM, and land the durable
+ * command on a PERSISTED terminal — stage COMPLETE with the outcome/result
+ * kept as the readable record when settled, or AWAITING_SETTLEMENT with an
+ * owned Finance case and a next-attempt time when anything (visit sweep, a
+ * late charge's full refund, an in-flight payment, the provider record) is
+ * still unfinished. The command is never deleted: the row IS the persisted
+ * outcome, and nothing reads Complete while a phase is missing.
+ */
+async function settleAfterDrive(
+  stripe: Stripe,
+  plan: CancellablePlan,
+  ctx: { requestedAt: string; attemptCount: number; nonce: string },
+  resolution: QueuedVisitsResolution,
+  flags: { stripeSubscriptionCanceled: boolean; alreadyCanceled: boolean }
+): Promise<CustomerCancelOutcome> {
+  const servicePlanId = plan.id;
+  const summary = summaryOfResolution(resolution);
+  const visitsStopped = resolution.canceled.length;
+  const visitsRemaining = resolution.needsDecision.length + resolution.failed.length;
 
   const confirmationEmailed = await sendCancellationConfirmation(
     plan.customerId,
+    servicePlanId,
     plan.planName,
-    result.queuedVisits
+    summary
   );
+  if (confirmationEmailed) {
+    await writeCancellationCommand(servicePlanId, ctx.nonce, {
+      stage: "NOTICE_SENT",
+    });
+  }
 
-  // Resolve the recovery case only if the cancellation is genuinely settled —
-  // never force-close it while a visit still needs removing or a late charge is
-  // owed back (that would undo the webhook's refund-owed case). The verified
-  // close and this auto-resolve share one settlement check.
-  const settled = await planCancellationSettled(servicePlanId);
-  if (settled.settled) {
+  // Settlement is proved against the provider AND the CRM; the verified close
+  // and this auto-resolve share the one check so they can never disagree.
+  const settled = await planCancellationSettled(servicePlanId, { stripe });
+  if (settled.settled && confirmationEmailed) {
     await resolveOwnedWork({
       kind: "PLAN_CANCELLATION_RECOVERY",
       dedupeKey: servicePlanId,
-      note: "Cancellation completed — billing stopped, visits cleared, and the customer confirmed.",
+      note: "Cancellation completed — provider stopped, visits cleared, late charges refunded, and the customer notified.",
     }).catch(() => undefined);
+    await writeCancellationCommand(servicePlanId, ctx.nonce, {
+      stage: "COMPLETE",
+      outcome: "COMPLETE",
+      resultJson: JSON.stringify({
+        visitsStopped,
+        visitsRemaining,
+        refundsOwed: summary.refundsOwed,
+        retained: summary.retained,
+        confirmationEmailed,
+        settled: true,
+      }),
+      lastError: null,
+      leaseUntil: null,
+    });
+  } else {
+    // NOT terminal: the schedule, a money outcome, the provider record, or
+    // the customer notice is unfinished. The command stays open (resumable at
+    // nextAttemptAt) and the residual is OWNED — never a quiet green.
+    const residual = !confirmationEmailed
+      ? `${settled.settled ? "" : `${settled.reason} `}The cancellation confirmation has not reached the provider yet.`
+      : settled.reason;
+    await openOwnedWork({
+      kind: "PLAN_CANCELLATION_RECOVERY",
+      dedupeKey: servicePlanId,
+      title: `Finish settling a canceled plan: ${plan.planName}`,
+      detail: `Plan ${servicePlanId} (${plan.planName}) is canceled but not fully settled: ${residual}`,
+      customerId: plan.customerId,
+      relatedId: servicePlanId,
+      sourceUrl: `/customers/${plan.customerId}`,
+      resolutionAction:
+        "Resume the cancellation (idempotent) or finish the named residual by hand — it can't close until Stripe and the CRM both read settled and the customer has the final word.",
+      ownerTeam: "FINANCE",
+    });
+    await writeCancellationCommand(servicePlanId, ctx.nonce, {
+      stage: "AWAITING_SETTLEMENT",
+      lastError: residual,
+      attemptCount: ctx.attemptCount + 1,
+      nextAttemptAt: new Date(Date.now() + CANCELLATION_RETRY_MS).toISOString(),
+      leaseUntil: null,
+    });
   }
 
-  // Terminal: the command is done, delete it — fenced on the holder nonce so
-  // a stale worker waking up late can never delete a newer attempt's command.
-  await releaseCancellationCommand(servicePlanId, ctx.nonce);
-
-  // GL-08 R3: every claim in the message is derived from the real resolution —
-  // "visits stopped" only when none failed, the kept-paid line only when one
-  // remains, and "emailed" only when the confirmation was actually sent — all
-  // from the one policy builder shared with the confirmation email.
-  const message = planCanceledSuccessMessage(
-    { failed: failedCount, keptPaid: needsDecisionCount },
-    { confirmationEmailed }
-  );
+  // GL-08 R3/R6: every claim in the message is derived from the real
+  // resolution and the per-visit 72-hour outcomes — all from the one policy
+  // builder shared with the confirmation email.
+  const message = planCanceledSuccessMessage(summary, { confirmationEmailed });
 
   return {
     status: "CANCELED",
-    alreadyCanceled: false,
-    stripeSubscriptionCanceled: result.stripeSubscriptionCanceled,
+    alreadyCanceled: flags.alreadyCanceled,
+    stripeSubscriptionCanceled: flags.stripeSubscriptionCanceled,
     visitsStopped,
     visitsRemaining,
     confirmationEmailed,
+    settled: settled.settled,
     message,
   };
+}
+
+/** A fenced command write: lands only while the nonce is still ours. Without
+ *  CAS wiring (unit fakes / deploy straddling) takeover is disabled, so the
+ *  plain single-holder write is the safe fallback. */
+async function writeCancellationCommand(
+  servicePlanId: string,
+  nonce: string,
+  sets: Record<string, string | number | boolean | null>
+): Promise<void> {
+  const res = await casFencedUpdate(
+    "PlanCancellationClaim",
+    servicePlanId,
+    { field: "leaseNonce", nonce },
+    sets
+  );
+  if (res.ok || res.reason === "LOST") return;
+  const client = await dataClient();
+  await client.models.PlanCancellationClaim
+    .update({ id: servicePlanId, ...sets } as never)
+    .catch(() => undefined);
 }
 
 export async function cancelPlanForCustomer(
@@ -571,8 +763,13 @@ export async function cancelPlanForCustomer(
   const reason = opts.reason?.trim() || null;
 
   // Duplicate-click / already-done: a second confirm on a plan that is already
-  // canceled is a no-op success, not an error and not a second Stripe call.
-  if (plan.status === "CANCELED") return alreadyCanceledOutcome();
+  // canceled is a no-op success ONLY when the cancellation is fully settled.
+  // A CANCELED plan with unfinished schedule/money/notice work is REPAIRED
+  // (GL-08 R2) — already-canceled must not short-circuit the residuals.
+  if (plan.status === "CANCELED") {
+    const settled = await planCancellationSettled(servicePlanId, { stripe });
+    if (settled.settled) return alreadyCanceledOutcome(true);
+  }
 
   const requestedAt = new Date().toISOString();
 
@@ -598,7 +795,10 @@ export async function cancelPlanForCustomer(
     const { data: current } = await client.models.ServicePlan.get({
       id: servicePlanId,
     });
-    if (current?.status === "CANCELED") return alreadyCanceledOutcome();
+    if (current?.status === "CANCELED") {
+      const settled = await planCancellationSettled(servicePlanId, { stripe });
+      if (settled.settled) return alreadyCanceledOutcome(true);
+    }
     const reclaimed = await reclaimOrphanedCancellationClaim(servicePlanId);
     if (!reclaimed.won) {
       // A live attempt genuinely owns the command — report the truthful pending
@@ -615,8 +815,13 @@ export async function cancelPlanForCustomer(
     id: servicePlanId,
   });
   if (afterClaim?.status === "CANCELED") {
-    await releaseCancellationCommand(servicePlanId, nonce);
-    return alreadyCanceledOutcome();
+    // Flipped CANCELED under us — repair any residual under the claim we hold
+    // (a settled plan settles the command COMPLETE inside the repair).
+    return repairCanceledPlan(stripe, plan, {
+      requestedAt,
+      attemptCount,
+      nonce,
+    });
   }
 
   return driveHeldCancellation(stripe, plan, {
@@ -634,6 +839,34 @@ export async function cancelPlanForCustomer(
  * or overdue is fair game. Returns whether we now hold it and the prior attempt
  * count, so history carries across the steal.
  */
+/**
+ * GL-08 R2 — repair a plan that already reads CANCELED but is not settled:
+ * re-sweep residual visits (idempotent — canceled jobs are skipped, each
+ * remaining one gets its 72-hour disposition), re-send or ADOPT the
+ * confirmation, and re-prove settlement — landing the durable command on
+ * COMPLETE only when Stripe and CRM agree and the customer has the word.
+ * Caller must HOLD the command (nonce).
+ */
+async function repairCanceledPlan(
+  stripe: Stripe,
+  plan: CancellablePlan,
+  ctx: { requestedAt: string; attemptCount: number; nonce: string }
+): Promise<CustomerCancelOutcome> {
+  const client = await dataClient();
+  const resolution = await cancelQueuedPlanVisits(
+    plan.id,
+    "Plan cancellation repair — clearing residual visits"
+  );
+  await client.models.ServicePlan.update({
+    id: plan.id,
+    cancellationPending: false,
+  }).catch(() => undefined);
+  return settleAfterDrive(stripe, plan, ctx, resolution, {
+    stripeSubscriptionCanceled: true,
+    alreadyCanceled: true,
+  });
+}
+
 async function reclaimOrphanedCancellationClaim(
   servicePlanId: string
 ): Promise<
@@ -677,29 +910,11 @@ async function reclaimOrphanedCancellationClaim(
     nonce,
     leaseField: "leaseUntil",
     leaseMs: CANCELLATION_LEASE_MS,
+    refuseStages: { field: "stage", values: ["COMPLETE"] },
   });
   return takeover.ok
     ? { won: true, attemptCount: held.attemptCount ?? 0, nonce }
     : { won: false, attemptCount: held.attemptCount ?? 0 };
-}
-
-/** Fenced terminal release of the cancellation command. An expired worker can
- *  never delete a newer attempt's command; without CAS wiring (unit fakes)
- *  takeover is disabled, so the plain delete is single-holder-safe. */
-async function releaseCancellationCommand(
-  servicePlanId: string,
-  nonce: string
-): Promise<void> {
-  const released = await casFencedDelete("PlanCancellationClaim", servicePlanId, {
-    field: "leaseNonce",
-    nonce,
-    allowMissingFence: true,
-  });
-  if (released !== "UNSUPPORTED") return;
-  const client = await dataClient();
-  await client.models.PlanCancellationClaim.delete({ id: servicePlanId }).catch(
-    () => undefined
-  );
 }
 
 /**
@@ -723,37 +938,41 @@ export async function resumePlanCancellation(
   });
   if (!plan) throw new Error(`Service plan ${servicePlanId} not found`);
 
-  // Already canceled: finish the bookkeeping and close out.
+  // Already canceled AND fully settled (proved against Stripe + CRM): mark
+  // the command COMPLETE if no live holder owns it, resolve the case, done.
+  // NOT settled: fall through — the repair below re-drives the residuals
+  // under the exclusive lease (GL-08 R2: CANCELED never short-circuits
+  // unfinished schedule, money, or notice work).
   if (plan.status === "CANCELED") {
-    if (plan.cancellationPending) {
-      await client.models.ServicePlan.update({
-        id: servicePlanId,
-        cancellationPending: false,
-      }).catch(() => undefined);
-    }
-    const settled = await planCancellationSettled(servicePlanId);
+    const settled = await planCancellationSettled(servicePlanId, { stripe });
     if (settled.settled) {
+      if (plan.cancellationPending) {
+        await client.models.ServicePlan.update({
+          id: servicePlanId,
+          cancellationPending: false,
+        }).catch(() => undefined);
+      }
       await resolveOwnedWork({
         kind: "PLAN_CANCELLATION_RECOVERY",
         dedupeKey: servicePlanId,
         note: "Cancellation already complete on resume — nothing left to do.",
       }).catch(() => undefined);
-      // Cleanup, not a release we own: delete only while NO live lease exists,
-      // so a holder mid-drive keeps its command.
-      const swept = await casGuardedDelete("PlanCancellationClaim", servicePlanId, [
-        {
-          kind: "notLiveLease",
-          field: "leaseUntil",
-          nowIso: new Date().toISOString(),
-        },
-      ]);
-      if (swept === "UNSUPPORTED") {
-        await client.models.PlanCancellationClaim.delete({
-          id: servicePlanId,
-        }).catch(() => undefined);
-      }
+      // Persist the terminal on the command if nobody live holds it — the
+      // row IS the readable outcome, never deleted.
+      await casGuardedUpdate(
+        "PlanCancellationClaim",
+        servicePlanId,
+        { stage: "COMPLETE", outcome: "COMPLETE", leaseUntil: null },
+        [
+          {
+            kind: "notLiveLease",
+            field: "leaseUntil",
+            nowIso: new Date().toISOString(),
+          },
+        ]
+      );
+      return alreadyCanceledOutcome(true);
     }
-    return alreadyCanceledOutcome();
   }
 
   // Ensure we hold the command (create it if a hard kill left none).
@@ -805,6 +1024,7 @@ export async function resumePlanCancellation(
       nonce,
       leaseField: "leaseUntil",
       leaseMs: CANCELLATION_LEASE_MS,
+      refuseStages: { field: "stage", values: ["COMPLETE"] },
     });
     if (!takeover.ok) {
       if (takeover.reason === "LOST") {
@@ -817,6 +1037,9 @@ export async function resumePlanCancellation(
     }
   }
 
+  if (plan.status === "CANCELED") {
+    return repairCanceledPlan(stripe, plan, { requestedAt, attemptCount, nonce });
+  }
   return driveHeldCancellation(stripe, plan, {
     requestedAt,
     reason: plan.cancellationReason ?? existing?.note ?? null,
@@ -825,14 +1048,35 @@ export async function resumePlanCancellation(
   });
 }
 
-/** The durable "you're canceled" email. Its own failure becomes owned
- *  EMAIL_FAILURE work inside sendEmail — the cancellation still stands. */
+/** The durable "you're canceled" email — logged against the PLAN id so a
+ *  repair can ADOPT a proven prior send instead of emailing twice. Its own
+ *  failure becomes owned EMAIL_FAILURE work inside sendEmail — the
+ *  cancellation still stands (but the command stays open until it lands). */
 async function sendCancellationConfirmation(
   customerId: string,
+  servicePlanId: string,
   planName: string,
-  queuedVisits: QueuedVisitsResolution
+  summary: VisitResolutionSummary
 ): Promise<boolean> {
   const client = await dataClient();
+  // Outbox adoption: a prior accepted send for THIS plan satisfies the
+  // promise — a resume/repair must not email the customer twice.
+  try {
+    if ("EmailLog" in client.models) {
+      const { data: prior } = await client.models.EmailLog.listEmailLogByRelatedId(
+        { relatedId: servicePlanId },
+        { limit: 50 }
+      );
+      const accepted = (prior ?? []).some(
+        (l) =>
+          l.template === "plan-canceled" &&
+          (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+      );
+      if (accepted) return true;
+    }
+  } catch (err) {
+    console.error("sendCancellationConfirmation: prior-send check failed", err);
+  }
   const { data: customer } = await client.models.Customer.get({
     id: customerId,
   });
@@ -854,18 +1098,12 @@ async function sendCancellationConfirmation(
     return false;
   }
 
-  // GL-08 R3: the email body is generated from the ACTUAL resolution — the
+  // GL-08 R3/R6: the email body is generated from the ACTUAL resolution — the
   // recurring-visits sentence is conditional on whether any removal failed,
-  // kept-paid visits are enumerated as keep-or-refund, and a failed removal is
-  // named as a visit we still need to take off (never called "prepaid") — so the
-  // email can never say every visit stopped while one remains.
-  const summary: VisitResolutionSummary = {
-    stopped: queuedVisits.canceled.length,
-    keptPaid: queuedVisits.needsDecision.length,
-    failed: queuedVisits.failed.length,
-    keptPaidDates: queuedVisits.needsDecision.map((v) => v.scheduledDate ?? null),
-    failedDates: queuedVisits.failed.map((v) => v.scheduledDate ?? null),
-  };
+  // each paid visit carries its exact server-calculated 72-hour money outcome
+  // (refund in full or retained — never a choice, never credit), and a failed
+  // removal is named as a visit we still need to take off (never "prepaid") —
+  // so the email can never say every visit stopped while one remains.
   const html = emailShell(
     "Your plan is canceled",
     confirmationEmailBodyHtml(planName, summary)
@@ -876,7 +1114,7 @@ async function sendCancellationConfirmation(
     subject: "Your BuzzKill plan is canceled",
     template: "plan-canceled",
     customerId,
-    relatedId: customerId,
+    relatedId: servicePlanId,
     html,
   });
 }

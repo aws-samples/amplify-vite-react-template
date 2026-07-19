@@ -24,9 +24,11 @@ export const PLAN_CANCELLATION_POLICY = {
   currentPeriodRefunded: false as const,
   /** Canceling does NOT clear unpaid OPEN/FAILED invoices already owed. */
   outstandingBalanceCleared: false as const,
-  /** A visit paid up front stays the customer's — keep it or refund it, their
-   *  choice — never silently lost. */
-  prepaidVisitDefault: "KEEP_OR_REFUND" as const,
+  /** Every future visit is canceled immediately; a PAID visit gets the
+   *  server-calculated 72-hour outcome — strictly more than 72 hours away:
+   *  full refund to the original payment method; 72 hours or less: no refund.
+   *  There is no keep-or-refund choice and never account credit. */
+  prepaidVisitDefault: "SEVENTY_TWO_HOUR_RULE" as const,
   /** Any charge that posts on/after the customer's accepted cancellation time is
    *  refunded; a person (Finance) approves each refund (business decision
    *  2026-07-18). The pending copy may say "we'll refund it" because we will. */
@@ -55,12 +57,16 @@ const usd = (cents: number): string =>
  */
 export type VisitResolutionSummary = {
   stopped: number;
-  keptPaid: number;
   failed: number;
-  /** Scheduled dates (YYYY-MM-DD or null) for the kept-paid visits. */
-  keptPaidDates: (string | null)[];
   /** Scheduled dates for the still-on-schedule failed removals. */
   failedDates: (string | null)[];
+  /** Paid visits canceled >72h out — refund owed in full (date + amount). */
+  refundsOwed: { date: string | null; amountCents: number }[];
+  /** Paid visits canceled ≤72h out — payment retained per policy. */
+  retained: { date: string | null; amountCents: number }[];
+  /** Visits whose real-world outcome is still with the office (technician on
+   *  site, or a payment still in motion). */
+  pendingDecisions: number;
 };
 
 /** The line about what happened to the recurring visits — conditional on whether
@@ -74,12 +80,37 @@ export function visitOutcomeSentence(summary: {
     : `Most of your recurring visits have stopped; ${summary.failed} still need our team to take off the schedule, and we're on it.`;
 }
 
-/** The kept-paid line — only when a paid-up-front visit remains. */
-export function keptPaidSentence(summary: { keptPaid: number }): string {
-  if (summary.keptPaid <= 0) return "";
-  return summary.keptPaid === 1
-    ? " A visit you'd already paid for stays on our books — we'll be in touch to keep it or refund it, your choice."
-    : ` ${summary.keptPaid} visits you'd already paid for stay on our books — we'll be in touch to keep or refund each, your choice.`;
+/** The refunds-owed line — the exact server-calculated 72-hour outcome. */
+export function refundsOwedSentence(summary: {
+  refundsOwed: { amountCents: number }[];
+}): string {
+  const totals = summary.refundsOwed.reduce((t, r) => t + r.amountCents, 0);
+  if (summary.refundsOwed.length === 0) return "";
+  return summary.refundsOwed.length === 1
+    ? ` A visit you'd paid for was more than 72 hours away, so the ${usd(totals)} you paid is being refunded in full to your original payment method.`
+    : ` ${summary.refundsOwed.length} visits you'd paid for were more than 72 hours away, so ${usd(totals)} is being refunded in full to your original payment method.`;
+}
+
+/** The retained line — a ≤72h paid visit keeps its payment per the policy,
+ *  said out loud rather than silently. */
+export function retainedSentence(summary: {
+  retained: { amountCents: number }[];
+}): string {
+  const totals = summary.retained.reduce((t, r) => t + r.amountCents, 0);
+  if (summary.retained.length === 0) return "";
+  return summary.retained.length === 1
+    ? ` One paid visit was within 72 hours of its start, so per our cancellation policy the ${usd(totals)} already paid isn't refunded.`
+    : ` ${summary.retained.length} paid visits were within 72 hours of their starts, so per our cancellation policy the ${usd(totals)} already paid isn't refunded.`;
+}
+
+/** The pending-decision line — money or a visit still with our team. */
+export function pendingDecisionSentence(summary: {
+  pendingDecisions: number;
+}): string {
+  if (summary.pendingDecisions <= 0) return "";
+  return summary.pendingDecisions === 1
+    ? " One visit still has a payment or service outcome our team is settling — we'll confirm it with you."
+    : ` ${summary.pendingDecisions} visits still have a payment or service outcome our team is settling — we'll confirm each with you.`;
 }
 
 /**
@@ -88,13 +119,22 @@ export function keptPaidSentence(summary: { keptPaid: number }): string {
  * "emailed" when the confirmation was actually accepted for sending.
  */
 export function planCanceledSuccessMessage(
-  summary: { failed: number; keptPaid: number },
+  summary: {
+    failed: number;
+    refundsOwed: { amountCents: number }[];
+    retained: { amountCents: number }[];
+    pendingDecisions: number;
+  },
   opts: { confirmationEmailed: boolean }
 ): string {
   let message = "Your plan is canceled and you won't be billed again. ";
   message += visitOutcomeSentence(summary);
-  message += keptPaidSentence(summary);
-  if (opts.confirmationEmailed) message += " We've emailed you a confirmation.";
+  message += refundsOwedSentence(summary);
+  message += retainedSentence(summary);
+  message += pendingDecisionSentence(summary);
+  if (opts.confirmationEmailed) {
+    message += " A confirmation email is on its way to you.";
+  }
   return message;
 }
 
@@ -127,8 +167,8 @@ export function finalChargeDescription(outstandingBalanceCents: number): string 
   )}`;
 }
 
-export function refundOrCreditDescription(): string {
-  return "The current period is already paid and isn't refunded. Any visit you paid for up front stays yours unless you ask us to refund it.";
+export function refundOutcomeDescription(): string {
+  return `The current period is already paid and isn't refunded. Every future visit is canceled; a visit you paid for gets the 72-hour rule automatically — more than 72 hours before its start, a full refund to your original payment method; 72 hours or less, no refund. We never issue account credit.`;
 }
 
 export function coverageEndingDescription(): string {
@@ -155,10 +195,12 @@ const fmtDate = (d: string | null): string | null => {
 /**
  * The confirmation-email inner HTML, generated from the actual resolution:
  *  - the recurring-visits sentence is conditional on failed===0,
- *  - kept-paid visits are enumerated as "keep or refund, your choice",
+ *  - each PAID visit is named with its exact server-calculated 72-hour money
+ *    outcome (refund in full, or retained — never a choice, never credit),
  *  - failed removals are named as visits WE still need to take off the schedule
  *    (never described as prepaid),
- * so the email can never say every visit stopped while one remains.
+ * so the email can never say every visit stopped while one remains, and never
+ * promises a money outcome different from the policy's.
  */
 export function confirmationEmailBodyHtml(
   planName: string,
@@ -170,18 +212,25 @@ export function confirmationEmailBodyHtml(
   );
   parts.push(`<p>You won't be billed again. ${visitOutcomeSentence(summary)}</p>`);
 
-  const keptDates = summary.keptPaidDates.map(fmtDate).filter(Boolean);
-  if (summary.keptPaid > 0) {
-    const which =
-      keptDates.length > 0 ? ` (${keptDates.join(", ")})` : "";
+  for (const r of summary.refundsOwed) {
+    const when = fmtDate(r.date);
+    parts.push(
+      `<p>Your paid visit${when ? ` on ${when}` : ""} was more than 72 hours away, so the <strong>${usd(r.amountCents)}</strong> you paid is being refunded in full to your original payment method.</p>`
+    );
+  }
+  for (const r of summary.retained) {
+    const when = fmtDate(r.date);
+    parts.push(
+      `<p>Your paid visit${when ? ` on ${when}` : ""} was within 72 hours of its start, so per our cancellation policy the ${usd(r.amountCents)} already paid isn't refunded.</p>`
+    );
+  }
+  if (summary.pendingDecisions > 0) {
     parts.push(
       `<p>${
-        summary.keptPaid === 1
-          ? `One visit you'd already paid for${which} is still on our books`
-          : `${summary.keptPaid} visits you'd already paid for${which} are still on our books`
-      } — we'll be in touch to either keep ${
-        summary.keptPaid === 1 ? "it" : "them"
-      } or refund ${summary.keptPaid === 1 ? "it" : "each"}, whichever you prefer.</p>`
+        summary.pendingDecisions === 1
+          ? "One visit still has a payment or service outcome our team is settling"
+          : `${summary.pendingDecisions} visits still have a payment or service outcome our team is settling`
+      } — we'll confirm it with you, usually within one business day.</p>`
     );
   }
 

@@ -381,7 +381,11 @@ async function onSubscriptionInvoice(
       invoiceId: row.id,
       amountCents: row.amountCents,
       description: row.description ?? "Subscription payment",
-      chargeCreatedUnix: stripeInvoice.created,
+      // GL-08 R3: judged by when the money actually MOVED — an invoice
+      // created before the cancellation but charged after (bank debit, card
+      // retry) is still a post-cancellation charge.
+      paidAtUnix:
+        stripeInvoice.status_transitions?.paid_at ?? stripeInvoice.created,
     });
     // The customer is current again — lift any delinquency suspension so the
     // recurring engine resumes dispatching visits.
@@ -414,17 +418,26 @@ async function onPaidSubscriptionCharge(opts: {
   invoiceId: string;
   amountCents: number;
   description: string;
-  chargeCreatedUnix: number;
+  paidAtUnix: number;
 }) {
   if (opts.amountCents <= 0) return;
   const client = await dataClient();
   const { data: plan } = await client.models.ServicePlan.get({
     id: opts.servicePlanId,
   });
-  const requestedAt = plan?.cancellationRequestedAt;
+  // The accepted cancellation time: the mutable plan stamp, with the DURABLE
+  // command's requestedAt as the fallback — a swallowed plan write must not
+  // turn a post-cancellation charge into an ordinary receipt.
+  let requestedAt = plan?.cancellationRequestedAt ?? null;
+  if (!requestedAt && "PlanCancellationClaim" in client.models) {
+    const { data: claim } = await client.models.PlanCancellationClaim.get({
+      id: opts.servicePlanId,
+    }).catch(() => ({ data: null }));
+    requestedAt = claim?.requestedAt ?? null;
+  }
   const postCancellation =
     Boolean(requestedAt) &&
-    opts.chargeCreatedUnix * 1000 >= new Date(requestedAt as string).getTime();
+    opts.paidAtUnix * 1000 >= new Date(requestedAt as string).getTime();
 
   if (!postCancellation) {
     await sendChargeReceipt({
@@ -436,24 +449,41 @@ async function onPaidSubscriptionCharge(opts: {
     return;
   }
 
+  // GL-08 R3: the CASE comes FIRST. The customer is promised a refund only
+  // when the Finance case that guarantees it durably exists — a promise
+  // backed by nothing is exactly the lie this gate closes.
   const amountUsd = `$${(opts.amountCents / 100).toFixed(2)}`;
-  await sendPostCancellationChargeNotice({
-    customerId: opts.customerId,
-    amountCents: opts.amountCents,
-    invoiceId: opts.invoiceId,
-  });
-  await openOwnedWork({
+  const caseId = await openOwnedWork({
     kind: "PLAN_CANCELLATION_RECOVERY",
     dedupeKey: opts.servicePlanId,
     title: `Refund a charge that posted after cancellation: ${plan?.planName ?? opts.servicePlanId}`,
-    detail: `${amountUsd} was charged on this plan after the customer's cancellation was accepted (${requestedAt}). Refund invoice ${opts.invoiceId} in full — the customer has been told we're refunding it — and make sure the subscription is actually cancelled so no further charge posts.`,
+    detail: `${amountUsd} was paid on this plan after the customer's cancellation was accepted (${requestedAt}). Refund invoice ${opts.invoiceId} IN FULL — a partial refund does not settle it — and make sure the subscription is actually cancelled so no further charge posts.`,
     customerId: opts.customerId,
     relatedId: opts.servicePlanId,
     sourceUrl: `/customers/${opts.customerId}`,
     resolutionAction:
-      "Refund this invoice in full from the customer's billing page, then resume the cancellation. This case can't close until the plan is canceled, every visit is cleared, and this refund is settled.",
+      "Refund this invoice in full from the customer's billing page, then resume the cancellation. This case can't close until the plan is canceled, every visit is cleared, and this refund is fully settled.",
     ownerTeam: "FINANCE",
   });
+  if (caseId) {
+    await sendPostCancellationChargeNotice({
+      customerId: opts.customerId,
+      amountCents: opts.amountCents,
+      invoiceId: opts.invoiceId,
+    });
+  } else {
+    // The case could not be written: no customer promise. Page the office
+    // urgently instead — the settlement check (full-refund-required) keeps
+    // the cancellation open until a person finishes this.
+    await notifyOffice({
+      subject: `URGENT — post-cancellation charge with NO case: ${plan?.planName ?? opts.servicePlanId}`,
+      heading: "A post-cancellation charge could not be put in the owned queue",
+      template: "ops-post-cancel-charge-unowned",
+      customerId: opts.customerId,
+      relatedId: opts.servicePlanId,
+      bodyHtml: `<p>${amountUsd} was paid on plan ${opts.servicePlanId} AFTER the customer's accepted cancellation (${requestedAt}), and the Finance recovery case could not be written. The customer has NOT been messaged. Refund invoice ${opts.invoiceId} in full and re-run the cancellation now.</p>`,
+    });
+  }
 }
 
 /** Best-effort real decline reason off a failed Stripe invoice. */
@@ -614,9 +644,24 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
         `<p style="color:#b91c1c;"><strong>${queued.failed.length} queued visit${queued.failed.length === 1 ? "" : "s"} could not be taken off the schedule.</strong> Cancel ${queued.failed.length === 1 ? "it" : "them"} by hand or a technician will be dispatched for free.</p>`
       );
     }
+    if ((queued.refundsOwed ?? []).length > 0) {
+      visitLines.push(
+        `<p><strong>Refunds owed in full (the visit was more than 72 hours out — the Finance case prescribes the exact amount):</strong></p>
+         <ul>${(queued.refundsOwed ?? [])
+           .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — $${(v.amountCents / 100).toFixed(2)}</li>`)
+           .join("")}</ul>`
+      );
+    }
+    if ((queued.retained ?? []).length > 0) {
+      visitLines.push(
+        `<p>Payment retained per the 72-hour policy (visit within 72 hours): ${(queued.retained ?? [])
+          .map((v) => `${v.scheduledDate ?? "unscheduled"} — $${(v.amountCents / 100).toFixed(2)}`)
+          .join(", ")}.</p>`
+      );
+    }
     if (queued.needsDecision.length > 0) {
       visitLines.push(
-        `<p><strong>Still on the schedule and needing a decision:</strong></p>
+        `<p><strong>Needing a decision (technician on site, or a payment still in motion):</strong></p>
          <ul>${queued.needsDecision
            .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — ${v.why}</li>`)
            .join("")}</ul>`

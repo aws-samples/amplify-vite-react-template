@@ -82,12 +82,20 @@ vi.mock("../shared/ownedWork", () => ({
   },
 }));
 
+// GL-08: the public cancel link goes through the SAME durable plan-cancel
+// command as the portal (cancelPlanForCustomer), never the bare engine.
 const cancelPlanBilling = vi.fn(async () => ({
-  canceled: true,
+  status: "CANCELED",
+  alreadyCanceled: false,
   stripeSubscriptionCanceled: true,
+  visitsStopped: 0,
+  visitsRemaining: 0,
+  confirmationEmailed: true,
+  settled: true,
+  message: "canceled",
 }));
-vi.mock("../shared/subscription", () => ({
-  cancelPlanBilling: (...args: unknown[]) => cancelPlanBilling(...(args as [])),
+vi.mock("../shared/planCancellation", () => ({
+  cancelPlanForCustomer: (...args: unknown[]) => cancelPlanBilling(...(args as [])),
 }));
 
 const refundsCreate = vi.fn(async () => ({ id: "re_1" }));
@@ -140,8 +148,14 @@ beforeEach(() => {
   cancelPlanBilling.mockClear();
   refundsCreate.mockClear();
   cancelPlanBilling.mockImplementation(async () => ({
-    canceled: true,
+    status: "CANCELED",
+    alreadyCanceled: false,
     stripeSubscriptionCanceled: true,
+    visitsStopped: 0,
+    visitsRemaining: 0,
+    confirmationEmailed: true,
+    settled: true,
+    message: "canceled",
   }));
   booking = {
     id: "b1",

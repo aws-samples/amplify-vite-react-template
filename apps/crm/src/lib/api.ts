@@ -353,7 +353,7 @@ export type PlanCancellationPreview = {
   cancellationPending: boolean;
   effectiveDate: string;
   finalCharge: { amountCents: number; description: string };
-  refundOrCredit: { amountCents: number; description: string };
+  refundOutcome: { amountCents: number; description: string };
   queuedVisits: {
     jobId: string;
     scheduledDate: string | null;

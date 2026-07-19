@@ -120,7 +120,7 @@ export default function CancelPlanSheet({
               — billing and visits stop right away.
             </li>
             <li>{preview.finalCharge.description}</li>
-            <li>{preview.refundOrCredit.description}</li>
+            <li>{preview.refundOutcome.description}</li>
             <li>
               {preview.visitsStopping === 0
                 ? "No upcoming visits are waiting to be scheduled."

@@ -16,10 +16,11 @@ import {
 
 const summary = (over: Partial<VisitResolutionSummary> = {}): VisitResolutionSummary => ({
   stopped: 0,
-  keptPaid: 0,
   failed: 0,
-  keptPaidDates: [],
   failedDates: [],
+  refundsOwed: [],
+  retained: [],
+  pendingDecisions: 0,
   ...over,
 });
 
@@ -36,22 +37,27 @@ describe("visitOutcomeSentence", () => {
 });
 
 describe("planCanceledSuccessMessage", () => {
-  it("clean cancel: stopped, no remainder, and emailed only when sent", () => {
-    const msg = planCanceledSuccessMessage(
-      { failed: 0, keptPaid: 0 },
-      { confirmationEmailed: true }
-    );
+  it("clean cancel: stopped, no remainder, and the email line only when sent", () => {
+    const msg = planCanceledSuccessMessage(summary(), {
+      confirmationEmailed: true,
+    });
     expect(msg).toMatch(/won't be billed again/i);
     expect(msg).toMatch(/have stopped/i);
-    expect(msg).toMatch(/emailed you a confirmation/i);
+    expect(msg).toMatch(/confirmation email is on its way/i);
   });
-  it("does not say 'emailed' when the confirmation did not send", () => {
+  it("does not claim an email when the confirmation did not send, and states the 72-hour outcomes", () => {
     const msg = planCanceledSuccessMessage(
-      { failed: 0, keptPaid: 1 },
+      summary({
+        refundsOwed: [{ date: "2026-09-15", amountCents: 12000 }],
+        retained: [{ date: null, amountCents: 9000 }],
+      }),
       { confirmationEmailed: false }
     );
-    expect(msg).not.toMatch(/emailed/i);
-    expect(msg).toMatch(/keep it or refund it/i);
+    expect(msg).not.toMatch(/email/i);
+    // GL-08 R6: exact server outcomes — never a choice, never credit.
+    expect(msg).toMatch(/\$120\.00.*refunded in full/i);
+    expect(msg).toMatch(/\$90\.00 already paid isn't refunded/i);
+    expect(msg).not.toMatch(/your choice|keep it or refund it|credit/i);
   });
 });
 
@@ -86,20 +92,34 @@ describe("confirmationEmailBodyHtml", () => {
     expect(html).not.toMatch(/Your recurring visits have stopped\./);
   });
 
-  it("a kept-paid visit is enumerated as keep-or-refund", () => {
+  it("each paid visit carries its exact 72-hour outcome — never a choice, never credit", () => {
     const html = confirmationEmailBodyHtml(
       "Quarterly Plan",
-      summary({ keptPaid: 1, keptPaidDates: ["2026-09-15"] })
+      summary({
+        refundsOwed: [{ date: "2026-09-15", amountCents: 12000 }],
+        retained: [{ date: "2026-07-20", amountCents: 9000 }],
+      })
     );
-    expect(html).toMatch(/already paid for/i);
     expect(html).toMatch(/September 15, 2026/);
-    expect(html).toMatch(/keep it or refund it/i);
+    expect(html).toMatch(/\$120\.00.*refunded in full/i);
+    expect(html).toMatch(/July 20, 2026/);
+    expect(html).toMatch(/\$90\.00 already paid isn't refunded/i);
+    expect(html).not.toMatch(/keep it or refund it|your choice|credit/i);
+  });
+
+  it("a pending money/service decision is named with the one-business-day promise", () => {
+    const html = confirmationEmailBodyHtml(
+      "Quarterly Plan",
+      summary({ pendingDecisions: 1 })
+    );
+    expect(html).toMatch(/our team is settling/i);
+    expect(html).toMatch(/one business day/i);
   });
 
   it("a fully clean cancel says visits stopped and lists no remainder", () => {
     const html = confirmationEmailBodyHtml("Quarterly Plan", summary({ stopped: 3 }));
     expect(html).toMatch(/Your recurring visits have stopped\./);
     expect(html).not.toMatch(/still on the schedule/i);
-    expect(html).not.toMatch(/already paid for/i);
+    expect(html).not.toMatch(/paid visit/i);
   });
 });

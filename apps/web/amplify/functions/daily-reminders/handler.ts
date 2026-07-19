@@ -589,7 +589,12 @@ export async function reconcilePlanCancellations() {
       limit: 200,
       nextToken: token,
     });
-    for (const cmd of page.data) ids.push(cmd.id);
+    for (const cmd of page.data) {
+      // Settled commands persist as the readable outcome (stage COMPLETE) —
+      // they are done, not open work.
+      if (cmd.stage === "COMPLETE") continue;
+      ids.push(cmd.id);
+    }
     token = page.nextToken;
   } while (token);
 
@@ -599,8 +604,15 @@ export async function reconcilePlanCancellations() {
   for (const id of ids) {
     try {
       const outcome = await resumePlanCancellation(stripe, id, { auto: true });
-      if (outcome.status === "CANCELED") completed++;
-      else stillPending++;
+      // GL-08 R2: a CANCELED plan whose settlement is NOT proved (visits,
+      // full late-charge refund, provider record, or notice outstanding) is
+      // STILL PENDING — the old tally counted it complete every day while its
+      // command stayed open and nothing escalated.
+      if (outcome.status === "CANCELED" && outcome.settled !== false) {
+        completed++;
+      } else {
+        stillPending++;
+      }
     } catch (err) {
       failed++;
       console.error(`reconcilePlanCancellations: could not resume ${id}`, err);

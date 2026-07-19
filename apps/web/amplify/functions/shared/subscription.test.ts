@@ -24,13 +24,25 @@ type Plan = {
 type Job = {
   id: string;
   servicePlanId: string;
+  customerId?: string;
   status: string;
   scheduledDate?: string | null;
   paidAt?: string | null;
+  priceCents?: number | null;
   routeId?: string | null;
   routeOrder?: number | null;
   notes?: string | null;
 };
+
+type TestInvoice = {
+  id: string;
+  jobId?: string | null;
+  status: string;
+  amountCents: number;
+  refundedAmountCents?: number | null;
+  stripePaymentIntentId?: string | null;
+};
+const invoices = new Map<string, TestInvoice>();
 
 const plans = new Map<string, Plan>();
 const customers = new Map<
@@ -65,6 +77,18 @@ const fakeDataClient = {
         nextToken: null,
       }),
       update: (patch: Partial<Job> & { id: string }) => jobUpdate(patch),
+    },
+    Invoice: {
+      list: async ({
+        filter,
+      }: {
+        filter?: { jobId?: { eq: string } };
+      }) => ({
+        data: [...invoices.values()].filter(
+          (inv) => !filter?.jobId || inv.jobId === filter.jobId.eq
+        ),
+        nextToken: null,
+      }),
     },
   },
 };
@@ -133,6 +157,7 @@ beforeEach(() => {
   plans.clear();
   customers.clear();
   jobs.clear();
+  invoices.clear();
   jobUpdate = async (patch) => {
     jobs.set(patch.id, { ...jobs.get(patch.id)!, ...patch });
     return { data: jobs.get(patch.id) ?? null };
@@ -165,9 +190,11 @@ const seedJob = (over: Partial<Job> = {}): Job => {
   const job: Job = {
     id: `j${jobs.size + 1}`,
     servicePlanId: "p1",
+    customerId: "c1",
     status: "UNSCHEDULED",
     scheduledDate: "2026-10-14",
     paidAt: null,
+    priceCents: null,
     routeId: null,
     routeOrder: null,
     notes: "Auto-queued quarterly visit after job j0.",
@@ -402,17 +429,85 @@ describe("cancelPlanBilling resolves the queued visits", () => {
     expect(notes).toMatch(/plan was canceled/i);
   });
 
-  it("leaves a paid-up-front visit alone and reports it for an office decision", async () => {
-    // The funnel's first visit is paid at booking. Money already moved, so
-    // "refund it or honour it" is an office decision, not a webhook's guess.
+  it("a paid visit >72h out is CANCELED with a full-refund Finance case — no keep-or-refund choice", async () => {
+    // GL-08 R4: cancellation is immediate for every visit; the money outcome
+    // is the SERVER-calculated 72-hour rule, prescribed in the owned case.
     seedPlan({ stripeSubscriptionId: "sub_live" });
     const job = seedJob({ status: "SCHEDULED", paidAt: "2026-07-10T12:00:00Z" });
+    invoices.set("i1", {
+      id: "i1",
+      jobId: job.id,
+      status: "PAID",
+      amountCents: 12000,
+    });
 
     const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
 
-    expect(jobs.get(job.id)!.status).toBe("SCHEDULED");
-    expect(result.queuedVisits.needsDecision).toHaveLength(1);
-    expect(result.queuedVisits.needsDecision[0].why).toMatch(/paid up front/i);
+    expect(jobs.get(job.id)!.status).toBe("CANCELED");
+    expect(result.queuedVisits.refundsOwed).toEqual([
+      expect.objectContaining({ jobId: job.id, amountCents: 12000 }),
+    ]);
+    expect(openOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "PAID_VISIT_CANCELLATION",
+        ownerTeam: "FINANCE",
+        resolutionAction: expect.stringMatching(/exact full refund/i),
+      })
+    );
+    const call = openOwnedWork.mock.calls.find((c) =>
+      String((c as unknown as [{ title: string }])[0].title).match(/refund/i)
+    ) as unknown as [{ detail: string }];
+    expect(call[0].detail).toMatch(/ONLY outcome is a full refund/);
+  });
+
+  it("a paid visit ≤72h out is CANCELED with the payment retained per policy — no refund, no credit", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const soon = new Date(Date.now() + 24 * 3600_000).toISOString().slice(0, 10);
+    const job = seedJob({
+      status: "SCHEDULED",
+      scheduledDate: soon,
+      paidAt: "2026-07-10T12:00:00Z",
+    });
+    invoices.set("i1", {
+      id: "i1",
+      jobId: job.id,
+      status: "PAID",
+      amountCents: 9000,
+    });
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(jobs.get(job.id)!.status).toBe("CANCELED");
+    expect(result.queuedVisits.retained).toEqual([
+      expect.objectContaining({ jobId: job.id, amountCents: 9000 }),
+    ]);
+    expect(result.queuedVisits.refundsOwed).toEqual([]);
+    // Retention is the decided policy outcome — no free-choice Finance case.
+    expect(jobs.get(job.id)!.notes).toMatch(/retained per the 72-hour policy/i);
+  });
+
+  it("a payment still in motion on a canceled visit becomes owned Finance work with the policy result spelled out", async () => {
+    seedPlan({ stripeSubscriptionId: "sub_live" });
+    const job = seedJob({ status: "SCHEDULED" });
+    invoices.set("i1", {
+      id: "i1",
+      jobId: job.id,
+      status: "OPEN",
+      amountCents: 12000,
+      stripePaymentIntentId: "pi_1",
+    });
+
+    const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
+
+    expect(jobs.get(job.id)!.status).toBe("CANCELED");
+    expect(result.queuedVisits.needsDecision[0].why).toMatch(/still in motion/i);
+    expect(openOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "PAID_VISIT_CANCELLATION",
+        dedupeKey: `pending-payment:${job.id}`,
+        ownerTeam: "FINANCE",
+      })
+    );
   });
 
   it("leaves an in-progress visit alone — a technician is standing in the yard", async () => {

@@ -226,21 +226,26 @@ describe("customer.subscription.deleted", () => {
     expect(alert.bodyHtml).toContain("2026-10-14");
   });
 
-  it("leaves a paid-up-front visit on the schedule and asks for a decision", async () => {
+  it("cancels a paid visit >72h out and names the full refund owed in the alert", async () => {
+    // GL-08 R4: cancellation is immediate; the paid visit's money outcome is
+    // the server-calculated 72-hour rule (2026-10-14 is far out — full refund),
+    // stated in the office alert and owned by a prescribed Finance case.
     seedPlan();
     const job = seedJob({
       status: "SCHEDULED",
       paidAt: "2026-07-10T12:00:00Z",
+      priceCents: 12000,
     });
 
     await invoke("customer.subscription.deleted", deletedEvent);
 
-    expect(jobs.get(job.id)!.status).toBe("SCHEDULED");
+    expect(jobs.get(job.id)!.status).toBe("CANCELED");
     const [alert] = notifyOffice.mock.calls[0] as unknown as [
       { bodyHtml: string },
     ];
-    expect(alert.bodyHtml).toMatch(/needing a decision/i);
-    expect(alert.bodyHtml).toMatch(/paid up front/i);
+    expect(alert.bodyHtml).toMatch(/refunds owed in full/i);
+    expect(alert.bodyHtml).toContain("$120.00");
+    expect(alert.bodyHtml).not.toMatch(/refund it or honour it/i);
   });
 
   it("stays silent when the CRM's own cancel already handled it", async () => {

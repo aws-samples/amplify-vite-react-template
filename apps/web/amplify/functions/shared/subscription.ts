@@ -2,6 +2,8 @@ import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
 import { notifyOffice } from "./email";
 import { openOwnedWork } from "./ownedWork";
+import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
+import { computeVisitCancellationPolicy } from "./cancellationPolicy";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -201,18 +203,30 @@ export type QueuedVisit = {
 };
 
 export type QueuedVisitsResolution = {
-  /** Auto-canceled: never worked, never paid for — dispatching one is a free service call. */
+  /** Canceled off the schedule (cancellation is immediate for every future
+   *  visit — paid or not; the money outcome is tracked separately below). */
   canceled: QueuedVisit[];
-  /** Deliberately left on the schedule; the office must decide what happens to it. */
+  /** A real-world outcome still needs an office decision (a technician on
+   *  site, or a payment still in motion) — each has an owned case. */
   needsDecision: (QueuedVisit & { why: string })[];
   /** Should have been canceled but the write failed — the caller must tell somebody. */
   failed: QueuedVisit[];
+  /** GL-08: paid visits canceled MORE than 72 hours out — a full
+   *  original-method refund is owed; each carries an owned Finance case with
+   *  the exact server-calculated amount (no other outcome is allowed). */
+  refundsOwed?: (QueuedVisit & { amountCents: number })[];
+  /** GL-08: paid visits canceled at 72 hours or less — per the approved
+   *  policy the payment is retained (no refund, never account credit); named
+   *  to the customer in the confirmation. */
+  retained?: (QueuedVisit & { amountCents: number })[];
 };
 
 const emptyResolution = (): QueuedVisitsResolution => ({
   canceled: [],
   needsDecision: [],
   failed: [],
+  refundsOwed: [],
+  retained: [],
 });
 
 /**
@@ -222,11 +236,16 @@ const emptyResolution = (): QueuedVisitsResolution => ({
  * and it completes unbillable and silent — the not-billing digest only scans
  * ACTIVE plans, so a free visit on a canceled plan triggers nothing anywhere.
  *
- * Auto-cancels queued visits that were never worked and never paid for, with
- * the reason written into the job's notes. Visits money or people are already
- * committed to — paid up front, or a technician mid-visit — are left alone and
- * reported back: "refund it, honour it, or reschedule it" is an office
- * decision, not something a cancel path should guess at.
+ * GL-08 (approved rule): subscription cancellation is effective immediately —
+ * every future visit comes OFF the schedule — and each affected visit
+ * independently receives the server-calculated 72-hour money outcome:
+ * strictly more than 72 hours before its start, a full refund to the original
+ * payment method (an owned Finance case carries the exact amount; no other
+ * outcome is allowed); at exactly 72 hours or less, no refund (the retained
+ * amount is named to the customer). There is no keep-or-refund choice and no
+ * account credit. A technician mid-visit, or a payment still in motion
+ * (pending bank debit), is a real-world outcome the system won't guess:
+ * those get an owned case with the policy result spelled out.
  *
  * Throws only if the schedule cannot be read at all; a single visit whose
  * write fails lands in `failed` so the caller can page a human about it.
@@ -237,6 +256,7 @@ export async function cancelQueuedPlanVisits(
 ): Promise<QueuedVisitsResolution> {
   const client = await dataClient();
   const resolution = emptyResolution();
+  const today = todayEasternDate();
 
   let token: string | null | undefined;
   do {
@@ -269,26 +289,30 @@ export async function cancelQueuedPlanVisits(
         continue;
       }
       if (job.status !== "UNSCHEDULED" && job.status !== "SCHEDULED") continue;
-      if (job.paidAt) {
-        resolution.needsDecision.push({
-          ...visit,
-          why: "it was paid up front — refund it or honour it",
-        });
-        await openOwnedWork({
-          kind: "PAID_VISIT_CANCELLATION",
-          dedupeKey: job.id,
-          title: "Canceled plan still has a paid visit",
-          detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was paid up front before plan ${servicePlanId} was canceled. It remains on the schedule pending a refund-or-honor decision.`,
-          customerId: job.customerId,
-          relatedId: job.id,
-          sourceUrl: `/customers/${job.customerId}`,
-          resolutionAction:
-            "Refund and cancel the visit, or confirm it will be honored; update the schedule and tell the customer.",
-          ownerTeam: "FINANCE",
-        });
-        continue;
-      }
-      const note = `Auto-canceled ${new Date().toISOString().slice(0, 10)}: ${cause}. Taken off the schedule so it cannot dispatch unbilled.`;
+
+      // The money facts BEFORE the schedule write, so the disposition rides on
+      // what was actually paid (net of prior refunds) and what is in motion.
+      const money = await jobMoneyFacts(job.id);
+      const paidCents =
+        money.paidNetCents > 0
+          ? money.paidNetCents
+          : job.paidAt
+            ? Math.max(0, job.priceCents ?? 0)
+            : 0;
+      const policy = computeVisitCancellationPolicy({
+        scheduledDate: job.scheduledDate ?? null,
+        amountPaidCents: paidCents,
+        today,
+      });
+
+      const note = `Auto-canceled ${new Date().toISOString().slice(0, 10)}: ${cause}.${
+        paidCents > 0
+          ? policy.withinFreeWindow
+            ? ` Paid ${(paidCents / 100).toFixed(2)} — full refund owed (more than ${CANCEL_FULL_REFUND_DAYS * 24} hours out).`
+            : ` Paid ${(paidCents / 100).toFixed(2)} — retained per the ${CANCEL_FULL_REFUND_DAYS * 24}-hour policy.`
+          : " Taken off the schedule so it cannot dispatch unbilled."
+      }`;
+      let canceled = false;
       try {
         const { data: updated } = await client.models.Job.update({
           id: job.id,
@@ -297,20 +321,120 @@ export async function cancelQueuedPlanVisits(
           routeOrder: null,
           notes: job.notes ? `${job.notes}\n${note}` : note,
         });
-        if (updated) resolution.canceled.push(visit);
-        else resolution.failed.push(visit);
+        canceled = Boolean(updated);
       } catch (err) {
         console.error(
           `cancelQueuedPlanVisits: could not cancel job ${job.id}`,
           err
         );
+      }
+      if (!canceled) {
         resolution.failed.push(visit);
+        continue;
+      }
+      resolution.canceled.push(visit);
+
+      if (paidCents > 0 && policy.withinFreeWindow) {
+        // >72h: the refund is owed in full — the case PRESCRIBES the exact
+        // server-calculated outcome; it is not a keep-or-refund choice.
+        (resolution.refundsOwed ??= []).push({ ...visit, amountCents: paidCents });
+        await openOwnedWork({
+          kind: "PAID_VISIT_CANCELLATION",
+          dedupeKey: job.id,
+          title: `Refund a canceled plan visit in full: $${(paidCents / 100).toFixed(2)}`,
+          detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was paid ($${(paidCents / 100).toFixed(2)} net of prior refunds) and canceled with plan ${servicePlanId} strictly more than 72 hours before its start. Per the approved policy the ONLY outcome is a full refund of that amount to the original payment method${money.paidInvoiceId ? ` (invoice ${money.paidInvoiceId})` : " (no paid invoice row was found — locate the payment in Stripe)"}. The visit is already off the schedule.`,
+          customerId: job.customerId,
+          relatedId: job.id,
+          sourceUrl: `/customers/${job.customerId}`,
+          resolutionAction:
+            "Issue the exact full refund to the original payment method and confirm it posted. No other disposition (partial refund, account credit, keeping the money) is allowed for this case.",
+          ownerTeam: "FINANCE",
+        });
+      } else if (paidCents > 0) {
+        // ≤72h: the approved policy retains the payment — decided, recorded,
+        // and named to the customer; not silently kept.
+        (resolution.retained ??= []).push({ ...visit, amountCents: paidCents });
+      }
+
+      if (money.inFlightCents > 0) {
+        // A pending (usually bank-debit) payment is still in motion for a
+        // visit that no longer exists — it cannot be voided here and must not
+        // settle into silence. Own it with the policy result spelled out.
+        resolution.needsDecision.push({
+          ...visit,
+          why: "a payment is still in motion — Finance settles it per the 72-hour rule",
+        });
+        await openOwnedWork({
+          kind: "PAID_VISIT_CANCELLATION",
+          dedupeKey: `pending-payment:${job.id}`,
+          title: "A payment is still in motion on a canceled plan visit",
+          detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was canceled with plan ${servicePlanId} while $${(money.inFlightCents / 100).toFixed(2)} is still processing${money.inFlightInvoiceId ? ` (invoice ${money.inFlightInvoiceId})` : ""}. When it settles: ${
+            policy.withinFreeWindow
+              ? "refund it in full — the visit was strictly more than 72 hours away at cancellation"
+              : "it is retained per the 72-hour policy (the visit was 72 hours or less away)"
+          }. If it fails, void the invoice. Do not let it settle into an ordinary receipt.`,
+          customerId: job.customerId,
+          relatedId: job.id,
+          sourceUrl: `/customers/${job.customerId}`,
+          resolutionAction:
+            "Watch the payment to settlement, apply the stated 72-hour outcome exactly once, and record it on the invoice.",
+          ownerTeam: "FINANCE",
+        });
       }
     }
     token = page.nextToken;
   } while (token);
 
   return resolution;
+}
+
+/** Today's calendar date in Eastern time — the clock the 72-hour rule runs on. */
+function todayEasternDate(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+/** The money already attached to one visit: net paid cents (paid minus prior
+ *  refunds), the paid invoice id, and any amount still in motion (an OPEN
+ *  invoice with a live PaymentIntent — the pending-bank-debit case). */
+async function jobMoneyFacts(jobId: string): Promise<{
+  paidNetCents: number;
+  paidInvoiceId: string | null;
+  inFlightCents: number;
+  inFlightInvoiceId: string | null;
+}> {
+  const client = await dataClient();
+  let paidNetCents = 0;
+  let paidInvoiceId: string | null = null;
+  let inFlightCents = 0;
+  let inFlightInvoiceId: string | null = null;
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.Invoice.list({
+      filter: { jobId: { eq: jobId } },
+      limit: 200,
+      nextToken: token,
+    });
+    for (const inv of page.data ?? []) {
+      if (inv.status === "PAID") {
+        const net = Math.max(
+          0,
+          (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0)
+        );
+        if (net > 0 && !paidInvoiceId) paidInvoiceId = inv.id;
+        paidNetCents += net;
+      } else if (inv.status === "OPEN" && inv.stripePaymentIntentId) {
+        inFlightCents += inv.amountCents ?? 0;
+        if (!inFlightInvoiceId) inFlightInvoiceId = inv.id;
+      }
+    }
+    token = page.nextToken;
+  } while (token);
+  return { paidNetCents, paidInvoiceId, inFlightCents, inFlightInvoiceId };
 }
 
 /**

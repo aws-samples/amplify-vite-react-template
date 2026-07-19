@@ -18,7 +18,7 @@ import {
   ZONE_B,
   type Zone,
 } from "../crm-pricing/rateCards";
-import { cancelPlanBilling } from "../shared/subscription";
+import { cancelPlanForCustomer } from "../shared/planCancellation";
 import {
   BOOKING_TERMS_TEXT,
   BOOKING_TERMS_VERSION,
@@ -1427,11 +1427,18 @@ async function cancel(body: Record<string, unknown>) {
 
   try {
     // Stop the recurring billing BEFORE anything else and before we tell the
-    // customer they are cancelled. Marking the plan CANCELED while its Stripe
-    // subscription keeps charging is an unauthorized recurring charge, and the
-    // customer has no way to see it — their visits simply stopped.
+    // customer they are cancelled. GL-08: this goes through the SAME durable
+    // cancellation command as the portal — single-winner claim, exclusive
+    // lease, phase tracking, settlement, and recovery — never a bare engine
+    // call that could race a portal cancel/resume of the same plan. A PENDING
+    // outcome means the command owns it and will finish; the customer's visit
+    // cancel below still proceeds.
     if (booking.servicePlanId) {
-      await cancelPlanBilling(await stripeClient(), booking.servicePlanId);
+      await cancelPlanForCustomer(
+        await stripeClient(),
+        booking.servicePlanId,
+        { reason: "Canceled from the booking cancellation link" }
+      );
     }
     if (refundable && booking.stripePaymentIntentId) {
       const s = await stripeClient();

@@ -666,7 +666,12 @@ async function runWorkVerifier(
       // can't close until billing is inactive, the plan is canceled, every
       // cancelable visit is off the schedule, no charge is in flight, and every
       // charge that posted after the accepted cancellation is refunded.
-      const result = await planCancellationSettled(item.relatedId);
+      // GL-08 R3: the verified close proves settlement against the PROVIDER
+      // too — crm-docs holds the billing key, so the check fails closed only
+      // when Stripe genuinely can't confirm the subscription stopped.
+      const result = await planCancellationSettled(item.relatedId, {
+        stripe: stripeClient(),
+      });
       return { ok: result.settled, message: result.reason };
     }
     default:

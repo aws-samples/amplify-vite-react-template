@@ -610,9 +610,13 @@ export const schema = a.schema({
       lastError: a.string(),
       recoveryWorkItemId: a.string(),
       /** Exclusive drive lease: only the nonce holder may write progress or
-       *  delete on terminal; takeover of an expired lease is one CAS write. */
+       *  settle the command; takeover of an expired lease is one CAS write. */
       leaseNonce: a.string(),
       leaseUntil: a.datetime(),
+      /** GL-08 R5: the persisted terminal — the row is never deleted; stage
+       *  COMPLETE + outcome + resultJson ARE the readable settled record. */
+      outcome: a.string(),
+      resultJson: a.json(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
