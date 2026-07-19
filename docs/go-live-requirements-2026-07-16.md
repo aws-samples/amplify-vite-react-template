@@ -2,14 +2,16 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 22 commits after `f70e621`, from `3717092` through `b64f157`; newest
-implementation commit `b64f157`
+**Latest commit review:** every commit after `f70e621` through `dc39f74`; newest
+implementation commit `dc39f74`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 100 business requirements**, ordered by launch priority and expected impact
+**Remaining:** **23 gates / 88 remaining requirements**, ordered by launch priority and
+expected impact. The count is the number of top-level bullets under the "Remaining requirements"
+headings below — sub-clauses inside one bullet are not counted separately.
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **39.6%**
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **39.6%** (mean of the register column)
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
@@ -181,14 +183,14 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
 | P0 | GL-13 | Policy-vocabulary approvals — engineering closed (`27ca1fb`) | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **12% — Very low (approvals only)** |
 | P0 | GL-15 | Compliance sign-off of encoded rules — engineering closed (`bbcf0c3`) | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **15% — Very low (sign-off + SES wiring)** |
-| P0 | GL-17 | Mosquito sale-path decision — engineering closed (`580d71c`) | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **20% — Low (product decision + ratification)** |
+| P0 | GL-17 | Mosquito sale-path decision — engineering closed (`dc39f74`) | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **20% — Low (product decision + ratification)** |
 | P0 | GL-12 | Copy/vocabulary approvals — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (approvals + backfill)** |
 | P0 | GL-05 | Copy sign-off + policy definitions — engineering closed (`cc76773`) | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (sign-offs)** |
-| P0 | GL-09 | Lifecycle policy sign-off + history export — engineering closed (`82f5fbf`) | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **10% — Very low (sign-off; export rides GL-19)** |
-| P0 | GL-08 | 72-hour copy + refund-workflow sign-off — engineering closed (`2556438`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
+| P0 | GL-09 | Lifecycle policy sign-off + history export — engineering closed (`dc39f74`) | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **10% — Very low (sign-off; export rides GL-19)** |
+| P0 | GL-08 | 72-hour copy + refund-workflow sign-off — engineering closed (`dc39f74`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
 | P0 | GL-07 | Copy sign-off; atomic capacity rides GL-04 — engineering closed (`5b2fb76`) | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **12% — Very low (sign-offs + GL-04 tie)** |
 | P0 | GL-18 | Override-authority + queue-ops sign-off — engineering closed (`f6a34a8`) | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-04/GL-23 ties)** |
-| P0 | GL-04 | Travel-model calibration + data entry — engineering closed (`b64f157`) | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
+| P0 | GL-04 | Travel-model calibration + data entry — engineering closed (`dc39f74`) | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
 | P0 | GL-06 | Finish honest, race-safe processing and failed payments | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **80% — High** |
 | P0 | GL-16 | Prompt-governed AI pricing with rollback | CEO + Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **78% — High** |
 | P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented | **52% — Medium** |
@@ -211,9 +213,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 **Business outcome:** A role change or departure cannot leave a person with unintended access, and
 leadership can retrieve the complete record of who changed access, why, and what work was reassigned.
 
-**Status:** engineering closed (`3717092`); the single-winner/lease mechanics its closure relied on
-were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
-remediation (`d546c10`). Remaining items are non-software.
+**Engineering:** closed (`3717092`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -228,9 +228,7 @@ remediation (`d546c10`). Remaining items are non-software.
 **Business outcome:** A technician sees only the minimum data for legitimate current or
 business-approved historical work, and access disappears when assignment or employment ends.
 
-**Status:** engineering closed (`27ca1fb`); the single-winner/lease mechanics its closure relied on
-were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
-remediation (`d546c10`). Remaining items are non-software.
+**Engineering:** closed (`27ca1fb`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -247,9 +245,7 @@ remediation (`d546c10`). Remaining items are non-software.
 **Business outcome:** Every issued service report and correction is an accurate, durable, correctly
 authored legal record with a truthful, non-duplicating customer-delivery state.
 
-**Status:** engineering closed (`bbcf0c3`); the single-winner/lease mechanics its closure relied on
-were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
-remediation (`d546c10`). Remaining items are non-software.
+**Engineering:** closed (`bbcf0c3`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -267,16 +263,7 @@ remediation (`d546c10`). Remaining items are non-software.
 **Business outcome:** Seasonal services bill and schedule exactly as customers were told, and every visit
 is assigned to a technician with a current license record without hard-coding changing state law.
 
-**Status:** engineering closed (`580d71c`); the single-winner/lease mechanics its closure relied on
-were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
-remediation (`d546c10`). The re-audit REOPENED this gate's engineering and `d546c10` corrected it: a
-licence-record read failure now fails CLOSED everywhere (a failed read sells no capacity and assigns
-no work — never a legacy-field fallback that could resurrect a revoked number); historical
-authorship never falls back to the legacy number once records exist; a seasonal-ledger write failure
-is owned OBLIGATION_RECOVERY work, not swallowed bookkeeping; and at most one scheduled-or-done
-visit per plan-month is enforced atomically (the obligation row is the month's mutex, claimed by the
-recurring engine, office job creation, and assignment, released when a visit cancels or moves).
-Remaining items are non-software.
+**Engineering:** closed (`dc39f74`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -297,12 +284,7 @@ Remaining items are non-software.
 **Business outcome:** A technician is dispatched only with the service-specific facts and approved scope
 needed to complete the visit safely, and can exit an unperformable visit without inventing a workaround.
 
-**Status:** engineering closed (`5c8c6ef`); the single-winner/lease mechanics its closure relied on
-were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
-remediation (`d546c10`). The re-audit REOPENED this gate's engineering and `d546c10` corrected it: a
-missing GOOGLE_ROUTES_API_KEY now REFUSES dispatch with the configuration named (fail closed)
-instead of silently skipping the routability proof; ALLOW_UNVERIFIED_ROUTES=true is the explicit
-local-dev-only escape, never set in production. Remaining items are non-software.
+**Engineering:** closed (`5c8c6ef`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -324,9 +306,7 @@ local-dev-only escape, never set in production. Remaining items are non-software
 customer commitment or one visible, verified refund/recovery case — even when execution stops between
 steps.
 
-**Status:** engineering closed (`cc76773`); the single-winner/lease mechanics its closure relied on
-were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
-remediation (`d546c10`). Remaining items are non-software.
+**Engineering:** closed (`cc76773`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -344,15 +324,7 @@ remediation (`d546c10`). Remaining items are non-software.
 **Business outcome:** Customer status, billing, access, scheduled work, and customer communication never
 disagree, and an employee always sees the real outcome of deactivation or reactivation.
 
-**Status:** engineering closed (`82f5fbf`, hardened by the `d546c10` remediation). Deactivation and
-reactivation run as one durable `CustomerLifecycleCommand` claimed before any provider effect, with a
-persisted server-computed inventory, per-stage progress under an exclusive fenced lease, serialized
-opposite requests, resumable PARTIALs under the same key, owned paid/in-progress visit decisions, a
-per-reason policy-driven tracked customer notice, persisted-result completion screens (Complete /
-Already complete / Still in progress / Needs recovery — never success on partial, in-progress, or
-unaudited), the LIFECYCLE_SETTLED verified close, a daily stale-command escalation, and fully paged
-history that shows read failures. The immutable record is a completion requirement: a lost audit or
-notice keeps the command PARTIAL. Remaining items are non-software plus one export view.
+**Engineering:** closed (`dc39f74`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -374,19 +346,7 @@ recovery policy.
 **Business outcome:** A customer's online cancellation is a durable instruction, and every customer
 message matches the actual billing, plan, schedule, and delivery state.
 
-**Status:** engineering closed (`2556438`, on the `d546c10` exclusive-lease remediation). The command
-owns the request through phases to a PERSISTED terminal (the row is the readable outcome, never
-deleted); a CANCELED-but-unsettled plan is repaired — residual visits swept, the confirmation re-sent
-or adopted from the per-plan outbox, settlement re-proved — never short-circuited, from both entry
-points, the resume, and the (now truthfully-counting) daily sweep. Settled is proved against BOTH
-Stripe and CRM (provider subscription actually canceled, fail closed when unverifiable), every late
-charge must be refunded IN FULL, the late-charge window is judged by payment time with the durable
-command's requestedAt fallback, and no refund is promised before the Finance case that guarantees it
-durably exists. Every future visit cancels immediately with the server-calculated 72-hour money
-outcome (>72h: full original-method refund via a Finance case that PRESCRIBES the exact amount; ≤72h:
-no refund, named to the customer; in-flight payments get their own prescribed case) — no keep-or-refund
-choice and no account credit anywhere in preview, email, message, or office alert; balances are net of
-refunds. The public /cancel link routes through the same durable command.
+**Engineering:** closed (`dc39f74`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -406,21 +366,7 @@ refunds. The public /cancel link routes through the same durable command.
 **Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
 capacity, route, audit, and customer-notification consequences in one guided action.
 
-**Status:** engineering closed (`5b2fb76`, on the `d546c10` exclusive-lease remediation).
-Cancellation reconciles EVERY invoice (exact multi-invoice refund, read-back-verified voids of every
-open bill; a failed void is a tracked PARTIAL with an owned case, never a fall-through Complete);
-COMPLETE requires money exact + invoices reconciled + notice accepted + audit recorded, the command is
-released only then, and a canceled visit with a surviving command RE-DRIVES on resume (checkpoints
-skip finished money; the notice adopts a provider-accepted send from the per-visit email log; the
-audit re-records); a history-less replay reports needs-recovery, never a fabricated Sent/Complete; a
-processing bank debit keeps the command open with the 72-hour settlement outcome prescribed in its
-Finance case; a bounced notice reopens the change as owned work. Reschedule carries the employee's
-intended destination and identity on the durable command, strands with an owned case and resumes with
-the SAME stored intent under the ORIGINAL actor, and a dated move with no technician stays visibly
-pending assignment behind a CONFIRMED staffing case — never published as a clean schedule or a
-confirmed-date notice. The 72-hour rule is hour-exact from the visit's scheduled start in
-America/New_York, judged from the first accepted request; MANAGER_EXCEPTION, the "refund or credit"
-wording, and the "Account credit applied" close reason are removed.
+**Engineering:** closed (`5b2fb76`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -440,20 +386,7 @@ wording, and the "Account credit applied" close reason are removed.
 obligation is true, while a routine employee can complete ordinary recovery work without CEO-level
 authority or an invented workaround.
 
-**Status:** engineering closed (`f6a34a8`, with the GL-07/GL-08/GL-09 closures supplying the repaired
-resume/verifier substrate). Verified closes now prove the exact obligation: per-visit money reconciles
-EVERY invoice to one durable disposition (full refund, void, or the recorded 72-hour retained-fee
-outcome — canceled-visit and partial-refund shortcuts are gone); visit-change recovery has a verified
-close covering money + schedule + accepted notice + audit; missing-contact requires an unsuppressed
-working address AND an accepted message since the case opened; staffing checks weekday + route
-capacity on top of active/licensed/route-agreement; plan settlement includes the customer's final
-word; mis-filed cases (unpaid stranded visits, plan-level read failures) now carry kinds whose
-verifiers can inspect them. Routine staff have bounded actions: claim/RELEASE/reassign, the
-consent-evidenced suppression lift (recorded SUPPRESSION_LIFTED event), cause-fit paid-booking
-actions (no Retry on orphan/outage rows), and the resume actions from GL-07/08/09. Money-verified
-closes are Finance/Owner-gated. Claim, resolve, rollback, and offboarding-release are single-winner
-guarded writes — two employees can never both own or both complete one case. The "Account credit
-applied" close reason is removed. Lead follow-ups close only on a verifiably landed lead fact.
+**Engineering:** closed (`f6a34a8`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
@@ -473,24 +406,16 @@ authority.
 **Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
 cannot buy the same last unit of capacity.
 
-**Status:** engineering closed (`b64f157`). One shared minute rule (Mon–Fri 8–5 Eastern, 540
-min/eligible technician; weekends, closures, PTO, inactive, and licence problems fail-closed all
-remove capacity; zero eligible technicians = zero sellable dates, no floor) is used by the funnel
-calendar, checkout, dispatch, and office reschedules. Checkout ATOMICALLY claims the day's minutes on
-a guarded ledger BEFORE any chargeable intent — exactly one of two concurrent buyers of the last
-minutes wins; card success consumes the claim into the booked job, an accepted pending bank debit
-extends it through settlement, failure releases it, and the daily sweep expires crashed checkouts and
-heals the ledger from ground truth. Office moves take the same atomic day claim. Operations maintain
-private technician base locations, reasoned per-day PTO/base overrides, and company closures, and the
-Schedule board's Availability panel shows exactly why a date is or isn't sellable.
+**Engineering:** closed (`dc39f74`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
 
 **Remaining requirements:**
 
-- Operations enters the real operating data: each technician's base location, known closures/holidays
-  (the federal-holiday list is not auto-seeded — enter them as closures), and PTO as it arises.
-- Travel-minute calibration: a visit's travel allowance uses its Google Routes dispatch proof when one
-  exists and a 30-minute default before assignment. Operations should confirm the default (and the
-  8-stops-per-tech secondary bound) against the first weeks of real routes.
+- Operations enters the real operating data: each technician's private base location, known
+  closures/holidays (the federal-holiday list is not auto-seeded — enter them as closures), and PTO
+  as it arises. Until a base is entered, a technician routes from HQ by design.
+- Operations ratifies the quote-time insertion estimate (a new stop's marginal travel = the real
+  Routes leg to its nearest same-window stop, both ways) against the first weeks of real routes; the
+  nightly rebuild already re-measures every slot as base → stops in route order → base.
 - The pending-bank-debit claim converts into the visible "Payment pending" scheduled visit in GL-06's
   processing flow (the slot is already held and counted today; GL-06 adds the booked-job surface).
 
