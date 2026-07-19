@@ -4,6 +4,7 @@ import { notifyOffice } from "./email";
 import { openOwnedWork } from "./ownedWork";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { computeVisitCancellationPolicy } from "./cancellationPolicy";
+import { releaseScheduledMinutes, visitMinutes } from "./capacity";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -333,6 +334,13 @@ export async function cancelQueuedPlanVisits(
         continue;
       }
       resolution.canceled.push(visit);
+      // GL-04: the canceled visit's minutes go back to the day's ledger.
+      if (job.scheduledDate) {
+        await releaseScheduledMinutes(
+          job.scheduledDate,
+          visitMinutes(job as { propertyClass?: string | null; dispatchDriveMinutes?: number | null })
+        ).catch(() => undefined);
+      }
 
       if (paidCents > 0 && policy.withinFreeWindow) {
         // >72h: the refund is owed in full — the case PRESCRIBES the exact

@@ -20,11 +20,15 @@ import {
 } from "../crm-pricing/rateCards";
 import { cancelPlanForCustomer } from "../shared/planCancellation";
 import {
+  claimCapacity,
+  DEFAULT_TRAVEL_MINUTES,
+} from "../shared/capacity";
+import {
   BOOKING_TERMS_TEXT,
   BOOKING_TERMS_VERSION,
   CANCEL_FULL_REFUND_DAYS,
 } from "../shared/bookingTerms";
-import { buildDayMatrix, type DayQuote } from "./availability";
+import { buildDayMatrix, ONSITE_MINUTES, type DayQuote } from "./availability";
 import {
   enqueueRateResearch,
   areaKeyFor,
@@ -1271,6 +1275,34 @@ async function book(
     } catch {
       /* already canceled/expired — fine */
     }
+  }
+
+  // GL-04 R1: atomically CLAIM the day's minutes for THIS payment attempt
+  // BEFORE any chargeable intent exists. Exactly one of two concurrent
+  // checkouts for the last minutes wins; the loser is told the day sold out
+  // before their card is ever chargeable. The claim is durable — success
+  // consumes it into the booked job, a pending bank debit extends it, and
+  // failure/abandonment releases it (the sweep owns crashed checkouts).
+  const onsiteMinutes = ONSITE_MINUTES[booking.service ?? ""] ?? 60;
+  const capacityClaim = await claimCapacity({
+    claimKey: booking.id,
+    date,
+    minutes: onsiteMinutes + DEFAULT_TRAVEL_MINUTES,
+    holdReason: `checkout for ${booking.email}`,
+  });
+  if (!capacityClaim.ok) {
+    if (existing) {
+      try {
+        await s.paymentIntents.cancel(existing.id);
+      } catch {
+        /* already canceled/expired — fine */
+      }
+    }
+    throw new HttpError(409, {
+      error: capacityClaim.soldOut
+        ? "That day just sold out — pick another day from a fresh quote."
+        : capacityClaim.message,
+    });
   }
 
   const customerId =

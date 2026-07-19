@@ -14,6 +14,11 @@ import { assertTechnicianCompliance } from "./compliance";
 import { licenseFactsFor } from "./licenses";
 import { releaseMonthForJob } from "./obligations";
 import {
+  releaseScheduledMinutes,
+  reserveScheduledMinutes,
+  visitMinutes,
+} from "./capacity";
+import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
 } from "./cancellationPolicy";
@@ -95,6 +100,8 @@ type JobRow = {
   routeId?: string | null;
   technicianId?: string | null;
   paidAt?: string | null;
+  propertyClass?: string | null;
+  dispatchDriveMinutes?: number | null;
 };
 
 type InvoiceRow = {
@@ -819,6 +826,14 @@ async function driveHeldVisitCancel(
     stage: moneyPending ? "PENDING" : "CANCELED",
   });
 
+  // GL-04: a canceled visit gives its day's minutes back to the shared
+  // capacity ledger.
+  if (job.scheduledDate) {
+    await releaseScheduledMinutes(job.scheduledDate, visitMinutes(job)).catch(
+      () => undefined
+    );
+  }
+
   // GL-17: a canceled seasonal visit gives its month back (SCHEDULED → DUE),
   // guarded on the month still belonging to THIS job — the month can be
   // re-booked without tripping the one-visit-per-month mutex.
@@ -1464,6 +1479,18 @@ export async function rescheduleVisit(args: {
         `That route is full (${stops} of ${STOPS_PER_TECH} stops). Pick another day or technician.`
       );
     }
+    // GL-04: the ATOMIC day claim — one guarded add on the shared minute
+    // ledger; two simultaneous office moves cannot both take the last
+    // minutes (the stop count above is a coarse secondary bound).
+    if (newDate !== priorScheduledDate) {
+      const reserved = await reserveScheduledMinutes(
+        newDate!,
+        visitMinutes(job)
+      );
+      if (!reserved.ok) {
+        throw new Error(reserved.message);
+      }
+    }
 
     const { data, errors } = await client.models.Job.update({
       id: job.id,
@@ -1481,6 +1508,11 @@ export async function rescheduleVisit(args: {
     }
     mutated = true;
     assignedToRoute = true;
+    if (priorScheduledDate && newDate !== priorScheduledDate) {
+      await releaseScheduledMinutes(priorScheduledDate, visitMinutes(job)).catch(
+        () => undefined
+      );
+    }
   } else {
     // GL-07 R4: a dated move with no technician is NEVER published as a clean
     // SCHEDULED — the owned staffing case is CONFIRMED FIRST (a case that
@@ -1527,6 +1559,25 @@ export async function rescheduleVisit(args: {
       );
     }
     mutated = true;
+    // A pool move still occupies its target day (pending assignment counts —
+    // the customer was promised the date window). Atomic reserve + release of
+    // the prior day, mirroring the assignment path.
+    if (newDate && newDate !== priorScheduledDate) {
+      const reserved = await reserveScheduledMinutes(newDate, visitMinutes(job));
+      if (!reserved.ok) {
+        // The schedule already moved — surface, don't strand: the UNSTAFFED
+        // case owns the day fit as part of assignment.
+        console.warn(
+          `rescheduleVisit: pool move to ${newDate} exceeds the day's minutes`,
+          job.id
+        );
+      }
+    }
+    if (priorScheduledDate && newDate !== priorScheduledDate) {
+      await releaseScheduledMinutes(priorScheduledDate, visitMinutes(job)).catch(
+        () => undefined
+      );
+    }
   }
 
   const { data: customer } = await client.models.Customer.get({

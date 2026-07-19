@@ -123,6 +123,10 @@ type SaveTechnicianArgs = {
   active: boolean;
   licenseNumber?: string | null;
   licenseExpiresOn?: string | null;
+  baseStreet?: string | null;
+  baseCity?: string | null;
+  baseState?: string | null;
+  baseZip?: string | null;
 };
 
 type SaveTechnicianLicenseArgs = {
@@ -437,6 +441,11 @@ async function saveTechnician(args: SaveTechnicianArgs) {
     active: args.active,
     licenseNumber: args.licenseNumber?.trim() || undefined,
     licenseExpiresOn: args.licenseExpiresOn?.trim() || undefined,
+    // GL-04: the private office-managed travel base (empty = HQ default).
+    baseStreet: args.baseStreet?.trim() || undefined,
+    baseCity: args.baseCity?.trim() || undefined,
+    baseState: args.baseState?.trim() || undefined,
+    baseZip: args.baseZip?.trim() || undefined,
   };
   assertTechnicianCanBeSaved(fields);
 

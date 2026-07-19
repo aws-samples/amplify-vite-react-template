@@ -1,6 +1,7 @@
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
 import { claimMonthForJob, markObligation } from "./obligations";
+import { noteScheduledMinutes, visitMinutes } from "./capacity";
 import {
   firstWeekdayOf,
   monthKeyAfter,
@@ -183,6 +184,13 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
         customer?.groupId ?? undefined
       ),
     });
+    // GL-04: the auto-queued visit occupies its target day on the shared
+    // minute ledger (system-created — never refused; overload shows on the
+    // Operations readout and the reconcile keeps the ledger honest).
+    await noteScheduledMinutes(
+      dueDate,
+      visitMinutes({ propertyClass: null, dispatchDriveMinutes: null })
+    ).catch(() => undefined);
     console.log(
       `Queued next ${plan.serviceFrequency} visit for plan ${job.servicePlanId} on ${dueDate}`
     );

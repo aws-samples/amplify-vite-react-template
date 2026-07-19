@@ -61,6 +61,13 @@ import {
   resumePlanCancellation,
 } from "../shared/planCancellation";
 import { resumeVisitChange, STOPS_PER_TECH } from "../shared/visitChange";
+import {
+  committedMinutesOn,
+  dayCapacityMinutes,
+  releaseScheduledMinutes,
+  reserveScheduledMinutes,
+  visitMinutes,
+} from "../shared/capacity";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
 import { isServiceMonth } from "../shared/season";
@@ -382,6 +389,27 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return resumeVisitChange(stripeClient(), event.arguments.jobId!, {
         auto: false,
       });
+    }
+    case "capacityDayFacts": {
+      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
+        throw new Error("Office role required");
+      }
+      const date = String(event.arguments.date ?? "");
+      const [cap, committed] = await Promise.all([
+        dayCapacityMinutes(date),
+        committedMinutesOn(date),
+      ]);
+      return {
+        date,
+        capMinutes: cap.capMinutes,
+        eligibleTechs: cap.eligibleTechs,
+        committedMinutes: committed.minutes,
+        scheduledVisits: committed.jobs,
+        liveCheckoutClaims: committed.claims,
+        remainingMinutes: Math.max(0, cap.capMinutes - committed.minutes),
+        sellable: cap.capMinutes > committed.minutes,
+        reasons: cap.reasons,
+      };
     }
     case "updateOwnedWork": {
       if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
@@ -1952,6 +1980,19 @@ async function updateJobSchedule(
     ) {
       throw new Error("The selected route does not belong to that technician and date");
     }
+    // GL-04: ONE atomic day claim on the shared minute ledger — two
+    // simultaneous assigns cannot both take the day's last minutes.
+    const priorDate = job.scheduledDate ?? null;
+    if (args.scheduledDate !== priorDate) {
+      const reserved = await reserveScheduledMinutes(
+        args.scheduledDate,
+        visitMinutes({
+          propertyClass: job.propertyClass,
+          dispatchDriveMinutes: routeProof?.driveMinutes ?? job.dispatchDriveMinutes,
+        })
+      );
+      if (!reserved.ok) throw new Error(reserved.message);
+    }
     const { data, errors } = await client.models.Job.update({
       id: job.id,
       routeId: route.id,
@@ -1967,6 +2008,12 @@ async function updateJobSchedule(
         : {}),
     });
     if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not assign job");
+    if (priorDate && args.scheduledDate !== priorDate) {
+      await releaseScheduledMinutes(
+        priorDate,
+        visitMinutes(job)
+      ).catch(() => undefined);
+    }
     return finish(
       { jobId: data.id },
       {
@@ -2036,6 +2083,13 @@ async function updateJobSchedule(
         jobId: job.id,
         note: "Visit canceled — the month is owed again.",
       }).catch(() => undefined);
+    }
+    // GL-04: the canceled visit's minutes go back to the shared day ledger.
+    if (job.scheduledDate) {
+      await releaseScheduledMinutes(
+        job.scheduledDate,
+        visitMinutes(job)
+      ).catch(() => undefined);
     }
     const { data, errors } = await client.models.Job.update({
       id: job.id,

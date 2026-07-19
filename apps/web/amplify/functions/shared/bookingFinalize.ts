@@ -3,6 +3,7 @@ import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
 import { casTakeover, casFencedDelete } from "./atomicLock";
+import { consumeCapacityClaim } from "./capacity";
 import { isSeasonalPlanName, monthKeyOf, isServiceMonth, SEASONAL_SERVICE_MONTHS } from "./season";
 import { ensureObligation } from "./obligations";
 import { customerAccessGroups } from "./dynamicGroups";
@@ -189,6 +190,10 @@ export async function finalizeBooking(opts: {
       opts.paymentIntentId,
       opts.paymentMethodId ?? null
     );
+    // GL-04: the checkout's capacity claim is CONSUMED into the booked job —
+    // the scheduled visit carries the minutes from here on, so the claim row
+    // goes away without giving them back.
+    await consumeCapacityClaim(opts.bookingRequestId);
     // The booking is whole. If a prior attempt had opened the paid-not-finalized
     // exception, this success closes it — the queue must not keep showing a
     // problem the retry already solved.

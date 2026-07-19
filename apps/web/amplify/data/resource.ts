@@ -810,6 +810,81 @@ export const schema = a.schema({
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
     ]),
 
+  /**
+   * GL-04 — a technician's one-day availability exception: PTO (the day
+   * contributes no capacity) or a reasoned base-location override for that
+   * day. Office-maintained with a REQUIRED reason; the field app and portal
+   * never read these.
+   */
+  TechnicianDayException: a
+    .model({
+      technicianId: a.id().required(),
+      date: a.date().required(),
+      /** PTO | BASE_OVERRIDE (flat string against the tsc depth ceiling). */
+      kind: a.string().required(),
+      reason: a.string().required(),
+      note: a.string(),
+      overrideStreet: a.string(),
+      overrideCity: a.string(),
+      overrideState: a.string(),
+      overrideZip: a.string(),
+    })
+    .secondaryIndexes((index) => [
+      index("technicianId").sortKeys(["date"]),
+      index("date"),
+    ])
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])]),
+
+  /** GL-04 — a company holiday/closure (id = YYYY-MM-DD): the whole day
+   *  sells and dispatches nothing. Office-maintained, reason required. */
+  CompanyClosure: a
+    .model({
+      date: a.date().required(),
+      reason: a.string().required(),
+    })
+    .secondaryIndexes((index) => [index("date")])
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])]),
+
+  /**
+   * GL-04 — the per-day capacity ledger (id = YYYY-MM-DD). committedMinutes
+   * is maintained by ATOMIC guarded increments (atomicLock): a claim or an
+   * office move fits only if the guarded add's condition holds, so two
+   * concurrent purchases or moves can never both take the last minutes. The
+   * daily reconcile recomputes it from the jobs + live claims (drift heals).
+   * Lambda-written; browser read for the Operations "why is this day (not)
+   * sellable" readout.
+   */
+  CapacityDay: a
+    .model({
+      date: a.date().required(),
+      committedMinutes: a.integer(),
+      reconciledAt: a.datetime(),
+    })
+    .secondaryIndexes((index) => [index("date")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
+  /**
+   * GL-04 — one checkout attempt's atomic capacity claim (id = bookingId).
+   * Created at checkout BEFORE the payment attempt; its minutes ride the
+   * CapacityDay ledger, so the customer's "your slot is held" is a fact. Card
+   * success consumes it into the booked job; an accepted pending bank debit
+   * extends it (the slot stays counted while money settles); failure or
+   * abandonment releases it (the expiry sweep owns crashed checkouts).
+   */
+  CapacityClaim: a
+    .model({
+      date: a.date().required(),
+      minutes: a.integer().required(),
+      expiresAt: a.datetime().required(),
+      holdReason: a.string(),
+    })
+    .secondaryIndexes((index) => [index("date")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
   // Best-effort per-IP throttle for the public quote endpoint (id =
   // "<ip>#<hour>"). Not a hard lock — it exists so a single abusive source
   // can't spin billed AI research and Routes calls unbounded.
@@ -987,6 +1062,13 @@ export const schema = a.schema({
       // never surfaced to a peer TECH through the raw Technician model.
       licenseNumber: a.string().authorization(fieldOfficeOnly),
       licenseExpiresOn: a.date().authorization(fieldOfficeOnly),
+      /** GL-04: the technician's private office-managed starting/ending base
+       *  for travel-time capacity. Office-only — never surfaced to peers or
+       *  customers; the field app never receives it. Empty = the HQ default. */
+      baseStreet: a.string().authorization(fieldOfficeOnly),
+      baseCity: a.string().authorization(fieldOfficeOnly),
+      baseState: a.string().authorization(fieldOfficeOnly),
+      baseZip: a.string().authorization(fieldOfficeOnly),
       routes: a.hasMany("Route", "technicianId"),
       jobs: a.hasMany("Job", "technicianId"),
       serviceReports: a.hasMany("ServiceReport", "technicianId"),
@@ -1869,10 +1951,27 @@ export const schema = a.schema({
       active: a.boolean().required(),
       licenseNumber: a.string(),
       licenseExpiresOn: a.date(),
+      /** GL-04: the private office-managed base for travel-time capacity. */
+      baseStreet: a.string(),
+      baseCity: a.string(),
+      baseState: a.string(),
+      baseZip: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-04 — the Operations "why is this date (not) sellable" readout: the
+   * day's minute capacity from the live rule (weekday, closures, PTO,
+   * licences, roster), the committed minutes, and every removal reason.
+   */
+  capacityDayFacts: a
+    .query()
+    .arguments({ date: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
 
   /**
    * Move a customer into/out of a CustomerGroup, rewriting accessGroups on

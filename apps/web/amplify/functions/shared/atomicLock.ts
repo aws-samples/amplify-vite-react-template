@@ -52,7 +52,13 @@ export type LockCondition =
   /** The field is missing or not any of the given values. */
   | { kind: "fieldNotIn"; field: string; values: (string | number)[] }
   /** The field was never written or holds null (e.g. "unclaimed"). */
-  | { kind: "fieldMissingOrNull"; field: string };
+  | { kind: "fieldMissingOrNull"; field: string }
+  /** The numeric field is missing (treated as 0 via if_not_exists semantics)
+   *  or at most the given value — the capacity-fit guard. */
+  | { kind: "fieldAtMostOrMissing"; field: string; value: number }
+  /** The numeric field exists and is at least the given value — the
+   *  never-go-negative guard on decrements. */
+  | { kind: "fieldAtLeast"; field: string; value: number };
 
 export type LockSets = Record<string, string | number | boolean | null>;
 
@@ -72,7 +78,11 @@ export type LockStore = {
     id: string,
     sets: LockSets,
     conditions: LockCondition[],
-    opts?: { bumpField?: string }
+    opts?: {
+      bumpField?: string;
+      /** Atomic numeric adds in the same guarded write (negative = decrement). */
+      addFields?: Record<string, number>;
+    }
   ): Promise<LockUpdateResult>;
   /** One atomic guarded delete. */
   conditionalDelete(
@@ -166,6 +176,14 @@ function buildCondition(
         values[`:c${i}`] = null;
         parts.push(`(attribute_not_exists(${n}) OR ${n} = :c${i})`);
         break;
+      case "fieldAtMostOrMissing":
+        values[`:c${i}`] = c.value;
+        parts.push(`(attribute_not_exists(${n}) OR ${n} <= :c${i})`);
+        break;
+      case "fieldAtLeast":
+        values[`:c${i}`] = c.value;
+        parts.push(`${n} >= :c${i}`);
+        break;
     }
   });
   return parts.join(" AND ");
@@ -206,6 +224,15 @@ function dynamoStore(): LockStore {
         values[":bumpZero"] = 0;
         values[":bumpOne"] = 1;
         setParts.push(`#bump = if_not_exists(#bump, :bumpZero) + :bumpOne`);
+      }
+      if (opts?.addFields) {
+        Object.entries(opts.addFields).forEach(([field, delta], j) => {
+          const n = `#a${j}`;
+          names[n] = field;
+          values[`:aZero${j}`] = 0;
+          values[`:a${j}`] = delta;
+          setParts.push(`${n} = if_not_exists(${n}, :aZero${j}) + :a${j}`);
+        });
       }
       const update =
         `SET ${setParts.join(", ")}` +
@@ -376,6 +403,17 @@ export async function casGuardedDelete(
   return store().conditionalDelete(model, id, conditions);
 }
 
+/** A guarded ATOMIC numeric add (e.g. the capacity ledger): the adds land
+ *  only while every condition holds, evaluated with the write. */
+export async function casGuardedAdd(
+  model: string,
+  id: string,
+  addFields: Record<string, number>,
+  conditions: LockCondition[]
+): Promise<LockUpdateResult> {
+  return store().conditionalUpdate(model, id, {}, conditions, { addFields });
+}
+
 /** A guarded state transition that is not lease-shaped (e.g. a seasonal
  *  month's DUE → SCHEDULED claim, conditioned on it still being DUE). */
 export async function casGuardedUpdate(
@@ -429,6 +467,12 @@ export function memoryLockStore(
         case "fieldMissingOrNull":
           if (v !== undefined && v !== null) return false;
           break;
+        case "fieldAtMostOrMissing":
+          if (v !== undefined && v !== null && Number(v) > c.value) return false;
+          break;
+        case "fieldAtLeast":
+          if (v === undefined || v === null || Number(v) < c.value) return false;
+          break;
       }
     }
     return true;
@@ -449,6 +493,11 @@ export function memoryLockStore(
       row.updatedAt = new Date().toISOString();
       if (opts?.bumpField) {
         row[opts.bumpField] = (Number(prior[opts.bumpField]) || 0) + 1;
+      }
+      if (opts?.addFields) {
+        for (const [field, delta] of Object.entries(opts.addFields)) {
+          row[field] = (Number(prior[field]) || 0) + delta;
+        }
       }
       return { ok: true, prior };
     },

@@ -1,10 +1,6 @@
 import { dataClient } from "../shared/dataClient";
+import { dayCapacityMap } from "../shared/capacity";
 import { driveMatrixFrom } from "../shared/driveTime";
-import {
-  licenseFactsFromRecords,
-  licenseRecordsFor,
-  type LicenseRecordLike,
-} from "../shared/licenses";
 import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
 
 /**
@@ -27,7 +23,7 @@ import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
 const STOPS_PER_TECH = 8;
 const WORKDAY_MINUTES = 8 * 60;
 const AVG_HOP_MINUTES = 20; // typical drive between consecutive stops
-const ONSITE_MINUTES: Record<string, number> = {
+export const ONSITE_MINUTES: Record<string, number> = {
   GENERAL_PEST: 90,
   WASP_NEST: 60,
   RODENT: 90,
@@ -128,28 +124,18 @@ export async function buildDayMatrix(opts: {
       )
     ),
   ]);
-  // GL-17: capacity counts only technicians LICENSED ON THAT DAY — an expiring
-  // licence removes funnel capacity from its expiry date forward, and zero
-  // eligible technicians means zero sellable dates (no floor of one: a day
-  // nobody can legally work is not for sale).
-  const activeTechs = techsRes.data.filter((t) => t.active);
-  const recordsByTech = new Map<string, LicenseRecordLike[] | null>();
-  await Promise.all(
-    activeTechs.map(async (t) => {
-      recordsByTech.set(t.id, await licenseRecordsFor(t.id));
-    })
-  );
-  const licensedCountOn = (date: string): number =>
-    activeTechs.filter((t) => {
-      const records = recordsByTech.get(t.id) ?? null;
-      // GL-17: a licence-records read failure fails CLOSED — that technician
-      // sells no capacity, rather than the legacy fields resurrecting a
-      // possibly-revoked number during an outage.
-      if (records === null) return false;
-      return licenseFactsFromRecords(records, t, date).current;
-    }).length;
+  // GL-04: the ONE shared capacity rule — minute-based Monday–Friday 8–5
+  // Eastern per eligible technician, with weekends, company closures, PTO,
+  // inactive status, and licence problems (fail closed) all removing
+  // capacity. Zero eligible technicians = zero sellable dates (no floor).
+  void techsRes;
+  const capacityFacts = await dayCapacityMap(days);
+  const capMinutesOn = (date: string): number =>
+    capacityFacts.get(date)?.capMinutes ?? 0;
+  // The stops-per-tech ceiling remains as a coarse secondary bound so a day
+  // of zero-travel stops still cannot exceed a workable route length.
   const capacityOn = (date: string): number =>
-    licensedCountOn(date) * STOPS_PER_TECH;
+    (capacityFacts.get(date)?.eligibleTechs ?? 0) * STOPS_PER_TECH;
 
   type Stop = { customerId: string; serviceType: string };
   const stopsByDay = new Map<string, Stop[]>();
@@ -200,26 +186,48 @@ export async function buildDayMatrix(opts: {
     });
   }
 
+  // Live checkout claims hold real minutes against their day (GL-04 R1).
+  const claimedMinutesOn = new Map<string, number>();
+  if ("CapacityClaim" in client.models) {
+    const nowIso = new Date().toISOString();
+    for (const date of days) {
+      let claimed = 0;
+      let token: string | null | undefined;
+      do {
+        const page = await client.models.CapacityClaim.listCapacityClaimByDate(
+          { date },
+          { limit: 200, nextToken: token }
+        );
+        for (const c of page.data ?? []) {
+          if (String(c.expiresAt) > nowIso) claimed += c.minutes ?? 0;
+        }
+        token = page.nextToken;
+      } while (token);
+      if (claimed > 0) claimedMinutesOn.set(date, claimed);
+    }
+  }
+
   const out: DayQuote[] = [];
   for (const date of days) {
     const stops = stopsByDay.get(date) ?? [];
     const capacity = capacityOn(date);
-    if (capacity <= 0 || stops.length >= capacity) continue;
+    if (capMinutesOn(date) <= 0 || capacity <= 0 || stops.length >= capacity) {
+      continue;
+    }
 
-    // Rough feasibility: existing onsite time + hops + this job must fit.
-    const existingMinutes = stops.reduce(
-      (sum, s) => sum + (ONSITE_MINUTES[s.serviceType] ?? 60) + AVG_HOP_MINUTES,
-      0
-    );
+    // Minute feasibility against the shared rule: existing onsite time +
+    // hops + live checkout claims + this job must fit the day's minutes.
+    const existingMinutes =
+      stops.reduce(
+        (sum, s) => sum + (ONSITE_MINUTES[s.serviceType] ?? 60) + AVG_HOP_MINUTES,
+        0
+      ) + (claimedMinutesOn.get(date) ?? 0);
     const nearest = stops.reduce<number | null>((best, s) => {
       const m = minutesByCustomer.get(s.customerId);
       return m != null && (best === null || m < best) ? m : best;
     }, null);
     const insertion = nearest != null ? nearest * 2 : AVG_HOP_MINUTES * 2;
-    if (
-      existingMinutes + onsite + insertion >
-      licensedCountOn(date) * WORKDAY_MINUTES
-    ) {
+    if (existingMinutes + onsite + insertion > capMinutesOn(date)) {
       continue;
     }
 

@@ -10,6 +10,12 @@ import { finalizeBooking } from "../shared/bookingFinalize";
 import { applyRefundToInvoice } from "../shared/refund";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
+  extendCapacityClaim,
+  releaseCapacityClaim,
+  consumeCapacityClaim,
+  PROCESSING_CLAIM_MS,
+} from "../shared/capacity";
+import {
   escapeHtml,
   sendChargeReceipt,
   sendPaymentFailedNotice,
@@ -74,11 +80,26 @@ export const handler = async (
       }
       // GL-06: an async funnel payment (e.g. bank debit) is still clearing —
       // hold the slot as PROCESSING, never a commitment, until it resolves.
-      case "payment_intent.processing":
-        await onFunnelPaymentProcessing(stripeEvent.data.object);
+      // GL-04: the checkout's capacity claim is EXTENDED so "your slot is
+      // held" stays a counted fact while the money settles.
+      case "payment_intent.processing": {
+        const pi = stripeEvent.data.object;
+        if (pi.metadata?.bookingRequestId) {
+          await extendCapacityClaim(
+            pi.metadata.bookingRequestId,
+            PROCESSING_CLAIM_MS
+          );
+        }
+        await onFunnelPaymentProcessing(pi);
         break;
+      }
       case "payment_intent.payment_failed": {
         const pi = stripeEvent.data.object;
+        // GL-04: a failed funnel payment releases the checkout's capacity
+        // claim — the slot goes back on sale.
+        if (pi.metadata?.bookingRequestId) {
+          await releaseCapacityClaim(pi.metadata.bookingRequestId);
+        }
         // A funnel payment has no invoice yet (finalization never ran), so it is
         // handled directly — the booking is marked failed and the customer told.
         // Everything else settles its invoice FAILED.

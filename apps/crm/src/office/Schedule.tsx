@@ -294,6 +294,8 @@ export default function Schedule() {
         </div>
       </Card>
 
+      <AvailabilityPanel date={date} techs={techs ?? []} />
+
       <ErrorNote error={error} />
       {!techs ? (
         <Spinner />
@@ -469,6 +471,240 @@ export default function Schedule() {
  * Compliance seat) flips a record's status. The single legacy licence fields
  * remain the fallback until a technician has records.
  */
+/**
+ * GL-04 — the day's capacity truth and its levers: WHY the selected date is
+ * (or isn't) sellable, the company closure for the day, and per-technician
+ * PTO — maintained here by the office, enforced everywhere by the one shared
+ * minute rule.
+ */
+function AvailabilityPanel({
+  date,
+  techs,
+}: {
+  date: string;
+  techs: Technician[];
+}) {
+  type DayFacts = {
+    capMinutes: number;
+    eligibleTechs: number;
+    committedMinutes: number;
+    scheduledVisits: number;
+    liveCheckoutClaims: number;
+    remainingMinutes: number;
+    sellable: boolean;
+    reasons: string[];
+  };
+  type ExceptionRow = {
+    id: string;
+    technicianId: string;
+    date: string;
+    kind: string;
+    reason: string;
+  };
+  const [facts, setFacts] = useState<DayFacts | null>(null);
+  const [exceptions, setExceptions] = useState<ExceptionRow[]>([]);
+  const [closureReason, setClosureReason] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [ptoTech, setPtoTech] = useState("");
+  const [ptoReason, setPtoReason] = useState("");
+  const [newClosure, setNewClosure] = useState("");
+
+  const models = api().models as unknown as {
+    TechnicianDayException: {
+      listTechnicianDayExceptionByDate: (
+        input: { date: string },
+        opts?: { limit?: number }
+      ) => Promise<{ data: ExceptionRow[] }>;
+      create: (input: Record<string, unknown>) => Promise<{ data: unknown }>;
+      delete: (input: { id: string }) => Promise<{ data: unknown }>;
+    };
+    CompanyClosure: {
+      get: (input: { id: string }) => Promise<{ data: { reason?: string } | null }>;
+      create: (input: Record<string, unknown>) => Promise<{ data: unknown }>;
+      delete: (input: { id: string }) => Promise<{ data: unknown }>;
+    };
+  };
+
+  const refresh = useCallback(async () => {
+    setErr(null);
+    try {
+      const [factsRes, exRes, closureRes] = await Promise.all([
+        (api().queries as unknown as {
+          capacityDayFacts: (input: { date: string }) => Promise<{ data: unknown }>;
+        }).capacityDayFacts({ date }),
+        models.TechnicianDayException.listTechnicianDayExceptionByDate(
+          { date },
+          { limit: 200 }
+        ),
+        models.CompanyClosure.get({ id: date }),
+      ]);
+      const parsed =
+        typeof factsRes.data === "string"
+          ? (JSON.parse(factsRes.data) as DayFacts)
+          : (factsRes.data as DayFacts);
+      setFacts(parsed);
+      setExceptions(exRes.data ?? []);
+      setClosureReason(closureRes.data?.reason ?? null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not read the day's capacity");
+    }
+  }, [date]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await fn();
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "The change did not save");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title={`Availability — ${date}`}>
+      {err ? <p className="error">{err}</p> : null}
+      {facts ? (
+        <>
+          <p>
+            <strong>{facts.sellable ? "Sellable" : "NOT sellable"}.</strong>{" "}
+            {facts.eligibleTechs} eligible technician
+            {facts.eligibleTechs === 1 ? "" : "s"} ·{" "}
+            {facts.committedMinutes} of {facts.capMinutes} minutes committed (
+            {facts.scheduledVisits} visit
+            {facts.scheduledVisits === 1 ? "" : "s"}
+            {facts.liveCheckoutClaims
+              ? `, ${facts.liveCheckoutClaims} live checkout hold${
+                  facts.liveCheckoutClaims === 1 ? "" : "s"
+                }`
+              : ""}
+            ) · {facts.remainingMinutes} minutes left.
+          </p>
+          {facts.reasons.length ? (
+            <ul className="muted small">
+              {facts.reasons.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      ) : (
+        <p className="muted">Reading the day's capacity…</p>
+      )}
+
+      <div className="row-split" style={{ marginTop: 8 }}>
+        <div>
+          <strong>Company closure</strong>
+          {closureReason ? (
+            <p>
+              Closed: {closureReason}{" "}
+              <Button
+                small
+                variant="ghost"
+                loading={busy}
+                onClick={() =>
+                  void act(() => models.CompanyClosure.delete({ id: date }))
+                }
+              >
+                Reopen the day
+              </Button>
+            </p>
+          ) : (
+            <p>
+              <input
+                placeholder="Reason (required) — closes the whole day"
+                value={newClosure}
+                onChange={(e) => setNewClosure(e.target.value)}
+              />{" "}
+              <Button
+                small
+                loading={busy}
+                onClick={() =>
+                  newClosure.trim()
+                    ? void act(() =>
+                        models.CompanyClosure.create({
+                          id: date,
+                          date,
+                          reason: newClosure.trim(),
+                        })
+                      )
+                    : undefined
+                }
+              >
+                Close this day
+              </Button>
+            </p>
+          )}
+        </div>
+        <div>
+          <strong>PTO on {date}</strong>
+          {exceptions
+            .filter((e) => e.kind === "PTO")
+            .map((e) => (
+              <p key={e.id}>
+                {techs.find((t) => t.id === e.technicianId)?.name ??
+                  e.technicianId}{" "}
+                — {e.reason}{" "}
+                <Button
+                  small
+                  variant="ghost"
+                  loading={busy}
+                  onClick={() =>
+                    void act(() =>
+                      models.TechnicianDayException.delete({ id: e.id })
+                    )
+                  }
+                >
+                  Remove
+                </Button>
+              </p>
+            ))}
+          <p>
+            <select value={ptoTech} onChange={(e) => setPtoTech(e.target.value)}>
+              <option value="">Technician…</option>
+              {techs.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>{" "}
+            <input
+              placeholder="Reason (required)"
+              value={ptoReason}
+              onChange={(e) => setPtoReason(e.target.value)}
+            />{" "}
+            <Button
+              small
+              loading={busy}
+              onClick={() =>
+                ptoTech && ptoReason.trim()
+                  ? void act(() =>
+                      models.TechnicianDayException.create({
+                        technicianId: ptoTech,
+                        date,
+                        kind: "PTO",
+                        reason: ptoReason.trim(),
+                      })
+                    )
+                  : undefined
+              }
+            >
+              Add PTO
+            </Button>
+          </p>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function LicenseRecords({ technicianId }: { technicianId: string }) {
   const roles = useRoles();
   const [records, setRecords] = useState<TechnicianLicenseRecord[] | null>(null);

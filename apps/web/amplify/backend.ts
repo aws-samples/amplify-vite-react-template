@@ -102,6 +102,8 @@ const LOCK_MODELS = [
   "ServiceReportFinalizeClaim",
   "TreatmentObligation",
   "WorkItem",
+  "CapacityDay",
+  "CapacityClaim",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
@@ -115,6 +117,8 @@ for (const fn of [
   backend.crmDocs,
   backend.dailyReminders,
   backend.stripeWebhook,
+  // GL-04: the public funnel takes the atomic capacity claim at checkout.
+  backend.bookingPublic,
 ]) {
   fn.resources.lambda.addToRolePolicy(lockTablePolicy);
 }

@@ -2,6 +2,7 @@ import { dataClient } from "../shared/dataClient";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import { licenseFactsFor } from "../shared/licenses";
 import { ensureObligation, markObligation } from "../shared/obligations";
+import { isWeekday, reconcileCapacityDay } from "../shared/capacity";
 import { isServiceMonth, monthKeyOf } from "../shared/season";
 import { assertDispatchFacts } from "../shared/dispatchReadiness";
 import { stripeClient } from "../shared/stripeClient";
@@ -126,6 +127,7 @@ export const handler = async () => {
   // GL-08: resume every plan cancellation a prior attempt could not finish, so
   // an accepted cancel can never sit Pending forever with billing still live.
   const cancellations = await reconcilePlanCancellations();
+  const capacity = await reconcileCapacity();
   // GL-07: resume every office visit cancel a prior attempt could not finish, so
   // a refunded-but-still-scheduled visit is never stranded.
   const visitChanges = await reconcileVisitChanges();
@@ -161,6 +163,7 @@ export const handler = async () => {
     overdueWork,
     reconciliation,
     cancellations,
+    capacity,
     visitChanges,
     staleLeads,
     presenceReviews,
@@ -633,6 +636,31 @@ export async function reconcilePlanCancellations() {
     stillPending,
     failed,
   };
+}
+
+/**
+ * GL-04 — heal every upcoming day's capacity ledger from ground truth (jobs +
+ * live claims) and release expired checkout claims, so counter drift or a
+ * crashed checkout can never hold (or leak) capacity for more than a day.
+ */
+export async function reconcileCapacity() {
+  let reconciled = 0;
+  let expired = 0;
+  try {
+    const today = new Date();
+    for (let i = 0; i < 45; i++) {
+      const date = new Date(today.getTime() + i * 86_400_000)
+        .toISOString()
+        .slice(0, 10);
+      if (!isWeekday(date)) continue;
+      const res = await reconcileCapacityDay(date);
+      reconciled++;
+      expired += res.expiredClaims;
+    }
+  } catch (err) {
+    console.error("reconcileCapacity failed", err);
+  }
+  return { task: "reconcile-capacity" as const, reconciled, expiredClaims: expired };
 }
 
 /**
