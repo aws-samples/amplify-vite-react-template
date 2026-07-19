@@ -3714,25 +3714,66 @@ async function finalizeServiceReport(reportId: string) {
   // they run on every pass and safely resume whichever a prior attempt missed.
   if (job.status !== "COMPLETED") {
     const completedAt = new Date().toISOString();
-    const { data: completed, errors: completeErrors } =
-      await client.models.Job.update({
+    // GUARDED on the snapshot this finalization read. If a cancel (with its
+    // refund) landed while the technician was on site, the flip LOSES: the
+    // canceled record stands, billing/next-visit are NOT run, and a Finance
+    // case owns the real conflict — service was performed on a visit the
+    // customer concurrently canceled. The finalized report itself is already
+    // durable either way (it is the legal application record).
+    let completedRes = await casGuardedUpdate(
+      "Job",
+      report.jobId,
+      { status: "COMPLETED", completedAt },
+      jobScheduleGuards(job)
+    );
+    if (!completedRes.ok && completedRes.reason === "LOST") {
+      const { data: freshJob } = await client.models.Job.get({
         id: report.jobId,
-        status: "COMPLETED",
-        completedAt,
       });
+      if (freshJob?.status === "CANCELED") {
+        await openOwnedWork({
+          kind: "VISIT_CHANGE_RECOVERY",
+          dedupeKey: `completed-after-cancel:${report.jobId}`,
+          title: `Service was performed on a concurrently canceled visit`,
+          detail: `The technician finalized the service report for job ${report.jobId}, but the visit was canceled (and its money disposition applied) while the work was happening. The report is durable and legal; the visit record stays CANCELED. Decide the money outcome: the work WAS done, so a refund issued by the cancel may need to be re-invoiced, or the cancellation honored as goodwill.`,
+          customerId: job.customerId,
+          relatedId: report.jobId,
+          sourceUrl: `/customers/${job.customerId}`,
+          resolutionAction:
+            "Compare the cancel's refund against the performed work and settle the invoice one way — then close this.",
+          ownerTeam: "FINANCE",
+        });
+        return {
+          reportId: report.id,
+          jobId: report.jobId,
+          finalized: true,
+          jobCompleted: false,
+          message:
+            "The report is finalized and saved, but this visit was canceled while you were on site — the office has a case to settle the money. Nothing was billed.",
+        } as never;
+      }
+      // Any other concurrent change (a move): retry once against the fresh
+      // snapshot — the work happened; the completion stands on the new state.
+      if (freshJob && freshJob.status !== "COMPLETED") {
+        completedRes = await casGuardedUpdate(
+          "Job",
+          report.jobId,
+          { status: "COMPLETED", completedAt },
+          jobScheduleGuards(freshJob)
+        );
+      } else if (freshJob?.status === "COMPLETED") {
+        completedRes = { ok: true, prior: {} };
+      }
+    }
     // VERIFY: billing and the next visit key off COMPLETED — a silently failed
     // flip must stop here (the report is finalized and durable; a retry
     // resumes from this checkpoint).
     const { data: verifyJob } = await client.models.Job.get({
       id: report.jobId,
     });
-    if (!completed || verifyJob?.status !== "COMPLETED") {
+    if (!completedRes.ok || verifyJob?.status !== "COMPLETED") {
       throw new Error(
-        `The job could not be marked completed${
-          completeErrors?.length
-            ? `: ${completeErrors.map((e) => e.message).join("; ")}`
-            : ""
-        }. The report is finalized and safe — try again to finish billing and delivery.`
+        "The job could not be marked completed. The report is finalized and safe — try again to finish billing and delivery."
       );
     }
     job.status = "COMPLETED";
@@ -4210,7 +4251,21 @@ async function completeJob(jobId: string) {
     );
   }
   const completedAt = new Date().toISOString();
-  await client.models.Job.update({ id: jobId, status: "COMPLETED", completedAt });
+  // GUARDED: a cancel landing after the read must not be overwritten into a
+  // COMPLETED-and-billed visit.
+  const completedRes = await casGuardedUpdate(
+    "Job",
+    jobId,
+    { status: "COMPLETED", completedAt },
+    jobScheduleGuards(job)
+  );
+  if (!completedRes.ok) {
+    throw new Error(
+      completedRes.reason === "UNSUPPORTED"
+        ? "The scheduling lock store is unavailable — try again in a moment."
+        : "This job changed while completing (it may have just been canceled or moved) — refresh and check its state."
+    );
+  }
   await startBillingForPlan(job);
   await scheduleNextRecurringVisit({ ...job, completedAt });
   return { jobId, alreadyCompleted: false };
