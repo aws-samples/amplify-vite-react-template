@@ -2,31 +2,40 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 11 commits after `f70e621`, from `3717092` through `cc76773`; newest
-implementation commit `cc76773`
+**Latest commit review:** 14 commits after `f70e621`, from `3717092` through `d546c10`; newest
+implementation commit `d546c10`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 123 business requirements**, ordered by launch priority and expected impact
+**Remaining:** **23 gates / 119 business requirements**, ordered by launch priority and expected impact
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **66.9%**
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **50.5%**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
 **Business policy inputs approved:** 18–19 July 2026
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The latest implementation commits affect GL-14, GL-13,
-and the staff/dispatch-verifier portions of GL-18. Completed and removed from GL-14: durable
-pre-change access commands (required idempotency key, single-winner claim, exclusive-lease resume,
-persisted outcomes), fail-safe role reduction with confirmed security cases, serialized owner changes,
-condition-checked and read-back-verified job/work/lead handoff, and the reasoned Schedule entrance.
-Completed and removed from GL-13: per-job assignment checks in the day view with owned mismatch work,
-employment/licence-bound reads, owner-bound purged local drafts with recorded stale-draft dispositions,
-the seven-year personally-authored document scope, the immutable reassignment audit, and reason-gated,
-reviewed, non-impersonating office field access. GL-14 now carries only the production two-owner
-operating setup; GL-13 only its policy-vocabulary approvals. The other gates remain because the new
-commits did not close them. An omitted item is not a request to rebuild it.
+implementation detail, and proof-only tasks. The newest commits close GL-09's engineering (`82f5fbf`)
+and land a systemic remediation (`d546c10`) that every earlier "single-winner" closure claim depended
+on: stale-lease takeover on every operational lock and durable command (staff access, owner serial,
+lifecycle claim/command, plan cancellation, visit change, booking finalization, booking communications,
+report finalization) is now ONE atomic conditional write instead of delete-then-create (which had let
+two reclaimers both win), every progress/terminal write and release is fenced on the holder's nonce (an
+expired worker can no longer overwrite or unlock its successor), browser roles can no longer delete any
+operational lock or durable command, and deterministic interleaving tests cover two stale reclaimers,
+an expired holder releasing after takeover, and an expired holder writing after takeover. The
+remediation also reopened and corrected GL-17 (licence-record read failures fail closed with no legacy
+fallback, none for historical authorship once records exist; seasonal-ledger write failures are owned
+work; one-visit-per-month is enforced atomically by the obligation row as the month's mutex) and GL-12
+(a missing Google Routes configuration refuses dispatch rather than silently skipping the proof).
+Completed and removed from GL-09: the durable pre-effect lifecycle command with per-stage progress,
+persisted inventory, exclusive fenced lease, serialized opposite requests, and stale-command
+escalation; owned paid/in-progress visit decisions and owned sweep/read failures; the server-computed
+employee preview and persisted-result completion states (never success on partial/in-progress/
+unaudited); per-reason policy-driven tracked customer notices; and fully paged history with visible
+read failures. GL-09 now carries only leadership sign-off of the per-reason transition policy and the
+history export that rides GL-19. An omitted item is not a request to rebuild it.
 
 The approved business-policy pass in this revision removes decision-only work for launch scope, payment
 methods, visit refunds, technician availability/base routing, seasonal treatment, callback eligibility,
@@ -137,24 +146,25 @@ action, and physical operating setup as dependencies the agent cannot complete a
 
 ## Systemic issues behind several gates
 
-- **X1 — Customer, lead, exception, and visit-change history can still disappear.**
-  `CustomerLifecycleEvent`, `LeadActivity`, `WorkEvent`, and `VisitChangeEvent` writes can still occur
-  after the business change or fail without a durably confirmed fallback. The lifecycle screen ignores
-  read errors and shows only its first 100 rows; the lead screen likewise substitutes an empty list on
-  failure and stops at 100. Visit-change history is now fully paged and business-readable, but a lost
-  event or recovery case can still be ignored and an already-canceled replay defaults missing history to
-  **Sent/Complete**. Sensitive customer, sales, ownership, money, and schedule changes can therefore still
-  be applied without durable, complete history.
+- **X1 — Lead, exception, and visit-change history can still disappear.**
+  `LeadActivity`, `WorkEvent`, and `VisitChangeEvent` writes can still occur after the business change
+  or fail without a durably confirmed fallback. The lead screen substitutes an empty list on failure and
+  stops at 100. Visit-change history is now fully paged and business-readable, but a lost event or
+  recovery case can still be ignored and an already-canceled replay defaults missing history to
+  **Sent/Complete**. (Lifecycle history is closed: `CustomerLifecycleEvent` loss keeps the transition
+  PARTIAL with owned recovery, and the screen pages to exhaustion and shows read failures as failures.)
+  Sensitive sales, ownership, money, and schedule changes can therefore still be applied without
+  durable, complete history.
 - **X2 — An exception can still turn green before the business obligation is fulfilled.** A canceled
   visit can count as money settled while a paid charge remains; adding an email can count as delivering
   the missed notice; any technician ID can count as safe staffing; plan-cancellation recovery can count a
   partial refund as settled and ignores final notice plus unresolved paid/in-progress visits; a
-  lead-follow-up can close even when its activity/state write failed; materially different paid-booking
-  problems are offered the same retry action even when no booking exists to retry; and lifecycle recovery
-  can be closed for fixing only the portal or audit while status, billing, scheduled work, notice, or
-  another transition effect is still wrong. Visit-change recovery has no verifier, its resume can no-op
-  after cancel or refuse reschedule, and cancellation itself can report complete after an invoice-void
-  failure.
+  lead-follow-up can close even when its activity/state write failed; and materially different
+  paid-booking problems are offered the same retry action even when no booking exists to retry.
+  (Lifecycle recovery is closed: the LIFECYCLE_SETTLED verifier requires billing, schedule, access,
+  status, and the durable command to agree before the case closes.) Visit-change recovery has no
+  verifier, its resume can no-op after cancel or refuse reschedule, and cancellation itself can report
+  complete after an invoice-void failure.
 - **X3 — Customer communication is still best-effort after provider acceptance.** An accepted email can
   lose its log and provider ID; transient failures have no actual retry; delivery-event processing can
   acknowledge and discard a failed update; and the business record that originated the message is not
@@ -174,7 +184,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-17 | Mosquito sale-path decision — engineering closed (`580d71c`) | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **20% — Low (product decision + ratification)** |
 | P0 | GL-12 | Copy/vocabulary approvals — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (approvals + backfill)** |
 | P0 | GL-05 | Copy sign-off + policy definitions — engineering closed (`cc76773`) | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (sign-offs)** |
-| P0 | GL-09 | Finish failure-safe customer lifecycle transitions | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **66% — Medium** |
+| P0 | GL-09 | Lifecycle policy sign-off + history export — engineering closed (`82f5fbf`) | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **10% — Very low (sign-off; export rides GL-19)** |
 | P0 | GL-08 | Finish exact, terminal customer plan cancellation | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **76% — High** |
 | P0 | GL-07 | Finish terminal office cancel/reschedule | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **74% — High** |
 | P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **72% — High** |
@@ -201,19 +211,9 @@ action, and physical operating setup as dependencies the agent cannot complete a
 **Business outcome:** A role change or departure cannot leave a person with unintended access, and
 leadership can retrieve the complete record of who changed access, why, and what work was reassigned.
 
-**Engineering closed (commit `3717092`):** every role change and offboarding now claims a durable
-access-change command (required unique idempotency key, conditional single-winner create) **before**
-any provider or work change; duplicates return the persisted progress/outcome; a stopped command is
-resumed under an exclusive nonce-verified lease, and PARTIAL outcomes are resumable with the same key.
-Role reductions apply each group op individually, still end sessions after a failed op, and land in a
-truthful PARTIAL with a **confirmed** security case — the UI never claims a case that was not written,
-and completion is read back from Cognito and the durable command. The job/work/lead handoff re-reads
-each record immediately before writing (a newer assignment is never overwritten), writes history before
-moving ownership, counts every failed item, and **Complete** additionally requires a read-back that
-zero scheduled future jobs remain on the inactive technician. Removing the TECH role hands field work
-over the same way. Both the Staff and Schedule entrances require the controlled reason (+ note for
-OTHER) and show the persisted Complete/Partial outcome with one next step. Owner-set changes are
-serialized through a mutex held across the last-owner check and the change.
+**Status:** engineering closed (`3717092`); the single-winner/lease mechanics its closure relied on
+were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
+remediation (`d546c10`). Remaining items are non-software.
 
 **Remaining requirements:**
 
@@ -228,23 +228,9 @@ serialized through a mutex held across the last-owner check and the change.
 **Business outcome:** A technician sees only the minimum data for legitimate current or
 business-approved historical work, and access disappears when assignment or employment ends.
 
-**Engineering closed (commit `27ca1fb`):** the day view now checks every stop against the assignment
-(the route is not the authority); a mismatch is withheld from the technician, its customer never loads,
-and it becomes owned ROUTE_MISMATCH Operations work while showing flagged to the office. Every read
-requires an active technician at the code layer — an offboarded person's unexpired session gets no day,
-job, or document link, and the app receives an explicit access-ended state it uses to purge local
-drafts; a licence-lapsed technician is limited to their own COMPLETED work (own reports only, no
-other-visit history, no current/future route). Local drafts are bound to the signed-in identity and
-purged on sign-out, on access-ended, and on a per-job refusal; a visit that leaves its technician with
-an unsent DRAFT report gets a recorded disposition (owned STALE_DRAFT review) from both the schedule
-surface and the offboarding sweep. Document links are proven per document — personally authored or on a
-currently assigned job, inside the seven-year record period; agreements are never technician documents.
-Every scheduling change writes one immutable JobAssignmentEvent (actor, controlled reason, former/new
-technician and route, effective time, draft disposition, outcome; a failed write is owned, visible
-work). Office use of a technician field action requires a recorded reason, is ledgered before the
-action runs (fail closed), and opens a routine review case; office edits of a technician's draft are
-refused, so the record stays the applicator's own words. Access/id token validity dropped to 15
-minutes.
+**Status:** engineering closed (`27ca1fb`); the single-winner/lease mechanics its closure relied on
+were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
+remediation (`d546c10`). Remaining items are non-software.
 
 **Remaining requirements:**
 
@@ -261,20 +247,9 @@ minutes.
 **Business outcome:** Every issued service report and correction is an accurate, durable, correctly
 authored legal record with a truthful, non-duplicating customer-delivery state.
 
-**Engineering closed (commit `bbcf0c3`):** finalization takes a conditional single-winner claim with
-stale reclaim, verifies the persisted FINALIZED report and COMPLETED job before billing or emailing,
-and collapses concurrent next-visit creation onto one deterministic row. Delivery is a truthful state
-machine: a verified SENDING intent precedes every provider call, provider acceptance records
-ACCEPTED (never "delivered"), a resume adopts the proven prior send from the email log instead of
-duplicating, a lost marker becomes visible owned work, and a later bounce/complaint corrects the
-report/amendment itself, reopens the delivery obligation as owned work, and cannot be un-bounced;
-the office records approved alternate delivery or re-sends the exact document. Label validation fails
-closed — no rate on file refuses finalization — and the catalog carries structured office-edited label
-rules (rates, quantity range, pests, service types, re-entry minimum) enforced on every recorded
-application. The presence-review obligation is a durable marker on the report, re-opened by the daily
-reconcile when its case write fails, settled by resolving the case, never blocking the technician.
-Office screens retrieve report photos, the no-access door photo, per-record delivery truth, and
-amendments without engineering.
+**Status:** engineering closed (`bbcf0c3`); the single-winner/lease mechanics its closure relied on
+were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
+remediation (`d546c10`). Remaining items are non-software.
 
 **Remaining requirements:**
 
@@ -292,21 +267,16 @@ amendments without engineering.
 **Business outcome:** Seasonal services bill and schedule exactly as customers were told, and every visit
 is assigned to a technician with a current license record without hard-coding changing state law.
 
-**Engineering closed (commit `580d71c`):** seasonal facts (seasonal + serviceMonths) are stamped on the
-plan at enrollment from one shared season module — the only encoding of the April–October rule — and
-every in-season month is a visible TreatmentObligation with truthful history (DUE / SCHEDULED /
-SATISFIED / SKIPPED_WEATHER / SKIPPED_MISSED). The recurring engine satisfies the completed month and
-targets the next in-season month (October → next April, never November); a passed unserved month is
-marked SKIPPED_MISSED by the daily sweep and creates no catch-up; office job creation and assignment
-refuse off-season dates and duplicate monthly visits; billing stays monthly year-round from enrollment;
-plan copy, portal, completion email, monitoring, and the rate-card labels read the same facts.
-Licences are one-to-many TechnicianLicense records (number, type/issuer, status, expiration, evidence,
-status history) — office-added, OWNER(Compliance)-status-controlled, PENDING until marked CURRENT —
-and shared/licenses.ts is the single authority read by funnel availability (per-day licensed counts,
-zero licensed = zero sellable dates), assignment, reschedule, field actions, the day view, T-1
-staffing, and the staffed-visit verifier. The daily sweep opens advance LICENSE_LAPSE work 30 days
-before expiry and per-visit unstaffed cases on lapse; finalized reports print the licence valid on the
-application date, so later changes never rewrite authorship. No state-by-service rules engine exists.
+**Status:** engineering closed (`580d71c`); the single-winner/lease mechanics its closure relied on
+were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
+remediation (`d546c10`). The re-audit REOPENED this gate's engineering and `d546c10` corrected it: a
+licence-record read failure now fails CLOSED everywhere (a failed read sells no capacity and assigns
+no work — never a legacy-field fallback that could resurrect a revoked number); historical
+authorship never falls back to the legacy number once records exist; a seasonal-ledger write failure
+is owned OBLIGATION_RECOVERY work, not swallowed bookkeeping; and at most one scheduled-or-done
+visit per plan-month is enforced atomically (the obligation row is the month's mutex, claimed by the
+recurring engine, office job creation, and assignment, released when a visit cancels or moves).
+Remaining items are non-software.
 
 **Remaining requirements:**
 
@@ -327,19 +297,12 @@ application date, so later changes never rewrite authorship. No state-by-service
 **Business outcome:** A technician is dispatched only with the service-specific facts and approved scope
 needed to complete the visit safely, and can exit an unperformable visit without inventing a workaround.
 
-**Engineering closed (commit `5c8c6ef`):** the dispatch gate proves a routable MA/RI address (placeholder
-tokens refused, the exact office fix named) and an explicit property classification carrying the locked
-30/60-minute durations, and attaches the same Google Routes result capacity uses to the assignment
-decision; a day-before sweep opens owned DISPATCH_NOT_READY work with a verified re-check close. The
-field packet carries prior treatment findings from finalized reports, the visit's rebook/callback
-lineage, and the on-site duration. **Scope does not match** and **required prep missing** are dedicated
-one-tap terminal outcomes that never start or complete service, free capacity, preserve the money
-facts, open owned Operations cases, and send the approved customer next step (one-business-day promise,
-missing-contact fallback); rebooking creates a new linked visit and auto-resolves the case. Every
-post-assignment packet change is versioned with an immutable change record, is brought to the assigned
-technician's attention (Start blocks until the new version is acknowledged, by their own identity
-only), and a material change after service starts requires a recorded manager reason with mid-visit
-technician notification.
+**Status:** engineering closed (`5c8c6ef`); the single-winner/lease mechanics its closure relied on
+were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
+remediation (`d546c10`). The re-audit REOPENED this gate's engineering and `d546c10` corrected it: a
+missing GOOGLE_ROUTES_API_KEY now REFUSES dispatch with the configuration named (fail closed)
+instead of silently skipping the routability proof; ALLOW_UNVERIFIED_ROUTES=true is the explicit
+local-dev-only escape, never set in production. Remaining items are non-software.
 
 **Remaining requirements:**
 
@@ -361,18 +324,9 @@ technician notification.
 customer commitment or one visible, verified refund/recovery case — even when execution stops between
 steps.
 
-**Engineering closed (commit `cc76773`):** the checkout shows **Payment received — finalizing** and
-renders **You're booked** only from the server-confirmed /booking-status readback; the URL carries the
-booking identifiers so reload and redirect return to the same durable outcome, and a finalization that
-needs a human shows the owned recovery state with one safe next step (never "pay again"). The
-confirmation send takes a conditional outbox claim before the provider call — the
-accepted-but-marker-not-stored window now resumes by adopting the proven send from the email log
-instead of duplicating — and a marker that cannot be stored is visible owned work. The booking carries
-its confirmation's true delivery state: a mailbox delivery upgrades it, a bounce/complaint corrects it
-and reopens the communication as owned work with a booking-shaped resend/alternate path, terminal-
-guarded. Reconciliation validates relationships (customer/job/plan/agreement/invoice ownership, amount,
-plan linkage, committed date) — a cross-linked child cannot count healthy — and a truncated provider
-scan opens owned Finance work, auto-resolves nothing, and reports not-ok.
+**Status:** engineering closed (`cc76773`); the single-winner/lease mechanics its closure relied on
+were re-verified and hardened to true atomic takeover, fenced writes, and fenced release in the
+remediation (`d546c10`). Remaining items are non-software.
 
 **Remaining requirements:**
 
@@ -385,63 +339,32 @@ scan opens owned Finance work, auto-resolves nothing, and reports not-ok.
 
 **Pass owner:** CEO and Engineering lead jointly; Finance owns reconciliation and recovery approval.
 
-### GL-09 — Finish failure-safe customer lifecycle transitions
+### GL-09 — Failure-safe customer lifecycle transitions
 
 **Business outcome:** Customer status, billing, access, scheduled work, and customer communication never
 disagree, and an employee always sees the real outcome of deactivation or reactivation.
 
-**Why this is still a gate:** The transition claim is a temporary lock, not a durable command. It records
-no step progress and is deleted after a handled partial result or thrown error; a process stop can leave
-provider effects with no recovery case, while a failed claim deletion can block every later transition
-indefinitely. Deactivation can stop some plans before a later plan fails, or lose a job/status write,
-then leave the record **ACTIVE** without a durable description of the mixed state. Reactivation can
-partially enable portal access before failing and file that as a generic portal case while the customer
-remains **INACTIVE**.
-
-The employee outcome is also not yet truthful. The reactivation screen announces success for an
-in-progress, partial, or unaudited server result; deactivation likewise announces success when its audit
-is missing. Paid or in-progress one-time visits are skipped without an owned decision, and the preview
-can say there are no visits to stop while one remains. Lifecycle history stops at 100 rows and hides a
-read failure. No transition sends and tracks the final customer notice, and every reason currently runs
-the same cancellation behavior even though nonpayment, a duplicate record, a move, a sale, and a normal
-service end can require different balance, record, access, and communication outcomes.
+**Status:** engineering closed (`82f5fbf`, hardened by the `d546c10` remediation). Deactivation and
+reactivation run as one durable `CustomerLifecycleCommand` claimed before any provider effect, with a
+persisted server-computed inventory, per-stage progress under an exclusive fenced lease, serialized
+opposite requests, resumable PARTIALs under the same key, owned paid/in-progress visit decisions, a
+per-reason policy-driven tracked customer notice, persisted-result completion screens (Complete /
+Already complete / Still in progress / Needs recovery — never success on partial, in-progress, or
+unaudited), the LIFECYCLE_SETTLED verified close, a daily stale-command escalation, and fully paged
+history that shows read failures. The immutable record is a completion requirement: a lost audit or
+notice keeps the command PARTIAL. Remaining items are non-software plus one export view.
 
 **Remaining requirements:**
 
-- Persist one lifecycle command **before** any billing, schedule, access, status, audit, or message change.
-  It retains request identity, actor, controlled reason, prior/requested state, every affected plan/job/
-  balance/access record, step progress, provider references, retry count, and final outcome. A worker
-  resumes it after timeout or process loss; stale claims are reclaimed or escalated; and a transition is
-  not released as terminal until it is complete or a confirmed recovery owner holds every unfinished
-  obligation. Duplicate and opposite requests return the same persisted progress or follow a defined,
-  serialized reversal—never a fresh interpretation of a partially changed customer.
-- Define one business state machine for clean and partial deactivation/reactivation. The displayed state
-  must distinguish **Active**, **Inactive**, and **Transition needs recovery** when billing, access,
-  schedule, or status disagree. A stopped plan plus ACTIVE status, or enabled login plus INACTIVE status,
-  cannot be treated as an ordinary active/inactive customer; the next employee sees one safe resume or
-  reverse action and what the customer can currently access, owe, buy, or receive.
-- The transition inventory and resulting disposition cover every provider subscription, CRM plan,
-  outstanding invoice, queued one-time/plan visit, paid visit, in-progress visit, route assignment, portal
-  login/group, and related customer/group access. Each write is read back. A paid or in-progress visit has
-  a specific honor/refund/cancel/finish decision with a staffed owner and deadline; a failed schedule read
-  or write cannot be skipped, counted as complete, or hidden by the final status.
-- The employee confirmation is calculated from the server's current inventory and explicitly states what
-  will stop, what will remain, money already paid, money still owed, customer access, and the final notice.
-  The completion screen uses the persisted result and can say **Complete**, **Already complete**, **Still
-  in progress**, or **Needs recovery**; it never announces reactivation/deactivation when `partial`,
-  `inProgress`, or `audited: false`, and it does not claim a recovery case exists until that case is
-  durably confirmed.
-- Every transition produces a tracked customer notice with the approved effective date, plan/service and
-  visit disposition, balance/refund next step, portal implication, and contact path. Leadership
-  approves the behavior and authority for each reason—especially nonpayment, duplicate, moved/property
-  sold, service ended, deactivated in error, and payment resolved—including whether to collect, write off,
-  merge, retain documents, restore access, or require a new booking. The same policy drives the employee
-  preview, provider actions, customer wording, and final record.
-- The immutable lifecycle record and its recovery are completion requirements, not best-effort aftermath.
-  Each missing transition has its own durable recovery identity; failure to create either the event or its
-  case cannot return clean success. Operations and leadership can page, search, and export the complete
-  history, see read failures, and reconcile actor, reason, provider effects, schedule, access, status,
-  customer notice, and any recovery disposition (**GL-18**, **GL-19**, and **X1**).
+- Leadership signs off the versioned per-reason transition policy now live as engineering defaults
+  (`LIFECYCLE_POLICY_VERSION 2026-07-19.1`): for each deactivation reason (customer request,
+  nonpayment, moved, property sold, service ended, duplicate, other) and reactivation reason, the
+  balance handling (collect / report-only / write-off review), document retention on a duplicate, and
+  the customer-notice wording (a duplicate record sends no notice by design). Every action records the
+  policy version it ran under; sign-off ratifies or amends the recorded values.
+- Leadership's page/search/**export** of the complete lifecycle history lands with the GL-19
+  reconciliation and command view (the history itself is durable, paged, and read-failure-honest
+  today; only the export surface is outstanding).
 
 **Pass owner:** Head of Operations; Finance and CEO approve protected fields, transition policy, and
 recovery policy.
@@ -451,13 +374,14 @@ recovery policy.
 **Business outcome:** A customer's online cancellation is a durable instruction, and every customer
 message matches the actual billing, plan, schedule, and delivery state.
 
-**Why this is still a gate:** The retained command and daily resumer improve outage recovery, but neither
-owns an exclusive resume lease. Two stale-claim reclaims, manual resumes, or a manual and scheduled resume
-can all drive the same cancellation concurrently. The command records no completed phases and is deleted
-after the provider/CRM cancel even when visits, a full refund, or the final notice remain unresolved. If a
-process stops after the plan becomes CANCELED but before schedule or notice work finishes, every later
-resume bypasses those steps; the sweep reports the command complete even while leaving it stuck and may
-never open a case.
+**Why this is still a gate:** The `d546c10` remediation made the command exclusively held — stale
+reclaim is one atomic takeover, every initial action and resume conditionally acquires the lease, its
+writes are fenced, and the browser can no longer raw-delete it. What remains is the phase model and the
+truth of settlement: the command records no completed phases and is deleted after the provider/CRM
+cancel even when visits, a full refund, or the final notice remain unresolved. If a process stops after
+the plan becomes CANCELED but before schedule or notice work finishes, every later resume bypasses
+those steps; the sweep reports the command complete even while leaving it stuck and may never open a
+case.
 
 The new settlement check can also report green too early. It trusts CRM status without confirming the
 subscription is inactive at the provider, treats any nonzero refund as settling a full late charge, and
@@ -474,10 +398,9 @@ and each affected visit independently receives the 72-hour money outcome.
 
 - One cancellation command owns the accepted request and every phase through **terminal** completion:
   provider stop, CRM state, each visit, every post-request charge/refund, final customer delivery, and
-  immutable outcome. Every scheduled, manual, or customer-triggered resume must conditionally acquire one
-  current lease/version; stale recovery is atomic; duplicate workers return persisted progress rather
-  than both acting. The command cannot be raw-deleted or marked complete while any phase or confirmed
-  recovery owner is missing.
+  immutable outcome. (The exclusive lease, atomic stale recovery, and no-raw-delete are done —
+  `d546c10`.) The command cannot be marked complete while any phase or confirmed recovery owner is
+  missing.
 - Resume from the last confirmed phase after every process stop. A plan already marked CANCELED must still
   repair unread/failed schedule work, paid and in-progress decisions, refund work, and final notice rather
   than short-circuiting. Failure to write the pending flag, command progress, or recovery case remains
@@ -514,10 +437,11 @@ and each affected visit independently receives the 72-hour money outcome.
 **Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
 capacity, route, audit, and customer-notification consequences in one guided action.
 
-**Why this is still a gate:** The new command is acquired before work begins, but stale reclaim and resume
-do not conditionally acquire an exclusive lease; multiple employees or the daily worker can drive the
-same change. A successful refund checkpoint, invoice void, recovery-case write, audit write, and command
-release can each fail without changing the final result. Only the first paid and first open invoice are
+**Why this is still a gate:** The `d546c10` remediation made the command exclusively held — stale
+reclaim is one atomic takeover, cancel and reschedule attempts and every resume conditionally acquire
+the lease, checkpoints and release are fenced, and the browser can no longer raw-delete it. What
+remains is result truthfulness and coverage: a successful refund checkpoint, invoice void,
+recovery-case write, audit write, and command release can each fail without changing the final result. Only the first paid and first open invoice are
 handled, an invoice-void exception can be logged and then reported **Complete**, and a processing payment
 is promised a refund even though no settlement webhook completes that promise. The visit is then marked
 CANCELED and the command deleted, so **Resume visit change** becomes a no-op.
@@ -536,11 +460,10 @@ Finance close a paid-cancellation case as **Account credit applied** despite hav
 **Remaining requirements:**
 
 - One durable command stores the original actor, controlled reason, action, decision, prior state, proposed
-  date/route/technician, every affected invoice, and every required phase. Each initial action, retry,
-  manual resume, and scheduled resume conditionally acquires one current lease/version; stale recovery is
-  atomic; and cancel versus reschedule cannot interleave. The command remains until the exact terminal
-  result or a durably confirmed cause-specific recovery owner exists, and raw staff deletion cannot erase
-  an accepted change.
+  date/route/technician, every affected invoice, and every required phase. (The exclusive
+  conditionally-acquired lease, atomic stale recovery, cancel/reschedule single-holder serialization,
+  and no-raw-delete are done — `d546c10`.) The command remains until the exact terminal result or a
+  durably confirmed cause-specific recovery owner exists.
 - Cancellation reconciles **all** invoices and provider payments for the visit. Every refund is exact and
   idempotent, every unpaid invoice is confirmed void, offline money requires a recorded real-world
   disposition, and no thrown/null write can fall through to **Complete**. A pending bank debit remains
