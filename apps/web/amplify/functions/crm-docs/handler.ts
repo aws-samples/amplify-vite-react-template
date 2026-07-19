@@ -4,11 +4,13 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { dataClient } from "../shared/dataClient";
 import {
+  assertApplicationWithinLabel,
   assertDeliverableAddress,
   assertProductCanBeSaved,
   assertTechnicianCompliance,
   EPA_REGISTRATION_RE,
   hasCurrentLicense,
+  parseLabelRules,
 } from "../shared/compliance";
 import { retryBookingFinalization } from "../shared/bookingFinalize";
 import { opFieldName } from "../shared/opEvent";
@@ -54,9 +56,11 @@ import {
   resumePlanCancellation,
 } from "../shared/planCancellation";
 import { resumeVisitChange } from "../shared/visitChange";
+import { queuePresenceReview } from "../shared/recovery";
 import {
   openMissingContactWork,
   openOwnedWork,
+  resolveOwnedWork,
   workItemId,
 } from "../shared/ownedWork";
 import {
@@ -124,6 +128,7 @@ type Args = {
   defaultRate?: string;
   reEntryHours?: number;
   labelApproved?: boolean;
+  labelRulesJson?: unknown;
   active?: boolean;
   sortOrder?: number;
   servicePlanId?: string;
@@ -140,6 +145,7 @@ type Args = {
   otherJobId?: string;
   otherRouteOrder?: number;
   workItemId?: string;
+  amendmentId?: string;
   action?: string;
   resolutionActionId?: string;
   reasonCode?: string;
@@ -252,6 +258,16 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         authorSub: callerSub(event.identity),
         authorEmail: callerEmail(event.identity),
         authorName: callerName(event.identity),
+      });
+    }
+    case "recordReportDelivery": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return recordReportDelivery({
+        reportId: event.arguments.reportId,
+        amendmentId: event.arguments.amendmentId,
+        action: event.arguments.action!,
+        note: event.arguments.note,
+        actorEmail: callerEmail(event.identity),
       });
     }
     case "saveProduct": {
@@ -552,6 +568,8 @@ export async function updateOwnedWork(args: {
         now,
         note: note || "Closed by a verified system action.",
         eventType: "RESOLVED",
+        kind,
+        relatedId: item.relatedId,
       });
     }
 
@@ -572,6 +590,8 @@ export async function updateOwnedWork(args: {
         now,
         note: note || `${chosen.label} — confirmed.`,
         eventType: "RESOLVED",
+        kind,
+        relatedId: item.relatedId,
       });
     }
 
@@ -612,6 +632,8 @@ export async function updateOwnedWork(args: {
       eventType: "MANUAL_OVERRIDE",
       manualOverride: true,
       reasonCode,
+      kind,
+      relatedId: item.relatedId,
     });
   }
 
@@ -639,6 +661,8 @@ async function closeResolvedWorkItem(input: {
   eventType: "RESOLVED" | "MANUAL_OVERRIDE";
   manualOverride?: boolean;
   reasonCode?: string;
+  kind?: string | null;
+  relatedId?: string | null;
 }) {
   const client = await dataClient();
   const { item, actorSub, actorEmail, now, note } = input;
@@ -685,6 +709,19 @@ async function closeResolvedWorkItem(input: {
       resolutionEvent.errors?.map((error) => error.message).join("; ") ||
         "Could not record resolution history"
     );
+  }
+  // GL-15: resolving a presence-review case settles the durable obligation on
+  // the report itself, so a resumed finalize / the daily sweep stop re-opening
+  // it. Best-effort — the resolved case is already the authoritative history.
+  if (
+    input.kind === "LOCATION_REVIEW" &&
+    input.relatedId &&
+    "ServiceReport" in client.models
+  ) {
+    await client.models.ServiceReport.update({
+      id: input.relatedId,
+      presenceReviewStatus: "RESOLVED",
+    }).catch(() => undefined);
   }
   return {
     workItemId: item.id,
@@ -798,9 +835,140 @@ async function sendCustomerEmail(
   return { sent, to: customer.email };
 }
 
+/**
+ * GL-15 — the office's controlled delivery actions for a finalized report or
+ * amendment. ALTERNATE records an approved alternate delivery (mail/hand-off,
+ * note required) — the resolution path for NO_EMAIL/BOUNCED; RESEND clears the
+ * failed state and re-runs the normal idempotent delivery (finalize /
+ * amendment resume paths), which adopts any proven prior send instead of
+ * duplicating. Both re-read the persisted record and return the VERIFIED new
+ * state.
+ */
+async function recordReportDelivery(input: {
+  reportId?: string | null;
+  amendmentId?: string | null;
+  action: string;
+  note?: string | null;
+  actorEmail: string | null;
+}) {
+  const action = input.action.trim().toUpperCase();
+  if (action !== "ALTERNATE" && action !== "RESEND") {
+    throw new Error("Unknown delivery action — use RESEND or ALTERNATE");
+  }
+  const client = await dataClient();
+  const isAmendment = Boolean(input.amendmentId);
+  const id = (input.amendmentId ?? input.reportId)?.trim();
+  if (!id) throw new Error("A report or amendment is required");
+
+  if (action === "ALTERNATE") {
+    const note = input.note?.trim();
+    if (!note) {
+      throw new Error(
+        "Say how the document was delivered (mailed, handed to the customer…) — the record needs the method."
+      );
+    }
+    if (isAmendment) {
+      const { data } = await client.models.ServiceReportAmendment.update({
+        id,
+        deliveryStatus: "ALTERNATE_DELIVERED",
+      });
+      if (!data) throw new Error("Could not record the alternate delivery");
+    } else {
+      const { data } = await client.models.ServiceReport.update({
+        id,
+        deliveryStatus: "ALTERNATE_DELIVERED",
+        emailedAt: new Date().toISOString(),
+      });
+      if (!data) throw new Error("Could not record the alternate delivery");
+    }
+    await resolveOwnedWork({
+      kind: isAmendment ? "MISSING_CONTACT" : "MISSING_CONTACT",
+      dedupeKey: isAmendment
+        ? `report-amendment-delivery:${id}`
+        : `service-report-delivery:${id}`,
+      note: `Alternate delivery recorded by ${input.actorEmail ?? "office"}: ${note}`,
+    });
+    await resolveOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: isAmendment
+        ? `report-amendment-delivery:${id}`
+        : `service-report-delivery:${id}`,
+      note: `Alternate delivery recorded by ${input.actorEmail ?? "office"}: ${note}`,
+    });
+    // Verified readback — the screen shows the persisted state.
+    const { data: verify } = isAmendment
+      ? await client.models.ServiceReportAmendment.get({ id })
+      : await client.models.ServiceReport.get({ id });
+    return {
+      id,
+      deliveryStatus: verify?.deliveryStatus ?? "ALTERNATE_DELIVERED",
+      recorded: verify?.deliveryStatus === "ALTERNATE_DELIVERED",
+    };
+  }
+
+  // RESEND: clear the failed/bounced state so the idempotent delivery path
+  // re-attempts (it adopts a proven prior send from the EmailLog rather than
+  // duplicating). For a report, re-run the finalize resume; the amendment
+  // resume runs through amendServiceReport with the same request.
+  if (isAmendment) {
+    const { data } = await client.models.ServiceReportAmendment.update({
+      id,
+      deliveryStatus: "FAILED",
+      emailedAt: null,
+    });
+    if (!data) throw new Error("Could not queue the resend");
+    return {
+      id,
+      deliveryStatus: "FAILED",
+      recorded: true,
+      nextStep:
+        "Re-issue the same amendment from the report screen — the resume sends only what never went out.",
+    };
+  }
+  const { data: report } = await client.models.ServiceReport.get({ id });
+  if (!report || report.status !== "FINALIZED") {
+    throw new Error("Only a finalized report's delivery can be re-run");
+  }
+  const { data } = await client.models.ServiceReport.update({
+    id,
+    deliveryStatus: "FAILED",
+    emailedAt: null,
+  });
+  if (!data) throw new Error("Could not queue the resend");
+  const result = await finalizeServiceReport(id);
+  return {
+    id,
+    deliveryStatus: (result as { deliveryStatus?: string }).deliveryStatus ?? null,
+    recorded: true,
+  };
+}
+
 async function saveProduct(args: Args) {
   const name = args.name?.trim() ?? "";
   if (!name) throw new Error("Product name is required");
+  // GL-15: structured label rules, validated for shape before they become the
+  // authority finalization fails closed against.
+  let labelRulesJson: string | null = null;
+  if (args.labelRulesJson != null && args.labelRulesJson !== "") {
+    const rules = parseLabelRules(args.labelRulesJson);
+    if (!rules) {
+      throw new Error(
+        "The label rules could not be read — they must be valid JSON (allowedServiceTypes, allowedPests, quantity {min,max,unit}, rates, minReEntryHours)."
+      );
+    }
+    if (
+      rules.quantity &&
+      (!Number.isFinite(rules.quantity.min) ||
+        !Number.isFinite(rules.quantity.max) ||
+        rules.quantity.min > rules.quantity.max ||
+        !rules.quantity.unit?.trim())
+    ) {
+      throw new Error(
+        "The label quantity rule needs a numeric min ≤ max and a unit (e.g. oz)."
+      );
+    }
+    labelRulesJson = JSON.stringify(rules);
+  }
   const fields = {
     name,
     epaNumber: args.epaNumber?.trim() || null,
@@ -810,6 +978,7 @@ async function saveProduct(args: Args) {
     reEntryHours: args.reEntryHours ?? null,
     labelApproved: args.labelApproved ?? false,
     targetPests: args.targetPests?.trim() || null,
+    labelRulesJson,
     notes: args.notes?.trim() || null,
     active: args.active ?? false,
     sortOrder: args.sortOrder ?? null,
@@ -1493,63 +1662,92 @@ async function flagLocationForReview(input: {
   geoAccuracyM: number;
 }): Promise<void> {
   try {
-    const reasons: string[] = [];
-    if (input.geoAccuracyM > GEO_REVIEW_ACCURACY_M) {
-      reasons.push(
-        `the GPS fix was only accurate to about ${Math.round(input.geoAccuracyM)} m`
-      );
+    const client = await dataClient();
+    // The durable marker is the truth a resumed finalize and the daily sweep
+    // read — a settled review never re-runs, an unsettled one always does.
+    const { data: current } = await client.models.ServiceReport.get({
+      id: input.reportId,
+    });
+    const status = current?.presenceReviewStatus ?? null;
+    if (status === "NOT_NEEDED" || status === "QUEUED" || status === "RESOLVED") {
+      return;
     }
 
-    const apiKey = process.env.GOOGLE_ROUTES_API_KEY;
-    if (apiKey && input.serviceAddress) {
-      const meters = await drivingDistanceMetersFromPoint(
-        apiKey,
-        { lat: input.geoLat, lng: input.geoLng },
-        input.serviceAddress
-      );
-      // null = couldn't route (no coverage/geocode). Treat as unknown, not far.
-      if (meters != null && meters > GEO_REVIEW_DISTANCE_M) {
+    let detail: string;
+    if (status === "FLAGGED") {
+      // A prior pass established the obligation but could not confirm the case
+      // — re-attempt the queue without recomputing (the flag IS the fact).
+      detail = `${input.customerName}'s ${input.serviceType} service report was flagged for an on-site presence review, but the review case did not persist on the first attempt. The record stands; this is a check, not a hold.`;
+    } else {
+      const reasons: string[] = [];
+      if (input.geoAccuracyM > GEO_REVIEW_ACCURACY_M) {
         reasons.push(
-          `the captured location is about ${(meters / 1609).toFixed(1)} mi from the service address`
+          `the GPS fix was only accurate to about ${Math.round(input.geoAccuracyM)} m`
         );
       }
+      const apiKey = process.env.GOOGLE_ROUTES_API_KEY;
+      if (apiKey && input.serviceAddress) {
+        const meters = await drivingDistanceMetersFromPoint(
+          apiKey,
+          { lat: input.geoLat, lng: input.geoLng },
+          input.serviceAddress
+        );
+        // null = couldn't route (no coverage/geocode). Unknown, not far.
+        if (meters != null && meters > GEO_REVIEW_DISTANCE_M) {
+          reasons.push(
+            `the captured location is about ${(meters / 1609).toFixed(1)} mi from the service address`
+          );
+        }
+      }
+      if (!reasons.length) {
+        await client.models.ServiceReport.update({
+          id: input.reportId,
+          presenceReviewStatus: "NOT_NEEDED",
+        });
+        return;
+      }
+      // The FLAGGED marker is the PERSISTENT recovery record, written and
+      // verified BEFORE the queue attempt — a failed case write can no longer
+      // silently erase the obligation; the daily sweep re-opens it from here.
+      const { data: marked } = await client.models.ServiceReport.update({
+        id: input.reportId,
+        presenceReviewStatus: "FLAGGED",
+      });
+      if (!marked) {
+        console.error(
+          "flagLocationForReview: could not persist FLAGGED marker",
+          input.reportId
+        );
+      }
+      detail = `${input.customerName}'s ${input.serviceType} service report is finalized, but its on-site location may not confirm presence — ${reasons.join(
+        " and "
+      )}. The record stands; this is a check, not a hold.`;
     }
 
-    if (!reasons.length) return;
-    const workId = await openOwnedWork({
-      kind: "LOCATION_REVIEW",
-      dedupeKey: `service-report-location:${input.reportId}`,
-      title: `On-site location needs a look: ${input.customerName}`,
-      detail: `${input.customerName}'s ${input.serviceType} service report is finalized, but its on-site location may not confirm presence — ${reasons.join(
-        " and "
-      )}. The record stands; this is a check, not a hold.`,
+    const queued = await queuePresenceReview({
+      reportId: input.reportId,
       customerId: input.customerId,
-      relatedId: input.reportId,
-      sourceUrl: `/customers/${input.customerId}`,
-      resolutionAction:
-        "Confirm the technician was on site (job-site photos, notes, customer contact). If confirmed, resolve. If not, issue a corrected report or open the discrepancy with the technician.",
-      ownerTeam: "OPS",
+      customerName: input.customerName,
+      serviceType: input.serviceType,
+      detail,
     });
-    // A review was warranted but the durable queue write did not land
-    // (openOwnedWork returns null on failure). The obligation must not vanish
-    // silently — page the office through a separate channel so a human still
-    // owns the presence check. Still non-blocking: the finalized record stands.
-    if (!workId) {
+    // Secondary alarm only — the durable FLAGGED marker plus the daily sweep
+    // are the real recovery; the email is a same-day nudge.
+    if (!queued) {
       await notifyOffice({
         subject: `On-site presence review couldn't be queued: ${input.customerName}`,
         heading: "A location review could not be recorded",
         template: "ops-location-review-unqueued",
         customerId: input.customerId,
         relatedId: input.reportId,
-        bodyHtml: `<p>${input.customerName}'s ${input.serviceType} service report is finalized, but its on-site location may not confirm presence — ${reasons.join(
-          " and "
-        )}.</p>
-         <p>The automatic review task could not be saved, so this needs a manual check: confirm the technician was on site (job-site photos, notes, customer contact). If it can't be confirmed, issue a corrected report or open the discrepancy with the technician.</p>`,
+        bodyHtml: `<p>${detail}</p>
+         <p>The automatic review task could not be saved; the daily reconcile will retry it. To act now: confirm the technician was on site (job-site photos, notes, customer contact).</p>`,
       });
     }
   } catch (err) {
     // A presence review is a safety net, never a gate. If it cannot run, the
-    // finalized record still stands.
+    // finalized record still stands — the FLAGGED marker (or the absent
+    // NOT_NEEDED marker) keeps the obligation discoverable by the sweep.
     console.error("flagLocationForReview failed", input.reportId, err);
   }
 }
@@ -1652,6 +1850,10 @@ type CatalogProduct = {
   /** The office-recorded label rate/dilution, checked against the approved
    *  product label. The authority a report's applied rate is validated to. */
   defaultRate?: string | null;
+  /** Label re-entry minimum (hours). */
+  reEntryHours?: number | null;
+  /** GL-15 structured label rules — see shared/compliance LabelRules. */
+  labelRulesJson?: unknown;
 };
 
 /**
@@ -1690,31 +1892,26 @@ function assertProductsAreApproved(
   }
 }
 
-/** Compare a rate/dilution string ignoring spacing and case, so "0.05 % dilution"
- *  and "0.05% dilution" are the same label rate but "1 oz / gal" and "2 oz / gal"
- *  are not. Deliberately conservative — it normalizes whitespace, not meaning. */
-function normalizeRate(value: string | null | undefined): string {
-  return (value ?? "").toLowerCase().replace(/\s+/g, "");
-}
-
 /**
- * GL-15, bullet 1: the applied rate/dilution has to be the approved label rate,
- * not a strength a technician typed on site. assertProductsAreApproved has
- * already matched each row to an active, label-approved catalog product by EPA
- * number and name; this holds the technician-entered rate to *that* product's
- * office-recorded label rate. A catalog row whose rate was checked against the
- * label (defaultRate) is the authority: a report rate that does not match it is
- * refused here, so plausible free text cannot authorize an application at a
- * different strength than the label allows.
- *
- * A catalog product with no recorded label rate cannot be validated against, so
- * it is passed through — the shape check in assertReportIsARecord still requires
- * the technician to record a rate, and the office is expected to record the
- * label rate when it approves the product (assertProductCanBeSaved's gate).
+ * GL-15, bullet 4: every recorded application fact is held to the product's
+ * label rules, and the check FAILS CLOSED — a catalog product that cannot be
+ * validated (no recorded rate or rules) refuses finalization with the office
+ * fix named, rather than passing silently onto a legal record. The rules
+ * themselves (allowed rates, quantity range, pest/service applicability,
+ * re-entry minimum) live on the catalog row (labelRulesJson + defaultRate +
+ * reEntryHours); the validation logic is shared/compliance's
+ * assertApplicationWithinLabel, pure and unit-tested.
  */
-function assertProductRatesMatchLabel(
-  products: { name?: string | null; epaNumber?: string | null; rate?: string | null }[],
-  catalog: CatalogProduct[]
+function assertProductsWithinLabelRules(
+  products: {
+    name?: string | null;
+    epaNumber?: string | null;
+    rate?: string | null;
+    quantity?: string | null;
+  }[],
+  catalog: CatalogProduct[],
+  report: { reEntryIntervalHours?: number | null; targetPests?: string | null },
+  job: { serviceType?: string | null }
 ): void {
   const approved = catalog.filter((c) => c.active && c.labelApproved);
   for (const p of products) {
@@ -1727,13 +1924,17 @@ function assertProductRatesMatchLabel(
     );
     // Unmatched rows are already refused by assertProductsAreApproved.
     if (!match) continue;
-    const labelRate = match.defaultRate?.trim();
-    if (!labelRate) continue;
-    if (normalizeRate(p.rate) !== normalizeRate(labelRate)) {
-      throw new Error(
-        `The rate recorded for “${name}” (${p.rate?.trim() || "—"}) isn't its approved label rate (${labelRate}). Apply and record the label rate, or ask the office to update the product's approved rate before it goes on a pesticide record.`
-      );
-    }
+    assertApplicationWithinLabel({
+      productName: name,
+      recordedQuantity: p.quantity,
+      recordedRate: p.rate,
+      reportReEntryHours: report.reEntryIntervalHours,
+      reportPests: report.targetPests,
+      jobServiceType: job.serviceType,
+      catalogDefaultRate: match.defaultRate,
+      catalogReEntryHours: match.reEntryHours,
+      rules: parseLabelRules(match.labelRulesJson),
+    });
   }
 }
 
@@ -1766,6 +1967,37 @@ async function loadReportPdf(pdfKey?: string | null): Promise<Uint8Array | null>
  * attempt (no marker) is re-attempted; a customer with no email on file is
  * owned delivery work, not a silent gap.
  */
+/**
+ * GL-15 — was this exact document already accepted by the provider on a prior
+ * pass whose marker write was lost? SES has no idempotency key, so the outbox
+ * check is the EmailLog: a SENT/DELIVERED row for this record + template means
+ * the customer HAS the message and a resend would duplicate a legal notice.
+ */
+async function priorAcceptedSend(
+  relatedId: string,
+  template: string
+): Promise<{ sentAt: string } | null> {
+  try {
+    const client = await dataClient();
+    if (!("EmailLog" in client.models)) return null;
+    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
+      { relatedId },
+      { limit: 50 }
+    );
+    const hit = (data ?? []).find(
+      (l) =>
+        l.template === template &&
+        (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+    );
+    return hit ? { sentAt: hit.sentAt } : null;
+  } catch (err) {
+    console.error("priorAcceptedSend lookup failed", relatedId, err);
+    // Unknown ≠ safe to resend a legal notice blind — the caller treats a
+    // lookup failure as "assume sent" and routes through owned work instead.
+    return { sentAt: new Date().toISOString() };
+  }
+}
+
 async function deliverServiceReport(
   report: {
     id: string;
@@ -1787,15 +2019,35 @@ async function deliverServiceReport(
   pdfInMemory?: Uint8Array
 ): Promise<{
   emailed: boolean;
-  deliveryStatus: "DELIVERED" | "FAILED" | "NO_EMAIL";
+  deliveryStatus: string;
 }> {
-  // Already delivered on a prior pass — the durable marker means the customer
-  // message went out. Never re-send it.
+  // Already sent on a prior pass — the durable marker means the provider took
+  // the customer message. Never re-send it. (Later mailbox events may upgrade
+  // or reopen the state; that is ses-events' job, not a resend trigger.)
   if (report.emailedAt) {
-    return { emailed: false, deliveryStatus: "DELIVERED" };
+    return {
+      emailed: false,
+      deliveryStatus: report.deliveryStatus ?? "ACCEPTED",
+    };
   }
 
   const client = await dataClient();
+
+  // A prior pass durably intended a send (SENDING) but its marker never
+  // landed. The EmailLog is the outbox truth: adopt a proven send instead of
+  // duplicating the customer's legal notice.
+  if (report.deliveryStatus === "SENDING") {
+    const prior = await priorAcceptedSend(report.id, "service-report");
+    if (prior) {
+      await client.models.ServiceReport.update({
+        id: report.id,
+        deliveryStatus: "ACCEPTED",
+        emailedAt: prior.sentAt,
+      });
+      return { emailed: false, deliveryStatus: "ACCEPTED" };
+    }
+    // Nothing left the building — fall through and send for real.
+  }
 
   if (!customer.email) {
     await openOwnedWork({
@@ -1844,6 +2096,34 @@ async function deliverServiceReport(
     return { emailed: false, deliveryStatus: "FAILED" };
   }
 
+  // The durable outbox intent, written and VERIFIED before the provider call:
+  // a crash between SES acceptance and the marker write now leaves SENDING —
+  // discoverable, resumable via the EmailLog check above — instead of an
+  // invisible duplicate-send window. If the intent cannot persist, we do not
+  // send (a send we could not mark is a duplicate waiting to happen).
+  if (report.deliveryStatus !== "SENDING") {
+    const { data: intent } = await client.models.ServiceReport.update({
+      id: report.id,
+      deliveryStatus: "SENDING",
+    });
+    if (!intent) {
+      await openOwnedWork({
+        kind: "EMAIL_FAILURE",
+        dedupeKey: `service-report-delivery:${report.id}`,
+        title: `Service report delivery could not start: ${customer.displayName}`,
+        detail: `${customer.displayName}'s ${job.serviceType} report is finalized, but the delivery-intent marker could not be written, so the send was not attempted (a send that can't be marked risks a duplicate).`,
+        customerId: customer.id,
+        relatedId: report.id,
+        sourceUrl: `/customers/${customer.id}`,
+        resolutionAction:
+          "Re-send the finalized report from the customer screen once the system recovers.",
+        ownerTeam: "OPS",
+      });
+      return { emailed: false, deliveryStatus: report.deliveryStatus ?? "FAILED" };
+    }
+    report.deliveryStatus = "SENDING";
+  }
+
   // If this visit was part of a plan, tell them when the next one lands.
   const { data: plan } = job.servicePlanId
     ? await client.models.ServicePlan.get({ id: job.servicePlanId })
@@ -1885,16 +2165,35 @@ async function deliverServiceReport(
     ),
   });
 
-  // Record the outcome. emailedAt is stamped only on a real send — it is the
-  // marker a resumed finalize reads to know delivery already happened. A failed
-  // send already opened EMAIL_FAILURE work inside sendEmail; leaving the marker
-  // unset lets the next finalize re-attempt without duplicating a delivery.
-  const deliveryStatus: "DELIVERED" | "FAILED" = emailed ? "DELIVERED" : "FAILED";
-  await client.models.ServiceReport.update({
+  // Record the outcome. ACCEPTED — the provider took it; a legal record never
+  // calls acceptance "delivered" (ses-events upgrades to DELIVERED on the
+  // mailbox event, or reopens the obligation on a bounce). emailedAt is the
+  // marker a resumed finalize reads to know the send already happened. A
+  // failed send already opened EMAIL_FAILURE work inside sendEmail; FAILED
+  // (not SENDING) lets the next finalize re-attempt cleanly.
+  const deliveryStatus = emailed ? "ACCEPTED" : "FAILED";
+  const { data: marked } = await client.models.ServiceReport.update({
     id: report.id,
     deliveryStatus,
     ...(emailed ? { emailedAt: new Date().toISOString() } : {}),
   });
+  // A send that happened but could not be marked is visible owned work — never
+  // a silent "sent but not recorded" (the SENDING state + EmailLog also make
+  // it discoverable to the resume path).
+  if (emailed && !marked) {
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `service-report-delivery:${report.id}`,
+      title: `Service report sent but not recorded: ${customer.displayName}`,
+      detail: `${customer.displayName}'s ${job.serviceType} report email was accepted by the provider, but the sent marker could not be written. Do NOT blind-resend — verify the EmailLog first.`,
+      customerId: customer.id,
+      relatedId: report.id,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Check the email log for this report. If the send is there, re-run finalize to adopt it; only resend if nothing was accepted.",
+      ownerTeam: "OPS",
+    });
+  }
   return { emailed, deliveryStatus };
 }
 
@@ -1910,6 +2209,47 @@ async function deliverServiceReport(
  * anything (deliverServiceReport), so a failed write can never leave a delivered
  * "complete" message pointing at a still-draft record.
  */
+/** How long a finalize claim may sit before a retry may reclaim it — past any
+ *  Lambda timeout, so a live attempt is never raced. */
+const FINALIZE_CLAIM_STALE_MS = 5 * 60_000;
+
+/**
+ * GL-15 — the single-winner finalize claim (conditional create, id = reportId).
+ * Returns true when this caller owns finalization; false when another attempt
+ * holds a fresh claim. A stale claim (crashed holder) is reclaimed.
+ */
+async function acquireFinalizeClaim(reportId: string): Promise<boolean> {
+  const client = await dataClient();
+  const attempt = async () => {
+    const { data } = await client.models.ServiceReportFinalizeClaim.create({
+      id: reportId,
+      requestedAt: new Date().toISOString(),
+    });
+    return Boolean(data);
+  };
+  if (await attempt()) return true;
+  const { data: held } = await client.models.ServiceReportFinalizeClaim.get({
+    id: reportId,
+  });
+  if (
+    held?.requestedAt &&
+    Date.now() - Date.parse(held.requestedAt) < FINALIZE_CLAIM_STALE_MS
+  ) {
+    return false;
+  }
+  await client.models.ServiceReportFinalizeClaim.delete({ id: reportId }).catch(
+    () => undefined
+  );
+  return attempt();
+}
+
+async function releaseFinalizeClaim(reportId: string): Promise<void> {
+  const client = await dataClient();
+  await client.models.ServiceReportFinalizeClaim.delete({ id: reportId }).catch(
+    () => undefined
+  );
+}
+
 async function finalizeServiceReport(reportId: string) {
   const client = await dataClient();
   const { data: report } = await client.models.ServiceReport.get({
@@ -1917,6 +2257,28 @@ async function finalizeServiceReport(reportId: string) {
   });
   if (!report) throw new Error(`ServiceReport ${reportId} not found`);
 
+  // GL-15: one winner. Two simultaneous finalizes must not both see
+  // "not finalized" and both bill, schedule, and email — the loser reports the
+  // honest in-progress state instead of proceeding.
+  if (!(await acquireFinalizeClaim(reportId))) {
+    return {
+      inProgress: true,
+      emailed: false,
+      deliveryStatus: report.deliveryStatus ?? null,
+      message:
+        "This report is already being finalized. Wait a moment, then refresh — the outcome will be recorded.",
+    };
+  }
+  const reportRow = report;
+  try {
+    return await runFinalize();
+  } finally {
+    await releaseFinalizeClaim(reportId);
+  }
+
+  async function runFinalize() {
+  // Narrowed alias — hoisted declarations do not inherit the null check above.
+  const report = reportRow;
   const [{ data: job }, { data: customer }, { data: technician }] =
     await Promise.all([
       client.models.Job.get({ id: report.jobId }),
@@ -1935,17 +2297,28 @@ async function finalizeServiceReport(reportId: string) {
     .filter(Boolean)
     .join(", ");
 
-  // Fully done already (finalized AND delivery settled): a resumed finalize has
-  // nothing left to do. NO_EMAIL is settled (there is nothing to send to); only
-  // a real send stamps emailedAt. A FAILED delivery is NOT settled — it falls
-  // through so the send is re-attempted.
+  // Fully done already (finalized AND delivery settled AND the presence-review
+  // obligation settled): a resumed finalize has nothing left to do. NO_EMAIL is
+  // settled (there is nothing to send to); only a real send stamps emailedAt. A
+  // FAILED delivery is NOT settled — it falls through so the send is
+  // re-attempted. A FLAGGED (or unrecorded) presence review is NOT settled —
+  // the resume re-runs checkpoint 3 so the obligation cannot vanish.
   const deliverySettled =
     !!report.emailedAt || report.deliveryStatus === "NO_EMAIL";
-  if (report.status === "FINALIZED" && report.pdfKey && deliverySettled) {
+  const reviewSettled =
+    report.presenceReviewStatus === "NOT_NEEDED" ||
+    report.presenceReviewStatus === "QUEUED" ||
+    report.presenceReviewStatus === "RESOLVED";
+  if (
+    report.status === "FINALIZED" &&
+    report.pdfKey &&
+    deliverySettled &&
+    reviewSettled
+  ) {
     return {
       pdfKey: report.pdfKey,
       emailed: false,
-      deliveryStatus: report.deliveryStatus ?? "DELIVERED",
+      deliveryStatus: report.deliveryStatus ?? "ACCEPTED",
       alreadyFinalized: true,
     };
   }
@@ -1968,7 +2341,7 @@ async function finalizeServiceReport(reportId: string) {
       const { data: catalog } = await client.models.Product.list({ limit: 1000 });
       const approved = catalog ?? [];
       assertProductsAreApproved(productsUsed, approved);
-      assertProductRatesMatchLabel(productsUsed, approved);
+      assertProductsWithinLabelRules(productsUsed, approved, report, job);
     }
 
     // assertReportIsARecord has already refused any report whose job is missing
@@ -2019,13 +2392,29 @@ async function finalizeServiceReport(reportId: string) {
       })
     );
 
-    await client.models.ServiceReport.update({
+    const { data: finalized, errors: finalizeErrors } =
+      await client.models.ServiceReport.update({
+        id: reportId,
+        status: "FINALIZED",
+        pdfKey,
+        applicationStartAt: applicationStartIso,
+        applicationEndAt: applicationEndIso,
+      });
+    // VERIFY the persisted record before anything downstream: a silently
+    // failed status write must not bill, schedule, or email "complete" over a
+    // still-draft report (GL-15).
+    const { data: verifyReport } = await client.models.ServiceReport.get({
       id: reportId,
-      status: "FINALIZED",
-      pdfKey,
-      applicationStartAt: applicationStartIso,
-      applicationEndAt: applicationEndIso,
     });
+    if (!finalized || verifyReport?.status !== "FINALIZED" || !verifyReport.pdfKey) {
+      throw new Error(
+        `The report could not be durably finalized${
+          finalizeErrors?.length
+            ? `: ${finalizeErrors.map((e) => e.message).join("; ")}`
+            : ""
+        }. Nothing was billed or sent — try again.`
+      );
+    }
     // Mirror onto the in-memory record so the checkpoints below see it as
     // finalized without a re-read.
     report.status = "FINALIZED";
@@ -2040,11 +2429,27 @@ async function finalizeServiceReport(reportId: string) {
   // they run on every pass and safely resume whichever a prior attempt missed.
   if (job.status !== "COMPLETED") {
     const completedAt = new Date().toISOString();
-    await client.models.Job.update({
+    const { data: completed, errors: completeErrors } =
+      await client.models.Job.update({
+        id: report.jobId,
+        status: "COMPLETED",
+        completedAt,
+      });
+    // VERIFY: billing and the next visit key off COMPLETED — a silently failed
+    // flip must stop here (the report is finalized and durable; a retry
+    // resumes from this checkpoint).
+    const { data: verifyJob } = await client.models.Job.get({
       id: report.jobId,
-      status: "COMPLETED",
-      completedAt,
     });
+    if (!completed || verifyJob?.status !== "COMPLETED") {
+      throw new Error(
+        `The job could not be marked completed${
+          completeErrors?.length
+            ? `: ${completeErrors.map((e) => e.message).join("; ")}`
+            : ""
+        }. The report is finalized and safe — try again to finish billing and delivery.`
+      );
+    }
     job.status = "COMPLETED";
     job.completedAt = completedAt;
   }
@@ -2082,6 +2487,7 @@ async function finalizeServiceReport(reportId: string) {
     deliveryStatus: delivery.deliveryStatus,
     alreadyFinalized: false,
   };
+  }
 }
 
 /** Corrected facts as they arrive from the office UI (AWSJSON, may be a string). */
@@ -2225,7 +2631,7 @@ async function amendServiceReport(
     return {
       amendmentId,
       pdfKey: amendment.pdfKey,
-      deliveryStatus: amendment.deliveryStatus ?? "DELIVERED",
+      deliveryStatus: amendment.deliveryStatus ?? "ACCEPTED",
       emailed: false,
       alreadyIssued: true,
     };
@@ -2267,10 +2673,67 @@ async function amendServiceReport(
     })
   );
 
-  // Deliver only if a prior attempt has not already delivered (emailedAt is the
-  // durable marker). A FAILED prior attempt left no marker and is re-attempted.
+  // Deliver only if a prior attempt has not already sent (emailedAt is the
+  // durable marker). GL-15: re-read the row RIGHT BEFORE deciding — a
+  // concurrent duplicate that lost the deterministic create must not race the
+  // winner's marker into a second customer email — then write the SENDING
+  // intent (verified) before the provider call, and adopt a proven prior send
+  // from the EmailLog instead of blind-resending.
+  const { data: freshAmendment } =
+    await client.models.ServiceReportAmendment.get({ id: amendmentId });
+  const current = freshAmendment ?? amendment;
   let emailed = false;
-  if (!amendment.emailedAt && customer.email) {
+  if (!current.emailedAt && customer.email) {
+    if (current.deliveryStatus === "SENDING") {
+      const prior = await priorAcceptedSend(
+        amendmentId,
+        "service-report-amendment"
+      );
+      if (prior) {
+        await client.models.ServiceReportAmendment.update({
+          id: amendmentId,
+          pdfKey,
+          deliveryStatus: "ACCEPTED",
+          emailedAt: prior.sentAt,
+        });
+        return {
+          amendmentId,
+          pdfKey,
+          deliveryStatus: "ACCEPTED",
+          emailed: false,
+          alreadyIssued: true,
+        };
+      }
+    }
+    const { data: intent } = await client.models.ServiceReportAmendment.update({
+      id: amendmentId,
+      deliveryStatus: "SENDING",
+    });
+    if (!intent) {
+      await openOwnedWork({
+        kind: "EMAIL_FAILURE",
+        dedupeKey: `report-amendment-delivery:${amendmentId}`,
+        title: `Amendment delivery could not start: ${customer.displayName}`,
+        detail: `The correction to ${customer.displayName}'s ${serviceType} report is issued, but the delivery-intent marker could not be written, so the send was not attempted.`,
+        customerId: customer.id,
+        relatedId: amendmentId,
+        sourceUrl: `/customers/${customer.id}`,
+        resolutionAction:
+          "Re-send the amendment from the customer screen once the system recovers.",
+        ownerTeam: "OPS",
+      });
+      await client.models.ServiceReportAmendment.update({
+        id: amendmentId,
+        pdfKey,
+      });
+      return {
+        amendmentId,
+        pdfKey,
+        deliveryStatus: current.deliveryStatus ?? "FAILED",
+        emailed: false,
+        alreadyIssued: false,
+      };
+    }
     emailed = await sendEmail({
       to: customer.email,
       subject: `Corrected service report — ${serviceType}`,
@@ -2293,11 +2756,12 @@ async function amendServiceReport(
       ),
     });
   }
-  // Delivery is a separate fact from issuance, exactly as it is for a report.
-  const deliveryStatus: "DELIVERED" | "FAILED" | "NO_EMAIL" = amendment.emailedAt
-    ? "DELIVERED"
+  // Delivery is a separate fact from issuance, exactly as it is for a report —
+  // and provider ACCEPTANCE is never called delivered on a legal record.
+  const deliveryStatus: "ACCEPTED" | "FAILED" | "NO_EMAIL" = current.emailedAt
+    ? "ACCEPTED"
     : emailed
-      ? "DELIVERED"
+      ? "ACCEPTED"
       : customer.email
         ? "FAILED"
         : "NO_EMAIL";
@@ -2316,12 +2780,29 @@ async function amendServiceReport(
     });
   }
 
-  await client.models.ServiceReportAmendment.update({
+  const { data: marked } = await client.models.ServiceReportAmendment.update({
     id: amendmentId,
     pdfKey,
     deliveryStatus,
     ...(emailed ? { emailedAt: new Date().toISOString() } : {}),
   });
+  // A send that happened but could not be marked is visible owned work — the
+  // SENDING state + EmailLog make it adoptable by the next attempt, never a
+  // blind duplicate.
+  if (emailed && !marked) {
+    await openOwnedWork({
+      kind: "EMAIL_FAILURE",
+      dedupeKey: `report-amendment-delivery:${amendmentId}`,
+      title: `Amendment sent but not recorded: ${customer.displayName}`,
+      detail: `The correction to ${customer.displayName}'s ${serviceType} report was accepted by the provider, but the sent marker could not be written. Do NOT blind-resend — verify the EmailLog first.`,
+      customerId: customer.id,
+      relatedId: amendmentId,
+      sourceUrl: `/customers/${customer.id}`,
+      resolutionAction:
+        "Check the email log for this amendment. If the send is there, re-run the amendment to adopt it; only resend if nothing was accepted.",
+      ownerTeam: "OPS",
+    });
+  }
 
   return {
     amendmentId,
@@ -2836,8 +3317,13 @@ async function getDocumentUrl(
   identity: AppSyncIdentity | undefined | null,
   key: string
 ) {
-  const match = /^(reports|agreements)\/([^/]+)\//.exec(key);
+  // reports/<cid>/…, agreements/<cid>/…, and jobs/<cid>/no-access/… (the
+  // no-access door-photo evidence, GL-15 retrieval).
+  const match = /^(reports|agreements|jobs)\/([^/]+)\//.exec(key);
   if (!match) throw new Error("Invalid document key");
+  if (match[1] === "jobs" && !/^jobs\/[^/]+\/no-access\//.test(key)) {
+    throw new Error("Invalid document key");
+  }
   const customerId = match[2];
   const groups = callerGroups(identity);
 

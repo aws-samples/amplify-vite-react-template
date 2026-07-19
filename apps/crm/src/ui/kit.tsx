@@ -180,6 +180,13 @@ export function StatusBadge({ status }: { status?: string | null }) {
  * "sent" unless it was. `emailedAt` covers reports finalized before
  * deliveryStatus existed: a stamped time means it was delivered.
  */
+/**
+ * GL-15 — one truthful sentence about where a legal document actually is.
+ * Provider ACCEPTANCE is never called delivered: only the mailbox-provider
+ * event (DELIVERED) earns the green "delivered", and a later bounce/complaint
+ * reopens the obligation visibly. No emailedAt fallback — an old timestamp is
+ * not proof of receipt.
+ */
 export function DeliveryBadge({
   status,
   emailedAt,
@@ -187,12 +194,26 @@ export function DeliveryBadge({
   status?: string | null;
   emailedAt?: string | null;
 }) {
-  const resolved = status ?? (emailedAt ? "DELIVERED" : null);
-  if (resolved === "DELIVERED") return <Badge tone="ok">sent to customer</Badge>;
+  // Legacy rows predating the delivery states: emailedAt alone proves only
+  // provider acceptance.
+  const resolved = status ?? (emailedAt ? "ACCEPTED" : null);
+  if (resolved === "DELIVERED") return <Badge tone="ok">delivered</Badge>;
+  if (resolved === "ACCEPTED")
+    return <Badge tone="info">sent — awaiting delivery confirmation</Badge>;
+  if (resolved === "SENDING")
+    return <Badge tone="warn">sending — not yet confirmed</Badge>;
+  if (resolved === "BOUNCED")
+    return <Badge tone="danger">bounced — customer does NOT have it</Badge>;
+  if (resolved === "COMPLAINED")
+    return <Badge tone="danger">marked spam — delivery reopened</Badge>;
+  if (resolved === "SUPPRESSED")
+    return <Badge tone="danger">address suppressed — not sent</Badge>;
   if (resolved === "FAILED")
     return <Badge tone="danger">delivery failed — office notified</Badge>;
   if (resolved === "NO_EMAIL")
     return <Badge tone="warn">no email on file — office will deliver</Badge>;
+  if (resolved === "ALTERNATE_DELIVERED")
+    return <Badge tone="ok">delivered another way (recorded)</Badge>;
   return null;
 }
 

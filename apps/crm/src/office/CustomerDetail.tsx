@@ -746,6 +746,24 @@ export default function CustomerDetail() {
                             : ""}
                         </span>
                       ) : null}
+                      {/* GL-15: the no-access evidence (reason + door photo) is
+                          retrievable here, not through engineering. */}
+                      {j.status === "NO_ACCESS" ? (
+                        <span className="nested-line">
+                          {j.noAccessReason
+                            ? `no access: ${String(j.noAccessReason).replace(/_/g, " ").toLowerCase()}`
+                            : "no access"}
+                          {j.noAccessPhotoKey ? (
+                            <>
+                              {" "}
+                              <DocButton
+                                docKey={j.noAccessPhotoKey}
+                                label="door photo"
+                              />
+                            </>
+                          ) : null}
+                        </span>
+                      ) : null}
                     </>
                   }
                   meta={
@@ -927,6 +945,12 @@ export default function CustomerDetail() {
             const reportAmendments = amendments.filter(
               (a) => a.originalReportId === r.id
             );
+            const undelivered =
+              r.deliveryStatus === "BOUNCED" ||
+              r.deliveryStatus === "COMPLAINED" ||
+              r.deliveryStatus === "FAILED" ||
+              r.deliveryStatus === "SUPPRESSED" ||
+              r.deliveryStatus === "NO_EMAIL";
             return (
               <div key={r.id}>
                 <ListRow
@@ -951,6 +975,30 @@ export default function CustomerDetail() {
                     </>
                   }
                 />
+                {/* GL-15: the photos and evidence behind the legal record are
+                    retrievable here, not through engineering. */}
+                {(r.photoKeys ?? []).filter(Boolean).length > 0 ? (
+                  <div style={{ marginLeft: 16, marginBottom: 4 }}>
+                    <span className="muted small">
+                      {(r.photoKeys ?? []).filter(Boolean).length} photo
+                      {(r.photoKeys ?? []).filter(Boolean).length === 1 ? "" : "s"}
+                      :
+                    </span>{" "}
+                    {(r.photoKeys ?? [])
+                      .filter((k): k is string => Boolean(k))
+                      .map((k, i) => (
+                        <DocButton key={k} docKey={k} label={`photo ${i + 1}`} />
+                      ))}
+                  </div>
+                ) : null}
+                {undelivered && roles.office ? (
+                  <div style={{ marginLeft: 16, marginBottom: 8 }}>
+                    <ReportDeliveryRecovery
+                      reportId={r.id}
+                      onDone={load}
+                    />
+                  </div>
+                ) : null}
                 {reportAmendments.map((a) => (
                   <div key={a.id} style={{ marginLeft: 16 }}>
                     <ListRow
@@ -1468,9 +1516,15 @@ export default function CustomerDetail() {
         {amending ? (
           <AmendReportForm
             report={amending}
-            onDone={async () => {
+            onDone={async (deliveryStatus) => {
               setAmending(null);
-              setNotice("Amendment issued and sent to the customer.");
+              setNotice(
+                deliveryStatus === "ACCEPTED" || deliveryStatus === "DELIVERED"
+                  ? "Amendment issued and sent to the customer."
+                  : deliveryStatus === "NO_EMAIL"
+                    ? "Amendment issued — the customer has no email on file, so delivery is now owned office work."
+                    : "Amendment issued — the email did NOT go out; delivery is now owned office work."
+              );
               await load();
             }}
           />
@@ -2278,7 +2332,7 @@ function AmendReportForm({
   onDone,
 }: {
   report: ServiceReport;
-  onDone: () => Promise<void>;
+  onDone: (deliveryStatus: string | null) => Promise<void>;
 }) {
   type Row = { label: string; from: string; to: string };
   const [reason, setReason] = useState("");
@@ -2367,8 +2421,10 @@ function AmendReportForm({
               changes: JSON.stringify(changes),
             })
             .then((res) => {
-              opResult(res);
-              return onDone();
+              const data = opResult<{ deliveryStatus?: string | null }>(res);
+              // The notice words come from the PERSISTED delivery state — an
+              // issued-but-undelivered amendment is never called "sent".
+              return onDone(data?.deliveryStatus ?? null);
             })
             .catch((err) => {
               setError(err.message ?? "Could not issue the amendment");
@@ -2378,6 +2434,83 @@ function AmendReportForm({
       >
         Issue amendment &amp; send
       </Button>
+    </div>
+  );
+}
+
+/**
+ * GL-15 — the office's bounded recovery for an undelivered report: re-send the
+ * exact document (the resume adopts any proven prior send) or record an
+ * approved alternate delivery with how it was delivered. Shows the VERIFIED
+ * resulting state via the reload.
+ */
+function ReportDeliveryRecovery({
+  reportId,
+  onDone,
+}: {
+  reportId: string;
+  onDone: () => Promise<void>;
+}) {
+  const [mode, setMode] = useState<null | "alternate">(null);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState<null | "resend" | "alternate">(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (action: "RESEND" | "ALTERNATE") => {
+    setBusy(action === "RESEND" ? "resend" : "alternate");
+    setError(null);
+    try {
+      const res = await (
+        api().mutations as unknown as {
+          recordReportDelivery: (i: {
+            reportId: string;
+            action: string;
+            note?: string;
+          }) => Promise<{ errors?: { message: string }[] }>;
+        }
+      ).recordReportDelivery({
+        reportId,
+        action,
+        note: note.trim() || undefined,
+      });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not record delivery");
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="form-grid" style={{ gap: 6 }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button
+          small
+          loading={busy === "resend"}
+          onClick={() => void run("RESEND")}
+        >
+          Re-send report
+        </Button>
+        <Button small variant="ghost" onClick={() => setMode("alternate")}>
+          Delivered another way…
+        </Button>
+      </div>
+      {mode === "alternate" ? (
+        <>
+          <Field label="How was it delivered?" hint="Mailed, handed to the customer…">
+            <input value={note} onChange={(e) => setNote(e.target.value)} />
+          </Field>
+          <Button
+            small
+            loading={busy === "alternate"}
+            disabled={!note.trim()}
+            onClick={() => void run("ALTERNATE")}
+          >
+            Record alternate delivery
+          </Button>
+        </>
+      ) : null}
+      <ErrorNote error={error} />
     </div>
   );
 }

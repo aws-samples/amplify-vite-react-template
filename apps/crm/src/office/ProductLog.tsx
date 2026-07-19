@@ -153,6 +153,43 @@ function ProductForm({
     existing?.labelApproved ?? false
   );
   const [targetPests, setTargetPests] = useState(existing?.targetPests ?? "");
+  // GL-15: the enforceable label rules finalization fails closed against.
+  // Stored as structured JSON; edited here as plain fields so the office never
+  // types JSON.
+  const existingRules = (() => {
+    try {
+      const raw = (existing as { labelRulesJson?: unknown } | null | undefined)
+        ?.labelRulesJson;
+      if (!raw) return null;
+      return (typeof raw === "string" ? JSON.parse(raw) : raw) as {
+        allowedServiceTypes?: string[];
+        allowedPests?: string[];
+        quantity?: { min: number; max: number; unit: string };
+        rates?: string[];
+        minReEntryHours?: number;
+      };
+    } catch {
+      return null;
+    }
+  })();
+  const [ruleServiceTypes, setRuleServiceTypes] = useState(
+    (existingRules?.allowedServiceTypes ?? []).join(", ")
+  );
+  const [rulePests, setRulePests] = useState(
+    (existingRules?.allowedPests ?? []).join(", ")
+  );
+  const [ruleRates, setRuleRates] = useState(
+    (existingRules?.rates ?? []).join(", ")
+  );
+  const [ruleQtyMin, setRuleQtyMin] = useState(
+    existingRules?.quantity ? String(existingRules.quantity.min) : ""
+  );
+  const [ruleQtyMax, setRuleQtyMax] = useState(
+    existingRules?.quantity ? String(existingRules.quantity.max) : ""
+  );
+  const [ruleQtyUnit, setRuleQtyUnit] = useState(
+    existingRules?.quantity?.unit ?? ""
+  );
   const [notes, setNotes] = useState(existing?.notes ?? "");
   const [active, setActive] = useState(existing?.active ?? true);
   const [busy, setBusy] = useState(false);
@@ -184,6 +221,32 @@ function ProductForm({
       setError("Re-entry hours must be zero or greater");
       return;
     }
+    const list = (v: string) =>
+      v
+        .split(/[,;]/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+    let labelRulesJson: string | null = null;
+    const hasQty =
+      ruleQtyMin.trim() !== "" || ruleQtyMax.trim() !== "" || ruleQtyUnit.trim() !== "";
+    if (hasQty && (ruleQtyMin.trim() === "" || ruleQtyMax.trim() === "" || !ruleQtyUnit.trim())) {
+      setError("A quantity rule needs min, max, and a unit (e.g. oz)");
+      return;
+    }
+    const rules: Record<string, unknown> = {};
+    if (list(ruleServiceTypes).length) rules.allowedServiceTypes = list(ruleServiceTypes);
+    if (list(rulePests).length) rules.allowedPests = list(rulePests);
+    if (list(ruleRates).length) rules.rates = list(ruleRates);
+    if (hasQty) {
+      const min = Number(ruleQtyMin);
+      const max = Number(ruleQtyMax);
+      if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) {
+        setError("The quantity rule needs numeric min ≤ max");
+        return;
+      }
+      rules.quantity = { min, max, unit: ruleQtyUnit.trim() };
+    }
+    if (Object.keys(rules).length) labelRulesJson = JSON.stringify(rules);
     setBusy(true);
     setError(null);
     const fields = {
@@ -195,6 +258,7 @@ function ProductForm({
       reEntryHours: parsedReEntry,
       labelApproved,
       targetPests: targetPests.trim() || null,
+      labelRulesJson,
       notes: notes.trim() || null,
       active,
     };
@@ -294,6 +358,44 @@ function ProductForm({
           value={targetPests}
           onChange={(e) => setTargetPests(e.target.value)}
           placeholder="Ants, spiders, roaches"
+        />
+      </Field>
+      <Field
+        group
+        label="Label rules (enforced at report time)"
+        hint="Facets you fill in are refused when a report falls outside them. Leave blank to enforce only the rate above."
+      >
+        <input
+          value={ruleRates}
+          onChange={(e) => setRuleRates(e.target.value)}
+          placeholder="Other approved rates, comma-separated (optional)"
+        />
+        <input
+          value={rulePests}
+          onChange={(e) => setRulePests(e.target.value)}
+          placeholder="Allowed pests, comma-separated (optional)"
+        />
+        <input
+          value={ruleServiceTypes}
+          onChange={(e) => setRuleServiceTypes(e.target.value)}
+          placeholder="Allowed service types, comma-separated (optional)"
+        />
+        <div className="form-row-2">
+          <input
+            value={ruleQtyMin}
+            onChange={(e) => setRuleQtyMin(e.target.value)}
+            placeholder="Qty min"
+          />
+          <input
+            value={ruleQtyMax}
+            onChange={(e) => setRuleQtyMax(e.target.value)}
+            placeholder="Qty max"
+          />
+        </div>
+        <input
+          value={ruleQtyUnit}
+          onChange={(e) => setRuleQtyUnit(e.target.value)}
+          placeholder="Qty unit (oz, gal…)"
         />
       </Field>
       <Field label="Notes" hint="Mixing/application notes for techs">

@@ -1,5 +1,6 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
+import { openOwnedWork } from "./ownedWork";
 import { sendChargeReceipt } from "./receipts";
 import {
   ensureStripeCustomer,
@@ -319,4 +320,37 @@ export async function clearPlanDelinquency(
     delinquent: false,
     delinquentSince: null,
   });
+}
+
+/**
+ * GL-15 — open (or re-open) the owned presence-review case for a FLAGGED
+ * report. Shared by finalize (crm-docs) and the daily reconcile sweep; flips
+ * the durable marker to QUEUED only when the case write is CONFIRMED.
+ */
+export async function queuePresenceReview(input: {
+  reportId: string;
+  customerId: string;
+  customerName: string;
+  serviceType: string;
+  detail: string;
+}): Promise<boolean> {
+  const workId = await openOwnedWork({
+    kind: "LOCATION_REVIEW",
+    dedupeKey: `service-report-location:${input.reportId}`,
+    title: `On-site location needs a look: ${input.customerName}`,
+    detail: input.detail,
+    customerId: input.customerId,
+    relatedId: input.reportId,
+    sourceUrl: `/customers/${input.customerId}`,
+    resolutionAction:
+      "Confirm the technician was on site (job-site photos, notes, customer contact). If confirmed, resolve. If not, issue a corrected report or open the discrepancy with the technician.",
+    ownerTeam: "OPS",
+  });
+  if (!workId) return false;
+  const client = await dataClient();
+  const { data } = await client.models.ServiceReport.update({
+    id: input.reportId,
+    presenceReviewStatus: "QUEUED",
+  });
+  return Boolean(data);
 }

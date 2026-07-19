@@ -16,6 +16,7 @@ import {
   MAX_DUNNING_ATTEMPTS,
   nextDunningAtIso,
   settleInvoiceOnCard,
+  queuePresenceReview,
 } from "../shared/recovery";
 import {
   defaultWorkOwner,
@@ -125,6 +126,9 @@ export const handler = async () => {
   // GL-02: no lead may silently go cold — surface every open lead whose next
   // action is overdue as an owned follow-up, routed to its owner or the team.
   const staleLeads = await reportStaleLeads();
+  // GL-15: a FLAGGED presence review whose owned case never landed is re-opened
+  // here — the obligation is durable on the report and cannot silently vanish.
+  const presenceReviews = await reconcilePresenceReviews();
   console.log("Reminder totals:", JSON.stringify(totals));
   return [
     ...totals,
@@ -140,8 +144,58 @@ export const handler = async () => {
     cancellations,
     visitChanges,
     staleLeads,
+    presenceReviews,
   ];
 };
+
+/**
+ * GL-15 — re-open the owned presence-review case for every report whose
+ * FLAGGED marker never reached QUEUED (the case write failed at finalize).
+ * The marker on the report is the durable obligation; this sweep is its
+ * recovery path. Idempotent: openOwnedWork dedupes on the report id.
+ */
+export async function reconcilePresenceReviews() {
+  const client = await dataClient();
+  if (!("ServiceReport" in client.models)) {
+    return { task: "reconcile-presence-reviews" as const, requeued: 0, failed: 0 };
+  }
+  let requeued = 0;
+  let failed = 0;
+  try {
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.ServiceReport.list({
+        filter: { presenceReviewStatus: { eq: "FLAGGED" } },
+        limit: 200,
+        nextToken: token,
+      });
+      for (const report of page.data ?? []) {
+        try {
+          const { data: customer } = await client.models.Customer.get({
+            id: report.customerId,
+          });
+          const ok = await queuePresenceReview({
+            reportId: report.id,
+            customerId: report.customerId,
+            customerName: customer?.displayName ?? "a customer",
+            serviceType: "service",
+            detail: `A finalized service report (${report.id}) was flagged for an on-site presence review, but the review case did not persist when it was finalized. The record stands; this is a check, not a hold.`,
+          });
+          if (ok) requeued++;
+          else failed++;
+        } catch (err) {
+          console.error("reconcilePresenceReviews: report failed", report.id, err);
+          failed++;
+        }
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    console.error("reconcilePresenceReviews failed", err);
+    failed++;
+  }
+  return { task: "reconcile-presence-reviews" as const, requeued, failed };
+}
 
 /**
  * GL-07 R1 — resume every office visit cancel/reschedule a prior attempt could

@@ -38,7 +38,11 @@ async function markLogDelivery(
   messageId: string | undefined,
   deliveryStatus: "DELIVERED" | "BOUNCED" | "COMPLAINED",
   error?: string
-): Promise<{ customerId?: string | null; template?: string | null } | null> {
+): Promise<{
+  customerId?: string | null;
+  template?: string | null;
+  relatedId?: string | null;
+} | null> {
   if (!messageId) return null;
   const client = await dataClient();
   if (!("EmailLog" in client.models)) return null;
@@ -47,9 +51,25 @@ async function markLogDelivery(
   const { data: logs } = await client.models.EmailLog.listEmailLogByMessageId({
     messageId,
   });
-  let meta: { customerId?: string | null; template?: string | null } | null = null;
+  let meta: {
+    customerId?: string | null;
+    template?: string | null;
+    relatedId?: string | null;
+  } | null = null;
   for (const log of logs ?? []) {
-    meta = { customerId: log.customerId, template: log.template };
+    meta = {
+      customerId: log.customerId,
+      template: log.template,
+      relatedId: log.relatedId,
+    };
+    // Terminal-state guard: a duplicate or out-of-order delivery event must
+    // never move a bounced/complained message back to delivered.
+    if (
+      deliveryStatus === "DELIVERED" &&
+      (log.deliveryStatus === "BOUNCED" || log.deliveryStatus === "COMPLAINED")
+    ) {
+      continue;
+    }
     await client.models.EmailLog.update({
       id: log.id,
       deliveryStatus,
@@ -57,6 +77,86 @@ async function markLogDelivery(
     });
   }
   return meta;
+}
+
+/**
+ * GL-15 / X3 — the later mailbox outcome corrects the BUSINESS record that
+ * originated the message, not only the general email log. For a service report
+ * or amendment: a delivery event upgrades ACCEPTED → DELIVERED; a bounce or
+ * complaint marks the legal record BOUNCED/COMPLAINED and REOPENS the delivery
+ * obligation as owned work — the report screen stops claiming the customer
+ * received it. Terminal-guarded: a late delivery event cannot un-bounce.
+ */
+async function correctOriginRecord(
+  meta: { template?: string | null; relatedId?: string | null; customerId?: string | null } | null,
+  outcome: "DELIVERED" | "BOUNCED" | "COMPLAINED",
+  detail: string
+): Promise<void> {
+  if (!meta?.relatedId || !meta.template) return;
+  const client = await dataClient();
+  const isReport = meta.template === "service-report";
+  const isAmendment = meta.template === "service-report-amendment";
+  if (!isReport && !isAmendment) return;
+  try {
+    // Branched (not a model-union) — naming the two model client types in one
+    // expression trips tsc's inference-depth ceiling.
+    let current: string | null = null;
+    let exists = false;
+    if (isReport) {
+      const { data } = await client.models.ServiceReport.get({
+        id: meta.relatedId,
+      });
+      exists = Boolean(data);
+      current = data?.deliveryStatus ?? null;
+    } else {
+      const { data } = await client.models.ServiceReportAmendment.get({
+        id: meta.relatedId,
+      });
+      exists = Boolean(data);
+      current = data?.deliveryStatus ?? null;
+    }
+    if (!exists) return;
+    // Never regress a terminal bad outcome to delivered, and never overwrite an
+    // office-recorded alternate delivery.
+    if (
+      current === "ALTERNATE_DELIVERED" ||
+      (outcome === "DELIVERED" &&
+        (current === "BOUNCED" || current === "COMPLAINED"))
+    ) {
+      return;
+    }
+    if (isReport) {
+      await client.models.ServiceReport.update({
+        id: meta.relatedId,
+        deliveryStatus: outcome,
+      });
+    } else {
+      await client.models.ServiceReportAmendment.update({
+        id: meta.relatedId,
+        deliveryStatus: outcome,
+      });
+    }
+    if (outcome !== "DELIVERED") {
+      await openOwnedWork({
+        kind: "EMAIL_FAILURE",
+        dedupeKey: isReport
+          ? `service-report-delivery:${meta.relatedId}`
+          : `report-amendment-delivery:${meta.relatedId}`,
+        title: isReport
+          ? "A customer's service report bounced — the legal record is undelivered"
+          : "A report amendment bounced — the correction is undelivered",
+        detail: `${detail} The record's delivery state has been corrected; the customer does NOT have their copy.`,
+        customerId: meta.customerId ?? undefined,
+        relatedId: meta.relatedId,
+        sourceUrl: meta.customerId ? `/customers/${meta.customerId}` : "/work",
+        resolutionAction:
+          "Correct the address and re-send the exact document, or deliver it by an approved alternate method and record how.",
+        ownerTeam: "OPS",
+      });
+    }
+  } catch (err) {
+    console.error("correctOriginRecord failed", meta.relatedId, err);
+  }
 }
 
 async function suppress(input: {
@@ -128,7 +228,8 @@ export async function handleSesNotification(
   const messageId = message.mail?.messageId;
 
   if (type === "delivery") {
-    await markLogDelivery(messageId, "DELIVERED");
+    const meta = await markLogDelivery(messageId, "DELIVERED");
+    await correctOriginRecord(meta, "DELIVERED", "The mailbox provider confirmed delivery.");
     return;
   }
 
@@ -139,6 +240,7 @@ export async function handleSesNotification(
     if ((bounce?.bounceType ?? "").toLowerCase() !== "permanent") return;
     const detail = `Bounce: ${bounce?.bounceType ?? ""}/${bounce?.bounceSubType ?? ""}`.trim();
     const meta = await markLogDelivery(messageId, "BOUNCED", detail);
+    await correctOriginRecord(meta, "BOUNCED", detail);
     for (const r of bounce?.bouncedRecipients ?? []) {
       if (!r.emailAddress) continue;
       await handleBadAddress({
@@ -155,6 +257,7 @@ export async function handleSesNotification(
   if (type === "complaint") {
     const detail = `Complaint: ${message.complaint?.complaintFeedbackType ?? "spam"}`;
     const meta = await markLogDelivery(messageId, "COMPLAINED", detail);
+    await correctOriginRecord(meta, "COMPLAINED", detail);
     for (const r of message.complaint?.complainedRecipients ?? []) {
       if (!r.emailAddress) continue;
       await handleBadAddress({

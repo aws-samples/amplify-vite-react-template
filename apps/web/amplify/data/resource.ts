@@ -88,10 +88,30 @@ export const schema = a.schema({
   ReportStatus: a.enum(["DRAFT", "FINALIZED"]),
   // Delivery is a separate fact from completion. A finalized report is the legal
   // pesticide record whether or not it reached the customer; this tracks whether
-  // the customer actually received their copy. FAILED (the send bounced) and
-  // NO_EMAIL (nothing on file to send to) each own a delivery task until a human
-  // gets the record to the customer and records how.
-  ReportDelivery: a.enum(["DELIVERED", "FAILED", "NO_EMAIL"]),
+  // the customer actually received their copy (GL-15). The states distinguish
+  // provider ACCEPTANCE from mailbox DELIVERY — acceptance is never called
+  // delivered on a legal record:
+  //   SENDING   — the durable outbox intent, written BEFORE the provider call so
+  //               a crash between acceptance and the marker is discoverable.
+  //   ACCEPTED  — the provider took it; awaiting the delivery event.
+  //   DELIVERED — the mailbox provider confirmed delivery (ses-events).
+  //   BOUNCED / COMPLAINED / SUPPRESSED — the later outcome corrected the
+  //               record and REOPENED the delivery obligation as owned work.
+  //   FAILED    — a synchronous send failure; retryable.
+  //   NO_EMAIL  — nothing on file to send to; owned work.
+  //   ALTERNATE_DELIVERED — an office-recorded approved alternate delivery
+  //               (mail / hand-off), the resolution for NO_EMAIL/BOUNCED.
+  ReportDelivery: a.enum([
+    "SENDING",
+    "ACCEPTED",
+    "DELIVERED",
+    "BOUNCED",
+    "COMPLAINED",
+    "SUPPRESSED",
+    "FAILED",
+    "NO_EMAIL",
+    "ALTERNATE_DELIVERED",
+  ]),
   InvoiceStatus: a.enum([
     "DRAFT",
     "OPEN",
@@ -657,6 +677,22 @@ export const schema = a.schema({
     })
     .authorization((allow) => [allow.groups(["OWNER"]).to(["read", "delete"])]),
 
+  /**
+   * GL-15 — the single-winner claim for finalizing one service report
+   * (id = reportId). Conditional create BEFORE any finalize step, so two
+   * simultaneous finalizes cannot both see "not finalized" and both bill,
+   * schedule, and email. The loser reports "in progress"; a stale claim
+   * (crashed holder) is reclaimable after requestedAt ages past the Lambda
+   * timeout. Deleted on every terminal path.
+   */
+  ServiceReportFinalizeClaim: a
+    .model({
+      requestedAt: a.datetime(),
+    })
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"]),
+    ]),
+
   // Best-effort per-IP throttle for the public quote endpoint (id =
   // "<ip>#<hour>"). Not a hard lock — it exists so a single abusive source
   // can't spin billed AI research and Routes calls unbounded.
@@ -973,6 +1009,15 @@ export const schema = a.schema({
        *  approved product label. Active catalog rows require this true. */
       labelApproved: a.boolean(),
       targetPests: a.string(),
+      /**
+       * GL-15 — the enforceable label rules finalization fails CLOSED against:
+       * { allowedServiceTypes?: string[], allowedPests?: string[],
+       *   quantity?: { min: number, max: number, unit: string },
+       *   rates?: string[], minReEntryHours?: number }.
+       * Facets present are enforced; the office encodes them from the approved
+       * label (Compliance signs the encoded rules).
+       */
+      labelRulesJson: a.json(),
       notes: a.string(),
       active: a.boolean().required(),
       sortOrder: a.integer(),
@@ -1033,6 +1078,11 @@ export const schema = a.schema({
       /** Whether the customer actually received their copy — separate from the
        *  report being finalized. Unset on a draft; set at finalize. */
       deliveryStatus: a.ref("ReportDelivery"),
+      /** GL-15: the durable on-site presence-review obligation. NOT_NEEDED |
+       *  FLAGGED (review warranted, case not yet confirmed — the reconcile
+       *  sweep re-opens it) | QUEUED (owned case confirmed) | RESOLVED. A
+       *  failed case write can no longer silently erase the obligation. */
+      presenceReviewStatus: a.string(),
       accessGroups: a.string().array(),
     })
     .secondaryIndexes((index) => [index("jobId")])
@@ -1240,7 +1290,7 @@ export const schema = a.schema({
       // (or QUEUED/SUPPRESSED/FAILED) and only reaches DELIVERED on proof.
       deliveryStatus: a.ref("EmailDelivery"),
     })
-    .secondaryIndexes((index) => [index("messageId")])
+    .secondaryIndexes((index) => [index("messageId"), index("relatedId")])
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
     ]),
@@ -1843,9 +1893,29 @@ export const schema = a.schema({
       reEntryHours: a.float(),
       labelApproved: a.boolean().required(),
       targetPests: a.string(),
+      labelRulesJson: a.json(),
       notes: a.string(),
       active: a.boolean().required(),
       sortOrder: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * GL-15 — the office's controlled report/amendment delivery actions:
+   * RESEND re-sends the exact finalized document to the (corrected) address;
+   * ALTERNATE records an approved alternate delivery (mail / hand-off) with a
+   * required note saying how. Both re-read the persisted record and return the
+   * verified new delivery state — never an assumed one.
+   */
+  recordReportDelivery: a
+    .mutation()
+    .arguments({
+      reportId: a.string(),
+      amendmentId: a.string(),
+      action: a.string().required(),
+      note: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])

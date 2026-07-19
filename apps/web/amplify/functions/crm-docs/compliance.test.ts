@@ -30,8 +30,32 @@ const officeEmails: { subject: string; bodyHtml: string }[] = [];
  *  what the rendered document says (e.g. who it names as the issuer). */
 const amendmentPdfCalls: Record<string, unknown>[] = [];
 
+const finalizeClaims = new Map<string, Record<string, unknown>>();
+/** EmailLog rows the SENDING-adoption resume reads (GL-15 outbox check). */
+let emailLogRows: Record<string, unknown>[] = [];
+/** Force WorkItem.create to fail so a test can prove the FLAGGED presence-review
+ *  marker survives a lost case write. */
+let workItemCreateFails = false;
+
 const fakeDataClient = {
   models: {
+    ServiceReportFinalizeClaim: {
+      // Conditional create: an existing id loses — the single-winner finalize
+      // claim (GL-15).
+      create: async ({ id }: { id: string }) => {
+        if (finalizeClaims.has(id)) return { data: null };
+        finalizeClaims.set(id, { id, requestedAt: new Date().toISOString() });
+        return { data: finalizeClaims.get(id) };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: finalizeClaims.get(id) ?? null,
+      }),
+      delete: async ({ id }: { id: string }) => {
+        const existed = finalizeClaims.get(id) ?? null;
+        finalizeClaims.delete(id);
+        return { data: existed };
+      },
+    },
     Job: {
       get: async ({ id }: { id: string }) => ({
         data: jobs.find((j) => j.id === id) ?? null,
@@ -111,6 +135,7 @@ const fakeDataClient = {
         errors: undefined,
       }),
       create: async (input: Record<string, unknown>) => {
+        if (workItemCreateFails) return { data: null, errors: [{ message: "injected" }] };
         const w = { ...input };
         workItems.push(w);
         return { data: w, errors: undefined };
@@ -126,6 +151,11 @@ const fakeDataClient = {
       create: async (input: Record<string, unknown>) => ({
         data: { id: `evt_${input.workItemId}`, ...input },
         errors: undefined,
+      }),
+    },
+    EmailLog: {
+      listEmailLogByRelatedId: async ({ relatedId }: { relatedId: string }) => ({
+        data: emailLogRows.filter((l) => l.relatedId === relatedId),
       }),
     },
   },
@@ -229,6 +259,9 @@ const validReport = (over: Partial<Report> = {}): Report => ({
 });
 
 beforeEach(() => {
+  finalizeClaims.clear();
+  emailLogRows = [];
+  workItemCreateFails = false;
   process.env.DOCS_BUCKET = "docs";
   technician = {
     name: "Marco Reyes",
@@ -700,12 +733,23 @@ describe("the finalize gate", () => {
     ).rejects.toThrow(/re-entry interval/i);
   });
 
-  it("accepts a re-entry interval of zero, which is a real answer", async () => {
+  it("accepts a re-entry interval of zero, which is a real answer (zero-minimum label)", async () => {
+    // Bait stations / exterior-only: the label minimum itself is 0. A zero
+    // report re-entry is honest here — but never below a label minimum.
+    catalog[0] = { ...catalog[0], reEntryHours: 0 };
     reports.push(validReport({ reEntryIntervalHours: 0 }));
 
     await call("finalizeServiceReport", { reportId: "rep_1" });
 
     expect(reports[0].status).toBe("FINALIZED");
+  });
+
+  it("refuses a report re-entry below the product's label minimum (GL-15 fail-closed)", async () => {
+    reports.push(validReport({ reEntryIntervalHours: 0 }));
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/below .*label minimum/i);
+    expect(reports[0].status).not.toBe("FINALIZED");
   });
 
   it("refuses without a location", async () => {
@@ -964,8 +1008,8 @@ describe("the finalize gate", () => {
         deliveryStatus: string;
       };
 
-      expect(res.deliveryStatus).toBe("DELIVERED");
-      expect(reports[0].deliveryStatus).toBe("DELIVERED");
+      expect(res.deliveryStatus).toBe("ACCEPTED");
+      expect(reports[0].deliveryStatus).toBe("ACCEPTED");
       expect(reports[0].emailedAt).toBeTruthy();
       expect(reports[0].status).toBe("FINALIZED");
     });
@@ -1045,7 +1089,7 @@ describe("the finalize gate", () => {
       };
 
       expect(again.alreadyFinalized).toBe(true);
-      expect(again.deliveryStatus).toBe("DELIVERED");
+      expect(again.deliveryStatus).toBe("ACCEPTED");
       // The customer is emailed exactly once across both attempts.
       expect(sendEmail).toHaveBeenCalledTimes(1);
       expect(reports).toHaveLength(1);
@@ -1067,7 +1111,7 @@ describe("the finalize gate", () => {
       const retry = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
         deliveryStatus: string;
       };
-      expect(retry.deliveryStatus).toBe("DELIVERED");
+      expect(retry.deliveryStatus).toBe("ACCEPTED");
       expect(reports[0].emailedAt).toBeTruthy();
       expect(jobs[0].completedAt).toBe(completedAtAfterFirst);
       expect(sendEmail).toHaveBeenCalledTimes(2);
@@ -1242,7 +1286,7 @@ describe("issued reports are corrected by append-only amendments", () => {
       { label: "Areas treated", from: "Kitchen", to: "Kitchen, basement, garage" },
     ]);
     expect(amd.pdfKey).toContain("amendments/");
-    expect(res.deliveryStatus).toBe("DELIVERED");
+    expect(res.deliveryStatus).toBe("ACCEPTED");
   });
 
   it("never touches the original issued record", async () => {
@@ -1405,7 +1449,7 @@ describe("issued reports are corrected by append-only amendments", () => {
       deliveryStatus: string;
     };
 
-    expect(retry.deliveryStatus).toBe("DELIVERED");
+    expect(retry.deliveryStatus).toBe("ACCEPTED");
     expect(amendments).toHaveLength(1);
     expect(amendments[0].emailedAt).toBeTruthy();
     expect(sendEmail).toHaveBeenCalledTimes(2);
@@ -1526,5 +1570,132 @@ describe("terminal visits are immutable — rebooking makes a new linked attempt
       /no-access or canceled/i
     );
     expect(jobs).toHaveLength(1);
+  });
+});
+
+describe("GL-15 — finalize is single-winner, verified, and durable", () => {
+  // Start from a fully-stamped job, exactly like the finalize-gate suite.
+  beforeEach(() => {
+    jobs[0].startedAt = "2026-07-16T13:05:00Z";
+    jobs[0].applicationEndAt = "2026-07-16T14:10:00Z";
+  });
+
+  it("two simultaneous finalizes produce ONE completion and ONE customer email", async () => {
+    reports.push(validReport());
+    const [a, b] = await Promise.all([
+      call("finalizeServiceReport", { reportId: "rep_1" }),
+      call("finalizeServiceReport", { reportId: "rep_1" }),
+    ]);
+    const results = [a, b] as { inProgress?: boolean }[];
+    // Exactly one winner; the loser reports the honest in-progress state.
+    expect(results.filter((r) => r.inProgress).length).toBe(1);
+    expect(reports[0].status).toBe("FINALIZED");
+    expect(
+      (sendEmail as unknown as { mock: { calls: unknown[] } }).mock.calls.length
+    ).toBe(1);
+  });
+
+  it("refuses finalization when the product has no label rate on file (fail closed)", async () => {
+    catalog[0] = { ...catalog[0], defaultRate: null };
+    reports.push(validReport());
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/no approved label rate on file/i);
+    expect(reports[0].status).not.toBe("FINALIZED");
+  });
+
+  it("enforces a structured quantity range when the label rule encodes one", async () => {
+    catalog[0] = {
+      ...catalog[0],
+      labelRulesJson: JSON.stringify({
+        quantity: { min: 0.5, max: 2, unit: "oz" },
+      }),
+    };
+    reports.push(
+      validReport({
+        productsUsed: JSON.stringify([
+          {
+            name: "Suspend PolyZone",
+            epaNumber: "432-1514",
+            quantity: "3 oz",
+            rate: "0.06%",
+          },
+        ]),
+      })
+    );
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/outside the label range/i);
+  });
+
+  it("enforces pest applicability when the label rule encodes it", async () => {
+    catalog[0] = {
+      ...catalog[0],
+      labelRulesJson: JSON.stringify({ allowedPests: ["ants", "spiders"] }),
+    };
+    reports.push(validReport({ targetPests: "ants, termites" }));
+    await expect(
+      call("finalizeServiceReport", { reportId: "rep_1" })
+    ).rejects.toThrow(/isn't labeled for: termites/i);
+  });
+
+  it("marks provider acceptance ACCEPTED, never DELIVERED, and records the SENDING intent first", async () => {
+    reports.push(validReport());
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+    expect(reports[0].deliveryStatus).toBe("ACCEPTED");
+    expect(reports[0].emailedAt).toBeTruthy();
+  });
+
+  it("adopts a proven prior send instead of re-emailing when the marker write was lost", async () => {
+    // A prior pass wrote SENDING and the EmailLog proves the provider accepted
+    // the send, but the crash lost the emailedAt marker.
+    reports.push(
+      validReport({
+        status: "FINALIZED",
+        pdfKey: "reports/c1/rep_1.pdf",
+        deliveryStatus: "SENDING",
+        presenceReviewStatus: "NOT_NEEDED",
+      })
+    );
+    emailLogRows.push({
+      id: "el-1",
+      relatedId: "rep_1",
+      template: "service-report",
+      deliveryStatus: "SENT",
+      sentAt: "2026-07-18T12:00:00.000Z",
+    });
+    const res = (await call("finalizeServiceReport", { reportId: "rep_1" })) as {
+      emailed: boolean;
+      deliveryStatus: string;
+    };
+    expect(res.emailed).toBe(false);
+    expect(reports[0].deliveryStatus).toBe("ACCEPTED");
+    expect(reports[0].emailedAt).toBe("2026-07-18T12:00:00.000Z");
+    expect(
+      (sendEmail as unknown as { mock: { calls: unknown[] } }).mock.calls.length
+    ).toBe(0);
+  });
+
+  it("keeps the presence-review obligation durable: FLAGGED persists when the case write fails, and the resume re-queues it", async () => {
+    // Force the WorkItem write to fail once so openOwnedWork returns null.
+    workItemCreateFails = true;
+    reports.push(
+      validReport({
+        // Imprecise fix — warrants a review.
+        geoAccuracyM: 500,
+      })
+    );
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+    expect(reports[0].status).toBe("FINALIZED");
+    expect(reports[0].presenceReviewStatus).toBe("FLAGGED");
+
+    // Recovery: the next pass (sweep or resumed finalize) lands the case.
+    workItemCreateFails = false;
+    await call("finalizeServiceReport", { reportId: "rep_1" });
+    expect(reports[0].presenceReviewStatus).toBe("QUEUED");
+    // Only one delivery went out across both passes.
+    expect(
+      (sendEmail as unknown as { mock: { calls: unknown[] } }).mock.calls.length
+    ).toBe(1);
   });
 });

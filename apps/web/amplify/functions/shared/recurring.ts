@@ -111,6 +111,11 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     const dueDate = toWeekday(addDays(base, interval));
 
     await client.models.Job.create({
+      // GL-15: deterministic id derived from the completed job, so the create
+      // is CONDITIONAL — two concurrent finalizes (or a resumed retry) collapse
+      // onto one next visit instead of both passing the scan above and creating
+      // two. A conflict is already-queued success, not an error.
+      id: `next-${job.id}`,
       customerId: job.customerId,
       servicePlanId: job.servicePlanId,
       type: "RECURRING",

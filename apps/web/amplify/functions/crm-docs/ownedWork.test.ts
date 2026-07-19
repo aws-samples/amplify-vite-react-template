@@ -9,8 +9,27 @@ let job: Record<string, unknown> | null;
 let invoices: Record<string, unknown>[];
 const history: Record<string, unknown>[] = [];
 
+const finalizeClaims = new Map<string, Record<string, unknown>>();
+
 const fakeDataClient = {
   models: {
+    ServiceReportFinalizeClaim: {
+      // Conditional create: an existing id loses — the single-winner finalize
+      // claim (GL-15).
+      create: async ({ id }: { id: string }) => {
+        if (finalizeClaims.has(id)) return { data: null };
+        finalizeClaims.set(id, { id, requestedAt: new Date().toISOString() });
+        return { data: finalizeClaims.get(id) };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: finalizeClaims.get(id) ?? null,
+      }),
+      delete: async ({ id }: { id: string }) => {
+        const existed = finalizeClaims.get(id) ?? null;
+        finalizeClaims.delete(id);
+        return { data: existed };
+      },
+    },
     WorkItem: {
       get: async () => ({ data: item }),
       update: async (input: Record<string, unknown>) => {
@@ -41,6 +60,7 @@ vi.mock("../shared/stripeClient", () => ({ stripeClient: () => ({}) }));
 const { updateOwnedWork } = await import("./handler");
 
 beforeEach(() => {
+  finalizeClaims.clear();
   item = {
     id: "work-1",
     kind: "LOCATION_REVIEW", // a kind with no verified path (manual-only)
