@@ -2,14 +2,14 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 20 commits after `f70e621`, from `3717092` through `f6a34a8`; newest
-implementation commit `f6a34a8`
+**Latest commit review:** 22 commits after `f70e621`, from `3717092` through `b64f157`; newest
+implementation commit `b64f157`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 103 business requirements**, ordered by launch priority and expected impact
+**Remaining:** **23 gates / 100 business requirements**, ordered by launch priority and expected impact
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **42.5%**
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **39.6%**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
@@ -188,7 +188,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-08 | 72-hour copy + refund-workflow sign-off — engineering closed (`2556438`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
 | P0 | GL-07 | Copy sign-off; atomic capacity rides GL-04 — engineering closed (`5b2fb76`) | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **12% — Very low (sign-offs + GL-04 tie)** |
 | P0 | GL-18 | Override-authority + queue-ops sign-off — engineering closed (`f6a34a8`) | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-04/GL-23 ties)** |
-| P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **82% — High** |
+| P0 | GL-04 | Travel-model calibration + data entry — engineering closed (`b64f157`) | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
 | P0 | GL-06 | Finish honest, race-safe processing and failed payments | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **80% — High** |
 | P0 | GL-16 | Prompt-governed AI pricing with rollback | CEO + Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **78% — High** |
 | P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented | **52% — Medium** |
@@ -473,33 +473,26 @@ authority.
 **Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
 cannot buy the same last unit of capacity.
 
+**Status:** engineering closed (`b64f157`). One shared minute rule (Mon–Fri 8–5 Eastern, 540
+min/eligible technician; weekends, closures, PTO, inactive, and licence problems fail-closed all
+remove capacity; zero eligible technicians = zero sellable dates, no floor) is used by the funnel
+calendar, checkout, dispatch, and office reschedules. Checkout ATOMICALLY claims the day's minutes on
+a guarded ledger BEFORE any chargeable intent — exactly one of two concurrent buyers of the last
+minutes wins; card success consumes the claim into the booked job, an accepted pending bank debit
+extends it through settlement, failure releases it, and the daily sweep expires crashed checkouts and
+heals the ledger from ground truth. Office moves take the same atomic day claim. Operations maintain
+private technician base locations, reasoned per-day PTO/base overrides, and company closures, and the
+Schedule board's Availability panel shows exactly why a date is or isn't sellable.
+
 **Remaining requirements:**
 
-- **No slot is ever reserved.** There is no capacity-hold concept in the system; two concurrent bookings
-  for the last slot both pass the check because capacity is derived from existing jobs and nothing is
-  written to claim the slot. A **PROCESSING** booking is also excluded from availability even though the
-  customer is told “Your slot is held.” Selecting checkout must atomically claim capacity for one payment
-  attempt. Card success consumes that claim into the final booking; an accepted pending bank debit consumes
-  it into a scheduled **Payment pending** job immediately and remains counted even though money has not
-  settled. Bank failure before service cancels/releases the job and slot; failure after service preserves
-  the historical capacity and creates the collectible balance. Concurrent purchases yield exactly one
-  claim without manual repair.
-- **Capacity is a coarse technician-per-day count that offers slots even with zero technicians.** It
-  multiplies active-technician count by a fixed stops-per-tech and floors that count at one. Replace it
-  with a minute-based Monday–Friday 8:00–5:00 Eastern schedule: 30 minutes on site for residential and 60
-  for commercial/community, plus Google Routes travel from the
-  technician's office-only starting/ending location and between stops. Company holidays/closures,
-  individual PTO, inactive status, and absence of a current license remove capacity; zero eligible
-  technicians means zero sellable dates. An office user can maintain each base location and create a
-  reasoned one-day override without exposing it to peers or customers.
-- **The funnel, dispatch board, and office reschedule do not share one capacity rule** — their fixed
-  stops-per-tech value is duplicated and the office move uses a count-then-write check that two concurrent
-  moves can both pass. They must use one atomic rule/claim so a day cannot be available to the customer,
-  over capacity to Operations, or oversubscribed by simultaneous office changes.
-- Operations can maintain holidays, closures, technician PTO, base-location overrides, and other
-  availability and see why a date is or is not sellable. A change immediately protects all unconsumed
-  slots and flags affected commitments. All technicians may work anywhere in MA/RI and perform every
-  launch service, but an inactive technician or one with no current license contributes no capacity.
+- Operations enters the real operating data: each technician's base location, known closures/holidays
+  (the federal-holiday list is not auto-seeded — enter them as closures), and PTO as it arises.
+- Travel-minute calibration: a visit's travel allowance uses its Google Routes dispatch proof when one
+  exists and a 30-minute default before assignment. Operations should confirm the default (and the
+  8-stops-per-tech secondary bound) against the first weeks of real routes.
+- The pending-bank-debit claim converts into the visible "Payment pending" scheduled visit in GL-06's
+  processing flow (the slot is already held and counted today; GL-06 adds the booked-job surface).
 
 **Pass owner:** Head of Operations.
 
