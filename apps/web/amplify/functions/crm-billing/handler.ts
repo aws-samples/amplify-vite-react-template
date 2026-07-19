@@ -11,6 +11,7 @@ import {
 } from "../shared/authz";
 import type { AppSyncIdentity } from "aws-lambda";
 import { paymentMethodLabel, stripeClient } from "../shared/stripeClient";
+import { readOpsPause } from "../shared/opsPause";
 import { notifyOffice } from "../shared/email";
 import { sendChargeReceipt } from "../shared/receipts";
 import { refundInvoice } from "../shared/refund";
@@ -150,7 +151,25 @@ function assertChargeableAmount(actor: Actor, amountCents: number) {
   }
 }
 
+/** GL-22: mutations that INITIATE money movement refuse while billing is
+ *  paused. Refunds, voids, offline records, and reads keep working — an
+ *  incident owner must be able to give money back while contained. */
+const BILLING_INITIATION_FIELDS = new Set([
+  "startSubscription",
+  "chargeOneTimeJob",
+  "chargeManualAmount",
+  "resumePlan",
+]);
+
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
+  if (BILLING_INITIATION_FIELDS.has(opFieldName(event) ?? "")) {
+    const pause = await readOpsPause();
+    if (pause.billingPaused) {
+      throw new Error(
+        `Billing is paused by an incident owner${pause.reason ? ` (${pause.reason})` : ""} — no new charge or subscription start until the pause is lifted from the Dashboard's emergency controls.`
+      );
+    }
+  }
   switch (opFieldName(event)) {
     case "createSetupIntent": {
       assertCanActForCustomer(event.identity, event.arguments.customerId!);

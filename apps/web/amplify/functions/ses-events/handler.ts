@@ -348,19 +348,43 @@ export async function handleSesNotification(
 }
 
 export const handler = async (event: SNSEvent): Promise<void> => {
+  // GL-22: a provider event may NEVER be acknowledged on a failed write. A
+  // processing failure throws, so the async invocation retries and — when it
+  // keeps failing — lands on the visible dead-letter queue whose depth alarm
+  // opens owned Office work. A truly malformed message (unparseable JSON)
+  // can never succeed on retry, so it is recorded as owned work instead of
+  // being retried forever or silently dropped.
+  const failures: unknown[] = [];
   for (const record of event.Records) {
     let message: SesNotification;
     try {
       message = JSON.parse(record.Sns.Message) as SesNotification;
     } catch (err) {
       console.error("ses-events: could not parse SNS message", err);
+      await openOwnedWork({
+        kind: "INFRA_ALERT",
+        dedupeKey: `ses-malformed:${record.Sns.MessageId ?? "unknown"}`,
+        title: "A mailbox delivery event could not be parsed",
+        detail: `SNS message ${record.Sns.MessageId ?? "?"} from the SES event topic is not valid JSON. Its email-state update was NOT applied — inspect the raw message in the ses-events logs and record the outcome by hand if it matters.`,
+        relatedId: record.Sns.MessageId ?? "ses-events",
+        resolutionAction:
+          "Find this message id in the ses-events CloudWatch logs, decide what the event meant, and update the email log/business record by hand.",
+        ownerTeam: "OPS",
+      }).catch((workErr) =>
+        console.error("ses-events: could not record malformed event", workErr)
+      );
       continue;
     }
     try {
       await handleSesNotification(message);
     } catch (err) {
-      // One bad notification must not fail the batch (SNS would redeliver all).
       console.error("ses-events: failed to handle notification", err);
+      failures.push(err);
     }
+  }
+  if (failures.length) {
+    throw new Error(
+      `ses-events: ${failures.length} notification(s) failed — retrying via redelivery/DLQ`
+    );
   }
 };

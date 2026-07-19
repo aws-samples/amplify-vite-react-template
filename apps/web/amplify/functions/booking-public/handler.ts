@@ -44,6 +44,7 @@ import {
   type PlanCadence,
 } from "../shared/marketRate";
 import { serviceLabelFor } from "../shared/serviceCatalog";
+import { readOpsPause } from "../shared/opsPause";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -266,6 +267,18 @@ export const handler = async (
 
   const path = event.requestContext.http.path.replace(/\/+$/, "");
   try {
+    // GL-22: while an incident owner has paused new bookings, the funnel's
+    // NEW-commitment entrances refuse honestly. Status polls, cancellation,
+    // and in-flight payment resolution keep working — a pause never strands
+    // a customer who already paid.
+    if (path.endsWith("/quote") || path.endsWith("/book")) {
+      const pause = await readOpsPause();
+      if (pause.bookingPaused) {
+        throw new HttpError(503, {
+          error: `Online booking is temporarily paused while we resolve an issue — nothing was charged. Please call us at ${SUPPORT_PHONE} or try again shortly.`,
+        });
+      }
+    }
     if (path.endsWith("/quote")) {
       return json(
         headers,

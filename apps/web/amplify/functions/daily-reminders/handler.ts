@@ -45,6 +45,7 @@ import {
 import { finalizeBooking } from "../shared/bookingFinalize";
 import { recordFunnelPaymentFailure } from "../shared/bookingPaymentFailure";
 import { stampProcessingNextCheck } from "../shared/bookingPayment";
+import { readOpsPause } from "../shared/opsPause";
 
 type OwedInvoice = {
   id: string;
@@ -103,9 +104,31 @@ const prettyDate = (isoDate: string) =>
 
 export const handler = async () => {
   const totals: Record<string, unknown>[] = [];
+  // GL-22: a subtask that fails must not (a) stop the remaining subtasks, or
+  // (b) let the run report a healthy scheduled invocation. Each failure is
+  // collected; at the end the run opens ONE owned item naming every failed
+  // subtask and THROWS — so the Lambda Errors alarm fires and the invocation
+  // is visibly unhealthy, never a caught-and-swallowed "success".
+  const failures: { task: string; error: string }[] = [];
+  const run = async <T>(
+    task: string,
+    fn: () => Promise<T>
+  ): Promise<T | null> => {
+    try {
+      return await fn();
+    } catch (err) {
+      console.error(`daily-reminders: subtask ${task} FAILED`, err);
+      failures.push({
+        task,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  };
+
   // Do this first: an unrelated reminder failure must not stop an already
   // overdue obligation from reaching its escalation path.
-  const overdueWork = await escalateOverdueOwnedWork();
+  const overdueWork = await run("escalateOverdueOwnedWork", escalateOverdueOwnedWork);
   // T-1 and T-7 reminders — the cron runs once a day, so each fires once.
   // Only T-1 gets the staffing gate: a week out, most visits legitimately
   // aren't routed yet, but by the day before every dated job must be on an
@@ -114,50 +137,65 @@ export const handler = async () => {
     [1, "tomorrow"],
     [7, "in one week"],
   ] as const) {
-    totals.push(await remind(easternPlusDays(daysOut), phrasing, daysOut === 1));
+    const r = await run(`remind:${phrasing}`, () =>
+      remind(easternPlusDays(daysOut), phrasing, daysOut === 1)
+    );
+    if (r) totals.push(r);
   }
-  const notBilling = await reportPlansNotBilling();
-  const uncharged = await reportUnchargedOneTimeJobs();
-  const noNextVisit = await reportPlansWithoutNextVisit();
+  const notBilling = await run("reportPlansNotBilling", reportPlansNotBilling);
+  const uncharged = await run("reportUnchargedOneTimeJobs", reportUnchargedOneTimeJobs);
+  const noNextVisit = await run("reportPlansWithoutNextVisit", reportPlansWithoutNextVisit);
   // Money-out recovery lifecycle.
-  const dunning = await runDunningRetries();
-  const invoiceReminders = await remindOpenInvoices();
-  const aging = await reportArAging();
-  const disputes = await reportDisputeDeadlines();
+  const dunning = await run("runDunningRetries", runDunningRetries);
+  const invoiceReminders = await run("remindOpenInvoices", remindOpenInvoices);
+  const aging = await run("reportArAging", reportArAging);
+  const disputes = await run("reportDisputeDeadlines", reportDisputeDeadlines);
   // GL-05: prove, against the real tables and Stripe, that every succeeded
   // booking payment has exactly one complete booking and vice versa.
-  const reconciliation = await reconcilePaidBookings();
+  const reconciliation = await run("reconcilePaidBookings", reconcilePaidBookings);
   // GL-06: re-read Stripe for every booking still PROCESSING — a missed
   // webhook can never leave a pending debit and its scheduled visit in limbo.
-  const processingPayments = await reconcileProcessingPayments();
+  const processingPayments = await run(
+    "reconcileProcessingPayments",
+    reconcileProcessingPayments
+  );
   // GL-08: resume every plan cancellation a prior attempt could not finish, so
   // an accepted cancel can never sit Pending forever with billing still live.
-  const cancellations = await reconcilePlanCancellations();
-  const capacity = await reconcileCapacity();
+  const cancellations = await run(
+    "reconcilePlanCancellations",
+    reconcilePlanCancellations
+  );
+  const capacity = await run("reconcileCapacity", reconcileCapacity);
   // GL-07: resume every office visit cancel a prior attempt could not finish, so
   // a refunded-but-still-scheduled visit is never stranded.
-  const visitChanges = await reconcileVisitChanges();
+  const visitChanges = await run("reconcileVisitChanges", reconcileVisitChanges);
   // GL-02: no lead may silently go cold — surface every open lead whose next
   // action is overdue as an owned follow-up, routed to its owner or the team.
-  const staleLeads = await reportStaleLeads();
+  const staleLeads = await run("reportStaleLeads", reportStaleLeads);
   // GL-15: a FLAGGED presence review whose owned case never landed is re-opened
   // here — the obligation is durable on the report and cannot silently vanish.
-  const presenceReviews = await reconcilePresenceReviews();
+  const presenceReviews = await run(
+    "reconcilePresenceReviews",
+    reconcilePresenceReviews
+  );
   // GL-17: advance licence-lapse work + capacity effects of expiry.
-  const licenses = await sweepLicenseLapses();
+  const licenses = await run("sweepLicenseLapses", sweepLicenseLapses);
   // GL-09: stale lifecycle commands (a process stop mid-transition) are
   // escalated to owned work and stale claims reclaimed — a customer can never
   // be stuck mid-transition silently or blocked forever.
-  const lifecycle = await reconcileLifecycleTransitions();
+  const lifecycle = await run(
+    "reconcileLifecycleTransitions",
+    reconcileLifecycleTransitions
+  );
   // GL-12: tomorrow's staffed visits must pass the pure dispatch facts — a
   // missing classification or placeholder address is owned work today, not a
   // doorstep discovery tomorrow.
-  const readiness = await sweepDispatchReadiness();
+  const readiness = await run("sweepDispatchReadiness", sweepDispatchReadiness);
   // GL-17: seasonal obligations — month rollover marks missed months (no
   // catch-up) and ensures the current in-season month is visible.
-  const seasonal = await sweepSeasonalObligations();
+  const seasonal = await run("sweepSeasonalObligations", sweepSeasonalObligations);
   console.log("Reminder totals:", JSON.stringify(totals));
-  return [
+  const results = [
     ...totals,
     notBilling,
     uncharged,
@@ -179,6 +217,30 @@ export const handler = async () => {
     readiness,
     lifecycle,
   ];
+  if (failures.length) {
+    await openOwnedWork({
+      kind: "INFRA_ALERT",
+      dedupeKey: `daily-reminders-incomplete:${new Date().toISOString().slice(0, 10)}`,
+      title: `Daily operations run incomplete — ${failures.length} subtask${failures.length === 1 ? "" : "s"} failed`,
+      detail: `Today's scheduled operations run finished with failures. Obligations those subtasks watch (reminders, dunning, reconciliation, sweeps) may be unmet until they run clean:\n${failures
+        .map((f) => `- ${f.task}: ${f.error}`)
+        .join("\n")}`,
+      relatedId: "daily-reminders",
+      resolutionAction:
+        "Check the daily-reminders logs, fix or escalate the failing subtask, and re-run (or wait for tomorrow's run) — then verify it completes clean.",
+      ownerTeam: "OPS",
+    }).catch((err) =>
+      console.error("daily-reminders: could not record the failed run", err)
+    );
+    // The invocation itself must read FAILED — a partially completed
+    // scheduled run is not a healthy scheduled run.
+    throw new Error(
+      `daily-reminders: ${failures.length} subtask(s) failed: ${failures
+        .map((f) => f.task)
+        .join(", ")}`
+    );
+  }
+  return results;
 };
 
 /**
@@ -1236,6 +1298,13 @@ async function remind(date: string, phrasing: string, staffingGate: boolean) {
  * suspension (shared/recovery clearPlanDelinquency, via the webhook).
  */
 async function runDunningRetries() {
+  // GL-22: while billing is paused by an incident owner, no charge is
+  // INITIATED — the retries hold (visibly) and resume when the pause lifts.
+  const pause = await readOpsPause();
+  if (pause.billingPaused) {
+    console.log("Dunning: billing is paused — no retries initiated");
+    return { dunningSkipped: "billing-paused" };
+  }
   const client = await dataClient();
   const nowIso = new Date().toISOString();
   const failed = await allInvoicesByStatus("FAILED");

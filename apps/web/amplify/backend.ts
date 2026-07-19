@@ -5,9 +5,17 @@ import {
   HttpMethod,
   InvokeMode,
 } from "aws-cdk-lib/aws-lambda";
+import { SqsDestination } from "aws-cdk-lib/aws-lambda-destinations";
 import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { Topic } from "aws-cdk-lib/aws-sns";
 import { LambdaSubscription } from "aws-cdk-lib/aws-sns-subscriptions";
+import {
+  ComparisonOperator,
+  TreatMissingData,
+} from "aws-cdk-lib/aws-cloudwatch";
+import { SnsAction } from "aws-cdk-lib/aws-cloudwatch-actions";
+import { Queue } from "aws-cdk-lib/aws-sqs";
+import type { CfnBucket } from "aws-cdk-lib/aws-s3";
 import {
   CfnConfigurationSet,
   CfnConfigurationSetEventDestination,
@@ -29,6 +37,7 @@ import { crmPricing } from "./functions/crm-pricing/resource";
 import { bookingPublic } from "./functions/booking-public/resource";
 import { pricingRefresh } from "./functions/pricing-refresh/resource";
 import { sesEvents } from "./functions/ses-events/resource";
+import { opsAlerts } from "./functions/ops-alerts/resource";
 
 const backend = defineBackend({
   auth,
@@ -46,6 +55,7 @@ const backend = defineBackend({
   bookingPublic,
   pricingRefresh,
   sesEvents,
+  opsAlerts,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
@@ -201,6 +211,9 @@ for (const fn of [
   // pricing-refresh emails the office (new-rate heads-ups, the weekly
   // report) and waiting leads ("your exact prices are ready").
   backend.pricingRefresh,
+  // GL-22: ops-alerts emails the office when an alarm turns a background
+  // failure into owned work.
+  backend.opsAlerts,
 ]) {
   fn.resources.lambda.addToRolePolicy(sesPolicy);
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
@@ -411,3 +424,124 @@ backend.addOutput({
     bookingApiUrl: bookingApiUrl.url,
   },
 });
+
+// ---------------------------------------------------------------------------
+// GL-22 — monitoring, durable event handling, and retention
+// ---------------------------------------------------------------------------
+
+// Every alarm publishes here; ops-alerts turns each into ONE deduplicated
+// shared-Office work item (INFRA_ALERT) with the common one-business-day
+// clock, and auto-resolves it when the alarm recovers. A background failure
+// pages the QUEUE — never only a log group.
+const opsAlarmsStack = backend.opsAlerts.resources.lambda.stack;
+const opsAlarmsTopic = new Topic(opsAlarmsStack, "OpsAlarmsTopic");
+opsAlarmsTopic.addSubscription(
+  new LambdaSubscription(backend.opsAlerts.resources.lambda)
+);
+const alarmAction = new SnsAction(opsAlarmsTopic);
+
+// Lambda ERROR alarms: any error on a business function within 5 minutes is
+// a page. Booking/quote/webhook errors, email-send failure runs, resumer
+// crashes, and the daily run's deliberate "incomplete run" throw all land
+// here (the daily-reminders handler throws when any subtask failed, so a
+// caught-and-swallowed subtask can no longer report a healthy run).
+const monitored: [string, { resources: { lambda: import("aws-cdk-lib/aws-lambda").IFunction } }][] = [
+  ["booking-public", backend.bookingPublic],
+  ["stripe-webhook", backend.stripeWebhook],
+  ["daily-reminders", backend.dailyReminders],
+  ["pricing-refresh", backend.pricingRefresh],
+  ["crm-docs", backend.crmDocs],
+  ["crm-billing", backend.crmBilling],
+  ["crm-admin", backend.crmAdmin],
+  ["crm-pricing", backend.crmPricing],
+  ["lead-intake", backend.leadIntake],
+  ["ses-events", backend.sesEvents],
+];
+for (const [name, fn] of monitored) {
+  fn.resources.lambda
+    .metricErrors({ period: Duration.minutes(5), statistic: "Sum" })
+    .createAlarm(fn.resources.lambda.stack, `${name}-errors-alarm`, {
+      alarmName: `buzzkill-${branch}-${name}-errors`,
+      alarmDescription: `The ${name} function is failing. Whatever it owns (bookings, payments, reminders, pricing, email tracking) may be silently behind until it runs clean.`,
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    })
+    .addAlarmAction(alarmAction);
+}
+// A scheduled job that NEVER RAN is as bad as one that failed — missing
+// data is BREACHING, so a broken schedule cannot hide as silence.
+backend.dailyReminders.resources.lambda
+  .metricInvocations({ period: Duration.hours(24), statistic: "Sum" })
+  .createAlarm(
+    backend.dailyReminders.resources.lambda.stack,
+    "daily-reminders-did-not-run",
+    {
+      alarmName: `buzzkill-${branch}-daily-reminders-did-not-run`,
+      alarmDescription:
+        "The daily operations run (reminders, dunning, reconciliation, sweeps) did not fire in the last 24 hours. Every obligation it watches is going unwatched.",
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.BREACHING,
+    }
+  )
+  .addAlarmAction(alarmAction);
+backend.pricingRefresh.resources.lambda
+  .metricInvocations({ period: Duration.hours(1), statistic: "Sum" })
+  .createAlarm(
+    backend.pricingRefresh.resources.lambda.stack,
+    "pricing-refresh-did-not-run",
+    {
+      alarmName: `buzzkill-${branch}-pricing-refresh-did-not-run`,
+      alarmDescription:
+        "The pricing-refresh schedule (every 5 minutes) produced zero invocations in an hour — waiting leads are not being priced and rate sheets are not refreshing.",
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.BREACHING,
+    }
+  )
+  .addAlarmAction(alarmAction);
+
+// GL-22: a mailbox delivery event may never be silently dropped. The
+// ses-events handler now THROWS on a failed write (no more ack-and-forget);
+// async retries run, and persistent failures land on this visible
+// dead-letter queue, whose depth alarm opens owned work.
+const sesEventsDlq = new Queue(emailEventsStack, "SesEventsDlq", {
+  retentionPeriod: Duration.days(14),
+});
+backend.sesEvents.resources.lambda.configureAsyncInvoke({
+  retryAttempts: 2,
+  onFailure: new SqsDestination(sesEventsDlq),
+});
+sesEventsDlq
+  .metricApproximateNumberOfMessagesVisible({
+    period: Duration.minutes(15),
+    statistic: "Maximum",
+  })
+  .createAlarm(emailEventsStack, "ses-events-dlq-alarm", {
+    alarmName: `buzzkill-${branch}-ses-events-dead-letter`,
+    alarmDescription:
+      "Mailbox delivery events (bounces, complaints, deliveries) failed processing repeatedly and are parked on the dead-letter queue. Email states and suppression decisions are NOT being recorded until these are replayed.",
+    threshold: 1,
+    evaluationPeriods: 1,
+    comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: TreatMissingData.NOT_BREACHING,
+  })
+  .addAlarmAction(alarmAction);
+
+// GL-22 retention: point-in-time recovery on EVERY business table (35-day
+// continuous restore against human or provider error), and versioning on
+// the documents bucket so an overwritten/deleted agreement, report PDF, or
+// photo remains recoverable. The seven-year retention itself is a
+// no-delete policy — nothing here expires business records.
+const amplifyTables =
+  backend.data.resources.cfnResources.amplifyDynamoDbTables;
+for (const table of Object.values(amplifyTables)) {
+  table.pointInTimeRecoveryEnabled = true;
+}
+const cfnDocsBucket = docsBucket.node.defaultChild as CfnBucket;
+cfnDocsBucket.versioningConfiguration = { status: "Enabled" };

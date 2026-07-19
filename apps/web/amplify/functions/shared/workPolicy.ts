@@ -48,6 +48,7 @@ export type WorkKind =
   | "PRICING_RESEARCH_EXHAUSTED"
   | "PRICING_CHANGE_REVIEW"
   | "SERVICE_CATALOG_DECISION"
+  | "INFRA_ALERT"
   | "BALANCE_COLLECTION"
   | "PAYMENT_PROCESSING_OVERDUE";
 
@@ -536,6 +537,23 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "ADDED_TO_CATALOG", label: "Added to the catalog (engineering change) and customer scheduled" },
       { code: "MAPPED_TO_EXISTING", label: "It maps to an existing catalog service — job created" },
       { code: "DECLINED_TOLD_CUSTOMER", label: "Declined — customer told we don't offer it" },
+      OTHER,
+    ],
+  },
+  INFRA_ALERT: {
+    severity: "HIGH",
+    // GL-22: a background system failure (Lambda errors, a scheduled job
+    // that never ran, dead-lettered email events, an incomplete daily run).
+    // The customer impact is indirect but real: obligations those systems
+    // watch can silently go unmet until this is fixed. Same one-business-day
+    // owned response as everything else — no severity classes.
+    customerImpact:
+      "A background system failed — reminders, reconciliation, or email tracking may be silently behind until it's fixed.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "RECOVERED_VERIFIED", label: "Recovered — verified healthy" },
+      { code: "ESCALATED_ENGINEERING", label: "Escalated to engineering" },
       OTHER,
     ],
   },

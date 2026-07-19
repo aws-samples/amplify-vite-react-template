@@ -10,6 +10,7 @@ import { bookingPublic } from "../functions/booking-public/resource";
 import { leadIntake } from "../functions/lead-intake/resource";
 import { pricingRefresh } from "../functions/pricing-refresh/resource";
 import { sesEvents } from "../functions/ses-events/resource";
+import { opsAlerts } from "../functions/ops-alerts/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -233,6 +234,9 @@ export const schema = a.schema({
     // GL-01: someone asked for work outside the service catalog — a catalog
     // decision (add it / decline it), never a silently invented job.
     "SERVICE_CATALOG_DECISION",
+    // GL-22: a CloudWatch alarm fired (Lambda errors, a scheduled job that
+    // never ran, dead-lettered email events) — owned within one business day.
+    "INFRA_ALERT",
     // GL-06: a bank debit failed AFTER the visit was performed — the invoice
     // is a balance due and the shared queue owns collection.
     "BALANCE_COLLECTION",
@@ -1114,6 +1118,22 @@ export const schema = a.schema({
   // row also carries the once-only daily-digest claim. Office/OWNER read
   // these for the Market Rates screen's engine panel; only the refresh
   // worker writes them (via guarded DynamoDB writes).
+  // GL-22: the emergency pause switchboard (one row, id "pause"). Authorized
+  // incident owners flip these through the OWNER-only setOpsPause mutation;
+  // the funnel refuses new bookings, scheduling refuses new dispatch, and
+  // the billing engines stop initiating charges while the matching flag is
+  // set. Read-only from browsers — the mutation is the only writer.
+  OpsControl: a
+    .model({
+      bookingPaused: a.boolean(),
+      dispatchPaused: a.boolean(),
+      billingPaused: a.boolean(),
+      reason: a.string(),
+      actorEmail: a.string(),
+      changedAt: a.datetime(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+
   PricingControl: a
     .model({
       kind: a.string().required(), // DRAIN | DAY | ROLLBACK
@@ -2052,6 +2072,24 @@ export const schema = a.schema({
       customerId: a.string(),
       technicianId: a.string(),
       resend: a.boolean(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-22 — flip the emergency pause switches (new bookings / new dispatch /
+   * billing initiation), with a required reason. OWNER-only: the incident
+   * playbooks name who may pull these levers; everything each pause refuses
+   * says so honestly to the person it refuses.
+   */
+  setOpsPause: a
+    .mutation()
+    .arguments({
+      bookingPaused: a.boolean(),
+      dispatchPaused: a.boolean(),
+      billingPaused: a.boolean(),
+      reason: a.string().required(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
@@ -3319,6 +3357,7 @@ export const schema = a.schema({
   allow.resource(leadIntake),
   allow.resource(pricingRefresh),
   allow.resource(sesEvents),
+  allow.resource(opsAlerts),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

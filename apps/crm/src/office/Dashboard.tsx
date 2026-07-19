@@ -6,6 +6,7 @@ import {
   listAll,
   listDisputes,
   listWorkItems,
+  unwrap,
   type Customer,
   type Dispute,
   type Invoice,
@@ -209,6 +210,7 @@ export default function Dashboard() {
 
   return (
     <Page title="Dashboard">
+      <EmergencyControls />
       <SegControl
         options={[
           { value: "MONTH" as Period, label: "This month" },
@@ -580,5 +582,133 @@ function AssignButton({
     >
       {ownerSub ? "Take over" : "Assign to me"}
     </Button>
+  );
+}
+
+/**
+ * GL-22 — the emergency pause switchboard. Every office user SEES an active
+ * pause (a banner-style card, always at the top); only an OWNER can flip
+ * the switches, and every change requires a reason and is announced to the
+ * office. The playbooks in docs/incident-playbooks name when to pull each.
+ */
+function EmergencyControls() {
+  const roles = useRoles();
+  const [pause, setPause] = useState<{
+    bookingPaused?: boolean | null;
+    dispatchPaused?: boolean | null;
+    billingPaused?: boolean | null;
+    reason?: string | null;
+    actorEmail?: string | null;
+  } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await api().models.OpsControl.get({ id: "pause" });
+      setPause(data ?? {});
+    } catch {
+      setPause({});
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const anyPaused = Boolean(
+    pause?.bookingPaused || pause?.dispatchPaused || pause?.billingPaused
+  );
+  // Hidden entirely for non-owners while everything runs; a pause is
+  // impossible to miss for everyone.
+  if (!pause || (!anyPaused && !roles.owner)) return null;
+
+  const flip = async (
+    key: "bookingPaused" | "dispatchPaused" | "billingPaused",
+    next: boolean
+  ) => {
+    const reason = window.prompt(
+      next
+        ? "Why is this being paused? (required — announced to the office)"
+        : "Why is it safe to resume? (required — announced to the office)"
+    );
+    if (!reason?.trim()) return;
+    setBusy(key);
+    setError(null);
+    try {
+      unwrap(
+        await api().mutations.setOpsPause({ [key]: next, reason: reason.trim() })
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change the pause");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rows: {
+    key: "bookingPaused" | "dispatchPaused" | "billingPaused";
+    label: string;
+    effect: string;
+  }[] = [
+    {
+      key: "bookingPaused",
+      label: "New online bookings",
+      effect: "The website funnel refuses new quotes and payments",
+    },
+    {
+      key: "dispatchPaused",
+      label: "New dispatch",
+      effect: "No new visit can be scheduled or assigned",
+    },
+    {
+      key: "billingPaused",
+      label: "Billing initiation",
+      effect: "No new charge, retry, or subscription start (refunds still work)",
+    },
+  ];
+
+  return (
+    <Card>
+      <div className="row-split">
+        <strong>Emergency controls</strong>
+        <Badge tone={anyPaused ? "danger" : "ok"}>
+          {anyPaused ? "SOMETHING IS PAUSED" : "all running"}
+        </Badge>
+      </div>
+      {anyPaused && pause.reason ? (
+        <p className="small" style={{ margin: "6px 0 0" }}>
+          {pause.actorEmail ?? "An owner"}: {pause.reason}
+        </p>
+      ) : null}
+      <ErrorNote error={error} />
+      {rows.map((r) => {
+        const paused = Boolean(pause[r.key]);
+        return (
+          <ListRow
+            key={r.key}
+            title={r.label}
+            subtitle={r.effect}
+            meta={
+              <>
+                <Badge tone={paused ? "danger" : "ok"}>
+                  {paused ? "PAUSED" : "running"}
+                </Badge>
+                {roles.owner ? (
+                  <Button
+                    small
+                    variant={paused ? "primary" : "danger"}
+                    loading={busy === r.key}
+                    onClick={() => void flip(r.key, !paused)}
+                  >
+                    {paused ? "Resume" : "Pause"}
+                  </Button>
+                ) : null}
+              </>
+            }
+          />
+        );
+      })}
+    </Card>
   );
 }

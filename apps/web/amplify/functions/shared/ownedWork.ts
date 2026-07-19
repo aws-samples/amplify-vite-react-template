@@ -81,6 +81,9 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-01: a request for work outside the catalog — the customer gets the
   // add/map/decline answer within the common one-business-day commitment.
   SERVICE_CATALOG_DECISION: 24 * 60,
+  // GL-22: a background failure surfaced by an alarm — the same common
+  // one-business-day owned response, escalated by the normal overdue sweep.
+  INFRA_ALERT: 24 * 60,
   // GL-06: work performed, bank debit failed after — collection is money-
   // critical but the customer was noticed; the common one-business-day clock.
   BALANCE_COLLECTION: 24 * 60,
