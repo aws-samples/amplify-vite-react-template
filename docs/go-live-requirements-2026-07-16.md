@@ -2,14 +2,14 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 16 commits after `f70e621`, from `3717092` through `2556438`; newest
-implementation commit `2556438`
+**Latest commit review:** 18 commits after `f70e621`, from `3717092` through `5b2fb76`; newest
+implementation commit `5b2fb76`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 115 business requirements**, ordered by launch priority and expected impact
+**Remaining:** **23 gates / 111 business requirements**, ordered by launch priority and expected impact
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **47.7%**
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **45.0%**
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
@@ -186,7 +186,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-05 | Copy sign-off + policy definitions — engineering closed (`cc76773`) | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (sign-offs)** |
 | P0 | GL-09 | Lifecycle policy sign-off + history export — engineering closed (`82f5fbf`) | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **10% — Very low (sign-off; export rides GL-19)** |
 | P0 | GL-08 | 72-hour copy + refund-workflow sign-off — engineering closed (`2556438`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
-| P0 | GL-07 | Finish terminal office cancel/reschedule | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **74% — High** |
+| P0 | GL-07 | Copy sign-off; atomic capacity rides GL-04 — engineering closed (`5b2fb76`) | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **12% — Very low (sign-offs + GL-04 tie)** |
 | P0 | GL-18 | Finish truthful, usable exception resolution | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **72% — High** |
 | P0 | GL-04 | Capacity that cannot be oversold | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **82% — High** |
 | P0 | GL-06 | Finish honest, race-safe processing and failed payments | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **80% — High** |
@@ -401,67 +401,36 @@ refunds. The public /cancel link routes through the same durable command.
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
 
-### GL-07 — Finish terminal office cancel/reschedule
+### GL-07 — Terminal office cancel/reschedule
 
 **Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
 capacity, route, audit, and customer-notification consequences in one guided action.
 
-**Why this is still a gate:** The `d546c10` remediation made the command exclusively held — stale
-reclaim is one atomic takeover, cancel and reschedule attempts and every resume conditionally acquire
-the lease, checkpoints and release are fenced, and the browser can no longer raw-delete it. What
-remains is result truthfulness and coverage: a successful refund checkpoint, invoice void,
-recovery-case write, audit write, and command release can each fail without changing the final result. Only the first paid and first open invoice are
-handled, an invoice-void exception can be logged and then reported **Complete**, and a processing payment
-is promised a refund even though no settlement webhook completes that promise. The visit is then marked
-CANCELED and the command deleted, so **Resume visit change** becomes a no-op.
-
-Reschedule is less recoverable than cancellation: validation or update errors strand the command without
-a case, automatic resume refuses all RESCHEDULE commands, and the original date/route/actor are not stored
-for a safe retry. The current office screen sends no technician or route, so every dated move bypasses
-capacity and qualification checks, publishes SCHEDULED, and depends on a best-effort unstaffed case that
-may not exist. Where assignment is supplied, capacity is still a read-then-write count that concurrent
-moves can oversubscribe. Both actions release their command after provider email acceptance—not delivery—
-and ignore a missing audit. If history is missing, an already-canceled replay fabricates **Sent/Complete**
-rather than showing recovery is required. Although the direct account-credit choice was removed, the
-employee preview still says a refund **or credit** will be confirmed and the recovery menu still lets
-Finance close a paid-cancellation case as **Account credit applied** despite having no credit ledger.
+**Status:** engineering closed (`5b2fb76`, on the `d546c10` exclusive-lease remediation).
+Cancellation reconciles EVERY invoice (exact multi-invoice refund, read-back-verified voids of every
+open bill; a failed void is a tracked PARTIAL with an owned case, never a fall-through Complete);
+COMPLETE requires money exact + invoices reconciled + notice accepted + audit recorded, the command is
+released only then, and a canceled visit with a surviving command RE-DRIVES on resume (checkpoints
+skip finished money; the notice adopts a provider-accepted send from the per-visit email log; the
+audit re-records); a history-less replay reports needs-recovery, never a fabricated Sent/Complete; a
+processing bank debit keeps the command open with the 72-hour settlement outcome prescribed in its
+Finance case; a bounced notice reopens the change as owned work. Reschedule carries the employee's
+intended destination and identity on the durable command, strands with an owned case and resumes with
+the SAME stored intent under the ORIGINAL actor, and a dated move with no technician stays visibly
+pending assignment behind a CONFIRMED staffing case — never published as a clean schedule or a
+confirmed-date notice. The 72-hour rule is hour-exact from the visit's scheduled start in
+America/New_York, judged from the first accepted request; MANAGER_EXCEPTION, the "refund or credit"
+wording, and the "Account credit applied" close reason are removed.
 
 **Remaining requirements:**
 
-- One durable command stores the original actor, controlled reason, action, decision, prior state, proposed
-  date/route/technician, every affected invoice, and every required phase. (The exclusive
-  conditionally-acquired lease, atomic stale recovery, cancel/reschedule single-holder serialization,
-  and no-raw-delete are done — `d546c10`.) The command remains until the exact terminal result or a
-  durably confirmed cause-specific recovery owner exists.
-- Cancellation reconciles **all** invoices and provider payments for the visit. Every refund is exact and
-  idempotent, every unpaid invoice is confirmed void, offline money requires a recorded real-world
-  disposition, and no thrown/null write can fall through to **Complete**. A pending bank debit remains
-  linked to the command: when cancellation is more than 72 hours away it is canceled if possible or fully
-  refunded on success; at exactly 72 hours or less its no-refund outcome is retained without calling it
-  settled early. Ledger readback and customer notice are required, and the command/case cannot disappear
-  after merely canceling the job.
-- Resume continues from the last confirmed phase even when the job already reads CANCELED. It can finish
-  money, route, notice, and audit work without duplicating a refund or message. A missing/stale command or
-  event produces **Needs recovery**, never a fabricated prior outcome, and success automatically resolves
-  the recovery case only after the full business result is re-verified (**GL-18**).
-- Reschedule failures are durably resumable with the employee's intended destination and original actor.
-  A dated visit becomes customer-confirmed **Scheduled** only after one atomic capacity claim and the full
-  dispatch rule pass: active/qualified technician, license/scope on the service date, availability,
-  territory, duration/travel capacity, route ownership, and unique route position. Otherwise it remains
-  visibly pending assignment with a confirmed Operations owner; failure to open that work cannot publish
-  a clean schedule or send a confirmed-date notice (**GL-04**, **GL-12**, and **GL-17**).
-- Audit, recovery ownership, and the customer communication are required phases. The original employee and
-  approved policy remain attached through automatic recovery; every provider/CRM write is read back; and
-  **Complete** requires a retry-safe notice at its approved delivered/alternate-contact outcome rather
-  than provider acceptance. The existing Operations/Finance history shows the original employee, policy,
-  every money/schedule/delivery result, and final resolution; a missing audit or case appears as an
-  operational failure rather than being hidden (**GL-03** and **X1**).
-- The server calculates one non-overridable visit policy from the scheduled start in
-  `America/New_York`: strictly more than 72 hours receives a full original-method refund; exactly 72 hours
-  or less receives none. Preview, accepted terms, employee action, provider money, invoice, audit,
-  recovery, customer notice, and reconciliation show that same result. Account credit, arbitrary refund
-  amounts, and a manager choice that contradicts the cutoff are removed. The approved reason lists,
-  reschedule/unscheduled rules, closures, and customer wording are versioned with the action.
+- Head of Operations / CEO sign off the changed customer-facing wording now live: the hour-exact
+  72-hour refusal copy (no owner override), and the pending-assignment reschedule notice ("we'll
+  confirm your appointment once your technician is assigned" instead of a confirmed date when no
+  technician is chosen).
+- The single ATOMIC capacity claim for assigned reschedules lands with GL-04 (today the route's stop
+  count is re-validated but two simultaneous moves could still pass one count read); the full
+  dispatch-facts/licence gate already runs on the new date.
 
 **Pass owner:** Head of Operations; Finance approves money dispositions.
 
