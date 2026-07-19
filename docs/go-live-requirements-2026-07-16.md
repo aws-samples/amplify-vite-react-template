@@ -2,8 +2,8 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 3 commits after `f70e621`, from `3717092` through `27ca1fb`; newest
-implementation commit `27ca1fb`
+**Latest commit review:** 5 commits after `f70e621`, from `3717092` through `bbcf0c3`; newest
+implementation commit `bbcf0c3`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
@@ -170,7 +170,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 |---|---|---|---|---|---|
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
 | P0 | GL-13 | Policy-vocabulary approvals — engineering closed (`27ca1fb`) | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **12% — Very low (approvals only)** |
-| P0 | GL-15 | Finish regulated-report durability and compliance sign-off | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **58% — Medium** |
+| P0 | GL-15 | Compliance sign-off of encoded rules — engineering closed (`bbcf0c3`) | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **15% — Very low (sign-off + SES wiring)** |
 | P0 | GL-17 | Finish seasonal plans and technician license controls | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **75% — High** |
 | P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched | **74% — High** |
 | P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **72% — High** |
@@ -261,37 +261,29 @@ minutes.
 **Business outcome:** Every issued service report and correction is an accurate, durable, correctly
 authored legal record with a truthful, non-duplicating customer-delivery state.
 
+**Engineering closed (commit `bbcf0c3`):** finalization takes a conditional single-winner claim with
+stale reclaim, verifies the persisted FINALIZED report and COMPLETED job before billing or emailing,
+and collapses concurrent next-visit creation onto one deterministic row. Delivery is a truthful state
+machine: a verified SENDING intent precedes every provider call, provider acceptance records
+ACCEPTED (never "delivered"), a resume adopts the proven prior send from the email log instead of
+duplicating, a lost marker becomes visible owned work, and a later bounce/complaint corrects the
+report/amendment itself, reopens the delivery obligation as owned work, and cannot be un-bounced;
+the office records approved alternate delivery or re-sends the exact document. Label validation fails
+closed — no rate on file refuses finalization — and the catalog carries structured office-edited label
+rules (rates, quantity range, pests, service types, re-entry minimum) enforced on every recorded
+application. The presence-review obligation is a durable marker on the report, re-opened by the daily
+reconcile when its case write fails, settled by resolving the case, never blocking the technician.
+Office screens retrieve report photos, the no-access door photo, per-record delivery truth, and
+amendments without engineering.
+
 **Remaining requirements:**
 
-- **Finalization is not concurrency-safe.** It reads the draft, then writes the finalized report,
-  completed job, billing start, and next visit with no conditional claim or version. Two simultaneous
-  finalizes both see "not finalized" and both proceed into billing and scheduling. Finalization must use
-  a conditional claim/version and verify the persisted report and job before reporting success, so
-  concurrent, duplicate, and resumed requests converge on one report, one completion, one billing/next
-  visit, and one delivery attempt.
-- **Report and amendment emails can duplicate.** The "sent" marker is written after the send with no
-  provider idempotency key, so a crash between provider acceptance and the marker write causes a
-  duplicate on retry. Delivery must use a provider idempotency key or an equivalent outbox that covers
-  the **accepted-but-marker-not-stored** window, and every marker write must be verified.
-- **The legal record still calls provider acceptance “delivered.”** The general email log can later
-  receive a bounce or complaint, but the service report/amendment stamps `emailedAt` and its own delivery
-  status when the provider first accepts the send; the later outcome does not correct that legal record.
-  One linked state must distinguish pending, mailbox-provider delivery, bounced/complained/suppressed,
-  failed, no-email, and approved alternate delivery. A later failure reopens the report-delivery
-  obligation and cannot leave the report screen claiming the customer received it (**see X3**).
-- **Label validation is a single string match.** It compares one recorded rate string to one catalog
-  default and skips entirely when that default is blank; quantity and re-entry are only checked non-blank.
-  The catalog must encode every allowed product/service/site/pest combination, quantity or concentration
-  range, rate/dilution, and re-entry rule, and finalization must fail closed when any recorded fact is
-  outside the rule.
-- **The on-site presence review can vanish.** When the durable review write fails, the fallback is
-  another best-effort email inside a swallowing try/catch. A persistent recovery record — not only an
-  email — must survive until Operations verifies or resolves the review. The technician stays unblocked
-  under the CEO's field rule.
-- Operations can retrieve the original, every amendment, delivery evidence, photos, no-access evidence,
-  and location-review history through authorized screens without engineering (**see X1**). Compliance
-  approves the capture-window grace, location thresholds, label rules, evidence, one-business-day
-  response rule, resolution policy, and issued formats for every launch service type.
+- Compliance (CEO) approves the encoded rules and thresholds now enforced in code: the capture-window
+  grace, the accuracy/distance review thresholds, each product's encoded label rules, evidence
+  requirements, the one-business-day response rule, resolution policy, and issued formats for every
+  launch service type. The mechanism is live; the sign-off ratifies the recorded values.
+- Production SES configuration set + SNS topic must be wired (GL-21) for mailbox delivery events —
+  without them, reports remain truthfully at ACCEPTED rather than falsely at delivered.
 
 **Pass owner:** CEO as Compliance owner; Operations signs delivery and retrieval.
 
