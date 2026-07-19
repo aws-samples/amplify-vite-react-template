@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `41020a6`; newest
-implementation commit `41020a6`
+**Latest commit review:** every commit after `f70e621` through `abcb908`; newest
+implementation commit `abcb908`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 77 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 75 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -196,7 +196,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-04 | Travel-model calibration + data entry — engineering closed (`dc39f74`) | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
 | P0 | GL-06 | Copy + recovery-workflow sign-offs — engineering closed (`1228822`) | CEO + Finance lead | A processing customer is promised a nonexistent hold, or an async success oversells the day | **12% — Very low (sign-offs)** |
 | P0 | GL-16 | Operating-value ratification — engineering closed (`41020a6`) | CEO + Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **12% — Very low (sign-offs)** |
-| P0 | GL-01 | One truthful, complete service catalog | CEO | An advertised service cannot be quoted, staffed, or documented | **52% — Medium** |
+| P0 | GL-01 | Catalog ratification + conflict decisions — engineering closed (`abcb908`) | CEO | An advertised service cannot be quoted, staffed, or documented | **15% — Very low (sign-offs)** |
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
 | P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money | **38% — Low** |
 | P0 | GL-22 | Monitoring, recovery, retention, and incident ownership | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **58% — Medium** |
@@ -473,22 +473,21 @@ engine/rollback panels are live. Only the item below remains.
 **Business outcome:** A customer can never be promised a service the operating system cannot price,
 staff, perform, document, and support profitably.
 
+**Engineering:** closed (`abcb908`). One versioned catalog (`serviceCatalog.ts`) now drives the funnel
+dropdown and sold labels, CRM Market Rates labels, plan naming, seasonal facts, pricing sources/cost
+kinds, and the locked class-based durations; every job and plan records an immutable serviceCode +
+catalog version (legacy strings adopted by the resolver); office job creation is a controlled catalog
+selection with server enforcement, and "Something else" opens an owned SERVICE_CATALOG_DECISION instead
+of an invented job; the CRM Service-catalog screen shows the catalog and the standing public-conflict
+inventory (exact file, promise, conflict, proposed replacement) for CEO approval. Only the item below
+remains.
+
 **Remaining requirements:**
 
-- **There is no single source of truth for services.** Service definitions are hand-duplicated across at
-  least four taxonomies plus a separate CRM pricing vocabulary. Create one versioned catalog for the
-  services selectable in the approved CRM/lead forms. It drives lead intake/pricing, CRM-created visits,
-  property kind and approved duration, technician instructions and allowed products, reporting, plans,
-  callbacks, cancellation/refunds, seasonal behavior, margin protection, and leadership reporting. Every
-  active technician with a current license remains eligible for every catalog service.
-- Replace the free-text CRM service entry and duplicated allow-lists/enums with a controlled catalog
-  selection and immutable service/version reference. Residential, commercial, and community classification
-  is explicit because duration and pricing depend on it. Mosquito/mosquito-plus-tick lead pricing uses the
-  same catalog and approved April–October treatment/year-round billing policy; unsupported text becomes an
-  owned catalog decision rather than a silently invented job.
-- Public-site service promises remain outside authorized edit scope. The CRM catalog reports each mismatch
-  with public calls-to-action—including specialized services that have no equivalent selectable CRM/lead
-  outcome—and requests explicit CEO approval before any public component is changed (**GL-20**).
+- CEO (with Operations, Finance, and Compliance written sign-off) ratifies the launch catalog's
+  membership and recorded facts — the ten entries, their property classes, cadences, seasonal facts,
+  and funnel/lead availability — and decides each public-site conflict listed on the CRM
+  Service-catalog screen (**GL-20**; public pages change only with explicit CEO approval).
 
 **Pass owner:** CEO, with written sign-off from Operations, Finance, and Compliance.
 
