@@ -2,8 +2,8 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** 5 commits after `f70e621`, from `3717092` through `bbcf0c3`; newest
-implementation commit `bbcf0c3`
+**Latest commit review:** 7 commits after `f70e621`, from `3717092` through `580d71c`; newest
+implementation commit `580d71c`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
@@ -171,7 +171,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
 | P0 | GL-13 | Policy-vocabulary approvals — engineering closed (`27ca1fb`) | CEO | A technician sees a peer's job/customer, or a departed tech keeps field access | **12% — Very low (approvals only)** |
 | P0 | GL-15 | Compliance sign-off of encoded rules — engineering closed (`bbcf0c3`) | Compliance owner | Invalid, duplicate, or falsely "delivered" legal record reaches a customer | **15% — Very low (sign-off + SES wiring)** |
-| P0 | GL-17 | Finish seasonal plans and technician license controls | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **75% — High** |
+| P0 | GL-17 | Mosquito sale-path decision — engineering closed (`580d71c`) | CEO + Compliance owner | Work billed out of season or performed without a current technician license | **20% — Low (product decision + ratification)** |
 | P0 | GL-12 | Finish service-specific dispatch readiness | Head of Operations | An unsafe or unperformable visit is dispatched | **74% — High** |
 | P0 | GL-05 | Complete paid-booking delivery and reconciliation controls | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **72% — High** |
 | P0 | GL-09 | Finish failure-safe customer lifecycle transitions | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **66% — Medium** |
@@ -292,24 +292,33 @@ amendments without engineering.
 **Business outcome:** Seasonal services bill and schedule exactly as customers were told, and every visit
 is assigned to a technician with a current license record without hard-coding changing state law.
 
+**Engineering closed (commit `580d71c`):** seasonal facts (seasonal + serviceMonths) are stamped on the
+plan at enrollment from one shared season module — the only encoding of the April–October rule — and
+every in-season month is a visible TreatmentObligation with truthful history (DUE / SCHEDULED /
+SATISFIED / SKIPPED_WEATHER / SKIPPED_MISSED). The recurring engine satisfies the completed month and
+targets the next in-season month (October → next April, never November); a passed unserved month is
+marked SKIPPED_MISSED by the daily sweep and creates no catch-up; office job creation and assignment
+refuse off-season dates and duplicate monthly visits; billing stays monthly year-round from enrollment;
+plan copy, portal, completion email, monitoring, and the rate-card labels read the same facts.
+Licences are one-to-many TechnicianLicense records (number, type/issuer, status, expiration, evidence,
+status history) — office-added, OWNER(Compliance)-status-controlled, PENDING until marked CURRENT —
+and shared/licenses.ts is the single authority read by funnel availability (per-day licensed counts,
+zero licensed = zero sellable dates), assignment, reschedule, field actions, the day view, T-1
+staffing, and the staffed-visit verifier. The daily sweep opens advance LICENSE_LAPSE work 30 days
+before expiry and per-visit unstaffed cases on lapse; finalized reports print the licence valid on the
+application date, so later changes never rewrite authorship. No state-by-service rules engine exists.
+
 **Remaining requirements:**
 
-- **The approved seasonal policy is not encoded.** "May–Oct" exists only in a price label; plans carry
-  frequency and status but no service season. Mosquito and mosquito-plus-tick plans must bill monthly all
-  year while producing exactly one visible treatment obligation in each month April–October and none in
-  November–March. Billing starts on enrollment even off-season; an in-season first treatment satisfies
-  that month's obligation; and a missed month does not create a catch-up treatment. Renewal, immediate
-  cancellation, weather delay, skipped-month history, and customer notices retain the promised schedule;
-  no background worker creates an off-season or duplicate monthly visit.
-- Replace the single technician license fields with office-managed one-to-many license records. An active
-  technician must have at least one Compliance-marked current license number; each record retains number,
-  type/issuer, status, expiration, evidence, and history. Expiry or revocation removes that technician's
-  future capacity and opens advance shared-Office work without erasing historical authorship. Every active
-  licensed technician remains eligible for every launch service; the application does not contain a
-  state-by-service legal rules engine.
-- CRM/lead offer, accepted terms, schedule, invoice, job packet, route capacity, customer notice, and
-  leadership reconciliation all use the same seasonal and license facts. A missing/expired license or
-  absent seasonal obligation cannot be bypassed with free text or a manually selected technician.
+- **Mosquito sale path (CEO/product decision):** the booking funnel does not yet offer the mosquito /
+  mosquito+tick services, so no seasonal plan can currently be sold end-to-end. The enrollment
+  machinery is live (any plan whose accepted offer is a mosquito plan is stamped seasonal
+  automatically); the CEO decides whether the sale lands in the funnel or a lead-conversion flow
+  (ties to GL-01's catalog).
+- Compliance-seat ratification: at launch the OWNER group is the Compliance authority for licence
+  status (the CEO holds the seat). Confirm, or direct a dedicated group.
+- Licence evidence is recorded as a note/document reference; if scanned-document uploads are wanted,
+  a storage path decision is needed.
 
 **Pass owner:** CEO as business and Compliance owner.
 
