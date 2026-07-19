@@ -67,6 +67,7 @@ import {
   makeLegResolver,
   notePoolMinutes,
   onsiteMinutes as slotOnsiteMinutes,
+  jobScheduleGuards,
   releaseJobCapacity,
   releasePoolMinutes,
   releaseSlot,
@@ -2140,9 +2141,7 @@ async function updateJobSchedule(
             }
           : {}),
       },
-      job.scheduledDate
-        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
-        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+      jobScheduleGuards(job)
     );
     if (!published.ok) {
       await compensateMonth();
@@ -2190,17 +2189,27 @@ async function updateJobSchedule(
     // re-assign releases pool facts — never the stale technician stamp.
     const poolWindow = windowOfTimeWindow(job.timeWindow);
     const poolMinutes = slotOnsiteMinutes(job.propertyClass);
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      routeId: null,
-      technicianId: null,
-      routeOrder: null,
-      status: "UNSCHEDULED",
-      capacityWindow: job.scheduledDate ? poolWindow : null,
-      capacityMinutes: job.scheduledDate ? poolMinutes : null,
-      capacityTechnicianId: null,
-    });
-    if (!data) throw new Error(errors?.map((e) => e.message).join("; ") || "Could not unassign job");
+    const published = await casGuardedUpdate(
+      "Job",
+      job.id,
+      {
+        routeId: null,
+        technicianId: null,
+        routeOrder: null,
+        status: "UNSCHEDULED",
+        capacityWindow: job.scheduledDate ? poolWindow : null,
+        capacityMinutes: job.scheduledDate ? poolMinutes : null,
+        capacityTechnicianId: null,
+      },
+      jobScheduleGuards(job)
+    );
+    if (!published.ok) {
+      throw new Error(
+        published.reason === "UNSUPPORTED"
+          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
+          : "This visit's schedule changed while unassigning — refresh and try again."
+      );
+    }
     await releaseJobCapacity(job);
     if (job.scheduledDate) {
       await notePoolMinutes(job.scheduledDate, poolWindow, poolMinutes).catch(
@@ -2208,7 +2217,7 @@ async function updateJobSchedule(
       );
     }
     return finish(
-      { jobId: data.id },
+      { jobId: job.id },
       {
         technicianId: null,
         routeId: null,
@@ -2263,9 +2272,7 @@ async function updateJobSchedule(
         capacityMinutes: null,
         capacityTechnicianId: null,
       },
-      job.scheduledDate
-        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
-        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+      jobScheduleGuards(job)
     );
     if (!published.ok) {
       throw new Error(
@@ -2420,9 +2427,7 @@ async function updateJobSchedule(
           ? { routeId: null, technicianId: null, routeOrder: null }
           : {}),
       },
-      job.scheduledDate
-        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
-        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+      jobScheduleGuards(job)
     );
     if (!published.ok) {
       await rollbackMonth();

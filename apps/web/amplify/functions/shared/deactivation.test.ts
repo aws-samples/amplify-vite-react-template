@@ -214,6 +214,7 @@ beforeEach(() => {
     memoryLockStore({
       CustomerLifecycleCommand: lifecycleCommands,
       CustomerLifecycleClaim: claims,
+      Job: jobs,
     })
   );
   customers.clear();
@@ -332,12 +333,11 @@ describe("deactivateCustomer", () => {
 
     const res = await deactivateCustomer(stripe, "c1", actor, opts());
 
-    expect(jobs.get(job.id)).toMatchObject({
-      status: "CANCELED",
-      routeId: null,
-      routeOrder: null,
-      technicianId: null,
-    });
+    expect(jobs.get(job.id)!.status).toBe("CANCELED");
+    // The guarded publish REMOVES cleared attributes (Dynamo REMOVE).
+    expect(jobs.get(job.id)!.routeId ?? null).toBeNull();
+    expect(jobs.get(job.id)!.routeOrder ?? null).toBeNull();
+    expect(jobs.get(job.id)!.technicianId ?? null).toBeNull();
     expect(jobs.get(job.id)!.notes).toMatch(/customer deactivated/i);
     expect(res.jobsCanceled).toBe(1);
   });

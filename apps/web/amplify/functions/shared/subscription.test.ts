@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
 import type Stripe from "stripe";
 
 /**
@@ -154,6 +155,7 @@ function makeStripe(opts: { hasPaymentMethod: boolean }): FakeStripe {
 }
 
 beforeEach(() => {
+  _setLockStoreForTests(memoryLockStore({ Job: jobs }));
   plans.clear();
   customers.clear();
   jobs.clear();
@@ -410,11 +412,10 @@ describe("cancelPlanBilling resolves the queued visits", () => {
 
     await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
 
-    expect(jobs.get(job.id)).toMatchObject({
-      status: "CANCELED",
-      routeId: null,
-      routeOrder: null,
-    });
+    expect(jobs.get(job.id)!.status).toBe("CANCELED");
+    // The guarded publish REMOVES cleared attributes (Dynamo REMOVE).
+    expect(jobs.get(job.id)!.routeId ?? null).toBeNull();
+    expect(jobs.get(job.id)!.routeOrder ?? null).toBeNull();
   });
 
   it("writes why into the job's notes — an audit trail, not a vanished row", async () => {
@@ -544,7 +545,9 @@ describe("cancelPlanBilling resolves the queued visits", () => {
     // did not. The failure goes to a human instead.
     seedPlan({ stripeSubscriptionId: "sub_live" });
     seedJob({ status: "UNSCHEDULED" });
-    jobUpdate = async () => ({ data: null });
+    // The cancel publish is a guarded CAS write now — take its lock store
+    // away, exactly like a refused conditional write.
+    _setLockStoreForTests(memoryLockStore({}));
 
     const result = await cancelPlanBilling(makeStripe({ hasPaymentMethod: true }), "p1");
 

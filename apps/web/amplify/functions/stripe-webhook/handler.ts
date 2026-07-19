@@ -504,15 +504,37 @@ async function onPaidSubscriptionCharge(opts: {
     return;
   }
 
-  // GL-08 R3: the CASE comes FIRST. The customer is promised a refund only
-  // when the Finance case that guarantees it durably exists — a promise
-  // backed by nothing is exactly the lie this gate closes.
+  await stagePostCancellationCharge({
+    servicePlanId: opts.servicePlanId,
+    planName: plan?.planName ?? null,
+    customerId: opts.customerId,
+    invoiceId: opts.invoiceId,
+    amountCents: opts.amountCents,
+    requestedAt: requestedAt as string,
+  });
+}
+
+/**
+ * GL-08 R2/R3: a charge that posted AFTER an accepted cancellation gets a
+ * durable Finance case FIRST, then the refund-promise notice — never an
+ * ordinary receipt. Called from invoice.paid (anchor already stamped) AND
+ * from subscription.deleted's late-charge rescan (charge landed in the
+ * delivery retry gap, before any anchor existed).
+ */
+async function stagePostCancellationCharge(opts: {
+  servicePlanId: string;
+  planName: string | null;
+  customerId: string;
+  invoiceId: string;
+  amountCents: number;
+  requestedAt: string;
+}) {
   const amountUsd = `$${(opts.amountCents / 100).toFixed(2)}`;
   const caseId = await openOwnedWork({
     kind: "PLAN_CANCELLATION_RECOVERY",
     dedupeKey: opts.servicePlanId,
-    title: `Refund a charge that posted after cancellation: ${plan?.planName ?? opts.servicePlanId}`,
-    detail: `${amountUsd} was paid on this plan after the customer's cancellation was accepted (${requestedAt}). Refund invoice ${opts.invoiceId} IN FULL — a partial refund does not settle it — and make sure the subscription is actually cancelled so no further charge posts.`,
+    title: `Refund a charge that posted after cancellation: ${opts.planName ?? opts.servicePlanId}`,
+    detail: `${amountUsd} was paid on this plan after the customer's cancellation was accepted (${opts.requestedAt}). Refund invoice ${opts.invoiceId} IN FULL — a partial refund does not settle it — and make sure the subscription is actually cancelled so no further charge posts.`,
     customerId: opts.customerId,
     relatedId: opts.servicePlanId,
     sourceUrl: `/customers/${opts.customerId}`,
@@ -531,12 +553,12 @@ async function onPaidSubscriptionCharge(opts: {
     // urgently instead — the settlement check (full-refund-required) keeps
     // the cancellation open until a person finishes this.
     await notifyOffice({
-      subject: `URGENT — post-cancellation charge with NO case: ${plan?.planName ?? opts.servicePlanId}`,
+      subject: `URGENT — post-cancellation charge with NO case: ${opts.planName ?? opts.servicePlanId}`,
       heading: "A post-cancellation charge could not be put in the owned queue",
       template: "ops-post-cancel-charge-unowned",
       customerId: opts.customerId,
       relatedId: opts.servicePlanId,
-      bodyHtml: `<p>${amountUsd} was paid on plan ${opts.servicePlanId} AFTER the customer's accepted cancellation (${requestedAt}), and the Finance recovery case could not be written. The customer has NOT been messaged. Refund invoice ${opts.invoiceId} in full and re-run the cancellation now.</p>`,
+      bodyHtml: `<p>${amountUsd} was paid on plan ${opts.servicePlanId} AFTER the customer's accepted cancellation (${opts.requestedAt}), and the Finance recovery case could not be written. The customer has NOT been messaged. Refund invoice ${opts.invoiceId} in full and re-run the cancellation now.</p>`,
     });
   }
 }
@@ -663,6 +685,45 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     // later charges are judged against the real cancel moment.
     cancellationRequestedAt: sub.cancellationRequestedAt ?? canceledAtIso,
   });
+
+  // LATE-CHARGE RESCAN: a charge that settled during this event's delivery
+  // retry gap was receipted as ordinary (no anchor existed yet) — now that
+  // the anchor is stamped, re-judge every PAID invoice on the plan and stage
+  // the refund case + customer notice for any post-cancellation charge.
+  // invoice.paid is never redelivered, so this rescan is the only path that
+  // catches them.
+  try {
+    let invToken: string | null | undefined;
+    do {
+      const page = await client.models.Invoice.list({
+        filter: { servicePlanId: { eq: crmServicePlanId } },
+        limit: 200,
+        nextToken: invToken,
+      });
+      for (const inv of page.data ?? []) {
+        const paidAt = inv.paidAt ?? inv.issuedAt ?? "";
+        if (
+          inv.status === "PAID" &&
+          paidAt >= canceledAtIso &&
+          (inv.refundedAmountCents ?? 0) < (inv.amountCents ?? 0)
+        ) {
+          await stagePostCancellationCharge({
+            servicePlanId: crmServicePlanId,
+            planName: sub.planName ?? null,
+            customerId: sub.customerId,
+            invoiceId: inv.id,
+            amountCents: inv.amountCents ?? 0,
+            requestedAt: canceledAtIso,
+          });
+        }
+      }
+      invToken = page.nextToken;
+    } while (invToken);
+  } catch (err) {
+    // The settlement gate (full-refund-required) still blocks the close;
+    // this rescan failing only delays the staged case, never the truth.
+    console.error("onSubscriptionDeleted: late-charge rescan failed", err);
+  }
 
   // Nothing below may throw: the plan is now CANCELED, so a Stripe retry of
   // this event would hit the guard above and never send the alert at all.

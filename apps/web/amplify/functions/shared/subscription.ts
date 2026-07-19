@@ -4,7 +4,8 @@ import { notifyOffice } from "./email";
 import { openOwnedWork } from "./ownedWork";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { computeVisitCancellationPolicy } from "./cancellationPolicy";
-import { releaseJobCapacity } from "./capacity";
+import { jobScheduleGuards, releaseJobCapacity } from "./capacity";
+import { casGuardedUpdate } from "./atomicLock";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -326,24 +327,34 @@ export async function cancelQueuedPlanVisits(
             : "NONE";
       let canceled = false;
       try {
-        const { data: updated } = await client.models.Job.update({
-          id: job.id,
-          status: "CANCELED",
-          routeId: null,
-          routeOrder: null,
-          // Stamps end WITH the hold — the release below reads the pre-update
-          // row, and a re-driven sweep finds nothing left to give back.
-          capacityWindow: null,
-          capacityMinutes: null,
-          capacityTechnicianId: null,
-          cancelDisposition: disposition,
-          cancelDispositionCents:
-            disposition === "AWAIT_SETTLEMENT"
-              ? money.inFlightCents
-              : paidCents,
-          notes: job.notes ? `${job.notes}\n${note}` : note,
-        });
-        canceled = Boolean(updated);
+        // GUARDED on the snapshot this sweep read: the 72-hour policy and
+        // the capacity release below were computed from THAT schedule — a
+        // concurrent move makes this cancel lose into the failed list (owned
+        // recovery re-runs it against the fresh state) instead of recording
+        // a money disposition for a date the visit no longer has.
+        const published = await casGuardedUpdate(
+          "Job",
+          job.id,
+          {
+            status: "CANCELED",
+            routeId: null,
+            routeOrder: null,
+            // Stamps end WITH the hold — the release below reads the
+            // pre-update row, and a re-driven sweep finds nothing left to
+            // give back.
+            capacityWindow: null,
+            capacityMinutes: null,
+            capacityTechnicianId: null,
+            cancelDisposition: disposition,
+            cancelDispositionCents:
+              disposition === "AWAIT_SETTLEMENT"
+                ? money.inFlightCents
+                : paidCents,
+            notes: job.notes ? `${job.notes}\n${note}` : note,
+          },
+          jobScheduleGuards(job)
+        );
+        canceled = published.ok;
       } catch (err) {
         console.error(
           `cancelQueuedPlanVisits: could not cancel job ${job.id}`,

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
 
 /**
  * The webhook is where Stripe's version of events reaches the CRM, and two of
@@ -178,6 +179,7 @@ const seedJob = (over: Partial<Job> = {}): Job => {
 };
 
 beforeEach(() => {
+  _setLockStoreForTests(memoryLockStore({ Job: jobs }));
   plans.clear();
   jobs.clear();
   bookings.clear();

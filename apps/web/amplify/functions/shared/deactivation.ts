@@ -3,7 +3,8 @@ import { dataClient } from "./dataClient";
 import { notifyOffice } from "./email";
 import { openMissingContactWork, openOwnedWork } from "./ownedWork";
 import { cancelPlanBilling } from "./subscription";
-import { releaseJobCapacity } from "./capacity";
+import { jobScheduleGuards, releaseJobCapacity } from "./capacity";
+import { casGuardedUpdate } from "./atomicLock";
 import { releaseMonthForJob } from "./obligations";
 import {
   recordCustomerLifecycleEvent,
@@ -761,20 +762,28 @@ async function sweepRemainingFutureJobs(
           continue;
         }
         try {
-          const { data: updated } = await client.models.Job.update({
-            id: job.id,
-            status: "CANCELED",
-            routeId: null,
-            routeOrder: null,
-            technicianId: null,
-            // Stamps end WITH the hold: the release below reads the
-            // pre-update row, so a resumed sweep cannot release twice.
-            capacityWindow: null,
-            capacityMinutes: null,
-            capacityTechnicianId: null,
-            notes: job.notes ? `${job.notes}\n${note}` : note,
-          });
-          if (updated) {
+          // GUARDED on the snapshot this sweep read — a concurrent schedule
+          // mutation makes this cancel lose into out.failed (the deactivation
+          // stays PARTIAL and re-runs against fresh state) instead of
+          // double-releasing a hold another mutation already moved.
+          const published = await casGuardedUpdate(
+            "Job",
+            job.id,
+            {
+              status: "CANCELED",
+              routeId: null,
+              routeOrder: null,
+              technicianId: null,
+              // Stamps end WITH the hold: the release below reads the
+              // pre-update row, so a resumed sweep cannot release twice.
+              capacityWindow: null,
+              capacityMinutes: null,
+              capacityTechnicianId: null,
+              notes: job.notes ? `${job.notes}\n${note}` : note,
+            },
+            jobScheduleGuards(job)
+          );
+          if (published.ok) {
             out.canceled++;
             // GL-04: a swept visit's technician-window (or pool) minutes go
             // back — a deactivation must not strand sold capacity.

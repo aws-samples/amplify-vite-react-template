@@ -120,6 +120,9 @@ vi.mock("./capacity", () => ({
   releaseSlot: vi.fn(async () => undefined),
   releasePoolMinutes: vi.fn(async () => undefined),
   releaseJobCapacity: vi.fn(async () => undefined),
+  // Unconditional pass-through: the guard mechanics are proven in the
+  // capacity/visitChange suites; this harness tests settlement truth.
+  jobScheduleGuards: () => [],
   onsiteMinutes: () => 30,
   windowOfTimeWindow: () => "MORNING",
 }));
@@ -154,7 +157,7 @@ beforeEach(() => {
   sendEmail.mockClear();
   openOwnedWork.mockClear();
   _setLockStoreForTests(
-    memoryLockStore({ PlanCancellationClaim: claims })
+    memoryLockStore({ PlanCancellationClaim: claims, Job: jobs })
   );
   customers.set("c1", { id: "c1", displayName: "Dana", email: "dana@example.com" });
   plans.set("p1", {

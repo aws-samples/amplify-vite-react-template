@@ -19,6 +19,7 @@ import {
   makeLegResolver,
   notePoolMinutes,
   onsiteMinutes as slotOnsiteMinutes,
+  jobScheduleGuards,
   releaseJobCapacity,
   releasePoolMinutes,
   releaseSlot,
@@ -821,9 +822,7 @@ async function driveHeldVisitCancel(
       cancelDispositionCents:
         disposition === "REFUND" ? refundedCents : policy.feeCents,
     },
-    job.scheduledDate
-      ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
-      : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+    jobScheduleGuards(job)
   );
   if (!cancelPublished.ok) {
     const detail =
@@ -1640,9 +1639,7 @@ export async function rescheduleVisit(args: {
         capacityMinutes: slotMinutes,
         capacityTechnicianId: null,
       },
-      job.scheduledDate
-        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
-        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+      jobScheduleGuards(job)
     );
     if (!published.ok) {
       // Compensation: the freshly reserved slot must not stay held for a
@@ -1721,9 +1718,7 @@ export async function rescheduleVisit(args: {
         capacityMinutes: newDate ? poolMinutes : null,
         capacityTechnicianId: null,
       },
-      job.scheduledDate
-        ? [{ kind: "fieldEquals", field: "scheduledDate", value: job.scheduledDate }]
-        : [{ kind: "fieldMissingOrNull", field: "scheduledDate" }]
+      jobScheduleGuards(job)
     );
     if (!published.ok) {
       throw new Error(

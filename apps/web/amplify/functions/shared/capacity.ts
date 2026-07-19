@@ -1,5 +1,5 @@
 import { dataClient } from "./dataClient";
-import { casGuardedAdd, casGuardedUpdate } from "./atomicLock";
+import { casGuardedAdd, casGuardedUpdate , type LockCondition } from "./atomicLock";
 import { onsiteMinutesFor } from "./dispatchReadiness";
 import { driveMinutesBetween, HQ_ADDRESS } from "./driveTime";
 import { licenseFactsFromRecords, licenseRecordsFor } from "./licenses";
@@ -662,6 +662,46 @@ export async function releaseCapacityClaim(claimKey: string): Promise<void> {
     claim.technicianId ?? POOL_TECH,
     claim.minutes ?? 0
   );
+}
+
+/**
+ * The optimistic-concurrency conditions for PUBLISHING a job's schedule
+ * state. Every mutation that publishes schedule state (assign, reschedule,
+ * unassign, cancel, the plan/deactivation sweeps) reads the job, decides,
+ * and then writes THROUGH these guards pinned to the snapshot it read: the
+ * date, the status, and the capacity attribution its releases will use.
+ * Any concurrent publisher changes at least one pinned field, so exactly
+ * one of two racing mutations lands — the loser refuses, re-reads, and
+ * re-decides. This is what makes ledger releases exactly-once and makes
+ * resurrecting a concurrently-canceled visit impossible.
+ */
+export function jobScheduleGuards(job: {
+  scheduledDate?: string | null;
+  status?: string | null;
+  technicianId?: string | null;
+  capacityWindow?: string | null;
+  capacityMinutes?: number | null;
+  capacityTechnicianId?: string | null;
+}): LockCondition[] {
+  const pin = (
+    field: string,
+    value: string | number | null | undefined
+  ): LockCondition =>
+    value === null || value === undefined
+      ? { kind: "fieldMissingOrNull", field }
+      : { kind: "fieldEquals", field, value };
+  return [
+    pin("scheduledDate", job.scheduledDate ?? null),
+    pin("status", job.status ?? null),
+    pin("technicianId", job.technicianId ?? null),
+    pin("capacityWindow", job.capacityWindow ?? null),
+    pin("capacityMinutes", job.capacityMinutes ?? null),
+    pin(
+      "capacityTechnicianId",
+      (job as { capacityTechnicianId?: string | null }).capacityTechnicianId ??
+        null
+    ),
+  ];
 }
 
 /** The slot a job's minutes are HELD on — strictly from its stamps. A job
