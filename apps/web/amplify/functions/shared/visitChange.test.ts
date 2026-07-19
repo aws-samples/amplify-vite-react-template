@@ -281,29 +281,18 @@ describe("cancelVisit — money", () => {
     expect(visitEvents[0]).toMatchObject({ disposition: "FEE_RETAINED" });
   });
 
-  it("MANAGER_EXCEPTION waives the fee for an owner and refunds in full", async () => {
+  it("GL-07 R6: inside 72 hours NOBODY can override the no-refund result — not even an owner", async () => {
     seedPaidVisit({ scheduledDate: daysFromNow(1) });
     const res = await cancelVisit(fakeStripe, {
       jobId: "j1",
-      decision: "MANAGER_EXCEPTION",
+      decision: "CANCEL_REFUND",
       reason: "our error",
       actor: OWNER,
     });
-    expect(res.disposition).toBe("REFUND");
-    expect(res.refundedCents).toBe(15000);
-  });
-
-  it("refuses MANAGER_EXCEPTION for a non-owner", async () => {
-    seedPaidVisit({ scheduledDate: daysFromNow(1) });
-    await expect(
-      cancelVisit(fakeStripe, {
-        jobId: "j1",
-        decision: "MANAGER_EXCEPTION",
-        reason: "waive it",
-        actor: OFFICE,
-      })
-    ).rejects.toThrow(/only an owner/i);
-    expect(jobs.get("j1")!.status).toBe("SCHEDULED");
+    expect(res.disposition).toBe("FEE_RETAINED");
+    expect(res.refundedCents).toBe(0);
+    expect(refundsCreate).not.toHaveBeenCalled();
+    expect(jobs.get("j1")!.status).toBe("CANCELED");
   });
 
   it("deletes the command on a clean cancel so the visit can be changed again later", async () => {
@@ -404,6 +393,7 @@ describe("cancelVisit — fail-safe", () => {
     (fakeDataClient.models.Job as unknown as { update: unknown }).update =
       origUpdate;
     const res = await resumeVisitChange(fakeStripe, "j1", { auto: false });
+    if (res.action !== "CANCEL") throw new Error("expected a cancel outcome");
     expect(res.outcome).toBe("COMPLETE");
     expect(res.refundedCents).toBe(15000);
     // Still only ONE refund across the whole flow (R2: never twice).
@@ -539,12 +529,20 @@ describe("rescheduleVisit", () => {
       actor: OFFICE,
     });
     expect(res.assignedToRoute).toBe(false);
+    // GL-07 R4: a dated move with no technician is NOT published as a clean
+    // SCHEDULED — it stays visibly pending assignment with a CONFIRMED owned
+    // staffing case, and the notice promises confirmation, not a set time.
     expect(jobs.get("j1")).toMatchObject({
       scheduledDate: newDate,
       routeId: null,
       technicianId: null,
-      status: "SCHEDULED",
+      status: "UNSCHEDULED",
     });
+    expect(openOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "UNSTAFFED_VISIT" })
+    );
     expect(sendEmail).toHaveBeenCalledOnce();
+    const [mail] = sendEmail.mock.calls[0] as unknown as [{ html: string }];
+    expect(mail.html).toMatch(/we'll confirm your appointment/i);
   });
 });

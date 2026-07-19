@@ -654,6 +654,14 @@ export const schema = a.schema({
       refundedCents: a.integer(),
       invoiceVoided: a.boolean(),
       newScheduledDate: a.string(),
+      /** GL-07 R4: the employee's intended destination and identity ride the
+       *  command, so a stranded reschedule resumes with the original intent
+       *  and actor — never a system guess. */
+      proposedTechnicianId: a.string(),
+      proposedRouteId: a.string(),
+      proposedTimeWindow: a.string(),
+      actorSub: a.string(),
+      actorEmail: a.string(),
       leaseNonce: a.string(),
       leaseUntil: a.datetime(),
     })

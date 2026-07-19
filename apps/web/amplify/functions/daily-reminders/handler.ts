@@ -537,7 +537,10 @@ export async function reconcileVisitChanges() {
   for (const id of ids) {
     try {
       const outcome = await resumeVisitChange(stripe, id, { auto: true });
-      if (outcome.outcome === "COMPLETE" || outcome.alreadyCanceled) completed++;
+      const done =
+        outcome.outcome === "COMPLETE" ||
+        ("alreadyCanceled" in outcome && outcome.alreadyCanceled === true);
+      if (done) completed++;
       else stillPending++;
     } catch (err) {
       failed++;

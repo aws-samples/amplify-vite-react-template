@@ -435,7 +435,6 @@ export type VisitChangePreview = {
   decisions: {
     reschedule: { available: boolean; description: string };
     cancelRefund: { available: boolean; amountCents: number; description: string };
-    managerException: { ownerOnly: true; amountCents: number; description: string };
   };
   planConsequence: string;
   routeConsequence: string;
@@ -443,7 +442,7 @@ export type VisitChangePreview = {
 };
 
 /** "Keep as account credit" was dropped for launch (no real credit ledger). */
-export type CancelDecision = "CANCEL_REFUND" | "MANAGER_EXCEPTION";
+export type CancelDecision = "CANCEL_REFUND";
 
 export type VisitCancelOutcome = {
   jobId: string;

@@ -97,7 +97,37 @@ async function correctOriginRecord(
   const isReport = meta.template === "service-report";
   const isAmendment = meta.template === "service-report-amendment";
   const isBookingConfirm = meta.template === "booking-confirmation";
-  if (!isReport && !isAmendment && !isBookingConfirm) return;
+  const isVisitNotice =
+    meta.template === "visit-canceled" || meta.template === "visit-rescheduled";
+  if (!isReport && !isAmendment && !isBookingConfirm && !isVisitNotice) return;
+
+  // GL-07 R5: a bounced visit cancel/reschedule notice REOPENS the visit
+  // change's owned obligation — the promise (old/new details, the refund
+  // outcome) never reached the customer, so the change must not stay green.
+  // The bounced EmailLog no longer reads accepted, so Resume visit change
+  // re-sends (it adopts only SENT/DELIVERED log rows) once the address is
+  // fixed.
+  if (isVisitNotice) {
+    if (outcome === "DELIVERED") return;
+    await openOwnedWork({
+      kind: "VISIT_CHANGE_RECOVERY",
+      dedupeKey: `visit-change:${meta.relatedId}`,
+      title:
+        meta.template === "visit-canceled"
+          ? "A visit-cancellation notice bounced — the customer doesn't know"
+          : "A reschedule notice bounced — the customer has the old details",
+      detail: `${detail} The customer did NOT receive the visit-change notice; its promise (the new details and the money outcome) is undelivered.`,
+      customerId: meta.customerId ?? undefined,
+      relatedId: meta.relatedId,
+      sourceUrl: meta.customerId ? `/customers/${meta.customerId}` : "/work",
+      resolutionAction:
+        "Correct the address (or reach them another way and record how), then use Resume visit change — it re-sends the exact notice without duplicating money or schedule work.",
+      ownerTeam: "OPS",
+    }).catch((err) =>
+      console.error("visit-notice correction failed", meta.relatedId, err)
+    );
+    return;
+  }
 
   // GL-05: the booking's confirmation state is corrected on the booking row
   // itself — a bounce reopens the finalization communication outcome as owned

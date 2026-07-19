@@ -104,7 +104,6 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       "A paid, canceled visit still owes the customer a refund, credit, or invoice void.",
     verified: [{ id: "MONEY_SETTLED", label: "Confirm the refund / void is settled" }],
     manualReasons: [
-      { code: "CREDIT_APPLIED", label: "Account credit applied and told the customer" },
       { code: "REFUNDED_IN_STRIPE", label: "Refunded directly in Stripe" },
       { code: "INVOICE_VOIDED", label: "Open invoice voided" },
       { code: "NOT_OWED", label: "Nothing was actually owed" },

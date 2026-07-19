@@ -8,7 +8,6 @@ import {
   type VisitCancelOutcome,
   type VisitChangePreview,
 } from "../lib/api";
-import { useRoles } from "../lib/auth";
 import { money } from "../lib/format";
 import { Button, ErrorNote, Field, Sheet, Spinner } from "../ui/kit";
 
@@ -43,7 +42,6 @@ export default function VisitCancelSheet({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const roles = useRoles();
   const [preview, setPreview] = useState<VisitChangePreview | null>(null);
   const [decision, setDecision] = useState<CancelDecision>("CANCEL_REFUND");
   const [reasonCode, setReasonCode] = useState<string>(VISIT_CANCEL_REASONS[0]);
@@ -157,33 +155,24 @@ export default function VisitCancelSheet({
             <li>{preview.noticePreview}</li>
           </ul>
 
-          <Field label="Decision" hint="The amount is set by policy — you never type it.">
+          <Field
+            label="Decision"
+            hint="The amount is the server's 72-hour policy result — you never type it, and it cannot be overridden."
+          >
             <select
               value={decision}
               onChange={(e) => setDecision(e.target.value as CancelDecision)}
             >
               <option value="CANCEL_REFUND">
-                Cancel and refund —{" "}
+                Cancel —{" "}
                 {preview.decisions.cancelRefund.amountCents > 0
-                  ? `refund ${money(preview.decisions.cancelRefund.amountCents)}`
-                  : "no refund (late-cancel fee applies)"}
+                  ? `refund ${money(preview.decisions.cancelRefund.amountCents)} in full`
+                  : "no refund (within 72 hours of the visit)"}
               </option>
-              {roles.owner ? (
-                <option value="MANAGER_EXCEPTION">
-                  Manager exception — waive fee, refund{" "}
-                  {money(preview.decisions.managerException.amountCents)}
-                </option>
-              ) : null}
             </select>
           </Field>
 
-          {decision === "MANAGER_EXCEPTION" ? (
-            <p className="muted small">
-              {preview.decisions.managerException.description}
-            </p>
-          ) : (
-            <p className="muted small">{preview.decisions.cancelRefund.description}</p>
-          )}
+          <p className="muted small">{preview.decisions.cancelRefund.description}</p>
 
           <Field
             label="Reason"

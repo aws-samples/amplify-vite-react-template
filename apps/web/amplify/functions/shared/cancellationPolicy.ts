@@ -54,10 +54,47 @@ const usd = (cents: number): string =>
     maximumFractionDigits: 2,
   })}`;
 
+/** Parse the visit's start hour (0–23) out of a free-form time window like
+ *  "8-10am", "1:30 PM", "10am-12pm". Defaults to the 8:00 AM workday start —
+ *  the conservative earliest a visit can begin. */
+export function windowStartHour(timeWindow: string | null | undefined): number {
+  const m = (timeWindow ?? "").match(/(\d{1,2})(?::(\d{2}))?\s*(a|p)?/i);
+  if (!m) return 8;
+  let hour = Number(m[1]);
+  if (!Number.isFinite(hour) || hour < 1 || hour > 12) return 8;
+  const meridiem = (m[3] ?? "").toLowerCase();
+  if (meridiem === "p" && hour !== 12) hour += 12;
+  if (meridiem === "a" && hour === 12) hour = 0;
+  // No meridiem: business hours run 8–5, so 1–7 mean afternoon.
+  if (!meridiem && hour >= 1 && hour <= 7) hour += 12;
+  return hour;
+}
+
+/** The epoch (ms) of an Eastern wall-clock time on a calendar date, DST-aware. */
+function easternEpochMs(dateIso: string, hour: number): number {
+  const guess = Date.parse(`${dateIso}T${String(hour).padStart(2, "0")}:00:00Z`);
+  const tz = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    timeZoneName: "shortOffset",
+  })
+    .formatToParts(new Date(guess))
+    .find((part) => part.type === "timeZoneName")?.value;
+  const m = tz?.match(/GMT([+-]\d+)/);
+  const offsetHours = m ? Number(m[1]) : -5;
+  return guess - offsetHours * 3600_000;
+}
+
 /**
  * Compute the cancellation policy for a visit. `today` is the caller's notion of
  * the current calendar day (Eastern) — passed in so the function stays pure and
  * so a retry judges the same window it did the first time.
+ *
+ * GL-07 R6 — when the caller supplies `nowMs` the rule is HOUR-EXACT: strictly
+ * more than 72 hours before the visit's scheduled start in America/New_York
+ * (the time-window's start, defaulting to the 8:00 AM workday open) refunds in
+ * full; exactly 72 hours or less refunds nothing. Without `nowMs` the legacy
+ * whole-calendar-day comparison applies (the public funnel's promised wording
+ * is day-based and changes only with CEO approval).
  *
  * A visit with no scheduled date, or amountPaid of 0, still returns a coherent
  * policy: nothing to be late for, nothing to refund.
@@ -66,6 +103,11 @@ export function computeVisitCancellationPolicy(opts: {
   scheduledDate: string | null | undefined;
   amountPaidCents: number;
   today: string;
+  /** The judging instant for the hour-exact rule (Date.now() at the accepted
+   *  request, or the durable command's requestedAt on a resume). */
+  nowMs?: number;
+  /** The visit's time window, for its start hour ("8-10am" → 8). */
+  timeWindow?: string | null;
 }): VisitCancellationPolicy {
   const amountPaidCents = Math.max(0, Math.trunc(opts.amountPaidCents || 0));
   const scheduledDate = opts.scheduledDate?.trim() || null;
@@ -91,9 +133,15 @@ export function computeVisitCancellationPolicy(opts: {
     (dayEpoch(scheduledDate) - dayEpoch(opts.today)) / MS_PER_DAY
   );
   const policyDeadline = addDays(scheduledDate, -CANCEL_FULL_REFUND_DAYS);
-  // The booking promise: MORE than CANCEL_FULL_REFUND_DAYS whole days out = full
-  // refund. Exactly at the cutoff, or nearer, is a late cancel.
-  const withinFreeWindow = daysUntilVisit > CANCEL_FULL_REFUND_DAYS;
+  // The locked rule: STRICTLY more than 72 hours before the scheduled start
+  // (hour-exact, Eastern) = full refund; at or inside 72 hours = none. The
+  // whole-day comparison remains for callers without a judging instant.
+  const withinFreeWindow =
+    opts.nowMs != null
+      ? easternEpochMs(scheduledDate, windowStartHour(opts.timeWindow)) -
+          opts.nowMs >
+        CANCEL_FULL_REFUND_DAYS * MS_PER_DAY
+      : daysUntilVisit > CANCEL_FULL_REFUND_DAYS;
 
   const refundableCents = withinFreeWindow ? amountPaidCents : 0;
   const feeCents = amountPaidCents - refundableCents;
@@ -104,7 +152,7 @@ export function computeVisitCancellationPolicy(opts: {
   } else if (withinFreeWindow) {
     explanation = `This is more than ${CANCEL_FULL_REFUND_DAYS} days before the visit (on or before ${policyDeadline}), so the full ${usd(amountPaidCents)} is refundable.`;
   } else {
-    explanation = `This is within ${CANCEL_FULL_REFUND_DAYS} days of the visit (the free-cancel deadline was ${policyDeadline}), so the ${usd(amountPaidCents)} already paid is kept as a late-cancellation fee. An owner can waive it with a manager exception.`;
+    explanation = `This is within ${CANCEL_FULL_REFUND_DAYS * 24} hours of the visit's scheduled start, so per the cancellation policy the ${usd(amountPaidCents)} already paid isn't refunded. There is no override and no account credit.`;
   }
 
   return {

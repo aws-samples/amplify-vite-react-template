@@ -67,7 +67,7 @@ export type VisitChangeActor = {
  *  the server derives them from policy. ("Keep as account credit" was removed
  *  for launch: it promised a balance with no real credit ledger behind it. Cancel
  *  offers refund-to-card, an owner manager exception, or a policy fee-retained.) */
-export type CancelDecision = "CANCEL_REFUND" | "MANAGER_EXCEPTION";
+export type CancelDecision = "CANCEL_REFUND";
 
 const todayEastern = (): string =>
   new Intl.DateTimeFormat("en-CA", {
@@ -123,22 +123,23 @@ async function invoicesForJob(jobId: string): Promise<InvoiceRow[]> {
   return rows;
 }
 
-/** The refundable paid invoice for a visit (PAID with money still to give
- *  back), and the open/unpaid invoice that a cancel should void. */
+/** GL-07 R2: EVERY refundable paid invoice and EVERY open/unpaid invoice on
+ *  the visit — a cancel reconciles all of them, never only the first of each. */
 function classifyInvoices(invoices: InvoiceRow[]) {
-  const paid = invoices.find(
+  const paidList = invoices.filter(
     (inv) =>
       (inv.status === "PAID" || inv.status === "REFUNDED") &&
       refundableRemaining(inv) > 0
   );
-  const open = invoices.find(
+  const openList = invoices.filter(
     (inv) => inv.status === "OPEN" || inv.status === "FAILED"
   );
-  return { paid, open };
+  return { paidList, openList };
 }
 
-function amountPaidFor(job: JobRow, paid: InvoiceRow | undefined): number {
-  if (paid) return refundableRemaining(paid);
+function amountPaidFor(job: JobRow, paidList: InvoiceRow[]): number {
+  const total = paidList.reduce((sum, inv) => sum + refundableRemaining(inv), 0);
+  if (total > 0) return total;
   // Booking writes paidAt in the same create as the job, so it is the
   // authoritative "already paid" even if the invoice row is missing.
   if (job.paidAt && job.priceCents && job.priceCents > 0) return job.priceCents;
@@ -171,7 +172,6 @@ export type VisitChangePreview = {
   decisions: {
     reschedule: { available: boolean; description: string };
     cancelRefund: { available: boolean; amountCents: number; description: string };
-    managerException: { ownerOnly: true; amountCents: number; description: string };
   };
   planConsequence: string;
   routeConsequence: string;
@@ -190,8 +190,8 @@ export async function buildVisitChangePreview(
     invoicesForJob(jobId),
   ]);
 
-  const { paid } = classifyInvoices(invoices);
-  const amountPaidCents = amountPaidFor(job as JobRow, paid);
+  const { paidList } = classifyInvoices(invoices);
+  const amountPaidCents = amountPaidFor(job as JobRow, paidList);
   const amountOpenCents = invoices
     .filter((inv) => inv.status === "OPEN" || inv.status === "FAILED")
     .reduce((sum, inv) => sum + (inv.amountCents ?? 0), 0);
@@ -200,6 +200,8 @@ export async function buildVisitChangePreview(
     scheduledDate: job.scheduledDate ?? null,
     amountPaidCents,
     today: todayEastern(),
+    nowMs: Date.now(),
+    timeWindow: job.timeWindow ?? null,
   });
 
   let planConsequence =
@@ -225,7 +227,7 @@ export async function buildVisitChangePreview(
       ? "Nothing was paid, so no money moves — the visit simply comes off the schedule."
       : policy.withinFreeWindow
         ? `Refund ${usd(policy.refundableCents)} to the card on file.`
-        : `Policy keeps the ${usd(policy.feeCents)} paid as a late-cancel fee — no refund unless an owner approves a manager exception.`;
+        : `The visit is within 72 hours of its start, so the ${usd(policy.feeCents)} paid is retained per the cancellation policy — no refund, and no account credit.`;
 
   return {
     jobId,
@@ -252,20 +254,12 @@ export async function buildVisitChangePreview(
         amountCents: policy.refundableCents,
         description: refundLine,
       },
-      managerException: {
-        ownerOnly: true,
-        amountCents: amountPaidCents,
-        description:
-          amountPaidCents > 0
-            ? `Owner override: waive any late-cancel fee and refund the full ${usd(amountPaidCents)} to the card.`
-            : "Owner override — nothing was paid, so there is no fee to waive.",
-      },
     },
     planConsequence,
     routeConsequence,
     noticePreview:
       amountPaidCents > 0
-        ? `We'll email ${customer?.displayName ?? "the customer"} that their ${job.serviceType} visit${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} is canceled, and confirm the refund or credit amount.`
+        ? `We'll email ${customer?.displayName ?? "the customer"} that their ${job.serviceType} visit${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} is canceled, with the exact refund amount — or that the payment is retained under the 72-hour policy.`
         : `We'll email ${customer?.displayName ?? "the customer"} that their ${job.serviceType} visit${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} is canceled.`,
   };
 }
@@ -274,7 +268,7 @@ export async function buildVisitChangePreview(
 // Ledger
 // ---------------------------------------------------------------------------
 
-type Disposition = "REFUND" | "CREDIT" | "FEE_RETAINED" | "NONE";
+type Disposition = "REFUND" | "FEE_RETAINED" | "NONE";
 
 /**
  * Write one immutable audit row (GL-07 R6). The change itself is already durably
@@ -448,11 +442,6 @@ export async function cancelVisit(
 
   const reason = args.reason?.trim();
   if (!reason) throw new Error("A reason is required to cancel a visit.");
-  if (args.decision === "MANAGER_EXCEPTION" && !args.actor.isOwner) {
-    throw new Error(
-      "Only an owner can approve a manager exception. Pick Cancel and refund (policy amount), or ask an owner."
-    );
-  }
 
   // R1: take the single-winner durable command BEFORE any money/schedule change.
   let nonce: string = randomUUID();
@@ -519,20 +508,25 @@ async function driveHeldVisitCancel(
     client.models.Customer.get({ id: job.customerId }),
     invoicesForJob(jobId),
   ]);
-  const { paid, open } = classifyInvoices(invoices);
-  const amountPaidCents = amountPaidFor(job, paid);
+  const { paidList, openList } = classifyInvoices(invoices);
+  const amountPaidCents = amountPaidFor(job, paidList);
+  // GL-07 R6: hour-exact, judged from the FIRST accepted request (the durable
+  // command's requestedAt) so a resume gets the same answer the customer was
+  // entitled to — an outage never moves them across the 72-hour line.
+  const requestedMs = claim?.requestedAt
+    ? Date.parse(String(claim.requestedAt))
+    : Date.now();
   const policy = computeVisitCancellationPolicy({
     scheduledDate: job.scheduledDate ?? null,
     amountPaidCents,
     today: todayEastern(),
+    nowMs: Number.isFinite(requestedMs) ? requestedMs : Date.now(),
+    timeWindow: job.timeWindow ?? null,
   });
 
-  const refundTarget =
-    decision === "MANAGER_EXCEPTION"
-      ? amountPaidCents
-      : decision === "CANCEL_REFUND"
-        ? policy.refundableCents
-        : 0;
+  // GL-07 R6: the SERVER-calculated 72-hour amount is the only refund — no
+  // owner override, no arbitrary amount, and never account credit.
+  const refundTarget = decision === "CANCEL_REFUND" ? policy.refundableCents : 0;
 
   let disposition: Disposition = "NONE";
   if (refundTarget > 0) disposition = "REFUND";
@@ -540,9 +534,7 @@ async function driveHeldVisitCancel(
 
   const policyUsed = policy.withinFreeWindow
     ? "Full-refund window"
-    : decision === "MANAGER_EXCEPTION"
-      ? "Late cancel — fee waived by manager exception"
-      : "Late cancel — fee retained";
+    : "Late cancel — no refund (72-hour policy)";
 
   const custName = customer?.displayName ?? job.customerId;
   const dateSuffix = job.scheduledDate ? ` on ${job.scheduledDate}` : "";
@@ -571,7 +563,7 @@ async function driveHeldVisitCancel(
   let refundStripeId: string | null = claim?.refundStripeId ?? null;
   let refundedCents = moneyDone ? (claim?.refundedCents ?? 0) : 0;
   if (!moneyDone && refundTarget > 0) {
-    if (!paid) {
+    if (paidList.length === 0) {
       const workId = await openOwnedWork({
         kind: "VISIT_CHANGE_RECOVERY",
         dedupeKey: `visit-change:${jobId}`,
@@ -590,14 +582,24 @@ async function driveHeldVisitCancel(
       );
     }
     try {
-      const outcome = await refundInvoice(stripe, {
-        invoiceId: paid.id,
-        amountCents: refundTarget,
-        reason,
-        actor: { sub: actor.sub, email: actor.email },
-      });
-      refundStripeId = outcome.stripeRefundId ?? null;
-      refundedCents = outcome.refundedNowCents;
+      // GL-07 R2: the exact policy amount is reconciled across EVERY refundable
+      // invoice on the visit — not only the first .find() hit. refundInvoice's
+      // per-invoice running-total idempotency keeps a resumed drive exact.
+      let remainingTarget = refundTarget;
+      for (const paid of paidList) {
+        if (remainingTarget <= 0) break;
+        const slice = Math.min(remainingTarget, refundableRemaining(paid));
+        if (slice <= 0) continue;
+        const outcome = await refundInvoice(stripe, {
+          invoiceId: paid.id,
+          amountCents: slice,
+          reason,
+          actor: { sub: actor.sub, email: actor.email },
+        });
+        refundStripeId = outcome.stripeRefundId ?? refundStripeId;
+        refundedCents += outcome.refundedNowCents;
+        remainingTarget -= slice;
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       const workId = await openOwnedWork({
@@ -640,12 +642,15 @@ async function driveHeldVisitCancel(
     });
   }
 
-  // 2. Void the open/unpaid invoice. R3: never COMPLETE while a charge is still
-  // processing — retrieve the intent and branch on its real state.
+  // 2. Void EVERY open/unpaid invoice (GL-07 R2 — never only the first). R3:
+  // never COMPLETE while a charge is still processing — retrieve each intent
+  // and branch on its real state; a failed or unread void is a tracked
+  // failure that keeps the outcome PARTIAL, never a quiet fall-through.
   let invoiceVoided = claim?.invoiceVoided ?? false;
   let moneyPending = false;
   let pendingDetail = "";
-  if (open && !invoiceVoided) {
+  let voidFailed = false;
+  const voidOne = async (open: InvoiceRow): Promise<void> => {
     const liveCharge = open.status === "OPEN" && Boolean(open.stripePaymentIntentId);
     if (liveCharge) {
       let intentStatus = "unknown";
@@ -671,7 +676,7 @@ async function driveHeldVisitCancel(
             ...(actor.email ? { voidedByEmail: actor.email } : {}),
           });
           const { data: reread } = await client.models.Invoice.get({ id: open.id });
-          invoiceVoided = reread?.status === "VOID";
+          if (reread?.status !== "VOID") voidFailed = true;
         } else if (pi.status === "processing" || pi.status === "succeeded") {
           // A bank debit in flight (or already landed) is NOT safely voidable
           // here — own it through settlement rather than reporting a final state.
@@ -689,48 +694,74 @@ async function driveHeldVisitCancel(
           kind: "VISIT_CHANGE_RECOVERY",
           dedupeKey: `visit-change:${jobId}`,
           title: `A charge is still processing on a canceled visit: ${custName}`,
-          detail: `The ${job.serviceType} visit was canceled, but its open invoice (${open.id}) has a payment still in motion (${intentStatus}). It can't be voided or refunded until it settles.`,
+          detail: `The ${job.serviceType} visit was canceled, but its open invoice (${open.id}) has a payment still in motion (${intentStatus}). It can't be voided or refunded until it settles. When it settles: ${
+            policy.withinFreeWindow
+              ? "refund it in full — the cancellation was strictly more than 72 hours before the visit's start"
+              : "it is retained per the 72-hour policy (the cancellation was 72 hours or less before the start)"
+          }; if it fails, void the invoice.`,
           customerId: job.customerId,
           relatedId: jobId,
           sourceUrl: `/customers/${job.customerId}`,
           resolutionAction:
-            "Once the payment settles, refund it in the billing tools and confirm the visit is fully settled.",
+            "Watch the payment to settlement, apply the stated 72-hour outcome exactly once, and confirm the visit is fully settled.",
           ownerTeam: "FINANCE",
         });
         await keepFailed("PENDING", `Charge ${intentStatus}, awaiting settlement.`, workId);
       }
-    } else {
-      try {
-        await client.models.Invoice.update({
-          id: open.id,
-          status: "VOID",
-          voidedAt: new Date().toISOString(),
-          voidReason: `Visit canceled: ${reason}`,
-          ...(actor.sub ? { voidedBy: actor.sub } : {}),
-          ...(actor.email ? { voidedByEmail: actor.email } : {}),
-        });
-        // R3: read back the void — a silently-failed void must not report done.
-        const { data: reread } = await client.models.Invoice.get({ id: open.id });
-        invoiceVoided = reread?.status === "VOID";
-        if (!invoiceVoided) {
-          const workId = await openOwnedWork({
-            kind: "VISIT_CHANGE_RECOVERY",
-            dedupeKey: `visit-change:${jobId}`,
-            title: `Void an open invoice for a canceled visit: ${custName}`,
-            detail: `The open invoice (${open.id}) for the canceled ${job.serviceType} visit did not read back as VOID.`,
-            customerId: job.customerId,
-            relatedId: jobId,
-            sourceUrl: `/customers/${job.customerId}`,
-            resolutionAction:
-              "Void the invoice in the billing tools and confirm it reads voided.",
-            ownerTeam: "FINANCE",
-          });
-          await keepFailed("MONEY_DONE", "Open-invoice void did not persist.", workId);
-        }
-      } catch (err) {
-        console.error(`cancelVisit: could not void open invoice ${open.id}`, err);
-      }
+      return;
     }
+    try {
+      await client.models.Invoice.update({
+        id: open.id,
+        status: "VOID",
+        voidedAt: new Date().toISOString(),
+        voidReason: `Visit canceled: ${reason}`,
+        ...(actor.sub ? { voidedBy: actor.sub } : {}),
+        ...(actor.email ? { voidedByEmail: actor.email } : {}),
+      });
+      // R3: read back the void — a silently-failed void must not report done.
+      const { data: reread } = await client.models.Invoice.get({ id: open.id });
+      if (reread?.status !== "VOID") {
+        voidFailed = true;
+        const workId = await openOwnedWork({
+          kind: "VISIT_CHANGE_RECOVERY",
+          dedupeKey: `visit-change:${jobId}`,
+          title: `Void an open invoice for a canceled visit: ${custName}`,
+          detail: `The open invoice (${open.id}) for the canceled ${job.serviceType} visit did not read back as VOID.`,
+          customerId: job.customerId,
+          relatedId: jobId,
+          sourceUrl: `/customers/${job.customerId}`,
+          resolutionAction:
+            "Void the invoice in the billing tools and confirm it reads voided.",
+          ownerTeam: "FINANCE",
+        });
+        await keepFailed("MONEY_DONE", "Open-invoice void did not persist.", workId);
+      }
+    } catch (err) {
+      // A thrown void is a tracked failure — it keeps the outcome PARTIAL and
+      // the command open; it can never quietly fall through to Complete.
+      voidFailed = true;
+      console.error(`cancelVisit: could not void open invoice ${open.id}`, err);
+      const workId = await openOwnedWork({
+        kind: "VISIT_CHANGE_RECOVERY",
+        dedupeKey: `visit-change:${jobId}`,
+        title: `Void an open invoice for a canceled visit: ${custName}`,
+        detail: `Voiding invoice ${open.id} for the canceled ${job.serviceType} visit threw: ${err instanceof Error ? err.message : String(err)}.`,
+        customerId: job.customerId,
+        relatedId: jobId,
+        sourceUrl: `/customers/${job.customerId}`,
+        resolutionAction:
+          "Void the invoice in the billing tools and confirm it reads voided, then resume the visit change.",
+        ownerTeam: "FINANCE",
+      });
+      await keepFailed("MONEY_DONE", "Open-invoice void threw.", workId);
+    }
+  };
+  if (!invoiceVoided) {
+    for (const open of openList) {
+      await voidOne(open);
+    }
+    invoiceVoided = openList.length > 0 && !voidFailed && !moneyPending;
     if (invoiceVoided) {
       await writeVisitChangeClaim(jobId, nonce, {
         stage: "VOIDED",
@@ -816,26 +847,38 @@ async function driveHeldVisitCancel(
      ${moneyLine}
      <p>Need to book again? Just reply to this email or give us a call — we're glad to help.</p>`
   );
-  const communicationResult = await notifyCustomer({
-    customerId: job.customerId,
-    customerName: custName,
-    email: customer?.email ?? null,
-    subject: "Your BuzzKill visit is canceled",
-    html,
-    template: "visit-canceled",
-    relatedId: jobId,
-    missingContactContext: `${custName}'s ${job.serviceType} visit was canceled${
-      disposition === "REFUND" ? ` with a ${usd(refundedCents)} refund` : ""
-    }, but the record has no email to confirm it.`,
-  });
+  // Outbox adoption (GL-07 R3): a resumed drive that already got its notice
+  // accepted must not email the customer twice — the per-visit email log is
+  // the proof.
+  let communicationResult: "SENT" | "FAILED" | "NO_EMAIL" | "PENDING";
+  if (await priorAcceptedVisitNotice(jobId, "visit-canceled")) {
+    communicationResult = "SENT";
+  } else {
+    communicationResult = await notifyCustomer({
+      customerId: job.customerId,
+      customerName: custName,
+      email: customer?.email ?? null,
+      subject: "Your BuzzKill visit is canceled",
+      html,
+      template: "visit-canceled",
+      relatedId: jobId,
+      missingContactContext: `${custName}'s ${job.serviceType} visit was canceled${
+        disposition === "REFUND" ? ` with a ${usd(refundedCents)} refund` : ""
+      }, but the record has no email to confirm it.`,
+    });
+  }
 
-  const outcome: "COMPLETE" | "PARTIAL" | "PENDING" = moneyPending
+  // GL-07 R5: the terminal outcome tells the whole truth — a failed invoice
+  // void, a missing audit row, or an unreached customer keeps it PARTIAL, and
+  // a processing charge keeps it PENDING. COMPLETE is reserved for all of:
+  // money exact, invoices reconciled, notice accepted, audit recorded.
+  const provisionalOutcome: "COMPLETE" | "PARTIAL" | "PENDING" = moneyPending
     ? "PENDING"
-    : communicationResult === "SENT"
+    : communicationResult === "SENT" && !voidFailed
       ? "COMPLETE"
       : "PARTIAL";
 
-  await recordVisitChangeEvent({
+  const { recorded: auditRecorded } = await recordVisitChangeEvent({
     jobId,
     customerId: job.customerId,
     action: "CANCEL",
@@ -860,20 +903,48 @@ async function driveHeldVisitCancel(
       "Visit canceled and taken off its route.",
       job.servicePlanId ? "Recurring plan left running." : "",
       communicationResult === "SENT"
-        ? "Customer emailed."
+        ? "Customer notice accepted by the provider."
         : communicationResult === "FAILED"
           ? "Customer email FAILED (owned)."
           : "No customer email on file (owned).",
+      voidFailed ? "An open invoice could not be voided (owned)." : "",
     ]
       .filter(Boolean)
       .join(" "),
-    outcome,
+    outcome: provisionalOutcome,
   });
 
-  // Terminal: the visit is canceled, so the CANCEL command is done — delete it so
-  // a later legitimate change to this visit can re-acquire. A processing charge is
-  // owned by the finance case above, not by keeping the command open forever.
-  await releaseVisitChangeClaim(jobId, nonce);
+  // A lost audit row is a completion requirement, not aftermath (its recovery
+  // case is opened inside recordVisitChangeEvent) — it downgrades COMPLETE.
+  const outcome: "COMPLETE" | "PARTIAL" | "PENDING" =
+    provisionalOutcome === "COMPLETE" && !auditRecorded
+      ? "PARTIAL"
+      : provisionalOutcome;
+
+  if (outcome === "COMPLETE") {
+    // Terminal: everything reconciled — release the command so a later
+    // legitimate change to this visit can re-acquire.
+    await releaseVisitChangeClaim(jobId, nonce);
+  } else {
+    // PARTIAL/PENDING: the command stays as the durable anchor Resume and the
+    // sweep drive — releasing here made "Resume visit change" a no-op while
+    // an invoice, notice, audit, or settling charge was still owed.
+    await writeVisitChangeClaim(jobId, nonce, {
+      stage: outcome === "PENDING" ? "PENDING" : "CANCELED",
+      lastError:
+        outcome === "PENDING"
+          ? `A payment is still settling: ${pendingDetail}.`
+          : [
+              voidFailed ? "open-invoice void unfinished" : "",
+              communicationResult !== "SENT" ? "customer notice unfinished" : "",
+              !auditRecorded ? "audit row missing" : "",
+            ]
+              .filter(Boolean)
+              .join("; "),
+      nextAttemptAt: new Date(Date.now() + VISIT_CHANGE_RETRY_MS).toISOString(),
+      leaseUntil: null,
+    });
+  }
 
   return {
     jobId,
@@ -890,8 +961,41 @@ async function driveHeldVisitCancel(
       ? "Visit canceled. A payment is still processing — the refund is owned by finance and will be issued once it settles."
       : outcome === "COMPLETE"
         ? "Visit canceled. The customer has been emailed."
-        : "Visit canceled. We couldn't reach the customer — an operations task was opened to notify them.",
+        : voidFailed
+          ? "Visit canceled, but an open invoice could not be voided — it's owned by finance; Resume finishes it."
+          : communicationResult === "SENT"
+            ? "Visit canceled, but its audit record is missing — owned; Resume re-verifies it."
+            : "Visit canceled. We couldn't reach the customer — an operations task was opened to notify them.",
   };
+}
+
+/** GL-07 R3/R5 — did a prior attempt's visit notice actually leave (provider
+ *  accepted)? The per-visit EmailLog is the outbox truth for the crash window
+ *  between acceptance and the outcome write. */
+async function priorAcceptedVisitNotice(
+  jobId: string,
+  template: string,
+  sinceIso?: string
+): Promise<boolean> {
+  try {
+    const client = await dataClient();
+    if (!("EmailLog" in client.models)) return false;
+    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
+      { relatedId: jobId },
+      { limit: 50 }
+    );
+    return (data ?? []).some(
+      (l) =>
+        l.template === template &&
+        (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
+        // For reschedules, only a send belonging to THIS command counts — an
+        // older reschedule's accepted notice must not suppress a new promise.
+        (!sinceIso || String(l.createdAt ?? "") >= sinceIso)
+    );
+  } catch (err) {
+    console.error("priorAcceptedVisitNotice failed", jobId, err);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,15 +1128,33 @@ async function storedCancelOutcome(
   decision: CancelDecision
 ): Promise<VisitCancelOutcome> {
   const ev = await latestVisitChangeEvent(jobId);
-  const disposition = (ev?.disposition ?? "NONE") as Disposition;
+  if (!ev) {
+    // GL-07 R3: NO history — the replay must say recovery is required, never
+    // fabricate a clean Sent/Complete out of a missing ledger.
+    return {
+      jobId,
+      action: "CANCEL",
+      decision,
+      canceled: true,
+      alreadyCanceled: true,
+      disposition: "NONE",
+      refundedCents: 0,
+      invoiceVoided: false,
+      communicationResult: "PENDING",
+      outcome: "PARTIAL",
+      message:
+        "This visit was already canceled, but its outcome history is missing — money, notice, and audit are unverified. Use Resume visit change to re-verify and finish them.",
+    };
+  }
+  const disposition = (ev.disposition ?? "NONE") as Disposition;
   const refundedCents =
-    disposition === "REFUND" ? Math.max(0, ev?.amountCents ?? 0) : 0;
-  const comm = (ev?.communicationResult ?? "SENT") as
+    disposition === "REFUND" ? Math.max(0, ev.amountCents ?? 0) : 0;
+  const comm = (ev.communicationResult ?? "PENDING") as
     | "SENT"
     | "FAILED"
     | "NO_EMAIL"
     | "PENDING";
-  const outcome = (ev?.outcome ?? "COMPLETE") as "COMPLETE" | "PARTIAL" | "PENDING";
+  const outcome = (ev.outcome ?? "PARTIAL") as "COMPLETE" | "PARTIAL" | "PENDING";
   return {
     jobId,
     action: "CANCEL",
@@ -1083,17 +1205,28 @@ export async function resumeVisitChange(
   stripe: Stripe,
   jobId: string,
   opts: { auto?: boolean } = {}
-): Promise<VisitCancelOutcome> {
+): Promise<VisitCancelOutcome | VisitRescheduleOutcome> {
   const client = await dataClient();
   const { data: job } = await client.models.Job.get({ id: jobId });
   if (!job) throw new Error(`Job ${jobId} not found`);
 
   const { data: existing } = await client.models.VisitChangeClaim.get({ id: jobId });
 
-  // Nothing to resume, or the visit is already canceled — clean up and report.
+  // Already canceled: a SURVIVING command means residuals (an unvoided
+  // invoice, a pending charge, a missed notice, a missing audit) — take the
+  // lease and RE-DRIVE; the checkpoints skip finished money, the notice
+  // adopts from the outbox, and the audit re-records (GL-07 R3). Only a
+  // canceled visit with NO command replays its stored outcome.
   if (job.status === "CANCELED") {
-    if (existing) await sweepUnheldVisitChangeClaim(jobId);
-    return storedCancelOutcome(jobId, (existing?.decision ?? "CANCEL_REFUND") as CancelDecision);
+    if (!existing || (existing.action ?? "CANCEL") !== "CANCEL") {
+      if (existing && (existing.action ?? "CANCEL") !== "CANCEL") {
+        await sweepUnheldVisitChangeClaim(jobId);
+      }
+      return storedCancelOutcome(
+        jobId,
+        (existing?.decision ?? "CANCEL_REFUND") as CancelDecision
+      );
+    }
   }
   if (!existing) {
     // A hard kill left no command but the visit is not canceled — nothing durable
@@ -1113,10 +1246,28 @@ export async function resumeVisitChange(
     }
   }
 
-  // Only CANCEL commands are auto-driveable to completion; a stuck RESCHEDULE is
-  // left to the office (its consequences need a person's date/tech choice).
+  // GL-07 R4: a stuck RESCHEDULE resumes with the employee's STORED intent
+  // (destination + time window) under the ORIGINAL actor — no system guess.
+  // rescheduleVisit re-acquires the command via the stale-reclaim CAS path,
+  // its notice adopts from the outbox, and its audit re-records.
   if ((existing.action ?? "CANCEL") !== "CANCEL") {
-    return inProgressCancelOutcome(jobId, "CANCEL_REFUND");
+    if (!existing.newScheduledDate && !existing.proposedTechnicianId) {
+      // A legacy command with no stored intent — a person must re-enter it.
+      return inProgressCancelOutcome(jobId, "CANCEL_REFUND");
+    }
+    return rescheduleVisit({
+      jobId,
+      scheduledDate: existing.newScheduledDate ?? null,
+      timeWindow: existing.proposedTimeWindow ?? null,
+      technicianId: existing.proposedTechnicianId ?? null,
+      routeId: existing.proposedRouteId ?? null,
+      reason: existing.reason ?? "Resumed reschedule",
+      actor: {
+        sub: existing.actorSub ?? null,
+        email: existing.actorEmail ?? "system",
+        isOwner: false,
+      },
+    });
   }
 
   // A resume is an exclusive holder like any other attempt: seize the lease
@@ -1209,6 +1360,15 @@ export async function rescheduleVisit(args: {
     requestedAt: new Date().toISOString(),
     attemptCount: 0,
     customerId: job.customerId,
+    // GL-07 R4: the intended destination and the ORIGINAL employee ride the
+    // durable command, so a stranded attempt resumes with the same intent
+    // and identity.
+    newScheduledDate: newDate ?? undefined,
+    proposedTechnicianId: args.technicianId ?? undefined,
+    proposedRouteId: args.routeId ?? undefined,
+    proposedTimeWindow: args.timeWindow?.trim() || undefined,
+    actorSub: args.actor.sub ?? undefined,
+    actorEmail: args.actor.email ?? undefined,
     leaseNonce: rescheduleNonce,
     leaseUntil: new Date(Date.now() + VISIT_CHANGE_LEASE_MS).toISOString(),
   });
@@ -1220,14 +1380,29 @@ export async function rescheduleVisit(args: {
       );
     }
     rescheduleNonce = reclaimed.nonce;
+    // A reclaimed command carries THIS attempt's intent from here on.
+    await writeVisitChangeClaim(job.id, rescheduleNonce, {
+      action: "RESCHEDULE",
+      reason,
+      newScheduledDate: newDate,
+      proposedTechnicianId: args.technicianId ?? null,
+      proposedRouteId: args.routeId ?? null,
+      proposedTimeWindow: args.timeWindow?.trim() || null,
+      actorSub: args.actor.sub ?? null,
+      actorEmail: args.actor.email ?? null,
+    });
   }
 
   const wantsAssignment = Boolean(args.technicianId && args.routeId && newDate);
   let assignedToRoute = false;
-  // R5: a dated visit left without a technician is never a clean SCHEDULED —
-  // its staffing is put in an owned queue below.
+  // R5: a dated visit left without a technician is never published as a clean
+  // SCHEDULED — it stays visibly pending assignment with a CONFIRMED owner.
   let staffingOwned = false;
+  // A refusal before any write releases the command (nothing to resume); a
+  // failure AFTER the first write keeps it durably resumable with a case.
+  let mutated = false;
 
+  try {
   if (wantsAssignment) {
     const [{ data: technician }, { data: route }, { data: customer0 }] =
       await Promise.all([
@@ -1304,35 +1479,23 @@ export async function rescheduleVisit(args: {
         errors?.map((e) => e.message).join("; ") || "Could not reschedule the visit"
       );
     }
+    mutated = true;
     assignedToRoute = true;
   } else {
-    // Move the date and return the visit to the pool for assignment.
-    const { data, errors } = await client.models.Job.update({
-      id: job.id,
-      scheduledDate: newDate,
-      timeWindow: args.timeWindow?.trim() || null,
-      routeId: null,
-      technicianId: null,
-      routeOrder: null,
-      status: newDate ? "SCHEDULED" : "UNSCHEDULED",
-    });
-    if (!data) {
-      throw new Error(
-        errors?.map((e) => e.message).join("; ") || "Could not reschedule the visit"
-      );
-    }
-    // R5: a visit given a date but no technician is not a clean SCHEDULED — put
-    // its staffing in an owned queue so it can't silently sit unassigned. (An
-    // UNSCHEDULED move has no date to staff, so it needs no case.)
+    // GL-07 R4: a dated move with no technician is NEVER published as a clean
+    // SCHEDULED — the owned staffing case is CONFIRMED FIRST (a case that
+    // can't be written aborts before anything is published or promised), the
+    // visit stays visibly pending assignment, and the customer is told the
+    // requested date will be confirmed — not a confirmed appointment.
     if (newDate) {
       const { data: customer0 } = await client.models.Customer.get({
         id: job.customerId,
       });
-      await openOwnedWork({
+      const staffingCase = await openOwnedWork({
         kind: "UNSTAFFED_VISIT",
         dedupeKey: `visit-reschedule-unstaffed:${job.id}`,
         title: `Assign a technician: ${customer0?.displayName ?? job.customerId} on ${newDate}`,
-        detail: `${job.serviceType} was rescheduled to ${newDate} without a technician or route. It needs a validated technician assigned before the day so it isn't a scheduled visit with no one to work it.`,
+        detail: `${job.serviceType} was moved to ${newDate} without a technician or route. It is deliberately NOT published as scheduled: assign a validated technician, then it becomes a confirmed appointment.`,
         customerId: job.customerId,
         relatedId: job.id,
         sourceUrl: `/schedule`,
@@ -1340,39 +1503,80 @@ export async function rescheduleVisit(args: {
           "Assign a licensed, available technician and put the visit on that day's route.",
         ownerTeam: "OPS",
       });
+      if (!staffingCase) {
+        throw new Error(
+          "The staffing case for this move could not be written — nothing was changed. Try again in a moment."
+        );
+      }
       staffingOwned = true;
     }
+    const { data, errors } = await client.models.Job.update({
+      id: job.id,
+      scheduledDate: newDate,
+      timeWindow: args.timeWindow?.trim() || null,
+      routeId: null,
+      technicianId: null,
+      routeOrder: null,
+      // Pending assignment is UNSCHEDULED-with-a-target-date, not a published
+      // schedule the dispatch board and reminders would trust.
+      status: "UNSCHEDULED",
+    });
+    if (!data) {
+      throw new Error(
+        errors?.map((e) => e.message).join("; ") || "Could not reschedule the visit"
+      );
+    }
+    mutated = true;
   }
 
   const { data: customer } = await client.models.Customer.get({
     id: job.customerId,
   });
+  // The customer is promised a CONFIRMED time only when a technician is truly
+  // assigned; a pending-assignment move promises confirmation, not a date.
+  const nowLine = assignedToRoute
+    ? `${newDate}${args.timeWindow ? ` (${args.timeWindow})` : ""}`
+    : newDate
+      ? `${newDate}${args.timeWindow ? ` (${args.timeWindow})` : ""} — requested; we'll confirm your appointment once your technician is assigned`
+      : "to be scheduled — we'll confirm the date";
   const html = emailShell(
     "Your visit has been rescheduled",
     `<p>Your <strong>${job.serviceType}</strong> visit has been moved.</p>
      <p><strong>Was:</strong> ${priorScheduledDate ?? "not yet scheduled"}${
        job.timeWindow ? ` (${job.timeWindow})` : ""
      }<br/>
-        <strong>Now:</strong> ${newDate ?? "to be scheduled — we'll confirm the date"}${
-          args.timeWindow ? ` (${args.timeWindow})` : ""
-        }</p>
+        <strong>Now:</strong> ${nowLine}</p>
      <p>If this new time doesn't work, just reply to this email or call us and we'll find another.</p>`
   );
-  const communicationResult = await notifyCustomer({
-    customerId: job.customerId,
-    customerName: customer?.displayName ?? job.customerId,
-    email: customer?.email ?? null,
-    subject: "Your BuzzKill visit has been rescheduled",
-    html,
-    template: "visit-rescheduled",
-    relatedId: job.id,
-    missingContactContext: `${customer?.displayName ?? job.customerId}'s ${job.serviceType} visit was moved from ${priorScheduledDate ?? "unscheduled"} to ${newDate ?? "a date to be confirmed"}, but the record has no email to tell them.`,
-  });
+  // Outbox adoption for a RESUMED attempt of this same command (accepted
+  // since the command was requested) — never a duplicate email; a NEW
+  // reschedule is a new command with a fresh requestedAt, so its notice sends.
+  let communicationResult: "SENT" | "FAILED" | "NO_EMAIL" | "PENDING";
+  if (
+    await priorAcceptedVisitNotice(
+      job.id,
+      "visit-rescheduled",
+      claim?.requestedAt ?? undefined
+    )
+  ) {
+    communicationResult = "SENT";
+  } else {
+    communicationResult = await notifyCustomer({
+      customerId: job.customerId,
+      customerName: customer?.displayName ?? job.customerId,
+      email: customer?.email ?? null,
+      subject: "Your BuzzKill visit has been rescheduled",
+      html,
+      template: "visit-rescheduled",
+      relatedId: job.id,
+      missingContactContext: `${customer?.displayName ?? job.customerId}'s ${job.serviceType} visit was moved from ${priorScheduledDate ?? "unscheduled"} to ${newDate ?? "a date to be confirmed"}, but the record has no email to tell them.`,
+    });
+  }
 
-  const outcome: "COMPLETE" | "PARTIAL" =
+  const provisionalOutcome: "COMPLETE" | "PARTIAL" =
     communicationResult === "SENT" ? "COMPLETE" : "PARTIAL";
 
-  await recordVisitChangeEvent({
+  const { recorded: auditRecorded } = await recordVisitChangeEvent({
     jobId: job.id,
     customerId: job.customerId,
     action: "RESCHEDULE",
@@ -1395,12 +1599,35 @@ export async function rescheduleVisit(args: {
           ? "Customer email FAILED (owned)."
           : "No customer email on file (owned).",
     ].join(" "),
-    outcome,
+    outcome: provisionalOutcome,
   });
 
-  // Terminal: the reschedule is applied, so release the single-winner command
-  // (fenced — an expired attempt can never delete a newer holder's command).
-  await releaseVisitChangeClaim(job.id, rescheduleNonce);
+  // A lost audit row is a completion requirement (its recovery case is opened
+  // inside recordVisitChangeEvent) — it downgrades COMPLETE.
+  const outcome: "COMPLETE" | "PARTIAL" =
+    provisionalOutcome === "COMPLETE" && !auditRecorded
+      ? "PARTIAL"
+      : provisionalOutcome;
+
+  if (outcome === "COMPLETE") {
+    // Terminal: applied, communicated, audited — release the command.
+    await releaseVisitChangeClaim(job.id, rescheduleNonce);
+  } else {
+    // The move is applied but the notice or audit is unfinished — the command
+    // stays as the durable, resumable anchor (Resume re-drives with the same
+    // stored intent; the notice adopts from the outbox, never duplicates).
+    await writeVisitChangeClaim(job.id, rescheduleNonce, {
+      stage: "RESCHEDULED",
+      lastError: [
+        communicationResult !== "SENT" ? "customer notice unfinished" : "",
+        !auditRecorded ? "audit row missing" : "",
+      ]
+        .filter(Boolean)
+        .join("; "),
+      nextAttemptAt: new Date(Date.now() + VISIT_CHANGE_RETRY_MS).toISOString(),
+      leaseUntil: null,
+    });
+  }
 
   return {
     jobId: job.id,
@@ -1414,6 +1641,39 @@ export async function rescheduleVisit(args: {
     message:
       outcome === "COMPLETE"
         ? "Visit rescheduled. The customer has been emailed the new details."
-        : "Visit rescheduled. We couldn't reach the customer — an operations task was opened to notify them.",
+        : communicationResult === "SENT"
+          ? "Visit rescheduled, but its audit record is missing — owned; Resume re-verifies it."
+          : "Visit rescheduled. We couldn't reach the customer — an operations task was opened to notify them.",
   };
+  } catch (err) {
+    if (!mutated) {
+      // Refused before any change — release the command so a corrected
+      // attempt isn't wedged behind a stranded REQUESTED row.
+      await releaseVisitChangeClaim(job.id, rescheduleNonce);
+      throw err;
+    }
+    // Stranded AFTER the schedule changed: durable command + owned case, so
+    // the employee's intent survives the failure and Resume finishes it.
+    const detail = err instanceof Error ? err.message : String(err);
+    const workId = await openOwnedWork({
+      kind: "VISIT_CHANGE_RECOVERY",
+      dedupeKey: `visit-change:${job.id}`,
+      title: `Finish a stranded reschedule`,
+      detail: `Rescheduling ${job.serviceType} to ${newDate ?? "unscheduled"} stopped partway: ${detail}. The schedule may be moved while the customer notice or audit is unfinished.`,
+      customerId: job.customerId,
+      relatedId: job.id,
+      sourceUrl: `/customers/${job.customerId}`,
+      resolutionAction:
+        "Resume the visit change — it re-drives the same stored destination under the original employee, adopts an already-sent notice, and re-records the audit.",
+      ownerTeam: "OPS",
+    });
+    await writeVisitChangeClaim(job.id, rescheduleNonce, {
+      stage: "RESCHEDULED",
+      lastError: detail,
+      ...(workId ? { recoveryWorkItemId: workId } : {}),
+      nextAttemptAt: new Date(Date.now() + VISIT_CHANGE_RETRY_MS).toISOString(),
+      leaseUntil: null,
+    });
+    throw err;
+  }
 }
