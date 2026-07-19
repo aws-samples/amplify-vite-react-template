@@ -8,9 +8,22 @@ import {
   notePoolMinutes,
   onsiteMinutes,
   POOL_TECH,
+  releasePoolMinutes,
+  releaseSlot,
   reserveSlot,
   type CapacityWindow,
 } from "./capacity";
+import { casGuardedUpdate } from "./atomicLock";
+
+/** Give back minutes a finalize attempt reserved but could not stamp. */
+async function reserveSlotRelease(
+  date: string,
+  window: CapacityWindow,
+  technicianId: string,
+  minutes: number
+): Promise<void> {
+  await releaseSlot(date, window, technicianId, minutes).catch(() => undefined);
+}
 import {
   firstWeekdayOf,
   isSeasonalPlanName,
@@ -264,17 +277,47 @@ export async function finalizeBooking(opts: {
       }
     }
     if (consumedSlot && booking.jobId) {
-      await client.models.Job.update({
-        id: booking.jobId,
-        capacityWindow: consumedSlot.window,
-        capacityMinutes: consumedSlot.minutes,
-        // The slot's technician holds these minutes until the office assigns
-        // for real — the rebuild keys on this, so the hold survives nightly.
-        capacityTechnicianId:
-          consumedSlot.technicianId === POOL_TECH
-            ? null
-            : consumedSlot.technicianId,
-      } as never).catch(() => undefined);
+      // GUARDED: the stamp lands only while the job is still the untouched
+      // funnel visit (no technician, no stamps). A retried finalization that
+      // runs AFTER the office already assigned must not overwrite the
+      // assignment's published stamps — on a loss, the minutes this attempt
+      // just took are given straight back so the office's accounting stands.
+      const stamped = await casGuardedUpdate(
+        "Job",
+        booking.jobId,
+        {
+          capacityWindow: consumedSlot.window,
+          capacityMinutes: consumedSlot.minutes,
+          // The slot's technician holds these minutes until the office
+          // assigns for real — the rebuild keys on this, so the hold
+          // survives nightly.
+          capacityTechnicianId:
+            consumedSlot.technicianId === POOL_TECH
+              ? null
+              : consumedSlot.technicianId,
+        },
+        [
+          { kind: "fieldMissingOrNull", field: "technicianId" },
+          { kind: "fieldMissingOrNull", field: "capacityWindow" },
+          { kind: "fieldMissingOrNull", field: "capacityMinutes" },
+        ]
+      ).catch(() => ({ ok: false as const, reason: "UNSUPPORTED" as const }));
+      if (!stamped.ok && booking.selectedDate) {
+        if (consumedSlot.technicianId === POOL_TECH) {
+          await releasePoolMinutes(
+            booking.selectedDate,
+            consumedSlot.window,
+            consumedSlot.minutes
+          ).catch(() => undefined);
+        } else {
+          await reserveSlotRelease(
+            booking.selectedDate,
+            consumedSlot.window,
+            consumedSlot.technicianId,
+            consumedSlot.minutes
+          );
+        }
+      }
     }
     // The booking is whole. If a prior attempt had opened the paid-not-finalized
     // exception, this success closes it — the queue must not keep showing a

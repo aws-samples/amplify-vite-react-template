@@ -590,8 +590,8 @@ describe("no access — the honest exit", () => {
 
     await call("reportNoAccess", { jobId: "j1", reason: "NOBODY_HOME" });
 
-    expect(jobs[0].routeId).toBeNull();
-    expect(jobs[0].routeOrder).toBeNull();
+    expect(jobs[0].routeId ?? null).toBeNull();
+    expect(jobs[0].routeOrder ?? null).toBeNull();
   });
 
   it("records the reason and the time", async () => {
@@ -1795,9 +1795,9 @@ describe("GL-12 — the honest one-tap exits and the versioned packet", () => {
 
     expect(res.status).toBe("SCOPE_MISMATCH");
     expect(jobs[0].status).toBe("SCOPE_MISMATCH");
-    expect(jobs[0].startedAt).toBeNull();
+    expect(jobs[0].startedAt ?? null).toBeNull();
     expect(jobs[0].completedAt ?? null).toBeNull();
-    expect(jobs[0].routeId).toBeNull();
+    expect(jobs[0].routeId ?? null).toBeNull();
     expect(jobs[0].paidAt).toBe("2026-07-01T00:00:00Z");
     const workRow = workItems.find((w) => w.kind === "SCOPE_MISMATCH");
     expect(workRow).toBeTruthy();

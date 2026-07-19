@@ -28,6 +28,7 @@ import {
   nextDunningAtIso,
 } from "../shared/recovery";
 import { openOwnedWork } from "../shared/ownedWork";
+import { casGuardedUpdate } from "../shared/atomicLock";
 import {
   cancelQueuedPlanVisits,
   type QueuedVisitsResolution,
@@ -369,6 +370,17 @@ async function onSubscriptionInvoice(
   let row: Row | null = null;
   let transitioned = false;
 
+  // The PaymentIntent behind the invoice charge — WITHOUT it a refund can
+  // only be recorded as offline (no Stripe money movement) and a dashboard
+  // refund can't find this row. Both make "refunded" a lie.
+  const invoicePi = (
+    stripeInvoice as unknown as {
+      payment_intent?: string | { id: string } | null;
+    }
+  ).payment_intent;
+  const stripePaymentIntentId =
+    typeof invoicePi === "string" ? invoicePi : (invoicePi?.id ?? undefined);
+
   if (existing[0]) {
     // Already in this state: a replayed webhook. Do nothing so it never
     // re-emails or re-schedules dunning.
@@ -377,6 +389,7 @@ async function onSubscriptionInvoice(
     await client.models.Invoice.update({
       id: existing[0].id,
       status,
+      ...(stripePaymentIntentId ? { stripePaymentIntentId } : {}),
       ...(paidAt
         ? { paidAt, failureReason: null, nextDunningAt: null }
         : {}),
@@ -404,6 +417,7 @@ async function onSubscriptionInvoice(
       amountCents: stripeInvoice.amount_due,
       status,
       stripeInvoiceId: stripeInvoice.id,
+      stripePaymentIntentId,
       issuedAt: new Date(stripeInvoice.created * 1000).toISOString(),
       ...(paidAt ? { paidAt } : {}),
       ...failedFields,
@@ -543,11 +557,24 @@ async function stagePostCancellationCharge(opts: {
     ownerTeam: "FINANCE",
   });
   if (caseId) {
-    await sendPostCancellationChargeNotice({
-      customerId: opts.customerId,
-      amountCents: opts.amountCents,
-      invoiceId: opts.invoiceId,
-    });
+    // SEND-ONCE: invoice.paid and the subscription.deleted rescan can both
+    // stage this charge concurrently — the notice goes out exactly once,
+    // decided by an atomic marker claim on the invoice row. UNSUPPORTED
+    // (no CAS wiring) sends anyway: a duplicate email is recoverable, a
+    // missing refund promise is the lie GL-08 forbids.
+    const marker = await casGuardedUpdate(
+      "Invoice",
+      opts.invoiceId,
+      { postCancelNoticeSentAt: new Date().toISOString() },
+      [{ kind: "fieldMissingOrNull", field: "postCancelNoticeSentAt" }]
+    );
+    if (marker.ok || marker.reason === "UNSUPPORTED") {
+      await sendPostCancellationChargeNotice({
+        customerId: opts.customerId,
+        amountCents: opts.amountCents,
+        invoiceId: opts.invoiceId,
+      });
+    }
   } else {
     // The case could not be written: no customer promise. Page the office
     // urgently instead — the settlement check (full-refund-required) keeps
@@ -639,9 +666,15 @@ async function onChargeRefunded(charge: Stripe.Charge) {
     typeof charge.payment_intent === "string"
       ? charge.payment_intent
       : charge.payment_intent?.id;
-  if (!paymentIntentId) return;
+  const chargeInvoice = (
+    charge as unknown as { invoice?: string | { id: string } | null }
+  ).invoice;
+  const stripeInvoiceId =
+    typeof chargeInvoice === "string" ? chargeInvoice : chargeInvoice?.id;
+  if (!paymentIntentId && !stripeInvoiceId) return;
   await applyRefundToInvoice({
-    paymentIntentId,
+    paymentIntentId: paymentIntentId ?? null,
+    stripeInvoiceId: stripeInvoiceId ?? null,
     amountRefundedCents: charge.amount_refunded,
     refundId: charge.refunds?.data?.[0]?.id,
   });
@@ -672,19 +705,30 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
   const canceledAtIso = stripeSub.canceled_at
     ? new Date(stripeSub.canceled_at * 1000).toISOString()
     : new Date().toISOString();
-  await client.models.ServicePlan.update({
-    id: crmServicePlanId,
-    status: "CANCELED",
-    // Clear the id too, so "the plan has a subscription id" always means a live
-    // one — a cancelled plan holding a dead id reads as healthy everywhere.
-    stripeSubscriptionId: null,
-    // GL-08 R3: keep the durable reference for the settlement readback.
-    canceledStripeSubscriptionId: stripeSub.id,
-    canceledAt: canceledAtIso,
-    // A dashboard cancel is an accepted cancellation too — anchor it so
-    // later charges are judged against the real cancel moment.
-    cancellationRequestedAt: sub.cancellationRequestedAt ?? canceledAtIso,
-  });
+  const { data: planFlipped, errors: planFlipErrors } =
+    await client.models.ServicePlan.update({
+      id: crmServicePlanId,
+      status: "CANCELED",
+      // Clear the id too, so "the plan has a subscription id" always means a live
+      // one — a cancelled plan holding a dead id reads as healthy everywhere.
+      stripeSubscriptionId: null,
+      // GL-08 R3: keep the durable reference for the settlement readback.
+      canceledStripeSubscriptionId: stripeSub.id,
+      canceledAt: canceledAtIso,
+      // A dashboard cancel is an accepted cancellation too — anchor it so
+      // later charges are judged against the real cancel moment.
+      cancellationRequestedAt: sub.cancellationRequestedAt ?? canceledAtIso,
+    });
+  if (!planFlipped) {
+    // THROW so the handler 500s and Stripe redelivers: acking a lost anchor
+    // write would leave the plan ACTIVE forever (free dispatch) and every
+    // later charge judged as an ordinary receipt.
+    throw new Error(
+      `subscription.deleted: plan ${crmServicePlanId} did not flip: ${
+        planFlipErrors?.map((e) => e.message).join("; ") ?? "unknown error"
+      }`
+    );
+  }
 
   // LATE-CHARGE RESCAN: a charge that settled during this event's delivery
   // retry gap was receipted as ordinary (no anchor existed yet) — now that

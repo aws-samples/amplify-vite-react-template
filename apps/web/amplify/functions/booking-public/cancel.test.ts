@@ -39,7 +39,10 @@ const fakeDataClient: {
       listBookingRequestByCancelToken: () => Promise<{ data: Booking[] }>;
       update: UpdateFn;
     };
-    Job: { update: () => Promise<{ data: null }> };
+    Job: {
+      update: () => Promise<{ data: null }>;
+      get: () => Promise<{ data: null }>;
+    };
   };
 } = {
   models: {
@@ -51,7 +54,12 @@ const fakeDataClient: {
         return { data: booking };
       },
     },
-    Job: { update: async () => ({ data: null }) },
+    // No job row behind these bookings: the guarded cancel path re-reads the
+    // job first and skips cleanly when there is nothing to cancel.
+    Job: {
+      update: async () => ({ data: null }),
+      get: async () => ({ data: null }),
+    },
   },
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));

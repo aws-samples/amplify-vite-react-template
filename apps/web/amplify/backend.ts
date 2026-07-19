@@ -108,6 +108,9 @@ const LOCK_MODELS = [
   // scheduledDate (two concurrent movers can't both land), so the CAS
   // helper needs the Job table.
   "Job",
+  // GL-08: the post-cancellation notice's send-once marker is claimed with
+  // a guarded update on the Invoice row.
+  "Invoice",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],

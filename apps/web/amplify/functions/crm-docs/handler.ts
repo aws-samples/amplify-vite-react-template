@@ -4249,14 +4249,20 @@ async function startJob(jobId: string) {
   if (!technician) throw new Error("The assigned technician record no longer exists");
   assertTechnicianCompliance(technician, { requireActive: true });
   const startedAt = new Date().toISOString();
-  const { data: updated, errors } = await client.models.Job.update({
-    id: jobId,
-    status: "IN_PROGRESS",
-    startedAt,
-  });
-  if (!updated) {
+  // GUARDED on the snapshot this start validated: a cancel that lands after
+  // the read makes the start LOSE instead of resurrecting a canceled (and
+  // possibly refunded) visit into IN_PROGRESS.
+  const started = await casGuardedUpdate(
+    "Job",
+    jobId,
+    { status: "IN_PROGRESS", startedAt },
+    jobScheduleGuards(job)
+  );
+  if (!started.ok) {
     throw new Error(
-      `Could not start the job: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+      started.reason === "UNSUPPORTED"
+        ? "The scheduling lock store is unavailable — try again in a moment."
+        : "This visit changed while starting (it may have just been canceled or moved) — refresh the job and check before starting."
     );
   }
   return { jobId, startedAt, alreadyStarted: false };
@@ -4493,26 +4499,28 @@ async function reportNoAccess(args: {
   }
 
   const nowIso = new Date().toISOString();
-  const { data: updated, errors } = await client.models.Job.update({
-    id: args.jobId,
-    status: "NO_ACCESS",
-    noAccessReason: args.reason as
-      | "NOBODY_HOME"
-      | "LOCKED_OUT"
-      | "DOG_LOOSE"
-      | "REFUSED_ENTRY"
-      | "UNSAFE_CONDITIONS"
-      | "WRONG_ADDRESS",
-    noAccessAt: nowIso,
-    noAccessNote: args.note?.trim() || undefined,
-    noAccessPhotoKey: args.photoKey ?? undefined,
-    // Off the route: the stop is done for today and the day's capacity is free.
-    routeId: null,
-    routeOrder: null,
-  });
-  if (!updated) {
+  // GUARDED: a concurrent cancel (with its refund disposition) must not be
+  // overwritten by a no-access record — the loser refuses and re-reads.
+  const reported = await casGuardedUpdate(
+    "Job",
+    args.jobId,
+    {
+      status: "NO_ACCESS",
+      noAccessReason: args.reason,
+      noAccessAt: nowIso,
+      noAccessNote: args.note?.trim() || null,
+      noAccessPhotoKey: args.photoKey ?? null,
+      // Off the route: the stop is done for today and the day's capacity is free.
+      routeId: null,
+      routeOrder: null,
+    },
+    jobScheduleGuards(job)
+  );
+  if (!reported.ok) {
     throw new Error(
-      `Could not report no access: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+      reported.reason === "UNSUPPORTED"
+        ? "The scheduling lock store is unavailable — try again in a moment."
+        : "This visit changed while reporting (it may have just been canceled or moved) — refresh the job and check its state before reporting."
     );
   }
 
@@ -4611,20 +4619,28 @@ async function reportVisitNotPerformed(
   }
 
   const nowIso = new Date().toISOString();
-  const { data: updated, errors } = await client.models.Job.update({
-    id: args.jobId,
-    status: kind,
-    notPerformedReason: args.reason,
-    notPerformedAt: nowIso,
-    notPerformedNote: args.note?.trim() || undefined,
-    notPerformedPhotoKey: args.photoKey ?? undefined,
-    // Off the route: the stop is done for today and the day's capacity frees.
-    routeId: null,
-    routeOrder: null,
-  });
-  if (!updated) {
+  // GUARDED: a concurrent cancel/move must not be overwritten by this
+  // terminal outcome — the loser refuses and re-reads.
+  const recorded = await casGuardedUpdate(
+    "Job",
+    args.jobId,
+    {
+      status: kind,
+      notPerformedReason: args.reason,
+      notPerformedAt: nowIso,
+      notPerformedNote: args.note?.trim() || null,
+      notPerformedPhotoKey: args.photoKey ?? null,
+      // Off the route: the stop is done for today and the day's capacity frees.
+      routeId: null,
+      routeOrder: null,
+    },
+    jobScheduleGuards(job)
+  );
+  if (!recorded.ok) {
     throw new Error(
-      `Could not record the outcome: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+      recorded.reason === "UNSUPPORTED"
+        ? "The scheduling lock store is unavailable — try again in a moment."
+        : "This visit changed while recording (it may have just been canceled or moved) — refresh the job and check its state before reporting."
     );
   }
 

@@ -1149,6 +1149,7 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
       memoryLockStore({
         CapacityDay: capacityFixture.maps.capacityDays,
         CapacityClaim: capacityFixture.maps.capacityClaims,
+        Job: store.Job,
       })
     );
     booking.capacityTechnicianId = "t1";

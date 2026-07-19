@@ -11,6 +11,8 @@ import {
   type UserType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "../shared/dataClient";
+import { casGuardedUpdate } from "../shared/atomicLock";
+import { jobScheduleGuards } from "../shared/capacity";
 import { assertTechnicianCanBeSaved } from "../shared/compliance";
 import { opFieldName } from "../shared/opEvent";
 import { notifyOffice } from "../shared/email";
@@ -1402,15 +1404,23 @@ async function reassignFutureJobs(
           ) {
             continue;
           }
-          const { data: updated } = await client.models.Job.update({
-            id: job.id,
-            status: "UNSCHEDULED",
-            routeId: null,
-            routeOrder: null,
-            technicianId: null,
-            notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
-          });
-          if (updated) {
+          // GUARDED on the re-read snapshot: an office ASSIGN to another
+          // technician that lands between this read and write makes the sweep
+          // LOSE — the newer assignment stands instead of being knocked back
+          // to UNSCHEDULED, and the read-back counts the job honestly.
+          const swept = await casGuardedUpdate(
+            "Job",
+            job.id,
+            {
+              status: "UNSCHEDULED",
+              routeId: null,
+              routeOrder: null,
+              technicianId: null,
+              notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
+            },
+            jobScheduleGuards(fresh)
+          );
+          if (swept.ok) {
             jobsUnassigned++;
             // GL-13: an unsent draft on a swept job gets a recorded office
             // disposition; a failed case write keeps the offboard PARTIAL.

@@ -180,19 +180,38 @@ export async function refundInvoice(
  * converge on the same number rather than double it.
  */
 export async function applyRefundToInvoice(opts: {
-  paymentIntentId: string;
+  paymentIntentId: string | null;
+  /** Fallback lookup: subscription invoices may predate PI stamping. */
+  stripeInvoiceId?: string | null;
   amountRefundedCents: number;
   refundId?: string;
 }): Promise<{ invoiceId: string; status: string } | null> {
   const client = await dataClient();
-  const { data: matches } =
-    await client.models.Invoice.listInvoiceByStripePaymentIntentId({
-      stripePaymentIntentId: opts.paymentIntentId,
+  type RefundTargetRow = RefundableInvoice & {
+    customerId: string;
+    description?: string | null;
+    refundReason?: string | null;
+  };
+  let invoice: RefundTargetRow | null = null;
+  if (opts.paymentIntentId) {
+    const { data: matches } =
+      await client.models.Invoice.listInvoiceByStripePaymentIntentId({
+        stripePaymentIntentId: opts.paymentIntentId,
+      });
+    invoice = (matches[0] as RefundTargetRow | undefined) ?? null;
+  }
+  if (!invoice && opts.stripeInvoiceId) {
+    // A dashboard refund of a subscription charge must still land on the
+    // CRM row — without this the settlement gate stays blocked forever
+    // after a REAL refund.
+    const { data: byInvoice } = await client.models.Invoice.list({
+      filter: { stripeInvoiceId: { eq: opts.stripeInvoiceId } },
     });
-  const invoice = matches[0];
+    invoice = (byInvoice[0] as RefundTargetRow | undefined) ?? null;
+  }
   if (!invoice) {
     console.warn(
-      `charge.refunded: no invoice for PaymentIntent ${opts.paymentIntentId}`
+      `charge.refunded: no invoice for PaymentIntent ${opts.paymentIntentId ?? "-"} / Stripe invoice ${opts.stripeInvoiceId ?? "-"}`
     );
     return null;
   }

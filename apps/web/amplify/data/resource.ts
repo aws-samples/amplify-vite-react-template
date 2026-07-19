@@ -1480,6 +1480,10 @@ export const schema = a.schema({
       method: a.ref("PaymentMethodKind"),
       stripeInvoiceId: a.string(),
       stripePaymentIntentId: a.string(),
+      // GL-08: send-once marker for the post-cancellation refund-promise
+      // notice — claimed atomically so concurrently delivered webhooks
+      // (invoice.paid + subscription.deleted rescan) can't both email.
+      postCancelNoticeSentAt: a.datetime(),
       issuedAt: a.datetime(),
       paidAt: a.datetime(),
       failureReason: a.string(),

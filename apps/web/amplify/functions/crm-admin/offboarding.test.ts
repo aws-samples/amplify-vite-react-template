@@ -420,6 +420,7 @@ beforeEach(() => {
     memoryLockStore({
       StaffAccessCommand: staffCommands,
       OwnerChangeSerial: ownerSerial,
+      Job: jobs,
     })
   );
   sends.length = 0;
@@ -701,11 +702,10 @@ describe("offboardStaff (GL-14)", () => {
 
     expect(res.jobsUnassigned).toBe(1);
     expect(res.technicianDeactivated).toBe(true);
-    expect(jobs.get("future")).toMatchObject({
-      status: "UNSCHEDULED",
-      technicianId: null,
-      routeId: null,
-    });
+    expect(jobs.get("future")!.status).toBe("UNSCHEDULED");
+    // The guarded publish REMOVES cleared attributes (Dynamo REMOVE).
+    expect(jobs.get("future")!.technicianId ?? null).toBeNull();
+    expect(jobs.get("future")!.routeId ?? null).toBeNull();
     expect(technicians.get("t1")!.active).toBe(false);
     expect(notifyOffice).toHaveBeenCalledOnce();
   });
@@ -1230,12 +1230,11 @@ describe("deactivateTechnician", () => {
     };
 
     expect(res.jobsUnassigned).toBe(1);
-    expect(jobs.get("future")).toMatchObject({
-      status: "UNSCHEDULED",
-      routeId: null,
-      routeOrder: null,
-      technicianId: null,
-    });
+    expect(jobs.get("future")!.status).toBe("UNSCHEDULED");
+    // The guarded publish REMOVES cleared attributes (Dynamo REMOVE).
+    expect(jobs.get("future")!.routeId ?? null).toBeNull();
+    expect(jobs.get("future")!.routeOrder ?? null).toBeNull();
+    expect(jobs.get("future")!.technicianId ?? null).toBeNull();
     // History is untouched.
     expect(jobs.get("done")).toMatchObject({ status: "COMPLETED", routeId: "r0" });
   });

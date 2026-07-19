@@ -19,7 +19,14 @@ import {
   type Zone,
 } from "../crm-pricing/rateCards";
 import { cancelPlanForCustomer } from "../shared/planCancellation";
-import { claimWindowSlot, type CapacityWindow } from "../shared/capacity";
+import {
+  claimWindowSlot,
+  jobScheduleGuards,
+  releaseJobCapacity,
+  type CapacityWindow,
+} from "../shared/capacity";
+import { casGuardedUpdate } from "../shared/atomicLock";
+import { releaseMonthForJob } from "../shared/obligations";
 import {
   BOOKING_TERMS_TEXT,
   BOOKING_TERMS_VERSION,
@@ -1600,12 +1607,46 @@ async function cancel(body: Record<string, unknown>) {
   }
 
   if (booking.jobId) {
-    await client.models.Job.update({
-      id: booking.jobId,
-      status: "CANCELED",
-      routeId: null,
-      routeOrder: null,
-    });
+    // A funnel cancel is a CANCEL publisher like every other: guarded on the
+    // snapshot it read, clearing the capacity stamps in the same write, then
+    // giving the held slot (or pool) minutes and the seasonal month back
+    // from the pre-update row. One re-read retry absorbs a concurrent office
+    // move; a second loss falls to the owned cancellation work the caller
+    // already records.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { data: cancelJob } = await client.models.Job.get({
+        id: booking.jobId,
+      });
+      if (!cancelJob || cancelJob.status === "CANCELED") break;
+      const published = await casGuardedUpdate(
+        "Job",
+        booking.jobId,
+        {
+          status: "CANCELED",
+          routeId: null,
+          routeOrder: null,
+          technicianId: null,
+          capacityWindow: null,
+          capacityMinutes: null,
+          capacityTechnicianId: null,
+        },
+        jobScheduleGuards(cancelJob)
+      );
+      if (!published.ok) {
+        if (published.reason === "UNSUPPORTED") break;
+        continue; // lost to a concurrent move — re-read and retry once
+      }
+      await releaseJobCapacity(cancelJob);
+      if (cancelJob.servicePlanId && cancelJob.scheduledDate) {
+        await releaseMonthForJob({
+          servicePlanId: cancelJob.servicePlanId,
+          monthKey: cancelJob.scheduledDate.slice(0, 7),
+          jobId: cancelJob.id,
+          note: "Visit canceled by the customer — the month is owed again.",
+        }).catch(() => undefined);
+      }
+      break;
+    }
   }
   await client.models.BookingRequest.update({
     id: booking.id,
