@@ -186,9 +186,27 @@ const jobs = new Map<string, Job>();
 const staffAccessEvents: Record<string, unknown>[] = [];
 /** Owned-work rows opened via openOwnedWork — keyed by the deterministic id. */
 const workItems = new Map<string, Record<string, unknown>>();
+/** The durable access-change commands (StaffAccessCommand), keyed by the
+ *  idempotency key. create is CONDITIONAL — an existing id loses (data: null),
+ *  exactly like AppSync — which is what the single-winner claim rides on. */
+const staffCommands = new Map<string, Record<string, unknown>>();
+/** The owner-change mutex row(s) (OwnerChangeSerial). */
+const ownerSerial = new Map<string, Record<string, unknown>>();
+/** Immutable lead activity rows written by the offboarding lead hand-over. */
+const leadActivities: Record<string, unknown>[] = [];
 /** Force the technician-deactivation write to fail, so a test can drive the
  *  fail-safe "access removed, downstream owned by a case" (PARTIAL) path. */
 let technicianUpdateThrows = false;
+/** Force Job.update to fail, so a test can prove a failed future-job unassign
+ *  is COUNTED (jobsFailed) instead of silently dropped. */
+let jobUpdateThrows = false;
+/** Force WorkEvent.create to fail, so a test can prove the hand-over writes
+ *  history BEFORE moving ownership (a failed history write leaves the claim
+ *  with the departing person, resumable). */
+let workEventCreateThrows = false;
+/** One-shot override for Job.get, so a test can simulate a job reassigned to a
+ *  NEWER technician between the offboard's list and its conditional write. */
+let jobGetOverride: ((id: string) => Job | null) | null = null;
 /** Force the audit-ledger write to fail, so a test can drive the durable-ledger
  *  "security case + PARTIAL" path. */
 let staffEventCreateThrows = false;
@@ -226,6 +244,9 @@ const fakeDataClient = {
       }),
     },
     Job: {
+      get: async ({ id }: { id: string }) => ({
+        data: jobGetOverride ? jobGetOverride(id) : jobs.get(id) ?? null,
+      }),
       list: async ({ filter }: { filter: { technicianId: { eq: string } } }) => ({
         data: [...jobs.values()].filter(
           (j) => j.technicianId === filter.technicianId.eq
@@ -233,8 +254,57 @@ const fakeDataClient = {
         nextToken: null,
       }),
       update: async (patch: Partial<Job> & { id: string }) => {
+        if (jobUpdateThrows) throw new Error("Job.update failed (injected)");
         jobs.set(patch.id, { ...jobs.get(patch.id)!, ...patch });
         return { data: jobs.get(patch.id) };
+      },
+    },
+    LeadActivity: {
+      create: async (row: Record<string, unknown>) => {
+        leadActivities.push(row);
+        return { data: row };
+      },
+    },
+    StaffAccessCommand: {
+      // Conditional create: an existing id loses, exactly like AppSync.
+      create: async (row: Record<string, unknown> & { id: string }) => {
+        if (staffCommands.has(row.id)) return { data: null };
+        staffCommands.set(row.id, { ...row });
+        return { data: staffCommands.get(row.id) };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: staffCommands.get(id) ?? null,
+      }),
+      update: async (patch: Record<string, unknown> & { id: string }) => {
+        const existing = staffCommands.get(patch.id);
+        if (!existing) return { data: null };
+        // Amplify update ignores undefined fields — mirror that so stage
+        // patches don't wipe recorded fields.
+        const applied = Object.fromEntries(
+          Object.entries(patch).filter(([, v]) => v !== undefined)
+        );
+        staffCommands.set(patch.id, { ...existing, ...applied });
+        return { data: staffCommands.get(patch.id) };
+      },
+      delete: async ({ id }: { id: string }) => {
+        const existed = staffCommands.get(id) ?? null;
+        staffCommands.delete(id);
+        return { data: existed };
+      },
+    },
+    OwnerChangeSerial: {
+      create: async (row: Record<string, unknown> & { id: string }) => {
+        if (ownerSerial.has(row.id)) return { data: null };
+        ownerSerial.set(row.id, { ...row });
+        return { data: ownerSerial.get(row.id) };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: ownerSerial.get(id) ?? null,
+      }),
+      delete: async ({ id }: { id: string }) => {
+        const existed = ownerSerial.get(id) ?? null;
+        ownerSerial.delete(id);
+        return { data: existed };
       },
     },
     StaffAccessEvent: {
@@ -278,7 +348,11 @@ const fakeDataClient = {
       }),
     },
     WorkEvent: {
-      create: async (row: Record<string, unknown>) => ({ data: row }),
+      create: async (row: Record<string, unknown>) => {
+        if (workEventCreateThrows)
+          throw new Error("WorkEvent.create failed (injected)");
+        return { data: row };
+      },
     },
   },
 };
@@ -297,15 +371,25 @@ vi.mock("../shared/email", () => ({
 const { handler } = await import("./handler");
 
 const call = (field: string, args: Record<string, unknown>) => {
-  // GL-14 requires a controlled reason on staff-access changes. Default one in
-  // for the many tests that aren't about the reason itself, so they still reach
-  // the behavior they assert; tests that check the reason pass their own.
-  const needsReason =
-    (field === "changeStaffRoles" || field === "offboardStaff") &&
-    args.reasonCode === undefined;
-  const arguments_ = needsReason
-    ? { ...args, reasonCode: field === "offboardStaff" ? "ROLE_ENDED" : "REASSIGNMENT" }
-    : args;
+  // GL-14 requires a controlled reason AND a unique idempotency key on
+  // staff-access changes. Default both in for the many tests that aren't about
+  // them, so those still reach the behavior they assert; tests that check the
+  // reason or the key pass their own.
+  const staffField =
+    field === "changeStaffRoles" ||
+    field === "offboardStaff" ||
+    field === "deactivateTechnician";
+  let arguments_ = args;
+  if (staffField) {
+    arguments_ = { ...args };
+    if (arguments_.reasonCode === undefined) {
+      arguments_.reasonCode =
+        field === "changeStaffRoles" ? "REASSIGNMENT" : "ROLE_ENDED";
+    }
+    if (arguments_.idempotencyKey === undefined) {
+      arguments_.idempotencyKey = `test-key-${++testKeyCounter}`;
+    }
+  }
   return (handler as unknown as (e: unknown) => Promise<unknown>)({
     info: { fieldName: field },
     arguments: arguments_,
@@ -323,6 +407,8 @@ const sentTypes = () => sends.map((s) => s.type);
 /** A licence date comfortably in the future, so an "active" tech is compliant. */
 const FUTURE_LICENSE = "2099-12-31";
 
+let testKeyCounter = 0;
+
 beforeEach(() => {
   sends.length = 0;
   timeline.length = 0;
@@ -333,8 +419,14 @@ beforeEach(() => {
   jobs.clear();
   staffAccessEvents.length = 0;
   workItems.clear();
+  staffCommands.clear();
+  ownerSerial.clear();
+  leadActivities.length = 0;
   technicianUpdateThrows = false;
   staffEventCreateThrows = false;
+  jobUpdateThrows = false;
+  workEventCreateThrows = false;
+  jobGetOverride = null;
   notifyOffice.mockClear();
   sendEmail.mockClear();
 });
@@ -1180,5 +1272,344 @@ describe("deactivateTechnician", () => {
     expect(res.loginDisabled).toBe(false);
     expect(technicians.get("t1")!.active).toBe(false);
     expect(notifyOffice).toHaveBeenCalledOnce();
+  });
+});
+
+describe("GL-14 — the durable access-change command", () => {
+  const finLogin = () => {
+    pool.set("finance@x.com", {
+      username: "finance@x.com",
+      sub: "sub-fin",
+      email: "finance@x.com",
+      groups: ["FINANCE"],
+    });
+    pool.set("owner@x.com", {
+      username: "owner@x.com",
+      sub: "owner-1",
+      email: "owner@x.com",
+      groups: ["OWNER"],
+    });
+  };
+
+  it("claims the command BEFORE any provider change — a live same-key duplicate acts on nothing and reports in-progress", async () => {
+    finLogin();
+    // Another attempt currently owns the command (live lease).
+    staffCommands.set("dup-key", {
+      id: "dup-key",
+      action: "OFFBOARD",
+      subjectEmail: "finance@x.com",
+      stage: "REQUESTED",
+      requestedAt: new Date().toISOString(),
+      leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+      leaseNonce: "other-nonce",
+      attemptCount: 1,
+    });
+    const res = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "dup-key",
+    })) as { inProgress?: boolean; outcome?: string };
+
+    expect(res.inProgress).toBe(true);
+    expect(res.outcome).toBe("IN_PROGRESS");
+    // Nothing was disabled, signed out, or removed — the loser acted on nothing.
+    expect(sentTypes()).not.toContain("Disable");
+    expect(sentTypes()).not.toContain("SignOut");
+    expect(sentTypes()).not.toContain("RemoveFromGroup");
+  });
+
+  it("a duplicate of a COMPLETE command returns the recorded outcome without re-driving", async () => {
+    finLogin();
+    const first = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "settle-key",
+    })) as { outcome: string };
+    expect(first.outcome).toBe("COMPLETE");
+    const disables = sentTypes().filter((t) => t === "Disable").length;
+
+    const replay = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "settle-key",
+    })) as { deduped?: boolean; outcome?: string };
+    expect(replay.deduped).toBe(true);
+    expect(replay.outcome).toBe("COMPLETE");
+    expect(sentTypes().filter((t) => t === "Disable").length).toBe(disables);
+  });
+
+  it("a PARTIAL outcome is resumable with the SAME key and converges to COMPLETE", async () => {
+    finLogin();
+    technicians.set("t9", {
+      id: "t9",
+      name: "Ray",
+      email: "finance@x.com",
+      active: true,
+      userSub: "sub-fin",
+      licenseNumber: "L-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+    technicianUpdateThrows = true;
+    const first = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "resume-key",
+    })) as { outcome: string; nextStep?: string | null };
+    expect(first.outcome).toBe("PARTIAL");
+    expect(first.nextStep).toMatch(/re-run offboard/i);
+    // The durable command retains the partial stage — not deleted, not COMPLETE.
+    expect(staffCommands.get("resume-key")!.stage).toBe("PARTIAL");
+
+    technicianUpdateThrows = false;
+    const second = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "resume-key",
+    })) as { outcome: string; technicianConfirmedInactive?: boolean };
+    expect(second.outcome).toBe("COMPLETE");
+    expect(second.technicianConfirmedInactive).toBe(true);
+    expect(staffCommands.get("resume-key")!.stage).toBe("COMPLETE");
+  });
+
+  it("a failed group op in a role change returns a truthful PARTIAL with a confirmed security case — never a raw throw", async () => {
+    finLogin();
+    // FINANCE -> OFFICE: the remove of FINANCE will fail.
+    const send = sends; // silence lint unused
+    void send;
+    const origPool = pool.get("finance@x.com")!;
+    // Inject: RemoveFromGroup throws once for FINANCE.
+    const { CognitoIdentityProviderClient } = await import(
+      "@aws-sdk/client-cognito-identity-provider"
+    );
+    const proto = CognitoIdentityProviderClient.prototype as unknown as {
+      send: (c: { __type: string; input: Record<string, unknown> }) => Promise<unknown>;
+    };
+    const realSend = proto.send;
+    proto.send = async function (c) {
+      if (c.__type === "RemoveFromGroup" && c.input.GroupName === "FINANCE") {
+        throw new Error("Cognito remove failed (injected)");
+      }
+      return realSend.call(this, c);
+    };
+    try {
+      const res = (await call("changeStaffRoles", {
+        email: "finance@x.com",
+        roles: ["OFFICE"],
+        idempotencyKey: "partial-role-key",
+      })) as {
+        outcome: string;
+        securityCaseOpened?: boolean;
+        effectiveRoles?: string[];
+        nextStep?: string | null;
+      };
+      expect(res.outcome).toBe("PARTIAL");
+      // The case write really happened — the claim is verified, not assumed.
+      expect(res.securityCaseOpened).toBe(true);
+      const caseRows = [...workItems.values()].filter(
+        (w) => w.kind === "STAFF_SECURITY"
+      );
+      expect(caseRows.length).toBeGreaterThan(0);
+      // The read-back shows the REAL mixed role set (both roles present).
+      expect(res.effectiveRoles).toEqual(
+        expect.arrayContaining(["OFFICE", "FINANCE"])
+      );
+      expect(origPool.groups).toEqual(
+        expect.arrayContaining(["OFFICE", "FINANCE"])
+      );
+      // Resume with the same key converges once the provider recovers.
+      proto.send = realSend;
+      const resumed = (await call("changeStaffRoles", {
+        email: "finance@x.com",
+        roles: ["OFFICE"],
+        idempotencyKey: "partial-role-key",
+      })) as { outcome: string; effectiveRoles?: string[] };
+      expect(resumed.outcome).toBe("COMPLETE");
+      expect(resumed.effectiveRoles).toEqual(["OFFICE"]);
+    } finally {
+      proto.send = realSend;
+    }
+  });
+
+  it("owner-set changes are serialized — a second owner change is refused while one is in flight, changing nothing", async () => {
+    finLogin();
+    pool.set("owner2@x.com", {
+      username: "owner2@x.com",
+      sub: "owner-2",
+      email: "owner2@x.com",
+      groups: ["OWNER"],
+    });
+    // Another owner change holds the mutex with a live lease.
+    ownerSerial.set("owner-serial", {
+      id: "owner-serial",
+      holder: "someone-else",
+      leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await expect(
+      call("offboardStaff", {
+        email: "owner2@x.com",
+        idempotencyKey: "owner-race-key",
+      })
+    ).rejects.toThrow(/another owner change/i);
+    // Nothing moved: no disable, no group removal.
+    expect(sentTypes()).not.toContain("Disable");
+    expect(sentTypes()).not.toContain("RemoveFromGroup");
+    // The command records the refusal terminally.
+    expect(staffCommands.get("owner-race-key")!.stage).toBe("FAILED");
+  });
+
+  it("counts a failed future-job unassign and keeps the offboard PARTIAL with an owned case", async () => {
+    finLogin();
+    technicians.set("t9", {
+      id: "t9",
+      name: "Ray",
+      email: "finance@x.com",
+      active: true,
+      userSub: "sub-fin",
+      licenseNumber: "L-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+    jobs.set("j-fail", {
+      id: "j-fail",
+      technicianId: "t9",
+      status: "SCHEDULED",
+      scheduledDate: "2099-01-01",
+    });
+    jobUpdateThrows = true;
+    const res = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "jobs-fail-key",
+    })) as { outcome: string; jobsFailed?: number };
+    expect(res.outcome).toBe("PARTIAL");
+    expect(res.jobsFailed).toBe(1);
+    const cases = [...workItems.values()].filter(
+      (w) => w.kind === "STAFF_OFFBOARD"
+    );
+    expect(cases.length).toBeGreaterThan(0);
+  });
+
+  it("never overwrites a NEWER job assignment made mid-offboard", async () => {
+    finLogin();
+    technicians.set("t9", {
+      id: "t9",
+      name: "Ray",
+      email: "finance@x.com",
+      active: true,
+      userSub: "sub-fin",
+      licenseNumber: "L-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+    jobs.set("j-moved", {
+      id: "j-moved",
+      technicianId: "t9",
+      status: "SCHEDULED",
+      scheduledDate: "2099-01-01",
+    });
+    // Between the offboard's list and its write, the office moved the job to a
+    // different technician — the fresh read sees the newer assignment.
+    jobGetOverride = (id) =>
+      id === "j-moved"
+        ? { ...jobs.get("j-moved")!, technicianId: "t-new" }
+        : jobs.get(id) ?? null;
+    const res = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "job-moved-key",
+    })) as { jobsUnassigned: number; jobsFailed?: number };
+    expect(res.jobsUnassigned).toBe(0);
+    expect(res.jobsFailed).toBe(0);
+    // The store still shows the job (the newer assignment was not clobbered).
+    expect(jobs.get("j-moved")!.technicianId).toBe("t9");
+  });
+
+  it("writes hand-over history BEFORE moving ownership — a failed history write leaves the claim resumable", async () => {
+    finLogin();
+    workItems.set("w-1", {
+      id: "w-1",
+      kind: "PORTAL_FAILURE",
+      status: "OPEN",
+      ownerSub: "sub-fin",
+      ownerTeam: "OPS",
+    });
+    workEventCreateThrows = true;
+    const res = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "history-first-key",
+    })) as { outcome: string; releaseFailed?: boolean };
+    expect(res.outcome).toBe("PARTIAL");
+    expect(res.releaseFailed).toBe(true);
+    // Ownership did NOT move — the item still belongs to the departing person,
+    // so a re-run finds and repairs it (history-first ordering).
+    expect(workItems.get("w-1")!.ownerSub).toBe("sub-fin");
+  });
+
+  it("deactivateTechnician (Schedule entrance) refuses a missing or invalid controlled reason", async () => {
+    technicians.set("t1", { id: "t1", name: "Marcus", active: true, userSub: null });
+    await expect(
+      call("deactivateTechnician", { technicianId: "t1", reasonCode: null })
+    ).rejects.toThrow(/reason is required/i);
+    await expect(
+      call("deactivateTechnician", { technicianId: "t1", reasonCode: "WHATEVER" })
+    ).rejects.toThrow(/isn't a valid reason/i);
+    expect(technicians.get("t1")!.active).toBe(true);
+  });
+
+  it("deactivateTechnician (no login) verifies the inactive flag and reports PARTIAL with an owned case when it does not persist", async () => {
+    technicians.set("t1", { id: "t1", name: "Marcus", active: true, userSub: null });
+    technicianUpdateThrows = true;
+    const res = (await call("deactivateTechnician", {
+      technicianId: "t1",
+    })) as { outcome: string; technicianConfirmedInactive?: boolean; nextStep?: string | null };
+    expect(res.outcome).toBe("PARTIAL");
+    expect(res.technicianConfirmedInactive).toBe(false);
+    expect(res.nextStep).toMatch(/re-run/i);
+    const cases = [...workItems.values()].filter(
+      (w) => w.kind === "STAFF_OFFBOARD"
+    );
+    expect(cases.length).toBeGreaterThan(0);
+    // The ledger records PARTIAL, not COMPLETE.
+    const ledger = staffAccessEvents.at(-1)!;
+    expect(ledger.outcome).toBe("PARTIAL");
+  });
+
+  it("deactivateTechnician (no login) opens an owned review case for each in-progress visit", async () => {
+    technicians.set("t1", { id: "t1", name: "Marcus", active: true, userSub: null });
+    jobs.set("j-live", {
+      id: "j-live",
+      technicianId: "t1",
+      status: "IN_PROGRESS",
+      scheduledDate: "2026-07-19",
+    });
+    const res = (await call("deactivateTechnician", {
+      technicianId: "t1",
+    })) as { outcome: string; inProgressCount?: number };
+    expect(res.outcome).toBe("COMPLETE");
+    expect(res.inProgressCount).toBe(1);
+    const cases = [...workItems.values()].filter((w) =>
+      String(w.title ?? "").includes("In-progress visit")
+    );
+    expect(cases.length).toBe(1);
+  });
+
+  it("hands a departing person's leads back with history written first and a newer owner preserved", async () => {
+    finLogin();
+    customers.set("lead-1", {
+      id: "lead-1",
+      displayName: "Lead One",
+      status: "LEAD",
+      ...( { leadOwnerSub: "sub-fin" } as object),
+    } as never);
+    customers.set("lead-2", {
+      id: "lead-2",
+      displayName: "Lead Two",
+      status: "LEAD",
+      ...( { leadOwnerSub: "someone-else" } as object),
+    } as never);
+    const res = (await call("offboardStaff", {
+      email: "finance@x.com",
+      idempotencyKey: "leads-key",
+    })) as { leadsReassigned: number; outcome: string };
+    expect(res.leadsReassigned).toBe(1);
+    expect(res.outcome).toBe("COMPLETE");
+    // History row exists for the reassigned lead, none for the other owner's.
+    expect(leadActivities.length).toBe(1);
+    expect((leadActivities[0] as { customerId: string }).customerId).toBe("lead-1");
+    // The other lead's newer owner is untouched.
+    expect(
+      (customers.get("lead-2") as unknown as { leadOwnerSub: string }).leadOwnerSub
+    ).toBe("someone-else");
   });
 });

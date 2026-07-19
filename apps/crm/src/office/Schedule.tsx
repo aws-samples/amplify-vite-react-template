@@ -3,6 +3,7 @@ import {
   api,
   listAll,
   opResult,
+  STAFF_OFFBOARD_REASONS,
   unwrap,
   type Customer,
   type Job,
@@ -479,10 +480,75 @@ function TechForm({
   const [createdTechId, setCreatedTechId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // GL-14: the Schedule entrance to offboarding carries the same controlled
+  // reason and stable idempotency key the Staff entrance does, and shows the
+  // PERSISTED outcome — never an assumed success.
+  const [offboardOpen, setOffboardOpen] = useState(false);
+  const [offboardReason, setOffboardReason] = useState<string>(
+    STAFF_OFFBOARD_REASONS[0]
+  );
+  const [offboardNote, setOffboardNote] = useState("");
+  const [offboardKey, setOffboardKey] = useState<string>(() =>
+    globalThis.crypto?.randomUUID?.() ?? `k-${Date.now()}`
+  );
+  const [offboardOutcome, setOffboardOutcome] = useState<{
+    outcome?: string;
+    effects?: string | null;
+    nextStep?: string | null;
+    inProgress?: boolean;
+  } | null>(null);
   // adminCreateUser is OWNER-only server-side (deliberately — invites are what
   // keep the role split real). Offering the checkbox to office staff meant the
   // record saved, the invite errored, and the error taught them errors are normal.
   const sendInvite = !existing && roles.owner && invite;
+
+  const runOffboard = async () => {
+    if (!existing) return;
+    if (offboardReason === "OTHER" && !offboardNote.trim()) {
+      setError("Choosing 'Other' needs a short note saying why.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api().mutations.deactivateTechnician({
+        technicianId: existing.id,
+        reasonCode: offboardReason,
+        note: offboardNote.trim() || undefined,
+        idempotencyKey: offboardKey,
+      });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      const data = opResult<{
+        outcome?: string;
+        effects?: string | null;
+        nextStep?: string | null;
+        inProgress?: boolean;
+        jobsUnassigned?: number;
+      }>(res);
+      if (data && (data.inProgress || data.outcome !== "COMPLETE")) {
+        // The persisted partial/in-progress outcome, with its one next step —
+        // the same key resumes it.
+        setOffboardOutcome(data);
+        setBusy(false);
+        return;
+      }
+      await onDone();
+      const n = data?.jobsUnassigned ?? 0;
+      window.alert(
+        `${existing.name} offboarded.${
+          n > 0
+            ? ` ${n} job${n === 1 ? " is" : "s are"} back in the scheduling pool and need${n === 1 ? "s" : ""} reassigning on the Schedule board.`
+            : ""
+        }`
+      );
+    } catch (err) {
+      // A refusal changed nothing; a fresh key lets a corrected request start
+      // clean.
+      setOffboardKey(globalThis.crypto?.randomUUID?.() ?? `k-${Date.now()}`);
+      setError(err instanceof Error ? err.message : "Could not offboard technician");
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="form-grid">
@@ -628,49 +694,82 @@ function TechForm({
       </Button>
       {existing ? (
         roles.owner ? (
-          <Button
-            block
-            variant="danger"
-            loading={busy}
-            onClick={() => {
-              // Offboarding kills a login and moves work — OWNER-only, and the
-              // confirm says both consequences out loud before it runs.
-              if (
-                !window.confirm(
-                  `Offboard ${existing.name}?\n\n• Their future assigned jobs go back to the scheduling pool for reassignment.\n• Their login is disabled and signed out immediately — they lose access to the customer book right now.\n\nTheir history stays.`
-                )
-              ) {
-                return;
-              }
-              setBusy(true);
-              (async () => {
-                const res = opResult<{
-                  jobsUnassigned: number;
-                  loginDisabled: boolean;
-                }>(
-                  await api().mutations.deactivateTechnician({
-                    technicianId: existing.id,
-                  })
-                );
-                await onDone();
-                const n = res?.jobsUnassigned ?? 0;
-                if (n > 0) {
-                  window.alert(
-                    `${existing.name} offboarded. ${n} job${
-                      n === 1 ? " is" : "s are"
-                    } back in the scheduling pool and need${
-                      n === 1 ? "s" : ""
-                    } reassigning on the Schedule board.`
-                  );
-                }
-              })().catch((err) => {
-                setError(err.message ?? "Could not offboard technician");
-                setBusy(false);
-              });
-            }}
-          >
-            Offboard technician
-          </Button>
+          offboardOutcome ? (
+            <Card>
+              <p style={{ margin: 0 }}>
+                <Badge tone="warn">
+                  {offboardOutcome.inProgress
+                    ? "already in progress"
+                    : "did not fully finish"}
+                </Badge>
+              </p>
+              <p className="small" style={{ marginTop: 8 }}>
+                {offboardOutcome.effects ??
+                  "The offboarding did not fully finish."}
+              </p>
+              {offboardOutcome.nextStep ? (
+                <p className="small" style={{ marginTop: 4 }}>
+                  {offboardOutcome.nextStep}
+                </p>
+              ) : null}
+              {!offboardOutcome.inProgress ? (
+                <Button block loading={busy} onClick={() => void runOffboard()}>
+                  Resume offboarding
+                </Button>
+              ) : null}
+            </Card>
+          ) : !offboardOpen ? (
+            <Button block variant="ghost" onClick={() => setOffboardOpen(true)}>
+              Offboard {existing.name}
+            </Button>
+          ) : (
+            <div className="form-grid">
+              <p className="muted small" style={{ margin: 0 }}>
+                Their future assigned jobs go back to the scheduling pool, and
+                their login (if any) is disabled and signed out immediately.
+                Their history stays.
+              </p>
+              <Field
+                label="Reason for offboarding"
+                hint="A controlled reason is recorded in the staff-access ledger with your name and the time."
+              >
+                <select
+                  value={offboardReason}
+                  onChange={(e) => setOffboardReason(e.target.value)}
+                >
+                  {STAFF_OFFBOARD_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r.replace(/_/g, " ").toLowerCase()}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {offboardReason === "OTHER" ? (
+                <Field label="Note" hint="Required when the reason is 'Other'.">
+                  <input
+                    value={offboardNote}
+                    onChange={(e) => setOffboardNote(e.target.value)}
+                    placeholder="Say why in a few words"
+                  />
+                </Field>
+              ) : null}
+              <Button
+                block
+                variant="danger"
+                loading={busy}
+                onClick={() => void runOffboard()}
+              >
+                Yes, offboard now
+              </Button>
+              <Button
+                block
+                variant="ghost"
+                onClick={() => setOffboardOpen(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          )
         ) : (
           <p className="muted small" style={{ margin: 0 }}>
             Ask the owner to offboard this technician — it disables their login,

@@ -591,6 +591,63 @@ export const schema = a.schema({
       allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read", "delete"]),
     ]),
 
+  /**
+   * GL-14 — the durable, single-winner staff access-change command. id = the
+   * caller's idempotency/version key, so the conditional create IS the claim:
+   * it is taken BEFORE any Cognito, work, or lead change and records actor,
+   * target, controlled reason, and prior/requested roles. A duplicate
+   * submission with the same key loses the create, reads this row, and returns
+   * the same persisted progress/outcome rather than starting another change; a
+   * process stop leaves the command holding the last confirmed stage + error so
+   * a resume (same key, after the lease expires) continues from there instead
+   * of reapplying blind. There is no browser delete — an accepted access change
+   * cannot be erased; the row itself becomes the persisted outcome the screens
+   * read back. Kept flat (validated strings, no new enums) against a schema
+   * near TypeScript's inference-depth ceiling. Stages: REQUESTED | VALIDATED |
+   * ACCESS_DONE | HANDOFF_DONE | COMPLETE | PARTIAL | FAILED.
+   */
+  StaffAccessCommand: a
+    .model({
+      action: a.string().required(),
+      subjectEmail: a.string().required(),
+      subjectSub: a.string(),
+      actorSub: a.string(),
+      actorEmail: a.string(),
+      reasonCode: a.string(),
+      reason: a.string(),
+      priorRoles: a.string(),
+      requestedRoles: a.string(),
+      stage: a.string().required(),
+      requestedAt: a.datetime().required(),
+      /** Exclusive resume lease: a retry/resume may take over only after this
+       *  passes, and must verify its own nonce read back before acting. */
+      leaseUntil: a.datetime(),
+      leaseNonce: a.string(),
+      attemptCount: a.integer(),
+      lastError: a.string(),
+      effects: a.string(),
+      outcome: a.string(),
+      resultJson: a.json(),
+    })
+    .secondaryIndexes((index) => [index("subjectEmail")])
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
+
+  /**
+   * GL-14 — serializes changes to the OWNER pool (fixed id "owner-serial").
+   * The conditional create is the mutex: any change that grants or removes the
+   * OWNER role holds it across the last-owner check AND the change itself, so
+   * two concurrent owner demotions/offboardings can no longer both pass a
+   * point-in-time count and then depend on a fallible after-the-fact rollback
+   * to keep one owner alive. Deleted on completion; a crashed holder's row is
+   * reclaimable after leaseUntil passes.
+   */
+  OwnerChangeSerial: a
+    .model({
+      holder: a.string(),
+      leaseUntil: a.datetime(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read", "delete"])]),
+
   // Best-effort per-IP throttle for the public quote endpoint (id =
   // "<ip>#<hour>"). Not a hard lock — it exists so a single abusive source
   // can't spin billed AI research and Routes calls unbounded.
@@ -1656,11 +1713,14 @@ export const schema = a.schema({
    */
   deactivateTechnician: a
     .mutation()
-    // GL-14 R2: an optional controlled reason (defaults to ROLE_ENDED). A tech
-    // with a login is routed through the hardened offboard workflow.
+    // GL-14: the Schedule entrance carries the same controlled reason (+ note
+    // for OTHER) and idempotency key the Staff entrance does. A tech with a
+    // login is routed through the hardened offboard workflow.
     .arguments({
       technicianId: a.string().required(),
-      reasonCode: a.string(),
+      reasonCode: a.string().required(),
+      note: a.string(),
+      idempotencyKey: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])

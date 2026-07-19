@@ -53,11 +53,18 @@ import {
 } from "../shared/lifecycleClaim";
 import { stripeClient } from "../shared/stripeClient";
 import {
-  findStaffAccessEventByKey,
   recordStaffAccessEvent,
   type StaffAccessActor,
   type StaffAccessEventInput,
 } from "../shared/staffAccessLog";
+import {
+  acquireOwnerSerial,
+  claimStaffAccessCommand,
+  finishCommand,
+  recordCommandStage,
+  releaseOwnerSerial,
+  type ClaimResult,
+} from "../shared/staffAccessCommand";
 import {
   assertOwnerRemains,
   assertReasonCode,
@@ -250,12 +257,20 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
       });
-    case "deactivateTechnician":
+    case "deactivateTechnician": {
+      const args = event.arguments as TechnicianIdArgs & {
+        reasonCode?: string | null;
+        note?: string | null;
+        idempotencyKey?: string | null;
+      };
       return deactivateTechnician(
-        (event.arguments as TechnicianIdArgs).technicianId,
+        args.technicianId,
         { sub: callerSub(event.identity), email: callerEmail(event.identity) },
-        (event.arguments as { reasonCode?: string }).reasonCode ?? null
+        args.reasonCode ?? null,
+        args.note ?? null,
+        args.idempotencyKey ?? null
       );
+    }
     case "saveTechnician":
       return saveTechnician(event.arguments as SaveTechnicianArgs);
     case "changeStaffRoles":
@@ -344,8 +359,8 @@ async function openAccessSecurityCase(opts: {
   relatedId: string;
   detail: string;
   resolutionAction: string;
-}) {
-  await openOwnedWork({
+}): Promise<boolean> {
+  const id = await openOwnedWork({
     kind: "STAFF_SECURITY",
     dedupeKey: `staff-security:${opts.relatedId}`,
     title: `Access removal did not finish: ${opts.subjectLabel}`,
@@ -355,6 +370,10 @@ async function openAccessSecurityCase(opts: {
     resolutionAction: opts.resolutionAction,
     ownerTeam: "OPS",
   });
+  // openOwnedWork never throws; null means the case does NOT exist. Callers
+  // must pass that truth on — the UI may never claim a case exists when its
+  // write failed (GL-14).
+  return id !== null;
 }
 
 /**
@@ -411,16 +430,22 @@ async function killLogin(
     return toRemove;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
+    let securityCaseOpened = false;
     if (caseContext) {
-      await openAccessSecurityCase({
+      securityCaseOpened = await openAccessSecurityCase({
         subjectLabel: caseContext.subjectLabel,
         relatedId: caseContext.relatedId,
         detail: `Disabling/signing-out/removing groups for ${caseContext.subjectLabel} failed partway: ${detail}. The login may still be enabled or partially privileged.`,
         resolutionAction:
           "Re-run the same access removal — every step is idempotent, so a re-run safely finishes it — then confirm the login is disabled and its groups are gone.",
-      }).catch(() => undefined);
+      }).catch(() => false);
     }
-    throw err;
+    // Carry whether the case durably exists: the caller reports it truthfully
+    // instead of promising a case that was never written.
+    throw Object.assign(
+      err instanceof Error ? err : new Error(detail),
+      { securityCaseOpened }
+    );
   }
 }
 
@@ -933,12 +958,16 @@ async function reassignFutureJobs(
   techName: string
 ): Promise<{
   jobsUnassigned: number;
+  /** Jobs whose unassign write failed — each one keeps the offboard out of
+   *  COMPLETE and is safely retried by re-running the same command (GL-14). */
+  jobsFailed: number;
   inProgress: { id: string; scheduledDate: string | null }[];
 }> {
   const client = await dataClient();
   const today = new Date().toISOString().slice(0, 10);
   const note = `Unassigned ${today}: ${techName} was offboarded. Returned to the scheduling pool for reassignment.`;
   let jobsUnassigned = 0;
+  let jobsFailed = 0;
   const inProgress: { id: string; scheduledDate: string | null }[] = [];
   let token: string | null | undefined;
   do {
@@ -953,20 +982,69 @@ async function reassignFutureJobs(
         continue;
       }
       if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
-        const { data: updated } = await client.models.Job.update({
-          id: job.id,
-          status: "UNSCHEDULED",
-          routeId: null,
-          routeOrder: null,
-          technicianId: null,
-          notes: job.notes ? `${job.notes}\n${note}` : note,
-        });
-        if (updated) jobsUnassigned++;
+        try {
+          // Re-read right before writing: if the office already moved this job
+          // to ANOTHER technician mid-offboard, that newer assignment stands —
+          // this handoff must never overwrite it back to UNSCHEDULED.
+          const { data: fresh } = await client.models.Job.get({ id: job.id });
+          if (
+            !fresh ||
+            fresh.technicianId !== technicianId ||
+            fresh.status !== "SCHEDULED"
+          ) {
+            continue;
+          }
+          const { data: updated } = await client.models.Job.update({
+            id: job.id,
+            status: "UNSCHEDULED",
+            routeId: null,
+            routeOrder: null,
+            technicianId: null,
+            notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
+          });
+          if (updated) jobsUnassigned++;
+          else jobsFailed++;
+        } catch {
+          jobsFailed++;
+        }
       }
     }
     token = page.nextToken;
   } while (token);
-  return { jobsUnassigned, inProgress };
+  return { jobsUnassigned, jobsFailed, inProgress };
+}
+
+/**
+ * The COMPLETE read-back for the job handoff (GL-14): count SCHEDULED future
+ * jobs still assigned to the technician AFTER the sweep. Zero is the only
+ * number that lets an offboard report COMPLETE — a job assigned mid-offboard or
+ * left by a failed write shows up here rather than hiding behind per-item
+ * counters. Returns -1 when the read itself fails (unknown ≠ confirmed).
+ */
+async function countAssignedFutureJobs(technicianId: string): Promise<number> {
+  try {
+    const client = await dataClient();
+    const today = new Date().toISOString().slice(0, 10);
+    let count = 0;
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Job.list({
+        filter: { technicianId: { eq: technicianId } },
+        nextToken: token,
+        limit: 200,
+      });
+      for (const job of page.data) {
+        if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
+          count++;
+        }
+      }
+      token = page.nextToken;
+    } while (token);
+    return count;
+  } catch (err) {
+    console.error("countAssignedFutureJobs failed", technicianId, err);
+    return -1;
+  }
 }
 
 /** Page the office to reassign the work an offboarded staff member left behind. */
@@ -1033,8 +1111,19 @@ async function notifyOffboard(opts: {
 async function deactivateTechnician(
   technicianId: string,
   actor: StaffAccessActor,
-  reasonCode?: string | null
+  reasonCode: string | null,
+  note: string | null,
+  idempotencyKey: string | null
 ) {
+  // GL-14: the Schedule entrance validates the same controlled reason the Staff
+  // entrance does — never a defaulted or free-typed one — before anything moves.
+  const code = assertReasonCode("OFFBOARD", reasonCode, note);
+  const key = idempotencyKey?.trim();
+  if (!key) {
+    throw new Error(
+      "This action needs a fresh request key from the screen — reload the Schedule board and retry."
+    );
+  }
   const client = await dataClient();
   const { data: tech } = await client.models.Technician.get({
     id: technicianId,
@@ -1049,21 +1138,106 @@ async function deactivateTechnician(
     return offboardStaff(
       {
         email: tech.email,
-        reasonCode: reasonCode ?? "ROLE_ENDED",
-        reason: "Deactivated from the Schedule board.",
+        reasonCode: code,
+        reason: note?.trim() || "Deactivated from the Schedule board.",
+        idempotencyKey: key,
       },
       actor
     );
   }
 
-  // A technician who was never invited to a login (no Cognito account) — there is
-  // no session to end or work/leads to release, but the deactivation is still a
-  // recorded, reasoned, audited action, not a silent flag flip.
-  const { jobsUnassigned, inProgress } = await reassignFutureJobs(
+  // A technician who was never invited to a login (no Cognito account) — there
+  // is no session to end or work/leads to release, but the deactivation is
+  // still one durable, reasoned, resumable command, not a silent flag flip.
+  const claim = await claimStaffAccessCommand({
+    idempotencyKey: key,
+    action: "OFFBOARD",
+    subjectEmail: tech.email ?? tech.name,
+    actor,
+    reasonCode: code,
+    reason: note ?? "Deactivated from the Schedule board (technician has no login).",
+    requestedRoles: [],
+  });
+  const dup = dedupedCommandResult(claim, tech.email ?? tech.name);
+  if (dup) return dup;
+
+  const { jobsUnassigned, jobsFailed, inProgress } = await reassignFutureJobs(
     technicianId,
     tech.name
   );
-  await client.models.Technician.update({ id: technicianId, active: false });
+  let techUpdateError: string | null = null;
+  try {
+    await client.models.Technician.update({ id: technicianId, active: false });
+  } catch (err) {
+    techUpdateError = err instanceof Error ? err.message : String(err);
+  }
+  // Complete means VERIFIED: read the record back rather than trusting the
+  // write, so a silent failure cannot report a deactivated technician.
+  const { data: verify } = await client.models.Technician.get({
+    id: technicianId,
+  });
+  const technicianConfirmedInactive = verify?.active === false;
+  // And no SCHEDULED future job may remain assigned — the read-back fact, not
+  // the sweep's own accounting.
+  const remainingFutureJobs = await countAssignedFutureJobs(technicianId);
+
+  // Every in-progress visit is a real-world action mid-flight — owned
+  // Operations review, exactly as the login path does. Confirmed writes only.
+  let caseWriteFailed = false;
+  for (const v of inProgress) {
+    const opened = await openOwnedWork({
+      kind: "STAFF_OFFBOARD",
+      dedupeKey: `offboard-inprogress:${v.id}`,
+      title: `In-progress visit left by a deactivated technician: ${tech.name}`,
+      detail: `${tech.name} was deactivated while visit ${v.id}${v.scheduledDate ? ` (${v.scheduledDate})` : ""} was in progress. It was left in place.`,
+      relatedId: v.id,
+      sourceUrl: "/schedule",
+      resolutionAction:
+        "Check whether the visit was actually finished. If it was, complete/close it; if not, reassign or reschedule it and tell the customer.",
+      ownerTeam: "OPS",
+    });
+    if (!opened) caseWriteFailed = true;
+  }
+
+  const partial =
+    !technicianConfirmedInactive ||
+    jobsFailed > 0 ||
+    remainingFutureJobs !== 0 ||
+    caseWriteFailed;
+  let recoveryCaseOpened = false;
+  if (partial) {
+    recoveryCaseOpened = Boolean(
+      await openOwnedWork({
+        kind: "STAFF_OFFBOARD",
+        dedupeKey: `${technicianId}:deactivate`,
+        title: `Finish deactivating ${tech.name}`,
+        detail: `Deactivating ${tech.name} did not fully finish: ${[
+          technicianConfirmedInactive
+            ? null
+            : `the inactive flag did not persist${techUpdateError ? ` (${techUpdateError})` : ""}`,
+          jobsFailed > 0
+            ? `${jobsFailed} future job${jobsFailed === 1 ? "" : "s"} could not be returned to the pool`
+            : null,
+          remainingFutureJobs > 0
+            ? `${remainingFutureJobs} future job${remainingFutureJobs === 1 ? " still reads" : "s still read"} as assigned`
+            : remainingFutureJobs === -1
+              ? "the remaining-jobs read-back failed"
+              : null,
+          caseWriteFailed
+            ? "an in-progress-visit review case could not be written"
+            : null,
+        ]
+          .filter(Boolean)
+          .join("; ")}.`,
+        relatedId: technicianId,
+        sourceUrl: "/schedule",
+        resolutionAction:
+          "Re-run Deactivate for this technician (idempotent) — it re-asserts the inactive flag and returns any remaining future jobs to the pool.",
+        ownerTeam: "OPS",
+      })
+    );
+  }
+
   await notifyOffboard({
     name: tech.name,
     relatedId: technicianId,
@@ -1072,30 +1246,97 @@ async function deactivateTechnician(
     jobsUnassigned,
     inProgress,
   });
+  const effects = `Technician ${tech.name} ${
+    technicianConfirmedInactive ? "verified inactive" : "NOT confirmed inactive"
+  }; ${jobsUnassigned} future job${
+    jobsUnassigned === 1 ? "" : "s"
+  } returned to the scheduling pool${
+    jobsFailed > 0 ? `, ${jobsFailed} could not be returned` : ""
+  }.${
+    inProgress.length
+      ? ` ${inProgress.length} in-progress visit${
+          inProgress.length === 1 ? "" : "s"
+        } put in owned Operations review.`
+      : ""
+  }`;
   const ledgerRecorded = await recordStaffAccessEventDurable({
     subjectEmail: tech.email ?? tech.name,
     subjectSub: technicianId,
     action: "OFFBOARD",
     actor,
-    reasonCode: reasonCode ?? "ROLE_ENDED",
-    reason: "Deactivated from the Schedule board (technician has no login).",
+    reasonCode: code,
+    reason: note ?? "Deactivated from the Schedule board (technician has no login).",
     priorRoles: ["TECH"],
     requestedRoles: [],
     newRoles: [],
-    idempotencyKey: null,
-    effects: `Technician ${tech.name} deactivated; ${jobsUnassigned} future job${
-      jobsUnassigned === 1 ? "" : "s"
-    } returned to the scheduling pool.${
-      inProgress.length
-        ? ` ${inProgress.length} in-progress visit${
-            inProgress.length === 1 ? "" : "s"
-          } left in place.`
-        : ""
-    }`,
-    outcome: "COMPLETE",
+    idempotencyKey: key,
+    effects,
+    outcome: partial ? "PARTIAL" : "COMPLETE",
   });
 
-  return { technicianId, jobsUnassigned, loginDisabled: false, ledgerRecorded };
+  const outcome = partial || !ledgerRecorded ? "PARTIAL" : "COMPLETE";
+  const result = {
+    technicianId,
+    jobsUnassigned,
+    jobsFailed,
+    inProgressCount: inProgress.length,
+    loginDisabled: false,
+    technicianConfirmedInactive,
+    recoveryCaseOpened,
+    ledgerRecorded,
+    outcome,
+    effects,
+    nextStep:
+      outcome === "COMPLETE"
+        ? null
+        : "Re-run Deactivate for this technician — it is idempotent and finishes what remains.",
+  };
+  const commandRecorded = await finishCommand(key, {
+    stage: outcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+    outcome,
+    effects,
+    result,
+  });
+  return { ...result, outcome: commandRecorded ? outcome : "PARTIAL" };
+}
+
+/**
+ * Translate a lost command claim into the truthful response (GL-14): a
+ * duplicate of a finished command returns the SAME persisted outcome; a
+ * duplicate of a live one reports in-progress rather than acting. Returns null
+ * when the caller won the claim and should proceed.
+ */
+function dedupedCommandResult(
+  claim: ClaimResult,
+  subjectLabel: string
+): Record<string, unknown> | null {
+  if (claim.claimed) return null;
+  if (claim.state === "DONE") {
+    let result: Record<string, unknown> | null = null;
+    if (typeof claim.command.resultJson === "string") {
+      try {
+        result = JSON.parse(claim.command.resultJson) as Record<string, unknown>;
+      } catch {
+        result = null;
+      }
+    }
+    return {
+      ...(result ?? {}),
+      subject: subjectLabel,
+      deduped: true,
+      outcome: claim.command.outcome ?? claim.command.stage,
+      effects: claim.command.effects ?? null,
+      stage: claim.command.stage,
+    };
+  }
+  return {
+    subject: subjectLabel,
+    inProgress: true,
+    outcome: "IN_PROGRESS",
+    stage: claim.command.stage,
+    effects:
+      "This change is already being applied by another request. Nothing was re-applied; check back in a moment for its recorded outcome.",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,20 +1514,6 @@ async function changeStaffRoles(
   // free-typed. Refused before anything is touched.
   const reasonCode = assertReasonCode("CHANGE_ROLES", args.reasonCode, args.reason);
 
-  // Idempotency: a replay with the same key is a no-op that returns the recorded
-  // outcome, so a double-submit cannot apply a second change.
-  if (args.idempotencyKey) {
-    const prior = await findStaffAccessEventByKey(args.idempotencyKey);
-    if (prior) {
-      return {
-        email: args.email.trim().toLowerCase(),
-        deduped: true,
-        outcome: prior.outcome,
-        effects: prior.effects,
-      };
-    }
-  }
-
   const roles = normalizeRoles(args.roles);
   assertValidRoleSet(roles);
   const want = staffRolesIn(roles);
@@ -1296,95 +1523,322 @@ async function changeStaffRoles(
     );
   }
 
-  const target = await loadStaffLogin(args.email);
-  const have = target.roles;
-
-  const removingOwner = have.includes("OWNER") && !want.includes("OWNER");
-  if (removingOwner) {
-    assertOwnerRemains({
-      targetLabel: target.email,
-      otherUsableOwners: await countOtherUsableOwners(target.username),
-      targetKeepsOwner: false,
-    });
-  }
-
-  if (want.includes("TECH") && !have.includes("TECH")) {
-    const client = await dataClient();
-    const { data: techs } =
-      await client.models.Technician.listTechnicianByUserSub({
-        userSub: target.sub,
-      });
-    const tech = techs?.[0];
-    if (!tech) {
-      throw new Error(
-        `Can't grant the technician role to ${target.email}: this login isn't linked to a technician record. Link it first with an invite (which binds a login to a licensed technician atomically).`
-      );
-    }
-    assertTechnicianCompliance(tech, { requireActive: true });
-  }
-
-  const toAdd = want.filter((r) => !have.includes(r));
-  const toRemove = have.filter((r) => !want.includes(r));
-  for (const r of toAdd) await addToGroup(target.username, r);
-  for (const r of toRemove) await removeFromGroup(target.username, r);
-
-  // A demotion must END the person's sessions, not just change group membership
-  // — otherwise an old token keeps the removed role until it expires. Any role
-  // removal globally signs the login out so the reduced access takes effect on
-  // the next request.
-  let sessionsInvalidated = false;
-  if (toRemove.length > 0) {
-    await globalSignOut(target.username);
-    sessionsInvalidated = true;
-  }
-
-  // Concurrency safety net: if this removed OWNER, re-count ALL usable owners
-  // now (not just at the stale pre-check). Two owners each demoting the other
-  // can both pass the point-in-time check; if the pool is now empty, put OWNER
-  // back on this target and refuse, so a recovery path always remains.
-  if (removingOwner && (await countAllUsableOwners()) === 0) {
-    await addToGroup(target.username, "OWNER");
+  // GL-14: the durable command is claimed BEFORE any provider read or change.
+  // The conditional create is the single-winner claim: a concurrent duplicate
+  // loses it and is handed the persisted progress/outcome instead of driving a
+  // second change, and a process stop leaves the command (stage + error) for a
+  // resume rather than an unrecorded partial change.
+  const key = args.idempotencyKey?.trim();
+  if (!key) {
     throw new Error(
-      `That change would leave BuzzKill with no usable owner (another owner change landed at the same time). ${target.email} keeps the owner role — promote a second owner, then retry.`
+      "This change needs a fresh request key from the screen — reload the Staff screen and retry."
     );
   }
-
-  // Read the end state back from Cognito rather than trusting the request: this
-  // is what the screen shows before reporting success, and what the ledger
-  // records. If it does not match `want`, a group op did not take and the caller
-  // (and the audit row) see the real roles, not the intended ones.
-  const effective = await effectiveStaffRoles(target.username);
-  const converged =
-    effective.length === want.length && want.every((r) => effective.includes(r));
-
-  const ledgerRecorded = await recordStaffAccessEventDurable({
-    subjectEmail: target.email,
-    subjectSub: target.sub,
+  const email = args.email.trim().toLowerCase();
+  const claim = await claimStaffAccessCommand({
+    idempotencyKey: key,
     action: "CHANGE_ROLES",
+    subjectEmail: email,
     actor,
     reasonCode,
-    reason: args.reason ?? null,
-    priorRoles: have,
+    reason: args.reason,
     requestedRoles: want,
-    newRoles: effective,
-    idempotencyKey: args.idempotencyKey ?? null,
-    effects: `Added ${toAdd.join(", ") || "none"}; removed ${
-      toRemove.join(", ") || "none"
-    }.${sessionsInvalidated ? " Sessions signed out." : ""}${converged ? "" : ` Effective roles did not converge on the request (${want.join(", ")}) — a group change did not take.`}`,
-    outcome: converged ? "COMPLETE" : "PARTIAL",
   });
+  const dup = dedupedCommandResult(claim, email);
+  if (dup) return dup;
 
-  return {
-    email: target.email,
-    roles: want,
-    effectiveRoles: effective,
-    converged,
-    sessionsInvalidated,
-    ledgerRecorded,
-    outcome: converged && ledgerRecorded ? "COMPLETE" : "PARTIAL",
-    added: toAdd,
-    removed: toRemove,
-  };
+  // From here the command owns the request: a validation refusal lands in a
+  // terminal FAILED (nothing changed, safe to retry with a fresh key), and any
+  // failure AFTER the first group write returns a truthful PARTIAL with a
+  // durable security owner — never a raw throw that loses the outcome.
+  let mutated = false;
+  let ownerSerialHeld = false;
+  try {
+    const target = await loadStaffLogin(args.email);
+    const have = target.roles;
+
+    const removingOwner = have.includes("OWNER") && !want.includes("OWNER");
+    const grantingOwner = !have.includes("OWNER") && want.includes("OWNER");
+    if (removingOwner || grantingOwner) {
+      // GL-14: owner-set changes are SERIALIZED. Holding the mutex across the
+      // last-owner check and the change makes the check authoritative — two
+      // concurrent demotions can no longer both pass a point-in-time count and
+      // then depend on a fallible rollback to keep one owner alive.
+      ownerSerialHeld = await acquireOwnerSerial(key);
+      if (!ownerSerialHeld) {
+        throw new Error(
+          "Another owner change is being applied right now. Wait a moment, then retry."
+        );
+      }
+    }
+    if (removingOwner) {
+      assertOwnerRemains({
+        targetLabel: target.email,
+        otherUsableOwners: await countOtherUsableOwners(target.username),
+        targetKeepsOwner: false,
+      });
+    }
+
+    if (want.includes("TECH") && !have.includes("TECH")) {
+      const client = await dataClient();
+      const { data: techs } =
+        await client.models.Technician.listTechnicianByUserSub({
+          userSub: target.sub,
+        });
+      const tech = techs?.[0];
+      if (!tech) {
+        throw new Error(
+          `Can't grant the technician role to ${target.email}: this login isn't linked to a technician record. Link it first with an invite (which binds a login to a licensed technician atomically).`
+        );
+      }
+      assertTechnicianCompliance(tech, { requireActive: true });
+    }
+
+    await recordCommandStage(key, "VALIDATED", {
+      priorRoles: have,
+      subjectSub: target.sub,
+    });
+
+    const toAdd = want.filter((r) => !have.includes(r));
+    const toRemove = have.filter((r) => !want.includes(r));
+
+    // Apply each group change individually. A failure no longer aborts the
+    // whole action into an unowned mixed state: the rest still apply, the
+    // failure is collected, and the result is a truthful PARTIAL with one safe
+    // resume (re-run — it re-applies only what is still missing).
+    mutated = true;
+    const opFailures: string[] = [];
+    for (const r of toAdd) {
+      try {
+        await addToGroup(target.username, r);
+      } catch (err) {
+        opFailures.push(
+          `add ${r}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+    for (const r of toRemove) {
+      try {
+        await removeFromGroup(target.username, r);
+      } catch (err) {
+        opFailures.push(
+          `remove ${r}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
+    // A demotion must END the person's sessions, not just change group
+    // membership — otherwise an old token keeps the removed role until it
+    // expires. Attempted even after a failed group op: the sign-out is the
+    // security-critical half.
+    let sessionsInvalidated = false;
+    if (toRemove.length > 0) {
+      try {
+        await globalSignOut(target.username);
+        sessionsInvalidated = true;
+      } catch (err) {
+        opFailures.push(
+          `sign-out: ${err instanceof Error ? err.message : String(err)} — old sessions may still carry the removed role${toRemove.length === 1 ? "" : "s"}`
+        );
+      }
+    }
+
+    // Defense-in-depth: under the owner serial this cannot fire, but if the
+    // pool ever reads empty, restore OWNER rather than proceed.
+    if (removingOwner && (await countAllUsableOwners()) === 0) {
+      await addToGroup(target.username, "OWNER");
+      throw new Error(
+        `That change would leave BuzzKill with no usable owner. ${target.email} keeps the owner role — promote a second owner, then retry.`
+      );
+    }
+
+    // Removing the TECH role is a field departure even when the person keeps
+    // office roles: their linked technician record goes inactive and future
+    // assigned visits return to the pool — a future job may not remain on
+    // someone who no longer holds the role (GL-14). Failures are counted, not
+    // swallowed, and keep the change out of COMPLETE.
+    let techJobsUnassigned = 0;
+    let techJobsFailed = 0;
+    let techInProgressCount = 0;
+    if (toRemove.includes("TECH")) {
+      try {
+        const client = await dataClient();
+        const { data: techs } =
+          await client.models.Technician.listTechnicianByUserSub({
+            userSub: target.sub,
+          });
+        const tech = techs?.[0];
+        if (tech) {
+          const r = await reassignFutureJobs(tech.id, tech.name);
+          techJobsUnassigned = r.jobsUnassigned;
+          techJobsFailed = r.jobsFailed;
+          techInProgressCount = r.inProgress.length;
+          for (const v of r.inProgress) {
+            const opened = await openOwnedWork({
+              kind: "STAFF_OFFBOARD",
+              dedupeKey: `offboard-inprogress:${v.id}`,
+              title: `In-progress visit left by a technician losing the TECH role: ${tech.name}`,
+              detail: `${tech.name} lost the TECH role while visit ${v.id}${v.scheduledDate ? ` (${v.scheduledDate})` : ""} was in progress. It was left in place.`,
+              relatedId: v.id,
+              sourceUrl: "/schedule",
+              resolutionAction:
+                "Check whether the visit was actually finished. If it was, complete/close it; if not, reassign or reschedule it and tell the customer.",
+              ownerTeam: "OPS",
+            });
+            if (!opened) techJobsFailed++;
+          }
+          await client.models.Technician.update({ id: tech.id, active: false });
+          const { data: verify } = await client.models.Technician.get({
+            id: tech.id,
+          });
+          if (verify?.active !== false) techJobsFailed++;
+        }
+      } catch (err) {
+        techJobsFailed++;
+        opFailures.push(
+          `technician handoff: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
+    // Read the end state back from Cognito rather than trusting the request:
+    // this is what the screen shows before reporting success, and what the
+    // ledger records.
+    const effective = await effectiveStaffRoles(target.username);
+    const converged =
+      opFailures.length === 0 &&
+      techJobsFailed === 0 &&
+      effective.length === want.length &&
+      want.every((r) => effective.includes(r));
+
+    // Every partial state has a durably CONFIRMED security owner. The flag is
+    // passed to the caller so the screen only claims a case that exists.
+    let securityCaseOpened = false;
+    if (!converged) {
+      securityCaseOpened = await openAccessSecurityCase({
+        subjectLabel: target.email,
+        relatedId: target.sub,
+        detail: `Role change on ${target.email} did not fully take. Requested ${want.join(", ")}; effective ${effective.join(", ") || "none"}.${opFailures.length ? ` Failures: ${opFailures.join("; ")}.` : ""}`,
+        resolutionAction:
+          "Resume the role change from the Staff screen — re-running the same change re-applies only what is still missing — then confirm the effective roles match the request.",
+      });
+    }
+
+    const ledgerRecorded = await recordStaffAccessEventDurable({
+      subjectEmail: target.email,
+      subjectSub: target.sub,
+      action: "CHANGE_ROLES",
+      actor,
+      reasonCode,
+      reason: args.reason ?? null,
+      priorRoles: have,
+      requestedRoles: want,
+      newRoles: effective,
+      idempotencyKey: key,
+      effects: `Added ${toAdd.join(", ") || "none"}; removed ${
+        toRemove.join(", ") || "none"
+      }.${sessionsInvalidated ? " Sessions signed out." : ""}${converged ? "" : ` Effective roles did not converge on the request (${want.join(", ")}) — a group change did not take.`}`,
+      outcome: converged ? "COMPLETE" : "PARTIAL",
+    });
+
+    const outcome = converged && ledgerRecorded ? "COMPLETE" : "PARTIAL";
+    const effects = `Added ${toAdd.join(", ") || "none"}; removed ${
+      toRemove.join(", ") || "none"
+    }; effective roles now ${effective.join(", ") || "none"}.${
+      sessionsInvalidated ? " Sessions signed out." : ""
+    }${
+      toRemove.includes("TECH")
+        ? ` Technician handoff: ${techJobsUnassigned} future job${
+            techJobsUnassigned === 1 ? "" : "s"
+          } returned to the pool${
+            techJobsFailed > 0 ? `, ${techJobsFailed} item(s) failed` : ""
+          }${
+            techInProgressCount > 0
+              ? `, ${techInProgressCount} in-progress visit(s) put in owned review`
+              : ""
+          }.`
+        : ""
+    }`;
+    const result = {
+      email: target.email,
+      roles: want,
+      effectiveRoles: effective,
+      converged,
+      sessionsInvalidated,
+      ledgerRecorded,
+      securityCaseOpened,
+      opFailures,
+      techJobsUnassigned,
+      techJobsFailed,
+      outcome,
+      effects,
+      nextStep:
+        outcome === "COMPLETE"
+          ? null
+          : "Resume the role change — re-running the same change applies only what is still missing.",
+      added: toAdd,
+      removed: toRemove,
+    };
+    const commandRecorded = await finishCommand(key, {
+      stage: outcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+      outcome,
+      effects,
+      lastError: opFailures.join("; ") || null,
+      result,
+    });
+    return { ...result, outcome: commandRecorded ? outcome : "PARTIAL" };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!mutated) {
+      // Refused before anything changed — terminal, truthful, safe to retry
+      // with a fresh key once the blocker is fixed.
+      await finishCommand(key, {
+        stage: "FAILED",
+        outcome: "REFUSED",
+        effects: "Nothing was changed.",
+        lastError: message,
+      });
+      throw err;
+    }
+    // Failed after mutation began (e.g. the Cognito read-back itself threw).
+    // Own it durably and return the truth instead of throwing it away.
+    const securityCaseOpened = await openAccessSecurityCase({
+      subjectLabel: email,
+      relatedId: `role-change:${email}`,
+      detail: `Role change on ${email} stopped partway: ${message}. The effective role set may not match the request.`,
+      resolutionAction:
+        "Resume the role change from the Staff screen — re-running the same change re-applies only what is still missing — then confirm the effective roles.",
+    }).catch(() => false);
+    const ledgerRecorded = await recordStaffAccessEventDurable({
+      subjectEmail: email,
+      action: "CHANGE_ROLES",
+      actor,
+      reasonCode,
+      reason: args.reason ?? null,
+      requestedRoles: want,
+      idempotencyKey: key,
+      effects: `Stopped partway: ${message}`,
+      outcome: "PARTIAL",
+    });
+    await finishCommand(key, {
+      stage: "PARTIAL",
+      outcome: "PARTIAL",
+      effects: `Stopped partway: ${message}`,
+      lastError: message,
+    });
+    return {
+      email,
+      outcome: "PARTIAL",
+      error: message,
+      securityCaseOpened,
+      ledgerRecorded,
+      effects: `Stopped partway: ${message}`,
+      nextStep:
+        "Resume the role change — re-running the same change applies only what is still missing.",
+    };
+  } finally {
+    if (ownerSerialHeld) await releaseOwnerSerial();
+  }
 }
 
 /**
@@ -1417,18 +1871,85 @@ async function offboardStaff(
 ) {
   const reasonCode = assertReasonCode("OFFBOARD", args.reasonCode, args.reason);
 
-  if (args.idempotencyKey) {
-    const prior = await findStaffAccessEventByKey(args.idempotencyKey);
-    if (prior) {
-      return {
-        email: args.email.trim().toLowerCase(),
-        deduped: true,
-        outcome: prior.outcome,
-        effects: prior.effects,
-      };
+  // GL-14: claim the durable command BEFORE any provider read or change — the
+  // single-winner conditional create. A duplicate returns the persisted
+  // progress/outcome; a stale command (process stop) is reclaimed under an
+  // exclusive lease and resumed idempotently.
+  const rawKey = args.idempotencyKey?.trim();
+  if (!rawKey) {
+    throw new Error(
+      "This action needs a fresh request key from the screen — reload the Staff screen and retry."
+    );
+  }
+  const key: string = rawKey;
+  const email = args.email.trim().toLowerCase();
+  const claim = await claimStaffAccessCommand({
+    idempotencyKey: key,
+    action: "OFFBOARD",
+    subjectEmail: email,
+    actor,
+    reasonCode,
+    reason: args.reason,
+    requestedRoles: [],
+  });
+  const dup = dedupedCommandResult(claim, email);
+  if (dup) return dup;
+
+  let mutated =
+    claim.claimed &&
+    claim.resumedFromStage !== null &&
+    claim.resumedFromStage !== "REQUESTED";
+  let ownerSerialHeld = false;
+  try {
+    return await runOffboard();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!mutated) {
+      await finishCommand(key, {
+        stage: "FAILED",
+        outcome: "REFUSED",
+        effects: "Nothing was changed.",
+        lastError: message,
+      });
+      throw err;
     }
+    // Stopped after access changes began. killLogin already opened (and
+    // reported) the security case when it threw; pass its truth through and
+    // return the persisted PARTIAL instead of losing it in a raw error.
+    const securityCaseOpened =
+      (err as { securityCaseOpened?: boolean }).securityCaseOpened === true;
+    const ledgerRecorded = await recordStaffAccessEventDurable({
+      subjectEmail: email,
+      action: "OFFBOARD",
+      actor,
+      reasonCode,
+      reason: args.reason ?? null,
+      requestedRoles: [],
+      idempotencyKey: key,
+      effects: `Stopped partway: ${message}`,
+      outcome: "PARTIAL",
+    });
+    await finishCommand(key, {
+      stage: "PARTIAL",
+      outcome: "PARTIAL",
+      effects: `Stopped partway: ${message}`,
+      lastError: message,
+    });
+    return {
+      email,
+      outcome: "PARTIAL",
+      error: message,
+      securityCaseOpened,
+      ledgerRecorded,
+      effects: `Stopped partway: ${message}`,
+      nextStep:
+        "Re-run Offboard with the same request — every step is idempotent and it continues from where it stopped.",
+    };
+  } finally {
+    if (ownerSerialHeld) await releaseOwnerSerial();
   }
 
+  async function runOffboard() {
   const target = await loadStaffLogin(args.email);
   const client = await dataClient();
   const { data: techs } =
@@ -1445,6 +1966,15 @@ async function offboardStaff(
 
   const offboardingOwner = target.roles.includes("OWNER");
   if (offboardingOwner) {
+    // GL-14: owner-set changes are serialized — the mutex is held across the
+    // last-owner check AND the removal, so the check is authoritative and no
+    // fallible rollback is needed to preserve an owner.
+    ownerSerialHeld = await acquireOwnerSerial(key);
+    if (!ownerSerialHeld) {
+      throw new Error(
+        "Another owner change is being applied right now. Wait a moment, then retry."
+      );
+    }
     assertOwnerRemains({
       targetLabel: target.email,
       otherUsableOwners: await countOtherUsableOwners(target.username),
@@ -1452,9 +1982,15 @@ async function offboardStaff(
     });
   }
 
+  await recordCommandStage(key, "VALIDATED", {
+    priorRoles: target.roles,
+    subjectSub: target.sub,
+  });
+
   // 1. Revoke access first: disable + global sign-out, THEN drop groups. A
   //    failure at any step opens a durable STAFF_SECURITY case and throws, so
   //    this never reports success over a half-revoked login.
+  mutated = true;
   const groupsRemoved = await killLogin(
     target.username,
     ["OWNER", "OFFICE", "FINANCE", "TECH", "cus-", "grp-"],
@@ -1462,9 +1998,8 @@ async function offboardStaff(
   );
   const rolesRemoved = groupsRemoved.filter(isStaffRole);
 
-  // Concurrency safety net: if this offboarded an owner and the pool is now
-  // empty (a second owner change landed at the same moment), roll this back —
-  // re-enable and restore OWNER — and refuse, so a recovery path always remains.
+  // Defense-in-depth: under the owner serial this cannot fire, but if the pool
+  // ever reads empty, restore access rather than proceed.
   if (offboardingOwner && (await countAllUsableOwners()) === 0) {
     await cognito.send(
       new AdminEnableUserCommand({
@@ -1474,12 +2009,19 @@ async function offboardStaff(
     );
     await addToGroup(target.username, "OWNER");
     throw new Error(
-      `Offboarding ${target.email} would leave BuzzKill with no usable owner (another owner change landed at the same time). Their access has been restored — promote a second owner, then retry.`
+      `Offboarding ${target.email} would leave BuzzKill with no usable owner. Their access has been restored — promote a second owner, then retry.`
     );
   }
 
+  await recordCommandStage(key, "ACCESS_DONE", {
+    effects: `Login disabled and signed out; groups removed: ${
+      groupsRemoved.join(", ") || "none"
+    }.`,
+  });
+
   // 2. Downstream effects — fail-safe, because access is already gone.
   let jobsUnassigned = 0;
+  let jobsFailed = 0;
   let inProgress: { id: string; scheduledDate: string | null }[] = [];
   let technicianDeactivated = false;
   let downstreamError: string | null = null;
@@ -1487,6 +2029,7 @@ async function offboardStaff(
     try {
       const r = await reassignFutureJobs(tech.id, tech.name);
       jobsUnassigned = r.jobsUnassigned;
+      jobsFailed = r.jobsFailed;
       inProgress = r.inProgress;
       await client.models.Technician.update({ id: tech.id, active: false });
       technicianDeactivated = true;
@@ -1495,18 +2038,26 @@ async function offboardStaff(
     }
   }
 
-  if (downstreamError) {
-    await openOwnedWork({
+  // Track whether every case this flow depends on was CONFIRMED written — the
+  // result may never claim owned recovery that does not durably exist (GL-14).
+  let caseWriteFailed = false;
+  if (downstreamError || jobsFailed > 0) {
+    const opened = await openOwnedWork({
       kind: "STAFF_OFFBOARD",
       dedupeKey: `${target.email}:offboard`,
       title: `Offboarding of ${tech?.name ?? target.email} didn't finish`,
-      detail: `Access was revoked (login disabled, signed out, roles removed) but returning ${tech?.name ?? "the technician"}'s future work to the pool failed: ${downstreamError}`,
+      detail: `Access was revoked (login disabled, signed out, roles removed) but returning ${tech?.name ?? "the technician"}'s future work to the pool ${
+        downstreamError
+          ? `failed: ${downstreamError}`
+          : `left ${jobsFailed} job${jobsFailed === 1 ? "" : "s"} unmoved`
+      }.`,
       relatedId: tech?.id ?? target.sub,
       sourceUrl: "/staff",
       resolutionAction:
         "Re-run Offboard for this person — access is already removed, so the re-run only returns their future jobs to the scheduling pool and flips the technician inactive.",
       ownerTeam: "OPS",
     });
+    if (!opened) caseWriteFailed = true;
   }
 
   // 3. Read the result back — "complete" means verified, not assumed (GL-14).
@@ -1519,16 +2070,41 @@ async function offboardStaff(
     loginConfirmedDisabled = false;
   }
   let technicianConfirmedInactive = !tech;
+  let remainingFutureJobs = 0;
   if (tech) {
     const { data: verify } = await client.models.Technician.get({ id: tech.id });
     technicianConfirmedInactive = verify?.active === false;
+    // COMPLETE requires the read-back fact, not the sweep's own accounting: no
+    // SCHEDULED future job may remain on this now-inactive technician.
+    remainingFutureJobs = await countAssignedFutureJobs(tech.id);
+    if (remainingFutureJobs !== 0 && !downstreamError && jobsFailed === 0) {
+      // The sweep believed it finished, but the read-back disagrees (a job
+      // assigned mid-offboard, or a failed read). Own it — never report green
+      // over an unverified handoff.
+      const opened = await openOwnedWork({
+        kind: "STAFF_OFFBOARD",
+        dedupeKey: `${target.email}:offboard`,
+        title: `Offboarding of ${tech.name} didn't finish`,
+        detail:
+          remainingFutureJobs > 0
+            ? `After the handoff, ${remainingFutureJobs} SCHEDULED future job${remainingFutureJobs === 1 ? " still reads" : "s still read"} as assigned to ${tech.name}, who is now inactive.`
+            : `The read-back that confirms no future job remains on ${tech.name} failed, so the handoff cannot be verified.`,
+        relatedId: tech.id,
+        sourceUrl: "/staff",
+        resolutionAction:
+          "Re-run Offboard for this person — it returns any remaining future jobs to the scheduling pool — then confirm none remain.",
+        ownerTeam: "OPS",
+      });
+      if (!opened) caseWriteFailed = true;
+    }
   }
 
   // Each in-progress visit is a real-world action mid-flight — put it in owned
   // Operations review rather than only naming it in an email, so nothing a
-  // departing technician was doing is left unwatched.
+  // departing technician was doing is left unwatched. Confirmed writes only: a
+  // visit whose case did not persist keeps the offboard out of COMPLETE.
   for (const v of inProgress) {
-    await openOwnedWork({
+    const opened = await openOwnedWork({
       kind: "STAFF_OFFBOARD",
       dedupeKey: `offboard-inprogress:${v.id}`,
       title: `In-progress visit left by an offboarded technician: ${tech?.name ?? target.email}`,
@@ -1539,6 +2115,7 @@ async function offboardStaff(
         "Check whether the visit was actually finished. If it was, complete/close it; if not, reassign or reschedule it and tell the customer.",
       ownerTeam: "OPS",
     });
+    if (!opened) caseWriteFailed = true;
   }
 
   // GL-18/GL-14 R5: every open exception this person had claimed goes back to
@@ -1560,7 +2137,7 @@ async function offboardStaff(
   // idempotent resume (re-run Offboard).
   const releaseFailed = workReleased.failed > 0 || leadsReassigned.failed > 0;
   if (releaseFailed) {
-    await openOwnedWork({
+    const opened = await openOwnedWork({
       kind: "STAFF_OFFBOARD",
       dedupeKey: `${target.email}:release`,
       title: `Finish returning ${tech?.name ?? target.email}'s owned work and leads`,
@@ -1571,28 +2148,85 @@ async function offboardStaff(
         "Re-run Offboard for this person (idempotent) to return their remaining claimed exceptions and open leads to the Sales/Ops team queues.",
       ownerTeam: "OPS",
     });
+    if (!opened) caseWriteFailed = true;
   }
+
+  await recordCommandStage(key, "HANDOFF_DONE");
 
   const outcome =
     downstreamError ||
+    jobsFailed > 0 ||
+    remainingFutureJobs !== 0 ||
     !loginConfirmedDisabled ||
     !technicianConfirmedInactive ||
-    releaseFailed
+    releaseFailed ||
+    caseWriteFailed
       ? "PARTIAL"
       : "COMPLETE";
 
   // If the login could not be confirmed disabled, that is a security gap, not a
-  // mere partial — own it explicitly.
+  // mere partial — own it explicitly, and only claim the case if it durably
+  // exists.
+  let securityCaseOpened = false;
   if (!loginConfirmedDisabled) {
-    await openAccessSecurityCase({
+    securityCaseOpened = await openAccessSecurityCase({
       subjectLabel: target.email,
       relatedId: target.sub,
       detail: `${target.email} was offboarded but a read-back could not confirm the login is disabled. It may still be enabled.`,
       resolutionAction:
         "Re-run Offboard (idempotent), then confirm in Cognito that the login is disabled and signed out.",
     });
+    if (!securityCaseOpened) caseWriteFailed = true;
   }
 
+  const effectsSummary = [
+    loginConfirmedDisabled
+      ? "Login disabled and globally signed out (confirmed)."
+      : securityCaseOpened
+        ? "Login disable NOT confirmed — security case opened."
+        : "Login disable NOT confirmed, and the security case could not be written — re-run Offboard now.",
+    `Roles removed: ${rolesRemoved.join(", ") || "none"}.`,
+    tech
+      ? technicianConfirmedInactive && jobsFailed === 0 && remainingFutureJobs === 0
+        ? `Technician ${tech.name} verified inactive; ${jobsUnassigned} future job${
+            jobsUnassigned === 1 ? "" : "s"
+          } returned to the scheduling pool (read-back confirms none remain).`
+        : `Technician ${tech.name} reassignment/deactivation incomplete${
+            jobsFailed > 0
+              ? ` (${jobsFailed} job${jobsFailed === 1 ? "" : "s"} could not be returned)`
+              : ""
+          }${
+            remainingFutureJobs > 0
+              ? ` (${remainingFutureJobs} future job${remainingFutureJobs === 1 ? "" : "s"} still read as assigned)`
+              : remainingFutureJobs === -1
+                ? " (the remaining-jobs read-back failed)"
+                : ""
+          } — owned OPS case ${downstreamError || jobsFailed > 0 ? "opened" : "required"}.`
+      : "No linked technician.",
+    inProgress.length
+      ? `${inProgress.length} in-progress visit${
+          inProgress.length === 1 ? "" : "s"
+        } put in owned Operations review.`
+      : "",
+    workReleased.released
+      ? `${workReleased.released} owned exception${
+          workReleased.released === 1 ? "" : "s"
+        } returned to the team inbox.`
+      : "",
+    leadsReassigned.reassigned
+      ? `${leadsReassigned.reassigned} open lead${
+          leadsReassigned.reassigned === 1 ? "" : "s"
+        } returned to the Sales queue.`
+      : "",
+    releaseFailed
+      ? `Hand-over incomplete (${workReleased.failed} exception(s), ${leadsReassigned.failed} lead(s)) — owned OPS case opened.`
+      : "",
+    caseWriteFailed
+      ? "At least one recovery case could not be written — re-run Offboard to re-assert it."
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   const ledgerRecorded = await recordStaffAccessEventDurable({
     subjectEmail: target.email,
     subjectSub: target.sub,
@@ -1603,40 +2237,8 @@ async function offboardStaff(
     priorRoles: target.roles,
     requestedRoles: [],
     newRoles: [],
-    idempotencyKey: args.idempotencyKey ?? null,
-    effects: [
-      loginConfirmedDisabled
-        ? "Login disabled and globally signed out (confirmed)."
-        : "Login disable NOT confirmed — security case opened.",
-      `Roles removed: ${rolesRemoved.join(", ") || "none"}.`,
-      tech
-        ? technicianConfirmedInactive
-          ? `Technician ${tech.name} verified inactive; ${jobsUnassigned} future job${
-              jobsUnassigned === 1 ? "" : "s"
-            } returned to the scheduling pool.`
-          : `Technician ${tech.name} reassignment/deactivation incomplete — owned OPS case opened.`
-        : "No linked technician.",
-      inProgress.length
-        ? `${inProgress.length} in-progress visit${
-            inProgress.length === 1 ? "" : "s"
-          } put in owned Operations review.`
-        : "",
-      workReleased.released
-        ? `${workReleased.released} owned exception${
-            workReleased.released === 1 ? "" : "s"
-          } returned to the team inbox.`
-        : "",
-      leadsReassigned.reassigned
-        ? `${leadsReassigned.reassigned} open lead${
-            leadsReassigned.reassigned === 1 ? "" : "s"
-          } returned to the Sales queue.`
-        : "",
-      releaseFailed
-        ? `Hand-over incomplete (${workReleased.failed} exception(s), ${leadsReassigned.failed} lead(s)) — owned OPS case opened.`
-        : "",
-    ]
-      .filter(Boolean)
-      .join(" "),
+    idempotencyKey: key,
+    effects: effectsSummary,
     outcome,
   });
 
@@ -1649,20 +2251,40 @@ async function offboardStaff(
     inProgress,
   });
 
-  return {
+  const finalOutcome = ledgerRecorded ? outcome : "PARTIAL";
+  const result = {
     email: target.email,
     loginDisabled: loginConfirmedDisabled,
     rolesRemoved,
     technicianDeactivated,
     technicianConfirmedInactive,
     jobsUnassigned,
+    jobsFailed,
     inProgressCount: inProgress.length,
     workReleased: workReleased.released,
     leadsReassigned: leadsReassigned.reassigned,
     releaseFailed,
     ledgerRecorded,
-    outcome: ledgerRecorded ? outcome : "PARTIAL",
+    securityCaseOpened,
+    caseWriteFailed,
+    outcome: finalOutcome,
+    effects: effectsSummary,
+    nextStep:
+      finalOutcome === "COMPLETE"
+        ? null
+        : "Re-run Offboard for this person — every step is idempotent, and the re-run finishes only what remains.",
   };
+  // The terminal command write is itself part of "complete": if it cannot be
+  // recorded, the effects stand but the durable command still reads unfinished,
+  // so the caller is told PARTIAL and the resume path stays live.
+  const commandRecorded = await finishCommand(key, {
+    stage: finalOutcome === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+    outcome: finalOutcome,
+    effects: effectsSummary,
+    result,
+  });
+  return { ...result, outcome: commandRecorded ? finalOutcome : "PARTIAL" };
+  }
 }
 
 type StaffRosterRow = {

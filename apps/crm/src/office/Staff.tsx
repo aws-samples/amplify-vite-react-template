@@ -359,6 +359,21 @@ function RosterBadges({ row }: { row: StaffRosterRow }) {
   );
 }
 
+/** The persisted outcome the server hands back for a staff-access command —
+ *  the screen shows THIS, never an assumed success (GL-14). */
+type StaffOpOutcome = {
+  outcome?: string;
+  effects?: string | null;
+  nextStep?: string | null;
+  securityCaseOpened?: boolean;
+  caseWriteFailed?: boolean;
+  inProgress?: boolean;
+  deduped?: boolean;
+  error?: string | null;
+  converged?: boolean;
+  effectiveRoles?: string[];
+};
+
 function StaffActions({
   row,
   onDone,
@@ -376,7 +391,24 @@ function StaffActions({
   const [busy, setBusy] = useState<null | "role" | "offboard">(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmOffboard, setConfirmOffboard] = useState(false);
+  // One idempotency key per LOGICAL request, held stable across retries so the
+  // server can dedupe/resume the same durable command — a retry after a
+  // timeout must not mint a new key and apply a second change (GL-14). A new
+  // key is minted only when the requested change itself changes or after a
+  // terminal outcome is acknowledged.
+  const [roleKey, setRoleKey] = useState<string>(newIdempotencyKey);
+  const [offboardKey, setOffboardKey] = useState<string>(newIdempotencyKey);
+  const [opOutcome, setOpOutcome] = useState<
+    (StaffOpOutcome & { kind: "role" | "offboard" }) | null
+  >(null);
   const isSelf = me.email?.toLowerCase() === row.email.toLowerCase();
+
+  const editRole = (next: RoleChoice) => {
+    setChoice(next);
+    // A different requested role set is a NEW logical request.
+    setRoleKey(newIdempotencyKey());
+    setOpOutcome(null);
+  };
 
   const saveRole = async () => {
     if (roleReason === "OTHER" && !note.trim()) {
@@ -391,27 +423,29 @@ function StaffActions({
         roles: [...ROLE_CHOICES[choice].groups],
         reasonCode: roleReason,
         reason: note.trim() || undefined,
-        idempotencyKey: newIdempotencyKey(),
+        idempotencyKey: roleKey,
       });
       if (res.errors?.length) throw new Error(res.errors[0].message);
-      // The server reads the effective roles back from Cognito and reports
-      // whether they converged on the request — surface a mismatch rather than
-      // a false success, so a group change that didn't take isn't hidden.
-      const data = opResult<{ converged?: boolean; effectiveRoles?: string[]; outcome?: string }>(res);
-      if (data && data.converged === false) {
-        throw new Error(
-          `The role change didn't fully take — the login is now ${
-            (data.effectiveRoles ?? []).join(", ") || "no roles"
-          }. Try again; it will converge on the requested set.`
-        );
+      const data = opResult<StaffOpOutcome>(res);
+      if (data?.inProgress) {
+        setOpOutcome({ ...data, kind: "role" });
+        setBusy(null);
+        return;
       }
-      if (data && data.outcome === "PARTIAL") {
-        throw new Error(
-          "The role changed, but its audit record couldn't be written — a security task was opened. Check the access history."
-        );
+      if (data && data.outcome !== "COMPLETE") {
+        // The persisted PARTIAL outcome — shown as recorded, with its one next
+        // step. The same key resumes it; nothing is invented client-side.
+        setOpOutcome({ ...data, kind: "role" });
+        setBusy(null);
+        return;
       }
+      setRoleKey(newIdempotencyKey());
+      setOpOutcome(null);
       await onDone();
     } catch (err) {
+      // A refusal (validation, last-owner, in-flight owner change): nothing
+      // changed. A fresh key lets the corrected request start clean.
+      setRoleKey(newIdempotencyKey());
       setError(err instanceof Error ? err.message : "Could not change the role");
       setBusy(null);
     }
@@ -429,20 +463,25 @@ function StaffActions({
         email: row.email,
         reasonCode: offboardReason,
         reason: note.trim() || undefined,
-        idempotencyKey: newIdempotencyKey(),
+        idempotencyKey: offboardKey,
       });
       if (res.errors?.length) throw new Error(res.errors[0].message);
-      // A PARTIAL outcome means access was removed but a downstream effect
-      // (reassignment, the read-back, or the audit write) is now owned by a
-      // case — report that truthfully instead of a clean success.
-      const data = opResult<{ outcome?: string }>(res);
-      if (data && data.outcome === "PARTIAL") {
-        throw new Error(
-          "Access was removed, but not every step could be confirmed — an owned case was opened. Re-run Offboard to finish it (it's safe to repeat)."
-        );
+      const data = opResult<StaffOpOutcome>(res);
+      if (data?.inProgress) {
+        setOpOutcome({ ...data, kind: "offboard" });
+        setBusy(null);
+        return;
       }
+      if (data && data.outcome !== "COMPLETE") {
+        setOpOutcome({ ...data, kind: "offboard" });
+        setBusy(null);
+        return;
+      }
+      setOffboardKey(newIdempotencyKey());
+      setOpOutcome(null);
       await onDone();
     } catch (err) {
+      setOffboardKey(newIdempotencyKey());
       setError(err instanceof Error ? err.message : "Could not offboard this person");
       setBusy(null);
     }
@@ -499,7 +538,7 @@ function StaffActions({
         label="Change role"
         hint="Granting the technician role needs a linked, licensed technician record."
       >
-        <select value={choice} onChange={(e) => setChoice(e.target.value as RoleChoice)}>
+        <select value={choice} onChange={(e) => editRole(e.target.value as RoleChoice)}>
           {Object.entries(ROLE_CHOICES).map(([k, v]) => (
             <option key={k} value={k}>
               {v.label}
@@ -584,6 +623,44 @@ function StaffActions({
         )}
       </div>
 
+      {opOutcome ? (
+        <Card>
+          <p style={{ margin: 0 }}>
+            {opOutcome.inProgress ? (
+              <Badge tone="warn">already in progress</Badge>
+            ) : (
+              <Badge tone="warn">
+                {opOutcome.deduped ? "recorded outcome" : "partial"}
+              </Badge>
+            )}
+          </p>
+          <p className="small" style={{ marginTop: 8 }}>
+            {opOutcome.effects ??
+              opOutcome.error ??
+              "The change did not fully finish."}
+          </p>
+          {!opOutcome.inProgress && opOutcome.securityCaseOpened === false && (opOutcome.error || opOutcome.caseWriteFailed) ? (
+            <p className="small" style={{ marginTop: 4 }}>
+              A recovery case could <strong>not</strong> be written for this —
+              resume it now; do not assume anyone else has been notified.
+            </p>
+          ) : null}
+          {opOutcome.nextStep ? (
+            <p className="small" style={{ marginTop: 4 }}>{opOutcome.nextStep}</p>
+          ) : null}
+          {!opOutcome.inProgress && opOutcome.outcome !== "COMPLETE" ? (
+            <Button
+              block
+              loading={busy !== null}
+              onClick={() =>
+                void (opOutcome.kind === "role" ? saveRole() : doOffboard())
+              }
+            >
+              Resume {opOutcome.kind === "role" ? "role change" : "offboarding"}
+            </Button>
+          ) : null}
+        </Card>
+      ) : null}
       <ErrorNote error={error} />
     </div>
   );

@@ -328,23 +328,54 @@ export async function reassignLeadsForSub(input: {
         if ((lead as { leadOwnerSub?: string | null }).leadOwnerSub !== input.sub) {
           continue;
         }
-        const { data: updated } = await client.models.Customer.update({
-          id: lead.id,
-          leadOwnerSub: null,
-          leadOwnerEmail: null,
-        });
-        if (!updated) {
+        // Per-lead isolation: one failed lead may not abandon the rest of the
+        // sweep (GL-14) — each is counted individually and remains resumable.
+        try {
+          // Re-read right before moving: a reassignment made after this sweep
+          // began (a newer owner) stands — never overwritten back to the queue.
+          const { data: fresh } = await client.models.Customer.get({
+            id: lead.id,
+          });
+          if (
+            !fresh ||
+            (fresh as { leadOwnerSub?: string | null }).leadOwnerSub !==
+              input.sub
+          ) {
+            continue;
+          }
+          // History BEFORE the ownership move, and CHECKED: if the move then
+          // fails, a re-run still finds the lead owned by the departing person
+          // and repairs it. The reverse order loses the trail the moment
+          // ownership moves — a missing history row could never be rebuilt by
+          // re-running.
+          const { data: activity } = await client.models.LeadActivity.create({
+            customerId: lead.id,
+            channel: "LIFECYCLE",
+            direction: "OUTBOUND",
+            actorSub: undefined,
+            actorEmail: input.actorEmail ?? "system@pestbuzzkill.com",
+            outcome: "NOTE",
+            note: "Lead owner was offboarded — returned to the Sales team queue.",
+            occurredAt: new Date().toISOString(),
+          });
+          if (!activity) {
+            failed++;
+            continue;
+          }
+          const { data: updated } = await client.models.Customer.update({
+            id: lead.id,
+            leadOwnerSub: null,
+            leadOwnerEmail: null,
+          });
+          if (!updated) {
+            failed++;
+            continue;
+          }
+          reassigned++;
+        } catch (err) {
+          console.error("reassignLeadsForSub: lead failed", lead.id, err);
           failed++;
-          continue;
         }
-        await appendLeadActivity({
-          customerId: lead.id,
-          channel: "LIFECYCLE",
-          outcome: "NOTE",
-          note: "Lead owner was offboarded — returned to the Sales team queue.",
-          actor: { sub: null, email: input.actorEmail ?? null },
-        });
-        reassigned++;
       }
       token = page.nextToken ?? undefined;
     } while (token);

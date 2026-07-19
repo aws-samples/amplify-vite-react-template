@@ -288,24 +288,48 @@ export async function releaseOwnedWorkForSub(input: {
         nextToken: token,
       });
       for (const item of page.data ?? []) {
-        const team = (item.ownerTeam as WorkOwnerTeam) ?? "OPS";
-        const { data: updated } = await client.models.WorkItem.update({
-          id: item.id,
-          ownerSub: null,
-          ownerEmail: defaultWorkOwner(team),
-        });
-        if (!updated) {
+        // Per-item isolation (GL-14): one failed item may not abandon the rest
+        // of the sweep — each is counted individually and stays resumable.
+        try {
+          // Re-read right before moving: a claim made after this sweep began
+          // (a newer, active owner) stands — never overwritten back to the
+          // team inbox.
+          const { data: fresh } = await client.models.WorkItem.get({
+            id: item.id,
+          });
+          if (!fresh || fresh.status !== "OPEN" || fresh.ownerSub !== input.sub) {
+            continue;
+          }
+          const team = (fresh.ownerTeam as WorkOwnerTeam) ?? "OPS";
+          // History BEFORE the ownership move, and CHECKED: if the move then
+          // fails, a re-run still finds the item owned by the departing person
+          // and repairs it. The reverse order loses the trail the moment
+          // ownership moves.
+          const { data: event } = await client.models.WorkEvent.create({
+            workItemId: item.id,
+            eventType: "RELEASED",
+            actorEmail: input.actorEmail ?? "system@pestbuzzkill.com",
+            note: `Returned to the ${team} team inbox — the previous owner was offboarded. ${input.reason}`,
+            occurredAt: new Date().toISOString(),
+          });
+          if (!event) {
+            failed++;
+            continue;
+          }
+          const { data: updated } = await client.models.WorkItem.update({
+            id: item.id,
+            ownerSub: null,
+            ownerEmail: defaultWorkOwner(team),
+          });
+          if (!updated) {
+            failed++;
+            continue;
+          }
+          released++;
+        } catch (err) {
+          console.error("releaseOwnedWorkForSub: item failed", item.id, err);
           failed++;
-          continue;
         }
-        await client.models.WorkEvent.create({
-          workItemId: item.id,
-          eventType: "RELEASED",
-          actorEmail: input.actorEmail ?? "system@pestbuzzkill.com",
-          note: `Returned to the ${team} team inbox — the previous owner was offboarded. ${input.reason}`,
-          occurredAt: new Date().toISOString(),
-        });
-        released++;
       }
       token = page.nextToken ?? undefined;
     } while (token);
