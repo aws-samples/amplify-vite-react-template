@@ -4,6 +4,7 @@ import { emailShell, sendEmail } from "./email";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
 import { refundInvoice, refundableRemaining } from "./refund";
 import { assertTechnicianCompliance } from "./compliance";
+import { licenseFactsFor } from "./licenses";
 import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
@@ -1114,11 +1115,27 @@ export async function rescheduleVisit(args: {
     if (!customer0) throw new Error(`Customer ${job.customerId} no longer exists`);
     if (!technician) throw new Error(`Technician ${args.technicianId} not found`);
     // Revalidate the license for the NEW date — a move past a license expiry is
-    // exactly the case this catches.
-    assertTechnicianCompliance(technician, {
-      requireActive: true,
-      workDate: newDate!,
-    });
+    // exactly the case this catches. GL-17: currency comes from the licence
+    // records (legacy fields only while a technician has no records).
+    if (!technician.active) {
+      throw new Error(
+        `${technician.name ?? "This technician"} is inactive and cannot be assigned regulated work`
+      );
+    }
+    {
+      const facts = await licenseFactsFor(technician, newDate!);
+      if (!facts.current) {
+        if (facts.source === "LEGACY") {
+          assertTechnicianCompliance(technician, {
+            requireActive: true,
+            workDate: newDate!,
+          });
+        }
+        throw new Error(
+          `${technician.name ?? "This technician"} has no current applicator licence on record for ${newDate} — record a current licence or pick another technician`
+        );
+      }
+    }
     if (!route || route.technicianId !== technician.id || route.date !== newDate) {
       throw new Error(
         "The selected route doesn't belong to that technician and date."

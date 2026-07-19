@@ -769,6 +769,50 @@ export const STAFF_OFFBOARD_REASONS = [
   "OTHER",
 ] as const;
 
+/** GL-17 — licence records. Office adds/updates records; only an OWNER
+ *  (Compliance seat) changes a record's status. */
+export type TechnicianLicenseRecord = {
+  id: string;
+  technicianId: string;
+  number: string;
+  licenseType?: string | null;
+  issuer?: string | null;
+  status: string;
+  expiresOn?: string | null;
+  evidenceKey?: string | null;
+  evidenceNote?: string | null;
+  statusSetBy?: string | null;
+  statusSetAt?: string | null;
+};
+
+export function saveTechnicianLicense(input: {
+  licenseId?: string;
+  technicianId: string;
+  number: string;
+  licenseType?: string;
+  issuer?: string;
+  expiresOn?: string;
+  evidenceNote?: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      saveTechnicianLicense: (i: typeof input) => OpResult;
+    }
+  ).saveTechnicianLicense(input);
+}
+
+export function setLicenseStatus(input: {
+  licenseId: string;
+  status: string;
+  reason: string;
+}): OpResult {
+  return (
+    api().mutations as unknown as {
+      setLicenseStatus: (i: typeof input) => OpResult;
+    }
+  ).setLicenseStatus(input);
+}
+
 /** Set a staff login's role set to exactly `roles`. A controlled reasonCode is
  *  required; an idempotencyKey makes a retry safe. Server ends sessions on a
  *  demotion, reads the effective roles back, and records the durable ledger row. */

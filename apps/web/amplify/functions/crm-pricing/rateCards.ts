@@ -40,7 +40,7 @@ export const ZONE_B = {
   MOSQUITO_MONTHLY: $(25),
 };
 
-// ---------- Mosquito & tick (seasonal, May–October) ----------
+// ---------- Mosquito & tick (seasonal, Apr–October) ----------
 
 export function priceMosquito(opts: {
   tick: boolean;
@@ -87,7 +87,7 @@ export function priceMosquito(opts: {
     monthly += ZONE_B.MOSQUITO_MONTHLY;
   }
   return {
-    service: opts.tick ? "Mosquito + tick plan (May–Oct)" : "Mosquito plan (May–Oct)",
+    service: opts.tick ? "Mosquito + tick plan (Apr–Oct)" : "Mosquito plan (Apr–Oct)",
     frequency: "MONTHLY",
     monthlyCents: monthly,
     oneTimeCents: null,

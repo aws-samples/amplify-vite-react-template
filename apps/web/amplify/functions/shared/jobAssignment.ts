@@ -1,6 +1,7 @@
 import type { AppSyncIdentity } from "aws-lambda";
 import { callerIsOffice, callerSub } from "./authz";
 import { assertTechnicianCompliance, hasCurrentLicense } from "./compliance";
+import { licenseFactsFor } from "./licenses";
 import { dataClient } from "./dataClient";
 import { openOwnedWork } from "./ownedWork";
 
@@ -89,10 +90,25 @@ export async function assertCanActOnJob(
   // The caller IS the assignee — from here, surfacing the real reason leaks
   // nothing. Active-credential requirement: the assignee must still be a
   // current applicator to touch a regulated job, judged against the visit date.
-  assertTechnicianCompliance(tech, {
-    requireActive: true,
-    workDate: job.scheduledDate ?? undefined,
-  });
+  // GL-17: licence currency comes from the one-to-many licence records (legacy
+  // single fields only for technicians with no records yet).
+  if (!tech.active) {
+    throw new Error(`${tech.name ?? "This technician"} is inactive and cannot be assigned regulated work`);
+  }
+  const licenseFacts = await licenseFactsFor(tech, job.scheduledDate ?? undefined);
+  if (!licenseFacts.current) {
+    if (licenseFacts.source === "LEGACY") {
+      // No records yet — the legacy single-field check names exactly which
+      // fact is missing/expired (better fix-it message than a generic one).
+      assertTechnicianCompliance(tech, {
+        requireActive: true,
+        workDate: job.scheduledDate ?? undefined,
+      });
+    }
+    throw new Error(
+      `${tech.name ?? "This technician"} has no current applicator licence on record for ${job.scheduledDate ?? "today"} — ask the office to record a current licence before acting on regulated work`
+    );
+  }
 }
 
 /**
@@ -124,8 +140,9 @@ export async function assertCanReadJob(
   if (!job.technicianId || job.technicianId !== tech.id) {
     throw new Error(NOT_AUTHORIZED_JOB);
   }
-  if (!hasCurrentLicense(tech) && job.status !== "COMPLETED") {
-    throw new Error(NOT_AUTHORIZED_JOB);
+  if (job.status !== "COMPLETED") {
+    const facts = await licenseFactsFor(tech);
+    if (!facts.current) throw new Error(NOT_AUTHORIZED_JOB);
   }
 }
 
@@ -248,7 +265,7 @@ export async function technicianDocumentAllowed(
   // Live work context: the report's job is currently assigned to the caller and
   // they hold a current licence (an unlicensed tech gets no new customer
   // context, only their own history).
-  if (report.jobId && hasCurrentLicense(tech)) {
+  if (report.jobId && (await licenseFactsFor(tech)).current) {
     const { data: job } = await client.models.Job.get({
       id: String(report.jobId),
     });

@@ -569,7 +569,7 @@ export default function CustomerDetail() {
             <ListRow
               key={p.id}
               title={p.planName}
-              subtitle={planCadence(p.priceCents, p.serviceFrequency)}
+              subtitle={planCadence(p.priceCents, p.serviceFrequency, p.seasonal)}
               meta={
                 <>
                   {p.cancellationPending ? (

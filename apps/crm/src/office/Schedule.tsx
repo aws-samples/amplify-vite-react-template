@@ -3,12 +3,15 @@ import {
   api,
   listAll,
   opResult,
+  saveTechnicianLicense,
+  setLicenseStatus,
   STAFF_OFFBOARD_REASONS,
   unwrap,
   type Customer,
   type Job,
   type Route,
   type Technician,
+  type TechnicianLicenseRecord,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { addDays, fmtDate, prettyWeekday, todayEastern } from "../lib/format";
@@ -460,6 +463,206 @@ export default function Schedule() {
   );
 }
 
+/**
+ * GL-17 — a technician's one-to-many licence records: full history always
+ * visible, office adds renewals with evidence, and only an owner (the
+ * Compliance seat) flips a record's status. The single legacy licence fields
+ * remain the fallback until a technician has records.
+ */
+function LicenseRecords({ technicianId }: { technicianId: string }) {
+  const roles = useRoles();
+  const [records, setRecords] = useState<TechnicianLicenseRecord[] | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [number, setNumber] = useState("");
+  const [licenseType, setLicenseType] = useState("");
+  const [issuer, setIssuer] = useState("");
+  const [expiresOn, setExpiresOn] = useState("");
+  const [evidenceNote, setEvidenceNote] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await (
+        api().models as unknown as {
+          TechnicianLicense: {
+            listTechnicianLicenseByTechnicianId: (
+              q: { technicianId: string },
+              o: { limit: number }
+            ) => Promise<{ data: TechnicianLicenseRecord[] }>;
+          };
+        }
+      ).TechnicianLicense.listTechnicianLicenseByTechnicianId(
+        { technicianId },
+        { limit: 100 }
+      );
+      setRecords(res.data ?? []);
+    } catch {
+      setRecords([]);
+    }
+  }, [technicianId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const addRecord = async () => {
+    if (!number.trim()) {
+      setError("The licence number is required");
+      return;
+    }
+    setBusy("add");
+    setError(null);
+    try {
+      const res = await saveTechnicianLicense({
+        technicianId,
+        number: number.trim(),
+        licenseType: licenseType.trim() || undefined,
+        issuer: issuer.trim() || undefined,
+        expiresOn: expiresOn || undefined,
+        evidenceNote: evidenceNote.trim() || undefined,
+      });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      setNumber("");
+      setLicenseType("");
+      setIssuer("");
+      setExpiresOn("");
+      setEvidenceNote("");
+      setAdding(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save the licence");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const changeStatus = async (rec: TechnicianLicenseRecord, status: string) => {
+    const reason = window.prompt(
+      `Set licence ${rec.number} to ${status.toLowerCase()} — why? (recorded)`
+    );
+    if (!reason?.trim()) return;
+    setBusy(rec.id);
+    setError(null);
+    try {
+      const res = await setLicenseStatus({
+        licenseId: rec.id,
+        status,
+        reason: reason.trim(),
+      });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change the status");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const statusTone = (s: string): "ok" | "warn" | "danger" | "muted" =>
+    s === "CURRENT" ? "ok" : s === "PENDING" ? "warn" : "danger";
+
+  return (
+    <Field
+      group
+      label="Licence records"
+      hint="Full history stays visible. New records start pending until an owner marks them current — that is what makes the technician dispatchable."
+    >
+      {records === null ? (
+        <Spinner />
+      ) : records.length === 0 ? (
+        <p className="muted small" style={{ margin: 0 }}>
+          No licence records yet — the single licence fields above still apply
+          until the first record is added.
+        </p>
+      ) : (
+        records.map((r) => (
+          <ListRow
+            key={r.id}
+            title={`${r.number}${r.licenseType ? ` · ${r.licenseType}` : ""}`}
+            subtitle={[
+              r.issuer,
+              r.expiresOn ? `expires ${r.expiresOn}` : null,
+              r.evidenceNote ? `evidence: ${r.evidenceNote}` : null,
+              r.statusSetBy
+                ? `status by ${r.statusSetBy}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+            meta={
+              <>
+                <Badge tone={statusTone(r.status)}>{r.status.toLowerCase()}</Badge>
+                {roles.owner && r.status !== "CURRENT" ? (
+                  <Button
+                    small
+                    variant="ghost"
+                    loading={busy === r.id}
+                    onClick={() => void changeStatus(r, "CURRENT")}
+                  >
+                    Mark current
+                  </Button>
+                ) : null}
+                {roles.owner && r.status === "CURRENT" ? (
+                  <Button
+                    small
+                    variant="ghost"
+                    loading={busy === r.id}
+                    onClick={() => void changeStatus(r, "REVOKED")}
+                  >
+                    Revoke
+                  </Button>
+                ) : null}
+              </>
+            }
+          />
+        ))
+      )}
+      {!adding ? (
+        <Button small variant="ghost" onClick={() => setAdding(true)}>
+          + Add licence / renewal
+        </Button>
+      ) : (
+        <>
+          <div className="form-row-2">
+            <input
+              value={number}
+              onChange={(e) => setNumber(e.target.value)}
+              placeholder="Licence number"
+            />
+            <input
+              value={licenseType}
+              onChange={(e) => setLicenseType(e.target.value)}
+              placeholder="Type (e.g. applicator)"
+            />
+          </div>
+          <div className="form-row-2">
+            <input
+              value={issuer}
+              onChange={(e) => setIssuer(e.target.value)}
+              placeholder="Issuer (MA / RI)"
+            />
+            <input
+              type="date"
+              value={expiresOn}
+              onChange={(e) => setExpiresOn(e.target.value)}
+            />
+          </div>
+          <input
+            value={evidenceNote}
+            onChange={(e) => setEvidenceNote(e.target.value)}
+            placeholder="Evidence (document ref, where it's filed)"
+          />
+          <Button small loading={busy === "add"} onClick={() => void addRecord()}>
+            Save licence record
+          </Button>
+        </>
+      )}
+      <ErrorNote error={error} />
+    </Field>
+  );
+}
+
 function TechForm({
   existing,
   onDone,
@@ -695,6 +898,7 @@ function TechForm({
       >
         {existing ? "Save technician" : "Add technician"}
       </Button>
+      {existing ? <LicenseRecords technicianId={existing.id} /> : null}
       {existing ? (
         roles.owner ? (
           offboardOutcome ? (

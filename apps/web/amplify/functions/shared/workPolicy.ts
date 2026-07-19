@@ -39,7 +39,8 @@ export type WorkKind =
   | "VISIT_CHANGE_RECOVERY"
   | "ROUTE_MISMATCH"
   | "STALE_DRAFT"
-  | "OFFICE_FIELD_REVIEW";
+  | "OFFICE_FIELD_REVIEW"
+  | "LICENSE_LAPSE";
 
 /**
  * CRITICAL — money is at risk, access/security may be wrong, or the customer was
@@ -53,7 +54,8 @@ export type VerifierId =
   | "CUSTOMER_HAS_EMAIL"
   | "JOB_STAFFED"
   | "VISIT_MONEY_SETTLED"
-  | "PLAN_CANCELLATION_SETTLED";
+  | "PLAN_CANCELLATION_SETTLED"
+  | "TECH_LICENSED";
 
 /**
  * A close the app can *confirm*. Running it re-checks the real-world fact
@@ -405,6 +407,27 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     manualReasons: [
       { code: "REVIEWED_APPROPRIATE", label: "Reviewed — appropriate use" },
       { code: "REVIEWED_COACHED", label: "Reviewed — coached the employee" },
+      OTHER,
+    ],
+  },
+  LICENSE_LAPSE: {
+    severity: "HIGH",
+    // A technician's applicator licence is expiring (advance warning) or has
+    // expired/been revoked. Their future capacity is already removed by the
+    // enforcement points; this is the office's advance renewal/reassignment
+    // work so customers are moved BEFORE a doorstep failure.
+    customerImpact:
+      "A technician's applicator licence is lapsing — their future visits need a renewal on file or reassignment before service dates arrive.",
+    ownerTeam: "OPS",
+    verified: [
+      {
+        id: "LICENSE_CURRENT",
+        label: "Confirm a current licence is on file (or no future work remains)",
+        verifier: "TECH_LICENSED",
+      },
+    ],
+    manualReasons: [
+      { code: "TECH_OFFBOARDED", label: "Technician offboarded — no future work" },
       OTHER,
     ],
   },

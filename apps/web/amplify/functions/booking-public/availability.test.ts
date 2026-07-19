@@ -20,7 +20,16 @@ const listJobByScheduledDate = vi.fn(
 const fakeDataClient = {
   models: {
     Technician: {
-      list: async () => ({ data: [{ id: "t1", active: true }] }),
+      list: async () => ({
+        data: [
+          {
+            id: "t1",
+            active: true,
+            licenseNumber: "MA-1",
+            licenseExpiresOn: "2099-01-01",
+          },
+        ],
+      }),
     },
     Job: { listJobByScheduledDate },
     Customer: {

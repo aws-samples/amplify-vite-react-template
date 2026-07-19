@@ -99,7 +99,7 @@ export default function PortalHome() {
                   title={p.planName}
                   subtitle={
                     <>
-                      {planCadence(p.priceCents, p.serviceFrequency)}
+                      {planCadence(p.priceCents, p.serviceFrequency, p.seasonal)}
                       {p.cancellationPending ? (
                         <span className="nested-line">
                           Cancellation in progress — your plan stays active until

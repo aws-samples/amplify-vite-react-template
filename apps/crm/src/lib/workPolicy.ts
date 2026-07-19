@@ -296,6 +296,22 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  LICENSE_LAPSE: {
+    label: "Licence lapsing",
+    severity: "HIGH",
+    customerImpact:
+      "A technician's applicator licence is lapsing — their future visits need a renewal on file or reassignment before service dates arrive.",
+    verified: [
+      {
+        id: "LICENSE_CURRENT",
+        label: "Confirm a current licence is on file (or no future work remains)",
+      },
+    ],
+    manualReasons: [
+      { code: "TECH_OFFBOARDED", label: "Technician offboarded — no future work" },
+      OTHER,
+    ],
+  },
   OFFICE_FIELD_REVIEW: {
     label: "Office field-action review",
     severity: "ROUTINE",

@@ -205,6 +205,9 @@ export const schema = a.schema({
     // GL-13: an office member performed a technician field action with a
     // recorded reason; reviewed on the routine clock.
     "OFFICE_FIELD_REVIEW",
+    // GL-17: a licence is expiring/expired — advance renewal or reassignment
+    // work opened before service dates arrive.
+    "LICENSE_LAPSE",
   ]),
   WorkStatus: a.enum(["OPEN", "RESOLVED"]),
   WorkEventType: a.enum([
@@ -390,6 +393,12 @@ export const schema = a.schema({
       // on the subscription clears it and service resumes.
       delinquent: a.boolean(),
       delinquentSince: a.datetime(),
+      // GL-17 — the approved seasonal facts, stamped at enrollment from the
+      // accepted offer. seasonal plans bill monthly year-round and owe exactly
+      // one treatment per month in serviceMonths (mosquito/mosquito+tick:
+      // [4..10], April–October). Data, not a law engine.
+      seasonal: a.boolean(),
+      serviceMonths: a.integer().array(),
       notes: a.string(),
       accessGroups: a.string().array(),
       jobs: a.hasMany("Job", "servicePlanId"),
@@ -702,6 +711,61 @@ export const schema = a.schema({
       windowStart: a.datetime(),
     })
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read", "delete"])]),
+
+  /**
+   * GL-17 — one visible treatment obligation per in-season calendar month of a
+   * seasonal plan (id = `<servicePlanId>#<YYYY-MM>` so creation is naturally
+   * idempotent). The obligation is what the customer was promised; its status
+   * is the truthful history: DUE (owed, nothing queued yet), SCHEDULED (a
+   * visit exists), SATISFIED (that month's treatment happened — an in-season
+   * first treatment counts), SKIPPED_WEATHER (visibly rescheduled/delayed), or
+   * SKIPPED_MISSED (the month passed unserved — durable history, and per the
+   * locked rule it creates NO catch-up visit). Lambda-written; office and the
+   * customer's portal read.
+   */
+  TreatmentObligation: a
+    .model({
+      servicePlanId: a.id().required(),
+      customerId: a.id(),
+      monthKey: a.string().required(),
+      status: a.string().required(),
+      jobId: a.string(),
+      note: a.string(),
+      accessGroups: a.string().array(),
+    })
+    .secondaryIndexes((index) => [index("servicePlanId").sortKeys(["monthKey"])])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groupsDefinedIn("accessGroups").to(["read"]),
+    ]),
+
+  /**
+   * GL-17 — one-to-many applicator licence records per technician. Each record
+   * retains number, type/issuer, status, expiration, evidence, and its full
+   * status history (statusSetBy/statusSetAt on the row; changes append to the
+   * staff-access ledger). Compliance (OWNER, the CEO's compliance seat)
+   * controls whether a record is CURRENT. No browser writes — all changes go
+   * through saveTechnicianLicense/setLicenseStatus so every change is a
+   * reasoned, attributable action. Office-only read: a licence is credential
+   * PII (GL-13).
+   */
+  TechnicianLicense: a
+    .model({
+      technicianId: a.id().required(),
+      number: a.string().required(),
+      licenseType: a.string(),
+      issuer: a.string(),
+      status: a.string().required(),
+      expiresOn: a.date(),
+      evidenceKey: a.string(),
+      evidenceNote: a.string(),
+      statusSetBy: a.string(),
+      statusSetAt: a.datetime(),
+    })
+    .secondaryIndexes((index) => [index("technicianId")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
 
   // AI-researched market rates — the base price for every quoted service.
   // One research per service+area(+sqft band) returns a full rate sheet
@@ -1600,6 +1664,44 @@ export const schema = a.schema({
    * compliance fields; active technicians must have a current applicator
    * license. Direct model writes are read-only so this gate cannot be skipped.
    */
+  /**
+   * GL-17 — add or update one licence record for a technician. Office adds
+   * records and evidence; only setLicenseStatus (OWNER/Compliance) changes a
+   * record's status. Every save is validated and audited.
+   */
+  saveTechnicianLicense: a
+    .mutation()
+    .arguments({
+      licenseId: a.string(),
+      technicianId: a.string().required(),
+      number: a.string().required(),
+      licenseType: a.string(),
+      issuer: a.string(),
+      expiresOn: a.date(),
+      evidenceKey: a.string(),
+      evidenceNote: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
+   * GL-17 — Compliance's control over licence currency: set a record CURRENT,
+   * EXPIRED, or REVOKED with a required reason. OWNER-only (the CEO holds the
+   * Compliance seat at launch). Revocation/expiry triggers the capacity sweep
+   * and advance owned work; it never erases historical authorship.
+   */
+  setLicenseStatus: a
+    .mutation()
+    .arguments({
+      licenseId: a.string().required(),
+      status: a.string().required(),
+      reason: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmAdmin)),
+
   saveTechnician: a
     .mutation()
     .arguments({

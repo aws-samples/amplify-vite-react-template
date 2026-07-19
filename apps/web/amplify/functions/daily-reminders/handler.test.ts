@@ -33,7 +33,13 @@ type Job = {
 };
 type Invoice = { id: string; jobId?: string | null; status: string };
 type Route = { id: string; date: string; technicianId: string };
-type Tech = { id: string; name: string; active: boolean };
+type Tech = {
+  id: string;
+  name: string;
+  active: boolean;
+  licenseNumber?: string | null;
+  licenseExpiresOn?: string | null;
+};
 
 let plans: Plan[] = [];
 let jobs: Job[] = [];
@@ -381,7 +387,7 @@ describe("unstaffed-visit gate on tomorrow's reminders", () => {
 
   const staffedSetup = () => {
     routes.push({ id: "r1", date: tomorrow(), technicianId: "t1" });
-    techs.push({ id: "t1", name: "Sam", active: true });
+    techs.push({ id: "t1", name: "Sam", active: true, licenseNumber: "MA-1", licenseExpiresOn: "2099-01-01" });
   };
 
   it("reminds the customer when the visit is on an active technician's route", async () => {
@@ -441,7 +447,7 @@ describe("unstaffed-visit gate on tomorrow's reminders", () => {
 
   it("suppresses the reminder when the job's route is dated a different day", async () => {
     routes.push({ id: "r1", date: "2020-01-01", technicianId: "t1" });
-    techs.push({ id: "t1", name: "Sam", active: true });
+    techs.push({ id: "t1", name: "Sam", active: true, licenseNumber: "MA-1", licenseExpiresOn: "2099-01-01" });
     seedJob({
       customerId: "c-moved",
       status: "SCHEDULED",

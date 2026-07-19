@@ -1,5 +1,13 @@
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
+import { ensureObligation, markObligation } from "./obligations";
+import {
+  firstWeekdayOf,
+  monthKeyAfter,
+  monthKeyOf,
+  nextServiceMonth,
+  type SeasonalPlanFacts,
+} from "./season";
 
 /** Days between visits for each recurring frequency. */
 const FREQUENCY_DAYS: Record<string, number> = {
@@ -68,8 +76,9 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       return;
     }
 
+    const seasonal = Boolean((plan as SeasonalPlanFacts).seasonal);
     const interval = FREQUENCY_DAYS[plan.serviceFrequency];
-    if (!interval) return;
+    if (!interval && !seasonal) return;
 
     // Defense in depth: never queue a visit for a deactivated customer. Their
     // deactivation already cancels the plans, so an ACTIVE plan on an INACTIVE
@@ -108,7 +117,28 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     } while (token);
 
     const base = (job.completedAt ?? new Date().toISOString()).slice(0, 10);
-    const dueDate = toWeekday(addDays(base, interval));
+    let dueDate = toWeekday(addDays(base, interval || 30));
+    let nextMonthKey: string | null = null;
+    if (seasonal) {
+      // GL-17: seasonal plans owe one treatment per in-season calendar month.
+      // The completed visit SATISFIES its month (an in-season first treatment
+      // counts); the next visit targets the NEXT in-season month — October
+      // rolls to next April, never a November date, and a missed month is
+      // never compensated with a catch-up.
+      const completedMonth = monthKeyOf(job.completedAt ?? new Date().toISOString());
+      await markObligation({
+        servicePlanId: job.servicePlanId,
+        monthKey: completedMonth,
+        status: "SATISFIED",
+        jobId: job.id,
+        note: "Treatment completed — this calendar month's obligation is met.",
+      });
+      nextMonthKey = nextServiceMonth(
+        plan as SeasonalPlanFacts,
+        monthKeyAfter(completedMonth)
+      );
+      dueDate = toWeekday(firstWeekdayOf(nextMonthKey));
+    }
 
     await client.models.Job.create({
       // GL-15: deterministic id derived from the completed job, so the create
@@ -131,6 +161,19 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
         customer?.groupId ?? undefined
       ),
     });
+    if (seasonal && nextMonthKey) {
+      await ensureObligation({
+        servicePlanId: job.servicePlanId,
+        customerId: job.customerId,
+        monthKey: nextMonthKey,
+        status: "SCHEDULED",
+        jobId: `next-${job.id}`,
+        accessGroups: customerAccessGroups(
+          job.customerId,
+          customer?.groupId ?? undefined
+        ),
+      });
+    }
     console.log(
       `Queued next ${plan.serviceFrequency} visit for plan ${job.servicePlanId} on ${dueDate}`
     );
@@ -139,11 +182,18 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
   }
 }
 
-/** Next visit's target date for a plan, for the completion email copy. */
+/** Next visit's target date for a plan, for the completion email copy. A
+ *  seasonal plan's next treatment is the first weekday of the next in-season
+ *  month — an October completion says April, never late November. */
 export function nextVisitDate(
   frequency: string,
-  completedIso: string
+  completedIso: string,
+  plan?: SeasonalPlanFacts | null
 ): string | null {
+  if (plan?.seasonal) {
+    const next = nextServiceMonth(plan, monthKeyAfter(monthKeyOf(completedIso)));
+    return toWeekday(firstWeekdayOf(next));
+  }
   const interval = FREQUENCY_DAYS[frequency];
   if (!interval) return null;
   return toWeekday(addDays(completedIso.slice(0, 10), interval));

@@ -1,6 +1,8 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { dataClient } from "./dataClient";
+import { isSeasonalPlanName, monthKeyOf, isServiceMonth, SEASONAL_SERVICE_MONTHS } from "./season";
+import { ensureObligation } from "./obligations";
 import { customerAccessGroups } from "./dynamicGroups";
 import { emailShell, notifyLeads, sendEmail } from "./email";
 import { provisionPortalLogin } from "./portalProvision";
@@ -923,11 +925,35 @@ async function finalizeClaimed(
             | "QUARTERLY",
           status: "ACTIVE",
           startDate: booking.selectedDate ?? undefined,
+          // GL-17: seasonal facts are stamped at enrollment from the accepted
+          // offer — mosquito / mosquito+tick bills monthly year-round and owes
+          // one treatment per month April–October. Billing starts immediately
+          // even off-season; the first in-season treatment satisfies its month.
+          ...(isSeasonalPlanName(serviceLabel)
+            ? { seasonal: true, serviceMonths: [...SEASONAL_SERVICE_MONTHS] }
+            : {}),
           notes: "Booked online via the website funnel",
           accessGroups,
         }),
       () => client.models.ServicePlan.get({ id: planId })
     );
+    // GL-17: an in-season enrollment's first visit is that calendar month's
+    // treatment obligation (SCHEDULED now, SATISFIED when it completes). An
+    // off-season enrollment creates no obligation — billing starts now, the
+    // first obligation is next April, created when its visit is queued.
+    if (isSeasonalPlanName(serviceLabel) && booking.selectedDate && plan?.id) {
+      const monthKey = booking.selectedDate.slice(0, 7);
+      if (isServiceMonth({ seasonal: true }, monthKey)) {
+        await ensureObligation({
+          servicePlanId: plan.id,
+          customerId: customer.id,
+          monthKey,
+          status: "SCHEDULED",
+          jobId: `job-${booking.id}`,
+          accessGroups,
+        });
+      }
+    }
   }
   const servicePlanId = plan?.id ?? undefined;
 

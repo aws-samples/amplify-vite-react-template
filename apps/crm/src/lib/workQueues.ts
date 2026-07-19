@@ -67,6 +67,8 @@ export type PlanVisitJob = {
 };
 
 export type NextVisitPlan = {
+  seasonal?: boolean | null;
+  serviceMonths?: (number | null)[] | null;
   id: string;
   status?: string | null;
 };
@@ -94,5 +96,16 @@ export function plansWithoutNextVisit<P extends NextVisitPlan>(
       )
       .map((j) => j.servicePlanId as string)
   );
-  return plans.filter((p) => p.status === "ACTIVE" && !hasVisit.has(p.id));
+  // GL-17: an off-season seasonal plan legitimately has no next visit — it is
+  // healthy, not broken. In season it is held to the same bar as everyone.
+  const month = Number(today.slice(5, 7));
+  const inSeason = (p: NextVisitPlan): boolean => {
+    if (!p.seasonal) return true;
+    const months =
+      (p.serviceMonths ?? []).filter((m): m is number => typeof m === "number");
+    return (months.length ? months : [4, 5, 6, 7, 8, 9, 10]).includes(month);
+  };
+  return plans.filter(
+    (p) => p.status === "ACTIVE" && inSeason(p) && !hasVisit.has(p.id)
+  );
 }

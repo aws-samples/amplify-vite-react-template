@@ -59,6 +59,9 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-13: an office member used emergency field access with a reason —
   // reviewed on the routine clock.
   OFFICE_FIELD_REVIEW: 24 * 60,
+  // GL-17: a licence is expiring or expired — advance renewal/reassignment
+  // work so customers move before a doorstep failure.
+  LICENSE_LAPSE: 24 * 60,
 };
 
 export function defaultWorkOwner(team: WorkOwnerTeam): string {

@@ -1,6 +1,6 @@
 import type { AppSyncIdentity } from "aws-lambda";
 import { callerIsOffice } from "./authz";
-import { hasCurrentLicense } from "./compliance";
+import { licenseFactsFor } from "./licenses";
 import { dataClient } from "./dataClient";
 import { assertCanReadJob, technicianForCaller } from "./jobAssignment";
 import { openOwnedWork } from "./ownedWork";
@@ -133,7 +133,7 @@ export async function buildTechnicianDay(
     }
     // Employed but no current licence: no current/future route or new customer
     // context. Their own completed jobs stay reviewable via technicianJob.
-    if (!hasCurrentLicense(tech)) {
+    if (!(await licenseFactsFor(tech)).current) {
       return emptyDay({
         licenseLapsed: true,
         technicianId: tech.id,
@@ -303,7 +303,9 @@ export async function buildTechnicianJob(
   // their own COMPLETED jobs). That review does not grant NEW customer context:
   // no other-visit history, and only the reports they personally authored.
   const lapsedReview =
-    !callerIsOffice(identity) && tech != null && !hasCurrentLicense(tech);
+    !callerIsOffice(identity) &&
+    tech != null &&
+    !(await licenseFactsFor(tech)).current;
 
   const priorVisits = lapsedReview
     ? []

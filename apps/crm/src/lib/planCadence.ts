@@ -20,14 +20,20 @@ const VISIT_INTERVAL: Record<string, string> = {
   QUARTERLY: "technician visits every 3 months",
 };
 
-/** e.g. "$45.00 per month · technician visits every 3 months" */
+/** e.g. "$45.00 per month · technician visits every 3 months". A seasonal plan
+ *  (GL-17) says the approved promise: billed monthly year-round, treatments
+ *  monthly April–October — off-season it is healthy, not broken. */
 export function planCadence(
   priceCents: number | null | undefined,
-  frequency: string | null | undefined
+  frequency: string | null | undefined,
+  seasonal?: boolean | null
 ): string {
-  const visits = VISIT_INTERVAL[frequency ?? ""] ?? null;
   const price =
     priceCents != null ? `${money(priceCents)} per month` : "AI-priced";
+  if (seasonal) {
+    return `${price} year-round · treatments monthly April–October`;
+  }
+  const visits = VISIT_INTERVAL[frequency ?? ""] ?? null;
   return visits ? `${price} · ${visits}` : price;
 }
 

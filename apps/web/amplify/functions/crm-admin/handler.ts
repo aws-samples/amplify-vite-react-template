@@ -11,10 +11,7 @@ import {
   type UserType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "../shared/dataClient";
-import {
-  assertTechnicianCanBeSaved,
-  assertTechnicianCompliance,
-} from "../shared/compliance";
+import { assertTechnicianCanBeSaved } from "../shared/compliance";
 import { opFieldName } from "../shared/opEvent";
 import { notifyOffice } from "../shared/email";
 import {
@@ -44,6 +41,7 @@ import {
 } from "../shared/leadLifecycle";
 import { recordCustomerLifecycleEvent } from "../shared/lifecycleLog";
 import { deactivateCustomer as sharedDeactivateCustomer } from "../shared/deactivation";
+import { licenseFactsFor } from "../shared/licenses";
 import {
   assertLifecycleReason,
   lifecycleReasonSummary,
@@ -111,6 +109,22 @@ type SaveTechnicianArgs = {
   active: boolean;
   licenseNumber?: string | null;
   licenseExpiresOn?: string | null;
+};
+
+type SaveTechnicianLicenseArgs = {
+  licenseId?: string | null;
+  technicianId: string;
+  number: string;
+  licenseType?: string | null;
+  issuer?: string | null;
+  expiresOn?: string | null;
+  evidenceKey?: string | null;
+  evidenceNote?: string | null;
+};
+type SetLicenseStatusArgs = {
+  licenseId: string;
+  status: string;
+  reason?: string | null;
 };
 
 type ChangeStaffRolesArgs = {
@@ -274,6 +288,16 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
     }
     case "saveTechnician":
       return saveTechnician(event.arguments as SaveTechnicianArgs);
+    case "saveTechnicianLicense":
+      return saveTechnicianLicense(
+        event.arguments as unknown as SaveTechnicianLicenseArgs,
+        { sub: callerSub(event.identity), email: callerEmail(event.identity) }
+      );
+    case "setLicenseStatus":
+      return setLicenseStatus(
+        event.arguments as unknown as SetLicenseStatusArgs,
+        { sub: callerSub(event.identity), email: callerEmail(event.identity) }
+      );
     case "changeStaffRoles":
       return changeStaffRoles(event.arguments as ChangeStaffRolesArgs, {
         sub: callerSub(event.identity),
@@ -337,6 +361,131 @@ async function saveTechnician(args: SaveTechnicianArgs) {
     );
   }
   return { technicianId: result.data.id };
+}
+
+
+/** GL-17 — the statuses Compliance may set on a licence record. */
+const LICENSE_STATUSES = ["CURRENT", "PENDING", "EXPIRED", "REVOKED"] as const;
+
+/**
+ * GL-17 — add or update one licence record. Office records the fact; only
+ * setLicenseStatus (OWNER, the Compliance seat) flips a record CURRENT, so an
+ * office typo cannot mint capacity. A NEW record starts PENDING; updating an
+ * existing record's facts keeps its status. Every change lands in the
+ * staff-access ledger.
+ */
+async function saveTechnicianLicense(
+  args: SaveTechnicianLicenseArgs,
+  actor: StaffAccessActor
+) {
+  const number = args.number.trim();
+  if (!number) throw new Error("The licence number is required");
+  if (args.expiresOn && !/^\d{4}-\d{2}-\d{2}$/.test(args.expiresOn)) {
+    throw new Error("The expiration date must be YYYY-MM-DD");
+  }
+  const client = await dataClient();
+  const { data: tech } = await client.models.Technician.get({
+    id: args.technicianId,
+  });
+  if (!tech) throw new Error(`Technician ${args.technicianId} not found`);
+
+  const fields = {
+    technicianId: args.technicianId,
+    number,
+    licenseType: args.licenseType?.trim() || undefined,
+    issuer: args.issuer?.trim() || undefined,
+    expiresOn: args.expiresOn || undefined,
+    evidenceKey: args.evidenceKey?.trim() || undefined,
+    evidenceNote: args.evidenceNote?.trim() || undefined,
+  };
+  let licenseId: string;
+  let status: string;
+  if (args.licenseId) {
+    const { data: existing } = await client.models.TechnicianLicense.get({
+      id: args.licenseId,
+    });
+    if (!existing || existing.technicianId !== args.technicianId) {
+      throw new Error("That licence record does not belong to this technician");
+    }
+    const { data: updated } = await client.models.TechnicianLicense.update({
+      id: args.licenseId,
+      ...fields,
+    });
+    if (!updated) throw new Error("Could not save the licence record");
+    licenseId = updated.id;
+    status = updated.status;
+  } else {
+    const { data: created } = await client.models.TechnicianLicense.create({
+      ...fields,
+      status: "PENDING",
+      statusSetBy: actor.email ?? undefined,
+      statusSetAt: new Date().toISOString(),
+    });
+    if (!created) throw new Error("Could not create the licence record");
+    licenseId = created.id;
+    status = created.status;
+  }
+  await recordStaffAccessEventDurable({
+    subjectEmail: tech.email ?? tech.name,
+    subjectSub: args.technicianId,
+    action: "CHANGE_ROLES",
+    actor,
+    reasonCode: "CORRECTION",
+    reason: `Licence record ${args.licenseId ? "updated" : "added"}: ${number}${args.expiresOn ? ` (expires ${args.expiresOn})` : ""}.`,
+    idempotencyKey: null,
+    effects: `Technician ${tech.name} licence record ${licenseId} saved (status ${status}).`,
+    outcome: "COMPLETE",
+  });
+  return { licenseId, status };
+}
+
+/**
+ * GL-17 — Compliance's control of licence currency. OWNER-only at the schema.
+ * A revocation/expiry removes future capacity everywhere the enforcement
+ * points read (availability, assignment, T-1 staffing, field actions) and the
+ * daily sweep opens the reassignment work; historical authorship is untouched.
+ */
+async function setLicenseStatus(
+  args: SetLicenseStatusArgs,
+  actor: StaffAccessActor
+) {
+  const status = args.status.trim().toUpperCase();
+  if (!(LICENSE_STATUSES as readonly string[]).includes(status)) {
+    throw new Error(
+      `"${args.status}" isn't a licence status. Use one of: ${LICENSE_STATUSES.join(", ")}.`
+    );
+  }
+  const reason = args.reason?.trim();
+  if (!reason) {
+    throw new Error("A short reason is required — it is recorded with the change.");
+  }
+  const client = await dataClient();
+  const { data: existing } = await client.models.TechnicianLicense.get({
+    id: args.licenseId,
+  });
+  if (!existing) throw new Error("Licence record not found");
+  const { data: updated } = await client.models.TechnicianLicense.update({
+    id: args.licenseId,
+    status,
+    statusSetBy: actor.email ?? undefined,
+    statusSetAt: new Date().toISOString(),
+  });
+  if (!updated) throw new Error("Could not update the licence status");
+  const { data: tech } = await client.models.Technician.get({
+    id: existing.technicianId,
+  });
+  await recordStaffAccessEventDurable({
+    subjectEmail: tech?.email ?? tech?.name ?? existing.technicianId,
+    subjectSub: existing.technicianId,
+    action: "CHANGE_ROLES",
+    actor,
+    reasonCode: "CORRECTION",
+    reason: `Licence ${existing.number} status → ${status}: ${reason}`,
+    idempotencyKey: null,
+    effects: `Technician licence record ${args.licenseId} set ${status} by ${actor.email ?? "owner"}.`,
+    outcome: "COMPLETE",
+  });
+  return { licenseId: args.licenseId, status };
 }
 
 async function removeFromGroup(username: string, groupName: string) {
@@ -480,9 +629,16 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
         `Technician ${args.technicianId} not found — pick an existing technician record to link this login to.`
       );
     }
-    // Active + present, current licence. Reuses the same rule saveTechnician and
-    // dispatch enforce, so the message names exactly what's missing.
-    assertTechnicianCompliance(tech, { requireActive: true });
+    // Active + present, current licence (GL-17: from the licence records, with
+    // the legacy fields honored only until records exist).
+    if (!tech.active) {
+      throw new Error(`${tech.name} is inactive and cannot hold a technician login`);
+    }
+    if (!(await licenseFactsFor(tech)).current) {
+      throw new Error(
+        `${tech.name} has no current applicator licence on record — record one before inviting their login.`
+      );
+    }
     // Exactly one login per technician. If this record already belongs to a
     // different person's login, linking it here would make two logins one
     // identity — the shared-identity case GL-14 forbids.
@@ -1601,7 +1757,14 @@ async function changeStaffRoles(
           `Can't grant the technician role to ${target.email}: this login isn't linked to a technician record. Link it first with an invite (which binds a login to a licensed technician atomically).`
         );
       }
-      assertTechnicianCompliance(tech, { requireActive: true });
+      if (!tech.active) {
+        throw new Error(`${tech.name} is inactive and cannot hold the technician role`);
+      }
+      if (!(await licenseFactsFor(tech)).current) {
+        throw new Error(
+          `${tech.name} has no current applicator licence on record — record one before granting the technician role.`
+        );
+      }
     }
 
     await recordCommandStage(key, "VALIDATED", {
@@ -2395,13 +2558,11 @@ async function staffRoster() {
     }
     row.linkedTechnicianId = tech.id;
     row.technicianActive = tech.active;
-    row.licenseExpiresOn = tech.licenseExpiresOn ?? null;
-    try {
-      assertTechnicianCompliance(tech, { requireActive: true });
-      row.licenseValid = true;
-    } catch {
-      row.licenseValid = false;
-    }
+    // GL-17: licence currency from the one-to-many records (legacy fields only
+    // while a technician has no records).
+    const facts = await licenseFactsFor(tech);
+    row.licenseValid = Boolean(tech.active) && facts.current;
+    row.licenseExpiresOn = facts.expiresOn;
   }
 
   const staff = [...byUsername.values()].map((r) => ({

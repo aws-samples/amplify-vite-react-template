@@ -1,5 +1,8 @@
 import { dataClient } from "../shared/dataClient";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
+import { licenseFactsFor } from "../shared/licenses";
+import { ensureObligation, markObligation } from "../shared/obligations";
+import { isServiceMonth, monthKeyOf } from "../shared/season";
 import { stripeClient } from "../shared/stripeClient";
 import { resumePlanCancellation } from "../shared/planCancellation";
 import { resumeVisitChange } from "../shared/visitChange";
@@ -129,6 +132,11 @@ export const handler = async () => {
   // GL-15: a FLAGGED presence review whose owned case never landed is re-opened
   // here — the obligation is durable on the report and cannot silently vanish.
   const presenceReviews = await reconcilePresenceReviews();
+  // GL-17: advance licence-lapse work + capacity effects of expiry.
+  const licenses = await sweepLicenseLapses();
+  // GL-17: seasonal obligations — month rollover marks missed months (no
+  // catch-up) and ensures the current in-season month is visible.
+  const seasonal = await sweepSeasonalObligations();
   console.log("Reminder totals:", JSON.stringify(totals));
   return [
     ...totals,
@@ -145,8 +153,177 @@ export const handler = async () => {
     visitChanges,
     staleLeads,
     presenceReviews,
+    licenses,
+    seasonal,
   ];
 };
+
+/** GL-17 — licences expiring within this many days open advance owned work. */
+const LICENSE_WARN_DAYS = 30;
+
+/**
+ * GL-17 — the daily licence sweep. For every ACTIVE technician:
+ *  - licence expiring within LICENSE_WARN_DAYS → advance LICENSE_LAPSE work
+ *    ("renew or plan reassignment") so customers move before service dates;
+ *  - licence already lapsed → LICENSE_LAPSE plus one UNSTAFFED_VISIT case per
+ *    future SCHEDULED visit still assigned to them. Visits are NOT silently
+ *    unassigned — the office decides — but capacity everywhere else already
+ *    excludes the technician (availability, assignment, T-1 staffing).
+ */
+export async function sweepLicenseLapses() {
+  const client = await dataClient();
+  if (!("Technician" in client.models)) {
+    return { task: "license-lapses" as const, warned: 0, lapsed: 0, visitsFlagged: 0 };
+  }
+  let warned = 0;
+  let lapsed = 0;
+  let visitsFlagged = 0;
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const warnDate = new Date(Date.now() + LICENSE_WARN_DAYS * 86400_000)
+      .toISOString()
+      .slice(0, 10);
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Technician.list({
+        limit: 200,
+        nextToken: token,
+      });
+      for (const tech of page.data ?? []) {
+        if (!tech.active) continue;
+        const factsNow = await licenseFactsFor(tech, today);
+        const factsAtWarn = await licenseFactsFor(tech, warnDate);
+        if (factsNow.current && factsAtWarn.current) continue;
+        const expiresOn = factsNow.expiresOn ?? "unknown";
+        if (factsNow.current && !factsAtWarn.current) {
+          warned++;
+          await openOwnedWork({
+            kind: "LICENSE_LAPSE",
+            dedupeKey: `license-lapse:${tech.id}:${factsNow.expiresOn ?? "none"}`,
+            title: `${tech.name}'s applicator licence expires ${expiresOn}`,
+            detail: `${tech.name}'s licence is current today but expires ${expiresOn} — within ${LICENSE_WARN_DAYS} days. From that date they contribute no capacity and cannot be assigned. Renew the licence on file, or plan reassignment of their later visits now.`,
+            relatedId: tech.id,
+            sourceUrl: "/schedule",
+            resolutionAction:
+              "Record the renewed licence (technician's licence records), or reassign their visits past the expiry date — then confirm.",
+            ownerTeam: "OPS",
+          });
+          continue;
+        }
+        // Already lapsed.
+        lapsed++;
+        await openOwnedWork({
+          kind: "LICENSE_LAPSE",
+          dedupeKey: `license-lapse:${tech.id}:lapsed`,
+          title: `${tech.name} has no current applicator licence`,
+          detail: `${tech.name} is active but holds no current licence record. They contribute no capacity, cannot be assigned, and their remaining future visits must be reassigned.`,
+          relatedId: tech.id,
+          sourceUrl: "/schedule",
+          resolutionAction:
+            "Record a current licence, or reassign their future visits and offboard/deactivate — then confirm.",
+          ownerTeam: "OPS",
+        });
+        let jobToken: string | null | undefined;
+        do {
+          const jobsPage = await client.models.Job.list({
+            filter: { technicianId: { eq: tech.id } },
+            limit: 200,
+            nextToken: jobToken,
+          });
+          for (const job of jobsPage.data ?? []) {
+            if (job.status !== "SCHEDULED" || (job.scheduledDate ?? "") < today) {
+              continue;
+            }
+            visitsFlagged++;
+            await openOwnedWork({
+              kind: "UNSTAFFED_VISIT",
+              dedupeKey: `license-unstaffed:${job.id}`,
+              title: `Visit assigned to an unlicensed technician: ${tech.name}`,
+              detail: `Visit ${job.id} (${job.scheduledDate ?? "undated"}) is assigned to ${tech.name}, who has no current applicator licence. It cannot legally happen as scheduled — reassign or reschedule it with the customer.`,
+              customerId: job.customerId,
+              relatedId: job.id,
+              sourceUrl: "/schedule",
+              resolutionAction:
+                "Reassign the visit to a licensed technician (or reschedule/cancel it with the customer), then confirm it is staffed.",
+              ownerTeam: "OPS",
+            });
+          }
+          jobToken = jobsPage.nextToken;
+        } while (jobToken);
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    console.error("sweepLicenseLapses failed", err);
+  }
+  return { task: "license-lapses" as const, warned, lapsed, visitsFlagged };
+}
+
+/**
+ * GL-17 — seasonal obligations bookkeeping. For every ACTIVE seasonal plan:
+ *  - ensure the current in-season month's obligation row exists (visible DUE);
+ *  - mark every PAST in-season month that never reached SATISFIED as
+ *    SKIPPED_MISSED — durable history, and per the locked rule it creates NO
+ *    catch-up visit.
+ */
+export async function sweepSeasonalObligations() {
+  const client = await dataClient();
+  if (!("ServicePlan" in client.models) || !("TreatmentObligation" in client.models)) {
+    return { task: "seasonal-obligations" as const, ensured: 0, skipped: 0 };
+  }
+  let ensured = 0;
+  let skipped = 0;
+  try {
+    const nowMonth = monthKeyOf(new Date().toISOString());
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.ServicePlan.list({
+        filter: { status: { eq: "ACTIVE" } },
+        limit: 200,
+        nextToken: token,
+      });
+      for (const plan of page.data ?? []) {
+        if (!plan.seasonal) continue;
+        // Current month, when in season, is a visible obligation.
+        if (isServiceMonth(plan, nowMonth)) {
+          const { created } = await ensureObligation({
+            servicePlanId: plan.id,
+            customerId: plan.customerId,
+            monthKey: nowMonth,
+            accessGroups: plan.accessGroups?.filter(
+              (g): g is string => typeof g === "string"
+            ),
+          });
+          if (created) ensured++;
+        }
+        // Past months that never reached SATISFIED become SKIPPED_MISSED.
+        const { data: obligations } =
+          await client.models.TreatmentObligation.listTreatmentObligationByServicePlanIdAndMonthKey(
+            { servicePlanId: plan.id },
+            { limit: 200 }
+          );
+        for (const ob of obligations ?? []) {
+          if (
+            ob.monthKey < nowMonth &&
+            (ob.status === "DUE" || ob.status === "SCHEDULED")
+          ) {
+            const ok = await markObligation({
+              servicePlanId: plan.id,
+              monthKey: ob.monthKey,
+              status: "SKIPPED_MISSED",
+              note: "The month ended without a completed treatment. Per the seasonal policy a missed month creates no catch-up visit.",
+            });
+            if (ok) skipped++;
+          }
+        }
+      }
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    console.error("sweepSeasonalObligations failed", err);
+  }
+  return { task: "seasonal-obligations" as const, ensured, skipped };
+}
 
 /**
  * GL-15 — re-open the owned presence-review case for every report whose
@@ -647,6 +824,7 @@ async function splitByStaffing(date: string, jobs: DatedJob[]) {
     { date: string; technicianId: string } | null
   >();
   const techCache = new Map<string, { name: string; active: boolean } | null>();
+  const licenseCache = new Map<string, boolean>();
 
   const staffed: DatedJob[] = [];
   const unstaffed: { job: DatedJob; why: string }[] = [];
@@ -692,6 +870,26 @@ async function splitByStaffing(date: string, jobs: DatedJob[]) {
       unstaffed.push({
         job,
         why: `assigned to ${tech.name}, who is deactivated`,
+      });
+      continue;
+    }
+    // GL-17: a route staffed by a technician with no licence current on the
+    // service date is an unstaffed visit — caught the day before, not at the
+    // doorstep.
+    const licKey = `${route.technicianId}:${date}`;
+    if (!licenseCache.has(licKey)) {
+      const { data: fullTech } = await client.models.Technician.get({
+        id: route.technicianId,
+      });
+      licenseCache.set(
+        licKey,
+        fullTech ? (await licenseFactsFor(fullTech, date)).current : false
+      );
+    }
+    if (!licenseCache.get(licKey)) {
+      unstaffed.push({
+        job,
+        why: `assigned to ${tech.name}, whose applicator licence is not current on ${date}`,
       });
       continue;
     }

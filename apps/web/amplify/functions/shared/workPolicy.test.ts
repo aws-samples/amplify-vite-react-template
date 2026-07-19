@@ -32,6 +32,7 @@ const ALL_KINDS: WorkKind[] = [
   "ROUTE_MISMATCH",
   "STALE_DRAFT",
   "OFFICE_FIELD_REVIEW",
+  "LICENSE_LAPSE",
 ];
 
 describe("GL-18 work policy registry", () => {

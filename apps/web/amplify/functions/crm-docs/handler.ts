@@ -57,6 +57,9 @@ import {
 } from "../shared/planCancellation";
 import { resumeVisitChange } from "../shared/visitChange";
 import { queuePresenceReview } from "../shared/recovery";
+import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
+import { isServiceMonth } from "../shared/season";
+import { ensureObligation } from "../shared/obligations";
 import {
   openMissingContactWork,
   openOwnedWork,
@@ -419,7 +422,10 @@ async function runWorkVerifier(
       const { data: tech } = await client.models.Technician.get({
         id: job.technicianId,
       });
-      if (!tech?.active || !hasCurrentLicense(tech, job.scheduledDate ?? undefined)) {
+      if (
+        !tech?.active ||
+        !(await licenseFactsFor(tech, job.scheduledDate ?? undefined)).current
+      ) {
         return {
           ok: false,
           message:
@@ -472,6 +478,45 @@ async function runWorkVerifier(
         ok: !liveChargeInFlight && (moneyReturned || visitGone),
         message:
           "Refund the payment, void the open invoice, or cancel the visit in the billing tools first — then confirm the money is settled.",
+      };
+    }
+    case "TECH_LICENSED": {
+      // GL-17: closable only when the technician holds a CURRENT unexpired
+      // licence record, OR is inactive with no future assigned work.
+      const { data: tech } = await client.models.Technician.get({
+        id: item.relatedId,
+      });
+      if (!tech) {
+        return { ok: false, message: "The technician record could not be read." };
+      }
+      const facts = await licenseFactsFor(tech);
+      if (facts.current) return { ok: true, message: "" };
+      if (!tech.active) {
+        const today = new Date().toISOString().slice(0, 10);
+        let hasFuture = false;
+        let token: string | null | undefined;
+        do {
+          const page = await client.models.Job.list({
+            filter: { technicianId: { eq: tech.id } },
+            limit: 200,
+            nextToken: token,
+          });
+          hasFuture = (page.data ?? []).some(
+            (j) => j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= today
+          );
+          token = hasFuture ? null : page.nextToken;
+        } while (token);
+        if (!hasFuture) return { ok: true, message: "" };
+        return {
+          ok: false,
+          message:
+            "The technician is inactive but still has future assigned visits — reassign them first.",
+        };
+      }
+      return {
+        ok: false,
+        message:
+          "Record a current licence for this technician (or offboard them and reassign their work) — then confirm.",
       };
     }
     case "PLAN_CANCELLATION_SETTLED": {
@@ -1044,6 +1089,27 @@ async function createOfficeJob(args: Args) {
     if (!plan || plan.customerId !== customerId) {
       throw new Error("That service plan does not belong to this customer");
     }
+    // GL-17: a seasonal plan's visit may only land in an in-season month, and
+    // never a second visit in a month whose treatment already happened — there
+    // is no free-text bypass around the seasonal promise.
+    if (plan.seasonal && args.scheduledDate) {
+      const monthKey = args.scheduledDate.slice(0, 7);
+      if (!isServiceMonth(plan, monthKey)) {
+        throw new Error(
+          "This plan's treatments run April–October. Pick an in-season month — November–March has no routine treatment (the plan still bills monthly year-round)."
+        );
+      }
+      const { status } = await ensureObligation({
+        servicePlanId: plan.id,
+        customerId,
+        monthKey,
+      });
+      if (status === "SATISFIED") {
+        throw new Error(
+          `This plan's ${monthKey} treatment already happened — a seasonal plan gets exactly one treatment per month. Pick the next month instead.`
+        );
+      }
+    }
   }
 
   const { data: created, errors } = await client.models.Job.create({
@@ -1284,10 +1350,39 @@ async function updateJobSchedule(
     if (!customer) throw new Error(`Customer ${job.customerId} no longer exists`);
     assertDeliverableAddress(customer);
     if (!technician) throw new Error(`Technician ${args.technicianId} not found`);
-    assertTechnicianCompliance(technician, {
-      requireActive: true,
-      workDate: args.scheduledDate,
-    });
+    if (!technician.active) {
+      throw new Error(
+        `${technician.name ?? "This technician"} is inactive and cannot be assigned regulated work`
+      );
+    }
+    // GL-17: licence currency on the SERVICE DATE comes from the one-to-many
+    // licence records (legacy single fields only when no records exist).
+    {
+      const facts = await licenseFactsFor(technician, args.scheduledDate);
+      if (!facts.current) {
+        if (facts.source === "LEGACY") {
+          // No records yet — the legacy check names the exact missing fact.
+          assertTechnicianCompliance(technician, {
+            requireActive: true,
+            workDate: args.scheduledDate,
+          });
+        }
+        throw new Error(
+          `${technician.name ?? "This technician"} has no current applicator licence on record for ${args.scheduledDate} — record a current licence (or pick another technician) before assigning regulated work`
+        );
+      }
+    }
+    // GL-17: a seasonal plan's visit may only land in an in-season month.
+    if (job.servicePlanId) {
+      const { data: plan } = await client.models.ServicePlan.get({
+        id: job.servicePlanId,
+      });
+      if (plan?.seasonal && !isServiceMonth(plan, args.scheduledDate.slice(0, 7))) {
+        throw new Error(
+          "This plan's treatments run April–October — pick an in-season date (the plan still bills monthly year-round)."
+        );
+      }
+    }
     if (
       !route ||
       route.technicianId !== technician.id ||
@@ -2130,7 +2225,7 @@ async function deliverServiceReport(
     : { data: null };
   const nextIso =
     plan && plan.status === "ACTIVE"
-      ? nextVisitDate(plan.serviceFrequency, new Date().toISOString())
+      ? nextVisitDate(plan.serviceFrequency, new Date().toISOString(), plan)
       : null;
   const reviewUrl = process.env.GOOGLE_REVIEW_URL;
 
@@ -2354,6 +2449,15 @@ async function finalizeServiceReport(reportId: string) {
       workDate: applicationStartIso.slice(0, 10),
     });
 
+    // GL-17: the record prints the licence that was valid ON THE APPLICATION
+    // DATE — a later renewal, expiry, or revocation never rewrites authorship.
+    const authorship = technician
+      ? licenseValidOnDate(
+          await licenseRecordsFor(technician.id),
+          technician,
+          applicationStartIso.slice(0, 10)
+        )
+      : { number: null };
     pdf = await renderServiceReportPdf({
       reportId,
       customerName: customer.displayName,
@@ -2361,7 +2465,7 @@ async function finalizeServiceReport(reportId: string) {
       serviceType: job.serviceType,
       serviceDateIso: report.serviceDate,
       technicianName,
-      technicianLicenseNumber: technician?.licenseNumber,
+      technicianLicenseNumber: authorship.number,
       applicationStartIso,
       applicationEndIso,
       reEntryIntervalHours: report.reEntryIntervalHours,

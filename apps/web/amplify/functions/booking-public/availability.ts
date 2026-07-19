@@ -1,5 +1,10 @@
 import { dataClient } from "../shared/dataClient";
 import { driveMatrixFrom } from "../shared/driveTime";
+import {
+  licenseFactsFromRecords,
+  licenseRecordsFor,
+  type LicenseRecordLike,
+} from "../shared/licenses";
 import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
 
 /**
@@ -123,11 +128,23 @@ export async function buildDayMatrix(opts: {
       )
     ),
   ]);
-  const techCount = Math.max(
-    1,
-    techsRes.data.filter((t) => t.active).length
+  // GL-17: capacity counts only technicians LICENSED ON THAT DAY — an expiring
+  // licence removes funnel capacity from its expiry date forward, and zero
+  // eligible technicians means zero sellable dates (no floor of one: a day
+  // nobody can legally work is not for sale).
+  const activeTechs = techsRes.data.filter((t) => t.active);
+  const recordsByTech = new Map<string, LicenseRecordLike[]>();
+  await Promise.all(
+    activeTechs.map(async (t) => {
+      recordsByTech.set(t.id, await licenseRecordsFor(t.id));
+    })
   );
-  const capacity = techCount * STOPS_PER_TECH;
+  const licensedCountOn = (date: string): number =>
+    activeTechs.filter(
+      (t) => licenseFactsFromRecords(recordsByTech.get(t.id) ?? [], t, date).current
+    ).length;
+  const capacityOn = (date: string): number =>
+    licensedCountOn(date) * STOPS_PER_TECH;
 
   type Stop = { customerId: string; serviceType: string };
   const stopsByDay = new Map<string, Stop[]>();
@@ -181,7 +198,8 @@ export async function buildDayMatrix(opts: {
   const out: DayQuote[] = [];
   for (const date of days) {
     const stops = stopsByDay.get(date) ?? [];
-    if (stops.length >= capacity) continue;
+    const capacity = capacityOn(date);
+    if (capacity <= 0 || stops.length >= capacity) continue;
 
     // Rough feasibility: existing onsite time + hops + this job must fit.
     const existingMinutes = stops.reduce(
@@ -193,7 +211,10 @@ export async function buildDayMatrix(opts: {
       return m != null && (best === null || m < best) ? m : best;
     }, null);
     const insertion = nearest != null ? nearest * 2 : AVG_HOP_MINUTES * 2;
-    if (existingMinutes + onsite + insertion > techCount * WORKDAY_MINUTES) {
+    if (
+      existingMinutes + onsite + insertion >
+      licensedCountOn(date) * WORKDAY_MINUTES
+    ) {
       continue;
     }
 
@@ -203,7 +224,7 @@ export async function buildDayMatrix(opts: {
       factor -= 0.1;
       factors.push(`route-density −10% (stop ${nearest} min away)`);
     }
-    const load = stops.length / capacity;
+    const load = stops.length / capacityOn(date);
     if (load < 0.5) {
       factor -= 0.05;
       factors.push("quiet-day −5%");
