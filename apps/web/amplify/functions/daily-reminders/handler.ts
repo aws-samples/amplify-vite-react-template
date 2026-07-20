@@ -1,3 +1,4 @@
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { dataClient } from "../shared/dataClient";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import { licenseFactsFor } from "../shared/licenses";
@@ -222,6 +223,10 @@ export const handler = async () => {
     "reconcileRequestOwnership",
     reconcileRequestOwnership
   );
+  // GL-11: a group change that stopped partway (PARTIAL / stale lease) is
+  // re-driven to a VERIFIED completion through crm-admin, and one that
+  // keeps failing becomes visible owned work.
+  const groupChanges = await run("reconcileGroupChanges", reconcileGroupChanges);
   console.log("Reminder totals:", JSON.stringify(totals));
   const results = [
     ...totals,
@@ -248,6 +253,7 @@ export const handler = async () => {
     readiness,
     lifecycle,
     requestOwnership,
+    groupChanges,
   ];
   if (failures.length) {
     await openOwnedWork({
@@ -2177,6 +2183,88 @@ export async function reconcileRequestOwnership() {
   }
 
   return { task: "reconcileRequestOwnership", portalRepaired, callbacksRepaired };
+}
+
+/**
+ * GL-11 — group changes cannot remain silently split. Any GroupChangeCommand
+ * that is neither COMPLETE nor FAILED and holds no live lease is re-driven
+ * through crm-admin's resumeGroupChange (that handler owns the Cognito
+ * permissions and the verified stage machine). A command still unfinished
+ * after several attempts is escalated as owned work — automatic resume is
+ * recovery, not a place for failures to hide.
+ */
+export async function reconcileGroupChanges() {
+  const client = await dataClient();
+  if (!("GroupChangeCommand" in client.models)) {
+    return { task: "reconcileGroupChanges", resumed: 0, escalated: 0 };
+  }
+  const fnName = process.env.CRM_ADMIN_FUNCTION_NAME;
+  const lambdaClient = new LambdaClient({});
+  const nowIso = new Date().toISOString();
+  let resumed = 0;
+  let escalated = 0;
+  const model = (
+    client.models as unknown as {
+      GroupChangeCommand: {
+        list: (a: object) => Promise<{
+          data: Record<string, unknown>[];
+          nextToken?: string | null;
+        }>;
+      };
+    }
+  ).GroupChangeCommand;
+  let token: string | null | undefined;
+  do {
+    const page = await model.list({ limit: 200, nextToken: token });
+    for (const cmd of page.data ?? []) {
+      const stage = String(cmd.stage ?? "");
+      if (stage === "COMPLETE" || stage === "FAILED") continue;
+      const leaseLive =
+        typeof cmd.leaseUntil === "string" && cmd.leaseUntil > nowIso;
+      if (leaseLive) continue;
+      const attempts = Number(cmd.attemptCount) || 1;
+      if (attempts >= 4) {
+        const opened = await openOwnedWork({
+          kind: "STATE_MISMATCH",
+          dedupeKey: `group-change-stuck:${cmd.id}`,
+          title: `A group change keeps failing: ${cmd.customerId}`,
+          detail: `Group change ${cmd.id} (${cmd.fromGroupId ?? "none"} → ${cmd.toGroupId ?? "none"}) is still ${stage} after ${attempts} attempts (last error: ${cmd.lastError ?? "unrecorded"}). The customer's audit/row/child/Cognito surfaces may disagree until this completes.`,
+          customerId: String(cmd.customerId),
+          relatedId: String(cmd.id),
+          sourceUrl: `/customers/${cmd.customerId}`,
+          resolutionAction:
+            "Escalate to engineering with the command id; after the underlying fault is fixed, the next daily run (or a manual resume) completes and verifies the change.",
+          ownerTeam: "OPS",
+        });
+        if (opened) escalated++;
+        continue;
+      }
+      if (!fnName) {
+        console.error(
+          "reconcileGroupChanges: CRM_ADMIN_FUNCTION_NAME unset — cannot resume",
+          cmd.id
+        );
+        continue;
+      }
+      await lambdaClient.send(
+        new InvokeCommand({
+          FunctionName: fnName,
+          InvocationType: "Event",
+          Payload: Buffer.from(
+            JSON.stringify({
+              info: { fieldName: "resumeGroupChange" },
+              arguments: { commandId: cmd.id },
+              identity: null,
+              source: "daily-reminders-resumer",
+            })
+          ),
+        })
+      );
+      resumed++;
+    }
+    token = page.nextToken;
+  } while (token);
+  return { task: "reconcileGroupChanges", resumed, escalated };
 }
 
 export async function reconcilePaidBookings() {

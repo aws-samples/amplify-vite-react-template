@@ -11,6 +11,10 @@ import {
   type UserType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "../shared/dataClient";
+import {
+  claimGroupChange,
+  executeGroupChange,
+} from "../shared/groupChange";
 import { writeOpsPause } from "../shared/opsPause";
 import { casGuardedUpdate } from "../shared/atomicLock";
 import { jobScheduleGuards } from "../shared/capacity";
@@ -234,6 +238,13 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
       });
+    case "resumeGroupChange": {
+      // Internal: the daily run re-drives stuck group changes through this
+      // handler (which holds the Cognito perms). IAM restricts who can
+      // invoke; an AppSync office identity may also trigger it manually.
+      const rArgs = event.arguments as unknown as { commandId?: string };
+      return resumeGroupChange(String(rArgs.commandId ?? ""));
+    }
     case "revokePortalAccess": {
       const customerId = (event.arguments as CustomerIdArgs).customerId;
       try {
@@ -843,6 +854,61 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
  *   2. accessGroups on every child record
  *   3. the portal user's Cognito group membership (grp-*)
  */
+/** GL-11 — the Cognito half of a group change, injected into the durable
+ *  command so the SAME code runs it and verifies it (and the daily resumer
+ *  re-drives it through this handler, which holds the Cognito perms). */
+function groupCognitoSync(): {
+  apply: (customer: Record<string, unknown>, toGroupId: string | null) => Promise<void>;
+  verify: (customer: Record<string, unknown>, toGroupId: string | null) => Promise<boolean>;
+} {
+  const read = async (customer: Record<string, unknown>) => {
+    const username = (customer.email as string | undefined)?.toLowerCase();
+    if (!customer.portalUserSub || !username) return null;
+    const { Groups } = await cognito.send(
+      new AdminListGroupsForUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+      })
+    );
+    return {
+      username,
+      current: (Groups ?? [])
+        .map((g) => g.GroupName!)
+        .filter((g) => g.startsWith("grp-")),
+    };
+  };
+  return {
+    apply: async (customer, toGroupId) => {
+      const state = await read(customer);
+      if (!state) return; // no portal login — nothing to sync
+      const wanted = toGroupId ? grpGroup(toGroupId) : null;
+      for (const g of state.current) {
+        if (g !== wanted) {
+          await cognito.send(
+            new AdminRemoveUserFromGroupCommand({
+              UserPoolId: USER_POOL_ID,
+              Username: state.username,
+              GroupName: g,
+            })
+          );
+        }
+      }
+      if (wanted && !state.current.includes(wanted)) {
+        await ensureCognitoGroup(wanted);
+        await addToGroup(state.username, wanted);
+      }
+    },
+    verify: async (customer, toGroupId) => {
+      const state = await read(customer);
+      if (!state) return true; // no portal login — vacuously in sync
+      const wanted = toGroupId ? grpGroup(toGroupId) : null;
+      const stale = state.current.filter((g) => g !== wanted);
+      if (stale.length) return false;
+      return wanted ? state.current.includes(wanted) : true;
+    },
+  };
+}
+
 async function setCustomerGroup(
   args: SetCustomerGroupArgs,
   actor: { sub: string | null; email: string | null }
@@ -875,109 +941,90 @@ async function setCustomerGroup(
     }
   }
 
-  // GL-11: the audit record is DURABLE — it lands BEFORE the change, and a
-  // failed audit write refuses the change with nothing applied. A membership
-  // change whose only evidence is a log line is not "retained who changed
-  // it, when, and why". (If the apply below then fails, the operator sees
-  // the error and retries — the retry re-applies idempotently and records
-  // its own attempt.)
-  if (!("CustomerLifecycleEvent" in client.models)) {
-    throw new Error(
-      "Group membership can't be changed right now: the audit log is unavailable, and an unaudited change is not allowed."
-    );
-  }
-  const { data: audited } = await client.models.CustomerLifecycleEvent.create({
+  // GL-11: the change runs as a DURABLE, RESUMABLE, VERIFIED command —
+  // audit first (a failed audit refuses everything), then customer row,
+  // child access groups, and Cognito, each stage fenced-recorded, and
+  // COMPLETE only after verification proves all four surfaces agree. A
+  // crash leaves a resumable PARTIAL the daily run re-drives; the surfaces
+  // can never silently remain split.
+  const claim = await claimGroupChange({
     customerId: args.customerId,
-    action: "GROUP_CHANGE",
-    actorSub: actor.sub ?? undefined,
-    actorEmail: actor.email ?? "office",
+    fromGroupId: (customer.groupId as string | null) ?? null,
+    toGroupId: newGroupId,
     reason: args.reason.trim(),
-    effects: `group: ${customer.groupId ?? "none"} → ${newGroupId ?? "none"}`,
-    occurredAt: new Date().toISOString(),
+    actor,
   });
-  if (!audited) {
+  if (!claim.claimed) {
+    if (claim.state === "CONFLICT") {
+      throw new Error(
+        `Another group change (${claim.command?.fromGroupId ?? "none"} → ${claim.command?.toGroupId ?? "none"}) is mid-flight for this customer — let it finish (the daily run resumes stuck ones) before starting a different one.`
+      );
+    }
+    if (claim.state === "IN_FLIGHT") {
+      throw new Error(
+        "This group change is already running — give it a moment and refresh the customer."
+      );
+    }
     throw new Error(
-      "Group membership was NOT changed: the audit record could not be written. Try again."
+      "Group membership can't be changed right now: the change command store is unavailable, and an untracked change is not allowed."
     );
   }
-
-  const accessGroups = customerAccessGroups(args.customerId, newGroupId);
-  await client.models.Customer.update({
-    id: args.customerId,
-    groupId: newGroupId,
-    accessGroups,
-  });
-
-  // Rewrite accessGroups on all child records.
-  const filter = { customerId: { eq: args.customerId } };
-  let childrenUpdated = 0;
-  const collections = [
-    client.models.ServicePlan,
-    client.models.Job,
-    client.models.Agreement,
-    client.models.ServiceReport,
-    client.models.Invoice,
-  ] as const;
-  for (const model of collections) {
-    let nextToken: string | null | undefined;
-    do {
-      const page = await (
-        model.list as (args: object) => Promise<{
-          data: { id: string }[];
-          nextToken?: string | null;
-        }>
-      )({ filter, nextToken, limit: 200 });
-      for (const record of page.data) {
-        await (
-          model.update as (args: object) => Promise<unknown>
-        )({ id: record.id, accessGroups });
-        childrenUpdated++;
-      }
-      nextToken = page.nextToken;
-    } while (nextToken);
+  const result = await executeGroupChange(
+    { commandId: claim.commandId, nonce: claim.nonce },
+    groupCognitoSync()
+  );
+  if (result.stage !== "COMPLETE") {
+    throw new Error(
+      `The group change is PARTIALLY applied (${result.lastError ?? "unknown fault"}). It is recorded as command ${result.commandId} and the daily run will finish it automatically — check the customer screen later, or retry now to re-drive it.`
+    );
   }
-
-  // Fix the portal user's Cognito membership.
-  let cognitoUpdated = false;
-  if (customer.portalUserSub) {
-    const username = customer.email?.toLowerCase();
-    if (username) {
-      const { Groups } = await cognito.send(
-        new AdminListGroupsForUserCommand({
-          UserPoolId: USER_POOL_ID,
-          Username: username,
-        })
-      );
-      const current = (Groups ?? [])
-        .map((g) => g.GroupName!)
-        .filter((g) => g.startsWith("grp-"));
-      const wanted = newGroupId ? grpGroup(newGroupId) : null;
-      for (const g of current) {
-        if (g !== wanted) {
-          await cognito.send(
-            new AdminRemoveUserFromGroupCommand({
-              UserPoolId: USER_POOL_ID,
-              Username: username,
-              GroupName: g,
-            })
-          );
-        }
-      }
-      if (wanted && !current.includes(wanted)) {
-        await ensureCognitoGroup(wanted);
-        await addToGroup(username, wanted);
-      }
-      cognitoUpdated = true;
-    }
-  }
-
   return {
     customerId: args.customerId,
     groupId: newGroupId,
-    accessGroups,
-    childrenUpdated,
-    cognitoUpdated,
+    childrenUpdated: result.childrenUpdated,
+    verified: result.verified,
+    commandId: result.commandId,
   };
+}
+
+/** GL-11 — re-drive a stuck (PARTIAL / stale-leased) group change to a
+ *  verified completion. Reached by office identity or by the daily
+ *  resumer's direct invoke (IAM-restricted). */
+async function resumeGroupChange(commandId: string) {
+  const client = await dataClient();
+  const models = client.models as unknown as {
+    GroupChangeCommand?: {
+      get: (a: { id: string }) => Promise<{
+        data: Record<string, unknown> | null;
+      }>;
+    };
+  };
+  if (!models.GroupChangeCommand) {
+    throw new Error("Group change commands are unavailable");
+  }
+  const { data: row } = await models.GroupChangeCommand.get({ id: commandId });
+  if (!row) throw new Error(`Group change ${commandId} not found`);
+  if (row.stage === "COMPLETE" || row.stage === "FAILED") {
+    return { commandId, stage: row.stage };
+  }
+  const claim = await claimGroupChange({
+    customerId: String(row.customerId),
+    fromGroupId: (row.fromGroupId as string | null) ?? null,
+    toGroupId: (row.toGroupId as string | null) ?? null,
+    reason: String(row.reason ?? "resume"),
+    actor: {
+      sub: (row.actorSub as string | null) ?? null,
+      email: (row.actorEmail as string | null) ?? null,
+    },
+  });
+  if (!claim.claimed) {
+    return { commandId, stage: String(row.stage), resumed: false };
+  }
+  const result = await executeGroupChange(
+    { commandId: claim.commandId, nonce: claim.nonce },
+    groupCognitoSync()
+  );
+  return { commandId: result.commandId, stage: result.stage, resumed: true };
 }
 
 /**

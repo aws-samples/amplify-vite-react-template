@@ -794,6 +794,39 @@ export const schema = a.schema({
     ]),
 
   /**
+   * GL-11 — the durable, resumable, VERIFIED group-membership change. A
+   * group change touches four surfaces (audit ledger, customer row, child
+   * records' accessGroups, Cognito membership) — this command claims the
+   * change before touching any of them, records each confirmed stage
+   * (fenced on the holder nonce), and completes only after VERIFYING all
+   * four agree. A crash leaves a resumable PARTIAL the daily run re-drives
+   * to completion; the surfaces can never silently remain split. Stages:
+   * REQUESTED | AUDITED | CUSTOMER_DONE | CHILDREN_DONE | COGNITO_DONE |
+   * COMPLETE | PARTIAL | FAILED.
+   */
+  GroupChangeCommand: a
+    .model({
+      customerId: a.id().required(),
+      fromGroupId: a.string(),
+      toGroupId: a.string(),
+      reason: a.string().required(),
+      actorSub: a.string(),
+      actorEmail: a.string(),
+      stage: a.string().required(),
+      requestedAt: a.datetime().required(),
+      leaseUntil: a.datetime(),
+      leaseNonce: a.string(),
+      attemptCount: a.integer(),
+      lastError: a.string(),
+      effects: a.string(),
+      verifiedAt: a.datetime(),
+    })
+    .secondaryIndexes((index) => [index("customerId").sortKeys(["requestedAt"])])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
+  /**
    * GL-14 — the durable, single-winner staff access-change command. id = the
    * caller's idempotency/version key, so the conditional create IS the claim:
    * it is taken BEFORE any Cognito, work, or lead change and records actor,

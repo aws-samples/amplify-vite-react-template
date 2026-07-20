@@ -142,6 +142,9 @@ const LOCK_MODELS = [
   "RateCoverage",
   // GL-10: the callback finding/terminal-notice transitions are guarded.
   "CallbackRequest",
+  // GL-11: the durable group-membership change command (claim/lease/fenced
+  // stage writes).
+  "GroupChangeCommand",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
@@ -300,6 +303,17 @@ backend.crmPricing.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
 backend.bookingPublic.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.bookingPublic.addEnvironment("AMPLIFY_BRANCH", branch);
+// GL-11: the daily run re-drives stuck group-change commands through
+// crm-admin (which holds the Cognito permissions) — an async self-invoke,
+// IAM-scoped to exactly this function.
+backend.crmAdmin.resources.lambda.grantInvoke(
+  backend.dailyReminders.resources.lambda
+);
+backend.dailyReminders.addEnvironment(
+  "CRM_ADMIN_FUNCTION_NAME",
+  backend.crmAdmin.resources.lambda.functionName
+);
+
 // A cold pricing miss starts the existing refresh worker immediately. The
 // five-minute schedule remains the recovery sweep, so a failed async invoke
 // never strands the lead.
