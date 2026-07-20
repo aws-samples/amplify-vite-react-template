@@ -2,12 +2,13 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `67df267` through `f238d82`; newest implementation
-commit `f238d82` (GL-17 funnel sale path)
+**Latest commit review:** every commit after `67df267` through the current branch head; newest
+implementation commits `f238d82` (GL-17 funnel), `136f02a` (GL-09 export), `3f97ced` (GL-07 atomic
+reschedules), and the GL-19 metrics commit
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **22 gates / 37 remaining requirements**, ordered by launch priority and
+**Remaining:** **22 gates / 36 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -158,7 +159,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P1 | GL-02 | Sales/Compliance operating-policy approval — engineering closed (`b6d4e99`) | Head of Sales | A team can operate the correct lead controls inconsistently | **12% — Very low (approvals only)** |
 | P1 | GL-03 | Sales/Operations/Compliance approval — engineering closed (`8d322e4`, `f39de9e`) | Head of Sales + Head of Operations | Staff use inconsistent promises or recovery steps | **10% — Very low (approvals only)** |
 | P1 | GL-10 | Workflow/promise sign-offs — engineering closed (`b8ba8a4`) | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **12% — Very low (sign-offs)** |
-| P1 | GL-19 | Complete leadership metrics and approve command views | Finance lead | Leadership cannot rely on money, plan, or sales mismatches each morning | **15% — Very low (code + sign-offs)** |
+| P1 | GL-19 | Metrics complete — engineering closed (in-branch) | Finance lead | Leadership cannot rely on money, plan, or sales mismatches each morning | **10% — Very low (sign-offs)** |
 | P1 | GL-11 | Workflow sign-off — engineering closed (`a2a2fc2`) | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **10% — Very low (sign-off)** |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner | **50% — Medium** |
 
@@ -574,8 +575,10 @@ notice, replay-proof); no-access now matches the locked rule.
 **Business outcome:** Leadership can tell each morning whether customers, work, and money agree, without
 asking engineering to query production.
 
-**Engineering:** the core Command view and daily leadership reconciliations are closed, but the final
-lifecycle-derived measures listed below are not. The daily pass
+**Engineering:** closed — the core Command view, the daily leadership reconciliations, and the final
+lifecycle-derived measures (true first-response time from activity timestamps, attempt-versus-reached,
+the qualification funnel, and callback/repeat-callback rates over completed visits — labeled 30-day
+window and denominators, all-or-nothing reads, never inferred from stage totals). The daily pass
 now proves the FULL provider ledger against the CRM (every succeeded payment ↔ one paid invoice, every
 refund recorded, net cash explained — mismatches are owned Finance MONEY_MISMATCH cases), provider
 subscriptions against CRM plans (canceled-still-billing, active-but-provider-canceled, provider-only,
@@ -593,10 +596,6 @@ items below remain.
 - Finance ratifies the CEO-approved pause/rollback threshold of one unexplained mismatch and the CEO as
   decision holder; Sales and Operations sign their command/service-quality views; Finance signs the
   money-reconciliation workflow.
-- The Command view calculates and displays true first-response time from activity timestamps,
-  attempt-versus-reached rates, the qualification funnel, callback rates, and repeat-callback rates from
-  the completed GL-02 and GL-10 lifecycle data. It must not infer these measures from the current coarse
-  stage totals or open work-item count.
 
 **Pass owner:** CEO and Finance lead jointly; Sales and Operations sign their views.
 
