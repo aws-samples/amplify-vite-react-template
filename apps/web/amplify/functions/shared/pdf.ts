@@ -5,6 +5,11 @@ import {
   StandardFonts,
   rgb,
 } from "pdf-lib";
+import {
+  BUZZKILL_LOGO_H,
+  BUZZKILL_LOGO_PNG_BASE64,
+  BUZZKILL_LOGO_W,
+} from "./logoAsset";
 
 const PAGE = { width: 612, height: 792 }; // US Letter
 const MARGIN = 54;
@@ -732,6 +737,30 @@ const fmtQuoteDate = (iso: string) =>
   });
 
 /**
+ * Draw the BuzzKill logo lockup with its top-left corner at (x, top), scaled to
+ * `width` points, and return the drawn height so the caller can position the
+ * masthead rule beneath it. Returns null if the embedded asset fails to decode,
+ * letting callers fall back to the text wordmark rather than break the document.
+ */
+async function drawLogo(
+  d: AgreementDoc,
+  x: number,
+  top: number,
+  width: number
+): Promise<number | null> {
+  try {
+    const png = await d.doc.embedPng(
+      Buffer.from(BUZZKILL_LOGO_PNG_BASE64, "base64")
+    );
+    const height = (width * BUZZKILL_LOGO_H) / BUZZKILL_LOGO_W;
+    d.page.drawImage(png, { x, y: top - height, width, height });
+    return height;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Render a branded one-page price quote: the same masthead and green-band
  * layout as the service agreement, a two-column service-address / quote-detail
  * header, and money boxes for the one-time treatment and/or the recurring plan.
@@ -773,14 +802,19 @@ export async function renderQuotePdf(opts: {
   const co = opts.company ?? { name: "BuzzKill Pest Control" };
   const rightX = A_M + A_COLW + A_GUTTER;
 
-  // ---- Masthead: wordmark (left) · PRICE QUOTE (center) · contact (right)
+  // ---- Masthead: logo (left) · PRICE QUOTE (center) · contact (right)
   const topY = d.y;
-  d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
-  d.write("PEST CONTROL", A_M + 2, topY - 24, {
-    font: d.bold,
-    size: 7.5,
-    color: MUTED,
-  });
+  const logoH = await drawLogo(d, A_M, topY, 150);
+  if (logoH == null) {
+    // Asset failed to embed — fall back to the text wordmark so the quote still
+    // renders a branded masthead.
+    d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
+    d.write("PEST CONTROL", A_M + 2, topY - 24, {
+      font: d.bold,
+      size: 7.5,
+      color: MUTED,
+    });
+  }
   d.write("PRICE QUOTE", A_M, topY - 6, {
     font: d.bold,
     size: 17,
@@ -806,9 +840,9 @@ export async function renderQuotePdf(opts: {
     align: "right",
     lineGap: 1.5,
   });
-  // The rule sits below the taller of the wordmark and the contact block, so a
-  // multi-line company block (address + phone + license) never overruns it.
-  d.y = Math.min(topY - 44, contactBottom) - 6;
+  // The rule sits below the taller of the logo (or wordmark fallback) and the
+  // contact block, so a multi-line company block never overruns it.
+  d.y = Math.min(topY - (logoH ?? 44), contactBottom) - 6;
   d.hline(A_M, PAGE.width - A_M, d.y, BK_GREEN, 1.5);
   d.y -= 14;
 
