@@ -27,9 +27,10 @@ DynamoDB table suffix from the GraphQL endpoint hostname (a separate DNS id, not
 deployed conditional write threw ResourceNotFoundException, and the error was classified as "somebody
 else holds it"; the pricing worker read its own broken wiring as a held drain lease and skipped every
 run, silently (`3826eb1` fixes resolution via an SSM-published apiId and makes infra failures loud;
-the worker's CAS layer is verified working on staging — real drain leases, real budget consumption —
-but the worker is NOT yet called healthy: every post-fix provider research attempt has timed out, and
-health requires at least one real research to succeed on staging). The staging Amplify BUILD pipeline failed pre-clone from job 82 (GitHub deploy keys deleted when
+the worker is verified HEALTHY on staging: after raising the research call's 55s timeout to 4 minutes
+(every deployed attempt had timed out while still consuming budget), a live demand miss was researched
+end-to-end on 20 Jul — drain lease taken, sheet cached, quote flipped PRICED, waiting lead notified,
+single-drainer refusing the overlapping cron throughout). The staging Amplify BUILD pipeline failed pre-clone from job 82 (GitHub deploy keys deleted when
 the repo went public) and recovered once the public repo became anonymously cloneable — build job 89
 is green on the current commit.
 Corrective commits: `f57817c` (GL-16 complete-catalog rollback), `bc20401` (GL-22 seven-year
