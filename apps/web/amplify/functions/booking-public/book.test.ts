@@ -25,6 +25,7 @@ type Stop = { customerId: string; serviceType: string; status: string };
 
 let booking: Record<string, unknown>;
 const bookingRows = new Map<string, Record<string, unknown>>();
+let failCheckoutPersistWrites = false;
 let stopsOnDay: Stop[];
 let jobRow: Record<string, unknown> | null = null;
 let opsPauseRow: Record<string, unknown> | null = null;
@@ -195,16 +196,33 @@ beforeEach(() => {
   capacityFixture.maps.closures.clear();
   capacityFixture.maps.exceptions.clear();
   bookingRows.clear();
-  _setLockStoreForTests(
-    memoryLockStore({
-      CapacityDay: capacityFixture.maps.capacityDays,
-      CapacityClaim: capacityFixture.maps.capacityClaims,
-      TechDayStops: capacityFixture.maps.techDayStops,
-      // GL-17: the single-winner payment-attempt lease lives on the
-      // BookingRequest row — same map object the fake model serves.
-      BookingRequest: bookingRows,
-    })
-  );
+  failCheckoutPersistWrites = false;
+  const baseStore = memoryLockStore({
+    CapacityDay: capacityFixture.maps.capacityDays,
+    CapacityClaim: capacityFixture.maps.capacityClaims,
+    TechDayStops: capacityFixture.maps.techDayStops,
+    // GL-17: the single-winner payment-attempt lease AND the fenced
+    // checkout persistence live on the BookingRequest row — same map
+    // object the fake model serves.
+    BookingRequest: bookingRows,
+  });
+  // Fault injection for the FENCED checkout persistence only (writes that
+  // carry the intent reference) — the attempt lease still works, exactly
+  // like a store that fails mid-attempt.
+  _setLockStoreForTests({
+    conditionalUpdate: async (model, id, sets, conditions, opts) => {
+      if (
+        failCheckoutPersistWrites &&
+        model === "BookingRequest" &&
+        "stripePaymentIntentId" in sets
+      ) {
+        return { ok: false, reason: "UNSUPPORTED" };
+      }
+      return baseStore.conditionalUpdate(model, id, sets, conditions, opts);
+    },
+    conditionalDelete: (model, id, conditions) =>
+      baseStore.conditionalDelete(model, id, conditions),
+  });
   vi.useFakeTimers();
   freezeEastern("2026-07-16");
   bookingUpdates.length = 0;
@@ -271,7 +289,8 @@ describe("booking re-checks live availability (R29)", () => {
       expect.objectContaining({ amount: 31300 }),
       expect.anything()
     );
-    expect(bookingUpdates[0]).toMatchObject({
+    // The fenced write landed the facts on the durable row.
+    expect(booking).toMatchObject({
       selectedDate: "2026-07-22",
       selectedWindow: "MORNING",
       stripePaymentIntentId: "pi_new",
@@ -368,7 +387,7 @@ describe("plan-only quotes always book the plan", () => {
       expect.objectContaining({ amount: 28800 }),
       expect.anything()
     );
-    expect(bookingUpdates[0]).toMatchObject({
+    expect(booking).toMatchObject({
       recurring: true,
       amountCents: 28800,
     });
@@ -407,7 +426,7 @@ describe("terms acceptance is versioned and recorded (R17)", () => {
     const res = await bookIt({ tcAcceptedAt: "1999-01-01T00:00:00Z" });
 
     expect(res.status).toBe(200);
-    expect(bookingUpdates[0]).toMatchObject({
+    expect(booking).toMatchObject({
       tcVersion: BOOKING_TERMS_VERSION,
       tcAcceptedAt: new Date().toISOString(), // frozen 2026-07-16T16:00:00.000Z
       tcIp: "1.2.3.4",
@@ -545,13 +564,15 @@ describe("GL-17 — off-season enrollment checks out date-less, paid TODAY", () 
     // The enrollment holds no slot: nothing touched the capacity ledgers.
     expect(capacityFixture.maps.capacityDays.size).toBe(0);
     expect(capacityFixture.maps.capacityClaims.size).toBe(0);
-    const update = bookingUpdates.at(-1)!;
-    expect(update).toMatchObject({
-      selectedDate: null,
-      selectedWindow: null,
+    // The fenced write landed the enrollment facts on the durable row
+    // (nulls REMOVE the attribute, exactly like the deployed CAS write).
+    expect(booking.selectedDate ?? null).toBeNull();
+    expect(booking.selectedWindow ?? null).toBeNull();
+    expect(booking).toMatchObject({
       recurring: true,
       amountCents: 11900,
       tcVersion: BOOKING_TERMS_VERSION,
+      stripePaymentIntentId: "pi_new",
     });
   });
 
@@ -750,20 +771,16 @@ describe("GL-17 corrective — off-season checkout behind the failure-safe payme
 
   it("provider create OK + persistence FAILURE: the intent is closed, no secret leaves", async () => {
     offSeasonQuote();
-    const realUpdate = fakeDataClient.models.BookingRequest.update;
-    fakeDataClient.models.BookingRequest.update = (async () => ({
-      data: null,
-      errors: [{ message: "write refused" }],
-    })) as unknown as typeof realUpdate;
-    try {
-      const res = await enroll();
-      expect(res.status).toBe(503);
-      expect(res.body.clientSecret).toBeUndefined();
-      // The fresh intent was closed safely instead of left chargeable.
-      expect(intentCancel).toHaveBeenCalledWith("pi_new");
-    } finally {
-      fakeDataClient.models.BookingRequest.update = realUpdate;
-    }
+    failCheckoutPersistWrites = true;
+
+    const res = await enroll();
+
+    expect(res.status).toBe(503);
+    expect(res.body.clientSecret).toBeUndefined();
+    // The fresh intent was closed safely instead of left chargeable, and
+    // nothing durable references it.
+    expect(intentCancel).toHaveBeenCalledWith("pi_new");
+    expect(booking.stripePaymentIntentId ?? null).toBeNull();
   });
 
   it("persistence failure then RETRY: the idempotency chain replays the dead generation and mints exactly one new intent", async () => {
@@ -796,14 +813,11 @@ describe("GL-17 corrective — off-season checkout behind the failure-safe payme
       return { id, status: "canceled" };
     });
 
-    // Attempt 1: the booking write fails after pi_1 exists — pi_1 is closed.
-    const realUpdate = fakeDataClient.models.BookingRequest.update;
-    fakeDataClient.models.BookingRequest.update = (async () => ({
-      data: null,
-      errors: [{ message: "write refused" }],
-    })) as unknown as typeof realUpdate;
+    // Attempt 1: the fenced persistence fails after pi_1 exists — pi_1 is
+    // closed instead of left chargeable.
+    failCheckoutPersistWrites = true;
     const first = await enroll();
-    fakeDataClient.models.BookingRequest.update = realUpdate;
+    failCheckoutPersistWrites = false;
     expect(first.status).toBe(503);
 
     // Attempt 2: the same first-generation key REPLAYS canceled pi_1; the
@@ -816,7 +830,7 @@ describe("GL-17 corrective — off-season checkout behind the failure-safe payme
     expect(minted).toBe(2); // pi_1 (dead) + pi_2 — nothing else, ever
     expect(byKey.has("bk-intent-b1-first")).toBe(true);
     expect(byKey.has("bk-intent-b1-pi_1")).toBe(true);
-    expect(bookingUpdates.at(-1)).toMatchObject({
+    expect(booking).toMatchObject({
       stripePaymentIntentId: "pi_2",
       tcVersion: BOOKING_TERMS_VERSION,
     });
@@ -840,5 +854,199 @@ describe("GL-17 corrective — the STANDARD path shares the payable-reuse allowl
     expect(res.status).toBe(200);
     expect(res.body.clientSecret).toBe("cs_new");
     expect(res.body.clientSecret).not.toBe("cs_dead");
+  });
+});
+
+describe("GL-17 corrective 3 — lifecycle-fenced checkout on EVERY /book branch", () => {
+  const flush = async (rounds = 80) => {
+    for (let i = 0; i < rounds; i++) await Promise.resolve();
+  };
+
+  it("a webhook flipping QUOTED → PROCESSING mid-attempt is NEVER regressed — truthful 409, our intent closed", async () => {
+    // The debit-processing webhook lands between provider work and checkout
+    // persistence: the fenced write must lose and the state must stand.
+    intentCreate.mockImplementation(async (args: { amount: number }) => {
+      booking.status = "PROCESSING"; // the concurrent webhook
+      return {
+        id: "pi_new",
+        client_secret: "cs_new",
+        status: "requires_payment_method",
+        amount: args.amount,
+      };
+    });
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(409);
+    expect(String(res.body.error)).toContain("still processing");
+    expect(res.body.clientSecret).toBeUndefined();
+    expect(booking.status).toBe("PROCESSING"); // NOT regressed to QUOTED
+    // Our unreferenced intent was closed, not left chargeable.
+    expect(intentCancel).toHaveBeenCalledWith("pi_new");
+  });
+
+  it("a webhook flipping QUOTED → BOOKED mid-attempt is NEVER regressed — truthful already-paid", async () => {
+    intentCreate.mockImplementation(async (args: { amount: number }) => {
+      booking.status = "BOOKED"; // finalization completed concurrently
+      return {
+        id: "pi_new",
+        client_secret: "cs_new",
+        status: "requires_payment_method",
+        amount: args.amount,
+      };
+    });
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(409);
+    expect(String(res.body.error)).toContain("already paid");
+    expect(booking.status).toBe("BOOKED");
+    expect(intentCancel).toHaveBeenCalledWith("pi_new");
+  });
+
+  it("STANDARD fresh-intent persistence failure: no secret, intent closed, capacity claim released", async () => {
+    failCheckoutPersistWrites = true;
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(503);
+    expect(res.body.clientSecret).toBeUndefined();
+    expect(intentCancel).toHaveBeenCalledWith("pi_new");
+    // Full compensation: no claim row survives and the slot minutes are back.
+    expect(capacityFixture.maps.capacityClaims.size).toBe(0);
+    for (const slot of capacityFixture.maps.capacityDays.values()) {
+      expect(slot.committedMinutes ?? 0).toBe(0);
+    }
+    expect(booking.stripePaymentIntentId ?? null).toBeNull();
+  });
+
+  it("STANDARD reuse persistence failure: no secret leaves", async () => {
+    booking.stripePaymentIntentId = "pi_live";
+    booking.selectedDate = "2026-07-22";
+    booking.selectedWindow = "MORNING";
+    existingIntent = {
+      id: "pi_live",
+      amount: 31300,
+      status: "requires_payment_method",
+      client_secret: "cs_live",
+    };
+    failCheckoutPersistWrites = true;
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(503);
+    expect(res.body.clientSecret).toBeUndefined();
+  });
+
+  it("STANDARD path: an unprovable prior-intent cancellation blocks any replacement", async () => {
+    booking.stripePaymentIntentId = "pi_stuck";
+    // Mismatched selection forces replacement; the provider won't confirm
+    // the cancel and the re-read still shows it live.
+    booking.selectedDate = "2026-07-20";
+    booking.selectedWindow = "AFTERNOON";
+    existingIntent = {
+      id: "pi_stuck",
+      amount: 31300,
+      status: "requires_payment_method",
+      client_secret: "cs_stuck",
+    };
+    intentCancel.mockImplementation(async () => {
+      throw new Error("provider timeout");
+    });
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(503);
+    expect(String(res.body.error)).toContain("couldn't safely close");
+    expect(intentCreate).not.toHaveBeenCalled();
+  });
+
+  it("PARALLEL dated requests with different selections: one attempt mutates selection/capacity; one intent exists", async () => {
+    let releaseCreate!: () => void;
+    const gate = new Promise<void>((resolve) => (releaseCreate = resolve));
+    intentCreate.mockImplementation(async (args: { amount: number }) => {
+      await gate;
+      return {
+        id: "pi_new",
+        client_secret: "cs_new",
+        status: "requires_payment_method",
+        amount: args.amount,
+      };
+    });
+
+    const first = bookIt(); // MORNING
+    await flush(); // parked inside the provider create, lease held
+    expect(intentCreate).toHaveBeenCalledTimes(1);
+
+    const second = await bookIt({ window: "AFTERNOON" }); // racing selection
+    expect(second.status).toBe(409);
+    expect(String(second.body.error)).toContain("already being prepared");
+
+    releaseCreate();
+    const winner = await first;
+
+    expect(winner.status).toBe(200);
+    // Exactly ONE selection mutation, ONE claim, ONE chargeable intent.
+    expect(booking.selectedWindow).toBe("MORNING");
+    expect(booking.stripePaymentIntentId).toBe("pi_new");
+    expect(intentCreate).toHaveBeenCalledTimes(1);
+    expect(capacityFixture.maps.capacityClaims.size).toBe(1);
+  });
+
+  it("LEASE-EXPIRY overlap converges on ONE intent and never overwrites the newer attempt", async () => {
+    // A replay-faithful provider so the deterministic key makes both
+    // attempts converge on the SAME intent.
+    const byKey = new Map<
+      string,
+      { id: string; client_secret: string; status: string; amount: number }
+    >();
+    let minted = 0;
+    const replay = async (
+      args: { amount: number },
+      opts?: { idempotencyKey?: string }
+    ) => {
+      const key = opts?.idempotencyKey ?? `anon-${minted}`;
+      if (!byKey.has(key)) {
+        minted++;
+        byKey.set(key, {
+          id: `pi_${minted}`,
+          client_secret: `cs_${minted}`,
+          status: "requires_payment_method",
+          amount: args.amount,
+        });
+      }
+      return { ...byKey.get(key)! };
+    };
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((resolve) => (releaseA = resolve));
+    let firstCall = true;
+    intentCreate.mockImplementation(async (args, opts) => {
+      if (firstCall) {
+        firstCall = false;
+        await gateA; // attempt A stalls INSIDE provider work past its lease
+      }
+      return replay(args as { amount: number }, opts);
+    });
+
+    const attemptA = bookIt();
+    await flush(); // A holds the lease, parked in the gate
+    vi.setSystemTime(new Date(Date.now() + 61_000)); // A's lease expires
+
+    const attemptB = await bookIt(); // takes over the expired lease
+    expect(attemptB.status).toBe(200);
+    expect(attemptB.body.clientSecret).toBe("cs_1"); // the converged intent
+    expect(booking.stripePaymentIntentId).toBe("pi_1");
+
+    releaseA();
+    const resA = await attemptA;
+
+    // A's fenced write LOST on the holder fence — truthful refusal, and the
+    // AUTHORITATIVE converged intent was NOT canceled out from under B.
+    expect(resA.status).toBe(409);
+    expect(String(resA.body.error)).toContain("finished first");
+    expect(intentCancel).not.toHaveBeenCalled();
+    expect(minted).toBe(1); // ONE intent, ever
+    expect(booking.stripePaymentIntentId).toBe("pi_1");
+    expect(booking.status).toBe("QUOTED"); // still payable, never clobbered
   });
 });

@@ -35,10 +35,16 @@ export const PAYABLE_REUSE_STATUSES: ReadonlySet<string> = new Set([
   "requires_action",
 ]);
 
-export const PAYMENT_ATTEMPT_LEASE_MS = 30_000;
+export const PAYMENT_ATTEMPT_LEASE_MS = 60_000;
 
 export type PaymentAttempt =
-  | { ok: true; release: () => Promise<void> }
+  | {
+      ok: true;
+      /** The lease value THIS attempt holds — fenced persistence conditions
+       *  on it, so an expired-and-taken-over attempt can never write. */
+      holderUntil: string;
+      release: () => Promise<void>;
+    }
   | { ok: false; unavailable: boolean };
 
 /**
@@ -50,6 +56,55 @@ export type PaymentAttempt =
  * carried by the deterministic provider idempotency keys and the
  * persist-before-secret rule, so even a lease-expiry overlap converges.
  */
+export type CheckoutPersistResult =
+  | { ok: true }
+  | { ok: false; reason: "LOST" | "UNSUPPORTED" };
+
+/**
+ * GL-17 — the ONE fenced checkout persistence every /book branch uses. The
+ * write lands only when ALL of these still hold, evaluated server-side in
+ * the same conditional write:
+ *  - THIS attempt still holds the lease (paymentAttemptLeaseUntil is the
+ *    exact value acquirePaymentAttempt granted) — an expired lease whose
+ *    booking a newer attempt took over can never write;
+ *  - the booking is still in a PAYABLE lifecycle state (QUOTED or
+ *    PAYMENT_FAILED) — a concurrent webhook's PROCESSING or BOOKED, an
+ *    office CANCELED, or an EXPIRED booking is never regressed to QUOTED;
+ *  - the booking still references the expected PRIOR PaymentIntent (or
+ *    none) — a newer attempt's intent is never overwritten.
+ * A lost write means the caller must re-read booking + provider state and
+ * answer truthfully; it must NOT return a client secret.
+ */
+export async function persistCheckoutAttempt(opts: {
+  bookingId: string;
+  holderUntil: string;
+  priorIntentId: string | null;
+  sets: Record<string, string | number | boolean | null>;
+}): Promise<CheckoutPersistResult> {
+  const conditions: LockCondition[] = [
+    {
+      kind: "fieldEquals",
+      field: "paymentAttemptLeaseUntil",
+      value: opts.holderUntil,
+    },
+    { kind: "fieldIn", field: "status", values: ["QUOTED", "PAYMENT_FAILED"] },
+    opts.priorIntentId
+      ? {
+          kind: "fieldEquals",
+          field: "stripePaymentIntentId",
+          value: opts.priorIntentId,
+        }
+      : { kind: "fieldMissingOrNull", field: "stripePaymentIntentId" },
+  ];
+  const res = await casGuardedUpdate(
+    "BookingRequest",
+    opts.bookingId,
+    opts.sets,
+    conditions
+  );
+  return res.ok ? { ok: true } : { ok: false, reason: res.reason };
+}
+
 export async function acquirePaymentAttempt(
   bookingId: string
 ): Promise<PaymentAttempt> {
@@ -64,6 +119,7 @@ export async function acquirePaymentAttempt(
   if (!res.ok) return { ok: false, unavailable: res.reason === "UNSUPPORTED" };
   return {
     ok: true,
+    holderUntil: until,
     release: async () => {
       // Only THIS holder releases — a later winner's lease is never cleared.
       await casGuardedUpdate(

@@ -37,7 +37,9 @@ import { casGuardedUpdate } from "../shared/atomicLock";
 import {
   acquirePaymentAttempt,
   PAYABLE_REUSE_STATUSES,
+  persistCheckoutAttempt,
 } from "../shared/bookingPayment";
+import { releaseCapacityClaim } from "../shared/capacity";
 import { releaseMonthForJob } from "../shared/obligations";
 import {
   BOOKING_TERMS_TEXT,
@@ -1347,6 +1349,198 @@ async function quote(
 
 // ----------------------------------------------------------------- /book
 
+/** GL-17: prove a PaymentIntent TERMINAL (canceled) — cancel then verify,
+ *  falling back to a re-read. False means the intent may still be able to
+ *  charge; no replacement may be created while that is true. */
+async function proveIntentTerminal(
+  s: Stripe,
+  intentId: string
+): Promise<boolean> {
+  try {
+    if ((await s.paymentIntents.cancel(intentId)).status === "canceled") {
+      return true;
+    }
+  } catch {
+    /* verified by the re-read below */
+  }
+  try {
+    return (await s.paymentIntents.retrieve(intentId)).status === "canceled";
+  } catch {
+    return false;
+  }
+}
+
+/** GL-17: a chargeable intent exists that the booking record does not
+ *  reference and could not be closed — CONFIRMED, deduplicated Finance
+ *  recovery. Never silently ignored: a failed open is logged CRITICAL (the
+ *  reconcile/stray-payment sweeps remain the money backstop). */
+async function ownOrphanedIntent(
+  booking: { id: string; name?: string | null },
+  intentId: string,
+  amountCents: number
+): Promise<void> {
+  let opened: string | null = null;
+  try {
+    opened = await openOwnedWork({
+      kind: "PAYMENT_INTENT_ORPHAN",
+      dedupeKey: `booking-payment-orphan:${booking.id}`,
+      title: `A checkout's payment intent is unrecorded: ${booking.name ?? booking.id}`,
+      detail: `Stripe PaymentIntent ${intentId} ($${(amountCents / 100).toFixed(2)}) exists for booking ${booking.id}, but the booking record could not be updated to reference it AND the intent could not be canceled. If the customer completes this payment, finalization will refuse it as superseded — verify the intent in Stripe, cancel or refund it, and reconcile the booking.`,
+      relatedId: booking.id,
+      sourceUrl: `/work`,
+      resolutionAction:
+        "Open the PaymentIntent in Stripe. If unpaid, cancel it. If paid, refund or manually finalize against this booking, then confirm the booking record references the right intent.",
+      ownerTeam: "FINANCE",
+    });
+  } catch (err) {
+    console.error("ownOrphanedIntent: openOwnedWork threw", booking.id, intentId, err);
+  }
+  if (!opened) {
+    console.error(
+      `CRITICAL: PAYMENT_INTENT_ORPHAN work for booking ${booking.id} / intent ${intentId} could not be opened — the unreferenced chargeable intent is covered only by the reconcile and stray-payment sweeps until a human intervenes.`
+    );
+  }
+}
+
+/** The booking row's CURRENT authoritative intent reference. */
+async function currentIntentId(
+  client: { models: Record<string, unknown> },
+  bookingId: string
+): Promise<string | null> {
+  try {
+    const { data } = await (
+      client.models.BookingRequest as {
+        get: (i: { id: string }) => Promise<{
+          data: { stripePaymentIntentId?: string | null } | null;
+        }>;
+      }
+    ).get({ id: bookingId });
+    return data?.stripePaymentIntentId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** GL-17: after a LOST/UNSUPPORTED fenced write, settle the fate of the
+ *  intent THIS attempt minted: if a concurrent attempt persisted the very
+ *  same (idempotency-converged) intent, it is authoritative — leave it.
+ *  Otherwise it is unreferenced and chargeable — prove it terminal or open
+ *  confirmed Finance recovery. */
+async function settleUnpersistedIntent(
+  client: { models: Record<string, unknown> },
+  s: Stripe,
+  booking: { id: string; name?: string | null },
+  intentId: string,
+  amountCents: number
+): Promise<void> {
+  const authoritative = await currentIntentId(client, booking.id);
+  if (authoritative === intentId) return; // converged — another attempt owns it
+  if (!(await proveIntentTerminal(s, intentId))) {
+    await ownOrphanedIntent(booking, intentId, amountCents);
+  }
+}
+
+/** GL-17: the truthful refusal after a LOST fenced checkout write — re-read
+ *  the booking's durable lifecycle and answer with what is actually true.
+ *  Never returns a client secret. */
+async function truthfulCheckoutRefusal(
+  client: { models: Record<string, unknown> },
+  bookingId: string
+): Promise<HttpError> {
+  let status: string | undefined;
+  try {
+    const { data } = await (
+      client.models.BookingRequest as {
+        get: (i: { id: string }) => Promise<{
+          data: { status?: string | null } | null;
+        }>;
+      }
+    ).get({ id: bookingId });
+    status = data?.status ?? undefined;
+  } catch {
+    /* fall through to the generic refusal */
+  }
+  if (status === "BOOKED") {
+    return new HttpError(409, {
+      error:
+        "This booking is already paid — check your email for the confirmation.",
+    });
+  }
+  if (status === "PROCESSING") {
+    return new HttpError(409, {
+      error:
+        "Your payment is still processing — please don't pay again. We'll email your confirmation as soon as it clears, or let you know if it doesn't go through.",
+    });
+  }
+  if (status === "CANCELED") {
+    return new HttpError(410, {
+      error: "This booking was canceled — request a fresh quote.",
+    });
+  }
+  if (status === "EXPIRED") {
+    return new HttpError(410, {
+      error: "This quote expired — request a fresh one.",
+    });
+  }
+  return new HttpError(409, {
+    error:
+      "Another checkout attempt for this booking finished first — refresh and try again.",
+  });
+}
+
+/** GL-17: mint (or converge on) THIS attempt's PaymentIntent with the
+ *  generation-chained deterministic idempotency key. A replayed dead
+ *  (canceled) generation advances the chain; a replayed succeeded/processing
+ *  intent is answered truthfully by throwing. */
+async function createConvergentIntent(
+  s: Stripe,
+  opts: {
+    bookingId: string;
+    customerId: string;
+    amountCents: number;
+    description: string;
+    generation: string;
+  }
+): Promise<Stripe.PaymentIntent> {
+  let generation = opts.generation;
+  for (let hop = 0; hop < 3; hop++) {
+    const created = await s.paymentIntents.create(
+      {
+        amount: opts.amountCents,
+        currency: "usd",
+        customer: opts.customerId,
+        setup_future_usage: "off_session",
+        automatic_payment_methods: { enabled: true },
+        description: opts.description,
+        metadata: { bookingRequestId: opts.bookingId },
+      },
+      { idempotencyKey: `bk-intent-${opts.bookingId}-${generation}` }
+    );
+    if (created.status === "succeeded") {
+      throw new HttpError(409, {
+        error:
+          "This booking is already paid — check your email for the confirmation.",
+      });
+    }
+    if (created.status === "processing") {
+      throw new HttpError(409, {
+        error:
+          "Your payment is still processing — please don't pay again. We'll email your confirmation as soon as it clears, or let you know if it doesn't go through.",
+      });
+    }
+    if (created.status === "canceled") {
+      generation = created.id;
+      continue;
+    }
+    if (!created.client_secret) break;
+    return created;
+  }
+  throw new HttpError(503, {
+    error:
+      "We couldn't prepare your checkout — nothing was charged. Please try again in a moment.",
+  });
+}
+
 /**
  * GL-17 — check out an OFF-SEASON seasonal-plan enrollment: the customer
  * pays the first month now (billing starts immediately, as advertised), no
@@ -1371,41 +1565,6 @@ async function quote(
  * Webhook finalization then converges on the one recorded intent (its
  * superseded-intent guard already refuses everything else).
  */
-async function bookOffSeasonEnrollment(opts: {
-  booking: {
-    id: string;
-    email: string;
-    name: string;
-    phone?: string | null;
-    cancelToken?: string | null;
-    stripeCustomerId?: string | null;
-    stripePaymentIntentId?: string | null;
-  };
-  stored: {
-    serviceLabel?: string;
-    recurringOffer: { frequency: string; monthlyCents: number; initialFeeCents: number };
-  };
-  req: { sourceIp?: string; userAgent?: string };
-  tcVersion: string;
-  // Deliberately untyped V6Client (TS2321 depth ceiling) — one update call.
-  client: { models: Record<string, unknown> };
-}) {
-  const { booking, req, tcVersion } = opts;
-  const attempt = await acquirePaymentAttempt(booking.id);
-  if (!attempt.ok) {
-    throw new HttpError(attempt.unavailable ? 503 : 409, {
-      error: attempt.unavailable
-        ? "Checkout can't be verified right now — nothing was charged. Try again in a moment."
-        : "Your checkout is already being prepared (another click or tab got there first) — give it a few seconds and try again.",
-    });
-  }
-  try {
-    return await offSeasonEnrollmentAttempt(opts);
-  } finally {
-    await attempt.release();
-  }
-}
-
 async function offSeasonEnrollmentAttempt(opts: {
   booking: {
     id: string;
@@ -1423,28 +1582,28 @@ async function offSeasonEnrollmentAttempt(opts: {
   req: { sourceIp?: string; userAgent?: string };
   tcVersion: string;
   client: { models: Record<string, unknown> };
+  /** The exact attempt-lease value book() acquired — the persistence fence. */
+  holderUntil: string;
 }) {
-  const { booking, stored, req, tcVersion, client } = opts;
+  const { booking, stored, req, tcVersion, client, holderUntil } = opts;
   const amountCents = stored.recurringOffer.initialFeeCents;
   const s = await stripeClient();
-  const bookingModel = client.models.BookingRequest as {
-    update: (input: Record<string, unknown>) => Promise<{
-      data: { stripePaymentIntentId?: string | null } | null;
-      errors?: { message: string }[];
-    }>;
-  };
   const summary = `${stored.serviceLabel ?? "Seasonal plan"} — billing starts today; first treatment scheduled for April (we'll confirm the exact day).`;
 
-  /** The enrollment facts + THIS attempt's intent reference, written and
-   *  read back — the secret is returned only on a CONFIRMED record. */
+  /** The enrollment facts + THIS attempt's intent reference, landed through
+   *  the ONE fenced write (attempt holder + payable state + expected prior
+   *  intent) — a concurrent webhook's PROCESSING/BOOKED, a cancellation, or
+   *  a newer attempt's intent is never regressed to QUOTED. */
   const persistEnrollment = async (
     intentId: string,
     customerId?: string
-  ): Promise<boolean> => {
-    const write = async (): Promise<boolean> => {
-      try {
-        const res = await bookingModel.update({
-          id: booking.id,
+  ): Promise<"OK" | "LOST" | "UNSUPPORTED"> => {
+    const write = () =>
+      persistCheckoutAttempt({
+        bookingId: booking.id,
+        holderUntil,
+        priorIntentId: booking.stripePaymentIntentId ?? null,
+        sets: {
           status: "QUOTED",
           selectedDate: null,
           selectedWindow: null,
@@ -1458,17 +1617,17 @@ async function offSeasonEnrollmentAttempt(opts: {
           paymentFailedNoticeSentAt: null,
           tcVersion,
           tcAcceptedAt: new Date().toISOString(),
-          tcIp: req.sourceIp || undefined,
-          tcUserAgent: req.userAgent?.slice(0, 512) || undefined,
-        });
-        return Boolean(
-          res?.data && res.data.stripePaymentIntentId === intentId
-        );
-      } catch {
-        return false;
-      }
-    };
-    return (await write()) || (await write());
+          tcIp: req.sourceIp || null,
+          tcUserAgent: req.userAgent?.slice(0, 512) || null,
+        },
+      });
+    const first = await write();
+    if (first.ok) return "OK";
+    if (first.reason === "UNSUPPORTED") {
+      const retry = await write();
+      return retry.ok ? "OK" : retry.reason;
+    }
+    return "LOST";
   };
 
   // 1. Prior-intent triage against the EXPLICIT allowlist.
@@ -1494,7 +1653,11 @@ async function offSeasonEnrollmentAttempt(opts: {
     ) {
       // Reusable — but the acceptance record must be durably confirmed
       // before this attempt's secret leaves the server.
-      if (!(await persistEnrollment(existing.id))) {
+      const persisted = await persistEnrollment(existing.id);
+      if (persisted === "LOST") {
+        throw await truthfulCheckoutRefusal(client, booking.id);
+      }
+      if (persisted !== "OK") {
         throw new HttpError(503, {
           error:
             "We couldn't record your acceptance — nothing was charged. Please try again in a moment.",
@@ -1509,27 +1672,14 @@ async function offSeasonEnrollmentAttempt(opts: {
     }
     // Not reusable: PROVE it terminal before any replacement can charge —
     // an async intent that later settles must be impossible here.
-    if (existing.status !== "canceled") {
-      let terminal = false;
-      try {
-        terminal = (await s.paymentIntents.cancel(existing.id)).status === "canceled";
-      } catch {
-        /* verified by re-read below */
-      }
-      if (!terminal) {
-        try {
-          terminal =
-            (await s.paymentIntents.retrieve(existing.id)).status === "canceled";
-        } catch {
-          /* still unproven */
-        }
-      }
-      if (!terminal) {
-        throw new HttpError(503, {
-          error:
-            "We couldn't safely close your previous payment attempt — nothing was charged. Please try again in a moment.",
-        });
-      }
+    if (
+      existing.status !== "canceled" &&
+      !(await proveIntentTerminal(s, existing.id))
+    ) {
+      throw new HttpError(503, {
+        error:
+          "We couldn't safely close your previous payment attempt — nothing was charged. Please try again in a moment.",
+      });
     }
   }
 
@@ -1550,70 +1700,23 @@ async function offSeasonEnrollmentAttempt(opts: {
         { idempotencyKey: `bk-cust-${booking.id}` }
       )
     ).id;
-  let generation = priorId ?? "first";
-  let intent: Stripe.PaymentIntent | null = null;
-  for (let hop = 0; hop < 3 && !intent; hop++) {
-    const created = await s.paymentIntents.create(
-      {
-        amount: amountCents,
-        currency: "usd",
-        customer: customerId,
-        setup_future_usage: "off_session",
-        automatic_payment_methods: { enabled: true },
-        description: `${stored.serviceLabel ?? "Seasonal plan"} — off-season enrollment (first treatment next April)`,
-        metadata: { bookingRequestId: booking.id },
-      },
-      { idempotencyKey: `bk-intent-${booking.id}-${generation}` }
-    );
-    if (created.status === "succeeded") {
-      throw new HttpError(409, {
-        error:
-          "This enrollment is already paid — check your email for the confirmation.",
-      });
-    }
-    if (created.status === "processing") {
-      throw new HttpError(409, {
-        error:
-          "Your payment is still processing — please don't pay again. We'll email your confirmation as soon as it clears, or let you know if it doesn't go through.",
-      });
-    }
-    if (created.status === "canceled") {
-      // An idempotent REPLAY of a generation this contract already closed
-      // (e.g. canceled after a persistence failure) — advance the chain.
-      generation = created.id;
-      continue;
-    }
-    intent = created;
-  }
-  if (!intent?.client_secret) {
-    throw new HttpError(503, {
-      error:
-        "We couldn't prepare your checkout — nothing was charged. Please try again in a moment.",
-    });
-  }
+  const intent = await createConvergentIntent(s, {
+    bookingId: booking.id,
+    customerId,
+    amountCents,
+    description: `${stored.serviceLabel ?? "Seasonal plan"} — off-season enrollment (first treatment next April)`,
+    generation: priorId ?? "first",
+  });
 
-  // 3. DURABLE persistence BEFORE the secret. If the record cannot be
-  // confirmed, the fresh intent is closed safely — and if even that fails,
-  // the orphaned chargeable intent becomes deduplicated owned Finance work.
-  if (!(await persistEnrollment(intent.id, customerId))) {
-    let closed = false;
-    try {
-      closed = (await s.paymentIntents.cancel(intent.id)).status === "canceled";
-    } catch {
-      /* owned below */
-    }
-    if (!closed) {
-      await openOwnedWork({
-        kind: "PAYMENT_INTENT_ORPHAN",
-        dedupeKey: `booking-payment-orphan:${booking.id}`,
-        title: `An off-season enrollment's payment intent is unrecorded: ${booking.name}`,
-        detail: `Stripe PaymentIntent ${intent.id} (${(amountCents / 100).toFixed(2)} USD) exists for booking ${booking.id}, but the booking record could not be updated to reference it AND the intent could not be canceled. If the customer completes this payment, finalization will refuse it as superseded — verify the intent in Stripe, cancel or refund it, and reconcile the booking.`,
-        relatedId: booking.id,
-        sourceUrl: `/work`,
-        resolutionAction:
-          "Open the PaymentIntent in Stripe. If unpaid, cancel it. If paid, refund or manually finalize against this booking, then confirm the booking record references the right intent.",
-        ownerTeam: "FINANCE",
-      }).catch(() => undefined);
+  // 3. DURABLE FENCED persistence BEFORE the secret. A lost fence means the
+  // lifecycle moved (webhook, newer attempt) — close OUR unreferenced intent
+  // and answer truthfully; an unsupported write closes the intent or opens
+  // confirmed Finance recovery. No path returns a secret unconfirmed.
+  const persisted = await persistEnrollment(intent.id, customerId);
+  if (persisted !== "OK") {
+    await settleUnpersistedIntent(client, s, booking, intent.id, amountCents);
+    if (persisted === "LOST") {
+      throw await truthfulCheckoutRefusal(client, booking.id);
     }
     throw new HttpError(503, {
       error:
@@ -1657,6 +1760,7 @@ async function book(
   if (!booking) {
     throw new HttpError(404, { error: "Quote not found — request a new one." });
   }
+  const bookingRow = booking;
   // GL-06: a returning/refreshing/retrying customer retrieves the durable
   // state — no payment state ever falls through to "Quote not found" or is
   // invited to pay again without the truth about the prior attempt.
@@ -1721,26 +1825,54 @@ async function book(
   if (recurring && !stored.recurringOffer) {
     throw new HttpError(400, { error: "No recurring plan was offered on this quote." });
   }
-  if (offSeason) {
+  if (offSeason && !stored.recurringOffer) {
     // An off-season enrollment IS the plan — a quote stored without its
     // recurring offer cannot price the first month and must not 500.
-    if (!stored.recurringOffer) {
-      throw new HttpError(400, {
-        error: "No recurring plan was offered on this quote.",
-      });
-    }
-    return bookOffSeasonEnrollment({
-      booking,
-      stored: stored as {
-        serviceLabel?: string;
-        recurringOffer: { frequency: string; monthlyCents: number; initialFeeCents: number };
-      },
-      req,
-      tcVersion,
-      client,
+    throw new HttpError(400, {
+      error: "No recurring plan was offered on this quote.",
     });
   }
 
+  // GL-17: EVERY /book branch — dated, plan-only, and off-season — runs
+  // behind ONE durable single-winner attempt boundary. Parallel requests
+  // (double-clicks, two tabs, different selections) get exactly one live
+  // attempt; the loser is refused honestly before any provider object or
+  // capacity/selection mutation exists. Fenced persistence (the attempt
+  // holder below) keeps even a lease-expiry overlap convergent.
+  const attempt = await acquirePaymentAttempt(bookingId);
+  if (!attempt.ok) {
+    throw new HttpError(attempt.unavailable ? 503 : 409, {
+      error: attempt.unavailable
+        ? "Checkout can't be verified right now — nothing was charged. Try again in a moment."
+        : "Your checkout is already being prepared (another click or tab got there first) — give it a few seconds and try again.",
+    });
+  }
+  const holderUntil = attempt.holderUntil;
+  try {
+    if (offSeason) {
+      return await offSeasonEnrollmentAttempt({
+        booking,
+        stored: stored as {
+          serviceLabel?: string;
+          recurringOffer: { frequency: string; monthlyCents: number; initialFeeCents: number };
+        },
+        req,
+        tcVersion,
+        client,
+        holderUntil,
+      });
+    }
+    return await bookDatedAttempt();
+  } finally {
+    await attempt.release();
+  }
+
+  // The dated (and plan-only) checkout, INSIDE the attempt boundary — a
+  // closure so it shares every validated fact above.
+  async function bookDatedAttempt() {
+  // TS narrowing doesn't cross the closure boundary; the null check above
+  // already threw. Shadow with the proven-non-null row.
+  const booking = bookingRow;
   // Server-side price: one-time pays the day price; recurring pays the
   // initial fee now and the subscription starts after the first visit.
   const amountCents = recurring
@@ -1852,17 +1984,46 @@ async function book(
             : reclaimed.message,
         });
       }
-      await client.models.BookingRequest.update({
-        id: booking.id,
-        capacityTechnicianId: slot0.technicianId,
-        capacityMinutes: slot0.claimMinutes,
-        // GL-06: a retried attempt (after a pre-service failure) re-arms the
-        // state machine — the reused intent's webhooks only apply to QUOTED/
-        // PROCESSING, and a fresh failure must be able to notice again.
-        status: "QUOTED",
-        paymentFailedReason: null,
-        paymentFailedNoticeSentAt: null,
-      }).catch(() => undefined);
+      // GL-17: the reuse facts land through the SAME fenced write as a
+      // fresh attempt — attempt holder, payable state, expected intent. A
+      // concurrent webhook's PROCESSING/BOOKED is never regressed, and the
+      // secret is returned only on CONFIRMED persistence.
+      const reusePersisted = await persistCheckoutAttempt({
+        bookingId: booking.id,
+        holderUntil,
+        priorIntentId: existing.id,
+        sets: {
+          // Restate the reused intent's authority in the same fenced write
+          // that lands the selection/terms — confirmed persistence covers
+          // ALL the facts the secret is returned against.
+          stripePaymentIntentId: existing.id,
+          capacityTechnicianId: slot0.technicianId,
+          capacityMinutes: slot0.claimMinutes,
+          selectedDate: date,
+          selectedWindow: window,
+          recurring,
+          amountCents,
+          // GL-06: a retried attempt (after a pre-service failure) re-arms
+          // the state machine — the reused intent's webhooks only apply to
+          // QUOTED/PROCESSING, and a fresh failure must notice again.
+          status: "QUOTED",
+          paymentFailedReason: null,
+          paymentFailedNoticeSentAt: null,
+          tcVersion,
+          tcAcceptedAt: new Date().toISOString(),
+          tcIp: req.sourceIp || null,
+          tcUserAgent: req.userAgent?.slice(0, 512) || null,
+        },
+      });
+      if (!reusePersisted.ok) {
+        if (reusePersisted.reason === "LOST") {
+          throw await truthfulCheckoutRefusal(client, booking.id);
+        }
+        throw new HttpError(503, {
+          error:
+            "We couldn't record your booking details — nothing was charged. Please try again in a moment.",
+        });
+      }
       return {
         clientSecret: existing.client_secret,
         amountCents,
@@ -1870,10 +2031,16 @@ async function book(
         summary: summaryFor(stored, date, window, recurring),
       };
     }
-    try {
-      await s.paymentIntents.cancel(existing.id);
-    } catch {
-      /* already canceled/expired — fine */
+    // GL-17: PROVE the prior intent terminal before any replacement can
+    // become chargeable — an unproven cancellation blocks the attempt.
+    if (
+      existing.status !== "canceled" &&
+      !(await proveIntentTerminal(s, existing.id))
+    ) {
+      throw new HttpError(503, {
+        error:
+          "We couldn't safely close your previous payment attempt — nothing was charged. Please try again in a moment.",
+      });
     }
   }
 
@@ -1947,47 +2114,74 @@ async function book(
         { idempotencyKey: `bk-cust-${booking.id}` }
       )
     ).id;
-  const intent = await s.paymentIntents.create(
-    {
-      amount: amountCents,
-      currency: "usd",
-      customer: customerId,
-      setup_future_usage: "off_session",
-      automatic_payment_methods: { enabled: true },
-      description: `${stored.serviceLabel ?? "BuzzKill service"} — ${date} (${window.toLowerCase()})`,
-      metadata: { bookingRequestId: booking.id },
-    },
-    // GL-17: generation-chained — same prior attempt ⇒ same key ⇒ one
-    // intent, even for overlapping creates.
-    { idempotencyKey: `bk-intent-${booking.id}-${booking.stripePaymentIntentId ?? "first"}` }
-  );
-
-  await client.models.BookingRequest.update({
-    id: booking.id,
-    // GL-06: a fresh payable intent resets the booking to QUOTED, clearing any
-    // prior PROCESSING/PAYMENT_FAILED so a retried attempt finalizes cleanly.
-    status: "QUOTED",
-    selectedDate: date,
-    selectedWindow: window,
-    // GL-04: the checkout claim's slot facts survive the claim row — if the
-    // hold expires before the payment lands, finalize re-reserves from THESE
-    // instead of booking a visit that holds nothing.
-    capacityTechnicianId: slot.technicianId,
-    capacityMinutes: slot.claimMinutes,
-    recurring,
+  // GL-17: generation-chained deterministic key — same prior attempt ⇒
+  // same key ⇒ ONE intent even for overlapping creates; a replayed dead
+  // generation advances instead of charging.
+  const intent = await createConvergentIntent(s, {
+    bookingId: booking.id,
+    customerId,
     amountCents,
-    stripeCustomerId: customerId,
-    stripePaymentIntentId: intent.id,
-    // A new attempt clears the prior failure's reason and notice marker.
-    paymentFailedReason: null,
-    paymentFailedNoticeSentAt: null,
-    // R17: the acceptance record. tcAcceptedAt is server time — a client
-    // clock (or a client lie) never decides when the terms were accepted.
-    tcVersion,
-    tcAcceptedAt: new Date().toISOString(),
-    tcIp: req.sourceIp || undefined,
-    tcUserAgent: req.userAgent?.slice(0, 512) || undefined,
+    description: `${stored.serviceLabel ?? "BuzzKill service"} — ${date} (${window.toLowerCase()})`,
+    generation: booking.stripePaymentIntentId ?? "first",
   });
+
+  // GL-17: the selection, amount, terms, capacity facts, and THIS intent's
+  // authority land through the ONE fenced write — and the secret is
+  // returned only on CONFIRMED persistence. A lost fence closes OUR
+  // unreferenced intent and answers truthfully; an unsupported write
+  // additionally releases the capacity claim (full compensation) or opens
+  // confirmed Finance recovery.
+  const persisted = await persistCheckoutAttempt({
+    bookingId: booking.id,
+    holderUntil,
+    priorIntentId: booking.stripePaymentIntentId ?? null,
+    sets: {
+      // GL-06: a fresh payable intent resets the booking to QUOTED, clearing
+      // any prior PAYMENT_FAILED so a retried attempt finalizes cleanly.
+      status: "QUOTED",
+      selectedDate: date,
+      selectedWindow: window,
+      // GL-04: the checkout claim's slot facts survive the claim row — if
+      // the hold expires before the payment lands, finalize re-reserves
+      // from THESE instead of booking a visit that holds nothing.
+      capacityTechnicianId: slot.technicianId,
+      capacityMinutes: slot.claimMinutes,
+      recurring,
+      amountCents,
+      stripeCustomerId: customerId,
+      stripePaymentIntentId: intent.id,
+      // A new attempt clears the prior failure's reason and notice marker.
+      paymentFailedReason: null,
+      paymentFailedNoticeSentAt: null,
+      // R17: the acceptance record. tcAcceptedAt is server time — a client
+      // clock (or a client lie) never decides when the terms were accepted.
+      tcVersion,
+      tcAcceptedAt: new Date().toISOString(),
+      tcIp: req.sourceIp || null,
+      tcUserAgent: req.userAgent?.slice(0, 512) || null,
+    },
+  });
+  if (!persisted.ok) {
+    await settleUnpersistedIntent(
+      client as unknown as { models: Record<string, unknown> },
+      s,
+      booking,
+      intent.id,
+      amountCents
+    );
+    if (persisted.reason === "LOST") {
+      // The lifecycle moved (webhook, newer attempt) — its owner keeps its
+      // capacity; only OUR (non-authoritative) intent needed closing.
+      throw await truthfulCheckoutRefusal(client, booking.id);
+    }
+    // UNSUPPORTED: nothing durable recorded this attempt — give the claimed
+    // slot back too, so a failed checkout leaks neither money nor capacity.
+    await releaseCapacityClaim(booking.id).catch(() => undefined);
+    throw new HttpError(503, {
+      error:
+        "We couldn't save your checkout — nothing was charged. Please try again in a moment.",
+    });
+  }
 
   return {
     clientSecret: intent.client_secret,
@@ -1995,6 +2189,7 @@ async function book(
     statusToken: booking.cancelToken ?? undefined,
     summary: summaryFor(stored, date, window, recurring),
   };
+  }
 }
 
 function summaryFor(
