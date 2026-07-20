@@ -1,7 +1,6 @@
 import { defineAuth } from "@aws-amplify/backend";
 import { crmAdmin } from "../functions/crm-admin/resource";
 import { postAuth } from "../functions/post-auth/resource";
-import { preToken } from "../functions/pre-token/resource";
 import { stripeWebhook } from "../functions/stripe-webhook/resource";
 import {
   createChallenge,
@@ -57,11 +56,10 @@ export const auth = defineAuth({
   groups: ["OWNER", "OFFICE", "FINANCE", "TECH", "CUSTOMER"],
   triggers: {
     postAuthentication: postAuth,
-    // Adds email/name to the access token so the CRM resolvers can name the
-    // acting human (Amplify signs AppSync with the access token, which omits
-    // them). backend.ts pins this to the V2_0 event so it can write access-
-    // token claims — the default V1 trigger can only touch the id token.
-    preTokenGeneration: preToken,
+    // NOTE: the pre-token-generation trigger is wired in backend.ts, not here.
+    // It must add email/name to the ACCESS token (Amplify signs AppSync with
+    // it), which needs the V2 event contract that defineAuth.triggers does not
+    // expose — backend.ts attaches it as a V2_0 trigger via a property override.
     defineAuthChallenge: defineChallenge,
     createAuthChallenge: createChallenge,
     verifyAuthChallengeResponse: verifyChallenge,

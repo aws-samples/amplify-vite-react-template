@@ -50,6 +50,7 @@ import { pricingRefresh } from "./functions/pricing-refresh/resource";
 import { sesEvents } from "./functions/ses-events/resource";
 import { opsAlerts } from "./functions/ops-alerts/resource";
 import { leadSweep } from "./functions/lead-sweep/resource";
+import { preToken } from "./functions/pre-token/resource";
 
 const backend = defineBackend({
   auth,
@@ -69,6 +70,7 @@ const backend = defineBackend({
   sesEvents,
   opsAlerts,
   leadSweep,
+  preToken,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
@@ -78,32 +80,31 @@ const backend = defineBackend({
 backend.auth.resources.cfnResources.cfnUserPool.adminCreateUserConfig = {
   allowAdminCreateUserOnly: true,
 };
-// The pre-token trigger (auth/resource.ts) must run as a V2_0 Lambda so it can
-// add `email`/`name` to the ACCESS token — the default V1 trigger Amplify wires
-// can only modify the id token, and Amplify's Data client signs AppSync with
-// the access token. defineAuth already created the function and Cognito's
-// invoke permission via triggers.preTokenGeneration (which populates
-// lambdaConfig.preTokenGeneration with the arn); here we re-point Cognito at the
-// same Lambda through preTokenGenerationConfig, which takes precedence and
-// selects the V2 event contract. Reusing the arn keeps the existing IAM wiring.
+// The pre-token trigger adds `email`/`name` to the ACCESS token so the CRM
+// resolvers can name the acting human — Amplify signs AppSync with the access
+// token, which omits them (only the id token carries them). It must run as the
+// V2 event contract; the default V1 pre-token trigger can only write the id
+// token.
+//
+// It is wired here rather than through defineAuth.triggers because that path
+// offers only the V1 contract, and the trigger arn it sets is not readable from
+// the L1 pool at synth time. Instead the function is a normal backend function
+// pinned to the auth stack (resourceGroupName "auth", so referencing it from
+// the pool creates no cross-stack cycle); we select V2_0 with a CloudFormation
+// property override (applied at synthesis, so it is order-independent of
+// Amplify's own LambdaConfig writes and leaves the pool's other triggers
+// untouched) and grant the Cognito invoke permission defineAuth would have.
 {
   const cfnUserPool = backend.auth.resources.cfnResources.cfnUserPool;
-  const lambdaConfig =
-    (cfnUserPool.lambdaConfig as { preTokenGeneration?: string } | undefined) ??
-    undefined;
-  const preTokenArn = lambdaConfig?.preTokenGeneration;
-  if (!preTokenArn) {
-    throw new Error(
-      "Expected defineAuth to wire the pre-token trigger before the V2_0 override."
-    );
-  }
-  cfnUserPool.lambdaConfig = {
-    ...lambdaConfig,
-    preTokenGenerationConfig: {
-      lambdaArn: preTokenArn,
-      lambdaVersion: "V2_0",
-    },
-  };
+  const preTokenFn = backend.preToken.resources.lambda;
+  cfnUserPool.addPropertyOverride("LambdaConfig.PreTokenGenerationConfig", {
+    LambdaArn: preTokenFn.functionArn,
+    LambdaVersion: "V2_0",
+  });
+  preTokenFn.addPermission("CognitoInvokePreToken", {
+    principal: new ServicePrincipal("cognito-idp.amazonaws.com"),
+    sourceArn: backend.auth.resources.userPool.userPoolArn,
+  });
 }
 backend.auth.resources.cfnResources.cfnUserPoolClient.explicitAuthFlows = [
   "ALLOW_USER_SRP_AUTH",
