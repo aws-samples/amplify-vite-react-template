@@ -2558,31 +2558,38 @@ async function updateJobSchedule(
     const slotMinutes =
       slotOnsiteMinutes(job.propertyClass) +
       (routeProof ? routeProof.driveMinutes * 2 : 0);
-    // GL-07: DELTA-correct claims, mirroring rescheduleVisit. A visit
-    // already ASSIGNED to this same technician-day holds its stop — a
-    // reassignment there is stop-delta 0 (a fully-booked eight-stop day can
-    // still be re-routed), and a same-window reassignment reserves only the
-    // positive minutes delta. A checkout hold or pool visit held no stop,
-    // so a fresh assignment claims one.
-    const priorAssignedFacts = (() => {
-      if (!job.technicianId || job.technicianId === POOL_TECH) return null;
+    // GL-07: DELTA-correct claims, mirroring rescheduleVisit. The job's
+    // existing hold on a REAL technician's ledger counts — whether it is a
+    // prior ASSIGNMENT (technicianId) or a funnel checkout hold that already
+    // sits on this technician's slot (capacityTechnicianId). A funnel-booked
+    // visit whose hold consumed most of the window used to double-claim
+    // against its own minutes here and refuse as "fully booked" on an empty
+    // schedule. Same tech-day claims reserve only the positive minutes
+    // delta; only a prior ASSIGNMENT also held a stop, so a first
+    // assignment over a checkout hold still claims its stop.
+    const priorHeldFacts = (() => {
       const f = jobCapacityFacts(job);
       return f && f.technicianId && f.technicianId !== POOL_TECH ? f : null;
     })();
+    const priorWasAssigned = Boolean(
+      job.technicianId && job.technicianId !== POOL_TECH
+    );
     const sameTechDay = Boolean(
-      job.technicianId &&
-        job.technicianId !== POOL_TECH &&
+      (priorWasAssigned &&
         job.technicianId === technician.id &&
-        job.scheduledDate === args.scheduledDate
+        job.scheduledDate === args.scheduledDate) ||
+        (priorHeldFacts &&
+          priorHeldFacts.technicianId === technician.id &&
+          priorHeldFacts.date === args.scheduledDate)
     );
     const sameSlotExact = Boolean(
       sameTechDay &&
-        priorAssignedFacts &&
-        priorAssignedFacts.window === targetWindow
+        priorHeldFacts &&
+        priorHeldFacts.window === targetWindow
     );
-    const stopDelta = sameTechDay ? 0 : 1;
+    const stopDelta = sameTechDay && priorWasAssigned ? 0 : 1;
     const claimMinutes = sameSlotExact
-      ? Math.max(0, slotMinutes - priorAssignedFacts!.minutes)
+      ? Math.max(0, slotMinutes - priorHeldFacts!.minutes)
       : slotMinutes;
     if (claimMinutes > 0 || stopDelta > 0) {
       const reserved = await reserveSlot(
@@ -2656,7 +2663,7 @@ async function updateJobSchedule(
     // reassignment settles only its shrink; a cross-window same-day one
     // returns the source window's minutes (its stop never moved).
     if (sameSlotExact) {
-      const shrink = priorAssignedFacts!.minutes - slotMinutes;
+      const shrink = priorHeldFacts!.minutes - slotMinutes;
       if (shrink > 0) {
         await releaseSlot(
           args.scheduledDate,
@@ -2666,12 +2673,12 @@ async function updateJobSchedule(
         ).catch(() => undefined);
       }
     } else if (sameTechDay) {
-      if (priorAssignedFacts && priorAssignedFacts.minutes > 0) {
+      if (priorHeldFacts && priorHeldFacts.minutes > 0) {
         await releaseSlot(
-          priorAssignedFacts.date,
-          priorAssignedFacts.window,
-          priorAssignedFacts.technicianId!,
-          priorAssignedFacts.minutes
+          priorHeldFacts.date,
+          priorHeldFacts.window,
+          priorHeldFacts.technicianId!,
+          priorHeldFacts.minutes
         ).catch(() => undefined);
       }
     } else {

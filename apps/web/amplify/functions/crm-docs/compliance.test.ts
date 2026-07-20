@@ -427,6 +427,66 @@ describe("regulated assignment", () => {
     });
   });
 
+  it("assigns a funnel-booked visit whose own checkout hold nearly fills the window (GL-07 delta, not a double claim)", async () => {
+    // The staging failure: a funnel booking holds 220 of the morning's 240
+    // minutes on t1 via capacityTechnicianId. Assigning that same visit to
+    // t1 used to claim ANOTHER full slot on top of its own hold and refuse
+    // as "fully booked" on an empty schedule.
+    jobs[0] = {
+      id: "j1",
+      customerId: "c1",
+      type: "ONE_TIME",
+      serviceType: "General pest",
+      status: "SCHEDULED",
+      propertyClass: "RESIDENTIAL",
+      scheduledDate: "2026-07-20",
+      timeWindow: "morning (8am–12pm)",
+      capacityTechnicianId: "t1",
+      capacityWindow: "MORNING",
+      capacityMinutes: 220,
+    };
+    routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
+    capacityFixture.maps.capacityDays.set("2026-07-20#MORNING#t1", {
+      id: "2026-07-20#MORNING#t1",
+      date: "2026-07-20",
+      window: "MORNING",
+      technicianId: "t1",
+      committedMinutes: 220,
+    });
+
+    await call(
+      "updateJobSchedule",
+      {
+        jobId: "j1",
+        operation: "ASSIGN",
+        technicianId: "t1",
+        routeId: "r1",
+        routeOrder: 1,
+        scheduledDate: "2026-07-20",
+      },
+      ["OFFICE"]
+    );
+
+    expect(jobs[0]).toMatchObject({
+      status: "SCHEDULED",
+      technicianId: "t1",
+      routeId: "r1",
+    });
+    // The assignment supersedes the checkout hold's attribution.
+    expect(jobs[0].capacityTechnicianId ?? null).toBeNull();
+    // The ledger settles to the assignment's real footprint (30 onsite
+    // minutes, no drive under the local-dev escape): the hold's surplus is
+    // released, nothing double-held.
+    expect(
+      capacityFixture.maps.capacityDays.get("2026-07-20#MORNING#t1")
+        ?.committedMinutes
+    ).toBe(30);
+    // A checkout hold never held a stop — the first assignment claims it.
+    expect(
+      capacityFixture.maps.techDayStops.get("2026-07-20#t1")?.committedStops
+    ).toBe(1);
+  });
+
   it("refuses to route a job whose customer has no deliverable address (GL-12)", async () => {
     jobs[0].status = "UNSCHEDULED";
     customer.serviceStreet = null;
