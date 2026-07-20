@@ -148,6 +148,36 @@ function parseProducts(raw: unknown): ReportProduct[] {
   }
 }
 
+/**
+ * Coerce a value into the JSON *string* an AWSJSON model field expects. An
+ * `a.json()` custom-mutation argument is handed to this Lambda already parsed
+ * into a JS value, so forwarding it straight into a model write hands AppSync a
+ * raw array/object — which its AWSJSON variable coercion rejects with
+ * "Variable '<field>' has an invalid value.". Re-serialize non-strings; a value
+ * that is already a string is the browser's own JSON.stringify output and is
+ * passed through untouched (never double-encoded). Nullish yields undefined so
+ * the field is simply omitted from the write.
+ */
+function toAwsJson(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/**
+ * Render a model write's errors for the message thrown back to the caller.
+ * Includes each error's `errorType` when present — a bare AppSync line like
+ * "Variable 'x' has an invalid value." carries the reason in the type, not the
+ * message, so surfacing only the message leaves the failure undiagnosable.
+ */
+function describeWriteErrors(
+  errors: ReadonlyArray<{ message: string; errorType?: string | null }> | undefined
+): string {
+  if (!errors?.length) return "unknown error";
+  return errors
+    .map((e) => (e.errorType ? `${e.message} (${e.errorType})` : e.message))
+    .join("; ");
+}
+
 type Args = {
   reportId?: string;
   jobId?: string;
@@ -4930,7 +4960,9 @@ async function saveServiceReportDraft(
 
   const fields = {
     servicesPerformed: args.servicesPerformed ?? undefined,
-    productsUsed: args.productsUsed ?? undefined,
+    // AWSJSON model field: this arg reaches the Lambda already parsed, so it
+    // must be re-serialized to a string or AppSync rejects the write's variable.
+    productsUsed: toAwsJson(args.productsUsed),
     targetPests: args.targetPests ?? undefined,
     areasTreated: args.areasTreated ?? undefined,
     recommendations: args.recommendations ?? undefined,
@@ -4976,8 +5008,13 @@ async function saveServiceReportDraft(
       ...fields,
     });
     if (!updated) {
+      console.error("ServiceReport.update failed", {
+        reportId: args.reportId,
+        errors,
+        productsUsedType: typeof args.productsUsed,
+      });
       throw new Error(
-        `Could not save the report: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+        `Could not save the report: ${describeWriteErrors(errors)}`
       );
     }
     return { reportId: updated.id, status: updated.status };
@@ -5005,8 +5042,13 @@ async function saveServiceReportDraft(
     accessGroups: customerAccessGroups(job.customerId, customer?.groupId),
   });
   if (!created) {
+    console.error("ServiceReport.create failed", {
+      jobId: job.id,
+      errors,
+      productsUsedType: typeof args.productsUsed,
+    });
     throw new Error(
-      `Could not start the report: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+      `Could not start the report: ${describeWriteErrors(errors)}`
     );
   }
   return { reportId: created.id, status: created.status };

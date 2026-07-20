@@ -1386,6 +1386,30 @@ describe("a finalized report is immutable", () => {
   });
 });
 
+describe("productsUsed is written as an AWSJSON string, not a raw value", () => {
+  // AppSync hands an `a.json()` argument to the Lambda already parsed into a JS
+  // array. Forwarding that array straight into the model write made AppSync
+  // reject the variable ("Variable 'productsUsed' has an invalid value."), so
+  // every report-with-products create failed. The write must re-serialize.
+  const PRODUCTS = [
+    { name: "Suspend PolyZone", epaNumber: "432-1514", quantity: "1.5 oz", rate: "0.06%" },
+  ];
+
+  it("re-serializes a parsed-array argument before the create", async () => {
+    await call("saveServiceReportDraft", { jobId: "j1", productsUsed: PRODUCTS });
+
+    expect(typeof reports[0].productsUsed).toBe("string");
+    expect(JSON.parse(reports[0].productsUsed as string)).toEqual(PRODUCTS);
+  });
+
+  it("passes an already-stringified argument through without double-encoding", async () => {
+    const asString = JSON.stringify(PRODUCTS);
+    await call("saveServiceReportDraft", { jobId: "j1", productsUsed: asString });
+
+    expect(reports[0].productsUsed).toBe(asString);
+  });
+});
+
 describe("issued reports are corrected by append-only amendments", () => {
   const finalizedReport = (over: Partial<Report> = {}): Report =>
     validReport({
