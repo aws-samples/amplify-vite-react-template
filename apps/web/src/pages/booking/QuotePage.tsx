@@ -500,74 +500,28 @@ export default function QuotePage() {
       </div>
     ) : null;
 
+  // ── Submit in flight — the same loading screen, from second zero ──
+  if (submitting) {
+    return (
+      <QuoteLoadingScreen
+        eyebrow="Pricing your request"
+        message="We're pricing your service and checking real availability. This usually takes just a few seconds."
+        step={1}
+      />
+    );
+  }
+
   // ── PENDING outcome — live async pricing + availability ──────────
   if (pending) {
-    const buildingDays = pending.quote.stage === "BUILDING_AVAILABILITY";
-    const longWait = waitedMs >= LONG_WAIT_MS;
     return (
-      <>
-        <SEO title="Preparing Your Instant Quote" noindex />
-        <section className="bk-section bk-section-light">
-          <div
-            className="bk-container bk-narrow bk-confirm bk-quote-loading"
-            role="status"
-            aria-live="polite"
-          >
-            <div className="bk-quote-spinner" aria-hidden="true" />
-            <div className="bk-eyebrow">Your request is saved</div>
-            <h1 className="bk-h2">We&rsquo;re building your exact quote.</h1>
-            <p className="bk-body-lead">{pending.quote.message}</p>
-
-            <ol className="bk-quote-progress" aria-label="Quote progress">
-              <li className="is-done">
-                <span aria-hidden="true">✓</span>
-                Property details checked
-              </li>
-              <li className={buildingDays ? "is-done" : "is-active"}>
-                <span aria-hidden="true">{buildingDays ? "✓" : "2"}</span>
-                Exact service price
-              </li>
-              <li className={buildingDays ? "is-active" : ""}>
-                <span aria-hidden="true">3</span>
-                Available days and times
-              </li>
-            </ol>
-
-            {pendingError && (
-              <div className="bk-notice" role="alert">
-                {pendingError}
-              </div>
-            )}
-
-            {longWait ? (
-              <div className="bk-quote-loading__reassurance">
-                <strong>You don&rsquo;t have to keep this page open.</strong>
-                <p>
-                  This is taking longer than usual. We&rsquo;ll email a secure
-                  link to the finished quote automatically, and this page will
-                  keep checking while you&rsquo;re here.
-                </p>
-              </div>
-            ) : (
-              <p className="bk-p bk-quote-loading__hint">
-                Most quotes finish shortly. If you leave, we&rsquo;ll email a
-                secure link as soon as it&rsquo;s ready.
-              </p>
-            )}
-
-            <p className="bk-p">
-              Need help now? Call <strong>{OFFICE_PHONE}</strong>.
-            </p>
-            <button
-              type="button"
-              className="bk-btn bk-btn-outline"
-              onClick={startOver}
-            >
-              Change my details
-            </button>
-          </div>
-        </section>
-      </>
+      <QuoteLoadingScreen
+        eyebrow="Your request is saved"
+        message={pending.quote.message}
+        step={pending.quote.stage === "BUILDING_AVAILABILITY" ? 3 : 2}
+        pendingError={pendingError}
+        longWait={waitedMs >= LONG_WAIT_MS}
+        onChangeDetails={startOver}
+      />
     );
   }
 
@@ -1155,6 +1109,101 @@ export default function QuotePage() {
               </div>
             </form>
           </div>
+        </div>
+      </section>
+    </>
+  );
+}
+
+/**
+ * The one loading screen for the whole quote journey. Step 1 renders the
+ * moment the form is submitted (the synchronous /quote call can take a few
+ * seconds), steps 2 and 3 track the durable async request's stage. The
+ * email-fallback hint and the change-details button only appear once the
+ * request is saved server-side (step 2+), because before that there is
+ * nothing durable to email a link to or reopen.
+ */
+function QuoteLoadingScreen({
+  eyebrow,
+  message,
+  step,
+  pendingError = null,
+  longWait = false,
+  onChangeDetails,
+}: {
+  eyebrow: string;
+  message: string;
+  step: 1 | 2 | 3;
+  pendingError?: string | null;
+  longWait?: boolean;
+  onChangeDetails?: () => void;
+}) {
+  return (
+    <>
+      <SEO title="Preparing Your Instant Quote" noindex />
+      <section className="bk-section bk-section-light">
+        <div
+          className="bk-container bk-narrow bk-confirm bk-quote-loading"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="bk-quote-spinner" aria-hidden="true" />
+          <div className="bk-eyebrow">{eyebrow}</div>
+          <h1 className="bk-h2">We&rsquo;re building your exact quote.</h1>
+          <p className="bk-body-lead">{message}</p>
+
+          <ol className="bk-quote-progress" aria-label="Quote progress">
+            <li className={step > 1 ? "is-done" : "is-active"}>
+              <span aria-hidden="true">{step > 1 ? "✓" : "1"}</span>
+              {step > 1
+                ? "Property details checked"
+                : "Checking your property details"}
+            </li>
+            <li className={step > 2 ? "is-done" : step === 2 ? "is-active" : ""}>
+              <span aria-hidden="true">{step > 2 ? "✓" : "2"}</span>
+              Exact service price
+            </li>
+            <li className={step === 3 ? "is-active" : ""}>
+              <span aria-hidden="true">3</span>
+              Available days and times
+            </li>
+          </ol>
+
+          {pendingError && (
+            <div className="bk-notice" role="alert">
+              {pendingError}
+            </div>
+          )}
+
+          {step > 1 &&
+            (longWait ? (
+              <div className="bk-quote-loading__reassurance">
+                <strong>You don&rsquo;t have to keep this page open.</strong>
+                <p>
+                  This is taking longer than usual. We&rsquo;ll email a secure
+                  link to the finished quote automatically, and this page will
+                  keep checking while you&rsquo;re here.
+                </p>
+              </div>
+            ) : (
+              <p className="bk-p bk-quote-loading__hint">
+                Most quotes finish shortly. If you leave, we&rsquo;ll email a
+                secure link as soon as it&rsquo;s ready.
+              </p>
+            ))}
+
+          <p className="bk-p">
+            Need help now? Call <strong>{OFFICE_PHONE}</strong>.
+          </p>
+          {onChangeDetails && (
+            <button
+              type="button"
+              className="bk-btn bk-btn-outline"
+              onClick={onChangeDetails}
+            >
+              Change my details
+            </button>
+          )}
         </div>
       </section>
     </>
