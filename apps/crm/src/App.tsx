@@ -25,7 +25,6 @@ import PricingLog from "./office/PricingLog";
 import ProductLog from "./office/ProductLog";
 import MarketRates from "./office/MarketRates";
 import Catalog from "./office/Catalog";
-import Command from "./office/Command";
 import Schedule from "./office/Schedule";
 import Staff from "./office/Staff";
 import VisitChangeHistory from "./pages/VisitChangeHistory";
@@ -219,7 +218,6 @@ function Shell() {
         <Route path="/products" element={<Require when={staff}><ProductLog /></Require>} />
         <Route path="/market-rates" element={<Require when={staff}><MarketRates /></Require>} />
         <Route path="/catalog" element={<Require when={staff}><Catalog /></Require>} />
-        <Route path="/command" element={<Require when={staff}><Command /></Require>} />
         <Route path="/staff" element={<Require when={roles.owner}><Staff /></Require>} />
 
         {/* Technician */}
