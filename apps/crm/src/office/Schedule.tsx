@@ -518,6 +518,8 @@ function AvailabilityPanel({
   const [ptoTech, setPtoTech] = useState("");
   const [ptoReason, setPtoReason] = useState("");
   const [newClosure, setNewClosure] = useState("");
+  const [showClosureForm, setShowClosureForm] = useState(false);
+  const [showPtoForm, setShowPtoForm] = useState(false);
 
   const models = api().models as unknown as {
     TechnicianDayException: {
@@ -561,15 +563,29 @@ function AvailabilityPanel({
   }, [date]);
 
   useEffect(() => {
+    // Never leave the prior day's facts or a half-entered exception on screen
+    // after the office changes dates.
+    setFacts(null);
+    setExceptions([]);
+    setClosureReason(null);
+    setNewClosure("");
+    setPtoTech("");
+    setPtoReason("");
+    setShowClosureForm(false);
+    setShowPtoForm(false);
     void refresh();
   }, [refresh]);
 
-  const act = async (fn: () => Promise<unknown>) => {
+  const act = async (
+    fn: () => Promise<unknown>,
+    onSaved?: () => void
+  ) => {
     setBusy(true);
     setErr(null);
     try {
       await fn();
       await refresh();
+      onSaved?.();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "The change did not save");
     } finally {
@@ -577,157 +593,333 @@ function AvailabilityPanel({
     }
   };
 
-  return (
-    <Card title={`Availability — ${date}`}>
-      {err ? <p className="error">{err}</p> : null}
-      {facts ? (
-        <>
-          <p>
-            <strong>{facts.sellable ? "Sellable" : "NOT sellable"}.</strong>{" "}
-            {facts.eligibleTechs} eligible technician
-            {facts.eligibleTechs === 1 ? "" : "s"}
-            {facts.liveCheckoutClaims
-              ? ` · ${facts.liveCheckoutClaims} live checkout hold${
-                  facts.liveCheckoutClaims === 1 ? "" : "s"
-                }`
-              : ""}
-            .
-          </p>
-          {facts.windows.map((w) => (
-            <p key={w.window} className="small">
-              <strong>
-                {w.window === "MORNING" ? "Morning (8–12)" : "Afternoon (12–5)"}:
-              </strong>{" "}
-              {w.technicians.length === 0
-                ? "no eligible technician"
-                : w.technicians
-                    .map(
-                      (t) =>
-                        `${t.technicianName} ${t.committedMinutes}/${t.windowMinutes} min${
-                          t.verified ? "" : " (UNVERIFIED — sells nothing until the nightly Routes check passes)"
-                        }`
-                    )
-                    .join(" · ")}
-              {w.poolMinutes
-                ? ` · pool (awaiting assignment): ${w.poolMinutes} min`
-                : ""}
-            </p>
-          ))}
-          {facts.reasons.length ? (
-            <ul className="muted small">
-              {facts.reasons.map((r, i) => (
-                <li key={i}>{r}</li>
-              ))}
-            </ul>
-          ) : null}
-        </>
-      ) : (
-        <p className="muted">Reading the day's capacity…</p>
-      )}
+  const pto = exceptions.filter((e) => e.kind === "PTO");
+  const readableDate = prettyWeekday(date);
 
-      <div className="row-split" style={{ marginTop: 8 }}>
-        <div>
-          <strong>Company closure</strong>
-          {closureReason ? (
-            <p>
-              Closed: {closureReason}{" "}
-              <Button
-                small
-                variant="ghost"
-                loading={busy}
-                onClick={() =>
-                  void act(() => models.CompanyClosure.delete({ id: date }))
-                }
-              >
-                Reopen the day
-              </Button>
-            </p>
+  return (
+    <>
+      <Card
+        title={`Booking availability · ${readableDate}`}
+        actions={
+          err ? (
+            <Badge tone="danger">Unavailable</Badge>
+          ) : facts ? (
+            <Badge tone={facts.sellable ? "ok" : "danger"}>
+              {facts.sellable ? "Open for booking" : "Not bookable"}
+            </Badge>
           ) : (
-            <p>
-              <input
-                placeholder="Reason (required) — closes the whole day"
-                value={newClosure}
-                onChange={(e) => setNewClosure(e.target.value)}
-              />{" "}
-              <Button
-                small
-                loading={busy}
-                onClick={() =>
-                  newClosure.trim()
-                    ? void act(() =>
-                        models.CompanyClosure.create({
-                          id: date,
-                          date,
-                          reason: newClosure.trim(),
-                        })
-                      )
-                    : undefined
-                }
-              >
-                Close this day
-              </Button>
-            </p>
-          )}
-        </div>
-        <div>
-          <strong>PTO on {date}</strong>
-          {exceptions
-            .filter((e) => e.kind === "PTO")
-            .map((e) => (
-              <p key={e.id}>
-                {techs.find((t) => t.id === e.technicianId)?.name ??
-                  e.technicianId}{" "}
-                — {e.reason}{" "}
-                <Button
-                  small
-                  variant="ghost"
-                  loading={busy}
-                  onClick={() =>
-                    void act(() =>
-                      models.TechnicianDayException.delete({ id: e.id })
-                    )
-                  }
-                >
-                  Remove
-                </Button>
-              </p>
-            ))}
-          <p>
-            <select value={ptoTech} onChange={(e) => setPtoTech(e.target.value)}>
-              <option value="">Technician…</option>
-              {techs.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>{" "}
-            <input
-              placeholder="Reason (required)"
-              value={ptoReason}
-              onChange={(e) => setPtoReason(e.target.value)}
-            />{" "}
-            <Button
-              small
-              loading={busy}
-              onClick={() =>
-                ptoTech && ptoReason.trim()
-                  ? void act(() =>
-                      models.TechnicianDayException.create({
-                        technicianId: ptoTech,
-                        date,
-                        kind: "PTO",
-                        reason: ptoReason.trim(),
-                      })
-                    )
-                  : undefined
-              }
-            >
-              Add PTO
+            <Badge tone="muted">Checking…</Badge>
+          )
+        }
+        className="availability-card"
+      >
+        <ErrorNote error={err} />
+        {facts ? (
+          <>
+            <div className="availability-summary" aria-label="Day capacity summary">
+              <div>
+                <span>Available technicians</span>
+                <strong>{facts.eligibleTechs}</strong>
+              </div>
+              <div>
+                <span>Customers checking out now</span>
+                <strong>{facts.liveCheckoutClaims}</strong>
+              </div>
+            </div>
+
+            <div className="availability-window-grid">
+              {facts.windows.map((w) => {
+                const morning = w.window === "MORNING";
+                return (
+                  <section className="availability-window" key={w.window}>
+                    <header>
+                      <div>
+                        <strong>{morning ? "Morning" : "Afternoon"}</strong>
+                        <span>{morning ? "8 AM–12 PM" : "12–5 PM"}</span>
+                      </div>
+                      <Badge tone={w.sellable ? "ok" : "warn"}>
+                        {w.sellable ? "Available" : "Unavailable"}
+                      </Badge>
+                    </header>
+
+                    {w.technicians.length === 0 ? (
+                      <p className="availability-empty">No eligible technician.</p>
+                    ) : (
+                      <div className="availability-tech-list">
+                        {w.technicians.map((t) => (
+                          <div className="availability-tech" key={t.technicianId}>
+                            <div>
+                              <strong>{t.technicianName}</strong>
+                              <span>
+                                {t.committedMinutes} of {t.windowMinutes} minutes scheduled
+                              </span>
+                            </div>
+                            {!t.verified ? (
+                              <Badge tone="warn">Not verified</Badge>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {w.poolMinutes ? (
+                      <p className="availability-pool">
+                        {w.poolMinutes} minutes still awaiting technician assignment
+                      </p>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
+
+            {facts.reasons.length ? (
+              <div className="availability-reasons">
+                <strong>What is limiting availability</strong>
+                <ul>
+                  {facts.reasons.map((reason, index) => (
+                    <li key={index}>{reason}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </>
+        ) : err ? null : (
+          <div className="availability-loading" role="status">
+            <span className="btn-spinner" />
+            Checking routes, PTO, and remaining capacity…
+          </div>
+        )}
+      </Card>
+
+      <Card title="Time off & closures" className="availability-controls-card">
+        <p className="availability-controls-intro">
+          Manage exceptions for {readableDate}. These changes immediately affect
+          what the office and online checkout can schedule.
+        </p>
+
+        {err || !facts ? (
+          <div className="availability-controls-unavailable">
+            <div>
+              <strong>Schedule controls are temporarily unavailable</strong>
+              <span>Reload the day before recording a closure or PTO.</span>
+            </div>
+            <Button small variant="ghost" loading={busy} onClick={() => void refresh()}>
+              Try again
             </Button>
-          </p>
-        </div>
-      </div>
-    </Card>
+          </div>
+        ) : (
+          <div className="availability-control-list">
+            <section className="availability-control-section">
+              <div className="availability-control-heading">
+                <div>
+                  <strong>Company schedule</strong>
+                  <span>Controls availability for every technician.</span>
+                </div>
+                {!closureReason && !showClosureForm ? (
+                  <Button
+                    small
+                    variant="danger"
+                    disabled={busy}
+                    onClick={() => setShowClosureForm(true)}
+                  >
+                    Close this day
+                  </Button>
+                ) : null}
+              </div>
+
+              {closureReason ? (
+                <div className="availability-closure-active">
+                  <div>
+                    <Badge tone="danger">Company closed</Badge>
+                    <strong>{closureReason}</strong>
+                  </div>
+                  <Button
+                    small
+                    variant="ghost"
+                    loading={busy}
+                    onClick={() =>
+                      void act(() => models.CompanyClosure.delete({ id: date }))
+                    }
+                  >
+                    Reopen this day
+                  </Button>
+                </div>
+              ) : showClosureForm ? (
+                <div className="availability-action-form availability-action-form-danger">
+                  <Field
+                    label="Reason for closing"
+                    hint="Required. This prevents new bookings for the entire company."
+                  >
+                    <input
+                      autoFocus
+                      placeholder="Example: Company holiday"
+                      value={newClosure}
+                      onChange={(e) => setNewClosure(e.target.value)}
+                    />
+                  </Field>
+                  <div className="availability-form-actions">
+                    <Button
+                      small
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => {
+                        setNewClosure("");
+                        setShowClosureForm(false);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      small
+                      variant="danger"
+                      loading={busy}
+                      disabled={!newClosure.trim()}
+                      onClick={() =>
+                        void act(
+                          () =>
+                            models.CompanyClosure.create({
+                              id: date,
+                              date,
+                              reason: newClosure.trim(),
+                            }),
+                          () => {
+                            setNewClosure("");
+                            setShowClosureForm(false);
+                          }
+                        )
+                      }
+                    >
+                      Confirm company closure
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="availability-open-state">
+                  <Badge tone="ok">Open</Badge>
+                  <span>No company closure is recorded.</span>
+                </div>
+              )}
+            </section>
+
+            <section className="availability-control-section">
+              <div className="availability-control-heading">
+                <div>
+                  <strong>Technician PTO</strong>
+                  <span>Removes only the selected technician from capacity.</span>
+                </div>
+                {!showPtoForm ? (
+                  <Button
+                    small
+                    variant="ghost"
+                    disabled={busy || techs.length === 0}
+                    onClick={() => setShowPtoForm(true)}
+                  >
+                    + Add PTO
+                  </Button>
+                ) : null}
+              </div>
+
+              {pto.length ? (
+                <div className="availability-pto-list">
+                  {pto.map((exception) => (
+                    <div className="availability-pto-row" key={exception.id}>
+                      <div>
+                        <strong>
+                          {techs.find((t) => t.id === exception.technicianId)?.name ??
+                            exception.technicianId}
+                        </strong>
+                        <span>{exception.reason}</span>
+                      </div>
+                      <Button
+                        small
+                        variant="danger"
+                        loading={busy}
+                        onClick={() =>
+                          void act(() =>
+                            models.TechnicianDayException.delete({
+                              id: exception.id,
+                            })
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="availability-empty">No technician PTO recorded.</p>
+              )}
+
+              {showPtoForm ? (
+                <div className="availability-action-form">
+                  <div className="availability-pto-fields">
+                    <Field label="Technician">
+                      <select
+                        autoFocus
+                        value={ptoTech}
+                        onChange={(e) => setPtoTech(e.target.value)}
+                      >
+                        <option value="">Select a technician</option>
+                        {techs.map((tech) => (
+                          <option key={tech.id} value={tech.id}>
+                            {tech.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Reason">
+                      <input
+                        placeholder="Example: Vacation"
+                        value={ptoReason}
+                        onChange={(e) => setPtoReason(e.target.value)}
+                      />
+                    </Field>
+                  </div>
+                  <div className="availability-form-actions">
+                    <Button
+                      small
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => {
+                        setPtoTech("");
+                        setPtoReason("");
+                        setShowPtoForm(false);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      small
+                      loading={busy}
+                      disabled={!ptoTech || !ptoReason.trim()}
+                      onClick={() =>
+                        void act(
+                          () =>
+                            models.TechnicianDayException.create({
+                              technicianId: ptoTech,
+                              date,
+                              kind: "PTO",
+                              reason: ptoReason.trim(),
+                            }),
+                          () => {
+                            setPtoTech("");
+                            setPtoReason("");
+                            setShowPtoForm(false);
+                          }
+                        )
+                      }
+                    >
+                      Save PTO
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </section>
+          </div>
+        )}
+      </Card>
+    </>
   );
 }
 
