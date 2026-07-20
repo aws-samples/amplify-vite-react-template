@@ -1,5 +1,5 @@
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
-import { contactDueAt } from "../shared/businessHours";
+import { oneBusinessDayDeadline } from "../shared/businessDays";
 import { dataClient } from "../shared/dataClient";
 import {
   emailShell,
@@ -2190,7 +2190,7 @@ export async function reconcileRequestOwnership() {
           detail: `Booking request ${id} promised ${b.name ?? "a lead"} (${b.email ?? "no email"}) a follow-up, but no live owned action existed — its creation never reached the queue. The one-business-day clock started ${madeAt.toISOString()}.`,
           relatedId: id,
           sourceUrl: "/work",
-          dueAt: contactDueAt(madeAt).toISOString(),
+          dueAt: (await oneBusinessDayDeadline(madeAt)).toISOString(),
           resolutionAction:
             "Reach the lead by their promised deadline (call if consented, otherwise email), record the outcome, and send the correct next step.",
           ownerTeam: "SALES",
@@ -2385,6 +2385,30 @@ export async function retryQueuedEmails() {
           relatedId: String(row.id),
           resolutionAction:
             "Verify with the provider/recipient whether it arrived, correct the EmailLog row, and resend only if it truly never left.",
+          ownerTeam: "OPS",
+        });
+        if (opened) escalated++;
+        continue;
+      }
+      // GL-03: a provider-ACCEPTED message that never reaches a terminal
+      // event is not "Sent" forever — after three days without delivery
+      // proof it becomes an owned, timed question (bounded to a rolling
+      // two-week window so historic rows don't flood the queue).
+      if (
+        status === "SENT" &&
+        process.env.SES_CONFIGURATION_SET &&
+        now - at > 3 * 24 * 60 * 60_000 &&
+        now - at < 14 * 24 * 60 * 60_000
+      ) {
+        const opened = await openOwnedWork({
+          kind: "EMAIL_FAILURE",
+          dedupeKey: `email-no-terminal:${row.id}`,
+          title: `No delivery confirmation after 3 days: ${row.subject}`,
+          detail: `The provider accepted the ${row.template} email to ${row.toEmail} (message ${row.messageId ?? "unknown"}) but no delivery, bounce, or complaint event ever arrived. The customer may not have received it.`,
+          customerId: (row.customerId as string | null) ?? undefined,
+          relatedId: String(row.id),
+          resolutionAction:
+            "Confirm with the customer (or another channel) whether it arrived; resend or record alternate delivery, and check the delivery-event pipeline if this recurs.",
           ownerTeam: "OPS",
         });
         if (opened) escalated++;

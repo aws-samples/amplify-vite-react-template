@@ -140,6 +140,35 @@ export default function WorkQueue() {
     [load]
   );
 
+  // GL-03: resend the EXACT stored message from its outbox row. The server
+  // refuses unknown-outcome and attachment rows with the reason named.
+  const resendExact = async (item: WorkItem) => {
+    setBusyId(item.id);
+    setError(null);
+    try {
+      const result = opResult(
+        await (
+          api().mutations as unknown as {
+            resendEmailLog: (a: { emailLogId: string }) => Promise<{
+              data: unknown;
+              errors?: { message: string }[];
+            }>;
+          }
+        ).resendEmailLog({ emailLogId: item.relatedId! })
+      ) as { resent?: boolean } | null;
+      if (!result?.resent) {
+        throw new Error(
+          "The resend did not go out — check the case detail and the email log."
+        );
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not resend");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   // GL-18 R2: the bounded suppression release for a bounced/complained
   // address — required consent note; the server records the lift on the case.
   const liftSuppression = useCallback(
@@ -517,6 +546,22 @@ export default function WorkQueue() {
                     onClick={() => void liftSuppression(item)}
                   >
                     Lift email suppression…
+                  </Button>
+                ) : null}
+                {/* GL-03: the routine exact resend — only for cases whose
+                    related record IS an outbox row (el-…); the server refuses
+                    rows it can't honestly reproduce. */}
+                {item.status === "OPEN" &&
+                item.kind === "EMAIL_FAILURE" &&
+                item.relatedId?.startsWith("el-") &&
+                (roles.office || roles.finance) ? (
+                  <Button
+                    small
+                    variant="subtle"
+                    loading={busyId === item.id}
+                    onClick={() => void resendExact(item)}
+                  >
+                    Resend exact message
                   </Button>
                 ) : null}
                 {item.status === "OPEN" &&

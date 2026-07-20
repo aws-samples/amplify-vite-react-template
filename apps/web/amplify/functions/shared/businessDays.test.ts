@@ -15,7 +15,9 @@ vi.mock("./dataClient", () => ({
   }),
 }));
 
-const { oneBusinessDayDueAt } = await import("./businessDays");
+const { oneBusinessDayDeadline, oneBusinessDayDueAt } = await import(
+  "./businessDays"
+);
 
 beforeEach(() => {
   closures.clear();
@@ -33,6 +35,19 @@ describe("shared America/New_York one-business-day deadline", () => {
     closures.add("2026-07-20");
     await expect(oneBusinessDayDueAt(new Date("2026-07-17T19:00:00Z")))
       .resolves.toEqual(new Date("2026-07-21T19:00:00Z"));
+  });
+
+  it("starts an after-hours request at the next opening", async () => {
+    // Saturday July 18 -> Monday 8am ET start -> Tuesday 8am ET deadline.
+    await expect(oneBusinessDayDeadline(new Date("2026-07-18T14:00:00Z")))
+      .resolves.toEqual(new Date("2026-07-21T12:00:00Z"));
+  });
+
+  it("uses one shared deadline contract for GL-02 and GL-03", async () => {
+    const from = new Date("2026-07-17T19:00:00Z");
+    await expect(oneBusinessDayDueAt(from)).resolves.toEqual(
+      await oneBusinessDayDeadline(from)
+    );
   });
 
   it("fails closed instead of inventing an earlier deadline when the calendar is unreadable", async () => {

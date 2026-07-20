@@ -3514,6 +3514,15 @@ export const schema = a.schema({
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
     .handler(a.handler.function(crmDocs)),
 
+  /** GL-03 — resend the EXACT stored message from its outbox row (no
+   *  re-render, attachments refused, suppression still honored). */
+  resendEmailLog: a
+    .mutation()
+    .arguments({ emailLogId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
   /** GL-10 — the office schedules the callback visit ($0 by construction)
    *  onto a REAL technician-window capacity slot, no later than the
    *  promised return unless the customer chose later. */

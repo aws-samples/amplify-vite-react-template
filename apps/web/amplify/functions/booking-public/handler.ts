@@ -10,7 +10,8 @@ import { dataClient } from "../shared/dataClient";
 import { BOOKING_LINK_TOKEN_RE } from "../shared/bookingLink";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
 import { openOwnedWork, workItemId } from "../shared/ownedWork";
-import { contactDueAt, nextContactPhrase } from "../shared/businessHours";
+import { nextContactPhrase } from "../shared/businessHours";
+import { oneBusinessDayDeadline } from "../shared/businessDays";
 import { CALL_CONSENT_TEXT_VERSION } from "../shared/consentText";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
@@ -899,7 +900,8 @@ async function quote(
       detail: `${name} was promised a ${channelWord} ${timing} about ${service.toLowerCase().replace("_", " ")} at ${address}. ${opsNote.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`.trim(),
       relatedId: booking.id,
       sourceUrl: "/work",
-      dueAt: contactDueAt(now).toISOString(),
+      // Closure-aware: a holiday between now and the deadline pushes it out.
+      dueAt: (await oneBusinessDayDeadline(now)).toISOString(),
       resolutionAction: canCall
         ? "Call the lead by the promised time, record the outcome, and send the correct booking or referral next step."
         : "Email the lead their options by the promised time, record the outcome, and send the correct booking or referral next step.",

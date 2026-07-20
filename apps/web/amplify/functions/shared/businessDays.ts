@@ -91,13 +91,23 @@ export async function addBusinessDays(
 /**
  * The common Office response deadline: one complete business day after the
  * originating instant, using the same America/New_York closure calendar as
- * scheduling and guarantee callbacks. The wall-clock time is retained across
- * DST; a Friday 3pm obligation is due Monday 3pm unless Monday is closed.
+ * scheduling and guarantee callbacks. Outside business hours, the clock starts
+ * at the next business opening. Eastern wall-clock time is retained across DST.
  */
-export async function oneBusinessDayDueAt(from: Date = new Date()): Promise<Date> {
-  const parts = easternParts(from);
+export async function oneBusinessDayDeadline(
+  from: Date = new Date()
+): Promise<Date> {
+  const { isWithinBusinessHours, nextBusinessOpen } = await import(
+    "./businessHours"
+  );
+  const base = isWithinBusinessHours(from) ? from : nextBusinessOpen(from);
+  const parts = easternParts(base);
   const startDate = `${parts.year}-${parts.month}-${parts.day}`;
   const dueDate = await addBusinessDays(startDate, 1);
   const time = `${String(Number(parts.hour) % 24).padStart(2, "0")}:${parts.minute}:${parts.second}`;
   return easternWallToUtc(dueDate, time);
 }
+
+/** Backward-compatible name used by the GL-02 lifecycle. Both gates share the
+ * exact same calendar and deadline semantics. */
+export const oneBusinessDayDueAt = oneBusinessDayDeadline;

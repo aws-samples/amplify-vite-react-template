@@ -26,6 +26,9 @@ const fakeDataClient = {
     CallbackRequest: {
       list: async () => ({ data: callbackRows, nextToken: null }),
     },
+    CompanyClosure: {
+      get: async () => ({ data: null, errors: [] }),
+    },
     WorkItem: {
       get: async ({ id }: { id: string }) => ({
         data: workItems.get(id) ?? null,
