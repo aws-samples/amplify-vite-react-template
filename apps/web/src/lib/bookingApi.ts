@@ -161,6 +161,12 @@ export type PendingQuote = {
   message: string;
 };
 
+export type AutomatedPricingError = {
+  bookingId: string;
+  decision: "ERROR";
+  message: string;
+};
+
 /** GL-06 — a resumed quote whose booking already entered a payment state.
  *  The message is the durable truth (don't pay again / already booked /
  *  failed with a rebook path); the page shows it instead of a price board. */
@@ -178,6 +184,7 @@ export type QuoteResponse =
   | PricedQuote
   | PendingQuote
   | ContactQuote
+  | AutomatedPricingError
   | PaymentStateQuote;
 
 export type BookRequest = {

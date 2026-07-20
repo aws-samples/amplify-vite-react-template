@@ -61,7 +61,7 @@ applications:
             - |
               for i in $(seq 1 16); do
                 npx ampx generate outputs --app-id d26qpsjewk0bee --branch $AWS_BRANCH || true
-                if node -e "const o=require('./amplify_outputs.json');const m=(o.data&&o.data.model_introspection&&o.data.model_introspection.models)||{};process.exit(m.Product&&m.ServiceReport?0:1)" 2>/dev/null; then
+                if node -e "const i=(require('./amplify_outputs.json').data||{}).model_introspection||{};const m=i.models||{};const p=(i.mutations||{}).priceLead;process.exit(m.Product&&m.ServiceReport&&m.LeadPricingRun&&m.LeadPricingRun.fields.researchRateKey&&p&&p.arguments.resumeRunId?0:1)" 2>/dev/null; then
                   echo "backend outputs are current (attempt $i)"; break
                 fi
                 if [ "$i" = "16" ]; then echo "ERROR backend outputs still stale after 8 minutes" && exit 1; fi

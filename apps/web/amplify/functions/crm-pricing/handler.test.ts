@@ -14,11 +14,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  *
  * And the AI-pricing contract: every base price comes from the cached
  * market-rate sheet via the PURE-READ getCachedRate API (deterministic
- * Zone B adders on top, like the funnel). The live path never researches:
- * a stale sheet still serves, and a combo with no sheet at all enqueues
- * the exact research for the demand worker and ESCALATES to a human while
- * it runs — never a silent skip, never
- * an invented price; HOA leads auto-quote per-unit like everything else.
+ * Zone B adders on top, like the funnel). The live path never researches
+ * inline: a stale sheet still serves, and a combo with no complete sheet
+ * enqueues only the exact demand, returns RESEARCHING, and resumes the same
+ * saved run automatically — never a human escalation or invented price.
  */
 
 const pricingRuns: Record<string, unknown>[] = [];
@@ -31,8 +30,21 @@ const fakeDataClient = {
   models: {
     LeadPricingRun: {
       create: async (input: Record<string, unknown>) => {
-        pricingRuns.push(input);
-        return { data: { id: "run_1", ...input } };
+        const row = { id: `run_${pricingRuns.length + 1}`, ...input };
+        pricingRuns.push(row);
+        return { data: { ...row } };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: pricingRuns.find((row) => row.id === id) ?? null,
+      }),
+      update: async (patch: Record<string, unknown> & { id: string }) => {
+        const row = pricingRuns.find((candidate) => candidate.id === patch.id);
+        if (!row) return { data: null, errors: [{ message: "not found" }] };
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === null) delete row[key];
+          else row[key] = value;
+        }
+        return { data: { ...row } };
       },
     },
     CatalogVersion: {
@@ -104,8 +116,8 @@ vi.mock("@aws-sdk/client-lambda", () => ({
   },
 }));
 
-// R80: a pricing escalation is a lead needing a call — it routes to sales@ via
-// notifyLeads now (was a hand-rolled sendEmail to the ops inbox).
+// Pricing must never use email as an implicit fallback. This capture remains
+// because the rollback controls legitimately notify office staff.
 const leadEscalations: { subject: string; bodyHtml: string; template: string }[] =
   [];
 vi.mock("../shared/email", () => ({
@@ -159,6 +171,7 @@ type FakeRate = {
   sheet: Record<string, unknown>;
   basis: string;
   cached: boolean;
+  pinned?: boolean;
   /** Row metadata a stale (past-expiresAt) sheet would carry — the caller
    *  must price from it untouched. */
   expiresAt?: string;
@@ -273,6 +286,7 @@ beforeEach(() => {
   process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
   process.env.GOOGLE_ROUTES_API_KEY = "test-routes-key";
   process.env.MARKETING_URL = "https://staging.d26qpsjewk0bee.amplifyapp.com";
+  process.env.PRICING_REFRESH_FUNCTION_NAME = "pricing-refresh-test";
 });
 
 describe("the licensing gate fails closed (R75)", () => {
@@ -429,6 +443,43 @@ describe("every base price comes from the AI market-rate sheet", () => {
     );
   });
 
+  it("prices rodent exclusion from AI instead of creating a custom handoff", async () => {
+    extraction = {
+      ...baseExtraction,
+      propertyType: "specialty",
+      specialtyKind: "rodent_exclusion",
+      pest: "mice entry points",
+      frequencyInterest: "one_time",
+    };
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.oneTimePriceCents).toBe(39900);
+    expect(String(run.service)).toContain("Rodent exclusion");
+    expect(marketRateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ service: "RODENT", sqft: 3200 })
+    );
+    expect(leadEscalations).toHaveLength(0);
+  });
+
+  it("special flags keep standard AI pricing and only record safe notes", async () => {
+    extraction = {
+      ...baseExtraction,
+      multiProperty: true,
+      competitorMatchBelowFloor: true,
+      complianceDocsRequested: true,
+    };
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(String(run.reason)).toContain("quoted the described property only");
+    expect(String(run.reason)).toContain("standard BuzzKill pricing shown");
+    expect(String(run.reason)).toContain("pricing is unaffected");
+    expect(leadEscalations).toHaveLength(0);
+  });
+
   it("pivots a one-time that fails the 3× lead-fee test to the sheet's quarterly plan", async () => {
     extraction = { ...baseExtraction, frequencyInterest: "one_time" };
 
@@ -452,34 +503,36 @@ describe("every base price comes from the AI market-rate sheet", () => {
   });
 });
 
-describe("a cache miss enqueues and escalates — a human owns it while research runs", () => {
-  it("no GP sheet → request the exact rate + ESCALATE with the holding script", async () => {
+describe("missing/incomplete rates finish asynchronously without escalation", () => {
+  it("no GP sheet → request the exact rate + RESEARCHING with an immediate wake", async () => {
     sheets.GENERAL_PEST = null;
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
-    expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe(
-      "AI rate research requested — exact sheet is not ready; follow up with this lead now"
-    );
-    expect(String(run.replyText)).toContain("custom quote from our owner");
+    expect(run.decision).toBe("RESEARCHING");
+    expect(String(run.reason)).toMatch(/finish automatically/i);
+    expect(run.replyText).toBeUndefined();
     expect(run.monthlyPriceCents).toBeUndefined();
     expect(run.oneTimePriceCents).toBeUndefined();
-    expect(enqueueMock).toHaveBeenCalledWith({
+    expect(run.researchRateKey).toBeTruthy();
+    expect(enqueueMock).toHaveBeenCalledWith(expect.objectContaining({
       service: "GENERAL_PEST",
       city: "Ware",
       state: "MA",
       sqft: 3200,
       requestedBy: "CRM_LEAD",
-    });
-    // R80: the escalation email is a lead alert — it routes to sales@ via
-    // notifyLeads with the pricing-escalation template, not the ops inbox.
-    expect(leadEscalations).toHaveLength(1);
-    expect(leadEscalations[0].template).toBe("pricing-escalation");
-    expect(leadEscalations[0].subject).toContain("Pricing escalation");
+      requestReason: "MISSING_RATE_SHEET",
+    }));
+    expect(lambdaInvokes).toHaveLength(1);
+    expect(
+      JSON.parse(
+        Buffer.from(lambdaInvokes[0].Payload as Uint8Array).toString("utf8")
+      )
+    ).toEqual({ rateKey: run.researchRateKey, source: "quote" });
+    expect(leadEscalations).toHaveLength(0);
   });
 
-  it("a multi-nest wasp job with no extra-nest component is unpriceable → ESCALATE", async () => {
+  it("an incomplete multi-nest sheet requests replacement research", async () => {
     sheets.WASP_NEST = { oneTimeCents: 28900 }; // no extraNestCents
     extraction = {
       ...baseExtraction,
@@ -491,16 +544,15 @@ describe("a cache miss enqueues and escalates — a human owns it while research
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
-    expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe(
-      "AI rate research requested — exact sheet is not ready; follow up with this lead now"
-    );
-    expect(enqueueMock).toHaveBeenCalledWith({
+    expect(run.decision).toBe("RESEARCHING");
+    expect(enqueueMock).toHaveBeenCalledWith(expect.objectContaining({
       service: "WASP_NEST",
       city: "Ware",
       state: "MA",
       requestedBy: "CRM_LEAD",
-    });
+      requestReason: "INCOMPLETE_RATE_SHEET",
+    }));
+    expect(leadEscalations).toHaveLength(0);
   });
 
   it("a stale sheet still prices — serve-last-known-good, no enqueue", async () => {
@@ -523,16 +575,81 @@ describe("a cache miss enqueues and escalates — a human owns it while research
     expect(enqueueMock).not.toHaveBeenCalled();
   });
 
-  it("labels a failed durable enqueue for immediate manual pricing", async () => {
+  it("a failed durable enqueue is an explicit retryable error, not a handoff", async () => {
     sheets.GENERAL_PEST = null;
     enqueueMock.mockResolvedValueOnce(false);
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
-    expect(run.decision).toBe("ESCALATE");
-    expect(String(run.reason)).toMatch(/could not be persisted/i);
-    expect(String(run.reason)).toMatch(/price this lead manually/i);
-    expect(leadEscalations[0].bodyHtml).toMatch(/could not be persisted/i);
+    expect(run.decision).toBe("ERROR");
+    expect(String(run.reason)).toMatch(/could not be saved/i);
+    expect(String(run.reason)).toMatch(/retry pricing/i);
+    expect(leadEscalations).toHaveLength(0);
+  });
+
+  it("resumes the same run after research without extracting the lead twice", async () => {
+    sheets.GENERAL_PEST = null;
+    const waiting = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+    expect(waiting.decision).toBe("RESEARCHING");
+
+    sheets.GENERAL_PEST = {
+      oneTimeCents: 31900,
+      plans: {
+        QUARTERLY: { monthlyCents: 7500, initialFeeCents: 9900 },
+        BIMONTHLY: { monthlyCents: 5900, initialFeeCents: 10900 },
+      },
+    };
+    const completed = await priceLead({ resumeRunId: waiting.id });
+
+    expect(completed.id).toBe(waiting.id);
+    expect(completed.decision).toBe("QUOTE");
+    expect(completed.monthlyPriceCents).toBe(7500);
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      messagesCreate.mock.calls.filter(
+        ([args]) => (args as { output_config?: unknown }).output_config
+      )
+    ).toHaveLength(1);
+  });
+
+  it("polling a still-running request is read-only and does not enqueue again", async () => {
+    sheets.GENERAL_PEST = null;
+    const waiting = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+    const rateKey = String(waiting.researchRateKey);
+    coverageRows.set(rateKey, { id: rateKey, active: true, failCount: 0 });
+
+    const polled = await priceLead({ resumeRunId: waiting.id });
+
+    expect(polled.id).toBe(waiting.id);
+    expect(polled.decision).toBe("RESEARCHING");
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+    expect(lambdaInvokes).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(pricingRuns).toHaveLength(1);
+  });
+
+  it("a pinned incomplete rate reports the exact office correction", async () => {
+    extraction = {
+      ...baseExtraction,
+      propertyType: "specialty",
+      specialtyKind: "wasp_nest",
+      nestCount: 2,
+    };
+    marketRateMock.mockResolvedValueOnce({
+      priceCents: 28900,
+      sheet: { oneTimeCents: 28900 },
+      basis: "office rate",
+      cached: true,
+      pinned: true,
+    });
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("ERROR");
+    expect(String(run.reason)).toMatch(/Unpin that exact Market Rate/i);
+    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(leadEscalations).toHaveLength(0);
   });
 });
 
@@ -608,7 +725,7 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
     expect(run.oneTimePriceCents).toBe(42400); // $399 + $25 Zone B flat
   });
 
-  it("a cache miss still escalates to a human for each new kind — and queues the combo", async () => {
+  it("a cache miss researches each new kind without handing it to a human", async () => {
     sheets.TERMITE = null;
     sheets.WILDLIFE = null;
     sheets.COMMERCIAL = null;
@@ -623,12 +740,11 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
 
       const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
-      expect(run.decision).toBe("ESCALATE");
-      expect(run.reason).toBe(
-        "AI rate research requested — exact sheet is not ready; follow up with this lead now"
-      );
-      expect(String(run.replyText)).toContain("custom quote from our owner");
+      expect(run.decision).toBe("RESEARCHING");
+      expect(String(run.reason)).toMatch(/finish automatically/i);
+      expect(run.replyText).toBeUndefined();
       expect(enqueueMock).toHaveBeenCalledTimes(1);
+      expect(leadEscalations).toHaveLength(0);
     }
   });
 });
@@ -675,22 +791,21 @@ describe("HOA auto-quotes per unit — the always-escalate policy is retired", (
     expect(String(run.reason)).toMatch(/unit count/i);
   });
 
-  it("an HOA cache miss escalates like every other service — band-less enqueue", async () => {
+  it("an HOA cache miss researches like every other service — band-less enqueue", async () => {
     sheets.HOA = null;
     extraction = hoaExtraction();
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
-    expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe(
-      "AI rate research requested — exact sheet is not ready; follow up with this lead now"
-    );
-    expect(enqueueMock).toHaveBeenCalledWith({
+    expect(run.decision).toBe("RESEARCHING");
+    expect(enqueueMock).toHaveBeenCalledWith(expect.objectContaining({
       service: "HOA",
       city: "Ware",
       state: "MA",
       requestedBy: "CRM_LEAD",
-    });
+      requestReason: "MISSING_RATE_SHEET",
+    }));
+    expect(leadEscalations).toHaveLength(0);
   });
 });
 

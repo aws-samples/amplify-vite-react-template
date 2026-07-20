@@ -916,10 +916,11 @@ describe("the self-heal email — a waiting lead hears exactly once", () => {
     expect(JSON.parse(c.notify!)).toEqual([]);
   });
 
-  it("does not announce ready when a live partial sheet still needs research", async () => {
+  it("replaces a live incomplete sheet before announcing that the rate is ready", async () => {
     await seedOnly();
     quietAll();
     const demand = waitingRow();
+    demand.researchRequestReason = "INCOMPLETE_RATE_SHEET";
     addCov(demand);
     rateRows.push({
       id: "partial-sheet",
@@ -933,9 +934,34 @@ describe("the self-heal email — a waiting lead hears exactly once", () => {
 
     const summary = await handler();
 
-    expect(summary.attempted).toBe(0);
+    expect(summary.attempted).toBe(1);
+    expect(summary.succeeded).toBe(1);
     expect(sentEmails.filter((e) => e.template === "booking-rate-ready"))
-      .toHaveLength(0);
+      .toHaveLength(2);
+    expect(JSON.parse(cov(demand.id)!.notify!)).toHaveLength(0);
+  });
+
+  it("does not replace a pinned office sheet even when a quote calls it incomplete", async () => {
+    await seedOnly();
+    quietAll();
+    const demand = waitingRow();
+    demand.researchRequestReason = "INCOMPLETE_RATE_SHEET";
+    addCov(demand);
+    rateRows.push({
+      id: "pinned-partial-sheet",
+      rateKey: demand.id,
+      service: demand.service,
+      areaKey: demand.areaKey,
+      priceCents: 32000,
+      active: true,
+      pinned: true,
+      researchedAt: new Date().toISOString(),
+    });
+
+    const summary = await handler();
+
+    expect(summary.attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
     expect(JSON.parse(cov(demand.id)!.notify!)).toHaveLength(2);
   });
 

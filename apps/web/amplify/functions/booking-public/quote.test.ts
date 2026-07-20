@@ -38,6 +38,7 @@ import {
 
 const bookings: Record<string, unknown>[] = [];
 const pricingRuns: Record<string, unknown>[] = [];
+const coverageRows = new Map<string, Record<string, unknown>>();
 /** Scheduled stops returned for EVERY day — 8 fills a one-tech schedule. */
 let stopsEveryDay: { customerId: string; serviceType: string; status: string }[] =
   [];
@@ -62,6 +63,11 @@ const fakeDataClient = {
       create: async (input: Record<string, unknown>) => ({ data: input }),
     },
     MarketRate: { list: async () => ({ data: [] }) },
+    RateCoverage: {
+      get: async ({ id }: { id: string }) => ({
+        data: coverageRows.get(id) ?? null,
+      }),
+    },
     BookingRequest: {
       create: async (input: Record<string, unknown>) => {
         const row = { id: `b${bookings.length + 1}`, ...input };
@@ -161,6 +167,7 @@ type FakeRate = {
   sheet: FakeSheet;
   basis: string;
   cached: boolean;
+  pinned?: boolean;
   /** Row metadata a stale (past-expiresAt) sheet would carry — the caller
    *  must serve it untouched, never inspect or refuse it. */
   expiresAt?: string;
@@ -185,6 +192,15 @@ vi.mock("../shared/marketRate", () => ({
   },
   enqueueRateResearch: async (opts: Record<string, unknown>) => {
     enqueueCalls.push(opts);
+    const band =
+      typeof opts.sqft === "number"
+        ? Math.max(500, Math.ceil(opts.sqft / 500) * 500)
+        : null;
+    const area = `${String(opts.city).trim().toLowerCase().replace(/\s+/g, "-")}-${String(opts.state).trim().toLowerCase()}`;
+    const key = `${opts.service}#${area}${band ? `#${band}` : ""}`;
+    if (enqueueSucceeds) {
+      coverageRows.set(key, { id: key, active: true, failCount: 0 });
+    }
     return enqueueSucceeds;
   },
   sqftBucket: (sqft: number) => Math.max(500, Math.ceil(sqft / 500) * 500),
@@ -276,6 +292,7 @@ beforeEach(() => {
   );
   bookings.length = 0;
   pricingRuns.length = 0;
+  coverageRows.clear();
   leadEmails.length = 0;
   customersByLinkToken = {};
   leadLookups.length = 0;
@@ -526,6 +543,7 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
         notifyEmail: "dana@example.com",
         bookingRequestId: res.body.bookingId,
         requestedBy: "PUBLIC_QUOTE",
+        requestReason: "MISSING_RATE_SHEET",
       },
     ]);
     // The honest holding copy: the loading screen stays attached to this
@@ -533,27 +551,24 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     expect(res.body.message).toMatch(/building your exact price/i);
     expect(res.body.statusToken).toBeTruthy();
     expect(pricingInvokes).toHaveLength(1);
-    expect(leadEmails[0].subject).toBe("Website lead waiting on AI pricing");
-    // R80: the rate-queued alert is a lead alert — it routes to sales@.
-    expect(leadEmails[0].template).toBe("ops-booking-rate-queued");
+    expect(leadEmails).toHaveLength(0);
   });
 
-  it("a miss that cannot be persisted becomes one owned office follow-up, never fake PENDING", async () => {
+  it("a miss that cannot be persisted returns an honest retry error, not a human handoff", async () => {
     marketRateResult = null;
     enqueueSucceeds = false;
 
     const res = await postQuote(gpInput);
 
-    expect(res.body.decision).toBe("CONTACT");
+    expect(res.body.decision).toBe("ERROR");
     expect(String(res.body.message)).toMatch(/couldn't start.*price research/i);
     expect(bookings).toHaveLength(1);
     expect(bookings[0]).toMatchObject({
       id: res.body.bookingId,
-      status: "CONTACT",
+      status: "PENDING",
     });
     expect(pricingInvokes).toHaveLength(0);
-    expect(leadEmails).toHaveLength(1);
-    expect(leadEmails[0].template).toBe("ops-booking-contact");
+    expect(leadEmails).toHaveLength(0);
   });
 
   it("the secure status poll turns the same PENDING request into its day board", async () => {
@@ -577,7 +592,8 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     expect(bookings).toHaveLength(1);
     expect(bookings[0]).toMatchObject({ id: bookingId, status: "QUOTED" });
     expect(pricingInvokes).toHaveLength(1);
-    expect(leadEmails).toHaveLength(1);
+    expect(enqueueCalls).toHaveLength(1);
+    expect(leadEmails).toHaveLength(0);
   });
 
   it("returns PENDING when the sheet is missing the chosen plan cadence", async () => {
@@ -591,6 +607,54 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     const res = await postQuote({ ...gpInput, recurringPreference: "MONTHLY" });
 
     expect(res.body.decision).toBe("PENDING");
+    expect(enqueueCalls[0]).toMatchObject({
+      service: "GENERAL_PEST",
+      requestReason: "INCOMPLETE_RATE_SHEET",
+    });
+  });
+
+  it("a status poll never re-enqueues, and bounded AI exhaustion stops cleanly", async () => {
+    marketRateResult = null;
+    const pending = await postQuote(gpInput);
+    const key = "GENERAL_PEST#ware-ma#2000";
+    coverageRows.set(key, {
+      ...coverageRows.get(key),
+      id: key,
+      active: true,
+      failCount: 5,
+      exhaustedAt: "2026-07-20T12:00:00.000Z",
+    });
+
+    const stopped = await postQuoteStatus({
+      bookingId: pending.body.bookingId,
+      statusToken: pending.body.statusToken,
+    });
+
+    expect(stopped.body.decision).toBe("ERROR");
+    expect(String(stopped.body.message)).toMatch(/AI couldn't complete/i);
+    expect(enqueueCalls).toHaveLength(1);
+    expect(pricingInvokes).toHaveLength(1);
+    expect(leadEmails).toHaveLength(0);
+  });
+
+  it("a pinned incomplete office sheet fails visibly instead of waiting forever", async () => {
+    marketRateResult = {
+      priceCents: 30000,
+      sheet: { oneTimeCents: 30000 },
+      basis: "incomplete office pin",
+      cached: true,
+      pinned: true,
+    };
+
+    const res = await postQuote({
+      ...gpInput,
+      recurringPreference: "MONTHLY",
+    });
+
+    expect(res.body.decision).toBe("ERROR");
+    expect(enqueueCalls).toHaveLength(0);
+    expect(pricingInvokes).toHaveLength(0);
+    expect(leadEmails).toHaveLength(0);
   });
 });
 
@@ -646,6 +710,10 @@ describe("WASP_NEST prices from the cached AI sheet", () => {
     const res = await postQuote({ ...waspInput, nestCount: 2 });
 
     expect(res.body.decision).toBe("PENDING");
+    expect(enqueueCalls[0]).toMatchObject({
+      service: "WASP_NEST",
+      requestReason: "INCOMPLETE_RATE_SHEET",
+    });
   });
 });
 

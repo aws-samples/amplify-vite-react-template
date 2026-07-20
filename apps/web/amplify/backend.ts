@@ -295,10 +295,11 @@ backend.stripeWebhook.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com"
 backend.stripeWebhook.addEnvironment("CRM_APP_URL", crmUrlEnv);
 
 // R80: lead-pipeline alerts route to the sales inbox, not the ops inbox. Set
-// SES_LEADS_EMAIL only on the functions that send a lead email — leadIntake
-// (new-lead / write-failed), bookingPublic (contact / rate-queued), crmPricing
-// (pricing-escalation), and stripeWebhook (the office-booking-alert fires in
-// bookingFinalize inside the webhook Lambda). Ops/money alarms stay on info@.
+// SES_LEADS_EMAIL only on functions that can send a sales-facing message —
+// leadIntake (new-lead / write-failed), bookingPublic (non-pricing CONTACT),
+// crmPricing (owner catalog rollback notices), and stripeWebhook (the office
+// booking alert fires in bookingFinalize inside the webhook Lambda).
+// Missing-rate pricing itself creates no sales email or human handoff.
 for (const fn of [
   backend.leadIntake,
   backend.bookingPublic,

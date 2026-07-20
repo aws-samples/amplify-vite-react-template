@@ -14,7 +14,6 @@ import { opFieldName } from "../shared/opEvent";
 import { callerEmail, callerIsOffice, callerIsOwner } from "../shared/authz";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { notifyLeads } from "../shared/email";
-import { openOwnedWork } from "../shared/ownedWork";
 import {
   clearsLeadFee,
   freqLabel,
@@ -30,11 +29,14 @@ import {
 } from "./rateCards";
 import {
   _resetRollbackMemoForTests,
+  areaKeyFor,
   enqueueRateResearch,
   getCachedRate,
   hoaBandFor,
   pickServingRow,
+  rateKeyFor,
   readPricingRollback,
+  sqftBucket,
   type MarketRateResult,
   type MarketRateService,
   type PlanCadence,
@@ -70,6 +72,7 @@ type Args = {
   reasonCode?: string;
   note?: string | null;
   rateKey?: string;
+  resumeRunId?: string | null;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -115,7 +118,7 @@ function townFromAreaKey(areaKey: string): { city: string; state: string } | nul
 
 async function wakePricingResearch(
   rateKey: string,
-  source: "manual"
+  source: "quote" | "manual"
 ): Promise<void> {
   const functionName = process.env.PRICING_REFRESH_FUNCTION_NAME;
   if (!functionName) return;
@@ -130,7 +133,7 @@ async function wakePricingResearch(
     .catch((err) => {
       // The durable request remains queued; the five-minute recovery worker
       // will still pick it up.
-      console.error("manual pricing wake-up failed; scheduled recovery remains", err);
+      console.error("pricing research wake-up failed; scheduled recovery remains", err);
     });
 }
 
@@ -586,21 +589,9 @@ const PASS_SCRIPTS: Record<string, string> = {
 
 // ---------- AI base price → priced plan (deterministic zone overlay) ----------
 
-/**
- * Escalation reason when no cached sheet exists for the combo. The live
- * path is a pure read now — it never researches inline. The exact miss is
- * persisted on the RateCoverage ledger and wakes the demand worker; the
- * five-minute schedule is recovery only. Never a silent skip or invented
- * price, and the office remains responsible for the lead while it runs.
- */
-export const AI_RATE_QUEUED_REASON =
-  "AI rate research requested — exact sheet is not ready; follow up with this lead now";
-
-// GL-03: no promise of a channel/timing we can't guarantee here (this reply
-// has no phone/consent context). The owner follows up; the funnel's own
-// fallback owns the truthful call-vs-email promise.
-const CUSTOM_QUOTE_SCRIPT =
-  "Thanks for reaching out! This one needs a custom quote from our owner, who will follow up to walk through the details and get you an exact price.";
+/** Durable, resumable state while the exact rate sheet is being researched. */
+export const AI_RATE_RESEARCHING_REASON =
+  "AI is researching this exact service, location, and size. The quote will finish automatically.";
 
 /**
  * A recurring GP plan from the researched sheet, with the deterministic
@@ -663,19 +654,6 @@ function oneTimeFromSheet(opts: {
     oneTimeCents: total,
     initialFeeCents: null,
     lines,
-  };
-}
-
-/** An escalate-only card: no price exists, Jake quotes custom. */
-function escalateOnly(service: string, escalate: string): PricedPlan {
-  return {
-    service,
-    frequency: "ONE_TIME",
-    monthlyCents: null,
-    oneTimeCents: null,
-    initialFeeCents: null,
-    lines: [],
-    escalate,
   };
 }
 
@@ -780,26 +758,59 @@ export function templateReply(facts: {
 // ---------- the main flow ----------
 
 async function priceLead(args: Args) {
-  if (!args.inputText?.trim() && !args.screenshotKey) {
+  if (!args.resumeRunId && !args.inputText?.trim() && !args.screenshotKey) {
     throw new Error("Paste the lead text or attach a screenshot");
+  }
+
+  const client = await dataClient();
+  type ResumableRun = {
+    id: string;
+    decision?: string | null;
+    extracted?: unknown;
+    customerId?: string | null;
+    inputText?: string | null;
+    screenshotKey?: string | null;
+    leadFeeCents?: number | null;
+    researchRateKey?: string | null;
+    zone?: string | null;
+    driveMinutes?: number | null;
+  };
+  let resumed: ResumableRun | null = null;
+  if (args.resumeRunId) {
+    const { data } = await client.models.LeadPricingRun.get({
+      id: args.resumeRunId,
+    });
+    if (!data) throw new Error("That saved pricing run no longer exists");
+    resumed = data as ResumableRun;
+    // Idempotent resume: once another poll finished the run, return it rather
+    // than creating another quote or spending another model call.
+    if (resumed.decision !== "RESEARCHING") return data;
   }
 
   const apiKey = await getSecret("ANTHROPIC_API_KEY");
   if (!apiKey) {
-    return {
-      decision: "NEEDS_INFO",
+    const failure = {
+      decision: "ERROR" as const,
       reason:
-        "AI pricing isn't configured yet — add the ANTHROPIC_API_KEY secret on the web app in the Amplify Console (App settings → Secrets), then try again.",
+        "AI pricing isn't configured. Add ANTHROPIC_API_KEY in Amplify, then retry.",
     };
+    if (!resumed) return failure;
+    const { data } = await client.models.LeadPricingRun.update({
+      id: resumed.id,
+      ...failure,
+    });
+    return data ?? { id: resumed.id, ...failure };
   }
   // AppSync caps custom-op resolvers at 30s — keep model calls fast and
   // fall back to the deterministic reply template when time runs short.
   const anthropic = new Anthropic({ apiKey, timeout: 20_000, maxRetries: 0 });
   const startedAt = Date.now();
 
-  // Screenshot from S3 → base64 for the vision call.
+  // Screenshot from S3 → base64 for the initial vision call. A resume
+  // reuses the immutable extracted facts on the run and never pays to read or
+  // extract the same lead again.
   let screenshot: { data: string; mediaType: string } | null = null;
-  if (args.screenshotKey) {
+  if (!resumed && args.screenshotKey) {
     if (!args.screenshotKey.startsWith("pricing/")) {
       throw new Error("Invalid screenshot key");
     }
@@ -817,22 +828,54 @@ async function priceLead(args: Args) {
     };
   }
 
-  const extracted = await extractLead(anthropic, args.inputText ?? null, screenshot);
-  const assumptions = [...(extracted.assumptions ?? [])];
+  let extracted: Extraction;
+  if (resumed) {
+    try {
+      extracted = (typeof resumed.extracted === "string"
+        ? JSON.parse(resumed.extracted)
+        : resumed.extracted) as Extraction;
+      if (!extracted || typeof extracted !== "object") throw new Error();
+    } catch {
+      const { data } = await client.models.LeadPricingRun.update({
+        id: resumed.id,
+        decision: "ERROR",
+        reason:
+          "The saved AI extraction is unreadable. Start a new pricing run.",
+      });
+      return data;
+    }
+  } else {
+    extracted = await extractLead(
+      anthropic,
+      args.inputText ?? null,
+      screenshot
+    );
+  }
+  const assumptions = [...new Set(extracted.assumptions ?? [])];
+  const addAssumption = (value: string) => {
+    if (!assumptions.includes(value)) assumptions.push(value);
+  };
 
-  const client = await dataClient();
   const persist = async (fields: Record<string, unknown>) => {
-    const { data: run, errors } = await client.models.LeadPricingRun.create({
-      customerId: args.customerId ?? undefined,
-      inputText: args.inputText?.slice(0, 4000) ?? undefined,
-      screenshotKey: args.screenshotKey ?? undefined,
+    const shared = {
       town: extracted.town ?? undefined,
       state: extracted.state ?? undefined,
       outcome: "PENDING",
       // Serialize the LIVE assumptions on every branch, not the raw extraction.
       extracted: JSON.stringify({ ...extracted, assumptions }),
       ...fields,
-    } as Parameters<typeof client.models.LeadPricingRun.create>[0]);
+    };
+    const { data: run, errors } = resumed
+      ? await client.models.LeadPricingRun.update({
+          id: resumed.id,
+          ...shared,
+        } as Parameters<typeof client.models.LeadPricingRun.update>[0])
+      : await client.models.LeadPricingRun.create({
+          customerId: args.customerId ?? undefined,
+          inputText: args.inputText?.slice(0, 4000) ?? undefined,
+          screenshotKey: args.screenshotKey ?? undefined,
+          ...shared,
+        } as Parameters<typeof client.models.LeadPricingRun.create>[0]);
     if (!run) {
       throw new Error(
         errors?.[0]?.message ?? "Could not save the pricing run"
@@ -842,7 +885,9 @@ async function priceLead(args: Args) {
   };
 
   // Lead fee: explicit arg wins; 0 means "direct lead / no fee".
-  const leadFeeCents = args.leadFeeCents ?? extracted.leadFeeCents;
+  const leadFeeCents =
+    resumed?.leadFeeCents ?? args.leadFeeCents ?? extracted.leadFeeCents;
+  const customerId = resumed?.customerId ?? args.customerId;
 
   // 1. Hard eligibility passes. Wildlife is no longer one of them — it
   // prices from the WILDLIFE market-rate sheet as a one-time
@@ -893,13 +938,19 @@ async function priceLead(args: Args) {
   // 3. Zone from real drive time.
   let zone: Zone = "UNKNOWN";
   let minutes: number | null = null;
-  if (extracted.fullAddress || extracted.town) {
+  if (
+    resumed?.zone &&
+    ["A", "B", "OUT", "UNKNOWN"].includes(resumed.zone)
+  ) {
+    zone = resumed.zone as Zone;
+    minutes = resumed.driveMinutes ?? null;
+  } else if (extracted.fullAddress || extracted.town) {
     // extracted.state is guaranteed by the R75 gate above — never default it.
     const dest = extracted.fullAddress ?? `${extracted.town}, ${extracted.state}`;
     minutes = await driveMinutes(dest);
     if (minutes !== null) zone = zoneFromMinutes(minutes);
     if (!extracted.fullAddress) {
-      assumptions.push("zone computed from the town center — confirm the street address");
+      addAssumption("zone computed from the town center — confirm the street address");
     }
   }
   if (zone === "OUT") {
@@ -926,21 +977,30 @@ async function priceLead(args: Args) {
     return run;
   }
 
-  // 4. Rule-driven escalations that price first, then flag.
-  const escalateReasons: string[] = [];
+  // 4. Special situations remain visible, but never hand the lead to a
+  // manager. The AI returns the standard safe quote and records what it did.
   const internalNotes: string[] = [];
   let pivotedFromOneTimeCents: number | null = null;
-  if (extracted.multiProperty) escalateReasons.push("Multi-property portfolio lead");
+  if (extracted.multiProperty) {
+    addAssumption(
+      "this quote covers the described property only — price each additional address separately"
+    );
+    internalNotes.push("Multi-property lead: quoted the described property only");
+  }
   if (extracted.competitorMatchBelowFloor)
-    escalateReasons.push("Request to match a competitor price below floor");
+    internalNotes.push(
+      "Customer requested a below-floor competitor match; standard BuzzKill pricing shown"
+    );
   if (extracted.complianceDocsRequested)
-    escalateReasons.push("Compliance documentation / audit support requested");
+    internalNotes.push(
+      "Compliance documentation requested; pricing is unaffected"
+    );
 
   // 5. Map to the AI market-rate engine and price from the cached sheet
   // (deterministic Zone B adders on top, exactly as the website funnel does
   // it). Only mosquito/tick keeps its deterministic card — the engine has
   // no service kind for it yet (its seasonal end-condition is an open
-  // decision, R32). Rodent exclusion also stays a custom escalation.
+  // decision, R32). Rodent exclusion uses the researched RODENT sheet.
   const statedFreq: Frequency | null =
     extracted.frequencyInterest === "monthly"
       ? "MONTHLY"
@@ -957,39 +1017,92 @@ async function priceLead(args: Args) {
   // Kept for the value-fallback plan strings in the reply.
   let gpRate: MarketRateResult | null = null;
 
-  // No cached sheet → persist the exact research request and hand the lead
-  // to a human for now. The worker wakes immediately and the five-minute
-  // schedule recovers persisted requests. Never a
-  // silent skip, never an invented number: the office gets the escalation
-  // with the holding script.
-  const escalateRateQueued = async (
+  // No complete cached sheet → persist and wake exactly one AI research
+  // request. The UI resumes this same run until it becomes QUOTE; it never
+  // re-extracts the lead and never creates a manager handoff.
+  const researchRate = async (
     serviceLabel: string,
     engineService: MarketRateService,
-    sqft?: number
+    sqft?: number,
+    requestReason: "MISSING_RATE_SHEET" | "INCOMPLETE_RATE_SHEET" =
+      "MISSING_RATE_SHEET",
+    pinned = false
   ) => {
-    // The escalation below reaches a human either way. town is guaranteed
-    // by the needsTown gate at every call site, and state by the R75 gate.
+    const exactRateKey = rateKeyFor(
+      engineService,
+      areaKeyFor(extracted.town!, extracted.state!),
+      sqft != null ? sqftBucket(sqft) : null
+    );
+    if (requestReason === "INCOMPLETE_RATE_SHEET" && pinned) {
+      return persist({
+        decision: "ERROR",
+        reason:
+          "The office-controlled rate is missing a required price. Unpin that exact Market Rate, then retry this AI quote.",
+        zone,
+        driveMinutes: minutes ?? undefined,
+        leadFeeCents,
+        service: serviceLabel,
+        researchRateKey: null,
+      });
+    }
+
+    if (resumed) {
+      const { data: coverage } = await client.models.RateCoverage.get({
+        id: exactRateKey,
+      });
+      if (!coverage || !coverage.active) {
+        return persist({
+          decision: "ERROR",
+          reason:
+            "The AI research request is no longer active. Retry pricing to start it again.",
+          service: serviceLabel,
+          researchRateKey: null,
+        });
+      }
+      if (coverage.exhaustedAt) {
+        return persist({
+          decision: "ERROR",
+          reason:
+            "AI could not produce a reliable rate after its bounded retries. Retry pricing to start one fresh exact-rate attempt.",
+          service: serviceLabel,
+          researchRateKey: null,
+        });
+      }
+      // Polling is read-only while the exact request is still running. This
+      // avoids a write every few seconds and returns the original saved run.
+      return resumed;
+    }
+
     const queued = await enqueueRateResearch({
       service: engineService,
       city: extracted.town!,
       state: extracted.state!,
       sqft,
       requestedBy: "CRM_LEAD",
+      requestReason,
     });
-    const reason = queued
-      ? AI_RATE_QUEUED_REASON
-      : "The exact AI rate request could not be persisted. Price this lead manually; do not wait for the pricing worker.";
-    const run = await persist({
-      decision: "ESCALATE",
-      reason,
+    if (!queued) {
+      return persist({
+        decision: "ERROR",
+        reason:
+          "The exact AI research request could not be saved. Retry pricing; no manager handoff was created.",
+        zone,
+        driveMinutes: minutes ?? undefined,
+        leadFeeCents,
+        service: serviceLabel,
+        researchRateKey: null,
+      });
+    }
+    await wakePricingResearch(exactRateKey, "quote");
+    return persist({
+      decision: "RESEARCHING",
+      reason: AI_RATE_RESEARCHING_REASON,
       zone,
       driveMinutes: minutes ?? undefined,
       leadFeeCents,
       service: serviceLabel,
-      replyText: CUSTOM_QUOTE_SCRIPT,
+      researchRateKey: exactRateKey,
     });
-    await notifyEscalation(run?.id, extracted, reason, null);
-    return run;
   };
   // The engine caches per service + area; the area key needs the town.
   const needsTown = async () =>
@@ -1010,7 +1123,7 @@ async function priceLead(args: Args) {
     if (!town) return needsTown();
     const sqft = extracted.sqft ?? 2000;
     if (extracted.sqft == null)
-      assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+      addAssumption("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
     const rate = await getCachedRate({
       service: "WILDLIFE",
       city: town,
@@ -1018,7 +1131,7 @@ async function priceLead(args: Args) {
       sqft,
     });
     if (!rate) {
-      return escalateRateQueued("Wildlife exclusion and removal", "WILDLIFE", sqft);
+      return researchRate("Wildlife exclusion and removal", "WILDLIFE", sqft);
     }
     priced = oneTimeFromSheet({
       service: "Wildlife exclusion and removal",
@@ -1037,12 +1150,11 @@ async function priceLead(args: Args) {
     gpKind = "rodent_exclusion";
   } else if (extracted.propertyType === "specialty" && extracted.specialtyKind !== "none") {
     if (extracted.specialtyKind === "termite") {
-      // Termite prices from its sheet — the Jake-quotes-custom policy is
-      // retired; escalation remains only the research-failure fallback.
+      // Termite prices from its sheet — the custom-quote policy is retired.
       if (!town) return needsTown();
       const sqft = extracted.sqft ?? 2000;
       if (extracted.sqft == null)
-        assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+        addAssumption("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
       const rate = await getCachedRate({
         service: "TERMITE",
         city: town,
@@ -1050,7 +1162,7 @@ async function priceLead(args: Args) {
         sqft,
       });
       if (!rate) {
-        return escalateRateQueued("Termite treatment", "TERMITE", sqft);
+        return researchRate("Termite treatment", "TERMITE", sqft);
       }
       priced = oneTimeFromSheet({
         service: "Termite treatment",
@@ -1065,11 +1177,31 @@ async function priceLead(args: Args) {
       // test rather than inventing new constants.
       gpKind = "one_time_gpc";
     } else if (extracted.specialtyKind === "rodent_exclusion") {
-      // No engine service kind for exclusion work — custom, not researched.
-      priced = escalateOnly(
-        "Rodent exclusion (exterior only)",
-        "Rodent exclusion — Jake quotes custom"
-      );
+      if (!town) return needsTown();
+      const sqft = extracted.sqft ?? 2000;
+      if (extracted.sqft == null)
+        addAssumption("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+      const rate = await getCachedRate({
+        service: "RODENT",
+        city: town,
+        state: extracted.state,
+        sqft,
+      });
+      if (!rate) {
+        return researchRate("Rodent exclusion (exterior only)", "RODENT", sqft);
+      }
+      priced = oneTimeFromSheet({
+        service: "Rodent exclusion (exterior only)",
+        lines: [
+          {
+            label: "AI market rate — rodent treatment with exclusion check",
+            cents: rate.priceCents,
+          },
+        ],
+        baseCents: rate.priceCents,
+        zone,
+      });
+      gpKind = "rodent_exclusion";
     } else if (extracted.specialtyKind === "wasp_nest") {
       if (!town) return needsTown();
       const rate = await getCachedRate({
@@ -1078,18 +1210,21 @@ async function priceLead(args: Args) {
         state: extracted.state,
       });
       if (!rate) {
-        return escalateRateQueued("Wasp / hornet nest removal", "WASP_NEST");
+        return researchRate("Wasp / hornet nest removal", "WASP_NEST");
       }
       const nests = Math.max(1, extracted.nestCount ?? 1);
       if (extracted.nestCount == null) {
-        assumptions.push("assumed a single nest — we'll confirm when scheduling");
+        addAssumption("assumed a single nest — we'll confirm when scheduling");
       }
       // The sheet must actually price what was asked: a multi-nest job with
       // no extra-nest component is an unpriceable request.
       if (nests > 1 && rate.sheet.extraNestCents == null) {
-        return escalateRateQueued(
+        return researchRate(
           "Wasp / hornet nest removal — multiple nests",
-          "WASP_NEST"
+          "WASP_NEST",
+          undefined,
+          "INCOMPLETE_RATE_SHEET",
+          Boolean(rate.pinned)
         );
       }
       const lines: PriceLine[] = [
@@ -1117,7 +1252,7 @@ async function priceLead(args: Args) {
       const roach = extracted.specialtyKind === "roach";
       const sqft = extracted.sqft ?? 2000;
       if (extracted.sqft == null)
-        assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+        addAssumption("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
       const rate = await getCachedRate({
         service: roach ? "ROACH" : "RODENT",
         city: town,
@@ -1128,7 +1263,7 @@ async function priceLead(args: Args) {
         ? "Specialized roach treatment"
         : "Rodent treatment (trapping + exclusion check)";
       if (!rate) {
-        return escalateRateQueued(label, roach ? "ROACH" : "RODENT", sqft);
+        return researchRate(label, roach ? "ROACH" : "RODENT", sqft);
       }
       priced = oneTimeFromSheet({
         service: label,
@@ -1150,9 +1285,7 @@ async function priceLead(args: Args) {
       return run;
     }
     if (!town) return needsTown();
-    // HOA auto-quotes like everything else now — the every-HOA-escalates-to-
-    // Jake policy is retired by Jake's decision. Escalation remains only the
-    // fallback when research fails.
+    // HOA auto-quotes like everything else now.
     const rate = await getCachedRate({
       service: "HOA",
       city: town,
@@ -1160,12 +1293,18 @@ async function priceLead(args: Args) {
     });
     const hoa = rate?.sheet.hoaPerUnitMonthly;
     if (!hoa) {
-      return escalateRateQueued("Association/HOA common areas", "HOA");
+      return researchRate(
+        "Association/HOA common areas",
+        "HOA",
+        undefined,
+        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
+        Boolean(rate?.pinned)
+      );
     }
     const freq: PlanCadence =
       statedFreq && statedFreq !== "ONE_TIME" ? statedFreq : "MONTHLY";
     if (statedFreq === "ONE_TIME") {
-      assumptions.push(
+      addAssumption(
         "quoted the monthly common-area plan — one-off association work is confirmed on a walkthrough"
       );
     }
@@ -1194,7 +1333,7 @@ async function priceLead(args: Args) {
     // Commercial prices from its sheet (one-time + all three plan cadences)
     // exactly like the funnel — the deterministic commercial card retired.
     const sqft = extracted.sqft ?? 2000;
-    if (extracted.sqft == null) assumptions.push("assumed ~2,000 sqft — confirm on booking");
+    if (extracted.sqft == null) addAssumption("assumed ~2,000 sqft — confirm on booking");
     if (!town) return needsTown();
     const rate = await getCachedRate({
       service: "COMMERCIAL",
@@ -1203,7 +1342,7 @@ async function priceLead(args: Args) {
       sqft,
     });
     if (!rate) {
-      return escalateRateQueued("Commercial pest control", "COMMERCIAL", sqft);
+      return researchRate("Commercial pest control", "COMMERCIAL", sqft);
     }
     const freq = statedFreq ?? "MONTHLY";
     if (freq === "ONE_TIME") {
@@ -1222,19 +1361,21 @@ async function priceLead(args: Args) {
       priced = planFromSheet(rate, freq, zone, "Commercial pest control");
       // A COMMERCIAL sheet without plan cadences can't price a plan lead.
       if (!priced) {
-        return escalateRateQueued(
+        return researchRate(
           `Commercial pest control — ${freqLabel(freq)}`,
           "COMMERCIAL",
-          sqft
+          sqft,
+          "INCOMPLETE_RATE_SHEET",
+          Boolean(rate.pinned)
         );
       }
     }
   } else if (extracted.propertyType === "mosquito") {
     if (extracted.halfAcres == null)
-      assumptions.push("assumed up to ½ acre yard — we'll confirm on the first visit");
+      addAssumption("assumed up to ½ acre yard — we'll confirm on the first visit");
     const mosquitoOneTime = statedFreq === "ONE_TIME";
     if (mosquitoOneTime && extracted.tick) {
-      assumptions.push(
+      addAssumption(
         "the one-time event spray covers mosquitoes only — tick coverage is on the seasonal plan"
       );
     }
@@ -1249,7 +1390,7 @@ async function priceLead(args: Args) {
     // Residential (default). Unknown sqft → assume 2,000 and say so.
     const sqft = extracted.sqft ?? 2000;
     if (extracted.sqft == null)
-      assumptions.push("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+      addAssumption("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
     if (!town) return needsTown();
     const rate = await getCachedRate({
       service: "GENERAL_PEST",
@@ -1258,7 +1399,7 @@ async function priceLead(args: Args) {
       sqft,
     });
     if (!rate) {
-      return escalateRateQueued(
+      return researchRate(
         "Residential general pest control",
         "GENERAL_PEST",
         sqft
@@ -1296,64 +1437,33 @@ async function priceLead(args: Args) {
       priced = planFromSheet(rate, freq, zone);
       // A GENERAL_PEST sheet without plan cadences can't price a plan lead.
       if (!priced) {
-        return escalateRateQueued(
+        return researchRate(
           `Residential GPC — ${freqLabel(freq)}`,
           "GENERAL_PEST",
-          sqft
+          sqft,
+          "INCOMPLETE_RATE_SHEET",
+          Boolean(rate.pinned)
         );
       }
     }
   }
 
   if (!priced) {
-    const run = await persist({
-      decision: "ESCALATE",
-      reason: "Couldn't map this lead to a rate card — Jake quotes custom.",
+    return persist({
+      decision: "NEEDS_INFO",
+      reason:
+        "AI couldn't identify a supported service from these details. Clarify the pest and property type, then run pricing again.",
       zone,
       driveMinutes: minutes ?? undefined,
       leadFeeCents,
     });
-    await notifyEscalation(run?.id, extracted, "Unmapped service", null);
-    return run;
-  }
-  // Escalate-only cards (termite, oversized commercial): no price exists, so
-  // never run reply composition — use the deterministic holding script.
-  if (priced.escalate && priced.monthlyCents == null && priced.oneTimeCents == null) {
-    const run = await persist({
-      decision: "ESCALATE",
-      reason: [priced.escalate, ...escalateReasons].join("; "),
-      zone,
-      driveMinutes: minutes ?? undefined,
-      leadFeeCents,
-      service: priced.service,
-      frequency: priced.frequency,
-      replyText: CUSTOM_QUOTE_SCRIPT,
-    });
-    await notifyEscalation(run?.id, extracted, [priced.escalate, ...escalateReasons].join("; "), priced);
-    return run;
-  }
-
-  if (priced.escalate) {
-    escalateReasons.push(priced.escalate);
-    if (priced.oneTimeCents != null && priced.monthlyCents == null && leadFeeCents > 0) {
-      const gp = oneTimeGrossProfitCents(gpKind, priced.oneTimeCents, zone);
-      if (clearsLeadFee(gp, leadFeeCents) === false) {
-        escalateReasons.push(
-          `One-time gross profit ${gp != null ? money(gp) : "?"} fails the 3× lead-fee test`
-        );
-      }
-    }
   }
 
   // 6. Specialty/one-time lead-fee test (recurring always clears).
-  // Escalate-flagged leads (multi-property, competitor-match, …) never
-  // short-circuit to PASS — Jake decides; the failed economics just become
-  // part of the escalation.
   if (
     priced.oneTimeCents != null &&
     priced.monthlyCents == null &&
-    leadFeeCents > 0 &&
-    !priced.escalate
+    leadFeeCents > 0
   ) {
     const gp = oneTimeGrossProfitCents(gpKind, priced.oneTimeCents, zone);
     if (clearsLeadFee(gp, leadFeeCents) === false) {
@@ -1395,10 +1505,10 @@ async function priceLead(args: Args) {
   // exactly this record instead of email-guessing. Best-effort — a resolve
   // or mint failure still replies with the bare funnel URL.
   let funnelUrl = FUNNEL_URL();
-  if (args.customerId) {
+  if (customerId) {
     try {
       const { data: leadCustomer } = await client.models.Customer.get({
-        id: args.customerId,
+        id: customerId,
       });
       if (leadCustomer) {
         const token = await ensureBookingLinkToken(client, leadCustomer);
@@ -1406,7 +1516,7 @@ async function priceLead(args: Args) {
       }
     } catch (err) {
       console.error(
-        `priceLead: could not resolve booking-link token for ${args.customerId}`,
+        `priceLead: could not resolve booking-link token for ${customerId}`,
         err
       );
     }
@@ -1445,11 +1555,9 @@ async function priceLead(args: Args) {
       funnelUrl,
     });
 
-  const decision = escalateReasons.length ? "ESCALATE" : "QUOTE";
   const run = await persist({
-    decision,
-    reason:
-      [...escalateReasons, ...internalNotes].join("; ") || undefined,
+    decision: "QUOTE",
+    reason: internalNotes.join("; ") || undefined,
     zone,
     driveMinutes: minutes ?? undefined,
     leadFeeCents,
@@ -1460,47 +1568,7 @@ async function priceLead(args: Args) {
     oneTimePriceCents: priced.oneTimeCents ?? undefined,
     priceBreakdown: JSON.stringify(priced.lines),
     replyText: composed,
+    researchRateKey: null,
   });
-
-  if (decision === "ESCALATE") {
-    await notifyEscalation(run?.id, extracted, escalateReasons.join("; "), priced);
-  }
   return run;
-}
-
-async function notifyEscalation(
-  runId: string | undefined,
-  extracted: Extraction,
-  reason: string,
-  priced: PricedPlan | null
-) {
-  const priceLine = priced
-    ? priced.monthlyCents != null
-      ? `${money(priced.monthlyCents)}/mo${priced.initialFeeCents != null ? ` + ${money(priced.initialFeeCents)} initial` : ""}`
-      : priced.oneTimeCents != null
-        ? `${money(priced.oneTimeCents)} flat`
-        : "no card price"
-    : "no card price";
-  await openOwnedWork({
-    kind: "PRICING_ESCALATION",
-    dedupeKey: runId ?? `${extracted.customerName ?? "unknown"}:${extracted.town ?? "unknown"}:${reason}`,
-    title: `Price manually: ${extracted.customerName ?? extracted.pest ?? "lead"}`,
-    detail: `${reason}. Computed quote: ${priceLine}.`,
-    relatedId: runId ?? "pricing-escalation",
-    sourceUrl: "/pricing",
-    resolutionAction:
-      "Review the pricing run, call the prospect the same day with an approved price or pass decision, and record the outcome.",
-    ownerTeam: "SALES",
-  });
-  // R80: a pricing escalation is a lead needing a call — route it to sales@.
-  await notifyLeads({
-    subject: `Pricing escalation: ${extracted.town ?? "unknown town"} — ${extracted.pest || "lead"}`,
-    template: "pricing-escalation",
-    relatedId: runId,
-    heading: "Lead needs your call",
-    bodyHtml: `<p><strong>Reason:</strong> ${reason}</p>
-       <p><strong>Lead:</strong> ${extracted.customerName ?? "unknown"} — ${extracted.pest || "?"} — ${extracted.town ?? "?"}, ${extracted.state ?? "?"}</p>
-       <p><strong>Computed quote:</strong> ${priceLine}</p>
-       <p>The receptionist has told the prospect a manager will follow up same day. Full details are in the CRM pricing log.</p>`,
-  });
 }

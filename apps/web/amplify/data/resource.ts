@@ -62,7 +62,16 @@ const fieldOfficeOnly = (allow: FieldAllow) => [
 export const schema = a.schema({
   CustomerStatus: a.enum(["LEAD", "ACTIVE", "INACTIVE"]),
   ServicePlanStatus: a.enum(["ACTIVE", "PAUSED", "CANCELED"]),
-  PricingDecision: a.enum(["QUOTE", "PASS", "ESCALATE", "NEEDS_INFO"]),
+  // ESCALATE remains readable for historical rows, but new pricing runs never
+  // produce it: missing prices are RESEARCHING, provider faults are ERROR.
+  PricingDecision: a.enum([
+    "QUOTE",
+    "PASS",
+    "ESCALATE",
+    "NEEDS_INFO",
+    "RESEARCHING",
+    "ERROR",
+  ]),
   PricingOutcome: a.enum(["PENDING", "SENT", "WON", "LOST", "PASSED"]),
   ServiceFrequency: a.enum(["MONTHLY", "BIMONTHLY", "QUARTERLY"]),
   JobType: a.enum(["ONE_TIME", "RECURRING"]),
@@ -1159,7 +1168,7 @@ export const schema = a.schema({
   // One research per service+area(+sqft band) returns a full rate sheet
   // (one-time, plan cadences with monthly + initial fees, wasp extra-nest,
   // HOA per-unit monthly rates by unit band) stored in ratesJson; priceCents
-  // mirrors the sheet's one-time price. Research happens ONLY in the hourly
+  // mirrors the sheet's one-time price. Research happens ONLY in the bounded
   // pricing-refresh worker, and ONLY after a real website/CRM quote misses
   // its sheet or staff explicitly requests a market review. The live quoting
   // paths are pure reads with serve-last-known-good semantics; rates do not
@@ -1412,12 +1421,15 @@ export const schema = a.schema({
       service: a.string(), // human label, e.g. "Residential GPC — quarterly"
       frequency: a.string(), // MONTHLY | BIMONTHLY | QUARTERLY | ONE_TIME
       extracted: a.json(), // pest, propertyType, sqft/units, assumptions, flags
+      // Exact demand key while AI market research is running. The CRM uses
+      // this to resume the same saved run without re-extracting the lead.
+      researchRateKey: a.string(),
       monthlyPriceCents: a.integer(),
       initialFeeCents: a.integer(),
       oneTimePriceCents: a.integer(),
       priceBreakdown: a.json(), // [{label, cents}]
       replyText: a.string(),
-      reason: a.string(), // pass/escalate/needs-info reason
+      reason: a.string(), // pass/researching/error/needs-info reason
       modelPriceMismatch: a.boolean(),
     })
     .authorization((allow) => [
@@ -3600,10 +3612,9 @@ export const schema = a.schema({
    * AI lead pricing: paste a Thumbtack lead (or attach a screenshot) and the
    * engine extracts the facts with Claude, determines the zone from real
    * drive time, prices from the cached AI market-rate sheets (deterministic
-   * Zone B adders on top), and returns QUOTE / PASS / ESCALATE with a
-   * paste-ready reply. Research failure escalates — the human is the
-   * fallback, never an invented price. Persists a LeadPricingRun and emails
-   * Jake on ESCALATE.
+   * Zone B adders on top), and returns QUOTE / PASS / NEEDS_INFO or a
+   * resumable RESEARCHING state with a paste-ready reply once ready. Provider
+   * faults return a retryable ERROR; no pricing run is handed to a manager.
    */
   priceLead: a
     .mutation()
@@ -3612,6 +3623,7 @@ export const schema = a.schema({
       screenshotKey: a.string(),
       customerId: a.string(),
       leadFeeCents: a.integer(),
+      resumeRunId: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])

@@ -248,6 +248,13 @@ export default function QuotePage() {
           window.scrollTo({ top: 0, behavior: "smooth" });
           return;
         }
+        if (result.body.decision === "ERROR") {
+          clearPendingQuote(window.sessionStorage);
+          setPending(null);
+          setBanner(result.body.message);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          return;
+        }
         if (
           result.body.decision === "PROCESSING" ||
           result.body.decision === "BOOKED" ||

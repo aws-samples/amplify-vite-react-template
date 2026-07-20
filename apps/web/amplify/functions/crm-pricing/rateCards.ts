@@ -25,7 +25,6 @@ export type PricedPlan = {
   oneTimeCents: number | null;
   initialFeeCents: number | null;
   lines: PriceLine[];
-  escalate?: string; // set when the card says ESCALATE
 };
 
 const $ = (dollars: number) => Math.round(dollars * 100);

@@ -1095,7 +1095,10 @@ async function quote(
   // here, then day pricing / capacity / the R62 cost floor below.
   const contactForPrice = async (
     engineService: MarketRateService,
-    sqft?: number
+    sqft?: number,
+    requestReason: "MISSING_RATE_SHEET" | "INCOMPLETE_RATE_SHEET" =
+      "MISSING_RATE_SHEET",
+    pinned = false
   ) => {
     const booking =
       resume && resumedBooking
@@ -1110,6 +1113,38 @@ async function quote(
       areaKeyFor(addr.city!, addr.state!),
       sqft != null ? sqftBucket(sqft) : null
     );
+    if (pinned) {
+      return {
+        bookingId: booking.id,
+        decision: "ERROR",
+        message:
+          "We couldn't complete this exact price automatically. Please start a fresh quote in a moment.",
+      };
+    }
+    // A status poll is read-only while the durable worker owns the request.
+    // Re-enqueueing here used to reset exhausted demand and could turn one
+    // browser left open into an unbounded stream of paid AI retries.
+    if (resume) {
+      const { data: coverage } = await client.models.RateCoverage.get({
+        id: rateKey,
+      });
+      if (coverage?.exhaustedAt) {
+        return {
+          bookingId: booking.id,
+          decision: "ERROR",
+          message:
+            "AI couldn't complete a reliable exact price after several attempts. Please start a fresh quote to try again.",
+        };
+      }
+      return {
+        bookingId: booking.id,
+        statusToken: booking.cancelToken,
+        decision: "PENDING",
+        stage: "RESEARCHING",
+        message:
+          "We're building your exact price and checking available appointment times now.",
+      };
+    }
     const queued = await enqueueRateResearch({
       service: engineService,
       city: addr.city!,
@@ -1118,31 +1153,20 @@ async function quote(
       notifyEmail: email,
       bookingRequestId: booking.id,
       requestedBy: "PUBLIC_QUOTE",
+      requestReason,
     });
     if (!queued) {
-      return contact(
-        "We couldn't start the automated price research safely",
-        "with your exact price",
-        {},
-        "The exact AI rate request did not persist. Do not wait for the pricing worker; price this lead manually.",
-        booking.id
-      );
+      return {
+        bookingId: booking.id,
+        decision: "ERROR",
+        message:
+          "We couldn't start the automated price research safely. Please submit a fresh quote in a moment.",
+      };
     }
-    // Only the original submission wakes the worker and pages sales. Polling
-    // must be a pure status check until the cached sheet appears.
-    if (!resume) {
-      await triggerPricingRefresh(rateKey);
-      await notifyLeads({
-        subject: "Website lead waiting on AI pricing",
-        heading: "Website lead waiting on AI pricing",
-        template: "ops-booking-rate-queued",
-        relatedId: booking.id,
-        bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}, and no cached rate exists for that combo yet.</p>
-         ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
-         ${attribution?.source ? `<p>Lead source: utm:${escapeHtml(attribution.source)}${attribution.campaign ? ` · campaign:${escapeHtml(attribution.campaign)}` : ""}</p>` : ""}
-         <p>The website is holding the lead on a live pricing screen while the rate worker runs. If they leave, the completed quote link will be emailed automatically. Booking request ${booking.id}.</p>`,
-      });
-    }
+    // Wake the worker immediately. No sales escalation is created: the AI
+    // owns this ordinary pricing state and the customer gets the secure ready
+    // email if they leave the live screen.
+    await triggerPricingRefresh(rateKey);
     return {
       bookingId: booking.id,
       statusToken: booking.cancelToken,
@@ -1206,7 +1230,13 @@ async function quote(
       state: addr.state!,
     });
     const hoa = rate?.sheet.hoaPerUnitMonthly;
-    if (!hoa) return contactForPrice("HOA");
+    if (!hoa)
+      return contactForPrice(
+        "HOA",
+        undefined,
+        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
+        Boolean(rate?.pinned)
+      );
     const units = input.units!;
     const perUnit = hoa[hoaBandFor(units)][freq];
     let monthly = perUnit * units;
@@ -1232,7 +1262,13 @@ async function quote(
       sqft: input.sqft!,
     });
     const plan = rate?.sheet.plans?.[freq];
-    if (!rate || !plan) return contactForPrice("COMMERCIAL", input.sqft!);
+    if (!rate || !plan)
+      return contactForPrice(
+        "COMMERCIAL",
+        input.sqft!,
+        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
+        Boolean(rate?.pinned)
+      );
     baseCents = rate.priceCents;
     serviceLabel = serviceLabelFor("COMMERCIAL_PEST", {
       sqftBucket: sqftBucket(input.sqft!),
@@ -1253,7 +1289,13 @@ async function quote(
       sqft: input.sqft!,
     });
     const plan = rate?.sheet.plans?.[freq];
-    if (!rate || !plan) return contactForPrice("GENERAL_PEST", input.sqft!);
+    if (!rate || !plan)
+      return contactForPrice(
+        "GENERAL_PEST",
+        input.sqft!,
+        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
+        Boolean(rate?.pinned)
+      );
     baseCents = rate.priceCents;
     serviceLabel = serviceLabelFor("GENERAL_PEST");
     // R60: the same deterministic Zone B travel adders the rate cards
@@ -1276,7 +1318,12 @@ async function quote(
     // The sheet must actually price what was asked: a multi-nest job with
     // no extra-nest component on the sheet is an unpriceable request.
     if (!rate || (extraNests > 0 && rate.sheet.extraNestCents == null)) {
-      return contactForPrice("WASP_NEST");
+      return contactForPrice(
+        "WASP_NEST",
+        undefined,
+        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
+        Boolean(rate?.pinned)
+      );
     }
     baseCents =
       rate.priceCents + extraNests * (rate.sheet.extraNestCents ?? 0);

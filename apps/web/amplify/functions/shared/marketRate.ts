@@ -23,7 +23,7 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  * pinned rows serve forever until un-pinned; only a combo with NO sheet at
  * all returns null. On null the caller records the real quote demand with
  * enqueueRateResearch (an idempotent RateCoverage upsert, optionally
- * carrying the waiting lead's email) and takes its honest fallback. The
+ * carrying the waiting lead's email) and returns a resumable research state. The
  * pricing worker researches only that requested combo and emails the lead
  * when their exact prices are ready. There is no speculative town seeding
  * and age alone never triggers research.
@@ -140,6 +140,8 @@ export type MarketRateResult = {
   sheet: RateSheet;
   basis: string;
   cached: boolean;
+  /** True when an office-authored row is intentionally protected from AI. */
+  pinned?: boolean;
 };
 
 /** What the row's required priceCents column mirrors for a given sheet. */
@@ -485,6 +487,7 @@ export async function getCachedRate(opts: {
       sheet: stored,
       basis: live.basis ?? "",
       cached: true,
+      pinned: Boolean(live.pinned),
     };
   }
   // priceCents is mirrored to the sheet's one-time on office save, and it
@@ -495,6 +498,7 @@ export async function getCachedRate(opts: {
     sheet: { ...(stored ?? {}), oneTimeCents: live.priceCents },
     basis: live.basis ?? "",
     cached: true,
+    pinned: Boolean(live.pinned),
   };
 }
 
@@ -549,6 +553,8 @@ export async function enqueueRateResearch(opts: {
   source?: "SEED" | "SERVED" | "DEMAND";
   /** Human-readable origin for the durable demand audit. */
   requestedBy?: "PUBLIC_QUOTE" | "CRM_LEAD";
+  /** Whether the exact sheet is absent or present but lacks a required part. */
+  requestReason?: "MISSING_RATE_SHEET" | "INCOMPLETE_RATE_SHEET";
 }): Promise<boolean> {
   try {
     const { service, city, state, sqft } = opts;
@@ -557,6 +563,7 @@ export async function enqueueRateResearch(opts: {
     const band = sqft != null ? sqftBucket(sqft) : null;
     const id = rateKeyFor(service, areaKey, band);
     const requestedAt = new Date().toISOString();
+    const requestReason = opts.requestReason ?? "MISSING_RATE_SHEET";
     const entry: RateNotifyEntry | null = opts.notifyEmail
       ? {
           email: opts.notifyEmail.trim().toLowerCase(),
@@ -582,7 +589,7 @@ export async function enqueueRateResearch(opts: {
             ? {
                 researchRequestedAt: requestedAt,
                 researchRequestedBy: opts.requestedBy ?? "QUOTE_DEMAND",
-                researchRequestReason: "MISSING_RATE_SHEET",
+                researchRequestReason: requestReason,
               }
             : {}),
           failCount: 0,
@@ -596,8 +603,8 @@ export async function enqueueRateResearch(opts: {
     }
 
     // GL-16: a retired coverage row is the office's decision and STAYS
-    // retired. The caller receives false and must use its honest human
-    // fallback instead of telling the customer research was queued.
+    // retired. The caller receives false and must report an explicit error
+    // instead of claiming that research was queued.
     if (!existing.active) return false;
 
     const patch: Record<string, unknown> = {};
@@ -607,7 +614,15 @@ export async function enqueueRateResearch(opts: {
       patch.source = "DEMAND";
       patch.researchRequestedAt = requestedAt;
       patch.researchRequestedBy = opts.requestedBy ?? "QUOTE_DEMAND";
-      patch.researchRequestReason = "MISSING_RATE_SHEET";
+      patch.researchRequestReason = requestReason;
+      // A genuinely new lead asking for this exact price is the retry. It
+      // re-arms a previously exhausted combo once; UI status polling never
+      // calls enqueue again, so polling cannot burn through the backoff.
+      if (existing.exhaustedAt) {
+        patch.exhaustedAt = null;
+        patch.nextEligibleAt = null;
+        patch.failCount = 0;
+      }
     }
     if (entry) {
       const list = parseNotify(existing.notify);

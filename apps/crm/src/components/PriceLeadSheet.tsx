@@ -20,14 +20,13 @@ type Extracted = {
 
 /**
  * AI lead pricing: paste the Thumbtack lead (or attach a screenshot), enter
- * the lead fee, and get QUOTE / PASS / ESCALATE with the exact breakdown
+ * the lead fee, and get QUOTE / PASS / NEEDS INFO with the exact breakdown
  * and a paste-ready reply. Every service auto-quotes from the same cached
  * AI market-rate sheets the website funnel prices from — general pest,
  * wasp, rodent, roach, termite, wildlife, commercial, and HOA/association
- * common areas alike. ESCALATE is the fallback, not a category: it fires
- * when no rate sheet is available (research budget/failure) or the lead
- * carries a special situation (multi-property portfolio, below-floor price
- * match, compliance paperwork). The reply is the whole next step — it
+ * common areas alike. If an exact rate is missing, the same saved run waits
+ * for targeted AI research and finishes automatically; it never creates a
+ * manager handoff. The reply is the whole next step — it
  * answers "what will it cost" and points the lead at the online booking
  * funnel, where they pick a day and pay by card to convert themselves.
  */
@@ -46,6 +45,7 @@ export default function PriceLeadSheet({
   const [run, setRun] = useState<LeadPricingRun | null>(null);
   const [copied, setCopied] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [researching, setResearching] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const attach = async (file: File) => {
@@ -153,6 +153,54 @@ export default function PriceLeadSheet({
     }
   };
 
+  // A missing or incomplete exact market rate is ordinary async work, not a
+  // human escalation. Resume the same saved run until it becomes a quote,
+  // pass, needs-info, or explicit error. The server reuses the extraction and
+  // does not enqueue the research again on these polls.
+  useEffect(() => {
+    if (!run?.id || run.decision !== "RESEARCHING") {
+      setResearching(false);
+      return;
+    }
+    let stopped = false;
+    let timer: number | undefined;
+    setResearching(true);
+
+    const poll = async () => {
+      try {
+        const response = await api().mutations.priceLead({
+          resumeRunId: run.id,
+        });
+        const resumed = opResult<LeadPricingRun>(response);
+        if (stopped) return;
+        if (!resumed) throw new Error("AI pricing status could not be read");
+        setError(null);
+        setRun(resumed);
+        if (resumed.decision === "RESEARCHING") {
+          timer = window.setTimeout(() => void poll(), 8_000);
+        } else {
+          setResearching(false);
+        }
+      } catch (err) {
+        if (stopped) return;
+        // A transient browser/network failure must not turn into a business
+        // escalation or abandon the quote. Show it and keep checking.
+        setError(
+          err instanceof Error
+            ? `${err.message} — retrying automatically`
+            : "Could not check AI pricing yet — retrying automatically"
+        );
+        timer = window.setTimeout(() => void poll(), 12_000);
+      }
+    };
+
+    timer = window.setTimeout(() => void poll(), 4_000);
+    return () => {
+      stopped = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [run?.id, run?.decision]);
+
   const copyReply = async () => {
     if (!run?.replyText) return;
     try {
@@ -169,7 +217,7 @@ export default function PriceLeadSheet({
   const decisionTone =
     run?.decision === "QUOTE"
       ? "ok"
-      : run?.decision === "ESCALATE"
+      : run?.decision === "RESEARCHING" || run?.decision === "NEEDS_INFO"
         ? "warn"
         : run?.decision === "PASS"
           ? "muted"
@@ -252,8 +300,17 @@ export default function PriceLeadSheet({
       </div>
 
       <ErrorNote error={error} />
-      <Button block loading={busy === "price"} onClick={() => void price()}>
-        {busy === "price" ? "Pricing…" : "Price this lead"}
+      <Button
+        block
+        disabled={run?.decision === "RESEARCHING"}
+        loading={busy === "price" || researching}
+        onClick={() => void price()}
+      >
+        {busy === "price"
+          ? "Pricing…"
+          : researching
+            ? "AI is researching the exact price…"
+            : "Price this lead"}
       </Button>
 
       {run ? (
@@ -312,7 +369,9 @@ export default function PriceLeadSheet({
 
           {run.reason ? (
             <p className="small" style={{ marginTop: 10 }}>
-              <Badge tone={run.decision === "ESCALATE" ? "warn" : "muted"}>why</Badge>{" "}
+              <Badge tone={run.decision === "RESEARCHING" ? "warn" : "muted"}>
+                {run.decision === "RESEARCHING" ? "status" : "why"}
+              </Badge>{" "}
               {run.reason}
             </p>
           ) : null}
@@ -343,10 +402,10 @@ export default function PriceLeadSheet({
             </div>
           ) : null}
 
-          {run.decision === "ESCALATE" ? (
+          {run.decision === "RESEARCHING" ? (
             <p className="muted small" style={{ marginTop: 8 }}>
-              Jake has been emailed the computed quote — tell the prospect a
-              manager will follow up same day.
+              Keep this window open. The exact request is running now and this
+              card will update automatically when the quote is ready.
             </p>
           ) : null}
         </div>

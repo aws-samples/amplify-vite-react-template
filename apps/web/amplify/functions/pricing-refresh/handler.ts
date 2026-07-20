@@ -231,6 +231,18 @@ function hasResearchRequest(c: CoverageRow): boolean {
     (c.source === "DEMAND" && !c.lastSuccessAt);
 }
 
+function demandNeedsResearch(
+  coverage: CoverageRow,
+  live: Map<string, RateRow>
+): boolean {
+  const serving = live.get(coverage.id);
+  if (!serving) return true;
+  return (
+    coverage.researchRequestReason === "INCOMPLETE_RATE_SHEET" &&
+    !serving.pinned
+  );
+}
+
 /**
  * What this run researches, in priority order:
  *   (a) Persisted DEMAND requests with no sheet — a real lead is waiting.
@@ -250,7 +262,7 @@ function selectWork(
   // still represents a real waiting quote without the new request stamp.
   const requested = eligible.filter(hasResearchRequest);
   const demand = requested
-    .filter((c) => c.source === "DEMAND" && !live.has(c.id))
+    .filter((c) => c.source === "DEMAND" && demandNeedsResearch(c, live))
     .sort(byAttempt);
   const manual = requested
     .filter((c) => c.source === "MANUAL" && !live.get(c.id)?.pinned)
@@ -491,7 +503,7 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
       `Combos exhausted — parked with an owned Office item (${exhausted.length})`,
       exhausted.map(
         (c) =>
-          `${esc(covLabel(c))}: ${c.failCount ?? 0} straight failures — quotes fall back to a callback until it's retried, pinned, or retired`
+          `${esc(covLabel(c))}: ${c.failCount ?? 0} straight failures — automated quoting shows a retry error until fresh research succeeds or the rate is corrected`
       ),
       "No combo has exhausted its research attempts."
     )}
@@ -603,7 +615,7 @@ async function sendWeeklyReport(): Promise<boolean> {
       `Combos failing research (${failing.length})`,
       failing.map(
         (c) =>
-          `${esc(covLabel(c))}: ${c.failCount} straight failures${c.lastSuccessAt ? ` — last good sheet ${ageDays(c.lastSuccessAt)}d ago still serving` : " — never priced, still falling to callback"}`
+          `${esc(covLabel(c))}: ${c.failCount} straight failures${c.lastSuccessAt ? ` — last good sheet ${ageDays(c.lastSuccessAt)}d ago still serving` : " — never priced, automated quoting will show a retry error if attempts exhaust"}`
       ),
       `Nothing has failed ${FAILING_THRESHOLD}+ times.`
     )}
@@ -656,7 +668,7 @@ async function settleResearchFailure(
       kind: "PRICING_RESEARCH_EXHAUSTED",
       dedupeKey: cov.id,
       title: `AI pricing gave up on ${covLabel(cov)}`,
-      detail: `Research failed ${fails} times in a row for ${covLabel(cov)}. Quotes for this service + area fall back to the callback path (never an invented price) until it is handled. From Market Rates: retry the research, set a price by hand (pins the row), or retire the combo.`,
+      detail: `Research failed ${fails} times in a row for ${covLabel(cov)}. Automated quotes for this service + area now show an explicit retry error (never an invented price or sales escalation). From Market Rates: retry the research, correct and pin the sheet, or retire the combo.`,
       relatedId: cov.id,
       resolutionAction:
         "Open Market Rates → research queue: retry, pin a manual price, or retire the combo.",
@@ -783,7 +795,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
           Boolean(targetedRow.researchRequestedAt) &&
           ((targetedSource === "quote" &&
             targetedRow.source === "DEMAND" &&
-            !live.has(targetedRateKey)) ||
+            demandNeedsResearch(targetedRow, live)) ||
             (targetedSource === "manual" &&
               targetedRow.source === "MANUAL" &&
               !live.get(targetedRateKey)?.pinned))

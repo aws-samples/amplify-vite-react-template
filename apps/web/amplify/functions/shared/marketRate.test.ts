@@ -367,6 +367,27 @@ describe("demand-enqueue — an idempotent RateCoverage upsert per combo", () =>
     expect(JSON.parse(covRows[0].notify!)).toHaveLength(1);
   });
 
+  it("records incomplete-sheet demand and re-arms an exhausted exact combo", async () => {
+    await miss();
+    Object.assign(covRows[0], {
+      failCount: 5,
+      exhaustedAt: "2026-07-20T12:00:00.000Z",
+      nextEligibleAt: "2026-07-21T12:00:00.000Z",
+    });
+
+    await expect(
+      miss({ requestReason: "INCOMPLETE_RATE_SHEET" })
+    ).resolves.toBe(true);
+
+    expect(covRows[0]).toMatchObject({
+      source: "DEMAND",
+      researchRequestReason: "INCOMPLETE_RATE_SHEET",
+      failCount: 0,
+      exhaustedAt: null,
+      nextEligibleAt: null,
+    });
+  });
+
   it(`caps the notify list at ${NOTIFY_CAP} — overflow leads still get the research, not the email`, async () => {
     for (let i = 0; i < NOTIFY_CAP + 2; i++) {
       await miss({ notifyEmail: `lead${i}@x.com`, bookingRequestId: `bk${i}` });
