@@ -130,6 +130,9 @@ const LOCK_MODELS = [
   "WorkItem",
   "CapacityDay",
   "CapacityClaim",
+  // GL-07: the dedicated technician-day assigned-stop ledger — every stop
+  // claim/release/compensation is a guarded conditional add on this table.
+  "TechDayStops",
   // GL-17: schedule publishes are optimistically guarded on the job's
   // scheduledDate (two concurrent movers can't both land), so the CAS
   // helper needs the Job table.

@@ -286,12 +286,14 @@ const validReport = (over: Partial<Report> = {}): Report => ({
 beforeEach(() => {
   capacityFixture.maps.capacityDays.clear();
   capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.techDayStops.clear();
   capacityFixture.maps.closures.clear();
   capacityFixture.maps.exceptions.clear();
   _setLockStoreForTests(
     memoryLockStore({
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
+      TechDayStops: capacityFixture.maps.techDayStops,
       TreatmentObligation: new Map(),
       // A live get-only view over the test's job array: guarded publishes
       // mutate the same row objects the fake models serve.

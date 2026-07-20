@@ -233,11 +233,13 @@ beforeEach(() => {
   delete process.env.GOOGLE_ROUTES_API_KEY;
   capacityFixture.maps.capacityDays.clear();
   capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.techDayStops.clear();
   _setLockStoreForTests(
     memoryLockStore({
       VisitChangeClaim: visitClaims,
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
+        TechDayStops: capacityFixture.maps.techDayStops,
       TreatmentObligation: obligations,
       Job: jobs,
       Route: routes,
@@ -457,6 +459,7 @@ describe("cancelVisit — fail-safe", () => {
         VisitChangeClaim: visitClaims,
         CapacityDay: capacityFixture.maps.capacityDays,
         CapacityClaim: capacityFixture.maps.capacityClaims,
+        TechDayStops: capacityFixture.maps.techDayStops,
         TreatmentObligation: obligations,
         Job: jobs,
         Route: routes,
@@ -466,6 +469,7 @@ describe("cancelVisit — fail-safe", () => {
         VisitChangeClaim: visitClaims,
         CapacityDay: capacityFixture.maps.capacityDays,
         CapacityClaim: capacityFixture.maps.capacityClaims,
+        TechDayStops: capacityFixture.maps.techDayStops,
         TreatmentObligation: obligations,
         // No Job wiring: the CANCELED flip fails closed, exactly like a
         // refused conditional write.
@@ -592,13 +596,14 @@ describe("rescheduleVisit", () => {
     const newDate = daysFromNow(9);
     seedForReschedule(newDate);
     // The technician's day already carries the full stop count (as a
-    // concurrent winner would leave it) — this move must refuse atomically.
-    const stopRow = `stops#${newDate}#t1`;
-    capacityFixture.maps.capacityDays.set(stopRow, {
+    // concurrent winner would leave it) — this CROSS-DAY move must refuse
+    // atomically (the visit is moving in from another day).
+    const stopRow = `${newDate}#t1`;
+    capacityFixture.maps.techDayStops.set(stopRow, {
       id: stopRow,
+      date: newDate,
       technicianId: "t1",
       committedStops: 8,
-      verified: true,
     });
 
     await expect(
@@ -614,7 +619,7 @@ describe("rescheduleVisit", () => {
     // Nothing moved, nothing held: the counter is untouched and the visit
     // stays where it was.
     expect(
-      capacityFixture.maps.capacityDays.get(stopRow)!.committedStops
+      capacityFixture.maps.techDayStops.get(stopRow)!.committedStops
     ).toBe(8);
     expect(jobs.get("j1")!.routeId).not.toBe("r-new");
   });
@@ -634,9 +639,247 @@ describe("rescheduleVisit", () => {
 
     expect(res.assignedToRoute).toBe(true);
     expect(
-      capacityFixture.maps.capacityDays.get(`stops#${newDate}#t1`)!
-        .committedStops
+      capacityFixture.maps.techDayStops.get(`${newDate}#t1`)!.committedStops
     ).toBe(1);
+  });
+
+  // ── GL-07 corrective — DELTA-correct transition math ──────────────
+  // ALLOW_UNVERIFIED_ROUTES is on in this harness, so every assigned move
+  // computes slotMinutes = 30 (residential on-site, no legs).
+
+  /** A job already ASSIGNED to t1 with real capacity facts, plus the
+   *  ledger rows those facts imply. */
+  function seedAssignedOnDay(opts: {
+    date: string;
+    window: "MORNING" | "AFTERNOON";
+    minutes: number;
+    stops?: number;
+  }) {
+    jobs.set("j1", {
+      id: "j1",
+      customerId: "c1",
+      serviceType: "Wasp nest removal",
+      status: "SCHEDULED",
+      scheduledDate: opts.date,
+      timeWindow: opts.window === "MORNING" ? "AM" : "PM",
+      routeId: "r0",
+      technicianId: "t1",
+      capacityWindow: opts.window,
+      capacityMinutes: opts.minutes,
+    });
+    customers.set("c1", { id: "c1", displayName: "Dana", email: "dana@example.com" });
+    technicians.set("t1", {
+      id: "t1",
+      name: "Marcus",
+      active: true,
+      licenseNumber: "APP-1",
+      licenseExpiresOn: FUTURE_LICENSE,
+    });
+    const slot = `${opts.date}#${opts.window}#t1`;
+    capacityFixture.maps.capacityDays.set(slot, {
+      id: slot,
+      date: opts.date,
+      window: opts.window,
+      technicianId: "t1",
+      committedMinutes: opts.minutes,
+      verified: true,
+    });
+    const stopRow = `${opts.date}#t1`;
+    capacityFixture.maps.techDayStops.set(stopRow, {
+      id: stopRow,
+      date: opts.date,
+      technicianId: "t1",
+      committedStops: opts.stops ?? 1,
+    });
+  }
+
+  it("GL-07: an EIGHT-STOP day can still be reordered — a same-day move never requests a ninth stop", async () => {
+    const day = daysFromNow(9);
+    seedAssignedOnDay({ date: day, window: "MORNING", minutes: 30, stops: 8 });
+    routes.set("r-new", { id: "r-new", technicianId: "t1", date: day });
+
+    const res = await rescheduleVisit({
+      jobId: "j1",
+      scheduledDate: day,
+      timeWindow: "AM",
+      routeOrder: 3, // pure reorder within the same technician-day-window
+      technicianId: "t1",
+      routeId: "r-new",
+      reason: "route optimization",
+      actor: OFFICE,
+    });
+
+    expect(res.assignedToRoute).toBe(true);
+    expect(jobs.get("j1")).toMatchObject({ routeId: "r-new", routeOrder: 3 });
+    // Stop count untouched at the ceiling; minutes unchanged.
+    expect(
+      capacityFixture.maps.techDayStops.get(`${day}#t1`)!.committedStops
+    ).toBe(8);
+    expect(
+      capacityFixture.maps.capacityDays.get(`${day}#MORNING#t1`)!
+        .committedMinutes
+    ).toBe(30);
+  });
+
+  it("GL-07: a same-window move reserves only the POSITIVE minutes delta", async () => {
+    const day = daysFromNow(9);
+    // The visit currently holds 20 of the morning; the move recomputes 30.
+    seedAssignedOnDay({ date: day, window: "MORNING", minutes: 20 });
+    routes.set("r-new", { id: "r-new", technicianId: "t1", date: day });
+
+    const res = await rescheduleVisit({
+      jobId: "j1",
+      scheduledDate: day,
+      timeWindow: "AM",
+      technicianId: "t1",
+      routeId: "r-new",
+      reason: "longer visit",
+      actor: OFFICE,
+    });
+
+    expect(res.assignedToRoute).toBe(true);
+    // 20 held + 10 delta = 30, NOT 20 + 30 double-claimed.
+    expect(
+      capacityFixture.maps.capacityDays.get(`${day}#MORNING#t1`)!
+        .committedMinutes
+    ).toBe(30);
+    expect(
+      capacityFixture.maps.techDayStops.get(`${day}#t1`)!.committedStops
+    ).toBe(1); // no stop churn
+  });
+
+  it("GL-07: a same-window SHRINK releases the difference only after publication", async () => {
+    const day = daysFromNow(9);
+    // The visit currently holds 50; the move recomputes 30.
+    seedAssignedOnDay({ date: day, window: "MORNING", minutes: 50 });
+    routes.set("r-new", { id: "r-new", technicianId: "t1", date: day });
+
+    const res = await rescheduleVisit({
+      jobId: "j1",
+      scheduledDate: day,
+      timeWindow: "AM",
+      technicianId: "t1",
+      routeId: "r-new",
+      reason: "shorter visit",
+      actor: OFFICE,
+    });
+
+    expect(res.assignedToRoute).toBe(true);
+    expect(
+      capacityFixture.maps.capacityDays.get(`${day}#MORNING#t1`)!
+        .committedMinutes
+    ).toBe(30); // 50 − 20 released after the publish landed
+    expect(
+      capacityFixture.maps.techDayStops.get(`${day}#t1`)!.committedStops
+    ).toBe(1);
+  });
+
+  it("GL-07: a cross-WINDOW same-day move swaps window minutes with stop delta 0", async () => {
+    const day = daysFromNow(9);
+    seedAssignedOnDay({ date: day, window: "MORNING", minutes: 30, stops: 8 });
+    routes.set("r-new", { id: "r-new", technicianId: "t1", date: day });
+
+    const res = await rescheduleVisit({
+      jobId: "j1",
+      scheduledDate: day,
+      timeWindow: "Afternoon",
+      technicianId: "t1",
+      routeId: "r-new",
+      reason: "customer request",
+      actor: OFFICE,
+    });
+
+    expect(res.assignedToRoute).toBe(true);
+    // Destination window claimed, source window released, stops untouched —
+    // even at the eight-stop ceiling.
+    expect(
+      capacityFixture.maps.capacityDays.get(`${day}#AFTERNOON#t1`)!
+        .committedMinutes
+    ).toBe(30);
+    expect(
+      capacityFixture.maps.capacityDays.get(`${day}#MORNING#t1`)!
+        .committedMinutes
+    ).toBe(0);
+    expect(
+      capacityFixture.maps.techDayStops.get(`${day}#t1`)!.committedStops
+    ).toBe(8);
+  });
+
+  it("GL-07: a cross-DAY move claims +1 on the destination and releases the source AFTER publication", async () => {
+    const oldDay = daysFromNow(3);
+    const newDay = daysFromNow(9);
+    seedAssignedOnDay({ date: oldDay, window: "MORNING", minutes: 30, stops: 2 });
+    routes.set("r-new", { id: "r-new", technicianId: "t1", date: newDay });
+
+    const res = await rescheduleVisit({
+      jobId: "j1",
+      scheduledDate: newDay,
+      timeWindow: "AM",
+      technicianId: "t1",
+      routeId: "r-new",
+      reason: "customer request",
+      actor: OFFICE,
+    });
+
+    expect(res.assignedToRoute).toBe(true);
+    expect(
+      capacityFixture.maps.techDayStops.get(`${newDay}#t1`)!.committedStops
+    ).toBe(1);
+    // Source day: the stop and its minutes came back.
+    expect(
+      capacityFixture.maps.techDayStops.get(`${oldDay}#t1`)!.committedStops
+    ).toBe(1); // was 2, this visit's stop released
+    expect(
+      capacityFixture.maps.capacityDays.get(`${oldDay}#MORNING#t1`)!
+        .committedMinutes
+    ).toBe(0);
+  });
+
+  it("GL-07: a FAILED publication compensates exactly the fresh delta — destination holds nothing", async () => {
+    const oldDay = daysFromNow(3);
+    const newDay = daysFromNow(9);
+    seedAssignedOnDay({ date: oldDay, window: "MORNING", minutes: 30, stops: 2 });
+    routes.set("r-new", { id: "r-new", technicianId: "t1", date: newDay });
+    // A concurrent mover already changed the schedule: the guarded publish
+    // (conditioned on the read schedule) must LOSE.
+    const readJob = jobs.get("j1")!;
+    jobs.set("j1", { ...readJob });
+    const liveRow = jobs.get("j1")!;
+    const origGet = fakeDataClient.models.Job.get;
+    fakeDataClient.models.Job.get = (async ({ id }: { id: string }) => {
+      // Serve a STALE copy, then flip the live row before publish.
+      const copy = { ...liveRow, scheduledDate: oldDay };
+      liveRow.scheduledDate = daysFromNow(5); // someone else moved it
+      return { data: id === "j1" ? copy : null };
+    }) as typeof fakeDataClient.models.Job.get;
+    try {
+      await expect(
+        rescheduleVisit({
+          jobId: "j1",
+          scheduledDate: newDay,
+          timeWindow: "AM",
+          technicianId: "t1",
+          routeId: "r-new",
+          reason: "customer request",
+          actor: OFFICE,
+        })
+      ).rejects.toThrow(/changed while rescheduling/);
+    } finally {
+      fakeDataClient.models.Job.get = origGet;
+    }
+    // The destination claim was compensated: no stop, no minutes.
+    expect(
+      capacityFixture.maps.techDayStops.get(`${newDay}#t1`)?.committedStops ??
+        0
+    ).toBe(0);
+    expect(
+      capacityFixture.maps.capacityDays.get(`${newDay}#MORNING#t1`)
+        ?.committedMinutes ?? 0
+    ).toBe(0);
+    // The source still holds everything — nothing was given away.
+    expect(
+      capacityFixture.maps.techDayStops.get(`${oldDay}#t1`)!.committedStops
+    ).toBe(2);
   });
 
   it("GL-17: a cross-month reschedule claims the target month and releases the prior month", async () => {

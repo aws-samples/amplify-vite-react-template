@@ -1028,14 +1028,30 @@ export const schema = a.schema({
       window: a.string(),
       technicianId: a.string(),
       committedMinutes: a.integer(),
-      /** GL-07: assigned stops on the technician's DAY (rows with the
-       *  `stops#date#tech` id shape carry this; they deliberately omit
-       *  `date` so slot readers never see them). Enforced atomically by
-       *  the backend CAS store; browsers are read-only on this model. */
-      committedStops: a.integer(),
       /** False ⇒ the nightly Routes rebuild could not verify this slot's
        *  travel legs — it sells NOTHING until it verifies (fail closed). */
       verified: a.boolean(),
+      reconciledAt: a.datetime(),
+    })
+    .secondaryIndexes((index) => [index("date")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
+  /**
+   * GL-07 — the per-technician-DAY assigned-stop ledger, a DEDICATED model
+   * (id = `date#technicianId`) so no CapacityDay slot or by-date index
+   * reader can ever see or mistake a stop row, and so the required-field
+   * create contract is honest — the row is created with every required
+   * field and a creation failure is surfaced, never swallowed. The counter
+   * itself is enforced atomically by the backend CAS store; browsers are
+   * read-only.
+   */
+  TechDayStops: a
+    .model({
+      date: a.date().required(),
+      technicianId: a.string().required(),
+      committedStops: a.integer(),
       reconciledAt: a.datetime(),
     })
     .secondaryIndexes((index) => [index("date")])

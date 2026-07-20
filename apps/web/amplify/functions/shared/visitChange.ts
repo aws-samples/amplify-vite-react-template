@@ -19,6 +19,8 @@ import {
   makeLegResolver,
   notePoolMinutes,
   onsiteMinutes as slotOnsiteMinutes,
+  POOL_TECH,
+  jobCapacityFacts,
   jobScheduleGuards,
   releaseJobCapacity,
   releasePoolMinutes,
@@ -1642,16 +1644,51 @@ export async function rescheduleVisit(args: {
       }
       slotMinutes = slotOnsiteMinutes(job.propertyClass) + legOut + legBack;
     }
-    const reserved = await reserveSlot(
-      newDate!,
-      targetWindow,
-      technician.id,
-      slotMinutes,
-      // GL-07: one assigned stop claimed with the minutes, atomically.
-      { stops: 1 }
+    // GL-07: DELTA-correct transition math. What the move actually changes
+    // on the ledgers depends on where the visit already is:
+    //  - same technician + same DAY: the visit already holds its stop —
+    //    stop delta 0, so a fully-booked eight-stop day can still be
+    //    moved/reordered without being told a ninth stop was requested.
+    //  - same technician + same day + same WINDOW: reserve only the
+    //    POSITIVE minutes delta; a smaller requirement releases the
+    //    difference after publication. A pure reorder touches nothing.
+    //  - same technician + same day, OTHER window: claim the destination
+    //    window's minutes, publish, then release the source window's —
+    //    no stop churn.
+    //  - different technician or day: claim +1 stop and full minutes on
+    //    the destination; the source's stop and minutes come back only
+    //    after the publish lands.
+    const priorAssignedFacts = (() => {
+      const f = jobCapacityFacts(job);
+      return f && f.technicianId && f.technicianId !== POOL_TECH ? f : null;
+    })();
+    const sameTechDay = Boolean(
+      job.technicianId &&
+        job.technicianId !== POOL_TECH &&
+        job.technicianId === technician.id &&
+        job.scheduledDate === newDate
     );
-    if (!reserved.ok) {
-      throw new Error(reserved.message);
+    const sameSlotExact = Boolean(
+      sameTechDay &&
+        priorAssignedFacts &&
+        priorAssignedFacts.technicianId === technician.id &&
+        priorAssignedFacts.window === targetWindow
+    );
+    const stopDelta = sameTechDay ? 0 : 1;
+    const claimMinutes = sameSlotExact
+      ? Math.max(0, slotMinutes - priorAssignedFacts!.minutes)
+      : slotMinutes;
+    if (claimMinutes > 0 || stopDelta > 0) {
+      const reserved = await reserveSlot(
+        newDate!,
+        targetWindow,
+        technician.id,
+        claimMinutes,
+        { stops: stopDelta }
+      );
+      if (!reserved.ok) {
+        throw new Error(reserved.message);
+      }
     }
 
     // Guarded on the schedule this move validated: a concurrent office
@@ -1675,11 +1712,14 @@ export async function rescheduleVisit(args: {
       jobScheduleGuards(job)
     );
     if (!published.ok) {
-      // Compensation: the freshly reserved minutes AND stop must not stay
-      // held for a publish that never landed.
-      await releaseSlot(newDate!, targetWindow, technician.id, slotMinutes, {
-        stops: 1,
-      }).catch(() => undefined);
+      // Compensation: exactly what this attempt freshly claimed — the
+      // minutes delta and (only on a cross-tech/day move) the stop — must
+      // not stay held for a publish that never landed.
+      if (claimMinutes > 0 || stopDelta > 0) {
+        await releaseSlot(newDate!, targetWindow, technician.id, claimMinutes, {
+          stops: stopDelta,
+        }).catch(() => undefined);
+      }
       throw new Error(
         published.reason === "UNSUPPORTED"
           ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
@@ -1697,10 +1737,35 @@ export async function rescheduleVisit(args: {
         note: "Visit moved to a different month.",
       }).catch(() => undefined);
     }
-    // The OLD slot's minutes — and its assigned stop — come back only
-    // after the move landed (releaseJobCapacity releases the stop when the
-    // prior row carried a real technicianId).
-    await releaseJobSlot(job);
+    if (sameSlotExact) {
+      // Same slot: only a SHRINK is left to settle — released after the
+      // publish so a failed publish never gave anything away.
+      const shrink = priorAssignedFacts!.minutes - slotMinutes;
+      if (shrink > 0) {
+        await releaseSlot(
+          newDate!,
+          targetWindow,
+          technician.id,
+          shrink
+        ).catch(() => undefined);
+      }
+    } else if (sameTechDay) {
+      // Cross-window on the same technician-day: give the source window's
+      // minutes back; the day's stop never moved.
+      if (priorAssignedFacts && priorAssignedFacts.minutes > 0) {
+        await releaseSlot(
+          priorAssignedFacts.date,
+          priorAssignedFacts.window,
+          priorAssignedFacts.technicianId!,
+          priorAssignedFacts.minutes
+        ).catch(() => undefined);
+      }
+    } else {
+      // Cross-technician/day: the OLD slot's minutes — and its assigned
+      // stop — come back only after the move landed (releaseJobCapacity
+      // releases the stop when the prior row carried a real technicianId).
+      await releaseJobSlot(job);
+    }
   } else {
     // GL-07 R4: a dated move with no technician is NEVER published as a clean
     // SCHEDULED — the owned staffing case is CONFIRMED FIRST (a case that

@@ -330,6 +330,7 @@ beforeEach(() => {
       } as unknown as Map<string, Record<string, unknown>>,
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
+        TechDayStops: capacityFixture.maps.techDayStops,
     })
   );
   existingCustomers = [];
@@ -350,6 +351,7 @@ beforeEach(() => {
   workResolved.length = 0;
   capacityFixture.maps.capacityDays.clear();
   capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.techDayStops.clear();
   store.ServicePlan.clear();
   store.Job.clear();
   store.Invoice.clear();
@@ -1054,6 +1056,7 @@ describe("GL-05 — finalization is idempotent and resumable under failure", () 
         Job: store.Job,
         CapacityDay: capacityFixture.maps.capacityDays,
         CapacityClaim: capacityFixture.maps.capacityClaims,
+        TechDayStops: capacityFixture.maps.techDayStops,
         // No BookingRequest wiring: the guarded BOOKED flip fails closed,
         // exactly as a refused conditional write would.
       })
@@ -1075,6 +1078,7 @@ describe("GL-05 — finalization is idempotent and resumable under failure", () 
         Job: store.Job,
         CapacityDay: capacityFixture.maps.capacityDays,
         CapacityClaim: capacityFixture.maps.capacityClaims,
+        TechDayStops: capacityFixture.maps.techDayStops,
       })
     );
     await finalize();
@@ -1210,6 +1214,7 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
       memoryLockStore({
         CapacityDay: capacityFixture.maps.capacityDays,
         CapacityClaim: capacityFixture.maps.capacityClaims,
+        TechDayStops: capacityFixture.maps.techDayStops,
         Job: store.Job,
         BookingRequest: {
           get: (id: string) =>

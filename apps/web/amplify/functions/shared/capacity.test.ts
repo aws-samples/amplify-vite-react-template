@@ -15,7 +15,7 @@ const licenses = new Map<string, Row[]>();
 const jobs = new Map<string, Row>();
 const customers = new Map<string, Row>();
 const capacityFixture = capacityFixtureModels();
-const { capacityDays, capacityClaims, closures, exceptions } =
+const { capacityDays, capacityClaims, techDayStops, closures, exceptions } =
   capacityFixture.maps;
 
 let modelsPresent = true;
@@ -104,6 +104,7 @@ beforeEach(() => {
     customers,
     capacityDays,
     capacityClaims,
+    techDayStops,
     closures,
     exceptions,
   ]) {
@@ -114,7 +115,11 @@ beforeEach(() => {
   driveMinutesBetween.mockClear();
   driveMinutesBetween.mockImplementation(async () => 15);
   _setLockStoreForTests(
-    memoryLockStore({ CapacityDay: capacityDays, CapacityClaim: capacityClaims })
+    memoryLockStore({
+      CapacityDay: capacityDays,
+      CapacityClaim: capacityClaims,
+      TechDayStops: techDayStops,
+    })
   );
   technicians.set("t1", {
     id: "t1",
@@ -446,11 +451,11 @@ describe("claim moves + strict releases — adversarial", () => {
 
 describe("GL-07 — the atomic assigned-stop day ledger", () => {
   it("two concurrent claims for the day's LAST STOP: exactly one wins", async () => {
-    capacityDays.set(dayStopId(WED, "t1"), {
+    techDayStops.set(dayStopId(WED, "t1"), {
       id: dayStopId(WED, "t1"),
+      date: WED,
       technicianId: "t1",
       committedStops: STOPS_PER_TECH - 1,
-      verified: true,
     });
 
     const [a, b] = await Promise.all([
@@ -464,7 +469,7 @@ describe("GL-07 — the atomic assigned-stop day ledger", () => {
       "day is full"
     );
     expect(
-      capacityDays.get(dayStopId(WED, "t1"))!.committedStops
+      techDayStops.get(dayStopId(WED, "t1"))!.committedStops
     ).toBe(STOPS_PER_TECH); // exactly one landed
   });
 
@@ -482,21 +487,23 @@ describe("GL-07 — the atomic assigned-stop day ledger", () => {
 
     expect(res.ok).toBe(false);
     expect(
-      capacityDays.get(dayStopId(WED, "t1"))?.committedStops ?? 0
+      techDayStops.get(dayStopId(WED, "t1"))?.committedStops ?? 0
     ).toBe(0); // the stop it won was compensated
   });
 
   it("release returns the minutes AND the assigned stop", async () => {
     const ok = await reserveSlot(WED, "MORNING", "t1", 45, { stops: 1 });
     expect(ok.ok).toBe(true);
-    expect(capacityDays.get(dayStopId(WED, "t1"))!.committedStops).toBe(1);
+    // The row was created against the REAL contract: required fields present.
+    const created = techDayStops.get(dayStopId(WED, "t1"))!;
+    expect(created).toMatchObject({ date: WED, technicianId: "t1", committedStops: 1 });
 
     await releaseSlot(WED, "MORNING", "t1", 45, { stops: 1 });
 
     expect(
       capacityDays.get(slotId(WED, "MORNING", "t1"))!.committedMinutes
     ).toBe(0);
-    expect(capacityDays.get(dayStopId(WED, "t1"))!.committedStops).toBe(0);
+    expect(techDayStops.get(dayStopId(WED, "t1"))!.committedStops).toBe(0);
   });
 
   it("the nightly rebuild repairs a DRIFTED stop counter from ground truth", async () => {
@@ -520,23 +527,93 @@ describe("GL-07 — the atomic assigned-stop day ledger", () => {
     });
     // …but the counter drifted to 5, and a second tech has a stale row
     // with no stops at all.
-    capacityDays.set(dayStopId(WED, "t1"), {
+    techDayStops.set(dayStopId(WED, "t1"), {
       id: dayStopId(WED, "t1"),
+      date: WED,
       technicianId: "t1",
       committedStops: 5,
-      verified: true,
     });
-    capacityDays.set(dayStopId(WED, "t9"), {
+    techDayStops.set(dayStopId(WED, "t9"), {
       id: dayStopId(WED, "t9"),
+      date: WED,
       technicianId: "t9",
       committedStops: 3,
-      verified: true,
     });
 
     await reconcileCapacityDay(WED, "routes-key");
 
-    expect(capacityDays.get(dayStopId(WED, "t1"))!.committedStops).toBe(1);
-    expect(capacityDays.get(dayStopId(WED, "t9"))!.committedStops).toBe(0);
+    expect(techDayStops.get(dayStopId(WED, "t1"))!.committedStops).toBe(1);
+    expect(techDayStops.get(dayStopId(WED, "t9"))!.committedStops).toBe(0);
+  });
+
+  it("FIRST-EVER stop: no row exists — the claim CREATES it with the real required fields and wins", async () => {
+    expect(techDayStops.size).toBe(0);
+
+    const res = await reserveSlot(WED, "MORNING", "t1", 30, { stops: 1 });
+
+    expect(res.ok).toBe(true);
+    expect(techDayStops.get(dayStopId(WED, "t1"))).toMatchObject({
+      date: WED,
+      technicianId: "t1",
+      committedStops: 1,
+    });
+  });
+
+  it("a stop-row CREATE the API rejects is an honest refusal, never a phantom 'day full'", async () => {
+    // Simulate the deployed contract refusing the create (as the old
+    // missing-required-field bug did): the model returns errors, no data.
+    const model = capacityFixture.models.TechDayStops as {
+      create: (i: Record<string, unknown>) => Promise<unknown>;
+    };
+    const realCreate = model.create;
+    model.create = async () => ({
+      data: null,
+      errors: [{ message: "Variable 'input' has coerced Null value" }],
+    });
+    try {
+      const res = await reserveSlot(WED, "MORNING", "t1", 30, { stops: 1 });
+      expect(res.ok).toBe(false);
+      const refusal = res as { unavailable?: boolean; message: string };
+      // UNAVAILABLE — "try again", owned by ops — NOT a capacity lie.
+      expect(refusal.unavailable).toBe(true);
+      expect(refusal.message).not.toContain("day is full");
+      // Nothing was claimed anywhere.
+      expect(techDayStops.size).toBe(0);
+      expect(
+        capacityDays.get(slotId(WED, "MORNING", "t1"))?.committedMinutes ?? 0
+      ).toBe(0);
+    } finally {
+      model.create = realCreate;
+    }
+  });
+
+  it("the nightly rebuild CREATES a missing row for a day that has assigned stops", async () => {
+    customers.set("c1", {
+      id: "c1",
+      serviceStreet: "9 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
+    jobs.set("j1", {
+      id: "j1",
+      customerId: "c1",
+      scheduledDate: WED,
+      status: "SCHEDULED",
+      technicianId: "t1",
+      timeWindow: "MORNING",
+      routeOrder: 1,
+      propertyClass: "RESIDENTIAL",
+    });
+    expect(techDayStops.size).toBe(0); // no ledger row at all
+
+    await reconcileCapacityDay(WED, "routes-key");
+
+    expect(techDayStops.get(dayStopId(WED, "t1"))).toMatchObject({
+      date: WED,
+      technicianId: "t1",
+      committedStops: 1,
+    });
   });
 });
 

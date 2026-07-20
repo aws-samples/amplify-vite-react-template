@@ -63,12 +63,11 @@ export const POOL_TECH = "POOL";
  *  stops — the coarse day ceiling alongside the per-window minutes ledger. */
 export const STOPS_PER_TECH = 8;
 
-/** GL-07: the per-technician-DAY assigned-stop ledger row. Deliberately
- *  carries NO `date` attribute, so the by-date index (slot readers, the
- *  availability matrix) never sees it — it exists only for the atomic
- *  stop-count invariant and the nightly rebuild. */
+/** GL-07: the id of a technician-day row on the DEDICATED TechDayStops
+ *  ledger model — its own table, so CapacityDay slot/index readers can
+ *  never see a stop row and the required-field create contract is honest. */
 export function dayStopId(date: string, technicianId: string): string {
-  return `stops#${date}#${technicianId}`;
+  return `${date}#${technicianId}`;
 }
 
 export function isWeekday(date: string): boolean {
@@ -110,6 +109,7 @@ async function capacityModelsReady(): Promise<boolean> {
   return (
     "CapacityDay" in m &&
     "CapacityClaim" in m &&
+    "TechDayStops" in m &&
     typeof (m.Technician as { list?: unknown } | undefined)?.list ===
       "function" &&
     typeof (m.Job as { listJobByScheduledDate?: unknown } | undefined)
@@ -455,9 +455,12 @@ export async function reserveSlot(
   const stops = opts?.stops ?? 0;
   if (stops > 0) {
     const stopRowId = dayStopId(date, technicianId);
-    await ensureDayStopRow(date, technicianId);
+    // The guarded add REQUIRES the row to exist (the CAS layer conditions on
+    // attribute_exists) — a row that could not be created or read back is an
+    // honest refusal, never a silent "day full".
+    if (!(await ensureDayStopRow(date, technicianId))) return UNAVAILABLE;
     const stopRes = await casGuardedAdd(
-      "CapacityDay",
+      "TechDayStops",
       stopRowId,
       { committedStops: stops },
       [
@@ -496,7 +499,7 @@ export async function reserveSlot(
     // The minutes ceiling refused after the stop was won — give the stop
     // back so a failed claim leaks nothing.
     await casGuardedAdd(
-      "CapacityDay",
+      "TechDayStops",
       dayStopId(date, technicianId),
       { committedStops: -stops },
       [{ kind: "fieldAtLeast", field: "committedStops", value: stops }]
@@ -510,19 +513,52 @@ export async function reserveSlot(
   };
 }
 
+/** Create the technician-day stop row if absent — with EVERY required field
+ *  of the real AppSync contract. Returns false only when the row neither got
+ *  created nor already exists; callers must refuse honestly, not proceed. */
 async function ensureDayStopRow(
   date: string,
   technicianId: string
-): Promise<void> {
+): Promise<boolean> {
   const client = await dataClient();
-  if (!("CapacityDay" in client.models)) return;
-  await client.models.CapacityDay.create({
-    id: dayStopId(date, technicianId),
-    // No `date` attribute on purpose — see dayStopId.
-    technicianId,
-    committedStops: 0,
-    verified: true,
-  } as never).catch(() => undefined);
+  const m = client.models as unknown as Record<
+    string,
+    {
+      create: (input: Record<string, unknown>) => Promise<{
+        data: unknown;
+        errors?: { message: string }[];
+      }>;
+      get: (input: { id: string }) => Promise<{ data: unknown }>;
+    }
+  >;
+  if (!("TechDayStops" in m)) return false;
+  const id = dayStopId(date, technicianId);
+  let createErrors: { message: string }[] | undefined;
+  try {
+    const res = await m.TechDayStops.create({
+      id,
+      date,
+      technicianId,
+      committedStops: 0,
+    });
+    if (res.data) return true;
+    createErrors = res.errors;
+  } catch (err) {
+    createErrors = [{ message: err instanceof Error ? err.message : String(err) }];
+  }
+  // A conditional-create conflict (the row already exists) is success; any
+  // other failure is surfaced — never swallowed into a phantom "day full".
+  try {
+    const { data: existing } = await m.TechDayStops.get({ id });
+    if (existing) return true;
+  } catch {
+    // fall through to the honest failure below
+  }
+  console.error(
+    `ensureDayStopRow: stop-ledger row ${id} could not be created or read back`,
+    createErrors ?? []
+  );
+  return false;
 }
 
 /** Give slot minutes back (a canceled/moved-off visit or a released claim).
@@ -548,7 +584,7 @@ export async function releaseSlot(
     // Independently guarded so drift in one counter can never leak the
     // other; the nightly rebuild converges both from ground truth.
     await casGuardedAdd(
-      "CapacityDay",
+      "TechDayStops",
       dayStopId(date, technicianId),
       { committedStops: -stops },
       [{ kind: "fieldAtLeast", field: "committedStops", value: stops }]
@@ -1197,35 +1233,60 @@ export async function reconcileCapacityDay(
   // are reset to zero.
   const stopRowTechs = new Set<string>(assignedStopsByTechFinal.keys());
   {
-    let token2: string | null | undefined;
-    do {
-      const page = await (
-        client.models.CapacityDay.list as (a: object) => Promise<{
-          data: { id: string; technicianId?: string | null }[];
-          nextToken?: string | null;
-        }>
-      )({ limit: 500, nextToken: token2 });
-      for (const row of page.data ?? []) {
-        if (row.id.startsWith(`stops#${date}#`) && row.technicianId) {
-          stopRowTechs.add(row.technicianId);
+    const stopModel = (client.models as unknown as Record<string, unknown>)
+      .TechDayStops as
+      | {
+          listTechDayStopsByDate?: (a: object) => Promise<{
+            data: { date?: string | null; technicianId?: string | null }[];
+            nextToken?: string | null;
+          }>;
+          list: (a: object) => Promise<{
+            data: { date?: string | null; technicianId?: string | null }[];
+            nextToken?: string | null;
+          }>;
         }
-      }
-      token2 = page.nextToken;
-    } while (token2);
+      | undefined;
+    if (stopModel) {
+      let token2: string | null | undefined;
+      do {
+        const page = stopModel.listTechDayStopsByDate
+          ? await stopModel.listTechDayStopsByDate({
+              date,
+              limit: 500,
+              nextToken: token2,
+            })
+          : await stopModel.list({ limit: 500, nextToken: token2 });
+        for (const row of page.data ?? []) {
+          if (
+            row.technicianId &&
+            (stopModel.listTechDayStopsByDate || row.date === date)
+          ) {
+            stopRowTechs.add(row.technicianId);
+          }
+        }
+        token2 = page.nextToken;
+      } while (token2);
+    }
   }
   for (const techId of stopRowTechs) {
     const trueStops = assignedStopsByTechFinal.get(techId) ?? 0;
     const id = dayStopId(date, techId);
-    await ensureDayStopRow(date, techId);
+    // A MISSING row is created (all required fields) and a DRIFTED one is
+    // overwritten with ground truth; a row that cannot be created is an
+    // honest error in the reconcile log, not a silent skip.
+    if (!(await ensureDayStopRow(date, techId))) continue;
     const sets = {
       committedStops: trueStops,
       reconciledAt: new Date().toISOString(),
     };
-    const written = await casGuardedUpdate("CapacityDay", id, sets, []);
+    const written = await casGuardedUpdate("TechDayStops", id, sets, []);
     if (!written.ok && written.reason === "UNSUPPORTED") {
-      await client.models.CapacityDay.update({ id, ...sets }).catch(
-        () => undefined
-      );
+      await (
+        client.models as unknown as Record<
+          string,
+          { update: (i: Record<string, unknown>) => Promise<unknown> }
+        >
+      ).TechDayStops.update({ id, ...sets }).catch(() => undefined);
     }
   }
   return { slots, expiredClaims, unverified };

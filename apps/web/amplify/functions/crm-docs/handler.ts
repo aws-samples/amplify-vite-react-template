@@ -67,7 +67,9 @@ import {
   makeLegResolver,
   notePoolMinutes,
   onsiteMinutes as slotOnsiteMinutes,
+  jobCapacityFacts,
   jobScheduleGuards,
+  POOL_TECH,
   releaseJobCapacity,
   releasePoolMinutes,
   releaseSlot,
@@ -2526,18 +2528,44 @@ async function updateJobSchedule(
     const slotMinutes =
       slotOnsiteMinutes(job.propertyClass) +
       (routeProof ? routeProof.driveMinutes * 2 : 0);
-    const reserved = await reserveSlot(
-      args.scheduledDate,
-      targetWindow,
-      technician.id,
-      slotMinutes,
-      // GL-07: an assignment claims one stop on the technician-day ledger
-      // in the same atomic pass as its minutes.
-      { stops: 1 }
+    // GL-07: DELTA-correct claims, mirroring rescheduleVisit. A visit
+    // already ASSIGNED to this same technician-day holds its stop — a
+    // reassignment there is stop-delta 0 (a fully-booked eight-stop day can
+    // still be re-routed), and a same-window reassignment reserves only the
+    // positive minutes delta. A checkout hold or pool visit held no stop,
+    // so a fresh assignment claims one.
+    const priorAssignedFacts = (() => {
+      if (!job.technicianId || job.technicianId === POOL_TECH) return null;
+      const f = jobCapacityFacts(job);
+      return f && f.technicianId && f.technicianId !== POOL_TECH ? f : null;
+    })();
+    const sameTechDay = Boolean(
+      job.technicianId &&
+        job.technicianId !== POOL_TECH &&
+        job.technicianId === technician.id &&
+        job.scheduledDate === args.scheduledDate
     );
-    if (!reserved.ok) {
-      await compensateMonth();
-      throw new Error(reserved.message);
+    const sameSlotExact = Boolean(
+      sameTechDay &&
+        priorAssignedFacts &&
+        priorAssignedFacts.window === targetWindow
+    );
+    const stopDelta = sameTechDay ? 0 : 1;
+    const claimMinutes = sameSlotExact
+      ? Math.max(0, slotMinutes - priorAssignedFacts!.minutes)
+      : slotMinutes;
+    if (claimMinutes > 0 || stopDelta > 0) {
+      const reserved = await reserveSlot(
+        args.scheduledDate,
+        targetWindow,
+        technician.id,
+        claimMinutes,
+        { stops: stopDelta }
+      );
+      if (!reserved.ok) {
+        await compensateMonth();
+        throw new Error(reserved.message);
+      }
     }
     // The publish is GUARDED on the schedule this assignment validated: a
     // concurrent reschedule that moved the visit (and its month claim) makes
@@ -2568,13 +2596,16 @@ async function updateJobSchedule(
     );
     if (!published.ok) {
       await compensateMonth();
-      await releaseSlot(
-        args.scheduledDate,
-        targetWindow,
-        technician.id,
-        slotMinutes,
-        { stops: 1 }
-      ).catch(() => undefined);
+      // Compensation: exactly what THIS attempt freshly claimed.
+      if (claimMinutes > 0 || stopDelta > 0) {
+        await releaseSlot(
+          args.scheduledDate,
+          targetWindow,
+          technician.id,
+          claimMinutes,
+          { stops: stopDelta }
+        ).catch(() => undefined);
+      }
       throw new Error(
         published.reason === "UNSUPPORTED"
           ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
@@ -2591,8 +2622,31 @@ async function updateJobSchedule(
       }).catch(() => undefined);
     }
     // The prior hold — technician slot, checkout-time funnel hold, or pool
-    // note — comes back strictly from the pre-update stamps.
-    await releaseJobCapacity(job);
+    // note — comes back strictly from the pre-update stamps. A same-slot
+    // reassignment settles only its shrink; a cross-window same-day one
+    // returns the source window's minutes (its stop never moved).
+    if (sameSlotExact) {
+      const shrink = priorAssignedFacts!.minutes - slotMinutes;
+      if (shrink > 0) {
+        await releaseSlot(
+          args.scheduledDate,
+          targetWindow,
+          technician.id,
+          shrink
+        ).catch(() => undefined);
+      }
+    } else if (sameTechDay) {
+      if (priorAssignedFacts && priorAssignedFacts.minutes > 0) {
+        await releaseSlot(
+          priorAssignedFacts.date,
+          priorAssignedFacts.window,
+          priorAssignedFacts.technicianId!,
+          priorAssignedFacts.minutes
+        ).catch(() => undefined);
+      }
+    } else {
+      await releaseJobCapacity(job);
+    }
     return finish(
       { jobId: job.id },
       {

@@ -174,12 +174,14 @@ const fillSlots = (date: string, headroom = 0) => {
 beforeEach(() => {
   capacityFixture.maps.capacityDays.clear();
   capacityFixture.maps.capacityClaims.clear();
+  capacityFixture.maps.techDayStops.clear();
   capacityFixture.maps.closures.clear();
   capacityFixture.maps.exceptions.clear();
   _setLockStoreForTests(
     memoryLockStore({
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
+      TechDayStops: capacityFixture.maps.techDayStops,
     })
   );
   vi.useFakeTimers();
