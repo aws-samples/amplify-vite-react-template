@@ -2050,8 +2050,8 @@ h6 {
   margin-bottom: 16px;
 }
 
-/* Final quote card on success */
-.bk-quote-card {
+/* Booking price summary. Keep this namespace separate from the marketing quote card. */
+.bk-booking-price-card {
   background: #F7F7F4;
   border-left: 4px solid var(--bk-green);
   border-radius: 0 8px 8px 0;
@@ -2060,7 +2060,7 @@ h6 {
   max-width: 380px;
   text-align: left;
 }
-.bk-quote-card__label {
+.bk-booking-price-card__label {
   font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
@@ -2068,20 +2068,20 @@ h6 {
   color: var(--bk-green-deep);
   margin-bottom: 6px;
 }
-.bk-quote-card__price {
+.bk-booking-price-card__price {
   font-family: var(--font-heading);
   font-size: 32px;
   font-weight: 700;
   line-height: 1;
   color: var(--fg1);
 }
-.bk-quote-card__per {
+.bk-booking-price-card__per {
   font-family: var(--font-body);
   font-size: 14px;
   font-weight: 400;
   color: var(--fg2);
 }
-.bk-quote-card__meta {
+.bk-booking-price-card__meta {
   font-size: 14px;
   color: var(--fg2);
   margin-top: 6px;

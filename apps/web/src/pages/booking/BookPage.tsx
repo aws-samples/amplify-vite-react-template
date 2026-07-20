@@ -351,19 +351,19 @@ export default function BookPage() {
           </div>
           <div className="bk-eyebrow">Confirmed</div>
           <h1 className="bk-h2">You&rsquo;re booked.</h1>
-          <div className="bk-quote-card">
-            <div className="bk-quote-card__label">Your visit</div>
-            <div className="bk-quote-card__price">
+          <div className="bk-booking-price-card">
+            <div className="bk-booking-price-card__label">Your visit</div>
+            <div className="bk-booking-price-card__price">
               {booked.selectedDate ? formatDay(booked.selectedDate) : "Scheduled"}
               {booked.selectedWindow ? (
-                <span className="bk-quote-card__per">
+                <span className="bk-booking-price-card__per">
                   {" "}
                   &bull; {windowLabel(booked.selectedWindow)}
                 </span>
               ) : null}
             </div>
             {booked.amountCents != null ? (
-              <div className="bk-quote-card__meta">
+              <div className="bk-booking-price-card__meta">
                 {money(booked.amountCents)} paid today
               </div>
             ) : null}
@@ -432,18 +432,18 @@ export default function BookPage() {
               : "We're scheduling your visit."}
           </h1>
           {(processingInfo || (quote && selection)) && (
-            <div className="bk-quote-card">
-              <div className="bk-quote-card__label">Your visit</div>
-              <div className="bk-quote-card__price">
+            <div className="bk-booking-price-card">
+              <div className="bk-booking-price-card__label">Your visit</div>
+              <div className="bk-booking-price-card__price">
                 {dateShown ? formatDay(dateShown) : "Scheduling"}
                 {windowShown ? (
-                  <span className="bk-quote-card__per">
+                  <span className="bk-booking-price-card__per">
                     {" "}
                     &bull; {windowLabel(windowShown)}
                   </span>
                 ) : null}
               </div>
-              <div className="bk-quote-card__meta">
+              <div className="bk-booking-price-card__meta">
                 {quote?.service ?? "Pest control service"}
                 {(processingInfo?.amountCents ?? amountCents) != null ? (
                   <>

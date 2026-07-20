@@ -608,15 +608,15 @@ export default function QuotePage() {
               {offSeason && offer && (
                 <>
                   <h3 className="bk-form-step__title">Your seasonal plan</h3>
-                  <div className="bk-quote-card">
-                    <div className="bk-quote-card__label">
+                  <div className="bk-booking-price-card">
+                    <div className="bk-booking-price-card__label">
                       Monthly plan — billed year-round
                     </div>
-                    <div className="bk-quote-card__price">
+                    <div className="bk-booking-price-card__price">
                       {money(offer.monthlyCents)}
-                      <span className="bk-quote-card__per">/mo</span>
+                      <span className="bk-booking-price-card__per">/mo</span>
                     </div>
-                    <div className="bk-quote-card__meta">
+                    <div className="bk-booking-price-card__meta">
                       {priced.offSeasonMessage ??
                         "Mosquito season runs April–October. Enroll now and your plan starts today, billed monthly year-round, and we'll schedule your first treatment for April and confirm the exact day with you."}{" "}
                       {money(offer.initialFeeCents)} is due today (your first
@@ -630,15 +630,15 @@ export default function QuotePage() {
               {requestedPlan && offer && !planOnly && !selectedDay && (
                 <>
                   <h3 className="bk-form-step__title">Your requested plan</h3>
-                  <div className="bk-quote-card">
-                    <div className="bk-quote-card__label">
+                  <div className="bk-booking-price-card">
+                    <div className="bk-booking-price-card__label">
                       {FREQUENCY_LABELS[offer.frequency]} plan
                     </div>
-                    <div className="bk-quote-card__price">
+                    <div className="bk-booking-price-card__price">
                       {money(offer.monthlyCents)}
-                      <span className="bk-quote-card__per">/mo</span>
+                      <span className="bk-booking-price-card__per">/mo</span>
                     </div>
-                    <div className="bk-quote-card__meta">
+                    <div className="bk-booking-price-card__meta">
                       {money(offer.initialFeeCents)} is due for your first visit;
                       the subscription starts after that visit is completed.
                     </div>
@@ -692,15 +692,15 @@ export default function QuotePage() {
               {selectedDay && selWindow && offer && planOnly && (
                 <>
                   <h3 className="bk-form-step__title">3. Your plan</h3>
-                  <div className="bk-quote-card">
-                    <div className="bk-quote-card__label">
+                  <div className="bk-booking-price-card">
+                    <div className="bk-booking-price-card__label">
                       {FREQUENCY_LABELS[offer.frequency]} plan
                     </div>
-                    <div className="bk-quote-card__price">
+                    <div className="bk-booking-price-card__price">
                       {money(offer.monthlyCents)}
-                      <span className="bk-quote-card__per">/mo</span>
+                      <span className="bk-booking-price-card__per">/mo</span>
                     </div>
-                    <div className="bk-quote-card__meta">
+                    <div className="bk-booking-price-card__meta">
                       {hoaMoneyLine(offer)} The subscription starts after your
                       first completed visit.
                     </div>
