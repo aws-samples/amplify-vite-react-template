@@ -304,14 +304,40 @@ backend.crmPricing.addEnvironment("AMPLIFY_BRANCH", branch);
 backend.bookingPublic.addEnvironment("AMPLIFY_APP_ID", appId);
 backend.bookingPublic.addEnvironment("AMPLIFY_BRANCH", branch);
 // GL-11: the daily run re-drives stuck group-change commands through
-// crm-admin (which holds the Cognito permissions) — an async self-invoke,
-// IAM-scoped to exactly this function.
-backend.crmAdmin.resources.lambda.grantInvoke(
-  backend.dailyReminders.resources.lambda
+// crm-admin (which holds the Cognito permissions). Direct CDK references
+// (grantInvoke + functionName env) created a CloudFormation circular
+// dependency between the auth/data/function stacks (build job 92), so the
+// wiring is TOKEN-FREE, mirroring the lock layer's apiId pattern: the
+// function stack publishes crm-admin's name to SSM (same-stack token), and
+// daily-reminders gets a literal parameter name + literal-pattern IAM.
+const crmAdminNameParam = `/buzzkill/${lockAppId}/${lockBranch}/crm-admin-function-name`;
+new StringParameter(
+  Stack.of(backend.crmAdmin.resources.lambda),
+  "CrmAdminFunctionNameParam",
+  {
+    parameterName: crmAdminNameParam,
+    stringValue: backend.crmAdmin.resources.lambda.functionName,
+  }
 );
 backend.dailyReminders.addEnvironment(
-  "CRM_ADMIN_FUNCTION_NAME",
-  backend.crmAdmin.resources.lambda.functionName
+  "CRM_ADMIN_FUNCTION_PARAM",
+  crmAdminNameParam
+);
+backend.dailyReminders.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [
+      `arn:aws:ssm:us-east-1:*:parameter${crmAdminNameParam}`,
+    ],
+  })
+);
+backend.dailyReminders.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["lambda:InvokeFunction"],
+    resources: [
+      `arn:aws:lambda:us-east-1:*:function:amplify-${lockAppId}-*crmadmin*`,
+    ],
+  })
 );
 
 // A cold pricing miss starts the existing refresh worker immediately. The

@@ -2198,7 +2198,23 @@ export async function reconcileGroupChanges() {
   if (!("GroupChangeCommand" in client.models)) {
     return { task: "reconcileGroupChanges", resumed: 0, escalated: 0 };
   }
-  const fnName = process.env.CRM_ADMIN_FUNCTION_NAME;
+  // Token-free wiring (a direct CDK function reference cycled the stacks):
+  // the function stack publishes crm-admin's name to SSM; the env override
+  // exists for tests.
+  let fnName = process.env.CRM_ADMIN_FUNCTION_NAME;
+  if (!fnName && process.env.CRM_ADMIN_FUNCTION_PARAM) {
+    try {
+      const { SSMClient, GetParameterCommand } = await import(
+        "@aws-sdk/client-ssm"
+      );
+      const out = await new SSMClient({}).send(
+        new GetParameterCommand({ Name: process.env.CRM_ADMIN_FUNCTION_PARAM })
+      );
+      fnName = out.Parameter?.Value ?? undefined;
+    } catch (err) {
+      console.error("reconcileGroupChanges: function-name param unreadable", err);
+    }
+  }
   const lambdaClient = new LambdaClient({});
   const nowIso = new Date().toISOString();
   let resumed = 0;
