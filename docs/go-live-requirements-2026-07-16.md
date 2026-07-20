@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `4a80b8e`; newest
-implementation commit `4a80b8e`
+**Latest commit review:** every commit after `f70e621` through `f39de9e`; newest
+implementation commit `f39de9e`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 64 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 57 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -665,12 +665,6 @@ defects**, both fixed in `8678623` but open until staging behavior proves them:
 
 **Remaining requirements:**
 
-- Scheduling the $0 callback visit is CAPACITY-SAFE: the same dispatch facts, technician
-  day-eligibility, routability proof, and ONE atomic technician-window slot claim (onsite + round-trip
-  drive minutes) as every other assignment — a sold-out window refuses, and a replay returns its
-  duplicate hold. *(Staging so far: the fail-closed path is proven — with the Routes key absent the
-  schedule REFUSED rather than dispatching unverified. The success + sold-out drills run once the
-  hosted build restores the console-baked key (a local pipeline-deploy stripped it).)*
 - Head of Operations signs the callback/no-access workflow; the CEO approves the customer-facing
   promise wording (reference email, scheduled/final notices, the no-access no-refund copy) and Finance
   the money posture ($0 callbacks; nonrefundable no-access). Richer callback analytics (repeat-attempt
@@ -684,53 +678,25 @@ defects**, both fixed in `8678623` but open until staging behavior proves them:
 team can meet, and every customer message reaches a truthful terminal outcome that a routine employee can
 recover without engineering.
 
-**Why this is still a gate:** The fallback response is returned even when creation of its owned action
-silently fails, and there is no sweep that rebuilds a missing action from a CONTACT booking. The fixed
-Monday–Friday calendar has no holidays, closures, or coverage exceptions, and current copy still promises
-an hourly response rather than the approved one-business-day response. Other customer copy
-still says an unpriceable booking will receive a call regardless of the lead's recorded choice. The
-checkbox grants “call or text” permission, while the flow records only one boolean and uses only calls;
-it does not retain the exact consent wording/version as a business record.
-
-An accepted email can still have no durable log or provider ID because that write is best-effort. A
-transient send failure is labeled **Queued** but nothing is actually queued to retry; a transient bounce
-is ignored and remains **Sent**, and an accepted message with no later event has no timeout or owner.
-Delivery-event processing can discard failures (**GL-22**), duplicate/out-of-order events have no terminal
-state guard, and the customer magic-link sender bypasses the log, configuration set, suppression, and
-recovery path entirely. Bounce/complaint work also loses the original message/related-record ownership,
-routes every case to Operations, and offers no business-operable correction, suppression-release, or
-resend action.
+**Engineering:** closed (`8d322e4`, `f39de9e`). The ONE approved commitment — one business day, closure-
+aware (weekends + tracked CompanyClosure days push the deadline; after-hours clocks start at the next
+open) — is the only promise anywhere; the funnel's CONTACT fallback is not returned unless its owned
+SALES action durably exists (loud 503 otherwise), and a daily sweep rebuilds any missing action with the
+deadline anchored to when the promise was MADE. Consent is versioned call-only wording retained on the
+record (shared/consentText.ts). The EMAIL OUTBOX: every send writes its attempt row BEFORE the provider
+call (an unrecordable send is refused), outcomes settle on the same row, a failed settle leaves a visible
+unknown-outcome row plus owned work that forbids blind resends; QUEUED means machine-retried from the
+stored exact body (single-winner claim, three-day expiry to FAILED, attachment rows escalate to a human);
+provider-accepted messages with no delivery proof become owned, timed work; the magic sign-in link rides
+the same contract; and the office has a routine one-click EXACT resend on EMAIL_FAILURE cases.
 
 **Remaining requirements:**
 
-- A customer-facing fallback promise and its owned action are one durable commitment. The promise is not
-  returned unless the action exists with the correct Sales owner, source record, channel, due time, and
-  wording; a recurring sweep finds and repairs any CONTACT booking missing that action.
-- The shared Office business-day calendar includes holidays, planned closures, emergency closure, and
-  `America/New_York`. Every accepted request receives the same deadline of one business day; all approved
-  lead-form messages, booking-link messages, CRM scripts, and employee copy use that rule. Any conflicting
-  public marketing copy is recorded under GL-20 and is not edited without CEO approval.
-- Compliance approves channel-specific consent and withdrawal language. The record retains the wording/
-  policy version, time, source, and channels authorized; it does not claim text consent when no approved
-  text workflow exists. A phone number without the applicable consent never creates a call promise or an
-  enabled call/text action. Do-not-contact blocks every non-essential channel and sender, fails closed or
-  creates an owned consent decision when its status cannot be read, and can be cleared only by an
-  authorized role with a controlled reason and retained evidence (**GL-02**).
-- Every send has a durable attempt/outbox record before provider submission, one retry identity, the
-  originating customer/lead/business record, owner team, message purpose, and provider ID. Provider
-  acceptance cannot become an untracked message when the next write fails, and a retry cannot duplicate a
-  message the provider already accepted.
-- **Queued** means a retry is actually scheduled with bounded backoff, expiry, and escalation. Permanent
-  failure, transient bounce/delay, complaint, suppression, and a provider-accepted message that never
-  reaches a terminal event all become truthful, timed states with owned recovery; none remains **Sent**
-  indefinitely.
-- Every production sender—including customer sign-in links—uses the same tracking, delivery-event,
-  suppression, and recovery contract. Later bounce/complaint state corrects the originating booking,
-  report, notice, or access outcome rather than living only in a general email log.
-- The recovery case stays with the original team and lists every missed message. An authorized routine
-  employee can correct contact data, record alternate delivery, release a suppression only under the
-  approved consent policy, resend the exact message, and see the terminal result. Exception closure is
-  governed by GL-18; durable event retry/dead-letter ownership by GL-22; production SES state by GL-21.
+- Head of Sales signs the one-business-day copy set (funnel fallback, work-queue scripts); Head of
+  Operations approves the delivery-recovery workflow (resend / alternate delivery / suppression-lift);
+  Compliance approves the consent and withdrawal language now versioned in shared/consentText.ts.
+  Do-not-contact hardening (fail-closed reads, authorized suppression-release with retained evidence)
+  is tracked under GL-02 where its lifecycle lives.
 
 **Pass owner:** Head of Sales; Head of Operations approves delivery recovery and Compliance approves
 consent.
