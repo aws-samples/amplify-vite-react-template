@@ -58,6 +58,51 @@ const s3 = new S3Client();
 // agreement must be the rule /cancel enforces, not a copy that can drift.
 const CANCEL_POLICY_TEXT = `CANCELLATION POLICY. Cancel more than ${CANCEL_FULL_REFUND_DAYS} days before your appointment for a full refund. Cancellations ${CANCEL_FULL_REFUND_DAYS} days or less before the appointment are not refundable.`;
 
+// Company identity printed on the service-agreement masthead. Sourced from the
+// website (Footer + Licensed & Insured page). The license shown is BuzzKill's
+// Massachusetts commercial pesticide certification — the state these bookings
+// serve.
+const AGREEMENT_COMPANY = {
+  name: "BuzzKill Pest Control",
+  addressLines: ["420 Lakeside Ave, Suite 104", "Marlborough, MA 01752"],
+  phone: "(508) 258-9294",
+  email: "info@pestbuzzkill.com",
+  website: "pestbuzzkill.com",
+  license: "CC-0060592",
+};
+
+// The pests the plan covers, drawn as the covered grid on the agreement.
+// Excludes wood-destroying organisms (termites, carpenter ants) and bed bugs
+// (BuzzKill does not service them) — never add either here.
+const AGREEMENT_COVERED_PESTS = [
+  "American Roach",
+  "Argentine Ants",
+  "Box Elders",
+  "Centipedes",
+  "Clover Mites",
+  "Crickets",
+  "Earwigs",
+  "Hornets",
+  "Mice / Rats",
+  "Millipedes",
+  "Odorous Ants",
+  "Oriental Roaches",
+  "Silverfish",
+  "Sow Bugs",
+  "Spiders",
+  "Wasps",
+];
+
+// "How year-round protection works" note, shown above pricing on recurring
+// plans. BuzzKill's phone number is the retreat contact.
+const AGREEMENT_PROTECTION_NOTE =
+  "The first treatment around your home is what is called an 'initial flush out'. This special treatment attempts to gain control over existing pest populations. Your first regular treatment should follow within 30-45 days of the initial treatment to help break up egg cycles. Insects are immune to treatments while in their egg shells and our products must be active to catch pests as they hatch.\n\nInitially you may see a slight increase in pest activity as pest populations are disrupted. Within a few weeks you should see this activity drastically decline as our products take effect. Over time, these pest levels will continually decrease as regular services are performed. Regular treatments are critical in maintaining protective barriers and preventing infestations from reoccurring. If you see more than the occasional pest around your home, please call (508) 258-9294 at any time for a complimentary retreat!";
+
+const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
 /**
  * Called by the Stripe webhook when a booking-funnel PaymentIntent
  * succeeds — or (GL-06, `pending` set) when a bank debit enters
@@ -84,6 +129,11 @@ export async function finalizeBooking(opts: {
   paymentMethodId?: string | null;
   /** GL-06: set for a pending bank debit — commit now, describe honestly. */
   pending?: { methodLabel: string | null };
+  /** Invoice-me (HOA/commercial net terms): finalize card-less with an OPEN
+   *  invoice. Called synchronously from /book, not a webhook — there is no
+   *  PaymentIntent, so paymentIntentId is a synthetic `invoice-<id>` anchor
+   *  and amountReceived is the invoiced amount (== booking.amountCents). */
+  invoice?: { terms: string; dueDate: string };
 }): Promise<void> {
   const client = await dataClient();
   const { data: booking } = await client.models.BookingRequest.get({
@@ -328,7 +378,8 @@ export async function finalizeBooking(opts: {
       booking,
       opts.paymentIntentId,
       opts.paymentMethodId ?? null,
-      opts.pending ?? null
+      opts.pending ?? null,
+      opts.invoice ?? null
     );
     // GL-04: the checkout's capacity claim is CONSUMED into the booked job —
     // the scheduled visit carries the claim's slot facts (window, technician,
@@ -1069,9 +1120,16 @@ async function finalizeClaimed(
   booking: BookingRecord,
   paymentIntentId: string,
   paymentMethodId: string | null,
-  pending: { methodLabel: string | null } | null = null
+  pending: { methodLabel: string | null } | null = null,
+  // Invoice-me (HOA/commercial net terms): the same complete commitment as a
+  // paid booking — scheduled visit, agreement, plan — but the money is an
+  // OPEN invoice the customer pays later, not a card charge. Sibling of
+  // `pending`; never set together. The job is unpaid but fully dispatchable,
+  // and (unlike a pending debit) the invoice IS collectable now.
+  invoiceMode: { terms: string; dueDate: string } | null = null
 ): Promise<void> {
   const client = await dataClient();
+  const deferred = Boolean(pending || invoiceMode);
 
   // The card that paid for the booking must become the customer's invoice
   // default, or "Start billing" would later report no payment method for
@@ -1482,13 +1540,22 @@ async function finalizeClaimed(
         // GL-06: a pending bank debit is a REAL, dispatchable visit — but it
         // is never described as paid. Every surface derives "Payment
         // pending" from paymentPendingIntentId until the debit settles.
-        paidAt: !pending && booking.amountCents ? paidAtIso : undefined,
+        paidAt: !deferred && booking.amountCents ? paidAtIso : undefined,
         paidPaymentIntentId:
-          !pending && booking.amountCents ? paymentIntentId : undefined,
+          !deferred && booking.amountCents ? paymentIntentId : undefined,
+        // Only a pending BANK debit suppresses collection; an invoiced job is
+        // owed now, so it carries no pending marker.
         paymentPendingIntentId: pending ? paymentIntentId : undefined,
-        notes: offSeasonFirstVisit
-          ? `Website booking ${booking.id}. ${pending ? `Bank debit processing (${paymentIntentId}) — payment pending.` : `Paid up front (${paymentIntentId}).`} ${booking.selectedDate ? `The selected date ${booking.selectedDate} is OFF-SEASON for this seasonal plan` : "OFF-SEASON enrollment (no first-visit day existed to pick)"} — the first treatment targets ${firstVisitDate}; confirm the date with the customer.`
-          : `Website booking ${booking.id}. ${pending ? `Bank debit processing (${paymentIntentId}) — payment pending.` : `Paid up front (${paymentIntentId}).`}`,
+        notes: (() => {
+          const money = invoiceMode
+            ? `Invoiced at booking (net terms, due ${invoiceMode.dueDate}).`
+            : pending
+              ? `Bank debit processing (${paymentIntentId}) — payment pending.`
+              : `Paid up front (${paymentIntentId}).`;
+          return offSeasonFirstVisit
+            ? `Website booking ${booking.id}. ${money} ${booking.selectedDate ? `The selected date ${booking.selectedDate} is OFF-SEASON for this seasonal plan` : "OFF-SEASON enrollment (no first-visit day existed to pick)"} — the first treatment targets ${firstVisitDate}; confirm the date with the customer.`
+            : `Website booking ${booking.id}. ${money}`;
+        })(),
         accessGroups,
       }),
     () => client.models.Job.get({ id: jobId })
@@ -1518,9 +1585,9 @@ async function finalizeClaimed(
         scheduledDate: firstVisitDate ?? null,
         timeWindow: windowLabel,
         paymentPendingIntentId: pending ? paymentIntentId : null,
-        paidAt: !pending && booking.amountCents ? paidAtIso : null,
+        paidAt: !deferred && booking.amountCents ? paidAtIso : null,
         paidPaymentIntentId:
-          !pending && booking.amountCents ? paymentIntentId : null,
+          !deferred && booking.amountCents ? paymentIntentId : null,
         // The old attempt's capacity facts were released with the cancel —
         // finalizeBooking's consume/stamp pass records the new claim's.
         capacityWindow: null,
@@ -1529,9 +1596,10 @@ async function finalizeClaimed(
       },
       [{ kind: "fieldEquals", field: "status", value: "CANCELED" }]
     );
-  } else if (!pending && !jobRow.paidAt && booking.amountCents) {
+  } else if (!deferred && !jobRow.paidAt && booking.amountCents) {
     // The debit settled on a commitment created in pending mode: stamp the
-    // job paid exactly once and retire its "Payment pending" marker.
+    // job paid exactly once and retire its "Payment pending" marker. Never
+    // for an invoiced job — that money is owed on the OPEN invoice, not paid.
     await casGuardedUpdate(
       "Job",
       jobId,
@@ -1583,35 +1651,44 @@ async function finalizeClaimed(
     const invoiceId = `booking-${booking.id}`;
     const amountCents = booking.amountCents;
     invoice = await createOrGet(
-      pending ? "pending invoice" : "paid invoice",
+      invoiceMode ? "invoiced booking invoice" : pending ? "pending invoice" : "paid invoice",
       () =>
         client.models.Invoice.create({
           id: invoiceId,
           customerId: customer.id,
           jobId: job.id ?? undefined,
           servicePlanId,
-          description: pending
-            ? `${serviceLabel} — bank debit processing (initiated at booking)`
-            : `${serviceLabel} — paid online at booking`,
+          description: invoiceMode
+            ? `${serviceLabel} — invoiced at booking (${invoiceMode.terms.replace(/_/g, " ").toLowerCase()})`
+            : pending
+              ? `${serviceLabel} — bank debit processing (initiated at booking)`
+              : `${serviceLabel} — paid online at booking`,
           amountCents,
           // GL-06: a pending debit's ledger row is OPEN — owed, not settled.
           // It flips to PAID exactly once when the money lands. The in-flight
           // marker keeps reminders/dunning/portal-pay off it (double-pay).
-          status: pending ? "OPEN" : "PAID",
-          method: pending ? "BANK" : "CARD",
-          stripePaymentIntentId: paymentIntentId,
+          // An invoiced booking is OPEN too, but collectable NOW — no in-flight
+          // marker — with a net-terms due date the office/portal collect against.
+          status: invoiceMode || pending ? "OPEN" : "PAID",
+          method: invoiceMode ? "INVOICE" : pending ? "BANK" : "CARD",
+          // No Stripe intent behind an invoiced booking.
+          stripePaymentIntentId: invoiceMode ? undefined : paymentIntentId,
           pendingDebitIntentId: pending ? paymentIntentId : undefined,
           issuedAt: paidAtIso,
-          paidAt: pending ? undefined : paidAtIso,
+          dueDate: invoiceMode ? invoiceMode.dueDate : undefined,
+          terms: invoiceMode ? invoiceMode.terms : undefined,
+          paidAt: invoiceMode || pending ? undefined : paidAtIso,
           accessGroups,
         }),
       () => client.models.Invoice.get({ id: invoiceId })
     );
     const invoiceRow = invoice as { id?: string | null; status?: string | null };
-    if (!pending && invoiceRow.status && invoiceRow.status !== "PAID") {
+    if (!deferred && invoiceRow.status && invoiceRow.status !== "PAID") {
       // Settling a commitment created in pending mode (OPEN), or re-paying a
       // booking whose prior attempt voided/failed the ledger row. One
       // conditional flip — a concurrent duplicate success cannot double-apply.
+      // Never for invoice mode — an invoiced booking's OPEN row is collected
+      // through AR (portal/office), not auto-settled at finalize.
       await casGuardedUpdate(
         "Invoice",
         invoiceId,
@@ -1649,23 +1726,96 @@ async function finalizeClaimed(
         ? `RECURRING PLAN. After the initial visit, service continues ${stored.recurringOffer.frequency.toLowerCase()} at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed automatically. Cancel anytime.`
         : `RECURRING PLAN. Billing starts today at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed monthly year-round. Treatments run April through October (one per month); the first treatment will be scheduled for ${firstTreatmentMonthLabel()}. Cancel anytime.`
       : null,
-    pending
-      ? `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} authorized by bank debit (ACH) at booking; the debit may take several business days to settle. If it does not settle before the visit, the visit is canceled and the customer notified; if it fails after service, the amount is an outstanding balance.`
-      : `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid online at booking.`,
+    invoiceMode
+      ? `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} invoiced at booking on ${invoiceMode.terms.replace(/_/g, " ").toLowerCase()} terms, due ${invoiceMode.dueDate}. An invoice with payment instructions is emailed separately.`
+      : pending
+        ? `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} authorized by bank debit (ACH) at booking; the debit may take several business days to settle. If it does not settle before the visit, the visit is canceled and the customer notified; if it fails after service, the amount is an outstanding balance.`
+        : `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid online at booking.`,
     CANCEL_POLICY_TEXT,
     "ACCEPTANCE. The customer accepted these terms and the cancellation policy via checkbox at online checkout; that acceptance is recorded as the electronic signature below.",
   ]
     .filter(Boolean)
     .join("\n\n");
 
+  // Structured inputs for the branded agreement layout. Everything below is
+  // derived from the real booking so the printed money always matches what was
+  // charged and what the plan bills.
+  const amountToday = booking.amountCents ?? 0;
+  const offer = booking.recurring ? stored.recurringOffer ?? null : null;
+
+  // A 12-month subscription calendar (recurring plans only): the first cell is
+  // what was charged today, the rest the monthly plan price.
+  const scheduleStart = new Date();
+  const scheduleMonths = offer
+    ? Array.from({ length: 12 }, (_, i) => {
+        const dt = new Date(
+          Date.UTC(
+            scheduleStart.getUTCFullYear(),
+            scheduleStart.getUTCMonth() + i,
+            1
+          )
+        );
+        return {
+          label: `${MONTH_ABBR[dt.getUTCMonth()]} '${String(
+            dt.getUTCFullYear()
+          ).slice(2)}`,
+          amountCents: i === 0 ? amountToday : offer.monthlyCents,
+        };
+      })
+    : null;
+
+  const paymentAuthText = invoiceMode
+    ? offer
+      ? `BuzzKill Pest Control will invoice me $${(amountToday / 100).toFixed(2)} at booking (${invoiceMode.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiceMode.dueDate}), and bill $${(offer.monthlyCents / 100).toFixed(2)} per month for my recurring plan and any additional services I approve. This authorization stays in effect until I cancel my plan or revoke it in writing. Please retain a copy for your records.`
+      : `BuzzKill Pest Control will invoice me $${(amountToday / 100).toFixed(2)} for the service booked (${invoiceMode.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiceMode.dueDate}). Please retain a copy for your records.`
+    : offer
+      ? `I authorize BuzzKill Pest Control to charge the payment method on file $${(amountToday / 100).toFixed(2)} today at booking${pending ? " by bank debit (ACH)" : ""}, and to automatically charge $${(offer.monthlyCents / 100).toFixed(2)} per month for my recurring plan and any additional services I approve. This authorization stays in effect until I cancel my plan or revoke it in writing. Please retain a copy for your records.`
+      : `I authorize BuzzKill Pest Control to charge the payment method on file $${(amountToday / 100).toFixed(2)} for the service booked${pending ? " by bank debit (ACH)" : ""}. Please retain a copy for your records.`;
+
   const pdf = await renderAgreementPdf({
     agreementId: booking.id,
     title: "BuzzKill Service Agreement — Online Booking",
     bodyText,
+    company: AGREEMENT_COMPANY,
     customerName: booking.name,
+    customerEmail: booking.email,
+    customerPhone: booking.phone ?? undefined,
     customerAddress: [booking.street, booking.city, booking.state, booking.zip]
       .filter(Boolean)
       .join(", "),
+    coveredPests: AGREEMENT_COVERED_PESTS,
+    protectionNote: offer ? AGREEMENT_PROTECTION_NOTE : undefined,
+    schedule: scheduleMonths
+      ? { title: "Monthly Pest Control Service Subscription", months: scheduleMonths }
+      : undefined,
+    initial: {
+      title: invoiceMode
+        ? "Initial Service (Invoiced)"
+        : pending
+          ? "Initial Service (Bank Debit)"
+          : "Initial Service",
+      rows: [
+        { label: "Service Charge", amountCents: amountToday },
+        { label: "Tax (0%)", amountCents: 0, muted: true },
+        {
+          label: invoiceMode ? "Invoiced" : offer ? "Charged Today" : "Total",
+          amountCents: amountToday,
+          total: true,
+        },
+      ],
+    },
+    recurring: offer
+      ? {
+          title: "Recurring Service",
+          rows: [
+            { label: "Monthly Service", amountCents: offer.monthlyCents },
+            { label: "Tax (0%)", amountCents: 0, muted: true },
+            { label: "Recurring Total", amountCents: offer.monthlyCents, total: true },
+          ],
+        }
+      : undefined,
+    paymentAuthText,
+    initialTermMonths: offer ? 12 : undefined,
     signerName: booking.name,
     signerEmail: booking.email,
     signatureDataUrl: null,
@@ -1806,6 +1956,9 @@ async function finalizeClaimed(
     matchFallbackReason,
     pdf,
     pdfKey,
+    invoiced: invoiceMode
+      ? { terms: invoiceMode.terms, dueDate: invoiceMode.dueDate }
+      : null,
   });
 }
 
@@ -1940,6 +2093,9 @@ async function deliverBookingComms(
     matchFallbackReason: string | null;
     pdf: Uint8Array;
     pdfKey: string | undefined;
+    /** Invoice-me: the money is an OPEN net-terms invoice, not a settled
+     *  payment — the confirmation says so instead of "payment confirmed". */
+    invoiced?: { terms: string; dueDate: string } | null;
   } | null
 ): Promise<void> {
   // Nothing left to do — both messages already went out. Cheap fast-path for
@@ -1956,8 +2112,10 @@ async function deliverBookingComms(
   let matchFallbackReason: string | null;
   let pdf: Uint8Array | null;
   let pdfKey: string | undefined;
+  let invoiced: { terms: string; dueDate: string } | null;
   if (ctx) {
     ({ serviceLabel, windowLabel, recurringOffer, portalInvited, matchFallbackReason, pdf, pdfKey } = ctx);
+    invoiced = ctx.invoiced ?? null;
   } else {
     // Resume path: rebuild from the persisted booking. A redelivery cannot know
     // whether the invite went out or whether matching fell back, so it makes no
@@ -1975,6 +2133,10 @@ async function deliverBookingComms(
     recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
     portalInvited = false;
     matchFallbackReason = null;
+    // Invoice-me finalizes synchronously and sends its confirmation in the
+    // same call, so a resume with an unsent confirmation is not expected; a
+    // rare redelivery uses the neutral "confirmed" copy rather than guessing.
+    invoiced = null;
     pdfKey =
       process.env.DOCS_BUCKET && booking.customerId
         ? `agreements/${booking.customerId}/booking-${booking.id}.pdf`
@@ -2023,12 +2185,22 @@ async function deliverBookingComms(
        <p><strong>${serviceLabel}</strong><br/>
        ${booking.selectedDate ? `${booking.selectedDate} · ${windowLabel}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
-       <p>Payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> is confirmed${
-         booking.recurring && recurringOffer
-           ? booking.selectedDate
-             ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
-             : ` — that's your first month. Your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round, with treatments April through October`
-           : ""
+       <p>${
+         invoiced
+           ? `An invoice for <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> is on its way (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate})${
+               booking.recurring && recurringOffer
+                 ? booking.selectedDate
+                   ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+                   : ` — that's your first month. Your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round, with treatments April through October`
+                 : ""
+             }`
+           : `Payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> is confirmed${
+               booking.recurring && recurringOffer
+                 ? booking.selectedDate
+                   ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+                   : ` — that's your first month. Your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round, with treatments April through October`
+                 : ""
+             }`
        }.${pdfKey && pdf ? " Your service agreement is attached." : ""}</p>
        <p>${booking.selectedDate ? "We'll remind you 7 days and 1 day before the visit." : "We'll reach out before the season starts to schedule your first treatment, and we'll remind you 7 days and 1 day before every visit."}</p>${
          portalInvited
@@ -2070,12 +2242,12 @@ async function deliverBookingComms(
     let sent = false;
     try {
       sent = await notifyLeads({
-        subject: `Website booking: ${booking.name} — ${booking.selectedDate ?? `off-season enrollment (first treatment ${firstTreatmentMonthLabel()})`}`,
+        subject: `Website booking${invoiced ? " (INVOICED)" : ""}: ${booking.name} — ${booking.selectedDate ?? `off-season enrollment (first treatment ${firstTreatmentMonthLabel()})`}`,
         template: "office-booking-alert",
-        heading: "New paid website booking",
+        heading: invoiced ? "New invoiced website booking" : "New paid website booking",
         customerId,
         relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate} (${windowLabel})` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing started at checkout; agree the first treatment date with the customer.") : ""}</p>
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate} (${windowLabel})` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} ${invoiced ? `<strong>invoiced</strong> (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate}) — an OPEN invoice is on the customer's account to collect` : "paid"}.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing started at checkout; agree the first treatment date with the customer.") : ""}</p>
          <p>${booking.selectedDate ? "The job is on the Needs-scheduling board for route assignment." : "The first visit is UNSCHEDULED with an owned action to confirm the date — do not leave it unassigned."}</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>

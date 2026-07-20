@@ -1,7 +1,15 @@
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { dataClient } from "../shared/dataClient";
-import { emailShell, notifyOffice, sendEmail } from "../shared/email";
+import {
+  emailShell,
+  notifyOffice,
+  sendEmail,
+  type EmailAttachment,
+} from "../shared/email";
 import { openOwnedWork } from "../shared/ownedWork";
+import { renderQuotePdf } from "../shared/pdf";
+import { OFF_SEASON_MESSAGE } from "../shared/bookingTerms";
 import { money } from "../crm-pricing/rateCards";
 import {
   acquireDrain,
@@ -282,6 +290,193 @@ function selectWork(
 
 // ------------------------------------------------------ self-heal email
 
+/** The subset of a stored quoteJson the emailed PDF prints. The bookable day
+ *  board is deliberately ignored here — days are live and perishable, so the
+ *  PDF is a stable pricing summary, not a schedule. */
+type QuoteSnapshot = {
+  days?: unknown[];
+  baseCents?: number;
+  serviceLabel?: string;
+  recurringOffer?: {
+    frequency: string;
+    monthlyCents: number;
+    initialFeeCents: number;
+  } | null;
+  planOnly?: boolean;
+  offSeason?: boolean;
+};
+
+function parseQuoteSnapshot(raw: unknown): QuoteSnapshot {
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === "object" ? (parsed as QuoteSnapshot) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The minimal BookingRequest shape the PDF path reads. */
+type ReadyBooking = {
+  id: string;
+  status?: string | null;
+  cancelToken?: string | null;
+  quoteJson?: unknown;
+  expiresAt?: string | null;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  street?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+};
+
+const lambdaClient = new LambdaClient({});
+let bookingPublicNameCache: string | null | undefined;
+
+/**
+ * booking-public's deployed function name. A direct CDK reference (grantInvoke
+ * + functionName env) would cycle the stacks — booking-public already invokes
+ * pricing-refresh — so the name is published to SSM and read here, token-free,
+ * mirroring the crm-admin resumer wiring. Memoized; `null` means "unconfigured"
+ * so we don't retry SSM every lead.
+ */
+async function bookingPublicFunctionName(): Promise<string | null> {
+  if (bookingPublicNameCache !== undefined) return bookingPublicNameCache;
+  const fromEnv = process.env.BOOKING_PUBLIC_FUNCTION_NAME;
+  if (fromEnv) return (bookingPublicNameCache = fromEnv);
+  const param = process.env.BOOKING_PUBLIC_FUNCTION_PARAM;
+  if (!param) return (bookingPublicNameCache = null);
+  try {
+    const out = await new SSMClient({}).send(
+      new GetParameterCommand({ Name: param })
+    );
+    return (bookingPublicNameCache = out.Parameter?.Value ?? null);
+  } catch (err) {
+    console.error("pricing-refresh: booking-public name param unreadable", err);
+    return (bookingPublicNameCache = null);
+  }
+}
+
+/**
+ * Drive the lead's PENDING booking to QUOTED through the exact same pricing
+ * path a customer's click uses — a server-side invoke of booking-public
+ * /quote-status. Reusing that endpoint (rather than re-implementing the
+ * safety-critical price overlay here) keeps the emailed price and the price on
+ * the funnel identical. No Origin header, so the handler's CORS gate admits the
+ * internal call. Returns whether the invoke ran the handler to completion; the
+ * caller re-reads the booking to see if it actually reached QUOTED.
+ */
+async function computeQuoteViaBookingPublic(
+  bookingId: string,
+  statusToken: string
+): Promise<boolean> {
+  const fnName = await bookingPublicFunctionName();
+  if (!fnName) return false;
+  try {
+    const res = await lambdaClient.send(
+      new InvokeCommand({
+        FunctionName: fnName,
+        InvocationType: "RequestResponse",
+        Payload: Buffer.from(
+          JSON.stringify({
+            headers: {},
+            isBase64Encoded: false,
+            body: JSON.stringify({ bookingId, statusToken }),
+            requestContext: {
+              http: { method: "POST", path: "/quote-status", sourceIp: "" },
+            },
+          })
+        ),
+      })
+    );
+    if (res.FunctionError) {
+      console.error(
+        "pricing-refresh: quote-status invoke returned an error",
+        bookingId,
+        res.FunctionError
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("pricing-refresh: quote-status invoke failed", bookingId, err);
+    return false;
+  }
+}
+
+/**
+ * Build the branded pricing-quote PDF for a rate-ready lead, computing +
+ * persisting the exact quote first if it isn't priced yet. Returns `null` — and
+ * the email goes out link-only — whenever pricing can't be produced (the invoke
+ * is unconfigured or fails, the quote lands on the callback/contact path, or
+ * the stored snapshot is incomplete). Never throws.
+ */
+async function buildRateReadyQuotePdf(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  booking: ReadyBooking
+): Promise<EmailAttachment | null> {
+  try {
+    let priced = booking;
+    if (priced.status !== "QUOTED") {
+      if (!priced.cancelToken) return null;
+      const ran = await computeQuoteViaBookingPublic(
+        priced.id,
+        priced.cancelToken
+      );
+      if (!ran) return null;
+      const { data: fresh } = await client.models.BookingRequest.get({
+        id: priced.id,
+      });
+      if (!fresh) return null;
+      priced = fresh as ReadyBooking;
+    }
+    // CONTACT / PENDING / EXPIRED all mean there is no exact price to print.
+    if (priced.status !== "QUOTED") return null;
+    const snap = parseQuoteSnapshot(priced.quoteJson);
+    // A priced quote is either a day board or a genuine off-season enrollment.
+    if (!snap.serviceLabel || (!snap.days?.length && !snap.offSeason)) return null;
+
+    const address = [
+      priced.street,
+      priced.city,
+      [priced.state, priced.zip].filter(Boolean).join(" ").trim(),
+    ]
+      .filter((p) => p && String(p).trim())
+      .join(", ");
+
+    const pdf = await renderQuotePdf({
+      quoteRef: priced.id,
+      quotedAtIso: new Date().toISOString(),
+      validThroughIso: priced.expiresAt ?? null,
+      customerName: priced.name ?? "Customer",
+      customerEmail: priced.email ?? null,
+      customerPhone: priced.phone ?? null,
+      serviceAddress: address || null,
+      serviceLabel: snap.serviceLabel,
+      // Plan-only quotes (mosquito / community) carry no one-time option.
+      oneTimeCents: snap.planOnly ? null : (snap.baseCents ?? null),
+      plan: snap.recurringOffer ?? null,
+      planOnly: Boolean(snap.planOnly),
+      offSeason: Boolean(snap.offSeason),
+      offSeasonMessage: snap.offSeason ? OFF_SEASON_MESSAGE : null,
+    });
+    return {
+      filename: "BuzzKill-Quote.pdf",
+      content: pdf,
+      contentType: "application/pdf",
+    };
+  } catch (err) {
+    console.error(
+      "pricing-refresh: quote PDF build failed — sending link-only",
+      booking.id,
+      err
+    );
+    return null;
+  }
+}
+
 /**
  * "Your exact prices are ready" — sent to each lead who hit this combo
  * before its sheet existed. Honest copy: their quote fell to the callback
@@ -320,6 +515,7 @@ async function deliverRateReadyEmails(
       return { sent };
     }
     let quoteUrl = quoteBase;
+    let attachments: EmailAttachment[] | undefined;
     if (entry.bookingRequestId) {
       try {
         const { data: booking } = await client.models.BookingRequest.get({
@@ -330,6 +526,14 @@ async function deliverRateReadyEmails(
           // quote page consumes it, clears it from the address bar, and polls
           // the token-authenticated status endpoint.
           quoteUrl = `${quoteBase}#request=${encodeURIComponent(entry.bookingRequestId)}&token=${encodeURIComponent(booking.cancelToken)}`;
+        }
+        // Now that the sheet exists, compute + persist the lead's exact quote
+        // (PENDING → QUOTED) and attach it as a branded PDF. Best-effort: any
+        // failure just sends the link-only email — the price is still one click
+        // away, and a rate-ready lead always hears.
+        if (booking) {
+          const pdf = await buildRateReadyQuotePdf(client, booking);
+          if (pdf) attachments = [pdf];
         }
       } catch (err) {
         console.error(
@@ -344,6 +548,7 @@ async function deliverRateReadyEmails(
       subject: "Your exact prices are ready — pick your day",
       template: "booking-rate-ready",
       relatedId: entry.bookingRequestId,
+      attachments,
       html: emailShell(
         "Your exact prices are ready",
         `<p>When you asked for a quote, we were still researching pricing for your area — that's done now.</p>

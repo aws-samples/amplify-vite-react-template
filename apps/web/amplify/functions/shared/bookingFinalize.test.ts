@@ -619,6 +619,113 @@ describe("new booking shapes finalize into the right records", () => {
   });
 });
 
+describe("invoice-me (HOA/commercial net terms) finalizes card-less into a BOOKED, OPEN-invoiced commitment", () => {
+  const finalizeInvoice = () =>
+    finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "invoice-b1",
+      amountReceived: 31300,
+      invoice: { terms: "NET_30", dueDate: "2026-08-21" },
+    });
+
+  beforeEach(() => {
+    booking.propertyKind = "COMMERCIAL";
+    booking.stripePaymentIntentId = undefined; // no card intent behind it
+  });
+
+  it("books the visit and creates an OPEN net-terms invoice — collectable now, never marked paid", async () => {
+    await finalizeInvoice();
+
+    // The commitment is complete and confirmed — not a "processing" state.
+    expect(booking.status).toBe("BOOKED");
+    expect(booking.jobId).toBe("job-b1");
+    expect(booking.customerId).toBeTruthy();
+
+    // The visit is real and dispatchable, but unpaid — and NOT flagged as a
+    // clearing debit (so AR/dunning/portal can collect it).
+    const job = store.Job.get("job-b1")!;
+    expect(job.status).toBe("SCHEDULED");
+    expect(job.paidAt).toBeUndefined();
+    expect(job.paidPaymentIntentId).toBeUndefined();
+    expect(job.paymentPendingIntentId).toBeUndefined();
+
+    // The ledger row is OPEN on net terms — the whole point of invoice-me.
+    const invoice = store.Invoice.get("booking-b1")!;
+    expect(invoice.status).toBe("OPEN");
+    expect(invoice.method).toBe("INVOICE");
+    expect(invoice.dueDate).toBe("2026-08-21");
+    expect(invoice.terms).toBe("NET_30");
+    expect(invoice.paidAt).toBeUndefined();
+    expect(invoice.pendingDebitIntentId).toBeUndefined();
+    expect(invoice.stripePaymentIntentId).toBeUndefined();
+
+    // The agreement records the invoiced terms, not a card charge.
+    const agreement = store.Agreement.get("agr-b1")!;
+    expect(String(agreement.bodyText)).toContain("invoiced at booking");
+    expect(String(agreement.bodyText)).toContain("due 2026-08-21");
+
+    // The customer hears "you're booked, an invoice is on its way".
+    const confirmations = emails.filter((e) =>
+      e.subject.startsWith("You're booked")
+    );
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0].html).toContain("invoice for");
+    expect(confirmations[0].html).toContain("on its way");
+    expect(confirmations[0].html).not.toContain("Payment of");
+
+    // The office alert flags it as invoiced with an OPEN balance to collect.
+    expect(leadAlerts).toHaveLength(1);
+    expect(leadAlerts[0].subject).toContain("INVOICED");
+    expect(leadAlerts[0].bodyHtml).toContain("invoiced");
+    expect(leadAlerts[0].bodyHtml).toContain("OPEN invoice");
+  });
+
+  it("is idempotent — a double submit converges on ONE commitment and one email", async () => {
+    await finalizeInvoice();
+    await finalizeInvoice();
+
+    expect(jobsCreated).toHaveLength(1);
+    expect(store.Invoice.size).toBe(1);
+    expect(
+      emails.filter((e) => e.subject.startsWith("You're booked"))
+    ).toHaveLength(1);
+    expect(leadAlerts).toHaveLength(1);
+    // Still OPEN — a replay never settles the invoice.
+    expect(store.Invoice.get("booking-b1")!.status).toBe("OPEN");
+  });
+
+  it("an invoiced recurring plan creates the plan but leaves the invoice OPEN", async () => {
+    booking.quoteJson = JSON.stringify({
+      serviceLabel: "Commercial pest control — up to 5,000 sqft",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 14900,
+        initialFeeCents: 19900,
+      },
+    });
+    booking.recurring = true;
+    booking.amountCents = 19900;
+
+    await finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "invoice-b1",
+      amountReceived: 19900,
+      invoice: { terms: "NET_30", dueDate: "2026-08-21" },
+    });
+
+    expect(booking.status).toBe("BOOKED");
+    expect(plansCreated[0]).toMatchObject({
+      priceCents: 14900,
+      serviceFrequency: "MONTHLY",
+      status: "ACTIVE",
+    });
+    const invoice = store.Invoice.get("booking-b1")!;
+    expect(invoice.status).toBe("OPEN");
+    expect(invoice.amountCents).toBe(19900); // the initial fee, invoiced
+    expect(invoice.method).toBe("INVOICE");
+  });
+});
+
 describe("the booking link's lead identity converts exactly that lead", () => {
   it("a phone-only lead using the spoken bare link resolves by normalized phone", async () => {
     seedLead({ email: null, phone: "+1 (413) 555-1234" });

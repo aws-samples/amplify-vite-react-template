@@ -34,6 +34,7 @@ import {
   type CapacityWindow,
 } from "../shared/capacity";
 import { casGuardedUpdate } from "../shared/atomicLock";
+import { finalizeBooking } from "../shared/bookingFinalize";
 import {
   acquirePaymentAttempt,
   PAYABLE_REUSE_STATUSES,
@@ -45,6 +46,7 @@ import {
   BOOKING_TERMS_TEXT,
   BOOKING_TERMS_VERSION,
   CANCEL_FULL_REFUND_DAYS,
+  OFF_SEASON_MESSAGE,
 } from "../shared/bookingTerms";
 import { addDays, buildDayMatrix, type DayQuote } from "./availability";
 import {
@@ -453,12 +455,6 @@ function quoteDisplayService(
         : "Quarterly";
   return `${base} — ${cadence} plan`;
 }
-
-/** GL-17: the one customer-facing explanation of an off-season enrollment —
- *  truthful about immediate year-round billing and about April being a
- *  month, not a promised exact day. */
-const OFF_SEASON_MESSAGE =
-  "Mosquito season runs April–October. Enroll now and your plan starts today — billed monthly year-round — and we'll schedule your first treatment for April and confirm the exact day with you.";
 
 /** Rehydrate the exact stored day board without recalculating its price. */
 function pricedResponse(booking: StoredQuoteBooking) {
@@ -2006,6 +2002,16 @@ async function book(
     planOnly?: boolean;
     offSeason?: boolean;
   };
+  // Invoice-me (net terms): allowed ONLY for HOA/community + commercial, and
+  // re-checked SERVER-SIDE from the booking's stored property kind — a client
+  // that flips `invoice:true` on a residential quote is refused here.
+  const invoiceMode = body.invoice === true;
+  if (invoiceMode && !invoiceEligibleFor(booking.propertyKind)) {
+    throw new HttpError(400, {
+      error:
+        "Invoicing isn't available for this property type — please pay by card to book.",
+    });
+  }
   // A plan-only quote (community common-area) has no one-time offer — the
   // booking is always the plan, whatever the client sent.
   const recurring = body.recurring === true || stored.planOnly === true;
@@ -2046,6 +2052,9 @@ async function book(
   }
   const holderUntil = attempt.holderUntil;
   try {
+    if (invoiceMode) {
+      return await bookInvoiceAttempt();
+    }
     if (offSeason) {
       return await offSeasonEnrollmentAttempt({
         booking,
@@ -2062,6 +2071,128 @@ async function book(
     return await bookDatedAttempt();
   } finally {
     await attempt.release();
+  }
+
+  // Invoice-me (HOA/community + commercial): book card-less on net terms.
+  // Same attempt boundary and live capacity claim as a card checkout, but
+  // no PaymentIntent — the visit is scheduled and an OPEN net-terms invoice
+  // is created for the customer to pay later. Finalizes synchronously (no
+  // webhook), so the response is a booked confirmation, not a client secret.
+  async function bookInvoiceAttempt() {
+    const booking = bookingRow;
+    const amountCents =
+      recurring || offSeason
+        ? stored.recurringOffer!.initialFeeCents
+        : day!.priceCents;
+    // Default net-30 terms; the due date is stamped on the OPEN invoice and
+    // drives AR aging / dunning exactly like any other net-terms bill.
+    const due = new Date();
+    due.setUTCDate(due.getUTCDate() + 30);
+    const invoiceTerms = { terms: "NET_30", dueDate: due.toISOString().slice(0, 10) };
+
+    // A dated invoice booking claims its slot against the LIVE schedule (R29
+    // / GL-04), exactly like a card checkout; a date-less off-season
+    // enrollment claims nothing (finalize targets the first in-season visit).
+    let claimedSlot: { technicianId: string; claimMinutes: number } | null = null;
+    if (!offSeason) {
+      const addr = `${booking.street}, ${booking.city}, ${booking.state}${booking.zip ? ` ${booking.zip}` : ""}`;
+      const liveDay = await buildDayMatrix({
+        routesKey: await getSecret("GOOGLE_ROUTES_API_KEY"),
+        candidateAddress: addr,
+        service: String(booking.service),
+        baseCents: day!.priceCents,
+        zone:
+          booking.zone === "A" || booking.zone === "B" ? booking.zone : undefined,
+        onlyDate: date,
+        onsiteMinutes:
+          booking.propertyKind === "COMMERCIAL" ||
+          booking.propertyKind === "COMMUNITY"
+            ? 60
+            : 30,
+      });
+      const slot = liveDay.find((d) => d.date === date)?.slots?.[
+        window as CapacityWindow
+      ];
+      if (!slot) {
+        throw new HttpError(409, {
+          error: "That window just sold out — pick another from a fresh quote.",
+        });
+      }
+      const claim = await claimWindowSlot({
+        claimKey: booking.id,
+        date,
+        window: window as CapacityWindow,
+        technicianId: slot.technicianId,
+        minutes: slot.claimMinutes,
+        address: addr,
+        holdReason: `invoice checkout for ${booking.email}`,
+      });
+      if (!claim.ok) {
+        throw new HttpError(409, {
+          error: claim.soldOut
+            ? "That window just sold out — pick another from a fresh quote."
+            : claim.message,
+        });
+      }
+      claimedSlot = { technicianId: slot.technicianId, claimMinutes: slot.claimMinutes };
+    }
+
+    // Persist the selection, amount, terms acceptance, and capacity facts
+    // through the ONE fenced write — no Stripe objects. A lost fence answers
+    // truthfully; an unsupported write releases the claim so nothing leaks.
+    const persisted = await persistCheckoutAttempt({
+      bookingId: booking.id,
+      holderUntil,
+      priorIntentId: booking.stripePaymentIntentId ?? null,
+      sets: {
+        status: "QUOTED",
+        selectedDate: offSeason ? null : date,
+        selectedWindow: offSeason ? null : window,
+        capacityTechnicianId: claimedSlot?.technicianId ?? null,
+        capacityMinutes: claimedSlot?.claimMinutes ?? null,
+        recurring,
+        amountCents,
+        paymentFailedReason: null,
+        paymentFailedNoticeSentAt: null,
+        tcVersion,
+        tcAcceptedAt: new Date().toISOString(),
+        tcIp: req.sourceIp || null,
+        tcUserAgent: req.userAgent?.slice(0, 512) || null,
+      },
+    });
+    if (!persisted.ok) {
+      if (!offSeason) await releaseCapacityClaim(booking.id).catch(() => undefined);
+      if (persisted.reason === "LOST") {
+        throw await truthfulCheckoutRefusal(client, booking.id);
+      }
+      throw new HttpError(503, {
+        error:
+          "We couldn't save your booking — nothing was charged. Please try again in a moment.",
+      });
+    }
+
+    // Card-less finalize: OPEN net-terms invoice, scheduled unpaid visit,
+    // signed agreement, BOOKED — the same complete commitment a paid booking
+    // makes. finalizeBooking re-reads the persisted facts; it is idempotent
+    // via the booking status, so a double-submit converges on one commitment.
+    await finalizeBooking({
+      bookingRequestId: booking.id,
+      paymentIntentId: `invoice-${booking.id}`,
+      amountReceived: amountCents,
+      invoice: invoiceTerms,
+    });
+
+    return {
+      booked: true as const,
+      amountCents,
+      statusToken: booking.cancelToken ?? undefined,
+      summary: summaryFor(
+        stored,
+        offSeason ? "" : date,
+        offSeason ? "" : window,
+        recurring
+      ),
+    };
   }
 
   // The dated (and plan-only) checkout, INSIDE the attempt boundary — a

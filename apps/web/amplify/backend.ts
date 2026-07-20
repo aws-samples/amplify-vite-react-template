@@ -371,6 +371,41 @@ backend.crmPricing.addEnvironment(
   "PRICING_REFRESH_FUNCTION_NAME",
   backend.pricingRefresh.resources.lambda.functionName
 );
+// The reverse edge: pricing-refresh computes + persists a rate-ready lead's
+// exact quote (PENDING → QUOTED) by invoking booking-public's /quote-status,
+// so the "your exact prices are ready" email can attach a real priced-quote
+// PDF. A direct CDK reference here would cycle the stacks (booking-public
+// already grants + names pricing-refresh, above), so this edge is TOKEN-FREE,
+// exactly like the crm-admin resumer: booking-public's stack publishes its own
+// name to SSM, and pricing-refresh gets a literal param name + literal-pattern
+// invoke IAM.
+const bookingPublicNameParam = `/buzzkill/${lockAppId}/${lockBranch}/booking-public-function-name`;
+new StringParameter(
+  Stack.of(backend.bookingPublic.resources.lambda),
+  "BookingPublicFunctionNameParam",
+  {
+    parameterName: bookingPublicNameParam,
+    stringValue: backend.bookingPublic.resources.lambda.functionName,
+  }
+);
+backend.pricingRefresh.addEnvironment(
+  "BOOKING_PUBLIC_FUNCTION_PARAM",
+  bookingPublicNameParam
+);
+backend.pricingRefresh.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [`arn:aws:ssm:us-east-1:*:parameter${bookingPublicNameParam}`],
+  })
+);
+backend.pricingRefresh.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["lambda:InvokeFunction"],
+    resources: [
+      `arn:aws:lambda:us-east-1:*:function:amplify-${lockAppId}-*bookingpublic*`,
+    ],
+  })
+);
 // pricing-refresh is where ALL market-rate research runs now, so it needs
 // the same Anthropic key lookup as the engines that used to research inline.
 backend.pricingRefresh.addEnvironment("AMPLIFY_APP_ID", appId);

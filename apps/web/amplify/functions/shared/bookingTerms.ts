@@ -23,3 +23,13 @@ export const BOOKING_TERMS_TEXT = [
   "Your cancellation link arrives in the booking confirmation email.",
   "If you book a recurring plan, today's charge is the plan's initial fee (for community common-area plans, your first month); the monthly subscription starts after your first completed visit.",
 ].join("\n\n");
+
+/**
+ * GL-17: the one customer-facing explanation of an off-season seasonal
+ * enrollment — truthful about immediate year-round billing and about April
+ * being a month, not a promised exact day. Shared so the funnel response
+ * (booking-public) and the emailed quote PDF (pricing-refresh) say it
+ * identically.
+ */
+export const OFF_SEASON_MESSAGE =
+  "Mosquito season runs April–October. Enroll now and your plan starts today — billed monthly year-round — and we'll schedule your first treatment for April and confirm the exact day with you.";

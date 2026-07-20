@@ -157,99 +157,786 @@ const fmtTime = (iso: string) =>
 
 export type AgreementImage = { bytes: Uint8Array; contentType: string };
 
+/* -------------------------------------------------------------------------- *
+ * Service Agreement — a branded, sectioned document.
+ *
+ * This is deliberately NOT built on PdfWriter (the linear cursor used by the
+ * service report and amendment). A service agreement is a designed page:
+ * a masthead, green section bands, two-column info blocks, a covered-pests
+ * grid, a month-by-month subscription calendar, side-by-side money summaries,
+ * and a signature block. That needs absolute placement and multi-column flow,
+ * so it gets its own small layout engine below.
+ * -------------------------------------------------------------------------- */
+
+// BuzzKill green (#7ac142) — the band/masthead color, echoing the brand.
+const BK_GREEN = rgb(0.478, 0.757, 0.259);
+const BK_GREEN_DK = rgb(0.278, 0.51, 0.114);
+const WHITE = rgb(1, 1, 1);
+const CELL_TINT = rgb(0.957, 0.976, 0.933); // faint green wash for table cells
+const BORDER = rgb(0.8, 0.82, 0.85);
+
+const A_M = 40; // page margin
+const A_CW = PAGE.width - A_M * 2; // content width
+const A_GUTTER = 14;
+const A_COLW = (A_CW - A_GUTTER) / 2;
+const BAR_H = 16; // section band height
+const A_BOTTOM = 44; // bottom margin
+
+const fmtMoney = (cents: number) =>
+  `$${(cents / 100).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const fmtSignedDate = (iso: string) =>
+  new Date(iso).toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: "America/New_York",
+  });
+
+export type AgreementCompany = {
+  name: string;
+  addressLines?: string[];
+  phone?: string;
+  email?: string;
+  website?: string;
+  /** Applicator/business license number. Printed only when provided. */
+  license?: string;
+};
+
+/** One line in a money summary box (label left, amount right). */
+export type AgreementMoneyRow = {
+  label: string;
+  amountCents: number;
+  /** Render as a parenthesised credit, e.g. a discount: ($420.00). */
+  negative?: boolean;
+  /** Bold, with a rule above — used for the box's total line. */
+  total?: boolean;
+  /** Grey, smaller — used for a "Tax (0%)" style line. */
+  muted?: boolean;
+};
+
+export type AgreementScheduleMonth = {
+  label: string; // "Oct '26"
+  amountCents: number;
+};
+
+/** Absolute-placement layout engine for the service agreement. */
+class AgreementDoc {
+  doc!: PDFDocument;
+  page!: PDFPage;
+  font!: PDFFont;
+  bold!: PDFFont;
+  italic!: PDFFont;
+  y = 0; // top edge of the next block, measured from the page bottom
+
+  static async create(): Promise<AgreementDoc> {
+    const d = new AgreementDoc();
+    d.doc = await PDFDocument.create();
+    d.font = await d.doc.embedFont(StandardFonts.Helvetica);
+    d.bold = await d.doc.embedFont(StandardFonts.HelveticaBold);
+    d.italic = await d.doc.embedFont(StandardFonts.HelveticaOblique);
+    d.newPage();
+    return d;
+  }
+
+  newPage() {
+    this.page = this.doc.addPage([PAGE.width, PAGE.height]);
+    this.y = PAGE.height - A_M;
+  }
+
+  /** Break to a new page if `h` more points would cross the bottom margin. */
+  need(h: number) {
+    if (this.y - h < A_BOTTOM) this.newPage();
+  }
+
+  fill(x: number, top: number, w: number, h: number, color = BK_GREEN) {
+    this.page.drawRectangle({ x, y: top - h, width: w, height: h, color });
+  }
+
+  box(x: number, top: number, w: number, h: number, color = BORDER, thickness = 0.75) {
+    this.page.drawRectangle({
+      x,
+      y: top - h,
+      width: w,
+      height: h,
+      borderColor: color,
+      borderWidth: thickness,
+    });
+  }
+
+  hline(x1: number, x2: number, yy: number, color = RULE, thickness = 0.75) {
+    this.page.drawLine({ start: { x: x1, y: yy }, end: { x: x2, y: yy }, thickness, color });
+  }
+
+  private lines(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
+    const out: string[] = [];
+    for (const raw of text.split(/\r?\n/)) {
+      if (!raw.trim()) {
+        out.push("");
+        continue;
+      }
+      let line = "";
+      for (const word of raw.split(/\s+/)) {
+        const cand = line ? `${line} ${word}` : word;
+        if (font.widthOfTextAtSize(cand, size) <= maxWidth) line = cand;
+        else {
+          if (line) out.push(line);
+          line = word;
+        }
+      }
+      out.push(line);
+    }
+    return out;
+  }
+
+  /**
+   * Draw wrapped text starting at top edge `top`, returning the new bottom.
+   * Does not paginate — callers that need flow use `flow()`.
+   */
+  write(
+    text: string,
+    x: number,
+    top: number,
+    opts: {
+      font?: PDFFont;
+      size?: number;
+      color?: ReturnType<typeof rgb>;
+      maxWidth?: number;
+      align?: "left" | "center" | "right";
+      lineGap?: number;
+    } = {}
+  ): number {
+    const font = opts.font ?? this.font;
+    const size = opts.size ?? 9.5;
+    const maxWidth = opts.maxWidth ?? A_CW;
+    const lh = size * 1.32 + (opts.lineGap ?? 0);
+    let yy = top;
+    for (const line of this.lines(text, font, size, maxWidth)) {
+      if (line) {
+        const tw = font.widthOfTextAtSize(line, size);
+        let dx = x;
+        if (opts.align === "center") dx = x + (maxWidth - tw) / 2;
+        else if (opts.align === "right") dx = x + (maxWidth - tw);
+        this.page.drawText(line, { x: dx, y: yy - size, size, font, color: opts.color ?? INK });
+      }
+      yy -= lh;
+    }
+    return yy;
+  }
+
+  measure(text: string, font: PDFFont, size: number, maxWidth: number, lineGap = 0): number {
+    const lh = size * 1.32 + lineGap;
+    return this.lines(text, font, size, maxWidth).length * lh;
+  }
+
+  /** A full- or column-width green band with white title. Advances `this.y`. */
+  band(title: string, x = A_M, w = A_CW, align: "left" | "center" = "center") {
+    this.need(BAR_H + 4);
+    this.fill(x, this.y, w, BAR_H);
+    this.write(title.toUpperCase(), x + (align === "center" ? 0 : 8), this.y - 2.5, {
+      font: this.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: align === "center" ? w : w - 16,
+      align,
+    });
+    this.y -= BAR_H;
+  }
+
+  /** Paginating full-width paragraph flow. */
+  flow(
+    text: string,
+    opts: { font?: PDFFont; size?: number; color?: ReturnType<typeof rgb>; gapAfter?: number } = {}
+  ) {
+    const font = opts.font ?? this.font;
+    const size = opts.size ?? 9;
+    const lh = size * 1.4;
+    for (const line of this.lines(text, font, size, A_CW)) {
+      this.need(lh);
+      if (line) {
+        this.page.drawText(line, {
+          x: A_M,
+          y: this.y - size,
+          size,
+          font,
+          color: opts.color ?? INK,
+        });
+      }
+      this.y -= lh;
+    }
+    this.y -= opts.gapAfter ?? 0;
+  }
+}
+
+/**
+ * Render a branded, sectioned service-agreement PDF: masthead, green section
+ * bands, two-column service/customer blocks, an optional covered-pests grid,
+ * an optional month-by-month subscription calendar, side-by-side initial and
+ * recurring money summaries, the terms body, and a signature block.
+ *
+ * Only `title`, `bodyText`, `customerName`, `signerName` and `signedAtIso` are
+ * required; every richer section renders only when its data is supplied, so a
+ * minimal caller still gets a valid, well-formed agreement.
+ */
 export async function renderAgreementPdf(opts: {
   agreementId: string;
   title: string;
   bodyText: string;
+  company?: AgreementCompany;
   customerName: string;
+  customerEmail?: string;
+  customerPhone?: string;
   customerAddress?: string;
+  billingAddress?: string;
+  /** Names of pests the plan covers — drawn as a grid, like the sample. */
+  coveredPests?: string[];
+  /** Short "how year-round protection works" explainer, drawn above pricing. */
+  protectionNote?: string;
+  /** Month-by-month subscription calendar (recurring plans only). */
+  schedule?: { title?: string; months: AgreementScheduleMonth[] };
+  /** Left money summary box (the initial service / today's charge). */
+  initial?: { title?: string; rows: AgreementMoneyRow[] };
+  /** Right money summary box (the recurring subscription). */
+  recurring?: { title?: string; rows: AgreementMoneyRow[] };
+  /** Payment-authorization terms (the EFT/auto-charge consent). */
+  paymentAuthText?: string;
+  /** Initial commitment length in months; printed as a closing line. */
+  initialTermMonths?: number;
   signerName: string;
   signerEmail?: string;
   signatureDataUrl?: string | null;
   signedAtIso: string;
   signerIp?: string;
   signerUserAgent?: string;
+  /** Legacy: pest/treatment photos. Superseded by `coveredPests` when present. */
   images?: AgreementImage[];
 }): Promise<Uint8Array> {
-  const w = await PdfWriter.create();
-  w.header("Service Agreement");
+  const d = await AgreementDoc.create();
+  const co = opts.company ?? { name: "BuzzKill Pest Control" };
 
-  w.text(opts.title, { font: w.bold, size: 14, gapAfter: 8 });
-  w.labelValue("Customer", opts.customerName);
-  if (opts.customerAddress) w.labelValue("Service address", opts.customerAddress);
-  w.rule();
+  // ---- Masthead: wordmark (left) · SERVICE AGREEMENT (center) · contact (right)
+  const topY = d.y;
+  d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
+  d.write("PEST CONTROL", A_M + 2, topY - 24, {
+    font: d.bold,
+    size: 7.5,
+    color: MUTED,
+  });
+  d.write("SERVICE AGREEMENT", A_M, topY - 6, {
+    font: d.bold,
+    size: 17,
+    color: BK_GREEN_DK,
+    maxWidth: A_CW,
+    align: "center",
+  });
+  const contact = [
+    co.name,
+    ...(co.addressLines ?? []),
+    co.phone,
+    co.email,
+    co.website,
+    co.license ? `License #: ${co.license}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const contactBottom = d.write(contact, A_M, topY, {
+    font: d.font,
+    size: 8,
+    color: INK,
+    maxWidth: A_CW,
+    align: "right",
+    lineGap: 1.5,
+  });
+  // The rule sits below the taller of the wordmark and the contact block, so a
+  // multi-line company block (address + phone + license) never overruns it.
+  d.y = Math.min(topY - 44, contactBottom) - 6;
+  d.hline(A_M, PAGE.width - A_M, d.y, BK_GREEN, 1.5);
+  d.y -= 14;
 
-  w.text(opts.bodyText, { gapAfter: 10 });
-
-  // Pest / treatment photos from the plan template.
-  if (opts.images?.length) {
-    w.heading("Covered pests");
-    const maxW = PAGE.width - MARGIN * 2;
-    for (const img of opts.images.slice(0, 8)) {
-      try {
-        const ct = img.contentType.toLowerCase();
-        if (!ct.includes("png") && !ct.includes("jpeg") && !ct.includes("jpg")) {
-          continue; // pdf-lib can only embed PNG/JPEG
-        }
-        const embedded = ct.includes("png")
-          ? await w.doc.embedPng(img.bytes)
-          : await w.doc.embedJpg(img.bytes);
-        const dims = embedded.scaleToFit(Math.min(maxW, 300), 220);
-        w.ensure(dims.height + 12);
-        w.page.drawImage(embedded, {
-          x: MARGIN,
-          y: w.y - dims.height,
-          width: dims.width,
-          height: dims.height,
-        });
-        w.y -= dims.height + 10;
-      } catch {
-        // Unsupported/corrupt image — the agreement still renders.
-      }
+  // ---- Two-column: Service Address | Customer Information
+  const infoTop = d.y;
+  const rightX = A_M + A_COLW + A_GUTTER;
+  const infoBlock = (x: number, title: string, rows: string[]): number => {
+    d.fill(x, infoTop, A_COLW, BAR_H);
+    d.write(title.toUpperCase(), x, infoTop - 2.5, {
+      font: d.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: A_COLW,
+      align: "center",
+    });
+    let yy = infoTop - BAR_H - 8;
+    for (const r of rows) {
+      yy = d.write(r, x + 4, yy, { size: 9.5, maxWidth: A_COLW - 8, lineGap: 1 });
+      yy -= 1;
     }
+    return yy;
+  };
+  const leftRows = [opts.customerName, ...(opts.customerAddress?.split(", ") ?? [])];
+  const rightRows = [
+    opts.customerEmail,
+    opts.customerPhone,
+    opts.signerEmail && opts.signerEmail !== opts.customerEmail ? opts.signerEmail : null,
+  ].filter((v): v is string => Boolean(v));
+  const leftBottom = infoBlock(A_M, "Service Address", leftRows);
+  const rightBottom = infoBlock(
+    rightX,
+    "Customer Information",
+    rightRows.length ? rightRows : ["—"]
+  );
+  d.y = Math.min(leftBottom, rightBottom) - 8;
+
+  // ---- Covered pests grid
+  if (opts.coveredPests?.length) {
+    d.band("What Your Plan Covers");
+    d.y -= 6;
+    const cols = 4;
+    const colW = A_CW / cols;
+    const rowH = 15;
+    const pests = opts.coveredPests.slice(0, 32);
+    const rows = Math.ceil(pests.length / cols);
+    d.need(rows * rowH + 4);
+    const gridTop = d.y;
+    pests.forEach((pest, i) => {
+      const cx = A_M + (i % cols) * colW;
+      const cy = gridTop - Math.floor(i / cols) * rowH;
+      d.write("•", cx, cy, { font: d.bold, size: 9.5, color: BK_GREEN });
+      d.write(pest, cx + 11, cy, { size: 9, maxWidth: colW - 14 });
+    });
+    d.y = gridTop - rows * rowH - 6;
   }
 
-  w.rule();
-  w.heading("Electronic signature");
+  // ---- Year-round protection explainer
+  if (opts.protectionNote) {
+    d.band("Year-Round Protection");
+    d.y -= 6;
+    const h = d.measure(opts.protectionNote, d.font, 9, A_CW, 0.5);
+    d.need(h + 4);
+    d.y = d.write(opts.protectionNote, A_M, d.y, { size: 9, maxWidth: A_CW, lineGap: 0.5 });
+    d.y -= 8;
+  }
 
+  // ---- Subscription calendar
+  if (opts.schedule?.months.length) {
+    d.band(opts.schedule.title ?? "Monthly Service Subscription");
+    d.y -= 6;
+    const months = opts.schedule.months.slice(0, 12);
+    const perRow = 6;
+    const cw = A_CW / perRow;
+    const headH = 14;
+    const bodyH = 16;
+    const cellH = headH + bodyH;
+    const gridRows = Math.ceil(months.length / perRow);
+    d.need(gridRows * cellH + 4);
+    const gTop = d.y;
+    months.forEach((m, i) => {
+      const cx = A_M + (i % perRow) * cw;
+      const cy = gTop - Math.floor(i / perRow) * cellH;
+      d.fill(cx, cy, cw, headH, BK_GREEN);
+      d.write(m.label, cx, cy - 2, {
+        font: d.bold,
+        size: 7.5,
+        color: WHITE,
+        maxWidth: cw,
+        align: "center",
+      });
+      d.fill(cx, cy - headH, cw, bodyH, CELL_TINT);
+      d.box(cx, cy, cw, cellH, BORDER, 0.5);
+      d.write(fmtMoney(m.amountCents), cx, cy - headH - 3.5, {
+        size: 8.5,
+        maxWidth: cw,
+        align: "center",
+      });
+    });
+    d.y = gTop - gridRows * cellH - 8;
+  }
+
+  // ---- Money summaries: Initial (left) | Recurring (right)
+  if (opts.initial || opts.recurring) {
+    const moneyTop = d.y;
+    const moneyBlock = (
+      x: number,
+      title: string,
+      rows: AgreementMoneyRow[]
+    ): number => {
+      d.fill(x, moneyTop, A_COLW, BAR_H);
+      d.write(title.toUpperCase(), x, moneyTop - 2.5, {
+        font: d.bold,
+        size: 8.5,
+        color: WHITE,
+        maxWidth: A_COLW,
+        align: "center",
+      });
+      let yy = moneyTop - BAR_H - 10;
+      for (const r of rows) {
+        const size = r.muted ? 8.5 : 9.5;
+        const font = r.total ? d.bold : d.font;
+        const color = r.muted ? MUTED : INK;
+        if (r.total) {
+          d.hline(x + 4, x + A_COLW - 4, yy + 4, BORDER, 0.75);
+          yy -= 4;
+        }
+        d.write(r.label, x + 4, yy, { font, size, color, maxWidth: A_COLW - 90 });
+        const amount = r.negative ? `(${fmtMoney(r.amountCents)})` : fmtMoney(r.amountCents);
+        d.write(amount, x + A_COLW - 84, yy, {
+          font,
+          size,
+          color,
+          maxWidth: 80,
+          align: "right",
+        });
+        yy -= size * 1.7;
+      }
+      return yy;
+    };
+    let lB = moneyTop - BAR_H;
+    let rB = moneyTop - BAR_H;
+    if (opts.initial)
+      lB = moneyBlock(A_M, opts.initial.title ?? "Initial Service", opts.initial.rows);
+    if (opts.recurring)
+      rB = moneyBlock(rightX, opts.recurring.title ?? "Recurring Service", opts.recurring.rows);
+    d.y = Math.min(lB, rB) - 10;
+  }
+
+  // ---- Terms & conditions
+  d.band("Terms & Conditions");
+  d.y -= 8;
+  d.flow(opts.bodyText, { size: 8.5, gapAfter: 10 });
+
+  // ---- Acceptance line
+  d.need(24);
+  d.write("I have read and understand this entire agreement.", A_M, d.y, {
+    font: d.bold,
+    size: 10,
+    color: BK_GREEN_DK,
+    maxWidth: A_CW,
+    align: "center",
+  });
+  d.y -= 22;
+
+  // ---- Billing | Payment authorization
+  if (opts.billingAddress || opts.paymentAuthText) {
+    const payTop = d.y;
+    const billRows = (opts.billingAddress ?? opts.customerAddress ?? "")
+      .split(", ")
+      .filter(Boolean);
+    // Billing box (left) is short; the authorization (right) can be tall — so
+    // the band pair is drawn, then each side flows independently below it.
+    d.fill(A_M, payTop, A_COLW, BAR_H);
+    d.write("BILLING INFO", A_M, payTop - 2.5, {
+      font: d.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: A_COLW,
+      align: "center",
+    });
+    d.fill(rightX, payTop, A_COLW, BAR_H);
+    d.write("PAYMENT AUTHORIZATION", rightX, payTop - 2.5, {
+      font: d.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: A_COLW,
+      align: "center",
+    });
+    let lY = payTop - BAR_H - 8;
+    for (const r of [opts.customerName, ...billRows]) {
+      lY = d.write(r, A_M + 4, lY, { size: 9.5, maxWidth: A_COLW - 8, lineGap: 1 });
+      lY -= 1;
+    }
+    let rY = payTop - BAR_H - 8;
+    if (opts.paymentAuthText) {
+      rY = d.write(opts.paymentAuthText, rightX + 4, rY, {
+        font: d.italic,
+        size: 8,
+        color: INK,
+        maxWidth: A_COLW - 8,
+        lineGap: 1,
+      });
+    }
+    d.y = Math.min(lY, rY) - 12;
+  }
+
+  // ---- Signature block
+  d.need(70);
   if (opts.signatureDataUrl?.startsWith("data:image/png;base64,")) {
     try {
-      const png = await w.doc.embedPng(
-        Buffer.from(
-          opts.signatureDataUrl.slice("data:image/png;base64,".length),
-          "base64"
-        )
+      const png = await d.doc.embedPng(
+        Buffer.from(opts.signatureDataUrl.slice("data:image/png;base64,".length), "base64")
       );
-      const dims = png.scaleToFit(220, 70);
-      w.ensure(dims.height + 10);
-      w.page.drawImage(png, {
-        x: MARGIN,
-        y: w.y - dims.height,
-        width: dims.width,
-        height: dims.height,
-      });
-      w.y -= dims.height + 8;
+      const dims = png.scaleToFit(200, 56);
+      d.page.drawImage(png, { x: A_M, y: d.y - dims.height, width: dims.width, height: dims.height });
+      d.y -= dims.height + 4;
     } catch {
-      // Fall through to the typed-signature rendering below.
+      d.y = d.write(opts.signerName, A_M, d.y, { font: d.italic, size: 20 }) - 4;
     }
   } else {
-    w.text(opts.signerName, { font: w.italic, size: 20, gapAfter: 6 });
+    d.y = d.write(opts.signerName, A_M, d.y, { font: d.italic, size: 20 }) - 4;
+  }
+  d.hline(A_M, A_M + 220, d.y, INK, 0.75);
+  d.y -= 12;
+  d.write(`Customer signed on: ${fmtSignedDate(opts.signedAtIso)}`, A_M, d.y, {
+    font: d.bold,
+    size: 9.5,
+  });
+  d.y -= 16;
+
+  // ---- Initial-term closing line
+  if (opts.initialTermMonths) {
+    d.need(24);
+    d.write(
+      `This agreement is for an initial period of ${opts.initialTermMonths} month(s).`,
+      A_M,
+      d.y,
+      { font: d.bold, size: 11, maxWidth: A_CW, align: "center" }
+    );
+    d.y -= 20;
   }
 
-  w.labelValue("Signed by", opts.signerName);
-  if (opts.signerEmail) w.labelValue("Email", opts.signerEmail);
-  w.labelValue("Signed at", fmtDateTime(opts.signedAtIso));
-  if (opts.signerIp) w.labelValue("IP address", opts.signerIp);
-  if (opts.signerUserAgent) {
-    w.labelValue("Device", opts.signerUserAgent.slice(0, 80));
+  // ---- Electronic-signature audit footer
+  d.need(40);
+  d.hline(A_M, PAGE.width - A_M, d.y, RULE, 0.5);
+  d.y -= 10;
+  const audit = [
+    `Signed electronically. Agreement reference: ${opts.agreementId}.`,
+    opts.signerEmail ? `Signer: ${opts.signerName} (${opts.signerEmail}).` : `Signer: ${opts.signerName}.`,
+    opts.signerIp ? `IP: ${opts.signerIp}.` : null,
+    opts.signerUserAgent ? `Device: ${opts.signerUserAgent.slice(0, 80)}.` : null,
+    "By signing, the signer agreed to the terms above and consented to conduct this transaction electronically.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  d.flow(audit, { size: 7.5, color: MUTED });
+
+  return d.doc.save();
+}
+
+const cadenceLabel = (frequency: string): string =>
+  frequency === "MONTHLY"
+    ? "Monthly"
+    : frequency === "BIMONTHLY"
+      ? "Every 2 months"
+      : frequency === "QUARTERLY"
+        ? "Quarterly"
+        : frequency;
+
+const fmtQuoteDate = (iso: string) =>
+  new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    timeZone: "America/New_York",
+  });
+
+/**
+ * Render a branded one-page price quote: the same masthead and green-band
+ * layout as the service agreement, a two-column service-address / quote-detail
+ * header, and money boxes for the one-time treatment and/or the recurring plan.
+ *
+ * It is a PRICING summary, deliberately not a schedule: appointment days are
+ * live and perishable (they can fill before the lead opens the email), so the
+ * bookable day board stays on the interactive quote page and never prints here.
+ *
+ * Every figure comes straight from the stored quote — no price is computed or
+ * rounded in this file. `oneTimeCents` and `plan` each render their box only
+ * when supplied, so a plan-only (mosquito / community) quote shows just the
+ * plan and a one-time-only quote (wasp / rodent / …) shows just the treatment.
+ */
+export async function renderQuotePdf(opts: {
+  quoteRef: string;
+  quotedAtIso: string;
+  validThroughIso?: string | null;
+  company?: AgreementCompany;
+  customerName: string;
+  customerEmail?: string | null;
+  customerPhone?: string | null;
+  serviceAddress?: string | null;
+  serviceLabel: string;
+  /** The one-time treatment price, in cents. Omit for a plan-only quote. */
+  oneTimeCents?: number | null;
+  /** The recurring plan offer. Omit for a one-time-only quote. */
+  plan?: {
+    frequency: string;
+    monthlyCents: number;
+    initialFeeCents: number;
+  } | null;
+  /** A community/seasonal plan-only quote — there is no one-time option. */
+  planOnly?: boolean;
+  /** GL-17: an off-season seasonal enrollment (billing now, first visit April). */
+  offSeason?: boolean;
+  offSeasonMessage?: string | null;
+}): Promise<Uint8Array> {
+  const d = await AgreementDoc.create();
+  const co = opts.company ?? { name: "BuzzKill Pest Control" };
+  const rightX = A_M + A_COLW + A_GUTTER;
+
+  // ---- Masthead: wordmark (left) · PRICE QUOTE (center) · contact (right)
+  const topY = d.y;
+  d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
+  d.write("PEST CONTROL", A_M + 2, topY - 24, {
+    font: d.bold,
+    size: 7.5,
+    color: MUTED,
+  });
+  d.write("PRICE QUOTE", A_M, topY - 6, {
+    font: d.bold,
+    size: 17,
+    color: BK_GREEN_DK,
+    maxWidth: A_CW,
+    align: "center",
+  });
+  const contact = [
+    co.name,
+    ...(co.addressLines ?? []),
+    co.phone,
+    co.email,
+    co.website,
+    co.license ? `License #: ${co.license}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const contactBottom = d.write(contact, A_M, topY, {
+    font: d.font,
+    size: 8,
+    color: INK,
+    maxWidth: A_CW,
+    align: "right",
+    lineGap: 1.5,
+  });
+  // The rule sits below the taller of the wordmark and the contact block, so a
+  // multi-line company block (address + phone + license) never overruns it.
+  d.y = Math.min(topY - 44, contactBottom) - 6;
+  d.hline(A_M, PAGE.width - A_M, d.y, BK_GREEN, 1.5);
+  d.y -= 14;
+
+  // ---- Two-column: Service Address | Quote Details
+  const infoTop = d.y;
+  const infoBlock = (x: number, title: string, rows: string[]): number => {
+    d.fill(x, infoTop, A_COLW, BAR_H);
+    d.write(title.toUpperCase(), x, infoTop - 2.5, {
+      font: d.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: A_COLW,
+      align: "center",
+    });
+    let yy = infoTop - BAR_H - 8;
+    for (const r of rows) {
+      yy = d.write(r, x + 4, yy, { size: 9.5, maxWidth: A_COLW - 8, lineGap: 1 });
+      yy -= 1;
+    }
+    return yy;
+  };
+  const leftRows = [
+    opts.customerName,
+    ...(opts.serviceAddress?.split(", ") ?? []),
+    opts.customerEmail || null,
+    opts.customerPhone || null,
+  ].filter((v): v is string => Boolean(v));
+  const rightRows = [
+    `Service: ${opts.serviceLabel}`,
+    `Quote date: ${fmtQuoteDate(opts.quotedAtIso)}`,
+    opts.validThroughIso ? `Valid through: ${fmtQuoteDate(opts.validThroughIso)}` : null,
+    `Reference: ${opts.quoteRef}`,
+  ].filter((v): v is string => Boolean(v));
+  const leftBottom = infoBlock(A_M, "Service Address", leftRows);
+  const rightBottom = infoBlock(rightX, "Quote Details", rightRows);
+  d.y = Math.min(leftBottom, rightBottom) - 10;
+
+  // ---- Money summaries: One-Time (left) | Recurring Plan (right)
+  const moneyTop = d.y;
+  const moneyBlock = (
+    x: number,
+    title: string,
+    rows: AgreementMoneyRow[]
+  ): number => {
+    d.fill(x, moneyTop, A_COLW, BAR_H);
+    d.write(title.toUpperCase(), x, moneyTop - 2.5, {
+      font: d.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: A_COLW,
+      align: "center",
+    });
+    let yy = moneyTop - BAR_H - 10;
+    for (const r of rows) {
+      const size = r.muted ? 8.5 : 9.5;
+      const font = r.total ? d.bold : d.font;
+      const color = r.muted ? MUTED : INK;
+      if (r.total) {
+        d.hline(x + 4, x + A_COLW - 4, yy + 4, BORDER, 0.75);
+        yy -= 4;
+      }
+      d.write(r.label, x + 4, yy, { font, size, color, maxWidth: A_COLW - 90 });
+      d.write(fmtMoney(r.amountCents), x + A_COLW - 84, yy, {
+        font,
+        size,
+        color,
+        maxWidth: 80,
+        align: "right",
+      });
+      yy -= size * 1.7;
+    }
+    return yy;
+  };
+  let lB = moneyTop - BAR_H;
+  let rB = moneyTop - BAR_H;
+  // A one-time treatment box — unless this is a plan-only (mosquito / community)
+  // quote, which is sold only as a subscription.
+  if (!opts.planOnly && opts.oneTimeCents != null) {
+    lB = moneyBlock(A_M, "One-Time Treatment", [
+      { label: "Service total", amountCents: opts.oneTimeCents, total: true },
+    ]);
   }
-  w.text(
-    `Signed electronically via the BuzzKill customer portal. Agreement reference: ${opts.agreementId}. ` +
-      "By signing, the signer agreed to the terms above and consented to conduct this transaction electronically.",
-    { size: 8.5, color: MUTED }
+  if (opts.plan) {
+    rB = moneyBlock(rightX, "Recurring Plan", [
+      { label: `Visits: ${cadenceLabel(opts.plan.frequency)}`, amountCents: opts.plan.monthlyCents, muted: true },
+      { label: "Billed monthly", amountCents: opts.plan.monthlyCents },
+      { label: "Due at booking", amountCents: opts.plan.initialFeeCents, total: true },
+    ]);
+  }
+  d.y = Math.min(lB, rB) - 12;
+
+  // ---- Off-season note (GL-17) or the standard how-to-book line
+  if (opts.offSeason && opts.offSeasonMessage) {
+    d.band("Seasonal Enrollment");
+    d.y -= 6;
+    d.y = d.write(opts.offSeasonMessage, A_M, d.y, {
+      size: 9,
+      maxWidth: A_CW,
+      lineGap: 0.5,
+    });
+    d.y -= 10;
+  }
+
+  d.need(30);
+  d.write(
+    "To lock in this price, open your quote from the email we just sent and pick the day that works — booking online takes about a minute.",
+    A_M,
+    d.y,
+    { size: 9.5, maxWidth: A_CW, lineGap: 0.5 }
   );
+  d.y -= 24;
 
-  return w.save();
+  // ---- Footer
+  d.need(30);
+  d.hline(A_M, PAGE.width - A_M, d.y, RULE, 0.5);
+  d.y -= 10;
+  const footer = [
+    opts.validThroughIso
+      ? `This quote is valid through ${fmtQuoteDate(opts.validThroughIso)}.`
+      : null,
+    `Quote reference: ${opts.quoteRef}.`,
+    "Prices reflect the service and property details you provided. Final scheduling is confirmed when you book.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  d.flow(footer, { size: 7.5, color: MUTED });
+
+  return d.doc.save();
 }
 
 export type ReportProduct = {

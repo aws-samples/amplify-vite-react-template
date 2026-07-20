@@ -141,7 +141,9 @@ export const schema = a.schema({
     "VOID",
     "REFUNDED",
   ]),
-  PaymentMethodKind: a.enum(["CARD", "BANK"]),
+  // CARD / BANK (ACH) are taken at checkout; INVOICE is a net-terms bill an
+  // HOA/commercial customer pays later (the OPEN invoice's dueDate/terms).
+  PaymentMethodKind: a.enum(["CARD", "BANK", "INVOICE"]),
   // GL-12: the one thing the technician must be told about money at the door.
   // COLLECT_NOTHING — website booking already charged, or a plan visit; the tech
   // takes no payment. DUE_THROUGH_OFFICE — the office bills afterward; the tech
