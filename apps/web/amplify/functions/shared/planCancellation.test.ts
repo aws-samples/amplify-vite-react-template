@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
 import type Stripe from "stripe";
 import type { QueuedVisitsResolution } from "./subscription";
@@ -31,6 +31,7 @@ type Job = {
   servicePlanId: string;
   status: string;
   scheduledDate?: string | null;
+  timeWindow?: string | null;
   paidAt?: string | null;
   priceCents?: number | null;
 };
@@ -330,6 +331,47 @@ describe("buildCancellationPreview", () => {
     const p = await buildCancellationPreview("p1");
     expect(p.alreadyResolved).toBe(true);
     expect(p.saveOfferAvailable).toBe(false);
+  });
+
+  // GL-08: the preview is HOUR-EXACT so it agrees with the dispositive cancel
+  // and the office path. Visit Monday 2026-07-20, morning window → 8:00 AM ET
+  // start, so the 72-hour line is Friday 8:00 AM ET — a boundary the old
+  // whole-day rule (Mon − Fri = 3 days) could never resolve as refundable.
+  describe("hour-exact 72-hour preview", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    const seedPaidMondayVisit = () => {
+      jobs.set("j1", {
+        id: "j1",
+        servicePlanId: "p1",
+        status: "SCHEDULED",
+        scheduledDate: "2026-07-20",
+        timeWindow: "morning (8am–12pm)",
+        paidAt: "2026-07-01T00:00:00Z",
+        priceCents: 12000,
+      });
+    };
+
+    it("names a full refund at 73 hours out (Friday 7am)", async () => {
+      seedPaidMondayVisit();
+      vi.setSystemTime(new Date("2026-07-17T07:00:00-04:00")); // 73h before Mon 8am
+
+      const p = await buildCancellationPreview("p1");
+
+      expect(p.queuedVisits[0].reason).toMatch(/refunded in full/i);
+      expect(p.queuedVisits[0].reason).toContain("$120.00");
+    });
+
+    it("names the retained payment at 71 hours out (Friday 9am)", async () => {
+      seedPaidMondayVisit();
+      vi.setSystemTime(new Date("2026-07-17T09:00:00-04:00")); // 71h before Mon 8am
+
+      const p = await buildCancellationPreview("p1");
+
+      expect(p.queuedVisits[0].reason).toMatch(/isn't refunded/i);
+      expect(p.queuedVisits[0].reason).not.toMatch(/credit/i);
+    });
   });
 });
 

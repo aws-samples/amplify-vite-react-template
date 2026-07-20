@@ -190,7 +190,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
   PAID_VISIT_CANCELLATION: {
     severity: "CRITICAL",
     customerImpact:
-      "A paid, canceled visit still owes the customer a refund, credit, or invoice void.",
+      "A paid, canceled visit still has an unresolved refund or invoice disposition.",
     ownerTeam: "FINANCE",
     verified: [
       {

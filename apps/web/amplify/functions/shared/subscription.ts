@@ -254,7 +254,12 @@ const emptyResolution = (): QueuedVisitsResolution => ({
  */
 export async function cancelQueuedPlanVisits(
   servicePlanId: string,
-  cause: string
+  cause: string,
+  /** GL-08: the accepted-cancellation instant (ms) that anchors the hour-exact
+   *  72-hour refund line — the same instant the plan's cancellationRequestedAt
+   *  records. Passed from every caller so a resume judges the moment the
+   *  customer was entitled to, not the retry. Defaults to now for safety. */
+  nowMs: number = Date.now()
 ): Promise<QueuedVisitsResolution> {
   const client = await dataClient();
   const resolution = emptyResolution();
@@ -301,10 +306,16 @@ export async function cancelQueuedPlanVisits(
           : job.paidAt
             ? Math.max(0, job.priceCents ?? 0)
             : 0;
+      // GL-08: hour-exact against the visit's Eastern scheduled start, judged
+      // from the accepted-cancellation instant — matching the office path
+      // (visitChange.driveHeldVisitCancel) so preview, this write, and the
+      // office button all agree with the customer-facing copy.
       const policy = computeVisitCancellationPolicy({
         scheduledDate: job.scheduledDate ?? null,
         amountPaidCents: paidCents,
         today,
+        nowMs,
+        timeWindow: job.timeWindow ?? null,
       });
 
       const note = `Auto-canceled ${new Date().toISOString().slice(0, 10)}: ${cause}.${
@@ -497,6 +508,13 @@ export async function cancelPlanBilling(
   });
   if (!plan) throw new Error(`Service plan ${servicePlanId} not found`);
 
+  // GL-08 R3: the accepted-cancellation instant. Anchored once here so the
+  // plan record, the hour-exact refund sweep below, and any resume all judge
+  // the 72-hour line from the SAME moment — a prior anchor survives a retry.
+  const acceptedCancelAt =
+    (plan as { cancellationRequestedAt?: string | null }).cancellationRequestedAt ??
+    new Date().toISOString();
+
   let stripeSubscriptionCanceled = false;
   if (plan.stripeSubscriptionId) {
     try {
@@ -536,9 +554,7 @@ export async function cancelPlanBilling(
       // the office button and the deactivation sweep included, not just the
       // customer portal. Without this stamp a charge that posts after the
       // cancel is judged pre-request and escapes the full-refund gate.
-      cancellationRequestedAt:
-        (plan as { cancellationRequestedAt?: string | null })
-          .cancellationRequestedAt ?? new Date().toISOString(),
+      cancellationRequestedAt: acceptedCancelAt,
     });
   if (!canceledPlan) {
     throw new Error(
@@ -556,7 +572,8 @@ export async function cancelPlanBilling(
   try {
     queuedVisits = await cancelQueuedPlanVisits(
       servicePlanId,
-      "the service plan was canceled"
+      "the service plan was canceled",
+      Date.parse(acceptedCancelAt)
     );
   } catch (err) {
     console.error(
