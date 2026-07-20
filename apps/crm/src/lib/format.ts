@@ -37,6 +37,12 @@ export const addDays = (isoDate: string, days: number) => {
   return d.toISOString().slice(0, 10);
 };
 
+/** Monday of the week containing `isoDate` (the shop's weeks start Monday). */
+export const startOfWeek = (isoDate: string) => {
+  const dow = new Date(`${isoDate}T12:00:00`).getDay(); // 0 Sun … 6 Sat
+  return addDays(isoDate, -((dow + 6) % 7));
+};
+
 export const prettyWeekday = (isoDate: string) =>
   new Date(`${isoDate}T12:00:00`).toLocaleDateString("en-US", {
     weekday: "long",

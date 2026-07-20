@@ -1209,6 +1209,59 @@ a.customer-profile-value {
 .week-chip-active strong { color: var(--brand-dark); }
 .week-chip-today span { color: var(--brand); font-weight: 700; }
 
+/* ---------- Schedule: per-technician week ---------- */
+
+.sched-weeknav { align-items: center; }
+.sched-weeknav-range { text-align: center; }
+.sched-weeknav-range > strong { display: block; font-size: 15px; }
+.sched-weeknav-range > span { font-size: 12px; color: var(--muted); }
+
+.tech-week {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin: 2px 0 12px;
+}
+.tech-day {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 5px 2px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  cursor: pointer;
+  color: var(--muted);
+  min-height: 56px;
+}
+.tech-day-dow { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.tech-day-num { font-size: 15px; font-weight: 600; color: var(--ink); }
+.tech-day-count { font-size: 10px; line-height: 1.2; text-align: center; }
+.tech-day.has-stops { border-color: var(--line-strong); }
+.tech-day.has-stops .tech-day-count { color: var(--brand); font-weight: 700; }
+.tech-day.is-active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.tech-day.is-active .tech-day-num { color: var(--brand-dark); }
+.tech-day.is-today .tech-day-dow { color: var(--brand); font-weight: 700; }
+
+.tech-day-detail-head { align-items: center; margin-bottom: 4px; }
+.tech-day-detail-head > strong { font-size: 14px; }
+
+.sched-capacity-toggle {
+  appearance: none;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  cursor: pointer;
+  color: var(--ink);
+  align-items: center;
+}
+
 /* ---------- Schedule availability ---------- */
 
 .availability-card .card-head {

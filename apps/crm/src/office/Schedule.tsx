@@ -14,7 +14,13 @@ import {
   type TechnicianLicenseRecord,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { addDays, fmtDate, prettyWeekday, todayEastern } from "../lib/format";
+import {
+  addDays,
+  fmtDate,
+  prettyWeekday,
+  startOfWeek,
+  todayEastern,
+} from "../lib/format";
 import { assignBlockedNote, unassignBlockedNote } from "../lib/unassignStop";
 import {
   Badge,
@@ -42,45 +48,66 @@ function technicianComplianceIssue(
   return null;
 }
 
+const DOW_LABEL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
 /**
- * Day board: one card per active technician (their route for the selected
- * day — created on demand, so every tech always has a daily route), plus
- * the "needs scheduling" pool of unassigned jobs.
+ * The schedule: a list of technicians, each with their own week calendar.
+ * Every tech card shows a Mon–Sun strip (stop count per day) over the
+ * shared focused day, whose stops appear beneath the strip with the
+ * routing controls. The "needs scheduling" pool assigns onto the focused
+ * day, and the day's booking-availability / time-off controls collapse
+ * below the list.
  */
 export default function Schedule() {
-  const [date, setDate] = useState(todayEastern());
+  const [weekStart, setWeekStart] = useState(() => startOfWeek(todayEastern()));
+  const [selDate, setSelDate] = useState(todayEastern());
   const [techs, setTechs] = useState<Technician[] | null>(null);
   const [routes, setRoutes] = useState<Route[]>([]);
-  const [dayJobs, setDayJobs] = useState<Job[]>([]);
+  const [weekJobs, setWeekJobs] = useState<Job[]>([]);
   const [poolJobs, setPoolJobs] = useState<Job[]>([]);
   const [customers, setCustomers] = useState<Map<string, Customer>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [assigning, setAssigning] = useState<Job | null>(null);
   const [addingTech, setAddingTech] = useState(false);
   const [editingTech, setEditingTech] = useState<Technician | null>(null);
+  const [showCapacity, setShowCapacity] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const thisWeekStart = startOfWeek(todayEastern());
 
   const load = useCallback(async () => {
     setError(null);
+    const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
     try {
       // Every list is paged to exhaustion: a filtered scan counts the limit
       // against rows scanned, not rows matched, so a single page can silently
-      // drop stops from the board and the pool past a few hundred jobs.
-      const [techList, routeList, jobsOnDate, unscheduled, customerList] =
+      // drop stops from the board and the pool past a few hundred jobs. The
+      // week's jobs and routes are each loaded per day (there is no by-week
+      // index), so switching the focused day inside the week never refetches.
+      const [techList, routesByDay, jobsByDay, unscheduled, customerList] =
         await Promise.all([
           listAll((t) =>
             api().models.Technician.list({ limit: 200, nextToken: t })
           ),
-          listAll((t) =>
-            api().models.Route.listRouteByDate(
-              { date },
-              { limit: 200, nextToken: t }
+          Promise.all(
+            days.map((d) =>
+              listAll((t) =>
+                api().models.Route.listRouteByDate(
+                  { date: d },
+                  { limit: 200, nextToken: t }
+                )
+              )
             )
           ),
-          listAll((t) =>
-            api().models.Job.listJobByScheduledDate(
-              { scheduledDate: date },
-              { limit: 500, nextToken: t }
+          Promise.all(
+            days.map((d) =>
+              listAll((t) =>
+                api().models.Job.listJobByScheduledDate(
+                  { scheduledDate: d },
+                  { limit: 500, nextToken: t }
+                )
+              )
             )
           ),
           listAll((t) =>
@@ -95,25 +122,27 @@ export default function Schedule() {
           ),
         ]);
       setTechs(techList.filter((t) => t.active));
-      setRoutes(routeList);
-      const onDate = jobsOnDate.filter((j) => j.status !== "CANCELED");
-      setDayJobs(onDate);
-      setPoolJobs([
-        // COMPLETED / IN_PROGRESS / CANCELED never belong in the pool. A
-        // NO_ACCESS visit does, but only to be rebooked — the render offers
-        // Rebook, not Assign — so it is let through the assign-blocked filter.
-        ...onDate.filter(
-          (j) =>
-            !j.routeId &&
-            (!assignBlockedNote(j.status) || j.status === "NO_ACCESS")
-        ),
-        ...unscheduled.filter((j) => j.scheduledDate !== date),
-      ]);
+      setRoutes(routesByDay.flat());
+      const inWeek = jobsByDay.flat().filter((j) => j.status !== "CANCELED");
+      setWeekJobs(inWeek);
+      // COMPLETED / IN_PROGRESS / CANCELED never belong in the pool. A
+      // NO_ACCESS visit does, but only to be rebooked — the render offers
+      // Rebook, not Assign — so it is let through the assign-blocked filter.
+      // Dated-but-unrouted stops anywhere in the week join the always-present
+      // UNSCHEDULED jobs; dedupe by id so a row can't appear twice.
+      const pool = new Map<string, Job>();
+      for (const j of inWeek) {
+        if (!j.routeId && (!assignBlockedNote(j.status) || j.status === "NO_ACCESS")) {
+          pool.set(j.id, j);
+        }
+      }
+      for (const j of unscheduled) pool.set(j.id, j);
+      setPoolJobs([...pool.values()]);
       setCustomers(new Map(customerList.map((c) => [c.id, c])));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load schedule");
     }
-  }, [date]);
+  }, [weekStart]);
 
   useEffect(() => {
     setTechs(null);
@@ -121,13 +150,18 @@ export default function Schedule() {
   }, [load]);
 
   /** Every technician has a daily route by default — created on first use. */
-  const ensureRoute = async (technicianId: string): Promise<Route> => {
-    const existing = routes.find((r) => r.technicianId === technicianId);
+  const ensureRoute = async (
+    technicianId: string,
+    day: string
+  ): Promise<Route> => {
+    const existing = routes.find(
+      (r) => r.technicianId === technicianId && r.date === day
+    );
     if (existing) return existing;
     const created = unwrap(
       await api().models.Route.create({
         technicianId,
-        date,
+        date: day,
         status: "PLANNED",
       })
     );
@@ -147,11 +181,12 @@ export default function Schedule() {
     setBusy(job.id);
     setError(null);
     try {
-      const route = await ensureRoute(technicianId);
+      // Pool assignment lands on the focused day.
+      const route = await ensureRoute(technicianId, selDate);
       const order =
         Math.max(
           0,
-          ...dayJobs
+          ...weekJobs
             .filter((j) => j.routeId === route.id)
             .map((j) => j.routeOrder ?? 0)
         ) + 1;
@@ -162,7 +197,7 @@ export default function Schedule() {
           routeId: route.id,
           technicianId,
           routeOrder: order,
-          scheduledDate: date,
+          scheduledDate: selDate,
           // The board is the routing surface — its controlled reason IS routing.
           reasonCode: "ROUTING",
         })
@@ -261,40 +296,49 @@ export default function Schedule() {
       }
     >
       <Card>
-        <div className="row-split">
-          <Button small variant="ghost" onClick={() => setDate(addDays(date, -1))}>
-            ‹ Prev
+        <div className="row-split sched-weeknav">
+          <Button
+            small
+            variant="ghost"
+            onClick={() => {
+              setWeekStart(addDays(weekStart, -7));
+              setSelDate(addDays(selDate, -7));
+            }}
+          >
+            ‹ Prev week
           </Button>
-          <div style={{ textAlign: "center" }}>
-            <strong>{prettyWeekday(date)}</strong>
-            {date !== todayEastern() ? (
+          <div className="sched-weeknav-range">
+            <strong>
+              {fmtDate(weekStart)} – {fmtDate(addDays(weekStart, 6))}
+            </strong>
+            <span>Showing {prettyWeekday(selDate)}</span>
+            {weekStart !== thisWeekStart ? (
               <div>
-                <Button small variant="subtle" onClick={() => setDate(todayEastern())}>
-                  Jump to today
+                <Button
+                  small
+                  variant="subtle"
+                  onClick={() => {
+                    setWeekStart(thisWeekStart);
+                    setSelDate(todayEastern());
+                  }}
+                >
+                  Jump to this week
                 </Button>
               </div>
             ) : null}
           </div>
-          <Button small variant="ghost" onClick={() => setDate(addDays(date, 1))}>
-            Next ›
+          <Button
+            small
+            variant="ghost"
+            onClick={() => {
+              setWeekStart(addDays(weekStart, 7));
+              setSelDate(addDays(selDate, 7));
+            }}
+          >
+            Next week ›
           </Button>
         </div>
-        <div className="week-strip">
-          {Array.from({ length: 7 }, (_, i) => addDays(date, i - 3)).map((d) => (
-            <button
-              key={d}
-              type="button"
-              className={`week-chip${d === date ? " week-chip-active" : ""}${d === todayEastern() ? " week-chip-today" : ""}`}
-              onClick={() => setDate(d)}
-            >
-              <span>{new Date(`${d}T12:00:00`).toLocaleDateString("en-US", { weekday: "short" })}</span>
-              <strong>{Number(d.slice(8, 10))}</strong>
-            </button>
-          ))}
-        </div>
       </Card>
-
-      <AvailabilityPanel date={date} techs={techs ?? []} />
 
       <ErrorNote error={error} />
       {!techs ? (
@@ -303,11 +347,15 @@ export default function Schedule() {
         <>
           {poolJobs.length > 0 ? (
             <Card title={`Needs scheduling (${poolJobs.length})`}>
+              <p className="muted small" style={{ marginTop: 0 }}>
+                Assigning adds the stop to {prettyWeekday(selDate)} — pick a
+                different day on any technician below to change that.
+              </p>
               {poolJobs.map((j) => (
                 <ListRow
                   key={j.id}
                   title={customerName(j)}
-                  subtitle={`${j.serviceType}${j.scheduledDate && j.scheduledDate !== date ? ` · wants ${fmtDate(j.scheduledDate)}` : ""}${customerCity(j) ? ` · ${customerCity(j)}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
+                  subtitle={`${j.serviceType}${j.scheduledDate && j.scheduledDate !== selDate ? ` · wants ${fmtDate(j.scheduledDate)}` : ""}${customerCity(j) ? ` · ${customerCity(j)}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
                   meta={
                     j.status === "NO_ACCESS" ? (
                       <>
@@ -345,15 +393,24 @@ export default function Schedule() {
             />
           ) : (
             techs.map((tech) => {
-              const complianceIssue = technicianComplianceIssue(tech, date);
-              const route = routes.find((r) => r.technicianId === tech.id);
-              const routeJobs = dayJobs
-                .filter((j) => j.routeId && j.routeId === route?.id)
+              // One glance at the week comes straight from the jobs — a stop's
+              // technicianId + scheduledDate is its assignment, no per-day
+              // route lookup needed for the counts.
+              const techJobs = weekJobs.filter(
+                (j) => j.routeId && j.technicianId === tech.id
+              );
+              const dayJobs = techJobs
+                .filter((j) => j.scheduledDate === selDate)
                 .sort((a, b) => (a.routeOrder ?? 0) - (b.routeOrder ?? 0));
+              const complianceIssue = technicianComplianceIssue(tech, selDate);
+              const route = routes.find(
+                (r) => r.technicianId === tech.id && r.date === selDate
+              );
+              const weekTotal = techJobs.length;
               return (
                 <Card
                   key={tech.id}
-                  title={`${tech.name} — ${routeJobs.length} stop${routeJobs.length === 1 ? "" : "s"}`}
+                  title={`${tech.name} — ${weekTotal} stop${weekTotal === 1 ? "" : "s"} this week`}
                   actions={
                     <>
                       {complianceIssue ? (
@@ -361,54 +418,108 @@ export default function Schedule() {
                       ) : (
                         <Badge tone="ok">license current</Badge>
                       )}
-                      {route ? <StatusBadge status={route.status} /> : <Badge tone="muted">empty route</Badge>}
                       <Button small variant="ghost" onClick={() => setEditingTech(tech)}>
                         Edit
                       </Button>
                     </>
                   }
                 >
-                  {routeJobs.length === 0 ? (
-                    <p className="muted small">No stops on this day's route.</p>
-                  ) : (
-                    routeJobs.map((j, i) => {
-                      const blocked = unassignBlockedNote(j.status, tech.name);
+                  <div className="tech-week" role="group" aria-label={`${tech.name} week`}>
+                    {weekDays.map((d, i) => {
+                      const count = techJobs.filter(
+                        (j) => j.scheduledDate === d
+                      ).length;
+                      const isActive = d === selDate;
+                      const isToday = d === todayEastern();
                       return (
-                        <ListRow
-                          key={j.id}
-                          title={`${i + 1}. ${customerName(j)}`}
-                          subtitle={`${j.serviceType}${j.timeWindow ? ` · ${j.timeWindow}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
-                          meta={
-                            <>
-                              <StatusBadge status={j.status} />
-                              <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                                <Button small variant="ghost" disabled={i === 0 || busy === j.id} onClick={() => void bump(j, -1, routeJobs)}>
-                                  ↑
-                                </Button>
-                                <Button small variant="ghost" disabled={i === routeJobs.length - 1 || busy === j.id} onClick={() => void bump(j, 1, routeJobs)}>
-                                  ↓
-                                </Button>
-                                {/* ✕ is a scheduling move, not an eraser: a
-                                    completed or in-progress stop gets the
-                                    honest words instead of a status flip. */}
-                                {blocked ? (
-                                  <span className="muted small">{blocked}</span>
-                                ) : (
-                                  <Button small variant="ghost" loading={busy === j.id} onClick={() => void unassign(j)}>
-                                    ✕
-                                  </Button>
-                                )}
-                              </span>
-                            </>
-                          }
-                        />
+                        <button
+                          key={d}
+                          type="button"
+                          aria-pressed={isActive}
+                          className={`tech-day${count ? " has-stops" : ""}${isActive ? " is-active" : ""}${isToday ? " is-today" : ""}`}
+                          onClick={() => setSelDate(d)}
+                        >
+                          <span className="tech-day-dow">{DOW_LABEL[i]}</span>
+                          <span className="tech-day-num">{Number(d.slice(8, 10))}</span>
+                          <span className="tech-day-count">
+                            {count ? `${count} stop${count === 1 ? "" : "s"}` : "—"}
+                          </span>
+                        </button>
                       );
-                    })
-                  )}
+                    })}
+                  </div>
+
+                  <div className="tech-day-detail">
+                    <div className="row-split tech-day-detail-head">
+                      <strong>{prettyWeekday(selDate)}</strong>
+                      {route ? (
+                        <StatusBadge status={route.status} />
+                      ) : (
+                        <Badge tone="muted">no route yet</Badge>
+                      )}
+                    </div>
+                    {dayJobs.length === 0 ? (
+                      <p className="muted small">No stops on this day.</p>
+                    ) : (
+                      dayJobs.map((j, i) => {
+                        const blocked = unassignBlockedNote(j.status, tech.name);
+                        return (
+                          <ListRow
+                            key={j.id}
+                            title={`${i + 1}. ${customerName(j)}`}
+                            subtitle={`${j.serviceType}${j.timeWindow ? ` · ${j.timeWindow}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
+                            meta={
+                              <>
+                                <StatusBadge status={j.status} />
+                                <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                                  <Button small variant="ghost" disabled={i === 0 || busy === j.id} onClick={() => void bump(j, -1, dayJobs)}>
+                                    ↑
+                                  </Button>
+                                  <Button small variant="ghost" disabled={i === dayJobs.length - 1 || busy === j.id} onClick={() => void bump(j, 1, dayJobs)}>
+                                    ↓
+                                  </Button>
+                                  {/* ✕ is a scheduling move, not an eraser: a
+                                      completed or in-progress stop gets the
+                                      honest words instead of a status flip. */}
+                                  {blocked ? (
+                                    <span className="muted small">{blocked}</span>
+                                  ) : (
+                                    <Button small variant="ghost" loading={busy === j.id} onClick={() => void unassign(j)}>
+                                      ✕
+                                    </Button>
+                                  )}
+                                </span>
+                              </>
+                            }
+                          />
+                        );
+                      })
+                    )}
+                  </div>
                 </Card>
               );
             })
           )}
+
+          <Card className="sched-capacity">
+            <button
+              type="button"
+              className="sched-capacity-toggle row-split"
+              aria-expanded={showCapacity}
+              onClick={() => setShowCapacity((v) => !v)}
+            >
+              <strong>Booking availability & time off</strong>
+              <span aria-hidden="true">{showCapacity ? "▲" : "▼"}</span>
+            </button>
+            {showCapacity ? (
+              <AvailabilityPanel date={selDate} techs={techs ?? []} />
+            ) : (
+              <p className="muted small" style={{ margin: "8px 0 0" }}>
+                Capacity for {prettyWeekday(selDate)}, company closures, and
+                technician PTO. Open to review or edit.
+              </p>
+            )}
+          </Card>
         </>
       )}
 
@@ -418,20 +529,20 @@ export default function Schedule() {
         title={`Assign — ${assigning ? customerName(assigning) : ""}`}
       >
         <p className="muted small">
-          Assign to a technician's route for {prettyWeekday(date)}.
+          Assign to a technician's route for {prettyWeekday(selDate)}.
         </p>
         {(techs ?? []).map((t) => (
           <Button
             key={t.id}
             block
             variant="ghost"
-            disabled={technicianComplianceIssue(t, date) !== null}
+            disabled={technicianComplianceIssue(t, selDate) !== null}
             loading={busy === assigning?.id}
             onClick={() => assigning && void assign(assigning, t.id)}
           >
             {t.name}
-            {technicianComplianceIssue(t, date)
-              ? ` — ${technicianComplianceIssue(t, date)}`
+            {technicianComplianceIssue(t, selDate)
+              ? ` — ${technicianComplianceIssue(t, selDate)}`
               : ""}
           </Button>
         ))}
