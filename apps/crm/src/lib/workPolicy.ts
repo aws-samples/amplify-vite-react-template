@@ -39,9 +39,10 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       "A paid visit couldn't be completed — no one could get in — and the plan is left without a next visit.",
     verified: [],
     externalAction: { mutation: "rebookJob", label: "Rebook visit" },
+    // GL-10 locked rule: no access is a NONREFUNDABLE cancellation — there is
+    // deliberately no refund disposition here (matches the server).
     manualReasons: [
       { code: "CUSTOMER_DECLINED_REBOOK", label: "Customer declined a rebook" },
-      { code: "REFUNDED_INSTEAD", label: "Refunded instead of rebooking" },
       { code: "RESOLVED_OFFLINE", label: "Resolved with the customer offline" },
       OTHER,
     ],
@@ -407,6 +408,126 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
     manualReasons: [
       { code: "REVIEWED_APPROPRIATE", label: "Reviewed — appropriate use" },
       { code: "REVIEWED_COACHED", label: "Reviewed — coached the employee" },
+      OTHER,
+    ],
+  },
+  PRICING_RESEARCH_EXHAUSTED: {
+    label: "Pricing research parked",
+    severity: "HIGH",
+    customerImpact:
+      "AI pricing repeatedly failed for a service + area, so those quotes fall back to a callback instead of an instant price.",
+    verified: [],
+    manualReasons: [
+      { code: "RESEARCH_RETRIED", label: "Research retried from Market Rates" },
+      { code: "PRICE_SET_MANUALLY", label: "Price set by hand (row pinned)" },
+      { code: "COMBO_RETIRED", label: "Combo retired — not offered here" },
+      OTHER,
+    ],
+  },
+  PRICING_CHANGE_REVIEW: {
+    label: "Daily price review",
+    severity: "ROUTINE",
+    customerImpact:
+      "New live prices are quoting to customers and await their recorded daily review.",
+    verified: [],
+    manualReasons: [
+      { code: "REVIEWED_OK", label: "Reviewed — prices stand" },
+      { code: "REVIEWED_CORRECTED", label: "Reviewed — corrected on Market Rates" },
+      { code: "REVIEWED_ROLLED_BACK", label: "Reviewed — catalog rolled back" },
+      OTHER,
+    ],
+  },
+  SERVICE_CATALOG_DECISION: {
+    label: "Catalog decision",
+    severity: "HIGH",
+    customerImpact:
+      "A customer asked for a service outside the catalog — they are waiting on whether BuzzKill sells it.",
+    verified: [],
+    manualReasons: [
+      { code: "ADDED_TO_CATALOG", label: "Added to the catalog (engineering change) and customer scheduled" },
+      { code: "MAPPED_TO_EXISTING", label: "It maps to an existing catalog service — job created" },
+      { code: "DECLINED_TOLD_CUSTOMER", label: "Declined — customer told we don't offer it" },
+      OTHER,
+    ],
+  },
+  CUSTOMER_REQUEST: {
+    label: "Portal request",
+    severity: "HIGH",
+    customerImpact:
+      "A customer submitted a portal request (reschedule or help) and is waiting on the office's answer.",
+    verified: [],
+    externalAction: { mutation: "resolvePortalRequest", label: "Resolve with an answer" },
+    manualReasons: [
+      { code: "RESOLVED_VIA_REQUEST", label: "Resolved through the portal request (see its note)" },
+      OTHER,
+    ],
+  },
+  INFRA_ALERT: {
+    label: "System alert",
+    severity: "HIGH",
+    customerImpact:
+      "A background system failed — reminders, reconciliation, or email tracking may be silently behind until it's fixed.",
+    verified: [],
+    manualReasons: [
+      { code: "RECOVERED_VERIFIED", label: "Recovered — verified healthy" },
+      { code: "ESCALATED_ENGINEERING", label: "Escalated to engineering" },
+      OTHER,
+    ],
+  },
+  MONEY_MISMATCH: {
+    label: "Money mismatch",
+    severity: "CRITICAL",
+    customerImpact:
+      "Stripe and the CRM disagree about a payment or refund — someone's money is recorded wrong until this reconciles.",
+    verified: [],
+    manualReasons: [
+      { code: "RECONCILED_CORRECTED", label: "Reconciled — record corrected, Finance signed" },
+      { code: "PROVIDER_TIMING", label: "Provider timing — verified it self-resolved" },
+      OTHER,
+    ],
+  },
+  PLAN_MISMATCH: {
+    label: "Plan mismatch",
+    severity: "CRITICAL",
+    customerImpact:
+      "A customer's recurring billing and their CRM plan disagree — they may be charged for a canceled plan or served without revenue.",
+    verified: [],
+    manualReasons: [
+      { code: "BILLING_CORRECTED", label: "Billing corrected — provider and CRM agree" },
+      { code: "PLAN_CORRECTED", label: "CRM plan corrected to match reality" },
+      OTHER,
+    ],
+  },
+  STATE_MISMATCH: {
+    label: "State mismatch",
+    severity: "HIGH",
+    customerImpact:
+      "A customer's status, schedule, and money tell different stories — a deactivated customer could be visited, or canceled work could hold live money.",
+    verified: [],
+    manualReasons: [
+      { code: "STATE_CORRECTED", label: "State corrected — status, schedule, and money agree" },
+      OTHER,
+    ],
+  },
+  BALANCE_COLLECTION: {
+    label: "Unpaid balance",
+    severity: "CRITICAL",
+    customerImpact:
+      "The visit was completed but the customer's bank payment failed afterward — the invoice is an unpaid balance.",
+    verified: [{ id: "BALANCE_SETTLED", label: "Confirm the balance is settled" }],
+    manualReasons: [
+      { code: "WRITTEN_OFF", label: "Balance written off (Finance approval)" },
+      OTHER,
+    ],
+  },
+  PAYMENT_PROCESSING_OVERDUE: {
+    label: "Payment overdue",
+    severity: "HIGH",
+    customerImpact:
+      "A customer's bank payment has been processing longer than expected — the scheduled visit is riding on money that hasn't settled.",
+    verified: [{ id: "PAYMENT_RESOLVED", label: "Confirm the payment reached a final state" }],
+    manualReasons: [
+      { code: "PROVIDER_CONFIRMED_PENDING", label: "Stripe confirms it is still processing normally" },
       OTHER,
     ],
   },
