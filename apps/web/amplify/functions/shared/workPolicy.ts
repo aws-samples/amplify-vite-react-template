@@ -49,6 +49,7 @@ export type WorkKind =
   | "PRICING_CHANGE_REVIEW"
   | "SERVICE_CATALOG_DECISION"
   | "INFRA_ALERT"
+  | "CUSTOMER_REQUEST"
   | "MONEY_MISMATCH"
   | "PLAN_MISMATCH"
   | "STATE_MISMATCH"
@@ -541,6 +542,20 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "ADDED_TO_CATALOG", label: "Added to the catalog (engineering change) and customer scheduled" },
       { code: "MAPPED_TO_EXISTING", label: "It maps to an existing catalog service — job created" },
       { code: "DECLINED_TOLD_CUSTOMER", label: "Declined — customer told we don't offer it" },
+      OTHER,
+    ],
+  },
+  CUSTOMER_REQUEST: {
+    severity: "HIGH",
+    // GL-11: a customer asked for something through the portal (reschedule /
+    // help) and is watching the case there — same one-business-day clock.
+    customerImpact:
+      "A customer submitted a portal request (reschedule or help) and is waiting on the office's answer.",
+    ownerTeam: "OPS",
+    verified: [],
+    externalAction: { mutation: "resolvePortalRequest", label: "Resolve with an answer" },
+    manualReasons: [
+      { code: "RESOLVED_VIA_REQUEST", label: "Resolved through the portal request (see its note)" },
       OTHER,
     ],
   },

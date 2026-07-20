@@ -36,6 +36,7 @@ import PortalHome from "./portal/Home";
 import PortalDocs from "./portal/Docs";
 import PortalBilling from "./portal/Billing";
 import PortalGroup from "./portal/Group";
+import PortalRequests from "./portal/Requests";
 import Welcome from "./pages/Welcome";
 
 export default function App({ backendReady }: { backendReady: boolean }) {
@@ -229,6 +230,7 @@ function Shell() {
         <Route path="/portal" element={<Require when={roles.customer}><PortalHome /></Require>} />
         <Route path="/portal/docs" element={<Require when={roles.customer}><PortalDocs /></Require>} />
         <Route path="/portal/billing" element={<Require when={roles.customer}><PortalBilling /></Require>} />
+        <Route path="/portal/requests" element={<Require when={roles.customer}><PortalRequests /></Require>} />
         <Route path="/portal/group" element={<Require when={roles.customer}><PortalGroup /></Require>} />
 
         <Route path="/more" element={<More />} />
@@ -262,6 +264,7 @@ function Shell() {
               <Tab to="/portal" icon="home" label="Home" />
               <Tab to="/portal/docs" icon="documents" label="Documents" />
               <Tab to="/portal/billing" icon="billing" label="Billing" />
+              <Tab to="/portal/requests" icon="schedule" label="Requests" />
               {myGroupIds(roles).length > 0 ? (
                 <Tab to="/portal/group" icon="group" label="Group" />
               ) : null}

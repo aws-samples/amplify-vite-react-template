@@ -375,6 +375,43 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         String(upArgs.contentType ?? "")
       );
     }
+    case "submitPortalRequest": {
+      // GL-11: a portal customer may submit only for their OWN account; the
+      // office may act for anyone.
+      const prArgs = event.arguments as unknown as {
+        customerId?: string;
+        kind?: string;
+        jobId?: string | null;
+        preferredDate?: string | null;
+        message?: string | null;
+      };
+      const prCustomerId = String(prArgs.customerId ?? "");
+      if (
+        !callerIsOffice(event.identity) &&
+        !callerGroups(event.identity).includes(cusGroup(prCustomerId))
+      ) {
+        throw new Error("You can only submit a request for your own account");
+      }
+      return submitPortalRequest({
+        customerId: prCustomerId,
+        kind: String(prArgs.kind ?? ""),
+        jobId: prArgs.jobId,
+        preferredDate: prArgs.preferredDate,
+        message: prArgs.message,
+      });
+    }
+    case "resolvePortalRequest": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      const rpArgs = event.arguments as unknown as {
+        portalRequestId?: string;
+        note?: string;
+      };
+      return resolvePortalRequest(
+        String(rpArgs.portalRequestId ?? ""),
+        String(rpArgs.note ?? ""),
+        callerEmail(event.identity)
+      );
+    }
     case "scheduleCallback": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       const scArgs = event.arguments as unknown as {
@@ -611,6 +648,135 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       throw new Error(`Unknown field ${opFieldName(event)}`);
   }
 };
+
+/**
+ * GL-11 — a portal reschedule/help request: one durable case the customer
+ * watches in the portal, one deduplicated owned item on the shared Office
+ * queue (common one-business-day clock). Success is reported only after
+ * BOTH exist — a failed submission surfaces to the customer to retry,
+ * never a silent fallback to an untracked phone call.
+ */
+const PORTAL_REQUEST_KINDS = new Set(["RESCHEDULE", "HELP"]);
+async function submitPortalRequest(opts: {
+  customerId: string;
+  kind: string;
+  jobId?: string | null;
+  preferredDate?: string | null;
+  message?: string | null;
+}): Promise<{ reference: string }> {
+  if (!PORTAL_REQUEST_KINDS.has(opts.kind)) {
+    throw new Error("Pick a request type");
+  }
+  const client = await dataClient();
+  if (!("PortalRequest" in client.models)) {
+    throw new Error("Requests are not available right now — call the office.");
+  }
+  const { data: customer } = await client.models.Customer.get({
+    id: opts.customerId,
+  });
+  if (!customer) throw new Error("Customer not found");
+  if (opts.kind === "RESCHEDULE") {
+    if (!opts.jobId) throw new Error("Pick the visit to reschedule");
+    const { data: job } = await client.models.Job.get({ id: opts.jobId });
+    if (!job || job.customerId !== opts.customerId) {
+      throw new Error("That visit doesn't belong to this account");
+    }
+    if (job.status !== "SCHEDULED" && job.status !== "UNSCHEDULED") {
+      throw new Error("That visit can't be rescheduled — call the office and we'll help");
+    }
+  } else if (!opts.message?.trim()) {
+    throw new Error("Tell us what you need help with");
+  }
+  const id = `pr-${randomUUID()}`;
+  const { data: created } = await client.models.PortalRequest.create({
+    id,
+    customerId: opts.customerId,
+    kind: opts.kind,
+    jobId: opts.jobId ?? undefined,
+    preferredDate: opts.preferredDate ?? undefined,
+    message: opts.message?.trim() || undefined,
+    status: "OPEN",
+    accessGroups: customerAccessGroups(
+      opts.customerId,
+      customer.groupId ?? undefined
+    ),
+  });
+  if (!created) throw new Error("The request could not be saved — try again");
+  const opened = await openOwnedWork({
+    kind: "CUSTOMER_REQUEST",
+    dedupeKey: id,
+    title:
+      opts.kind === "RESCHEDULE"
+        ? `Reschedule request: ${customer.displayName ?? opts.customerId}`
+        : `Help request: ${customer.displayName ?? opts.customerId}`,
+    detail:
+      opts.kind === "RESCHEDULE"
+        ? `The customer asked to reschedule visit ${opts.jobId}${opts.preferredDate ? ` (prefers ${opts.preferredDate})` : ""}${opts.message?.trim() ? ` — "${opts.message.trim()}"` : ""}. Answer within one business day; the customer watches request ${id} in the portal.`
+        : `The customer asked for help: "${opts.message?.trim()}". Answer within one business day; the customer watches request ${id} in the portal.`,
+    customerId: opts.customerId,
+    relatedId: id,
+    sourceUrl: `/customers/${opts.customerId}`,
+    resolutionAction:
+      "Handle the request with the customer, then resolve it WITH AN ANSWER from the customer screen (the portal shows your note).",
+    ownerTeam: "OPS",
+  });
+  if (!opened) {
+    // The case exists but the queue item does not — the promise would be
+    // invisible to the office. Fail loudly so the customer retries (the
+    // deduped id means a retry converges, never duplicates).
+    await client.models.PortalRequest.delete({ id }).catch(() => undefined);
+    throw new Error(
+      "The request couldn't reach the office queue — nothing was saved. Please try again, or call us."
+    );
+  }
+  return { reference: id };
+}
+
+async function resolvePortalRequest(
+  portalRequestId: string,
+  note: string,
+  actorEmail: string | null
+): Promise<{ resolved: true }> {
+  if (!note.trim()) throw new Error("Write the answer the customer will see");
+  const client = await dataClient();
+  const { data: pr } = await client.models.PortalRequest.get({
+    id: portalRequestId,
+  });
+  if (!pr) throw new Error("Request not found");
+  const { data: updated } = await client.models.PortalRequest.update({
+    id: pr.id,
+    status: "RESOLVED",
+    resolutionNote: note.trim().slice(0, 1000),
+    resolvedByEmail: actorEmail ?? "office",
+    resolvedAt: new Date().toISOString(),
+  });
+  if (!updated) throw new Error("The request could not be resolved — try again");
+  await resolveOwnedWork({
+    kind: "CUSTOMER_REQUEST",
+    dedupeKey: pr.id,
+    note: `Resolved with the customer-visible answer: ${note.trim().slice(0, 300)}`,
+  });
+  const { data: customer } = await client.models.Customer.get({
+    id: pr.customerId,
+  });
+  if (customer?.email) {
+    await sendEmail({
+      to: customer.email,
+      subject: "Your request has been answered",
+      template: "portal-request-resolved",
+      customerId: pr.customerId,
+      relatedId: pr.id,
+      html: emailShell(
+        "Your request has been answered",
+        `<p>Hi ${customer.displayName ?? "there"},</p>
+         <p>Your ${pr.kind === "RESCHEDULE" ? "reschedule" : "help"} request (${pr.id}) has been handled:</p>
+         <p><strong>${note.trim()}</strong></p>
+         <p style="color:#666;font-size:13px;">You can also see this in your portal. Anything else — just reply.</p>`
+      ),
+    }).catch(() => undefined);
+  }
+  return { resolved: true };
+}
 
 /** GL-10 — presigned PUT for the callback's REQUIRED customer photo. Keys
  *  land under callbacks/<customerId>/ so the existing document entitlements

@@ -108,6 +108,7 @@ type AdminCreateUserArgs = {
 type SetCustomerGroupArgs = {
   customerId: string;
   groupId?: string | null;
+  reason?: string | null;
 };
 
 type CustomerIdArgs = { customerId: string };
@@ -229,7 +230,10 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
       });
     }
     case "setCustomerGroup":
-      return setCustomerGroup(event.arguments as SetCustomerGroupArgs);
+      return setCustomerGroup(event.arguments as SetCustomerGroupArgs, {
+        sub: callerSub(event.identity),
+        email: callerEmail(event.identity),
+      });
     case "revokePortalAccess": {
       const customerId = (event.arguments as CustomerIdArgs).customerId;
       try {
@@ -839,7 +843,10 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
  *   2. accessGroups on every child record
  *   3. the portal user's Cognito group membership (grp-*)
  */
-async function setCustomerGroup(args: SetCustomerGroupArgs) {
+async function setCustomerGroup(
+  args: SetCustomerGroupArgs,
+  actor: { sub: string | null; email: string | null }
+) {
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({
     id: args.customerId,
@@ -868,6 +875,26 @@ async function setCustomerGroup(args: SetCustomerGroupArgs) {
     groupId: newGroupId,
     accessGroups,
   });
+
+  // GL-11: membership changes are audited — who changed it, when, and why —
+  // and the accessGroups rewrite below removes stale group access in the
+  // same pass. Best-effort: an audit-write fault must not strand the change
+  // half-applied, but it is never silent.
+  try {
+    if ("CustomerLifecycleEvent" in client.models) {
+      await client.models.CustomerLifecycleEvent.create({
+        customerId: args.customerId,
+        action: "GROUP_CHANGE",
+        actorSub: actor.sub ?? undefined,
+        actorEmail: actor.email ?? "office",
+        reason: args.reason?.trim() || undefined,
+        effects: `group: ${customer.groupId ?? "none"} → ${newGroupId ?? "none"}`,
+        occurredAt: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.error("setCustomerGroup: audit write failed", err);
+  }
 
   // Rewrite accessGroups on all child records.
   const filter = { customerId: { eq: args.customerId } };

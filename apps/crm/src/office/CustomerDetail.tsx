@@ -1766,6 +1766,7 @@ export default function CustomerDetail() {
       </Sheet>
 
       <CallbacksSection customerId={customer.id} onChanged={load} />
+      <PortalRequestsSection customerId={customer.id} />
 
       <Sheet open={sheet === "job"} onClose={() => setSheet(null)} title="New job">
         <JobForm
@@ -1810,9 +1811,10 @@ export default function CustomerDetail() {
         <GroupPicker
           groups={groups}
           currentGroupId={customer.groupId}
-          onPick={async (groupId) => {
+          onPick={async (groupId, reason) => {
             unwrap(
               await api().mutations.setCustomerGroup({
+                reason,
                 customerId: customer.id,
                 groupId: groupId ?? undefined,
               })
@@ -3027,9 +3029,10 @@ function GroupPicker({
 }: {
   groups: CustomerGroup[];
   currentGroupId?: string | null;
-  onPick: (groupId: string | null) => Promise<void>;
+  onPick: (groupId: string | null, reason: string) => Promise<void>;
 }) {
   const [value, setValue] = useState(currentGroupId ?? "");
+  const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
@@ -3047,13 +3050,23 @@ function GroupPicker({
           ))}
         </select>
       </Field>
+      {/* GL-11: membership changes grant/remove real portal access across the
+          group, so every change records who, when, and why. */}
+      <Field label="Why is this changing?">
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="e.g. new property manager for Maple Ridge"
+        />
+      </Field>
       <ErrorNote error={error} />
       <Button
         block
         loading={busy}
+        disabled={!reason.trim()}
         onClick={() => {
           setBusy(true);
-          onPick(value || null).catch((err) => {
+          onPick(value || null, reason.trim()).catch((err) => {
             setError(err.message ?? "Could not update group");
             setBusy(false);
           });
@@ -3062,6 +3075,126 @@ function GroupPicker({
         Save group
       </Button>
     </div>
+  );
+}
+
+/**
+ * GL-11 — the customer's portal requests (reschedule / help), with the one
+ * office action: resolve WITH AN ANSWER the customer sees in their portal
+ * (and by email). Resolving here also closes the shared-queue item.
+ */
+type PortalRequestRow = {
+  id: string;
+  kind: string;
+  jobId?: string | null;
+  preferredDate?: string | null;
+  message?: string | null;
+  status: string;
+  resolutionNote?: string | null;
+  createdAt?: string | null;
+};
+
+function PortalRequestsSection({ customerId }: { customerId: string }) {
+  const [rows, setRows] = useState<PortalRequestRow[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadRows = useCallback(async () => {
+    try {
+      const models = api().models as unknown as {
+        PortalRequest?: {
+          listPortalRequestByCustomerId: (a: {
+            customerId: string;
+            limit?: number;
+          }) => Promise<{ data: PortalRequestRow[] }>;
+        };
+      };
+      if (!models.PortalRequest) {
+        setRows([]);
+        return;
+      }
+      const { data } = await models.PortalRequest.listPortalRequestByCustomerId(
+        { customerId, limit: 100 }
+      );
+      setRows(data ?? []);
+    } catch {
+      setRows([]);
+    }
+  }, [customerId]);
+  useEffect(() => {
+    void loadRows();
+  }, [loadRows]);
+
+  if (!rows || rows.length === 0) return null;
+
+  const resolve = async (r: PortalRequestRow) => {
+    const note = window.prompt(
+      "The answer the customer will see in their portal and by email:"
+    );
+    if (!note?.trim()) return;
+    setBusyId(r.id);
+    setError(null);
+    try {
+      opResult(
+        await (
+          api().mutations as unknown as {
+            resolvePortalRequest: (a: {
+              portalRequestId: string;
+              note: string;
+            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
+          }
+        ).resolvePortalRequest({ portalRequestId: r.id, note: note.trim() })
+      );
+      await loadRows();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not resolve");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <Card title="Portal requests">
+      <ErrorNote error={error} />
+      {rows
+        .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
+        .map((r) => (
+          <ListRow
+            key={r.id}
+            title={r.kind === "RESCHEDULE" ? "Reschedule request" : "Help request"}
+            subtitle={
+              <>
+                {[
+                  r.jobId ? `visit ${r.jobId}` : null,
+                  r.preferredDate ? `prefers ${fmtDate(r.preferredDate, true)}` : null,
+                  r.message ?? null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+                {r.resolutionNote ? (
+                  <span className="nested-line">Answered: {r.resolutionNote}</span>
+                ) : null}
+              </>
+            }
+            meta={
+              r.status === "RESOLVED" ? (
+                <Badge tone="ok">answered</Badge>
+              ) : (
+                <>
+                  <Badge tone="warn">open</Badge>
+                  <Button
+                    small
+                    loading={busyId === r.id}
+                    onClick={() => void resolve(r)}
+                  >
+                    Resolve with an answer
+                  </Button>
+                </>
+              )
+            }
+          />
+        ))}
+    </Card>
   );
 }
 

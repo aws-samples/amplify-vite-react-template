@@ -237,6 +237,8 @@ export const schema = a.schema({
     // GL-22: a CloudWatch alarm fired (Lambda errors, a scheduled job that
     // never ran, dead-lettered email events) — owned within one business day.
     "INFRA_ALERT",
+    // GL-11: a portal customer's reschedule/help request awaiting the office.
+    "CUSTOMER_REQUEST",
     // GL-19: daily reconciliation mismatches — provider money vs the CRM
     // ledger, provider subscriptions vs CRM plans, and lifecycle/visit state
     // that disagrees with money or schedule. Finance signs money outcomes.
@@ -1124,6 +1126,29 @@ export const schema = a.schema({
   // row also carries the once-only daily-digest claim. Office/OWNER read
   // these for the Market Rates screen's engine panel; only the refresh
   // worker writes them (via guarded DynamoDB writes).
+  // GL-11 — a portal customer's own reschedule/help requests: submitted from
+  // the portal, visible there as a durable case (reference + status), owned
+  // on the shared Office queue with the common one-business-day clock, and
+  // resolved by the office with a recorded outcome. Never an untracked call.
+  PortalRequest: a
+    .model({
+      customerId: a.id().required(),
+      kind: a.string().required(), // RESCHEDULE | HELP
+      jobId: a.id(),
+      preferredDate: a.date(),
+      message: a.string(),
+      status: a.string().required(), // OPEN | RESOLVED
+      resolutionNote: a.string(),
+      resolvedByEmail: a.string(),
+      resolvedAt: a.datetime(),
+      accessGroups: a.string().array(),
+    })
+    .secondaryIndexes((index) => [index("customerId")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groupsDefinedIn("accessGroups").to(["read"]),
+    ]),
+
   // GL-10 — one guarantee callback per original completed appointment (the
   // row id is `cb-<originalJobId>`, so the one-callback rule is a
   // conditional create, not a policy someone remembers). The customer photo
@@ -2232,6 +2257,8 @@ export const schema = a.schema({
     .arguments({
       customerId: a.string().required(),
       groupId: a.string(),
+      // GL-11: membership changes are audited — who, when, why.
+      reason: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -3296,6 +3323,37 @@ export const schema = a.schema({
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * GL-11 — a portal customer's reschedule/help request. The server verifies
+   * the caller owns the customer, creates the durable case the portal shows,
+   * and puts it on the shared Office queue — a failed submission surfaces as
+   * an error to retry, never a silent fallback to a phone call.
+   */
+  submitPortalRequest: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      kind: a.string().required(), // RESCHEDULE | HELP
+      jobId: a.string(),
+      preferredDate: a.date(),
+      message: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** GL-11 — the office resolves a portal request with a recorded outcome
+   *  (also resolves its shared-queue item). */
+  resolvePortalRequest: a
+    .mutation()
+    .arguments({
+      portalRequestId: a.string().required(),
+      note: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmDocs)),
 
   /** GL-10 — presigned PUT for the callback's required customer photo. */

@@ -1986,3 +1986,127 @@ describe("GL-01 — office jobs are controlled catalog selections", () => {
     expect(String(decision.detail)).toContain("No job was created");
   });
 });
+
+describe("GL-11 — portal requests are durable cases, never untracked calls", () => {
+  const portalRequests = new Map<string, Record<string, unknown>>();
+  let workItemBlocked = false;
+
+  beforeEach(() => {
+    portalRequests.clear();
+    workItemBlocked = false;
+    (fakeDataClient.models as Record<string, unknown>).PortalRequest = {
+      get: async ({ id }: { id: string }) => ({
+        data: portalRequests.get(id) ?? null,
+      }),
+      create: async (input: Record<string, unknown> & { id: string }) => {
+        portalRequests.set(input.id, { ...input });
+        return { data: portalRequests.get(input.id) };
+      },
+      update: async (patch: Record<string, unknown> & { id: string }) => {
+        const row = portalRequests.get(patch.id);
+        if (!row) return { data: null, errors: [{ message: "no row" }] };
+        Object.assign(row, patch);
+        return { data: { ...row } };
+      },
+      delete: async ({ id }: { id: string }) => {
+        portalRequests.delete(id);
+        return { data: null };
+      },
+    };
+    const realCreate = fakeDataClient.models.WorkItem.create;
+    (fakeDataClient.models.WorkItem as Record<string, unknown>).create = async (
+      input: Record<string, unknown> & { id: string }
+    ) => {
+      if (workItemBlocked) return { data: null, errors: [{ message: "refused" }] };
+      return realCreate(input as never);
+    };
+  });
+
+  it("a customer submits for their OWN account: durable case + owned queue item + reference", async () => {
+    const res = (await call(
+      "submitPortalRequest",
+      { customerId: "c1", kind: "HELP", message: "Is my plan seasonal?" },
+      ["CUSTOMER", "cus-c1"]
+    )) as { reference: string };
+
+    expect(res.reference).toMatch(/^pr-/);
+    expect(portalRequests.get(res.reference)).toMatchObject({
+      customerId: "c1",
+      kind: "HELP",
+      status: "OPEN",
+    });
+    const item = workItems.find((w) => w.kind === "CUSTOMER_REQUEST")!;
+    expect(item).toBeTruthy();
+    expect(String(item.detail)).toContain("Is my plan seasonal?");
+  });
+
+  it("a customer cannot submit for someone else's account", async () => {
+    await expect(
+      call(
+        "submitPortalRequest",
+        { customerId: "c1", kind: "HELP", message: "hi" },
+        ["CUSTOMER", "cus-OTHER"]
+      )
+    ).rejects.toThrow(/own account/);
+  });
+
+  it("a reschedule must name the customer's OWN live visit", async () => {
+    jobs[0].status = "SCHEDULED";
+    const res = (await call(
+      "submitPortalRequest",
+      {
+        customerId: "c1",
+        kind: "RESCHEDULE",
+        jobId: "j1",
+        preferredDate: "2026-07-30",
+      },
+      ["CUSTOMER", "cus-c1"]
+    )) as { reference: string };
+    expect(portalRequests.get(res.reference)).toMatchObject({
+      kind: "RESCHEDULE",
+      jobId: "j1",
+    });
+
+    await expect(
+      call(
+        "submitPortalRequest",
+        { customerId: "c1", kind: "RESCHEDULE", jobId: "nope" },
+        ["CUSTOMER", "cus-c1"]
+      )
+    ).rejects.toThrow(/doesn't belong/);
+  });
+
+  it("if the shared-queue item cannot be created, the submission FAILS and nothing is saved", async () => {
+    workItemBlocked = true;
+
+    await expect(
+      call(
+        "submitPortalRequest",
+        { customerId: "c1", kind: "HELP", message: "hello" },
+        ["CUSTOMER", "cus-c1"]
+      )
+    ).rejects.toThrow(/couldn't reach the office queue/);
+    expect(portalRequests.size).toBe(0); // no half-saved promise
+  });
+
+  it("resolving records the customer-visible answer and closes the queue item", async () => {
+    const res = (await call(
+      "submitPortalRequest",
+      { customerId: "c1", kind: "HELP", message: "question" },
+      ["CUSTOMER", "cus-c1"]
+    )) as { reference: string };
+
+    await call(
+      "resolvePortalRequest",
+      { portalRequestId: res.reference, note: "Yes — April through October." },
+      ["OFFICE"]
+    );
+
+    expect(portalRequests.get(res.reference)).toMatchObject({
+      status: "RESOLVED",
+      resolutionNote: "Yes — April through October.",
+    });
+    const item = workItems.find((w) => w.kind === "CUSTOMER_REQUEST")!;
+    expect(item.status).toBe("RESOLVED");
+  });
+});
