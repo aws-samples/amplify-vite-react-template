@@ -78,6 +78,33 @@ const backend = defineBackend({
 backend.auth.resources.cfnResources.cfnUserPool.adminCreateUserConfig = {
   allowAdminCreateUserOnly: true,
 };
+// The pre-token trigger (auth/resource.ts) must run as a V2_0 Lambda so it can
+// add `email`/`name` to the ACCESS token — the default V1 trigger Amplify wires
+// can only modify the id token, and Amplify's Data client signs AppSync with
+// the access token. defineAuth already created the function and Cognito's
+// invoke permission via triggers.preTokenGeneration (which populates
+// lambdaConfig.preTokenGeneration with the arn); here we re-point Cognito at the
+// same Lambda through preTokenGenerationConfig, which takes precedence and
+// selects the V2 event contract. Reusing the arn keeps the existing IAM wiring.
+{
+  const cfnUserPool = backend.auth.resources.cfnResources.cfnUserPool;
+  const lambdaConfig =
+    (cfnUserPool.lambdaConfig as { preTokenGeneration?: string } | undefined) ??
+    undefined;
+  const preTokenArn = lambdaConfig?.preTokenGeneration;
+  if (!preTokenArn) {
+    throw new Error(
+      "Expected defineAuth to wire the pre-token trigger before the V2_0 override."
+    );
+  }
+  cfnUserPool.lambdaConfig = {
+    ...lambdaConfig,
+    preTokenGenerationConfig: {
+      lambdaArn: preTokenArn,
+      lambdaVersion: "V2_0",
+    },
+  };
+}
 backend.auth.resources.cfnResources.cfnUserPoolClient.explicitAuthFlows = [
   "ALLOW_USER_SRP_AUTH",
   "ALLOW_CUSTOM_AUTH",

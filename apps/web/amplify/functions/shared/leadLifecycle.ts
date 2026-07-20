@@ -406,7 +406,13 @@ export async function logLeadTouch(
   },
   actor: LeadActor
 ): Promise<{ ok: true; nextAction: string; nextActionAt: string }> {
-  if (!actor.sub || !actor.email) throw new Error("A staffed Office actor is required.");
+  // The stable identity is the token's `sub`; `email` is not carried by the
+  // Cognito access token Amplify sends (only the id token has it), so it may be
+  // null for a UUID-username login (e.g. the hand-provisioned owner). The body
+  // already falls back on a missing email — leadOwnerEmail defaults to the sales
+  // work owner and activity rows to a system actor — so `sub` is all this guard
+  // needs. (createLead never guarded email at all, for the same reason.)
+  if (!actor.sub) throw new Error("A staffed Office actor is required.");
   if (!(LEAD_TOUCH_CHANNELS as readonly string[]).includes(args.channel)) throw new Error("Unknown contact channel.");
   if (!(LEAD_TOUCH_OUTCOMES as readonly string[]).includes(args.outcome)) throw new Error("Pick what actually happened on this touch.");
   if (!OUTCOMES_BY_CHANNEL[args.channel]?.includes(args.outcome)) {
@@ -629,7 +635,11 @@ export async function setLeadDisposition(
   },
   actor: LeadActor
 ): Promise<{ ok: true; disposition: string }> {
-  if (!actor.sub || !actor.email) throw new Error("A staffed Office actor is required.");
+  // `sub` is the stable identity; email may be absent (see logLeadTouch). Each
+  // disposition path already tolerates a null email: doNotContactBy falls back
+  // to the sub, the DNC-clear audit to "unknown owner", and activity rows to a
+  // system actor.
+  if (!actor.sub) throw new Error("A staffed Office actor is required.");
   const mutationId = mutationKey("disposition", args.idempotencyKey);
   const claim = await acquireLeadLifecycleClaim(args.customerId, mutationId);
   if (!claim.won) throw new Error("Another lead action is in progress. Retry this same action.");

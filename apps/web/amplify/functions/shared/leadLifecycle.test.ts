@@ -438,6 +438,40 @@ describe("setLeadDisposition (GL-02 R5)", () => {
     });
   });
 
+  it("works for an actor without an email, recording the sub as who decided", async () => {
+    // The Cognito access token Amplify signs AppSync with carries no `email`
+    // claim, so a UUID-username login (e.g. the hand-provisioned owner) reaches
+    // here with sub only. Closing must not be blocked; who-decided falls back
+    // to the sub rather than "A staffed Office actor is required."
+    const emaillessActor = { sub: "owner-uuid", email: null };
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "Dana" });
+    await setLeadDisposition(
+      { customerId: "l1", disposition: "LOST", reasonCode: "NO_RESPONSE" },
+      emaillessActor
+    );
+    expect(customers.get("l1")).toMatchObject({ lostReason: "NO_RESPONSE" });
+
+    customers.set("l2", { id: "l2", status: "LEAD", displayName: "Ravi" });
+    await setLeadDisposition(
+      { customerId: "l2", disposition: "DNC" },
+      emaillessActor
+    );
+    expect(customers.get("l2")).toMatchObject({
+      doNotContact: true,
+      doNotContactBy: "owner-uuid",
+    });
+  });
+
+  it("still requires a sub", async () => {
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "Dana" });
+    await expect(
+      setLeadDisposition(
+        { customerId: "l1", disposition: "LOST", reasonCode: "PRICE" },
+        { sub: null, email: null }
+      )
+    ).rejects.toThrow(/staffed Office actor/i);
+  });
+
   it("only an owner can clear DNC, with controlled evidence", async () => {
     customers.set("l1", {
       id: "l1",
