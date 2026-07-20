@@ -807,6 +807,252 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+/* ---------- Customer detail hierarchy ---------- */
+
+.customer-summary-card {
+  display: grid;
+  gap: 12px;
+}
+
+.customer-summary-status,
+.portal-access-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.portal-access-line p {
+  margin: 0;
+}
+
+.permission-tooltip {
+  display: inline-flex;
+}
+
+.customer-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.customer-note svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.customer-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px 18px;
+}
+
+.customer-profile-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.customer-profile-item > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--brand);
+}
+
+.customer-profile-item > div {
+  min-width: 0;
+}
+
+.customer-profile-wide {
+  grid-column: 1 / -1;
+}
+
+.customer-profile-label,
+.customer-profile-value {
+  display: block;
+}
+
+.customer-profile-label {
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.customer-profile-value {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+a.customer-profile-value {
+  color: var(--brand-dark);
+  text-decoration: none;
+}
+
+.customer-group-value {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.text-action {
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand-dark);
+  font: inherit;
+  font-weight: 650;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--brand) 38%, transparent);
+  text-underline-offset: 2px;
+}
+
+.customer-group-action {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.attention-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.customer-job-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 330px;
+}
+
+.records-card > .card-head {
+  margin-bottom: 2px;
+}
+
+.record-section {
+  border-top: 1px solid var(--line);
+}
+
+.record-section > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 2px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.record-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.record-section-chevron {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  transition: transform 0.15s;
+}
+
+.record-section[open] .record-section-chevron {
+  transform: rotate(90deg);
+}
+
+.record-section-body {
+  padding: 0 2px 8px;
+}
+
+.records-empty,
+.records-read-error {
+  margin: 2px 0 8px;
+}
+
+.records-read-error {
+  color: var(--danger);
+}
+
+.lifecycle-summary {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.history-technical-detail {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.history-technical-detail summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--brand-dark);
+  font-size: 12px;
+}
+
+.history-technical-detail > span {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .customer-summary-status,
+  .portal-access-line {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .customer-profile-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .customer-profile-wide {
+    grid-column: auto;
+  }
+
+  .customer-job-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .customer-job-row .list-row-main,
+  .customer-job-row .list-row-meta {
+    width: 100%;
+  }
+
+  .customer-job-row .list-row-meta {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .customer-job-meta {
+    justify-content: flex-start;
+    max-width: none;
+  }
+}
+
 /* ---------- Auth screen ---------- */
 
 .auth-shell {
@@ -1222,7 +1468,7 @@ textarea {
   position: fixed;
   left: 12px;
   right: 12px;
-  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 12px);
+  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 18px);
   z-index: 40;
   margin: 0 auto;
   max-width: 560px;
@@ -1234,6 +1480,7 @@ textarea {
   border-radius: 16px;
   box-shadow: var(--shadow-lg);
   padding: 12px 14px;
+  isolation: isolate;
   animation: banner-in 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 
@@ -1270,13 +1517,23 @@ textarea {
 }
 
 .install-banner-close {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 42px;
+  height: 42px;
+  min-height: 42px;
   border: none;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted);
   font-size: 14px;
-  padding: 12px 10px;
-  margin: -8px -4px -8px -6px;
-  flex: none;
+  padding: 0;
+  margin: -5px -7px -5px -4px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 body.has-install-banner .app-frame {

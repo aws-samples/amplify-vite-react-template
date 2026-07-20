@@ -101,9 +101,18 @@ export default function InstallBanner() {
           Install
         </Button>
         <button
+          type="button"
           className="install-banner-close"
           aria-label="Dismiss"
-          onClick={dismiss}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            // The banner sits above the persistent navigation. Consume the
+            // gesture before unmounting so a dismissal can never become a tap
+            // on the More tab underneath it.
+            e.preventDefault();
+            e.stopPropagation();
+            dismiss();
+          }}
         >
           ✕
         </button>

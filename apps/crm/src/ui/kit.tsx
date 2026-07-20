@@ -222,15 +222,17 @@ export function ListRow({
   subtitle,
   meta,
   onClick,
+  className,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
   meta?: ReactNode;
   onClick?: () => void;
+  className?: string;
 }) {
   return (
     <div
-      className={`list-row ${onClick ? "list-row-tappable" : ""}`}
+      className={`list-row ${onClick ? "list-row-tappable" : ""} ${className ?? ""}`}
       onClick={onClick}
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   api,
@@ -63,12 +63,47 @@ import DocButton from "../components/DocButton";
 import PriceLeadSheet from "../components/PriceLeadSheet";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
+import { Icon } from "../ui/icons";
+import {
+  groupChangeSummary,
+  isTechnicalLifecycleReason,
+  lifecycleActionTitle,
+  lifecycleReasonSummary,
+} from "../lib/customerPresentation";
 
 /** Human-friendly label for a controlled reason code (CUSTOMER_REQUEST →
  *  "Customer request"). Mirrors the same helper on the Staff screen. */
 function reasonLabel(code: string): string {
   const s = code.replace(/_/g, " ").toLowerCase();
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function RecordSection({
+  title,
+  count,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  count: number;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <details
+      className="record-section"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary>
+        <span>{title}</span>
+        <Badge tone={count > 0 ? "info" : "muted"}>{count}</Badge>
+        <span className="record-section-chevron" aria-hidden="true">›</span>
+      </summary>
+      <div className="record-section-body">{children}</div>
+    </details>
+  );
 }
 
 /**
@@ -327,6 +362,50 @@ export default function CustomerDetail() {
     .filter(Boolean)
     .join(", ");
 
+  const statusAction =
+    customer.status === "LEAD" ? null : roles.finance ? (
+      customer.status === "ACTIVE" ? (
+        <Button
+          small
+          variant="danger"
+          loading={busyAction === "deactivate"}
+          onClick={() => {
+            setReasonCode(DEACTIVATION_REASONS[0]);
+            setReasonNote("");
+            setLifecycleSheet("deactivate");
+          }}
+        >
+          Mark inactive
+        </Button>
+      ) : (
+        <Button
+          small
+          variant="subtle"
+          loading={busyAction === "reactivate"}
+          onClick={() => {
+            setReasonCode(REACTIVATION_REASONS[0]);
+            setReasonNote("");
+            setLifecycleSheet("reactivate");
+          }}
+        >
+          Reactivate
+        </Button>
+      )
+    ) : (
+      <span
+        className="permission-tooltip"
+        title={
+          customer.status === "ACTIVE"
+            ? "Finance or an owner can mark this customer inactive, cancel billing, clear future visits, and end portal access."
+            : "Finance or an owner can reactivate this customer."
+        }
+      >
+        <Button small variant="ghost" disabled>
+          Finance / owner only
+        </Button>
+      </span>
+    );
+
   return (
     <Page
       title={customer.displayName}
@@ -342,52 +421,105 @@ export default function CustomerDetail() {
       <ErrorNote error={error} />
       <SuccessNote message={notice} />
 
-      <Card>
-        <div className="row-split" style={{ marginBottom: 8 }}>
-          <StatusBadge status={customer.status} />
-          {needsAttention ? <Badge tone="warn">no plan or upcoming job</Badge> : null}
-        </div>
-        <dl className="kv">
-          {customer.contactName ? (
-            <>
-              <dt>Contact</dt>
-              <dd>{customer.contactName}</dd>
-            </>
-          ) : null}
-          <dt>Email</dt>
-          <dd>{customer.email ?? "—"}</dd>
-          <dt>Phone</dt>
-          <dd>{customer.phone ?? "—"}</dd>
-          <dt>Address</dt>
-          <dd>{address || "—"}</dd>
-          {customer.leadSource ? (
-            <>
-              <dt>Source</dt>
-              <dd>{customer.leadSource}</dd>
-            </>
-          ) : null}
-          <dt>Group</dt>
-          <dd>
-            {group ? (
-              <a onClick={() => navigate(`/groups/${group.id}`)} style={{ color: "var(--brand)", cursor: "pointer" }}>
-                {group.name}
-              </a>
-            ) : (
-              "—"
-            )}
-            {roles.office ? (
-              <Button small variant="ghost" style={{ marginLeft: 8 }} onClick={() => setSheet("group")}>
-                Change
-              </Button>
+      <Card className="customer-summary-card">
+        <div className="customer-summary-status">
+          <div className="inline-actions">
+            <StatusBadge status={customer.status} />
+            {needsAttention ? (
+              <Badge tone="warn">no plan or upcoming job</Badge>
             ) : null}
-          </dd>
-          {customer.notes ? (
-            <>
-              <dt>Notes</dt>
-              <dd>{customer.notes}</dd>
-            </>
+          </div>
+          {statusAction}
+        </div>
+
+        {customer.notes ? (
+          <div className="customer-note">
+            <Icon name="notes" size={16} />
+            <span>{customer.notes}</span>
+          </div>
+        ) : null}
+
+        <div className="customer-profile-grid">
+          {customer.contactName ? (
+            <div className="customer-profile-item">
+              <Icon name="contact" size={18} />
+              <div>
+                <span className="customer-profile-label">Contact</span>
+                <span className="customer-profile-value">{customer.contactName}</span>
+              </div>
+            </div>
           ) : null}
-        </dl>
+          <div className="customer-profile-item">
+            <Icon name="email" size={18} />
+            <div>
+              <span className="customer-profile-label">Email</span>
+              {customer.email ? (
+                <a className="customer-profile-value" href={`mailto:${customer.email}`}>
+                  {customer.email}
+                </a>
+              ) : (
+                <span className="customer-profile-value muted">Not provided</span>
+              )}
+            </div>
+          </div>
+          <div className="customer-profile-item">
+            <Icon name="phone" size={18} />
+            <div>
+              <span className="customer-profile-label">Phone</span>
+              {customer.phone ? (
+                <a className="customer-profile-value" href={`tel:${customer.phone}`}>
+                  {customer.phone}
+                </a>
+              ) : (
+                <span className="customer-profile-value muted">Not provided</span>
+              )}
+            </div>
+          </div>
+          <div className="customer-profile-item customer-profile-wide">
+            <Icon name="address" size={18} />
+            <div>
+              <span className="customer-profile-label">Service address</span>
+              <span className="customer-profile-value">{address || "Not provided"}</span>
+            </div>
+          </div>
+          {customer.leadSource ? (
+            <div className="customer-profile-item">
+              <Icon name="leads" size={18} />
+              <div>
+                <span className="customer-profile-label">Source</span>
+                <span className="customer-profile-value">{customer.leadSource}</span>
+              </div>
+            </div>
+          ) : null}
+          <div className="customer-profile-item">
+            <Icon name="group" size={18} />
+            <div>
+              <span className="customer-profile-label">Group</span>
+              <span className="customer-profile-value customer-group-value">
+                {group ? (
+                  <button
+                    type="button"
+                    className="text-action"
+                    onClick={() => navigate(`/groups/${group.id}`)}
+                  >
+                    {group.name}
+                  </button>
+                ) : (
+                  <span className="muted">No group assigned</span>
+                )}
+                {roles.office ? (
+                  <button
+                    type="button"
+                    className="text-action customer-group-action"
+                    onClick={() => setSheet("group")}
+                  >
+                    {group ? "Change" : "Add group"}
+                  </button>
+                ) : null}
+              </span>
+            </div>
+          </div>
+        </div>
       </Card>
 
       {isLead && roles.office ? (
@@ -532,44 +664,54 @@ export default function CustomerDetail() {
             )
           }
         >
-          <p className="muted small" style={{ marginBottom: 10 }}>
-            {customer.portalLastLoginAt
-              ? `Last signed in ${fmtDateTime(customer.portalLastLoginAt)}.`
-              : customer.portalUserSub
-                ? `Invited${customer.portalInvitedAt ? ` ${fmtDate(customer.portalInvitedAt, true)}` : ""} — hasn't signed in yet.`
-                : "Invite the customer to view services, documents, and billing online."}
-          </p>
-          {/* adminCreateUser is OWNER-only server-side (deliberately). A
-              button every office employee can see but only the owner can use
-              is a dead button that teaches staff errors are normal — so it
-              renders only for the owner, and everyone else is told who to ask. */}
-          {roles.owner || customer.portalUserSub ? (
-            <div className="row-split">
+          <div className="portal-access-line">
+            <p className="muted small">
+              {customer.portalLastLoginAt
+                ? `Last signed in ${fmtDateTime(customer.portalLastLoginAt)}.`
+                : customer.portalUserSub
+                  ? `Invited${customer.portalInvitedAt ? ` ${fmtDate(customer.portalInvitedAt, true)}` : ""} — hasn't signed in yet.`
+                  : "Not invited yet."}
+            </p>
+            <div className="inline-actions">
               {roles.owner ? (
-                <Button
-                  small
-                  variant="subtle"
-                  disabled={!customer.email}
-                  loading={busyAction === "invite"}
-                  onClick={() =>
-                    void run(
-                      "invite",
-                      async () =>
-                        unwrap(
-                          await api().mutations.adminCreateUser({
-                            email: customer.email!,
-                            name: customer.contactName ?? customer.displayName,
-                            roles: ["CUSTOMER"],
-                            customerId: customer.id,
-                            resend: Boolean(customer.portalUserSub),
-                          })
-                        ),
-                      `Portal invite sent to ${customer.email}`
-                    )
-                  }
+                <span
+                  className="permission-tooltip"
+                  title={!customer.email ? "Add an email address first." : undefined}
                 >
-                  {customer.portalUserSub ? "Resend invite" : "Invite to portal"}
-                </Button>
+                  <Button
+                    small
+                    variant="subtle"
+                    disabled={!customer.email}
+                    loading={busyAction === "invite"}
+                    onClick={() =>
+                      void run(
+                        "invite",
+                        async () =>
+                          unwrap(
+                            await api().mutations.adminCreateUser({
+                              email: customer.email!,
+                              name: customer.contactName ?? customer.displayName,
+                              roles: ["CUSTOMER"],
+                              customerId: customer.id,
+                              resend: Boolean(customer.portalUserSub),
+                            })
+                          ),
+                        `Portal invite sent to ${customer.email}`
+                      )
+                    }
+                  >
+                    {customer.portalUserSub ? "Resend invite" : "Invite to portal"}
+                  </Button>
+                </span>
+              ) : !customer.portalUserSub ? (
+                <span
+                  className="permission-tooltip"
+                  title="Portal invitations are owner-only. Ask an owner to invite this customer."
+                >
+                  <Button small variant="ghost" disabled>
+                    Invite to portal
+                  </Button>
+                </span>
               ) : null}
               {customer.portalUserSub ? (
                 <Button
@@ -595,18 +737,7 @@ export default function CustomerDetail() {
                 </Button>
               ) : null}
             </div>
-          ) : null}
-          {!roles.owner ? (
-            <p className="muted small" style={{ marginTop: 8 }}>
-              Ask the owner to {customer.portalUserSub ? "resend the invite" : "invite them"} — portal
-              invites are owner-only.
-            </p>
-          ) : null}
-          {roles.owner && !customer.email ? (
-            <p className="muted small" style={{ marginTop: 8 }}>
-              Add an email address first.
-            </p>
-          ) : null}
+          </div>
         </Card>
       ) : null}
 
@@ -736,20 +867,16 @@ export default function CustomerDetail() {
         title="Jobs"
         actions={
           roles.office && customer.status === "ACTIVE" ? (
-            <Button small variant="ghost" onClick={() => setSheet("job")}>
-              + Job
+            <Button small variant="subtle" onClick={() => setSheet("job")}>
+              {activePlan && !upcomingJob ? "Schedule visit" : "+ Job"}
             </Button>
           ) : undefined
         }
       >
         {activePlan && !upcomingJob && roles.office && customer.status === "ACTIVE" ? (
-          <div className="row-split" style={{ marginBottom: 8 }}>
-            <p className="muted small" style={{ margin: 0 }}>
-              Plan is active but nothing is on the schedule.
-            </p>
-            <Button small variant="subtle" onClick={() => setSheet("job")}>
-              Schedule first visit
-            </Button>
+          <div className="attention-note" style={{ marginBottom: 8 }}>
+            <Badge tone="warn">schedule needed</Badge>
+            <span>Plan is active but nothing is on the schedule.</span>
           </div>
         ) : null}
         {jobs.length === 0 ? (
@@ -784,6 +911,7 @@ export default function CustomerDetail() {
               return (
                 <ListRow
                   key={j.id}
+                  className="customer-job-row"
                   title={j.serviceType}
                   subtitle={
                     <>
@@ -823,7 +951,7 @@ export default function CustomerDetail() {
                     </>
                   }
                   meta={
-                    <>
+                    <span className="customer-job-meta">
                       <StatusBadge status={j.status} />
                       {/* Paid online at booking. Shown on every status so the
                           row never looks chargeable to someone scanning it. */}
@@ -923,7 +1051,7 @@ export default function CustomerDetail() {
                             variant="danger"
                             onClick={() => setCancelingJob(j)}
                           >
-                            ✕
+                            Cancel visit
                           </Button>
                         </>
                       ) : null}
@@ -936,7 +1064,7 @@ export default function CustomerDetail() {
                           Packet
                         </Button>
                       ) : null}
-                    </>
+                    </span>
                   }
                 />
               );
@@ -970,16 +1098,17 @@ export default function CustomerDetail() {
         )}
       </Card>
 
-      {/* Read-only: the agreement is written by the online booking when the
-          customer accepts the terms and pays. Nothing is authored, sent, or
-          voided from here — this card is the record, not a workflow. */}
-      {roles.office ? (
-        <Card title="Agreements">
+      {/* Low-activity records share one compact area. Empty sections are one
+          summary row instead of permanent full-height cards; every record is
+          still available on demand. */}
+      <Card title="Records & history" className="records-card">
+        <RecordSection
+          title="Agreements"
+          count={agreements.length}
+          defaultOpen={agreements.length > 0}
+        >
           {agreements.length === 0 ? (
-            <p className="muted small">
-              No agreements yet — the terms the customer accepts at online
-              booking are recorded here.
-            </p>
+            <p className="muted small records-empty">No agreements.</p>
           ) : (
             agreements.map((a) => (
               <ListRow
@@ -999,12 +1128,15 @@ export default function CustomerDetail() {
               />
             ))
           )}
-        </Card>
-      ) : null}
+        </RecordSection>
 
-      <Card title="Service reports">
+        <RecordSection
+          title="Service reports"
+          count={reports.length}
+          defaultOpen={reports.length > 0}
+        >
         {reports.length === 0 ? (
-          <p className="muted small">No completed service reports.</p>
+          <p className="muted small records-empty">No completed service reports.</p>
         ) : (
           reports.map((r) => {
             const reportAmendments = amendments.filter(
@@ -1085,6 +1217,75 @@ export default function CustomerDetail() {
             );
           })
         )}
+        </RecordSection>
+
+        <RecordSection
+          title="Lifecycle history"
+          count={lifecycle.length}
+          defaultOpen={lifecycleReadFailed}
+        >
+          {lifecycleReadFailed ? (
+            <p className="small records-read-error">
+              Some history could not be read. Try again before relying on this
+              list.
+            </p>
+          ) : null}
+          {lifecycle.length === 0 && !lifecycleReadFailed ? (
+            <p className="muted small records-empty">No lifecycle changes.</p>
+          ) : null}
+          {lifecycle.map((e) => {
+            const groupSummary =
+              e.action === "GROUP_CHANGE"
+                ? groupChangeSummary(e.effects, groups)
+                : null;
+            const statusSummary =
+              e.priorStatus && e.newStatus
+                ? `${reasonLabel(e.priorStatus)} → ${reasonLabel(e.newStatus)}`
+                : null;
+            const technicalReason = isTechnicalLifecycleReason(e.reason);
+            return (
+              <ListRow
+                key={e.id}
+                title={lifecycleActionTitle(e.action)}
+                subtitle={
+                  <span>
+                    {groupSummary ? (
+                      <span className="nested-line lifecycle-summary">
+                        {groupSummary}
+                      </span>
+                    ) : null}
+                    {statusSummary ? (
+                      <span className="nested-line lifecycle-summary">
+                        Status: {statusSummary}
+                      </span>
+                    ) : null}
+                    Reason:{" "}
+                    {technicalReason
+                      ? "System verification"
+                      : lifecycleReasonSummary(e.reason)}
+                    {e.actorEmail ? ` · by ${e.actorEmail}` : ""}
+                    {e.effects || technicalReason ? (
+                      <details className="history-technical-detail">
+                        <summary>Technical details</summary>
+                        {technicalReason ? (
+                          <span>Recorded reason: {e.reason}</span>
+                        ) : null}
+                        {e.effects ? (
+                          <span>Recorded change: {e.effects}</span>
+                        ) : null}
+                      </details>
+                    ) : null}
+                  </span>
+                }
+                meta={
+                  <span className="muted small">
+                    {e.occurredAt ? fmtDateTime(e.occurredAt) : ""}
+                  </span>
+                }
+              />
+            );
+          })}
+        </RecordSection>
       </Card>
 
       {roles.office ? (
@@ -1276,99 +1477,6 @@ export default function CustomerDetail() {
               );
             })
           )}
-        </Card>
-      ) : null}
-
-      {(roles.office || roles.finance) && customer.status !== "LEAD" ? (
-        customer.status === "ACTIVE" ? (
-          roles.finance ? (
-            <Button
-              block
-              variant="danger"
-              loading={busyAction === "deactivate"}
-              onClick={() => {
-                setReasonCode(DEACTIVATION_REASONS[0]);
-                setReasonNote("");
-                setLifecycleSheet("deactivate");
-              }}
-            >
-              Mark inactive
-            </Button>
-          ) : (
-            <p className="muted small" style={{ margin: 0 }}>
-              Ask finance or an owner to mark this customer inactive — it cancels
-              their billing and ends their portal access.
-            </p>
-          )
-        ) : roles.finance ? (
-          <Button
-            block
-            variant="subtle"
-            loading={busyAction === "reactivate"}
-            onClick={() => {
-              setReasonCode(REACTIVATION_REASONS[0]);
-              setReasonNote("");
-              setLifecycleSheet("reactivate");
-            }}
-          >
-            Reactivate customer
-          </Button>
-        ) : (
-          <p className="muted small" style={{ margin: 0 }}>
-            Ask finance or an owner to reactivate this customer.
-          </p>
-        )
-      ) : null}
-
-      {/* ---------- Lifecycle history (GL-09) ---------- */}
-      {(roles.office || roles.finance) && lifecycle.length > 0 ? (
-        <Card title="Lifecycle history">
-          {lifecycleReadFailed ? (
-            <p className="small" style={{ color: "var(--danger, #b00)" }}>
-              Some history could not be read — this list may be incomplete. Try
-              again; a sensitive change must never look like it didn't happen.
-            </p>
-          ) : null}
-          {lifecycle.map((e) => {
-            const parts = String(e.reason ?? "").split(" — ");
-            const code = parts[0]?.trim();
-            const note = parts.slice(1).join(" — ").trim();
-            return (
-              <ListRow
-                key={e.id}
-                title={
-                  <span>
-                    {e.action === "DEACTIVATE" ? "Deactivated" : "Reactivated"}
-                    {e.priorStatus && e.newStatus ? (
-                      <span className="muted small">
-                        {" "}
-                        ({e.priorStatus} → {e.newStatus})
-                      </span>
-                    ) : null}
-                  </span>
-                }
-                subtitle={
-                  <span>
-                    {code ? reasonLabel(code) : "—"}
-                    {note ? ` · ${note}` : ""}
-                    {" · by "}
-                    {e.actorEmail}
-                    {e.effects ? (
-                      <>
-                        <br />
-                        <span className="muted small">{e.effects}</span>
-                      </>
-                    ) : null}
-                  </span>
-                }
-                meta={
-                  <span className="muted small">
-                    {e.occurredAt ? fmtDateTime(e.occurredAt) : ""}
-                  </span>
-                }
-              />
-            );
-          })}
         </Card>
       ) : null}
 
