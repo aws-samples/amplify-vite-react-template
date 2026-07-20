@@ -397,6 +397,16 @@ export default function TechJob() {
         </Card>
       ) : null}
 
+      {/* GL-10: a guarantee-callback visit asks the technician for ONE
+          controlled, evidenced finding — it decides whether the guarantee
+          continues or ends. */}
+      {job.id.startsWith("cbjob-") &&
+      (job.status === "SCHEDULED" ||
+        job.status === "IN_PROGRESS" ||
+        job.status === "COMPLETED") ? (
+        <CallbackFindingCard job={job} onDone={load} />
+      ) : null}
+
       {packetChanged ? (
         <Card>
           <Badge tone="warn">the packet changed</Badge>
@@ -649,6 +659,164 @@ function ScopePrepExits({ job, onDone }: { job: Job; onDone: () => Promise<void>
         </div>
       )}
       <ErrorNote error={error} />
+    </Card>
+  );
+}
+
+/**
+ * GL-10 — the callback technician's finding. Three controlled choices, an
+ * evidence note, an optional photo. TREATABLE continues the guarantee
+ * (treat and complete as normal); the other two END it — the customer gets
+ * one final notice and the CRM promises no appeal, so the words here say
+ * exactly what each tap means.
+ */
+const CALLBACK_FINDING_OPTIONS: { value: string; label: string; hint: string }[] = [
+  {
+    value: "TREATABLE_UNEXPECTED",
+    label: "Treatable, unexpected activity",
+    hint: "Covered — treat it and complete the visit as normal.",
+  },
+  {
+    value: "UNTREATABLE_CONDITION",
+    label: "Untreatable condition",
+    hint: "Ends the guarantee — the customer gets a final notice with your evidence.",
+  },
+  {
+    value: "EXPECTED_BEHAVIOR",
+    label: "Expected pest behavior",
+    hint: "Ends the guarantee — normal activity, not a treatable infestation.",
+  },
+];
+
+function CallbackFindingCard({
+  job,
+  onDone,
+}: {
+  job: Job;
+  onDone: () => Promise<void>;
+}) {
+  const [finding, setFinding] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+  const [photoKey, setPhotoKey] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const photoInput = useRef<HTMLInputElement>(null);
+  const callbackRequestId = job.id.replace(/^cbjob-/, "");
+
+  const uploadPhoto = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = opResult<{ uploadUrl: string; key: string }>(
+        await api().mutations.getNoAccessPhotoUploadUrl({
+          jobId: job.id,
+          contentType: file.type,
+        })
+      );
+      if (!res?.uploadUrl) throw new Error("Could not start the upload");
+      const put = await fetch(res.uploadUrl, {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type },
+      });
+      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+      setPhotoKey(res.key);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Photo upload failed");
+    } finally {
+      setBusy(false);
+      if (photoInput.current) photoInput.current.value = "";
+    }
+  };
+
+  const submit = async () => {
+    if (!finding || !note.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = opResult<{ status: string }>(
+        await api().mutations.recordCallbackFinding({
+          callbackRequestId,
+          finding,
+          note: note.trim(),
+          photoKey: photoKey ?? undefined,
+        })
+      );
+      setDone(res?.status ?? "recorded");
+      await onDone();
+    } catch (err) {
+      setError(
+        isConnectivityError(err)
+          ? "No connection — nothing was recorded. Try again with signal."
+          : err instanceof Error
+            ? err.message
+            : "Could not record the finding"
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <Card>
+        <Badge tone={done === "COMPLETED" ? "ok" : "warn"}>
+          finding recorded
+        </Badge>
+        <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+          {done === "COMPLETED"
+            ? "Covered — treat it and complete the visit as normal."
+            : "The guarantee is ended. The customer receives the final notice — nothing else for you to say at the door."}
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card title="Guarantee callback — what did you find?">
+      <div className="form-grid" style={{ gap: 8 }}>
+        {CALLBACK_FINDING_OPTIONS.map((o) => (
+          <div key={o.value}>
+            <Button
+              block
+              variant={finding === o.value ? "primary" : "ghost"}
+              onClick={() => setFinding(o.value)}
+            >
+              {o.label}
+            </Button>
+            {finding === o.value ? (
+              <p className="muted small" style={{ margin: "4px 0 0" }}>
+                {o.hint}
+              </p>
+            ) : null}
+          </div>
+        ))}
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="What you found, in plain words (required — it's the evidence)"
+        />
+        <input
+          ref={photoInput}
+          type="file"
+          accept="image/*"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void uploadPhoto(f);
+          }}
+        />
+        {photoKey ? <Badge tone="ok">photo attached</Badge> : null}
+        <Button
+          block
+          loading={busy}
+          disabled={!finding || !note.trim()}
+          onClick={() => void submit()}
+        >
+          Record the finding
+        </Button>
+        <ErrorNote error={error} />
+      </div>
     </Card>
   );
 }

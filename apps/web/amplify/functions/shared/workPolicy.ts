@@ -49,6 +49,9 @@ export type WorkKind =
   | "PRICING_CHANGE_REVIEW"
   | "SERVICE_CATALOG_DECISION"
   | "INFRA_ALERT"
+  | "MONEY_MISMATCH"
+  | "PLAN_MISMATCH"
+  | "STATE_MISMATCH"
   | "BALANCE_COLLECTION"
   | "PAYMENT_PROCESSING_OVERDUE";
 
@@ -117,9 +120,10 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ownerTeam: "OPS",
     verified: [],
     externalAction: { mutation: "rebookJob", label: "Rebook visit" },
+    // GL-10 locked rule: no access is a NONREFUNDABLE cancellation — there is
+    // deliberately no refund disposition here.
     manualReasons: [
       { code: "CUSTOMER_DECLINED_REBOOK", label: "Customer declined a rebook" },
-      { code: "REFUNDED_INSTEAD", label: "Refunded instead of rebooking" },
       { code: "RESOLVED_OFFLINE", label: "Resolved with the customer offline" },
       OTHER,
     ],
@@ -554,6 +558,44 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     manualReasons: [
       { code: "RECOVERED_VERIFIED", label: "Recovered — verified healthy" },
       { code: "ESCALATED_ENGINEERING", label: "Escalated to engineering" },
+      OTHER,
+    ],
+  },
+  MONEY_MISMATCH: {
+    severity: "CRITICAL",
+    // GL-19: the provider ledger and the CRM ledger disagree about money.
+    customerImpact:
+      "Stripe and the CRM disagree about a payment or refund — someone's money is recorded wrong until this reconciles.",
+    ownerTeam: "FINANCE",
+    verified: [],
+    manualReasons: [
+      { code: "RECONCILED_CORRECTED", label: "Reconciled — record corrected, Finance signed" },
+      { code: "PROVIDER_TIMING", label: "Provider timing — verified it self-resolved" },
+      OTHER,
+    ],
+  },
+  PLAN_MISMATCH: {
+    severity: "CRITICAL",
+    // GL-19: provider subscriptions and CRM plans disagree.
+    customerImpact:
+      "A customer's recurring billing and their CRM plan disagree — they may be charged for a canceled plan or served without revenue.",
+    ownerTeam: "FINANCE",
+    verified: [],
+    manualReasons: [
+      { code: "BILLING_CORRECTED", label: "Billing corrected — provider and CRM agree" },
+      { code: "PLAN_CORRECTED", label: "CRM plan corrected to match reality" },
+      OTHER,
+    ],
+  },
+  STATE_MISMATCH: {
+    severity: "HIGH",
+    // GL-19: lifecycle/visit state disagrees with money or the schedule.
+    customerImpact:
+      "A customer's status, schedule, and money tell different stories — a deactivated customer could be visited, or canceled work could hold live money.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "STATE_CORRECTED", label: "State corrected — status, schedule, and money agree" },
       OTHER,
     ],
   },

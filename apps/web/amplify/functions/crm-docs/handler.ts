@@ -94,6 +94,11 @@ import {
 } from "../shared/obligations";
 import { listAllLifecycleCommands } from "../shared/lifecycleCommand";
 import {
+  recordCallbackFinding,
+  requestCallback,
+  scheduleCallback,
+} from "../shared/callbacks";
+import {
   catalogEntry,
   entryForLabel,
   SERVICE_CATALOG_VERSION,
@@ -326,6 +331,91 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
       return completeJob(event.arguments.jobId!);
     }
+    case "requestCallback": {
+      // GL-10: a portal customer may request only for their OWN account (the
+      // dynamic cus-<id> group proves it); the office may act for anyone.
+      const cbArgs = event.arguments as unknown as {
+        customerId?: string;
+        originalJobId?: string;
+        photoKey?: string;
+        note?: string | null;
+      };
+      const cbCustomerId = String(cbArgs.customerId ?? "");
+      const office = callerIsOffice(event.identity);
+      if (
+        !office &&
+        !callerGroups(event.identity).includes(cusGroup(cbCustomerId))
+      ) {
+        throw new Error("You can only request a callback for your own account");
+      }
+      return requestCallback(
+        {
+          customerId: cbCustomerId,
+          originalJobId: String(cbArgs.originalJobId ?? ""),
+          photoKey: String(cbArgs.photoKey ?? ""),
+          note: cbArgs.note,
+        },
+        { email: callerEmail(event.identity), isOffice: office }
+      );
+    }
+    case "getCallbackPhotoUploadUrl": {
+      const upArgs = event.arguments as unknown as {
+        customerId?: string;
+        contentType?: string;
+      };
+      const upCustomerId = String(upArgs.customerId ?? "");
+      if (
+        !callerIsOffice(event.identity) &&
+        !callerGroups(event.identity).includes(cusGroup(upCustomerId))
+      ) {
+        throw new Error("You can only upload a photo for your own account");
+      }
+      return getCallbackPhotoUploadUrl(
+        upCustomerId,
+        String(upArgs.contentType ?? "")
+      );
+    }
+    case "scheduleCallback": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      const scArgs = event.arguments as unknown as {
+        callbackRequestId?: string;
+        scheduledDate?: string;
+        timeWindow?: string | null;
+        customerRequestedLater?: boolean | null;
+      };
+      return scheduleCallback({
+        callbackRequestId: String(scArgs.callbackRequestId ?? ""),
+        scheduledDate: String(scArgs.scheduledDate ?? ""),
+        timeWindow: scArgs.timeWindow,
+        customerRequestedLater: scArgs.customerRequestedLater,
+      });
+    }
+    case "recordCallbackFinding": {
+      // GL-10: the office, or the technician actually assigned to the
+      // callback visit — never an arbitrary tech with the id.
+      const fArgs = event.arguments as unknown as {
+        callbackRequestId?: string;
+        finding?: string;
+        note?: string;
+        photoKey?: string | null;
+      };
+      const fId = String(fArgs.callbackRequestId ?? "");
+      if (!callerIsOffice(event.identity)) {
+        const { data: cbRow } = await (
+          await dataClient()
+        ).models.CallbackRequest.get({ id: fId });
+        if (!cbRow?.callbackJobId) {
+          throw new Error("This callback has no scheduled visit yet");
+        }
+        await assertCanActOnJobId(event.identity, cbRow.callbackJobId);
+      }
+      return recordCallbackFinding({
+        callbackRequestId: fId,
+        finding: String(fArgs.finding ?? ""),
+        note: String(fArgs.note ?? ""),
+        photoKey: fArgs.photoKey,
+      });
+    }
     case "finalizeServiceReport": {
       await assertCanActOnReportId(event.identity, event.arguments.reportId!);
       return finalizeServiceReport(event.arguments.reportId!);
@@ -521,6 +611,28 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       throw new Error(`Unknown field ${opFieldName(event)}`);
   }
 };
+
+/** GL-10 — presigned PUT for the callback's REQUIRED customer photo. Keys
+ *  land under callbacks/<customerId>/ so the existing document entitlements
+ *  cover office viewing of the evidence. */
+const callbackS3 = new S3Client();
+async function getCallbackPhotoUploadUrl(
+  customerId: string,
+  contentType: string
+): Promise<{ uploadUrl: string; key: string }> {
+  if (!/^image\//.test(contentType)) {
+    throw new Error("The callback photo must be an image");
+  }
+  const bucket = process.env.DOCS_BUCKET;
+  if (!bucket) throw new Error("Document storage is not configured");
+  const key = `callbacks/${customerId}/${randomUUID()}`;
+  const uploadUrl = await getSignedUrl(
+    callbackS3,
+    new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
+    { expiresIn: 300 }
+  );
+  return { uploadUrl, key };
+}
 
 /**
  * GL-18 — re-confirm a verified resolution's real-world outcome server-side, so
@@ -4666,18 +4778,37 @@ async function reportNoAccess(args: {
     kind: "NO_ACCESS",
     dedupeKey: job.id,
     title: `Resolve no-access visit: ${customer?.displayName ?? job.customerId}`,
-    detail: `${label}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}. No service was performed${job.paidAt ? "; the visit was already paid up front" : " and no charge was made"}.`,
+    detail: `${label}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}. No service was performed${job.paidAt ? "; the visit was already paid up front" : " and no charge was made"}. GL-10 locked rule: no access is the appointment's NONREFUNDABLE cancellation under the 72-hour policy — there is no refund, fee, or credit decision to make. The one next step is rebooking the visit with the customer.`,
     customerId: job.customerId,
     relatedId: job.id,
     sourceUrl: `/customers/${job.customerId}`,
-    resolutionAction: job.paidAt
-      ? "Review the attendance evidence, then rebook the same paid visit or issue the approved refund and tell the customer."
-      : "Review the attendance evidence, then rebook the visit or document the approved no-charge disposition.",
+    resolutionAction:
+      "Rebook the visit with the customer (the attendance evidence is on the job). No money decision exists — the no-access outcome is nonrefundable by policy.",
     ownerTeam: "OPS",
   });
 
-  // The office owns what happens next: rebook, charge a no-access fee, or let
-  // it go. None of those are the technician's call from a driveway.
+  // GL-10: the customer hears the no-refund result and the rebooking path
+  // directly — the winner of the guarded transition sends exactly once (a
+  // replayed report loses the transition and returns alreadyReported).
+  if (customer?.email) {
+    await sendEmail({
+      to: customer.email,
+      subject: "We couldn't get in today — let's rebook your visit",
+      template: "no-access-notice",
+      customerId: job.customerId,
+      relatedId: job.id,
+      html: emailShell(
+        "We couldn't complete today's visit",
+        `<p>Hi ${customer.displayName ?? "there"},</p>
+         <p>Our technician arrived for your ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} but couldn't get access (${label.toLowerCase()}).</p>
+         <p>Under the cancellation policy, a visit we can't access counts as a same-day cancellation and <strong>isn't refundable</strong>${job.paidAt ? " — but your payment stays with your visit: we'll rebook it with you at no additional charge" : ""}.</p>
+         <p>Our office will reach out within one business day to set the new time — or just reply to this email with a day that works.</p>`
+      ),
+    }).catch(() => undefined);
+  }
+
+  // The office owns rebooking. There is no fee/refund/credit choice — the
+  // policy already decided the money.
   await notifyOffice({
     subject: `Couldn't access: ${customer?.displayName ?? job.customerId} — ${label}`,
     heading: "A technician couldn't do the job",
@@ -4686,7 +4817,7 @@ async function reportNoAccess(args: {
     relatedId: job.id,
     bodyHtml: `<p><strong>${technician?.name ?? "A technician"}</strong> attended <strong>${customer?.displayName ?? "this customer"}</strong> for ${job.serviceType}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} and couldn't do the work.</p>
        <p><strong>${label}</strong>${args.note?.trim() ? ` — ${args.note.trim()}` : ""}</p>
-       <p>No service report was filed and no new charge was made.${job.paidAt ? " This visit was already paid online, so rebook that paid service or decide the refund." : ""} The job is off the route and is waiting on a decision: rebook it${job.paidAt ? " or refund it" : " or document that no follow-up is owed"}.</p>
+       <p>No service report was filed and no new charge was made. The customer has been told the no-access outcome is nonrefundable under the policy and that we'll rebook. The one next step: <strong>rebook the visit</strong>${job.paidAt ? " (their payment stays applied to it)" : ""}.</p>
        <p style="margin:20px 0;"><a href="${CRM_URL()}/customers/${job.customerId}" style="background:#176b2c;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open the customer</a></p>`,
   });
 

@@ -237,6 +237,12 @@ export const schema = a.schema({
     // GL-22: a CloudWatch alarm fired (Lambda errors, a scheduled job that
     // never ran, dead-lettered email events) — owned within one business day.
     "INFRA_ALERT",
+    // GL-19: daily reconciliation mismatches — provider money vs the CRM
+    // ledger, provider subscriptions vs CRM plans, and lifecycle/visit state
+    // that disagrees with money or schedule. Finance signs money outcomes.
+    "MONEY_MISMATCH",
+    "PLAN_MISMATCH",
+    "STATE_MISMATCH",
     // GL-06: a bank debit failed AFTER the visit was performed — the invoice
     // is a balance due and the shared queue owns collection.
     "BALANCE_COLLECTION",
@@ -1118,6 +1124,52 @@ export const schema = a.schema({
   // row also carries the once-only daily-digest claim. Office/OWNER read
   // these for the Market Rates screen's engine panel; only the refresh
   // worker writes them (via guarded DynamoDB writes).
+  // GL-10 — one guarantee callback per original completed appointment (the
+  // row id is `cb-<originalJobId>`, so the one-callback rule is a
+  // conditional create, not a policy someone remembers). The customer photo
+  // is retained; the technician's controlled finding and evidence end or
+  // continue the guarantee; portal customers read their own via accessGroups.
+  CallbackRequest: a
+    .model({
+      customerId: a.id().required(),
+      originalJobId: a.id().required(),
+      servicePlanId: a.id(),
+      photoKey: a.string().required(),
+      note: a.string(),
+      status: a.string().required(), // REQUESTED | SCHEDULED | COMPLETED | GUARANTEE_ENDED
+      acceptedOn: a.date(),
+      promisedBy: a.date(),
+      scheduledDate: a.date(),
+      customerRequestedLater: a.boolean(),
+      callbackJobId: a.id(),
+      finding: a.string(), // TREATABLE_UNEXPECTED | UNTREATABLE_CONDITION | EXPECTED_BEHAVIOR
+      findingNote: a.string(),
+      findingPhotoKey: a.string(),
+      foundAt: a.datetime(),
+      terminalNoticeSentAt: a.datetime(),
+      accessGroups: a.string().array(),
+    })
+    .secondaryIndexes((index) => [index("customerId")])
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groupsDefinedIn("accessGroups").to(["read"]),
+    ]),
+
+  // GL-19: one row per daily leadership reconciliation run (id
+  // "<KIND>#<date>") — the Command view reads the latest MONEY / PLANS /
+  // STATE summaries without anyone querying production. Written only by the
+  // daily reconcile; mismatch DETAIL lives on the owned WorkItems.
+  ReconRun: a
+    .model({
+      kind: a.string().required(), // MONEY | PLANS | STATE
+      runDate: a.date().required(),
+      summary: a.json(),
+      mismatches: a.integer(),
+      healthy: a.boolean(),
+    })
+    .secondaryIndexes((index) => [index("kind").sortKeys(["runDate"])])
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+
   // GL-22: the emergency pause switchboard (one row, id "pause"). Authorized
   // incident owners flip these through the OWNER-only setOpsPause mutation;
   // the funnel refuses new bookings, scheduling refuses new dispatch, and
@@ -3226,6 +3278,62 @@ export const schema = a.schema({
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * GL-10 — request a guarantee callback (portal customer or office on the
+   * customer's behalf). The server enforces every locked rule: active
+   * residual plan only, completed original visit, required photo, one
+   * callback per appointment, reference + 7-business-day return promise.
+   */
+  requestCallback: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      originalJobId: a.string().required(),
+      photoKey: a.string().required(),
+      note: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** GL-10 — presigned PUT for the callback's required customer photo. */
+  getCallbackPhotoUploadUrl: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      contentType: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** GL-10 — the office schedules the callback visit ($0 by construction),
+   *  no later than the promised return unless the customer chose later. */
+  scheduleCallback: a
+    .mutation()
+    .arguments({
+      callbackRequestId: a.string().required(),
+      scheduledDate: a.date().required(),
+      timeWindow: a.string(),
+      customerRequestedLater: a.boolean(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** GL-10 — the callback technician's controlled, evidenced finding. */
+  recordCallbackFinding: a
+    .mutation()
+    .arguments({
+      callbackRequestId: a.string().required(),
+      finding: a.string().required(),
+      note: a.string().required(),
+      photoKey: a.string(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /**

@@ -84,6 +84,11 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-22: a background failure surfaced by an alarm — the same common
   // one-business-day owned response, escalated by the normal overdue sweep.
   INFRA_ALERT: 24 * 60,
+  // GL-19: daily reconciliation mismatches — the common one-business-day
+  // clock; Finance signs the money outcomes.
+  MONEY_MISMATCH: 24 * 60,
+  PLAN_MISMATCH: 24 * 60,
+  STATE_MISMATCH: 24 * 60,
   // GL-06: work performed, bank debit failed after — collection is money-
   // critical but the customer was noticed; the common one-business-day clock.
   BALANCE_COLLECTION: 24 * 60,

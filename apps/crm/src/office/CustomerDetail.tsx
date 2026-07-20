@@ -1765,6 +1765,8 @@ export default function CustomerDetail() {
         ) : null}
       </Sheet>
 
+      <CallbacksSection customerId={customer.id} onChanged={load} />
+
       <Sheet open={sheet === "job"} onClose={() => setSheet(null)} title="New job">
         <JobForm
           plans={plans}
@@ -3060,5 +3062,191 @@ function GroupPicker({
         Save group
       </Button>
     </div>
+  );
+}
+
+/**
+ * GL-10 — the customer's guarantee callbacks: reference, promise clock,
+ * photo evidence, the one scheduling action (never beyond the promised
+ * return unless the customer chose later), and the technician's finding
+ * once recorded. Money never appears — a callback visit is $0 by
+ * construction.
+ */
+type CallbackRow = {
+  id: string;
+  originalJobId: string;
+  status: string;
+  photoKey?: string | null;
+  note?: string | null;
+  promisedBy?: string | null;
+  scheduledDate?: string | null;
+  callbackJobId?: string | null;
+  finding?: string | null;
+  findingNote?: string | null;
+};
+
+const CALLBACK_STATUS_LABEL: Record<string, string> = {
+  REQUESTED: "needs scheduling",
+  SCHEDULED: "scheduled",
+  COMPLETED: "completed — guarantee continues",
+  GUARANTEE_ENDED: "guarantee ended by finding",
+};
+
+function CallbacksSection({
+  customerId,
+  onChanged,
+}: {
+  customerId: string;
+  onChanged: () => Promise<void>;
+}) {
+  const [rows, setRows] = useState<CallbackRow[] | null>(null);
+  const [scheduling, setScheduling] = useState<CallbackRow | null>(null);
+  const [date, setDate] = useState("");
+  const [laterOk, setLaterOk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadRows = useCallback(async () => {
+    try {
+      const models = api().models as unknown as {
+        CallbackRequest?: {
+          listCallbackRequestByCustomerId: (a: {
+            customerId: string;
+            limit?: number;
+          }) => Promise<{ data: CallbackRow[] }>;
+        };
+      };
+      if (!models.CallbackRequest) {
+        setRows([]);
+        return;
+      }
+      const { data } =
+        await models.CallbackRequest.listCallbackRequestByCustomerId({
+          customerId,
+          limit: 100,
+        });
+      setRows(data ?? []);
+    } catch {
+      setRows([]);
+    }
+  }, [customerId]);
+  useEffect(() => {
+    void loadRows();
+  }, [loadRows]);
+
+  if (!rows || rows.length === 0) return null;
+
+  const schedule = async () => {
+    if (!scheduling || !date) return;
+    setBusy(true);
+    setError(null);
+    try {
+      opResult(
+        await (
+          api().mutations as unknown as {
+            scheduleCallback: (a: {
+              callbackRequestId: string;
+              scheduledDate: string;
+              customerRequestedLater?: boolean;
+            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
+          }
+        ).scheduleCallback({
+          callbackRequestId: scheduling.id,
+          scheduledDate: date,
+          customerRequestedLater: laterOk || undefined,
+        })
+      );
+      setScheduling(null);
+      setDate("");
+      setLaterOk(false);
+      await loadRows();
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not schedule");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Guarantee callbacks">
+      {rows.map((cb) => (
+        <ListRow
+          key={cb.id}
+          title={`${cb.id} — visit ${cb.originalJobId}`}
+          subtitle={
+            <>
+              {`Promised return by ${cb.promisedBy ?? "—"}${cb.scheduledDate ? ` · scheduled ${fmtDate(cb.scheduledDate, true)}` : ""}`}
+              {cb.note ? <span className="nested-line">{cb.note}</span> : null}
+              {cb.photoKey ? (
+                <span className="nested-line">
+                  customer photo <DocButton docKey={cb.photoKey} label="view" />
+                </span>
+              ) : null}
+              {cb.finding ? (
+                <span className="nested-line">
+                  Finding: {cb.finding.replace(/_/g, " ").toLowerCase()}
+                  {cb.findingNote ? ` — ${cb.findingNote}` : ""}
+                </span>
+              ) : null}
+            </>
+          }
+          meta={
+            <>
+              <Badge
+                tone={
+                  cb.status === "GUARANTEE_ENDED" || cb.status === "REQUESTED"
+                    ? "warn"
+                    : "ok"
+                }
+              >
+                {CALLBACK_STATUS_LABEL[cb.status] ?? cb.status.toLowerCase()}
+              </Badge>
+              {cb.status === "REQUESTED" ? (
+                <Button small onClick={() => setScheduling(cb)}>
+                  Schedule
+                </Button>
+              ) : null}
+            </>
+          }
+        />
+      ))}
+      <Sheet
+        open={scheduling !== null}
+        onClose={() => setScheduling(null)}
+        title="Schedule the callback"
+      >
+        {scheduling ? (
+          <div className="form-grid">
+            <p className="muted small" style={{ margin: 0 }}>
+              Promised return by <strong>{scheduling.promisedBy ?? "—"}</strong>.
+              The visit is at no charge — nothing to price, nothing to collect.
+            </p>
+            <Field label="Date">
+              <DateField value={date} onChange={setDate} />
+            </Field>
+            {scheduling.promisedBy && date > scheduling.promisedBy ? (
+              <label className="inline-check small">
+                <input
+                  type="checkbox"
+                  checked={laterOk}
+                  onChange={(e) => setLaterOk(e.target.checked)}
+                />{" "}
+                The customer asked for this later date
+              </label>
+            ) : null}
+            <ErrorNote error={error} />
+            <Button
+              block
+              loading={busy}
+              disabled={!date}
+              onClick={() => void schedule()}
+            >
+              Schedule the callback visit
+            </Button>
+          </div>
+        ) : null}
+      </Sheet>
+    </Card>
   );
 }

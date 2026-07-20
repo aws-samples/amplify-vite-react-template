@@ -711,7 +711,7 @@ type InFlightBooking = {
   updatedAt?: string | null;
 };
 
-function PaymentsInFlight() {
+export function PaymentsInFlight() {
   const [rows, setRows] = useState<InFlightBooking[] | null>(null);
 
   useEffect(() => {

@@ -46,6 +46,21 @@ import { finalizeBooking } from "../shared/bookingFinalize";
 import { recordFunnelPaymentFailure } from "../shared/bookingPaymentFailure";
 import { stampProcessingNextCheck } from "../shared/bookingPayment";
 import { readOpsPause } from "../shared/opsPause";
+import {
+  computeMoneyMismatches,
+  computePlanMismatches,
+  computeStateMismatches,
+  type Mismatch as ReconMismatch,
+  type LedgerInvoice,
+  type PlanJobRow,
+  type PlanRow,
+  type ProviderPayment,
+  type ProviderRefund,
+  type ProviderSubscription,
+  type CustomerRow,
+  type StateInvoiceRow,
+  type StateJobRow,
+} from "../shared/leadershipRecon";
 
 type OwedInvoice = {
   id: string;
@@ -153,6 +168,11 @@ export const handler = async () => {
   // GL-05: prove, against the real tables and Stripe, that every succeeded
   // booking payment has exactly one complete booking and vice versa.
   const reconciliation = await run("reconcilePaidBookings", reconcilePaidBookings);
+  // GL-19: the leadership reconciliations — provider money vs the ledger,
+  // provider subscriptions vs plans, and lifecycle/visit state vs money.
+  const moneyRecon = await run("reconcileMoneyDaily", reconcileMoneyDaily);
+  const planRecon = await run("reconcilePlansDaily", reconcilePlansDaily);
+  const stateRecon = await run("reconcileStateDaily", reconcileStateDaily);
   // GL-06: re-read Stripe for every booking still PROCESSING — a missed
   // webhook can never leave a pending debit and its scheduled visit in limbo.
   const processingPayments = await run(
@@ -206,6 +226,9 @@ export const handler = async () => {
     disputes,
     overdueWork,
     reconciliation,
+    moneyRecon,
+    planRecon,
+    stateRecon,
     processingPayments,
     cancellations,
     capacity,
@@ -1817,6 +1840,251 @@ export async function reconcileProcessingPayments() {
     resumedFinalize,
     unreadable,
   };
+}
+
+
+// ---------------------------------------------------------------------------
+// GL-19 — daily leadership reconciliations (money / plans / state)
+// ---------------------------------------------------------------------------
+
+/** Persist one ReconRun row per kind/day so the Command view reads the
+ *  morning's answer without an engineering query. */
+async function writeReconRun(
+  kind: "MONEY" | "PLANS" | "STATE",
+  summary: Record<string, unknown>,
+  mismatches: number
+): Promise<void> {
+  try {
+    const client = await dataClient();
+    if (!("ReconRun" in client.models)) return;
+    const runDate = new Date().toISOString().slice(0, 10);
+    const id = `${kind}#${runDate}`;
+    const row = {
+      id,
+      kind,
+      runDate,
+      summary: JSON.stringify(summary),
+      mismatches,
+      healthy: mismatches === 0,
+    };
+    const { data: created } = await client.models.ReconRun.create(row);
+    if (!created) await client.models.ReconRun.update(row);
+  } catch (err) {
+    console.error(`writeReconRun ${kind} failed`, err);
+  }
+}
+
+async function openReconMismatches(
+  kind: "MONEY_MISMATCH" | "PLAN_MISMATCH" | "STATE_MISMATCH",
+  mismatches: ReconMismatch[]
+): Promise<void> {
+  for (const m of mismatches) {
+    await openOwnedWork({
+      kind,
+      dedupeKey: m.key,
+      title: m.title,
+      detail: m.detail,
+      customerId: m.customerId ?? undefined,
+      relatedId: m.relatedId,
+      sourceUrl: m.customerId ? `/customers/${m.customerId}` : undefined,
+      resolutionAction:
+        kind === "STATE_MISMATCH"
+          ? "Make status, schedule, and money agree (correct the wrong one), then close with the verified state."
+          : "Reconcile the provider record against the CRM, correct whichever is wrong, and close with Finance's sign-off.",
+      ownerTeam: m.team,
+    });
+  }
+}
+
+/**
+ * GL-19 — daily MONEY reconciliation: every succeeded provider payment in
+ * the window equals one CRM paid invoice (funnel money is the GL-05 pass's),
+ * every provider refund is recorded, and net cash is explainable. Mismatches
+ * are owned Finance work; the summary lands on the Command view.
+ */
+export async function reconcileMoneyDaily() {
+  const client = await dataClient();
+  if (!("ReconRun" in client.models)) return { skipped: "no-model" };
+  let stripe: ReturnType<typeof stripeClient>;
+  try {
+    stripe = stripeClient();
+  } catch (err) {
+    console.error("reconcileMoneyDaily: no Stripe client", err);
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+  const configured = Number(process.env.RECONCILE_WINDOW_DAYS ?? 45);
+  const windowDays =
+    Number.isFinite(configured) && configured > 0 ? configured : 45;
+  const windowStartIso = new Date(
+    Date.now() - windowDays * 86_400_000
+  ).toISOString();
+  const gte = Math.floor(Date.parse(windowStartIso) / 1000);
+
+  const payments: ProviderPayment[] = [];
+  let startingAfter: string | undefined;
+  for (let pages = 0; pages < 100; pages++) {
+    const page = await stripe.paymentIntents.list({
+      created: { gte },
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    for (const pi of page.data) {
+      if (pi.status !== "succeeded") continue;
+      payments.push({
+        id: pi.id,
+        amountCents: pi.amount_received ?? 0,
+        bookingRequestId: pi.metadata?.bookingRequestId ?? null,
+        stripeInvoiceId: ((): string | null => {
+          // Older API shapes carry `invoice` on the PaymentIntent; the
+          // current SDK types omit it — read it loosely either way.
+          const inv = (pi as unknown as { invoice?: string | { id: string } | null })
+            .invoice;
+          return typeof inv === "string" ? inv : (inv?.id ?? null);
+        })(),
+      });
+    }
+    if (!page.has_more) break;
+    startingAfter = page.data[page.data.length - 1]?.id;
+    if (!startingAfter) break;
+  }
+  const refunds: ProviderRefund[] = [];
+  startingAfter = undefined;
+  for (let pages = 0; pages < 100; pages++) {
+    const page = await stripe.refunds.list({
+      created: { gte },
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    for (const r of page.data) {
+      if (r.status === "failed" || r.status === "canceled") continue;
+      const pi =
+        typeof r.payment_intent === "string"
+          ? r.payment_intent
+          : (r.payment_intent?.id ?? null);
+      if (pi) refunds.push({ paymentIntentId: pi, amountCents: r.amount });
+    }
+    if (!page.has_more) break;
+    startingAfter = page.data[page.data.length - 1]?.id;
+    if (!startingAfter) break;
+  }
+
+  const invoices: LedgerInvoice[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.Invoice.list({ nextToken, limit: 200 });
+    invoices.push(...(page.data as unknown as LedgerInvoice[]));
+    nextToken = page.nextToken;
+  } while (nextToken);
+
+  const { mismatches, summary } = computeMoneyMismatches({
+    payments,
+    refunds,
+    invoices,
+    windowStartIso,
+  });
+  await openReconMismatches("MONEY_MISMATCH", mismatches);
+  await writeReconRun("MONEY", { ...summary, windowDays }, mismatches.length);
+  return { moneyRecon: summary };
+}
+
+/**
+ * GL-19 — daily PLAN reconciliation: provider subscriptions vs CRM plans
+ * (canceled-still-billing, active-but-provider-canceled, provider-only
+ * billing, delinquent plans with scheduled visits).
+ */
+export async function reconcilePlansDaily() {
+  const client = await dataClient();
+  if (!("ReconRun" in client.models)) return { skipped: "no-model" };
+  const stripe = stripeClient();
+  const subscriptions: ProviderSubscription[] = [];
+  let startingAfter: string | undefined;
+  for (let pages = 0; pages < 100; pages++) {
+    const page = await stripe.subscriptions.list({
+      status: "all",
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    for (const s of page.data) {
+      subscriptions.push({ id: s.id, status: s.status });
+    }
+    if (!page.has_more) break;
+    startingAfter = page.data[page.data.length - 1]?.id;
+    if (!startingAfter) break;
+  }
+  const plans: PlanRow[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await client.models.ServicePlan.list({ nextToken, limit: 200 });
+    plans.push(...(page.data as unknown as PlanRow[]));
+    nextToken = page.nextToken;
+  } while (nextToken);
+  const jobs: PlanJobRow[] = [];
+  let jobsToken: string | null | undefined;
+  do {
+    const page = await client.models.Job.list({
+      nextToken: jobsToken,
+      limit: 200,
+    });
+    jobs.push(...(page.data as unknown as PlanJobRow[]));
+    jobsToken = page.nextToken;
+  } while (jobsToken);
+
+  const { mismatches, summary } = computePlanMismatches({
+    subscriptions,
+    plans,
+    jobs,
+    todayIso: todayEasternDate(),
+  });
+  await openReconMismatches("PLAN_MISMATCH", mismatches);
+  await writeReconRun("PLANS", summary, mismatches.length);
+  return { planRecon: summary };
+}
+
+/**
+ * GL-19 — daily STATE reconciliation: lifecycle vs schedule vs money
+ * (deactivated customers with live work/plans; canceled visits holding open
+ * invoices).
+ */
+export async function reconcileStateDaily() {
+  const client = await dataClient();
+  if (!("ReconRun" in client.models)) return { skipped: "no-model" };
+  const listAllRows = async <T>(model: {
+    list(o: {
+      nextToken?: string | null;
+      limit?: number;
+    }): Promise<{ data: unknown[]; nextToken?: string | null }>;
+  }): Promise<T[]> => {
+    const out: unknown[] = [];
+    let token: string | null | undefined;
+    do {
+      const page = await model.list({ nextToken: token, limit: 200 });
+      out.push(...page.data);
+      token = page.nextToken;
+    } while (token);
+    return out as T[];
+  };
+  const customers = await listAllRows<CustomerRow>(client.models.Customer);
+  const jobs = await listAllRows<StateJobRow>(client.models.Job);
+  const plans = await listAllRows<PlanRow>(client.models.ServicePlan);
+  const invoices = await listAllRows<StateInvoiceRow>(client.models.Invoice);
+
+  const { mismatches, summary } = computeStateMismatches({
+    customers,
+    jobs,
+    plans,
+    invoices,
+    todayIso: todayEasternDate(),
+  });
+  await openReconMismatches("STATE_MISMATCH", mismatches);
+  await writeReconRun("STATE", summary, mismatches.length);
+  return { stateRecon: summary };
+}
+
+/** Today (YYYY-MM-DD) in the shop's timezone. */
+function todayEasternDate(): string {
+  return new Date().toLocaleDateString("en-CA", {
+    timeZone: "America/New_York",
+  });
 }
 
 export async function reconcilePaidBookings() {

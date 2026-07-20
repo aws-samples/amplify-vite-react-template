@@ -1,0 +1,308 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
+
+/**
+ * GL-10 — the guarantee callback lifecycle's locked rules: active residual
+ * plan only, completed original visit, required photo, ONE callback per
+ * appointment, the 7-business-day promise, $0 by construction, and the
+ * controlled evidenced finding that continues or ends the guarantee with
+ * one final notice.
+ */
+
+type Row = Record<string, unknown> & { id: string };
+const customers = new Map<string, Row>();
+const jobs = new Map<string, Row>();
+const plans = new Map<string, Row>();
+const callbacks = new Map<string, Row>();
+const closures = new Map<string, Row>();
+const jobsCreated: Row[] = [];
+
+const model = (table: Map<string, Row>, created?: Row[]) => ({
+  get: async ({ id }: { id: string }) => ({ data: table.get(id) ?? null }),
+  create: async (input: Row) => {
+    if (table.has(input.id)) return { data: null, errors: [{ message: "exists" }] };
+    table.set(input.id, { ...input });
+    created?.push(table.get(input.id)!);
+    return { data: table.get(input.id) };
+  },
+  update: async (patch: Row) => {
+    const row = table.get(patch.id);
+    if (!row) return { data: null, errors: [{ message: "no row" }] };
+    for (const [k, v] of Object.entries(patch)) if (v !== undefined) row[k] = v;
+    return { data: { ...row } };
+  },
+});
+
+vi.mock("./dataClient", () => ({
+  dataClient: async () => ({
+    models: {
+      Customer: model(customers),
+      Job: model(jobs, jobsCreated),
+      ServicePlan: model(plans),
+      CallbackRequest: model(callbacks),
+      CompanyClosure: model(closures),
+    },
+  }),
+}));
+
+const emails: { to: string; subject: string; html: string }[] = [];
+let emailFails = false;
+vi.mock("./email", () => ({
+  emailShell: (h: string, b: string) => `${h}${b}`,
+  sendEmail: async (o: { to: string; subject: string; html: string }) => {
+    emails.push(o);
+    return !emailFails;
+  },
+  notifyOffice: async () => true,
+}));
+const workOpened: Record<string, unknown>[] = [];
+const workResolved: Record<string, unknown>[] = [];
+vi.mock("./ownedWork", () => ({
+  openOwnedWork: async (o: Record<string, unknown>) => {
+    workOpened.push(o);
+    return "w1";
+  },
+  resolveOwnedWork: async (o: Record<string, unknown>) => {
+    workResolved.push(o);
+    return true;
+  },
+}));
+
+const { requestCallback, scheduleCallback, recordCallbackFinding } =
+  await import("./callbacks");
+
+const requester = { email: "dana@example.com", isOffice: false };
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-15T14:00:00Z")); // a Wednesday
+  customers.clear();
+  jobs.clear();
+  plans.clear();
+  callbacks.clear();
+  closures.clear();
+  jobsCreated.length = 0;
+  emails.length = 0;
+  emailFails = false;
+  workOpened.length = 0;
+  workResolved.length = 0;
+  _setLockStoreForTests(memoryLockStore({ CallbackRequest: callbacks }));
+  customers.set("c1", {
+    id: "c1",
+    displayName: "Dana",
+    email: "dana@example.com",
+    groupId: null,
+  });
+  plans.set("p1", { id: "p1", status: "ACTIVE" });
+  jobs.set("j1", {
+    id: "j1",
+    customerId: "c1",
+    servicePlanId: "p1",
+    status: "COMPLETED",
+    serviceType: "General pest control plan visit",
+    serviceCode: "GENERAL_PEST",
+    propertyClass: "RESIDENTIAL",
+    technicianId: "t1",
+  });
+});
+
+const request = (over: Record<string, unknown> = {}) =>
+  requestCallback(
+    {
+      customerId: "c1",
+      originalJobId: "j1",
+      photoKey: "callbacks/c1/photo1",
+      ...over,
+    } as never,
+    requester
+  );
+
+describe("eligibility — the locked rules refuse before anything schedules", () => {
+  it("accepts an active-plan completed visit with a photo: reference + 7-business-day promise + owned work + customer email", async () => {
+    const res = await request();
+
+    expect(res.status).toBe("ACCEPTED");
+    expect(res.reference).toBe("cb-j1");
+    // Wed Jul 15 + 7 business days = Fri Jul 24.
+    expect(res.promisedBy).toBe("2026-07-24");
+    expect(workOpened[0]).toMatchObject({
+      kind: "CALLBACK_PROMISE",
+      dedupeKey: "cb-j1",
+    });
+    expect(emails.some((e) => e.subject.includes("cb-j1"))).toBe(true);
+    expect(emails[0].html).toContain("2026-07-24");
+  });
+
+  it("tracked closures do not count as business days — the promise lands later", async () => {
+    closures.set("2026-07-17", { id: "2026-07-17", reason: "Company outing" });
+
+    const res = await request();
+
+    expect(res.promisedBy).toBe("2026-07-27"); // Friday lost → next Monday
+  });
+
+  it("one-time work is ineligible — the guarantee needs an active residual plan", async () => {
+    jobs.set("j1", { ...jobs.get("j1")!, servicePlanId: null });
+    await expect(request()).rejects.toThrow(/one-time visits aren't covered/);
+  });
+
+  it("a canceled or paused plan is ineligible", async () => {
+    plans.set("p1", { id: "p1", status: "CANCELED" });
+    await expect(request()).rejects.toThrow(/isn't active/);
+  });
+
+  it("an uncompleted visit is ineligible; someone else's visit is refused", async () => {
+    jobs.set("j1", { ...jobs.get("j1")!, status: "SCHEDULED" });
+    await expect(request()).rejects.toThrow(/hasn't been completed/);
+    jobs.set("j1", { ...jobs.get("j1")!, status: "COMPLETED", customerId: "c2" });
+    await expect(request()).rejects.toThrow(/doesn't belong/);
+  });
+
+  it("the photo is REQUIRED before anything can be scheduled", async () => {
+    await expect(request({ photoKey: "  " })).rejects.toThrow(/photo/);
+  });
+
+  it("ONE callback per original appointment — the second submission collapses onto the first", async () => {
+    const first = await request();
+    emails.length = 0;
+    workOpened.length = 0;
+
+    const second = await request();
+
+    expect(second.status).toBe("ALREADY_REQUESTED");
+    expect(second.reference).toBe(first.reference);
+    expect(second.promisedBy).toBe(first.promisedBy);
+    expect(workOpened).toHaveLength(0); // no duplicate owned work
+    expect(emails).toHaveLength(0); // no duplicate customer email
+  });
+});
+
+describe("scheduling — $0 by construction, inside the promise", () => {
+  it("creates the $0 callback visit carrying the original context and resolves the promise item", async () => {
+    await request();
+
+    const res = await scheduleCallback({
+      callbackRequestId: "cb-j1",
+      scheduledDate: "2026-07-22",
+    });
+
+    expect(res.callbackJobId).toBe("cbjob-cb-j1");
+    const job = jobs.get("cbjob-cb-j1")!;
+    expect(job.priceCents).toBeNull(); // nobody chooses or calculates money
+    expect(String(job.serviceType)).toContain("guarantee callback");
+    expect(String(job.notes)).toContain("j1");
+    expect(String(job.notes)).toContain("callbacks/c1/photo1");
+    expect(callbacks.get("cb-j1")).toMatchObject({
+      status: "SCHEDULED",
+      callbackJobId: "cbjob-cb-j1",
+    });
+    expect(workResolved.some((w) => w.kind === "CALLBACK_PROMISE")).toBe(true);
+  });
+
+  it("refuses a date beyond the promised return unless the customer chose it", async () => {
+    await request(); // promisedBy 2026-07-24
+
+    await expect(
+      scheduleCallback({ callbackRequestId: "cb-j1", scheduledDate: "2026-07-28" })
+    ).rejects.toThrow(/after the promised return/);
+
+    const ok = await scheduleCallback({
+      callbackRequestId: "cb-j1",
+      scheduledDate: "2026-07-28",
+      customerRequestedLater: true,
+    });
+    expect(ok.callbackJobId).toBe("cbjob-cb-j1");
+  });
+});
+
+describe("the technician's finding — controlled, evidenced, terminal-guarded", () => {
+  beforeEach(async () => {
+    await request();
+    await scheduleCallback({ callbackRequestId: "cb-j1", scheduledDate: "2026-07-22" });
+    emails.length = 0;
+  });
+
+  it("TREATABLE_UNEXPECTED continues the guarantee — no final notice, no ending", async () => {
+    const res = await recordCallbackFinding({
+      callbackRequestId: "cb-j1",
+      finding: "TREATABLE_UNEXPECTED",
+      note: "Fresh ant trail on the north wall — treatable.",
+    });
+
+    expect(res.status).toBe("COMPLETED");
+    expect(callbacks.get("cb-j1")!.terminalNoticeSentAt).toBeUndefined();
+    expect(emails).toHaveLength(0);
+  });
+
+  it("EXPECTED_BEHAVIOR ends the guarantee with evidence and ONE final notice", async () => {
+    const res = await recordCallbackFinding({
+      callbackRequestId: "cb-j1",
+      finding: "EXPECTED_BEHAVIOR",
+      note: "Seasonal cluster flies — normal for the week, not an infestation.",
+    });
+
+    expect(res.status).toBe("GUARANTEE_ENDED");
+    expect(callbacks.get("cb-j1")).toMatchObject({
+      finding: "EXPECTED_BEHAVIOR",
+      findingNote: "Seasonal cluster flies — normal for the week, not an infestation.",
+    });
+    expect(emails).toHaveLength(1);
+    expect(emails[0].html).toContain("expected pest behavior");
+    expect(emails[0].html).toContain("concludes the guarantee");
+    // No appeal or further callback is promised anywhere in the notice.
+    expect(emails[0].html.toLowerCase()).not.toContain("appeal");
+  });
+
+  it("a replayed finding cannot flip a terminal outcome or re-send the notice", async () => {
+    await recordCallbackFinding({
+      callbackRequestId: "cb-j1",
+      finding: "UNTREATABLE_CONDITION",
+      note: "Standing water under the crawlspace — a condition, not a treatment target.",
+    });
+    emails.length = 0;
+
+    const replay = await recordCallbackFinding({
+      callbackRequestId: "cb-j1",
+      finding: "TREATABLE_UNEXPECTED",
+      note: "second opinion",
+    });
+
+    expect(replay.status).toBe("GUARANTEE_ENDED"); // the recorded truth stands
+    expect(callbacks.get("cb-j1")!.finding).toBe("UNTREATABLE_CONDITION");
+    expect(emails).toHaveLength(0);
+  });
+
+  it("an uncontrolled finding or missing evidence is refused", async () => {
+    await expect(
+      recordCallbackFinding({
+        callbackRequestId: "cb-j1",
+        finding: "LOOKS_FINE",
+        note: "x",
+      })
+    ).rejects.toThrow(/controlled findings/);
+    await expect(
+      recordCallbackFinding({
+        callbackRequestId: "cb-j1",
+        finding: "EXPECTED_BEHAVIOR",
+        note: "  ",
+      })
+    ).rejects.toThrow(/evidence note/);
+  });
+
+  it("a failed final-notice send releases the claim and opens owned work — the customer is never silently untold", async () => {
+    emailFails = true;
+
+    await recordCallbackFinding({
+      callbackRequestId: "cb-j1",
+      finding: "EXPECTED_BEHAVIOR",
+      note: "Normal seasonal activity.",
+    });
+
+    expect(callbacks.get("cb-j1")!.terminalNoticeSentAt).toBeUndefined();
+    expect(
+      workOpened.some(
+        (w) => w.kind === "EMAIL_FAILURE" && w.dedupeKey === "callback-final:cb-j1"
+      )
+    ).toBe(true);
+  });
+});

@@ -886,7 +886,10 @@ describe("the only surviving CONTACT outcomes", () => {
   it("a fully-booked month falls to the callback path", async () => {
     // GL-04: "fully booked" means every technician-window LEDGER holds its
     // minutes — fill t1's slots for every weekday in the sellable window.
-    for (let i = 1; i <= 40; i++) {
+    // From i = 0 (not 1): after ~8pm Eastern the UTC day is already
+    // tomorrow's date, so starting at 1 left the first sellable Eastern day
+    // uncovered and the test flaked PRICED between 00:00 and 04:00 UTC.
+    for (let i = 0; i <= 41; i++) {
       const d = new Date(Date.now() + i * 86_400_000).toISOString().slice(0, 10);
       for (const w of ["MORNING", "AFTERNOON"] as const) {
         capacityFixture.maps.capacityDays.set(`${d}#${w}#t1`, {

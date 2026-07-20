@@ -129,6 +129,8 @@ const LOCK_MODELS = [
   // counters, and the per-combo research lease/notify claims.
   "PricingControl",
   "RateCoverage",
+  // GL-10: the callback finding/terminal-notice transitions are guarded.
+  "CallbackRequest",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
