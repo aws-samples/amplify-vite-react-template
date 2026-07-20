@@ -290,7 +290,9 @@ first April treatment obligation and a durable owned scheduling action are creat
 payment/webhook retries), and every customer/office surface promises April as a month — the office
 confirms the exact day; no invented date. A missing yard size is rejected with a field error, never
 silently priced as half an acre. EVERY `/book` branch — dated, plan-only, and off-season — now runs
-behind one failure-safe payment contract (`b9d9efb`, completed `a68649e`): a single durable
+behind one failure-safe payment contract (`b9d9efb`, completed `a68649e`; off-season made a
+CALENDAR fact in `6640821` — a booked-out in-season week is "fully booked", never a false April
+promise): a single durable
 single-winner attempt boundary; deterministic generation-chained provider idempotency keys (one
 customer, one intent even under parallel double-clicks, replays, or a lease-expiry overlap — which
 converges on the one authoritative intent instead of canceling it); an explicit payable-reuse
