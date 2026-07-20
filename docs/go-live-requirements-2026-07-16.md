@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `a2a2fc2`; newest
-implementation commit `a2a2fc2`
+**Latest commit review:** every commit after `f70e621` through `4a80b8e`; newest
+implementation commit `4a80b8e`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 62 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 70 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -18,7 +18,22 @@ headings below — sub-clauses inside one bullet are not counted separately.
 **Business policy inputs approved:** 18–19 July 2026
 
 This is a **delta-only** business requirements document. It excludes completed capabilities,
-implementation detail, and proof-only tasks. The newest commits close five gates' engineering:
+implementation detail, and proof-only tasks.
+
+**REOPENED 19 July (CEO direction, after staging verification): GL-16, GL-22, GL-10, GL-11.** Staging
+demonstrated defects behind four closure claims, and no gate may be marked closed while staging is
+failing. The systemic finding: the deployed CAS lock layer had NEVER worked — atomicLock derived its
+DynamoDB table suffix from the GraphQL endpoint hostname (a separate DNS id, not the apiId), so every
+deployed conditional write threw ResourceNotFoundException, and the error was classified as "somebody
+else holds it"; the pricing worker read its own broken wiring as a held drain lease and skipped every
+run, silently (`3826eb1` fixes resolution via an SSM-published apiId and makes infra failures loud;
+the worker is verified healthy on staging). Separately, the staging Amplify BUILD pipeline is down
+(GitHub deploy keys deleted when the repo went public — see GL-22) — backend fixes are deployed via
+manual pipeline-deploy and the hosted frontend is stale until Jake reconnects the repository.
+Corrective commits: `f57817c` (GL-16 complete-catalog rollback), `bc20401` (GL-22 seven-year
+retention + throttle alarms), `8678623` (GL-10 verified photo + capacity-safe callback scheduling),
+`4a80b8e` (GL-11 atomic request ownership + durable group audit). Each reopened gate lists exactly
+what staging behavior must demonstrate before it may close again. The newest commits close five gates' engineering:
 GL-06 (`1228822` — pending bank debits are real "Payment pending" commitments under one conditional
 payment state machine, exactly-once failure/settlement/cancel paths, daily Stripe reconcile, durable
 returning-customer states, office payments-in-flight view), GL-16 (`d990d07` cost-incident controls —
@@ -460,16 +475,25 @@ view. Only the items below remain; they are sign-offs — not software this repo
 **Business outcome:** The approved pricing prompt can publish researched prices without clamps or
 preapproval, while leadership can see what changed and safely recover from a bad model/prompt result.
 
-**Engineering:** closed (`41020a6`, cost-incident controls `d990d07`). Every AI row records the versioned
-prompt (label + content hash), model, inputs, raw result, sources, and run identity; rows are immutable
-versions (office edits create a new pinned row with a controlled reason, never editing AI history); the
-day's live changes enter the shared queue as a recorded one-business-day review; an OWNER-only audited
-rollback flips the whole catalog to a prior coherent moment in one write (pinned rows still win) and back;
-invalid execution fails closed into owned exhaustion work; budget, backoff, digest, and the Market Rates
-engine/rollback panels are live. Only the item below remains.
+**Engineering:** REOPENED 19 July on demonstrated staging defects; corrective commits landed but the
+gate stays open until staging behavior proves them. Demonstrated: the deployed pricing worker skipped
+every run as "drain-lease-held" forever — the CAS layer derived its DynamoDB table suffix from the
+GraphQL endpoint hostname (which is NOT the apiId), so every deployed conditional write missed its
+table and the failure was misread as a held lease (fixed `3826eb1`: apiId published from the data
+stack via SSM, infra failures classified UNSUPPORTED and thrown loudly; worker verified healthy on
+staging — real drains, real research, budget consumed). And the rollback did NOT govern the complete
+catalog (fixed `f57817c`), which restores the bullet below.
 
 **Remaining requirements:**
 
+- Preserve immutable rate-sheet versions and provide one reasoned, authorized rollback that atomically
+  restores the complete prior compatible sheet without editing history or producing a mixed catalog.
+  The customer-facing quote and CRM immediately read the restored version, and rollback itself is
+  audited. *(Reopened: during a rollback the worker emailed "prices ready" for sheets quoting refused,
+  the CRM list badged rolled-back sheets as fresh, and a 60s memo delayed "immediately". Fix `f57817c`:
+  ONE shared serving rule for engine/worker/CRM, rollback-aware notify gating and reports, serving
+  badges, 5-second state reads. Open until a staged rollback flip is verified end-to-end on staging:
+  funnel quote, CRM view, worker pause, ready-email holdback.)*
 - CEO/Finance ratify the recorded operating values now live: the daily change-review cadence (one
   claimable review item per day of changes), the controlled office-edit and rollback reason vocabularies,
   OWNER as the sole rollback authority, and the accepted no-clamp/no-preapproval posture the mechanism
@@ -575,17 +599,30 @@ or unconfigured provider event.
 **Business outcome:** A background failure is noticed before the customer reports it, and business records
 can be restored after human or provider error.
 
-**Engineering:** closed (`041f939`). CloudWatch Errors + did-not-run + dead-letter alarms feed the
-ops-alerts bridge, which opens/auto-resolves ONE deduplicated shared-Office INFRA_ALERT per alarm on the
-common one-business-day clock; the daily run isolates subtasks, records an incomplete-run item, and fails
-the invocation when any subtask failed; ses-events never acknowledges an unrecorded event (throw → retry
-→ visible DLQ; malformed → owned work; terminal bounce guard tested); PITR is enabled on every business
-table and the documents bucket is versioned; the OWNER-only pause switchboard (bookings / dispatch /
-billing initiation) is enforced server-side and visible on the Dashboard; docs/incident-playbooks-2026-07.md
-carries the seven one-page playbooks and the deletion/retention policy. Only the items below remain.
+**Engineering:** REOPENED 19 July — the monitoring closure had never run on staging (the branch's
+builds were failing), the retention claim did not meet the stated seven-year period, and "errors and
+throttles" was only half-covered. Corrective commit `bc20401` landed and the stack is now deployed
+and verified present on staging (23 alarms incl. per-function throttles, AWS Backup vault + 7-year
+monthly plan over every business table and the documents bucket, PITR enabled, SES DLQ + alarm), but
+the bullets below stay open until staging behavior proves them.
 
 **Remaining requirements:**
 
+- **The staging deployment pipeline is DOWN and must be restored (Jake).** Every Amplify build since
+  job 82 fails pre-clone with "!!! Internal error": the repo's SSH deploy keys are gone (deleted by
+  GitHub when the repository was made public ~00:00 UTC 20 Jul), so the build service cannot clone.
+  Reconnect the repository in the Amplify console (App settings → Repository) — the CLI repair routes
+  are permission-blocked in this session. Until pushes build green, backend changes reach staging only
+  by manual `ampx pipeline-deploy` and the FRONTEND is stale at commit `90c7606`. No gate may be
+  marked closed while this stands.
+- Alerts cover errors AND throttles, scheduled jobs that did not run, email failures, and the dead
+  letter queue, and every alert creates or updates a deduplicated shared-Office item with the
+  one-business-day clock. *(Alarms deployed and OK on staging; open until one end-to-end firing is
+  demonstrated on staging: forced alarm → INFRA_ALERT queue item + office email → auto-resolve.)*
+- Point-in-time recovery and versioned document backup are enabled FOR THE SEVEN-YEAR retention
+  period. *(PITR 35-day + bucket versioning were never seven-year retention; AWS Backup monthly
+  restore points retained 7 years now cover every business table and the documents bucket. Open until
+  the first restore point exists (plan runs the 1st monthly) and the restore drill below passes.)*
 - CEO/Compliance approve the written playbooks and the seven-year deletion/retention policy; Operations
   runs one verified restore drill (an S3 object version restore and an engineering-assisted PITR
   side-table restore proving the complete customer/job/plan/invoice/report relationship comes back
@@ -639,14 +676,22 @@ promised return ≤7 business days excluding weekends and tracked closures); sch
 callback visit carrying the original context and refuses dates beyond the promise unless the customer's
 later choice is recorded; the callback technician records one controlled evidenced finding in the field
 app (treatable continues; untreatable/expected ends the guarantee with evidence and exactly one final
-notice, replay-proof); no-access now matches the locked rule — a nonrefundable cancellation with the
-customer told the no-refund result and rebooking path directly, and no refund disposition offered
-anywhere. Routine Office/tech actions need no OWNER; Ops sees callback volume/compliance on the Command
-view and full detail per customer. The customer-facing PORTAL entrance rides GL-11. Only the item
-below remains.
+notice, replay-proof); no-access now matches the locked rule. **REOPENED 19 July on two demonstrated
+defects**, both fixed in `8678623` but open until staging behavior proves them:
 
 **Remaining requirements:**
 
+- The required callback photo is a VERIFIED upload: the submitted key must live under the customer's
+  own callbacks/ prefix and reference a real image object in the bucket — a plausible string, an
+  unfinished upload, another customer's key, or a non-image is refused with the fix named.
+  *(Was a non-empty-string check on a never-verified presign. Open until proven on staging: portal
+  upload → request accepted; fabricated key → refused.)*
+- Scheduling the $0 callback visit is CAPACITY-SAFE: the same dispatch facts, technician
+  day-eligibility, routability proof, and ONE atomic technician-window slot claim (onsite + round-trip
+  drive minutes) as every other assignment — a sold-out window refuses, and a replay returns its
+  duplicate hold. *(Was a SCHEDULED job with no technician and no capacity claim — the $0 visit could
+  oversell a day. Open until proven on staging: schedule consumes the slot; an over-full window
+  refuses.)*
 - Head of Operations signs the callback/no-access workflow; the CEO approves the customer-facing
   promise wording (reference email, scheduled/final notices, the no-access no-refund copy) and Finance
   the money posture ($0 callbacks; nonrefundable no-access). Richer callback analytics (repeat-attempt
@@ -780,13 +825,21 @@ photo, one per appointment, reference + 7-business-day promise), and general hel
 durable portal-visible case PLUS a deduplicated shared-queue item on the common one-business-day clock —
 success only when both exist, so a failed submission errors loudly instead of falling back to an
 untracked call, and the office resolves "with an answer" the customer sees. Group managers act across
-their whole group via the same dynamic access every portal page uses, and membership changes now record
-who/when/why (CustomerLifecycleEvent) while the accessGroups rewrite removes stale access in the same
-pass. The public "residents schedule in-unit directly" claim remains an explicit GL-20 conflict on the
-CRM catalog screen. Only the item below remains.
+their whole group via the same dynamic access every portal page uses. **REOPENED 19 July on two
+demonstrated defects**, both fixed in `4a80b8e` but open until staging behavior proves them:
 
 **Remaining requirements:**
 
+- A failed submission remains in the shared Office queue instead of falling back to an untracked call —
+  ATOMICALLY: request ids derive from what was asked and when, so a retry converges onto the same case
+  (random ids had minted duplicates); a queue-write failure is loud and the retry re-ensures the
+  deduplicated owned item; a daily sweep repairs the crash window so no OPEN portal request or
+  REQUESTED callback can exist without a live owned queue item. *(Open until proven on staging:
+  submit → work item; forced queue fault → loud error → retry converges; sweep repairs an orphan.)*
+- Group membership changes retain who changed it, when, and why DURABLY: the audit record lands before
+  the change, a failed audit write refuses the change with nothing applied (log lines are not an
+  audit), and the reason is mandatory. *(Open until proven on staging: change with reason → lifecycle
+  event; audit unavailable → change refused.)*
 - Head of Operations signs the portal request/callback/help workflows and the customer-facing wording;
   the in-unit-resident public claim is decided with the CEO under GL-20 (back it with a property-scoped
   flow or remove it).
