@@ -134,6 +134,12 @@ export type PricedQuote = {
    */
   planOnly?: boolean;
   /**
+   * HOA/condo-community and commercial quotes may pay by invoice (net terms)
+   * instead of a card at checkout. Server-derived from the property kind;
+   * residential quotes never carry it, and /book re-checks server-side.
+   */
+  invoiceEligible?: boolean;
+  /**
    * GL-17: an off-season seasonal quote — there is no day board (days is
    * empty), checkout enrolls the PLAN with no date, billing starts today,
    * and the first treatment is scheduled for the next season's start (the

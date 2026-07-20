@@ -424,6 +424,8 @@ describe("market-rate services carry the Zone B adder (R60)", () => {
 
     expect(res.body.decision).toBe("PRICED");
     expect(pricingRuns[0]).toMatchObject({ zone: "A", oneTimePriceCents: 19900 });
+    // Residential is never invoice-eligible — the flag is absent, not false.
+    expect(res.body.invoiceEligible).toBeUndefined();
   });
 });
 
@@ -847,6 +849,8 @@ describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
       initialFeeCents: 28800,
     });
     expect(res.body.planOnly).toBe(true);
+    // HOA/condo communities may pay by invoice at checkout.
+    expect(res.body.invoiceEligible).toBe(true);
   });
 
   it("defaults to the quarterly cadence", async () => {
@@ -943,6 +947,8 @@ describe("COMMERCIAL prices like residential GP from the COMMERCIAL sheet", () =
     });
     expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 39900 });
     expect(res.body.service).toContain("Commercial pest control");
+    // Commercial properties may pay by invoice at checkout.
+    expect(res.body.invoiceEligible).toBe(true);
   });
 
   it("keeps the deterministic Zone B adders on top", async () => {

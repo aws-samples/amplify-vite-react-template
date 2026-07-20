@@ -400,6 +400,20 @@ function parseStoredQuote(raw: unknown): {
   }
 }
 
+/**
+ * Invoicing (net-terms "Invoice me" at checkout) is offered ONLY to
+ * HOA/condo communities and commercial properties — never residential.
+ * Derived from the property kind recorded on the booking, so the client
+ * can never flip a residential quote into an invoiceable one by editing
+ * the request; /book re-derives it from the same stored field.
+ */
+export function invoiceEligibleFor(
+  propertyKind: string | null | undefined
+): boolean {
+  const kind = (propertyKind ?? "RESIDENTIAL").toUpperCase();
+  return kind === "COMMUNITY" || kind === "COMMERCIAL";
+}
+
 type QuoteFrequency = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
 
 function quoteFrequency(value: string | null | undefined): QuoteFrequency | undefined {
@@ -470,6 +484,9 @@ function pricedResponse(booking: StoredQuoteBooking) {
     recurringOffer: stored.recurringOffer ?? null,
     requestedFrequency,
     planOnly: stored.planOnly || undefined,
+    // Community/commercial checkouts may choose "Invoice me" (net terms)
+    // instead of paying by card — derived from the stored property kind.
+    invoiceEligible: invoiceEligibleFor(booking.propertyKind) || undefined,
     // GL-17: an off-season seasonal enrollment has NO first-visit day board —
     // billing starts now and April's exact day is confirmed by the office,
     // never invented here.
@@ -1510,6 +1527,8 @@ async function quote(
     // Plan-only quotes (community common-area) carry no one-time offer: the
     // day picks the first visit and the amount charged is the first month.
     planOnly: planOnly || undefined,
+    // Community/commercial checkouts may choose "Invoice me" (net terms).
+    invoiceEligible: invoiceEligibleFor(propertyKind) || undefined,
     // GL-17: an off-season enrollment ships an EMPTY day board plus the
     // truthful explanation — checkout is the plan itself, date-less.
     offSeason: offSeason || undefined,
