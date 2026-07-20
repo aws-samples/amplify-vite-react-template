@@ -2,21 +2,16 @@
 
 **Business review date:** 20 July 2026
 
-**Latest commit review:** every commit after `67df267` through the current branch head; newest
-implementation commits `f238d82` (GL-17 funnel) corrected by `04f4143` (off-season date-less sale,
-required acreage) and hardened by `b9d9efb` (single-winner payment-attempt contract), `136f02a`
-(GL-09 export) corrected by `4ede082` (Eastern business dates + formula neutralization), `3f97ced`
-(GL-07 atomic reschedules) superseded by `8e420e2` then corrected by `fd17f44` (dedicated
-TechDayStops model that truly creates; delta-correct move math), and `1a671be` (GL-19 metrics)
-corrected by `c962f86` (genuine first contact, cohort-tied callback rates)
+**Latest commit review:** every commit after `67df267` through implementation head `21925eb`;
+completed gates are omitted from this delta-only register.
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **17 gates / 25 remaining requirements**, ordered by launch priority and
+**Remaining:** **7 gates / 12 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **14.9%** (mean of the register column)
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **18.0%** (mean of the register column)
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
@@ -25,18 +20,13 @@ headings below — sub-clauses inside one bullet are not counted separately.
 This is a **delta-only** business requirements document. It excludes completed capabilities,
 implementation detail, and proof-only tasks.
 
-**Current review outcome:** GL-09 now durably records its policy version on every lifecycle event
-(`95e39d3`, staging verified in `3483b5c`); GL-20's copy-pasted service metadata is corrected
-(`9057015`); and the hour-exact GL-08 cancellation implementation is merged. GL-02's unified,
-failure-safe lead intake and lifecycle implementation (`b6d4e99`, merged through `632cdd5`) and
-GL-03's durable email recovery are also reconciled out of the remaining engineering work.
+**Current review outcome:** GL-20's copy-pasted service metadata is corrected (`9057015`). GL-02's
+unified, failure-safe lead intake and lifecycle implementation (`b6d4e99`, merged through `632cdd5`)
+and GL-03's durable email recovery are reconciled out of the remaining engineering work.
 
-The CEO/business-policy review has now ratified the GL-13 operating vocabularies, GL-07
-cancellation/reschedule copy, GL-18 override map, GL-05
-payment copy, GL-09 lifecycle policy, GL-16 no-clamp posture, GL-19 pause threshold and decision holder,
-GL-01 catalog, and the currently published GL-20 license/rating facts. Those completed decision items
-have been removed; outside co-signs, production configuration, operating data, and unresolved public
-promise conflicts remain.
+The CEO/business-policy review has ratified the completed operating decisions. Those gates have been
+removed; only the approvals, production operating data, and unresolved public-promise conflicts below
+remain.
 
 The **"McDonald's standard"** applies: a week-one employee must be able to do the right thing without
 remembering policy, doing mental math, reading system internals, or inventing free-text workarounds. The
@@ -145,16 +135,6 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed | Opus 4.8 / Ultracode likelihood |
 |---|---|---|---|---|---|
 | P0 | GL-20 | Resolve unsupported public promises and approve legal terms | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
-| P0 | GL-17 | Funnel sale path live — engineering closed (`04f4143`, corrected `b9d9efb`, `a68649e`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
-| P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
-| P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export `136f02a`, corrected `4ede082`) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
-| P0 | GL-07 | Reschedule capacity fully atomic — engineering closed (`8e420e2`, corrected `fd17f44`) | Head of Operations | Two concurrent moves can consume the same last capacity | **10% — Very low (sign-offs)** |
-| P0 | GL-18 | Finance/Operations recovery sign-off and launch staffing | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-23 tie)** |
-| P0 | GL-04 | Travel-model calibration + operating data | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
-| P0 | GL-06 | Finance/Operations recovery-workflow sign-off — engineering closed (`1228822`) | Finance lead + Head of Operations | A processing customer is promised a nonexistent hold, or an async success oversells the day | **12% — Very low (sign-offs)** |
-| P0 | GL-08 | Finance/Operations workflow sign-off — hour-exact engineering closed (`73174e8`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
-| P0 | GL-16 | Finance ratification — engineering and CEO decision closed (`41020a6`) | Finance lead | A bad prompt/model output silently changes live prices without rapid detection or recovery | **12% — Very low (Finance sign-off)** |
-| P0 | GL-01 | Operations/Finance/Compliance catalog co-signs — engineering and CEO decision closed (`abcb908`) | CEO | An advertised service cannot be quoted, staffed, or documented | **15% — Very low (co-signs)** |
 | P1 | GL-02 | Sales/Compliance operating-policy approval — engineering closed (`b6d4e99`) | Head of Sales | A team can operate the correct lead controls inconsistently | **12% — Very low (approvals only)** |
 | P1 | GL-03 | Sales/Operations/Compliance approval — engineering closed (`8d322e4`, `f39de9e`) | Head of Sales + Head of Operations | Staff use inconsistent promises or recovery steps | **10% — Very low (approvals only)** |
 | P1 | GL-10 | Workflow/promise sign-offs — engineering closed (`b8ba8a4`) | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **12% — Very low (sign-offs)** |
@@ -181,8 +161,8 @@ same offer, and no unsupported claim creates customer, regulatory, or brand expo
   communities and in-unit pages say residents book directly, but no property-scoped resident scheduling
   path exists (ties to GL-11). The claim is backed by a real flow or removed.
 - **Blanket "exact price / no callbacks / no waiting" appears on specialized pages** that likely need
-  human review. These are limited to services and circumstances that pass GL-01 and GL-04, with the review
-  fallback disclosed before payment.
+  human review. These are limited to services and circumstances supported by the approved service catalog
+  and capacity rules, with the review fallback disclosed before payment.
 - A named owner inventories every claim about price certainty, speed, guarantee/free returns, cancellation,
   license/insurance/status, response time, resident scheduling, safety, and ratings — each with evidence,
   scope, source, owner, and review/expiry date, or removed. Guarantee, cancellation, no-access, refund,
@@ -192,238 +172,6 @@ same offer, and no unsupported claim creates customer, regulatory, or brand expo
   approves the final public terms, privacy notice, and effective dates.
 
 **Pass owner:** CEO; Compliance/legal sign the regulated and contractual statements.
-
-### GL-17 — Add approved seasonal services to the lead funnel
-
-**Business outcome:** Seasonal services bill and schedule exactly as customers were told, and every visit
-is assigned to a technician with a current license record without hard-coding changing state law.
-
-**Engineering:** closed (`dc39f74`, funnel sale path `f238d82`, corrected `04f4143`). Both mosquito
-products sell through the approved funnel: deterministic card pricing (never the AI researcher),
-plan-only monthly billing year-round, and the first treatment sold onto April–October dates only. A
-fully off-season (November–March) ask is a REAL date-less sale, not a contact dead end: the customer
-accepts and pays the first month immediately, the plan starts that day billing monthly year-round, the
-first April treatment obligation and a durable owned scheduling action are created (idempotent under
-payment/webhook retries), and every customer/office surface promises April as a month — the office
-confirms the exact day; no invented date. A missing yard size is rejected with a field error, never
-silently priced as half an acre. EVERY `/book` branch — dated, plan-only, and off-season — now runs
-behind one failure-safe payment contract (`b9d9efb`, completed `a68649e`; off-season made a
-CALENDAR fact in `6640821` — a booked-out in-season week is "fully booked", never a false April
-promise): a single durable
-single-winner attempt boundary; deterministic generation-chained provider idempotency keys (one
-customer, one intent even under parallel double-clicks, replays, or a lease-expiry overlap — which
-converges on the one authoritative intent instead of canceling it); an explicit payable-reuse
-allowlist (canceled/succeeded/processing intents answered truthfully, never returned as chargeable);
-prior intents proven terminal before any replacement; and ONE fenced persistence write — conditioned
-on the exact attempt holder, a payable lifecycle state, and the expected prior intent — so a
-concurrent webhook's PROCESSING/BOOKED, a cancellation, or a newer attempt is never regressed to
-QUOTED, and a client secret is returned only after that confirmed write covers the intent's
-authority, selection, amount, terms, and capacity facts. A lost fence answers with the re-read truth;
-a failed write closes the intent and releases the capacity claim, or opens confirmed deduplicated
-Finance recovery. No other public page, metadata, SEO, or marketing copy changed.
-
-**Remaining requirements:**
-
-- CEO and Compliance sign the live funnel offer as sold (labels, card prices, seasonal copy) — the
-  bounded engineering change is complete.
-
-**Pass owner:** CEO as business and Compliance owner.
-
-### GL-05 — Approve paid-booking recovery controls
-
-**Business outcome:** Every succeeded booking payment is either one complete, correctly communicated
-customer commitment or one visible, verified refund/recovery case — even when execution stops between
-steps.
-
-**Engineering:** closed (`cc76773`); the CEO approved the at-payment and recovery copy.
-
-**Remaining requirements:**
-
-- Finance/Operations define who may record an "approved alternate delivery" for a bounced
-  confirmation and what counts (the mechanism is live).
-- Finance confirms the reconciliation window (45 days) vs expected production volume; the truncation
-  alarm covers the gap either way.
-
-**Pass owner:** CEO and Engineering lead jointly; Finance owns reconciliation and recovery approval.
-
-### GL-09 — Add lifecycle-history export
-
-**Business outcome:** Customer status, billing, access, scheduled work, and customer communication never
-disagree, and an employee always sees the real outcome of deactivation or reactivation.
-
-**Engineering:** closed (`dc39f74`, `95e39d3`). Leadership approved policy version
-`2026-07-19.1`, including its per-reason balance, retention, and notice dispositions; the deployed
-schema now durably stamps that version on every lifecycle event (`3483b5c`).
-
-**Engineering addendum:** the complete-history export is live on the Command view (`136f02a`,
-corrected `4ede082`; `buildLifecycleCsv`): every matching event read to pagination exhaustion before
-download, read failures abort with nothing produced, fields
-customer/action/reason/actor/timestamp/result/policyVersion. The optional From/To range means Eastern
-(America/New_York) business dates — DST-correct boundary conversion to UTC instants, the To day
-inclusive through 23:59:59 Eastern — and every field is neutralized against spreadsheet formula
-injection (leading = + - @ TAB CR opens with an apostrophe, content preserved).
-
-**Remaining requirements:**
-
-- Head of Operations signs the export's field set and access (OWNER/OFFICE/FINANCE read) as the
-  retrieval record leadership will rely on.
-
-**Pass owner:** Head of Operations; Finance and CEO approve protected fields, transition policy, and
-recovery policy.
-
-### GL-07 — Make assigned-reschedule capacity atomic
-
-**Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
-capacity, route, audit, and customer-notification consequences in one guided action.
-
-**Engineering:** closed (`5b2fb76`, `3f97ced`, `8e420e2`; corrected `fd17f44`). Review found the
-first stop-ledger attempt could not create its rows against the real AppSync contract (it omitted the
-required `date` field behind a type cast; the swallowed rejection made every first assigned stop read
-"day full") and that moves claimed a full new stop and full minutes. Corrected: the assigned-stop
-count lives on a DEDICATED backend-written TechDayStops model (required date + technicianId, id
-`date#technicianId`, in the CAS table set, browsers read-only) so no CapacityDay slot/index reader
-can ever see a stop row and creation failures are surfaced as an honest "try again" refusal — never a
-phantom "day full". Transition math is delta-correct in both the reschedule and office-assign paths:
-same technician-day moves/reorders are stop-delta 0 (a fully-booked eight-stop day can still be
-reordered), same-window moves reserve only the positive minutes delta and release a shrink after
-publication, cross-window same-day moves swap window minutes with no stop churn, and only
-cross-technician/day moves claim +1 destination and release the source after the publish lands, with
-failed publication compensating exactly the fresh delta. The nightly reconciliation creates missing
-rows with the full required-field contract, repairs drifted counters, and resets stale ones; the test
-fixture now enforces the real required-field schema. The Head of Operations/CEO approved the refusal
-and pending-assignment wording.
-
-**Remaining requirements:**
-
-- Head of Operations signs the reschedule/cancel workflow as the queue norm; Finance approves the money
-  dispositions the terminal workflow encodes.
-
-**Pass owner:** Head of Operations; Finance approves money dispositions.
-
-### GL-18 — Approve exception operations and production staffing
-
-**Business outcome:** A case turns green only after the exact customer, money, access, or operating
-obligation is true, while a routine employee can complete ordinary recovery work without CEO-level
-authority or an invented workaround.
-
-**Engineering:** closed (`f6a34a8`). The CEO approved the encoded override-authority map; manual
-overrides remain OWNER-only and verified money closures remain Finance/Owner.
-
-**Remaining requirements:**
-
-- Finance ratifies its money-close authority boundary (which was CEO+Finance approval per the locked
-  rule); Operations ratifies the release/reassign flow as the queue norm.
-- Operations confirms the deployed PTO/holiday/closure staffing verifier as its queue norm; GL-23
-  establishes the staffed Office queue, business-day calendar, and shift handoffs in production.
-
-**Pass owner:** Head of Operations; Finance approves money outcomes and the CEO approves override
-authority.
-
-### GL-04 — Capacity that cannot be oversold
-
-**Business outcome:** Any day/window shown to a customer can actually be staffed, and two customers
-cannot buy the same last unit of capacity.
-
-**Engineering:** closed (`dc39f74`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
-
-**Remaining requirements:**
-
-- Operations enters the real operating data: each technician's private base location, known
-  closures/holidays (the federal-holiday list is not auto-seeded — enter them as closures), and PTO
-  as it arises. Until a base is entered, a technician routes from HQ by design.
-- Operations ratifies the quote-time insertion estimate (a new stop's marginal travel = the real
-  Routes leg to its nearest same-window stop, both ways) against the first weeks of real routes; the
-  nightly rebuild already re-measures every slot as base → stops in route order → base.
-
-**Pass owner:** Head of Operations.
-
-### GL-06 — Approve processing and failed-payment recovery
-
-**Business outcome:** The customer and office always see the same payment, capacity, and booking state;
-an async payment cannot create a double payment, a nonexistent hold, an oversold visit, or an obligation
-that waits forever.
-
-**Engineering:** closed (`1228822`). A pending bank debit creates the full scheduled commitment
-immediately with every surface saying **Payment pending**; all payment/booking transitions are one
-conditional state machine; pre/post-service failure, late success, cancel, and reconcile paths are
-exactly-once; returning customers always retrieve the durable state; Operations has the payments-in-flight
-view. The CEO approved the customer-facing payment copy; the outside Finance and Operations approvals
-below remain.
-
-**Remaining requirements:**
-
-- Finance and Operations sign off the changed customer-facing workflow now live: the
-  "visit scheduled — payment processing, don't pay again" confirmation, the pre-service
-  "visit canceled, no money collected, rebook" and post-service "outstanding balance" failure notices,
-  the pending-cancel refund wording (refund completes after the debit settles), and the Finance-owned
-  balance-collection flow (case closes only on a verified money settle).
-
-**Pass owner:** CEO and Finance lead jointly; Head of Operations approves the recovery workflow.
-
-### GL-08 — Exact, terminal customer plan cancellation
-
-**Business outcome:** A customer's online cancellation is a durable instruction, and every customer
-message matches the actual billing, plan, schedule, and delivery state.
-
-**Engineering:** closed (`dc39f74`, hour-exact correction `73174e8`). The refund line is
-enforced HOUR-EXACT in `America/New_York` on all three money-dispositive cancel paths, matching the
-approved copy ("more than 72 hours away = full refund; within 72 hours = no refund"). The office path
-(`driveHeldVisitCancel`) was already hour-exact; the follow-up corrected the two paths that still
-decided on whole calendar days — plan cancellation (`cancelQueuedPlanVisits`, and the matching preview
-`listQueuedVisits`) and the public self-cancel link (`booking-public` `cancel`) — to judge refundability
-from the accepted-cancellation instant against the visit's DST-correct Eastern start. The public path
-now persists that instant (`BookingRequest.cancelRequestedAt`) so a retry after an outage judges the
-moment the customer was entitled to. Only the business sign-off below remains.
-
-**Remaining requirements:**
-
-- Finance and Operations sign off the changed customer-facing copy and workflow now live (CEO approved
-  19 July 2026): the per-visit 72-hour outcomes in the preview, confirmation email, and success message
-  (this replaces the previous "keep it or refund it, your choice" promise for paid visits), and the
-  prescribed-full-refund Finance
-  case flow (Finance issues the exact refund; no discretionary disposition).
-
-**Pass owner:** CEO, with Finance and Operations sign-off.
-
-### GL-16 — Obtain Finance pricing-control ratification
-
-**Business outcome:** The approved pricing prompt can publish researched prices without clamps or
-preapproval, while leadership can see what changed and safely recover from a bad model/prompt result.
-
-**Engineering:** closed (`41020a6`, `3826eb1`, `f57817c`) and verified healthy on staging. The CEO
-ratified the no-clamp/no-preapproval posture, daily review, controlled reason vocabularies, and OWNER-only
-rollback authority. Finance's independent ratification remains.
-
-**Remaining requirements:**
-
-- Finance ratifies the recorded operating values now live: the daily change-review cadence (one
-  claimable review item per day of changes), the controlled office-edit and rollback reason vocabularies,
-  OWNER as the sole rollback authority, and the accepted no-clamp/no-preapproval posture the mechanism
-  encodes.
-
-**Pass owner:** CEO and Finance lead jointly.
-
-### GL-01 — Obtain launch-catalog co-signs
-
-**Business outcome:** A customer can never be promised a service the operating system cannot price,
-staff, perform, document, and support profitably.
-
-**Engineering:** closed (`abcb908`). One versioned catalog (`serviceCatalog.ts`) now drives the funnel
-dropdown and sold labels, CRM Market Rates labels, plan naming, seasonal facts, pricing sources/cost
-kinds, and the locked class-based durations; every job and plan records an immutable serviceCode +
-catalog version (legacy strings adopted by the resolver); office job creation is a controlled catalog
-selection with server enforcement, and "Something else" opens an owned SERVICE_CATALOG_DECISION instead
-of an invented job; the CRM Service-catalog screen shows the catalog and the standing public-conflict
-inventory (exact file, promise, conflict, proposed replacement). The CEO ratified the ten-entry launch
-catalog and its conflict dispositions; the outside co-signs below remain.
-
-**Remaining requirements:**
-
-- Operations, Finance, and Compliance provide written co-signs for the CEO-ratified launch catalog's
-  ten entries, property classes, cadences, seasonal facts, funnel/lead availability, and recorded
-  public-site conflict dispositions (**GL-20**).
-
-**Pass owner:** CEO, with written sign-off from Operations, Finance, and Compliance.
 
 ---
 
@@ -594,12 +342,12 @@ The launch approver should use this table only after every named owner approves 
 
 | Function | Named approver | Date | Gates accepted | Approval record |
 |---|---|---|---|---|
-| CEO |  |  | GL-01, 05, 06, 08, 14, 16–20, 22 |  |
-| Sales |  |  | GL-02, 03, 14, 19 |  |
-| Operations |  |  | GL-03, 04, 06, 07, 09–12, 14, 15, 18, 19, 23 |  |
-| Finance |  |  | GL-05–09, 16–19, 21 |  |
-| Compliance/legal |  |  | GL-01–03, 10, 15, 17, 20, 22 |  |
-| Engineering |  |  | GL-05, 07, 09, 15, 17, 19, 21, 22 |  |
+| CEO |  |  | GL-10, 19, 20 |  |
+| Sales |  |  | GL-02, 03, 19 |  |
+| Operations |  |  | GL-03, 10, 11, 19, 23 |  |
+| Finance |  |  | GL-10, 19 |  |
+| Compliance/legal |  |  | GL-02, 03, 20 |  |
+| Engineering |  |  | GL-20 |  |
 
 **Production go-live decision:** `NO-GO / GO`
 
