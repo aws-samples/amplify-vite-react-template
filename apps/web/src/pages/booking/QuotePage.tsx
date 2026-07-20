@@ -829,7 +829,7 @@ export default function QuotePage() {
                     {(
                       [
                         ["RESIDENTIAL", "Residential"],
-                        ["COMMUNITY", "Condo / HOA"],
+                        ["COMMUNITY", "Condo / HOA Community"],
                         ["COMMERCIAL", "Commercial"],
                       ] as [PropertyKind, string][]
                     ).map(([kind, label]) => (
