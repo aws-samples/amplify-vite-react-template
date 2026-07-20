@@ -2,8 +2,8 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `67df267` through `4a56023`; newest implementation in
-that range `95e39d3` (previously reviewed `9057015` also reconciled below)
+**Latest commit review:** every commit after `67df267` through `f238d82`; newest implementation
+commit `f238d82` (GL-17 funnel sale path)
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
@@ -144,7 +144,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
 | P0 | GL-15 | Production delivery wiring — report rules approved and engineering closed (`bbcf0c3`) | Compliance owner | Invalid or falsely "delivered" legal record reaches a customer | **15% — Very low (SES wiring)** |
 | P0 | GL-22 | Policy approval and production alarm delivery — engineering closed (`041f939`, `bc20401`) | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **15% — Very low (production setup + approvals)** |
-| P0 | GL-17 | Add the approved mosquito services to the lead funnel | CEO + Compliance owner | A launch service cannot be sold through the approved path | **80% — High** |
+| P0 | GL-17 | Funnel sale path live — engineering closed (`f238d82`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
 | P0 | GL-12 | Legacy-visit backfill and final service constraints — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (ops backfill + co-signs)** |
 | P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
 | P0 | GL-09 | Lifecycle-history export — policy and engineering closed (`95e39d3`) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **85% — Very high (bounded export)** |
@@ -276,15 +276,17 @@ seven-year AWS Backup coverage, PITR, the SES DLQ, and the alarm-to-owned-work b
 **Business outcome:** Seasonal services bill and schedule exactly as customers were told, and every visit
 is assigned to a technician with a current license record without hard-coding changing state law.
 
-**Engineering:** the seasonal-plan and licensing controls are closed (`dc39f74`). The CEO selected the
-public lead funnel as the launch sale path for both mosquito products; only that bounded funnel change
-remains.
+**Engineering:** closed (`dc39f74`, funnel sale path `e3ad99b`). Both mosquito products sell through
+the approved funnel: deterministic card pricing (never the AI researcher), plan-only monthly billing
+year-round, first treatment sold onto April–October dates only (fully off-season asks fall to the owned
+contact path), yard-size input, and the existing seasonal enrollment (obligation claim, off-season
+redirect) confirmed reachable from the funnel labels. No other public page, metadata, SEO, or marketing
+copy changed.
 
 **Remaining requirements:**
 
-- Add `MOSQUITO` and `MOSQUITO_TICK` to the approved public lead-form funnel and confirm that each
-  accepted offer creates the already-implemented April–October seasonal plan. No other public page,
-  metadata, SEO, or marketing copy is changed.
+- CEO and Compliance sign the live funnel offer as sold (labels, card prices, seasonal copy) — the
+  bounded engineering change is complete.
 
 **Pass owner:** CEO as business and Compliance owner.
 
