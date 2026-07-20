@@ -175,7 +175,7 @@ export default function Leads() {
       }
     >
       <ErrorNote error={error} />
-      <label className="inline-check small" style={{ margin: "8px 0" }}>
+      <label className="inline-check small" style={{ margin: "8px 0 12px" }}>
         <input
           type="checkbox"
           checked={mineOnly}
