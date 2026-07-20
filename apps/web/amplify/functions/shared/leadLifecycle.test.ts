@@ -124,6 +124,7 @@ const {
   setLeadDisposition,
   assignLeadOwner,
   recordWebsiteQuoteRequested,
+  recordWebsiteQuoteLead,
   reassignLeadsForSub,
 } = await import("./leadLifecycle");
 
@@ -351,6 +352,63 @@ describe("recordWebsiteQuoteRequested", () => {
       status: "OPEN",
       dueAt: "2026-07-15T16:00:00.000Z",
     });
+  });
+});
+
+describe("recordWebsiteQuoteLead", () => {
+  it("captures the visitor as a LEAD and returns its id, retaining email and call permission", async () => {
+    const id = await recordWebsiteQuoteLead({
+      name: "Pat Visitor",
+      email: "pat@example.com",
+      phone: "+14135550123",
+      street: "1 Elm St",
+      city: "Springfield",
+      state: "MA",
+      zip: "01103",
+      callConsent: true,
+      leadSource: "Website · quote",
+      notes: "Service requested: Rodent Control",
+    });
+
+    expect(id).not.toBeNull();
+    expect(customers.get(id as string)).toMatchObject({
+      status: "LEAD",
+      email: "pat@example.com",
+      leadSource: "Website · quote",
+      contactConsent: true,
+      contactConsentChannels: ["EMAIL", "CALL"],
+      contactConsentSource: "website-quote",
+      contactConsentPolicyVersion: "2026-07-20.1",
+    });
+  });
+
+  it("retains email only, with the email-response policy version, when call consent is absent", async () => {
+    const id = await recordWebsiteQuoteLead({
+      name: "Sam Visitor",
+      email: "sam@example.com",
+      callConsent: false,
+      leadSource: "Website · quote",
+    });
+
+    expect(customers.get(id as string)).toMatchObject({
+      contactConsent: false,
+      contactConsentChannels: ["EMAIL"],
+      contactConsentPolicyVersion: "website-email-response-2026-07-20.1",
+    });
+  });
+
+  it("returns null instead of throwing when lead creation fails, so the quote is never withheld", async () => {
+    findLeadDuplicates.mockRejectedValueOnce(new Error("duplicate page unreadable"));
+
+    const id = await recordWebsiteQuoteLead({
+      name: "Unlucky Visitor",
+      email: "unlucky@example.com",
+      callConsent: false,
+      leadSource: "Website · quote",
+    });
+
+    expect(id).toBeNull();
+    expect(customers.size).toBe(0);
   });
 });
 

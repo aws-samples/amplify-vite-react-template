@@ -60,7 +60,10 @@ import {
   type PlanCadence,
 } from "../shared/marketRate";
 import { serviceLabelFor } from "../shared/serviceCatalog";
-import { recordWebsiteQuoteRequested } from "../shared/leadLifecycle";
+import {
+  recordWebsiteQuoteLead,
+  recordWebsiteQuoteRequested,
+} from "../shared/leadLifecycle";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -855,6 +858,54 @@ async function leadPrefill(body: Record<string, unknown>) {
   };
 }
 
+/** The lead's origin, in the same "Website · …" shape lead-intake stores. */
+function quoteLeadSource(attribution: Attribution | null): string {
+  const utm = attribution?.source?.trim();
+  return ["Website", "quote", utm ? `utm:${utm}` : undefined]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/**
+ * Everything the visitor told the funnel that has no first-class Customer
+ * column, kept verbatim for the office, mirroring lead-intake's note block.
+ */
+function quoteLeadNotes(
+  input: QuoteInput,
+  service: string,
+  propertyKind: string,
+  attribution: Attribution | null
+): string {
+  const lines: string[] = [];
+  const add = (label: string, v: unknown) => {
+    const t = String(v ?? "").trim();
+    if (t) lines.push(`${label}: ${t}`);
+  };
+  add("Service requested", service);
+  add("Property type", propertyKind);
+  add("Square footage", input.sqft);
+  add("Units", input.units);
+  add("Nests", input.nestCount);
+  add("Yard size (½ acres)", input.lotHalfAcres);
+  add("Recurring preference", input.recurringPreference);
+  add("Comments", input.comments?.slice(0, 2000));
+  if (attribution) {
+    add("Campaign", attribution.campaign);
+    add("Medium", attribution.medium);
+    add("Term", attribution.term);
+    add("Content", attribution.content);
+    add("Google click id", attribution.gclid);
+    add("Landing page", attribution.landingPage);
+    add("Referrer", attribution.referrer);
+  }
+  lines.push(
+    input.callConsent === true
+      ? "Consent: call permission granted for this quote; email always permitted"
+      : "Consent: email response only — no call or text permission granted"
+  );
+  return lines.join("\n");
+}
+
 async function quote(
   input: QuoteInput,
   sourceIp: string,
@@ -959,7 +1010,30 @@ async function quote(
   // Untrusted input: shape-checked, looked up by index, silently dropped when
   // it doesn't resolve — a stale or mangled token must never block a quote,
   // and the response never confirms whether it matched anything.
-  const leadCustomerId = await resolveLeadToken(client, input.leadToken);
+  let leadCustomerId = await resolveLeadToken(client, input.leadToken);
+
+  // A quote is a lead the moment it's requested. A visitor who arrived without
+  // an office booking link has no CRM record yet, so durably capture them now —
+  // the office should chase a priced quote nobody booked. The new lead id rides
+  // onto the BookingRequest below (base.leadCustomerId), so a later paid
+  // finalization converts this exact record. Only the original submission mints
+  // a lead; a token-authenticated status poll (resume) reuses the one already
+  // stamped on the pending request. Failure returns null and never withholds
+  // the quote.
+  if (!leadCustomerId && !resume) {
+    leadCustomerId = await recordWebsiteQuoteLead({
+      name,
+      email,
+      phone,
+      street: addr.street ?? null,
+      city: addr.city ?? null,
+      state: addr.state ?? null,
+      zip: addr.zip ?? null,
+      callConsent: input.callConsent === true,
+      leadSource: quoteLeadSource(attribution),
+      notes: quoteLeadNotes(input, service, propertyKind, attribution),
+    });
+  }
 
   const makeBooking = async (fields: Record<string, unknown>) => {
     const base = {
@@ -1004,9 +1078,10 @@ async function quote(
     if (!booking) {
       throw new Error(gqlErrors?.[0]?.message ?? "Could not store the request");
     }
-    // A staff-assisted public form submission replaces manual pipeline/status
-    // work. Record the new obligation only after the durable request exists;
-    // lifecycle recovery owns a partial failure without withholding the quote.
+    // The quote form submission — whether it advances an office-link lead or
+    // the one this request just created — logs its pipeline touch only after
+    // the durable request exists; lifecycle recovery owns a partial failure
+    // without withholding the quote.
     if (!resume && leadCustomerId) {
       await recordWebsiteQuoteRequested({
         customerId: leadCustomerId,

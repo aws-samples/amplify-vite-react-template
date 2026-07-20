@@ -262,6 +262,8 @@ vi.mock("@aws-sdk/client-lambda", () => ({
 }));
 
 const quoteLifecycleCalls: { customerId: string; bookingRequestId: string }[] = [];
+const quoteLeadCalls: { name: string; email: string; callConsent: boolean }[] = [];
+let quoteLeadResult: string | null = "web-lead-1";
 vi.mock("../shared/leadLifecycle", () => ({
   recordWebsiteQuoteRequested: async (input: {
     customerId: string;
@@ -269,6 +271,18 @@ vi.mock("../shared/leadLifecycle", () => ({
   }) => {
     quoteLifecycleCalls.push(input);
     return true;
+  },
+  recordWebsiteQuoteLead: async (input: {
+    name: string;
+    email: string;
+    callConsent: boolean;
+  }) => {
+    quoteLeadCalls.push({
+      name: input.name,
+      email: input.email,
+      callConsent: input.callConsent,
+    });
+    return quoteLeadResult;
   },
 }));
 
@@ -335,6 +349,8 @@ beforeEach(() => {
   leadEmails.length = 0;
   customersByLinkToken = {};
   quoteLifecycleCalls.length = 0;
+  quoteLeadCalls.length = 0;
+  quoteLeadResult = "web-lead-1";
   leadLookups.length = 0;
   marketRateCalls.length = 0;
   enqueueCalls.length = 0;
@@ -1224,16 +1240,23 @@ describe("the booking link's lead identity rides on the booking", () => {
     expect(quoteLifecycleCalls).toEqual([
       { customerId: "lead-77", bookingRequestId: "b1" },
     ]);
+    // An office-link lead is already in the CRM — the funnel advances it, it
+    // does not mint a second website lead.
+    expect(quoteLeadCalls).toHaveLength(0);
   });
 
-  it("silently drops a token that resolves to nothing — identity is an upgrade, not a gate", async () => {
+  it("silently drops a token that resolves to nothing, but still captures a fresh website lead", async () => {
     const { status, body } = await postQuote({
       ...rodentInput,
       leadToken: "tok-unknown-0123456789",
     });
 
     expect(status).toBe(200);
-    expect(bookings[0].leadCustomerId).toBeUndefined();
+    // The office token matched nobody, so a new CRM lead is created and its id
+    // rides on the booking — identity is an upgrade, not a gate, and no visitor
+    // leaves without a durable record.
+    expect(quoteLeadCalls).toHaveLength(1);
+    expect(bookings[0].leadCustomerId).toBe("web-lead-1");
     // The response never confirms whether the token matched anything.
     expect(JSON.stringify(body)).not.toContain("lead");
   });
@@ -1245,7 +1268,8 @@ describe("the booking link's lead identity rides on the booking", () => {
     });
 
     expect(status).toBe(200);
-    expect(bookings[0].leadCustomerId).toBeUndefined();
+    // No office identity resolved, so the visitor is captured as a fresh lead.
+    expect(bookings[0].leadCustomerId).toBe("web-lead-1");
     // The shape gate runs BEFORE the table — junk never costs a query.
     expect(leadLookups).toHaveLength(0);
   });
@@ -1262,7 +1286,8 @@ describe("the booking link's lead identity rides on the booking", () => {
     });
 
     expect(status).toBe(200);
-    expect(bookings[0].leadCustomerId).toBeUndefined();
+    // The ambiguous office token is refused, but the quote still creates a lead.
+    expect(bookings[0].leadCustomerId).toBe("web-lead-1");
   });
 
   it("a resumed PENDING quote keeps the lead identity from the original submission", async () => {
@@ -1296,6 +1321,71 @@ describe("the booking link's lead identity rides on the booking", () => {
       status: "QUOTED",
       leadCustomerId: "lead-77",
     });
+  });
+});
+
+describe("a plain website quote is captured as a CRM lead even if nobody books", () => {
+  it("creates a lead on submission and stamps it onto the booking", async () => {
+    const { status } = await postQuote({ ...rodentInput, callConsent: true });
+
+    expect(status).toBe(200);
+    // The visitor arrived with no office link, so the funnel mints the lead...
+    expect(quoteLeadCalls).toEqual([
+      { name: rodentInput.name, email: rodentInput.email, callConsent: true },
+    ]);
+    // ...stamps it on the durable booking so a later paid finalization converts
+    // this exact record...
+    expect(bookings[0].leadCustomerId).toBe("web-lead-1");
+    // ...and logs the pipeline touch against the new lead.
+    expect(quoteLifecycleCalls).toEqual([
+      { customerId: "web-lead-1", bookingRequestId: "b1" },
+    ]);
+  });
+
+  it("passes callConsent=false through when the box was not ticked", async () => {
+    await postQuote({ ...rodentInput, callConsent: false });
+
+    expect(quoteLeadCalls).toEqual([
+      { name: rodentInput.name, email: rodentInput.email, callConsent: false },
+    ]);
+  });
+
+  it("still returns the quote when lead capture fails — the booking is the durable store", async () => {
+    quoteLeadResult = null;
+
+    const { status } = await postQuote(rodentInput);
+
+    expect(status).toBe(200);
+    expect(quoteLeadCalls).toHaveLength(1);
+    // No lead id was returned, so nothing is stamped and no touch is logged,
+    // but the quote is never withheld.
+    expect(bookings[0].leadCustomerId).toBeUndefined();
+    expect(quoteLifecycleCalls).toHaveLength(0);
+  });
+
+  it("does not mint a second lead when a PENDING quote is resumed", async () => {
+    marketRateResult = null;
+    const pending = await postQuote(rodentInput);
+    expect(pending.body.decision).toBe("PENDING");
+    expect(quoteLeadCalls).toHaveLength(1);
+    expect(bookings[0].leadCustomerId).toBe("web-lead-1");
+
+    marketRateResult = {
+      priceCents: 19900,
+      sheet: { oneTimeCents: 19900 },
+      basis: "research completed",
+      cached: true,
+    };
+    const ready = await postQuoteStatus({
+      bookingId: pending.body.bookingId,
+      statusToken: pending.body.statusToken,
+    });
+
+    expect(ready.body.decision).toBe("PRICED");
+    // The resume reuses the lead the original submission created; it never
+    // creates another, and the stored identity survives.
+    expect(quoteLeadCalls).toHaveLength(1);
+    expect(bookings[0].leadCustomerId).toBe("web-lead-1");
   });
 });
 

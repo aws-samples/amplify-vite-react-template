@@ -24,6 +24,7 @@ import {
   resolveOwnedWork,
   workItemId,
 } from "./ownedWork";
+import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "./consentText";
 
 export type LeadActor = {
   sub: string | null;
@@ -540,6 +541,74 @@ export async function recordWebsiteQuoteRequested(input: {
       error
     );
     return false;
+  }
+}
+
+/**
+ * A public quote is a lead the moment it is requested. When a visitor reaches
+ * the funnel without an office booking link (no pre-resolved leadCustomerId),
+ * this durably captures them as a CRM lead — a priced quote they never book is
+ * still someone the office should chase. It returns the lead id so the caller
+ * can stamp it onto the BookingRequest; a later paid finalization then converts
+ * this exact record instead of minting a second customer.
+ *
+ * Consent mirrors lead-intake: the funnel always holds a valid email, so email
+ * response is retained; a call is retained only when the visitor ticked the
+ * GL-03 call-consent box. The server-owned wording is authoritative — a caller
+ * never supplies the evidence text that later authorizes outreach.
+ *
+ * A lead-creation fault must never withhold the quote (the durable
+ * BookingRequest still holds the contact for a hand recovery, and createLead's
+ * own recovery item owns the miss), so this swallows failure and returns null.
+ */
+export async function recordWebsiteQuoteLead(input: {
+  name: string;
+  email: string;
+  phone?: string | null;
+  street?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  callConsent: boolean;
+  leadSource: string;
+  notes?: string | null;
+}): Promise<string | null> {
+  try {
+    const result = await createLead(
+      {
+        displayName: input.name,
+        email: input.email,
+        phone: input.phone ?? undefined,
+        serviceStreet: input.street ?? undefined,
+        serviceCity: input.city ?? undefined,
+        serviceState: input.state ?? undefined,
+        serviceZip: input.zip ?? undefined,
+        leadSource: input.leadSource,
+        notes: input.notes ?? undefined,
+        // The visitor never merges records on the Office's behalf: keep the
+        // submission and let the controlled duplicate decision resolve identity.
+        force: true,
+        contactConsentChannels: [
+          "EMAIL",
+          ...(input.callConsent ? ["CALL"] : []),
+        ],
+        contactConsentSource: "website-quote",
+        contactConsentText: input.callConsent
+          ? CALL_CONSENT_TEXT
+          : "Customer supplied an email address in a direct quote request and requested an email response; no call or text permission was granted.",
+        contactConsentPolicyVersion: input.callConsent
+          ? CALL_CONSENT_TEXT_VERSION
+          : "website-email-response-2026-07-20.1",
+      },
+      { sub: null, email: null }
+    );
+    return result.decision === "CREATED" ? result.id : null;
+  } catch (error) {
+    console.error(
+      "recordWebsiteQuoteLead: createLead's recovery owns the miss",
+      error
+    );
+    return null;
   }
 }
 
