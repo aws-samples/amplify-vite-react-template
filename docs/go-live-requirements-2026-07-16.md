@@ -7,7 +7,7 @@ implementation commit `4a80b8e`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 70 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 69 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -27,9 +27,11 @@ DynamoDB table suffix from the GraphQL endpoint hostname (a separate DNS id, not
 deployed conditional write threw ResourceNotFoundException, and the error was classified as "somebody
 else holds it"; the pricing worker read its own broken wiring as a held drain lease and skipped every
 run, silently (`3826eb1` fixes resolution via an SSM-published apiId and makes infra failures loud;
-the worker is verified healthy on staging). Separately, the staging Amplify BUILD pipeline is down
-(GitHub deploy keys deleted when the repo went public — see GL-22) — backend fixes are deployed via
-manual pipeline-deploy and the hosted frontend is stale until Jake reconnects the repository.
+the worker's CAS layer is verified working on staging — real drain leases, real budget consumption —
+but the worker is NOT yet called healthy: every post-fix provider research attempt has timed out, and
+health requires at least one real research to succeed on staging). The staging Amplify BUILD pipeline failed pre-clone from job 82 (GitHub deploy keys deleted when
+the repo went public) and recovered once the public repo became anonymously cloneable — build job 89
+is green on the current commit.
 Corrective commits: `f57817c` (GL-16 complete-catalog rollback), `bc20401` (GL-22 seven-year
 retention + throttle alarms), `8678623` (GL-10 verified photo + capacity-safe callback scheduling),
 `4a80b8e` (GL-11 atomic request ownership + durable group audit). Each reopened gate lists exactly
@@ -608,13 +610,6 @@ the bullets below stay open until staging behavior proves them.
 
 **Remaining requirements:**
 
-- **The staging deployment pipeline is DOWN and must be restored (Jake).** Every Amplify build since
-  job 82 fails pre-clone with "!!! Internal error": the repo's SSH deploy keys are gone (deleted by
-  GitHub when the repository was made public ~00:00 UTC 20 Jul), so the build service cannot clone.
-  Reconnect the repository in the Amplify console (App settings → Repository) — the CLI repair routes
-  are permission-blocked in this session. Until pushes build green, backend changes reach staging only
-  by manual `ampx pipeline-deploy` and the FRONTEND is stale at commit `90c7606`. No gate may be
-  marked closed while this stands.
 - Alerts cover errors AND throttles, scheduled jobs that did not run, email failures, and the dead
   letter queue, and every alert creates or updates a deduplicated shared-Office item with the
   one-business-day clock. *(Alarms deployed and OK on staging; open until one end-to-end firing is
