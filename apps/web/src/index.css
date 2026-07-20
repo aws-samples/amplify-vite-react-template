@@ -2004,6 +2004,38 @@ h6 {
   margin-left: auto;
 }
 
+/* Consent checkbox row — spans the step, reads as fine print, not a field
+   label (the checkbox sits on the same baseline as the first line of text). */
+.bk-consent {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+.bk-consent input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--bk-green);
+  cursor: pointer;
+}
+.bk-consent span {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg2);
+}
+
+/* Closing fine print under the submit button, full width and muted. */
+.bk-form-fineprint {
+  grid-column: 1 / -1;
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg2);
+}
+
 /* Multi-column rows inside steps */
 .bk-form-row {
   grid-column: 1 / -1;

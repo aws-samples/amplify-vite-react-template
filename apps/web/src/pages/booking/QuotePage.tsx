@@ -796,22 +796,6 @@ export default function QuotePage() {
                 <h3 className="bk-form-step__title">What do you need?</h3>
 
                 <div className="bk-field bk-full">
-                  <label htmlFor="bq-service">Service</label>
-                  <select
-                    id="bq-service"
-                    value={fields.service}
-                    onChange={(e) => set("service")(e.target.value)}
-                  >
-                    {SERVICE_OPTIONS.map((s) => (
-                      <option key={s.code} value={s.code}>
-                        {s.label}
-                      </option>
-                    ))}
-                  </select>
-                  {fieldError("service")}
-                </div>
-
-                <div className="bk-field bk-full">
                   <label>Property type</label>
                   <div
                     className="bk-segmented bk-segmented--full"
@@ -836,6 +820,22 @@ export default function QuotePage() {
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div className="bk-field bk-full">
+                  <label htmlFor="bq-service">Service</label>
+                  <select
+                    id="bq-service"
+                    value={fields.service}
+                    onChange={(e) => set("service")(e.target.value)}
+                  >
+                    {SERVICE_OPTIONS.map((s) => (
+                      <option key={s.code} value={s.code}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                  {fieldError("service")}
                 </div>
 
                 {needs.sqft && (
@@ -982,29 +982,17 @@ export default function QuotePage() {
                     {fieldError("phone")}
                   </div>
                 </div>
-                <div className="bk-field">
-                  <label
-                    htmlFor="bq-call-consent"
-                    style={{
-                      display: "flex",
-                      gap: 8,
-                      alignItems: "flex-start",
-                      fontWeight: 400,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <input
-                      id="bq-call-consent"
-                      type="checkbox"
-                      checked={fields.callConsent}
-                      onChange={(e) =>
-                        setFields((f) => ({ ...f, callConsent: e.target.checked }))
-                      }
-                      style={{ marginTop: 3 }}
-                    />
-                    <span>{CALL_CONSENT_TEXT}</span>
-                  </label>
-                </div>
+                <label htmlFor="bq-call-consent" className="bk-consent">
+                  <input
+                    id="bq-call-consent"
+                    type="checkbox"
+                    checked={fields.callConsent}
+                    onChange={(e) =>
+                      setFields((f) => ({ ...f, callConsent: e.target.checked }))
+                    }
+                  />
+                  <span>{CALL_CONSENT_TEXT}</span>
+                </label>
 
                 <h3 className="bk-form-step__title">Where is the property?</h3>
 
@@ -1100,7 +1088,7 @@ export default function QuotePage() {
                     {submitting ? "Pricing…" : "Get my instant price"}
                   </button>
                 </div>
-                <p style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
+                <p className="bk-form-fineprint">
                   We only use these details to price and schedule your service.
                   In the rare case we can&rsquo;t price your address on the
                   spot, we&rsquo;ll follow up about this request, by phone if
