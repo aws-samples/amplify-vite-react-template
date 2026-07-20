@@ -13,10 +13,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 let customer: Record<string, unknown> | null;
 let customerUpdateFails = false;
 const customerUpdates: Record<string, unknown>[] = [];
+const claims = new Map<string, Record<string, unknown>>();
+const activities = new Map<string, Record<string, unknown>>();
+const workItems = new Map<string, Record<string, unknown>>();
 const fakeDataClient = {
   models: {
     Customer: {
-      get: async () => ({ data: customer }),
+      get: async () => ({ data: customer, errors: [] }),
       update: async (patch: Record<string, unknown>) => {
         if (customerUpdateFails) return { data: null };
         customerUpdates.push(patch);
@@ -24,6 +27,39 @@ const fakeDataClient = {
         return { data: customer };
       },
     },
+    LeadLifecycleClaim: {
+      create: async (row: Record<string, unknown>) => {
+        const id = String(row.id);
+        if (claims.has(id)) return { data: null };
+        claims.set(id, row);
+        return { data: row };
+      },
+      get: async ({ id }: { id: string }) => ({ data: claims.get(id) ?? null }),
+      delete: async ({ id }: { id: string }) => ({ data: claims.delete(id) }),
+    },
+    LeadActivity: {
+      get: async ({ id }: { id: string }) => ({ data: activities.get(id) ?? null, errors: [] }),
+      create: async (row: Record<string, unknown>) => {
+        activities.set(String(row.id), row);
+        return { data: row };
+      },
+    },
+    SuppressedEmail: { get: async () => ({ data: null, errors: [] }) },
+    CompanyClosure: { get: async () => ({ data: null, errors: [] }) },
+    WorkItem: {
+      get: async ({ id }: { id: string }) => ({ data: workItems.get(id) ?? null }),
+      create: async (row: Record<string, unknown>) => {
+        workItems.set(String(row.id), row);
+        return { data: row };
+      },
+      update: async (patch: Record<string, unknown>) => {
+        const id = String(patch.id);
+        const row = { ...workItems.get(id), ...patch };
+        workItems.set(id, row);
+        return { data: row };
+      },
+    },
+    WorkEvent: { create: async (row: Record<string, unknown>) => ({ data: row }) },
   },
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
@@ -70,10 +106,16 @@ vi.mock("@aws-sdk/s3-request-presigner", () => ({
 
 const { handler } = await import("./handler");
 
+let actionSequence = 0;
 const send = (kind: string, note?: string, groups: string[] = ["OFFICE"]) =>
   (handler as unknown as (e: never) => Promise<unknown>)({
     info: { fieldName: "sendCustomerEmail" },
-    arguments: { customerId: "c1", kind, note },
+    arguments: {
+      customerId: "c1",
+      kind,
+      note,
+      idempotencyKey: `booking-link-test-${++actionSequence}`,
+    },
     identity: { sub: "sub-office", groups, claims: { email: "csr@x.com" } },
   } as never);
 
@@ -81,11 +123,18 @@ beforeEach(() => {
   sentEmails.length = 0;
   customerUpdateFails = false;
   customerUpdates.length = 0;
+  claims.clear();
+  activities.clear();
+  workItems.clear();
   customer = {
     id: "c1",
     displayName: "Dana Whitlock",
     contactName: "Dana",
     email: "dana@example.com",
+    status: "LEAD",
+    contactConsentChannels: ["EMAIL"],
+    nextAction: "Deliver the lead-specific booking link",
+    nextActionAt: "2026-07-21T16:00:00.000Z",
   };
   process.env.MARKETING_URL = "https://staging.d26qpsjewk0bee.amplifyapp.com";
 });
@@ -107,12 +156,13 @@ describe("sendCustomerEmail kind booking-link", () => {
       /Or paste this link into your browser: https:\/\/staging\.d26qpsjewk0bee\.amplifyapp\.com\/quote\?lead=/
     );
     // First send mints the token onto the record, then (GL-02) stamps the
-    // sent time so the derived pipeline stage advances to Booking-sent.
+    // provider-accepted attempt while delivery remains a separate fact.
     expect(customerUpdates).toHaveLength(2);
     expect(String(customerUpdates[0].bookingLinkToken)).toMatch(
       /^[A-Za-z0-9_-]{16,}$/
     );
-    expect(customerUpdates[1].bookingLinkSentAt).toBeTruthy();
+    expect(customerUpdates[1].lastAttemptedAt).toBeTruthy();
+    expect(customerUpdates[1].bookingLinkDeliveredAt).toBeUndefined();
   });
 
   it("reuses the already-minted token on a resend", async () => {
@@ -121,21 +171,29 @@ describe("sendCustomerEmail kind booking-link", () => {
     await send("booking-link");
 
     expect(sentEmails[0].html).toContain("/quote?lead=tok-already-minted-0123");
-    // No token mint on a resend, but the sent time is stamped (GL-02).
+    // No token mint on a resend, but provider acceptance is stamped as an
+    // attempt, not customer delivery (GL-02).
     expect(customerUpdates).toHaveLength(1);
-    expect(customerUpdates[0].bookingLinkSentAt).toBeTruthy();
+    expect(customerUpdates[0].lastAttemptedAt).toBeTruthy();
+    expect(customerUpdates[0].bookingLinkDeliveredAt).toBeUndefined();
   });
 
-  it("a mint failure still sends the bare link — email matching stays the fallback", async () => {
+  it("a post-send lifecycle failure never reports the bare-link send as complete", async () => {
     customerUpdateFails = true;
 
-    const res = (await send("booking-link")) as { sent: boolean };
+    await expect(send("booking-link")).rejects.toThrow(/lead state was not saved/i);
 
-    expect(res.sent).toBe(true);
+    // Provider acceptance happened, but the whole business obligation did not,
+    // so the caller receives failure and shared recovery owns the partial.
     expect(sentEmails[0].html).toContain(
       'href="https://staging.d26qpsjewk0bee.amplifyapp.com/quote"'
     );
     expect(sentEmails[0].html).not.toContain("?lead=");
+    expect(
+      [...workItems.values()].some(
+        (row) => row.kind === "LEAD_LIFECYCLE_RECOVERY"
+      )
+    ).toBe(true);
   });
 
   it("is honest about what happens: price, pick a day, pay — specialist calls if not", async () => {

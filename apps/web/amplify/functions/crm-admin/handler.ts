@@ -39,13 +39,14 @@ import {
   workItemId,
 } from "../shared/ownedWork";
 import { disposeStaleDrafts } from "../shared/jobAssignment";
-import { callerEmail, callerSub } from "../shared/authz";
+import { callerEmail, callerIsOwner, callerSub } from "../shared/authz";
 import {
   assignLeadOwner,
   createLead,
   logLeadTouch,
   reassignLeadsForSub,
   setLeadDisposition,
+  SUPPRESSION_RELEASE_REASONS,
 } from "../shared/leadLifecycle";
 import { recordCustomerLifecycleEvent } from "../shared/lifecycleLog";
 import { deactivateCustomer as sharedDeactivateCustomer } from "../shared/deactivation";
@@ -331,26 +332,34 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
       return createLead(event.arguments as never, {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
+        isOwner: callerIsOwner(event.identity),
       });
     case "logLeadTouch":
       return logLeadTouch(event.arguments as never, {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
+        isOwner: callerIsOwner(event.identity),
       });
     case "setLeadDisposition":
       return setLeadDisposition(event.arguments as never, {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
+        isOwner: callerIsOwner(event.identity),
       });
     case "assignLeadOwner":
       return assignLeadOwner(event.arguments as never, {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
+        isOwner: callerIsOwner(event.identity),
       });
     case "liftEmailSuppression": {
-      const args = event.arguments as { email?: string; note?: string };
+      const args = event.arguments as { email?: string; reasonCode?: string; evidence?: string };
       return liftEmailSuppression(
-        { email: args.email ?? "", note: args.note ?? "" },
+        {
+          email: args.email ?? "",
+          reasonCode: args.reasonCode ?? "",
+          evidence: args.evidence ?? "",
+        },
         { sub: callerSub(event.identity), email: callerEmail(event.identity) }
       );
     }
@@ -2996,17 +3005,18 @@ async function staffRoster() {
  * is verified by read-back — "lifted" is a fact, not a hope.
  */
 async function liftEmailSuppression(
-  args: { email: string; note: string },
+  args: { email: string; reasonCode: string; evidence: string },
   actor: { sub: string | null; email: string | null }
 ): Promise<{ lifted: boolean; message: string }> {
   const email = args.email.trim().toLowerCase();
   if (!email || !email.includes("@")) {
     throw new Error("Enter the suppressed email address to lift.");
   }
-  if (!args.note.trim()) {
-    throw new Error(
-      "A short note is required — how did the customer consent, and what changed about the address?"
-    );
+  if (!(SUPPRESSION_RELEASE_REASONS as readonly string[]).includes(args.reasonCode)) {
+    throw new Error("Choose the controlled suppression-release reason.");
+  }
+  if (!args.evidence.trim()) {
+    throw new Error("Retained evidence is required — how was permission confirmed and what changed?");
   }
   const client = await dataClient();
   if (!("SuppressedEmail" in client.models)) {
@@ -3019,7 +3029,22 @@ async function liftEmailSuppression(
       message: `${email} isn't suppressed — sends to it are already allowed.`,
     };
   }
-  await client.models.SuppressedEmail.delete({ email });
+  // Immutable evidence lands BEFORE the destructive release. A failed audit
+  // leaves suppression in force rather than silently authorizing outreach.
+  const audit = await client.models.ConsentAudit.create({
+    id: `consent-${workItemId("EMAIL_FAILURE", `${email}:${args.reasonCode}:${args.evidence}`)}`,
+    subjectKey: email,
+    action: "EMAIL_SUPPRESSION_CLEARED",
+    channel: "EMAIL",
+    reasonCode: args.reasonCode,
+    evidence: args.evidence.trim(),
+    actorSub: actor.sub ?? undefined,
+    actorEmail: actor.email ?? "unknown owner",
+    occurredAt: new Date().toISOString(),
+  });
+  if (!audit.data) throw new Error("The suppression-release audit could not be saved; nothing was cleared.");
+  const removed = await client.models.SuppressedEmail.delete({ email });
+  if (!removed.data) throw new Error("The suppression could not be removed.");
   const { data: verify } = await client.models.SuppressedEmail.get({ email });
   if (verify) {
     throw new Error(
@@ -3039,7 +3064,7 @@ async function liftEmailSuppression(
         eventType: "SUPPRESSION_LIFTED",
         actorSub: actor.sub ?? undefined,
         actorEmail: actor.email ?? "unknown staff",
-        note: `Suppression lifted for ${email}: ${args.note.trim()}`,
+        note: `Suppression lifted for ${email} (${args.reasonCode}): ${args.evidence.trim()}`,
         occurredAt: new Date().toISOString(),
       }).catch(() => undefined);
     }

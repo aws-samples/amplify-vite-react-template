@@ -29,6 +29,7 @@ const emailLogs: Record<string, unknown>[] = [];
 const workRows: (Record<string, unknown> & { id: string })[] = [];
 const workHistory: Record<string, unknown>[] = [];
 const suppressedRows: Record<string, Record<string, unknown>> = {};
+let suppressionReadFails = false;
 vi.mock("./dataClient", () => ({
   dataClient: async () => ({
     models: {
@@ -39,9 +40,10 @@ vi.mock("./dataClient", () => ({
         },
       },
       SuppressedEmail: {
-        get: async ({ email }: { email: string }) => ({
-          data: suppressedRows[email] ?? null,
-        }),
+        get: async ({ email }: { email: string }) => {
+          if (suppressionReadFails) throw new Error("suppression table unavailable");
+          return { data: suppressedRows[email] ?? null };
+        },
         create: async (input: Record<string, unknown>) => {
           suppressedRows[input.email as string] = input;
           return { data: input };
@@ -103,6 +105,7 @@ beforeEach(() => {
   workRows.length = 0;
   workHistory.length = 0;
   for (const k of Object.keys(suppressedRows)) delete suppressedRows[k];
+  suppressionReadFails = false;
   delete process.env.SES_LEADS_EMAIL;
   delete process.env.SES_NOTIFY_EMAIL;
   delete process.env.SES_CONFIGURATION_SET;
@@ -227,6 +230,22 @@ describe("GL-03 delivery pipeline", () => {
       deliveryStatus: "SENT",
       status: "SENT",
     });
+  });
+
+  it("fails closed and creates owned work when suppression status is unreadable", async () => {
+    suppressionReadFails = true;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const ok = await sendEmail({
+      to: "dana@example.com",
+      subject: "Booking link",
+      html: "<p>book</p>",
+      template: "booking-link",
+      customerId: "lead-1",
+    });
+    expect(ok).toBe(false);
+    expect(sesSend).not.toHaveBeenCalled();
+    expect(emailLogs[0]).toMatchObject({ deliveryStatus: "SUPPRESSED" });
+    expect(workRows[0]).toMatchObject({ kind: "EMAIL_FAILURE" });
   });
 
   it("stamps the configuration set so bounce/complaint events flow", async () => {

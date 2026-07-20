@@ -51,11 +51,60 @@ export const LEAD_TOUCH_CHANNELS = [
 ] as const;
 export const LEAD_TOUCH_OUTCOMES = [
   { code: "REACHED", label: "Reached them" },
+  { code: "DELIVERED", label: "Delivered to customer" },
   { code: "LEFT_MESSAGE", label: "Left a message" },
   { code: "NO_ANSWER", label: "No answer" },
-  { code: "SENT", label: "Sent" },
+  { code: "SENT", label: "Provider accepted (not delivered)" },
+  { code: "QUALIFIED", label: "Qualified" },
+  { code: "UNQUALIFIED", label: "Unqualified" },
+  { code: "FAILED", label: "Failed" },
+  { code: "BOUNCED", label: "Bounced" },
+  { code: "SUPPRESSED", label: "Suppressed" },
   { code: "NOTE", label: "Just a note" },
 ] as const;
+
+export const LEAD_OUTCOME_CODES_BY_CHANNEL: Record<string, readonly string[]> = {
+  CALL: ["REACHED", "LEFT_MESSAGE", "NO_ANSWER", "FAILED"],
+  TEXT: ["REACHED", "DELIVERED", "SENT", "FAILED", "BOUNCED", "SUPPRESSED"],
+  EMAIL: ["REACHED", "DELIVERED", "SENT", "FAILED", "BOUNCED", "SUPPRESSED"],
+  NOTE: ["QUALIFIED", "UNQUALIFIED", "NOTE"],
+};
+
+type LeadActivityPage = {
+  data: LeadActivity[];
+  nextToken?: string | null;
+  errors?: { message: string }[];
+};
+
+/** Pure page collector so complete-history and page-error behavior stay tested. */
+export async function collectLeadActivityPages(
+  customerId: string,
+  listPage: (args: {
+    filter: unknown;
+    limit: number;
+    nextToken?: string | null;
+  }) => Promise<LeadActivityPage>
+): Promise<LeadActivity[]> {
+  const data: LeadActivity[] = [];
+  let nextToken: string | null | undefined;
+  do {
+    const page = await listPage({
+      filter: { customerId: { eq: customerId } },
+      limit: 500,
+      nextToken,
+    });
+    if (page.errors?.length) {
+      throw new Error(page.errors.map((error) => error.message).join("; "));
+    }
+    data.push(...page.data);
+    nextToken = page.nextToken;
+  } while (nextToken);
+  return data;
+}
+
+export function clientActionId(prefix: string): string {
+  return `${prefix}:${crypto.randomUUID()}`;
+}
 
 /** GL-02 lead mutations. Widened like the staff mutations — the actor is stamped
  *  server-side from the token, never these args. */
@@ -71,6 +120,11 @@ export function createLead(input: {
   leadSource?: string;
   notes?: string;
   force?: boolean;
+  idempotencyKey?: string;
+  contactConsentChannels?: string[];
+  contactConsentSource?: string;
+  contactConsentText?: string;
+  contactConsentPolicyVersion?: string;
 }): OpResult {
   return (
     api().mutations as unknown as { createLead: (i: typeof input) => OpResult }
@@ -85,6 +139,7 @@ export function logLeadTouch(input: {
   note?: string;
   nextAction?: string;
   nextActionAt?: string;
+  idempotencyKey: string;
 }): OpResult {
   return (
     api().mutations as unknown as { logLeadTouch: (i: typeof input) => OpResult }
@@ -96,6 +151,7 @@ export function setLeadDisposition(input: {
   disposition: "LOST" | "DNC" | "CLEAR";
   reasonCode?: string;
   note?: string;
+  idempotencyKey: string;
 }): OpResult {
   return (
     api().mutations as unknown as {
@@ -108,6 +164,7 @@ export function assignLeadOwner(input: {
   customerId: string;
   toSub?: string;
   toEmail?: string;
+  idempotencyKey: string;
 }): OpResult {
   return (
     api().mutations as unknown as {
@@ -116,18 +173,17 @@ export function assignLeadOwner(input: {
   ).assignLeadOwner(input);
 }
 
-/** List a lead's activity timeline, tolerant of the model being absent before
- *  the backend wave lands (same guard as listWorkItems). */
-export function listLeadActivity(customerId: string): Promise<{
+/** Page the complete immutable timeline. A missing model or failed page is an
+ * explicit error; it is never rendered as "no activity". */
+export async function listLeadActivity(customerId: string): Promise<{
   data: LeadActivity[];
-  nextToken?: string | null;
-  errors?: { message: string }[];
 }> {
   const models = api().models as unknown as {
     LeadActivity?: {
       list: (a: {
         filter?: unknown;
         limit?: number;
+        nextToken?: string | null;
       }) => Promise<{
         data: LeadActivity[];
         nextToken?: string | null;
@@ -135,11 +191,12 @@ export function listLeadActivity(customerId: string): Promise<{
       }>;
     };
   };
-  if (!models.LeadActivity) return Promise.resolve({ data: [], nextToken: null });
-  return models.LeadActivity.list({
-    filter: { customerId: { eq: customerId } },
-    limit: 100,
-  });
+  if (!models.LeadActivity) throw new Error("Lead activity is unavailable.");
+  const data = await collectLeadActivityPages(
+    customerId,
+    models.LeadActivity.list
+  );
+  return { data };
 }
 
 /**
@@ -255,7 +312,8 @@ export function updateOwnedWork(input: {
  *  the missed message can be re-sent. */
 export function liftEmailSuppression(input: {
   email: string;
-  note: string;
+  reasonCode: "CUSTOMER_RECONSENTED" | "ENTERED_IN_ERROR";
+  evidence: string;
 }): OpResult {
   return api().mutations.liftEmailSuppression(input);
 }
@@ -658,6 +716,7 @@ export function sendInvoicePaymentLink(input: {
   return api().mutations.sendCustomerEmail({
     customerId: input.customerId,
     kind: "payment-request",
+    idempotencyKey: clientActionId("invoice-payment-link"),
   });
 }
 

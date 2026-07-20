@@ -151,15 +151,20 @@ export default function WorkQueue() {
         guess
       );
       if (!email) return;
-      const note = window.prompt(
-        "How did the customer consent / what changed? (required — recorded on the case)"
+      const reason = window.prompt(
+        "Controlled reason: CUSTOMER_RECONSENTED or ENTERED_IN_ERROR",
+        "CUSTOMER_RECONSENTED"
       );
-      if (!note) return;
+      if (reason !== "CUSTOMER_RECONSENTED" && reason !== "ENTERED_IN_ERROR") return;
+      const evidence = window.prompt(
+        "What retained evidence proves the address may be enabled? (required)"
+      );
+      if (!evidence) return;
       setBusyId(item.id);
       setError(null);
       try {
         const result = opResult<{ lifted: boolean; message: string }>(
-          await liftEmailSuppression({ email, note })
+          await liftEmailSuppression({ email, reasonCode: reason, evidence })
         );
         if (!result) throw new Error("The suppression lift did not complete");
         window.alert(result.message);

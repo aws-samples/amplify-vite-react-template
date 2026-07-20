@@ -39,6 +39,10 @@ import { provisionPortalLogin } from "./portalProvision";
 import { renderAgreementPdf } from "./pdf";
 import { stripeClient } from "./stripeClient";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
+import { workItemId } from "./ownedWork";
+import { appendLeadActivity } from "./leadLifecycle";
+import { oneBusinessDayDueAt } from "./businessDays";
+import { normalizePhone } from "./leadIdentity";
 import {
   entryForLabel,
   SERVICE_CATALOG_VERSION,
@@ -746,6 +750,7 @@ function attributionNotes(attribution: Attribution | null): string | undefined {
 /** Only the fields conversion touches on an existing customer. */
 type ExistingCustomer = {
   id: string;
+  displayName?: string | null;
   status?: string | null;
   email?: string | null;
   contactName?: string | null;
@@ -777,6 +782,7 @@ type FinalizeDataClient = {
       list: (args: object) => Promise<{
         data: ExistingCustomer[];
         nextToken?: string | null;
+        errors?: { message: string }[];
       }>;
       update: (args: object) => Promise<{
         data: { id: string; groupId?: string | null } | null;
@@ -804,19 +810,31 @@ type FinalizeDataClient = {
  * paginated list scan (fine at this scale — the office's whole book fits in
  * a few pages).
  */
-async function findCustomersByEmail(
+async function findCustomersByContact(
   client: FinalizeDataClient,
-  email: string
+  email: string,
+  phone?: string | null
 ): Promise<ExistingCustomer[]> {
   const target = email.trim().toLowerCase();
-  if (!target) return [];
+  const targetPhone = normalizePhone(phone);
+  if (!target && !targetPhone) return [];
   const hits: ExistingCustomer[] = [];
   let nextToken: string | null | undefined;
   do {
     const page = await client.models.Customer.list({ nextToken, limit: 200 });
+    if (page.errors?.length) {
+      throw new Error(
+        `Customer identity lookup failed: ${page.errors
+          .map((error) => error.message)
+          .join("; ")}`
+      );
+    }
     hits.push(
       ...page.data.filter(
-        (c) => (c.email ?? "").trim().toLowerCase() === target
+        (c) =>
+          (Boolean(target) &&
+            (c.email ?? "").trim().toLowerCase() === target) ||
+          (Boolean(targetPhone) && normalizePhone(c.phone) === targetPhone)
       )
     );
     nextToken = page.nextToken;
@@ -831,9 +849,9 @@ async function findCustomersByEmail(
  * original leadSource preserved — the funnel label only lands when the
  * record never had a source.
  *
- * Throws on a failed write; the caller treats that as a match failure and
- * falls back to creating a fresh customer, because a paid finalization must
- * never be bricked by the merge.
+ * Throws on a failed write; the caller fails closed into owned recovery. A
+ * conversion write failure must never create a second ordinary customer
+ * beside an unresolved lead.
  */
 async function convertExistingCustomer(
   client: FinalizeDataClient,
@@ -883,6 +901,16 @@ async function convertExistingCustomer(
       booking.stripeCustomerId
     ),
   };
+  // Audit FIRST and deterministically. A retry adopts this immutable row; a
+  // failed audit cannot advance the customer state invisibly.
+  await appendLeadActivity({
+    customerId: existing.id,
+    channel: "LIFECYCLE",
+    outcome: "CONVERTED",
+    note: `Paid booking ${booking.id} converted this originating lead.`,
+    actor: { sub: null, email: "system@pestbuzzkill.com" },
+    mutationId: `paid-conversion:${booking.id}`,
+  });
   let { data: updated } = await client.models.Customer.update(patch);
   if (!updated && patch.phone) {
     // Same rule as the create path: a paid booking must never be bricked by
@@ -897,14 +925,94 @@ async function convertExistingCustomer(
       `finalizeBooking: could not convert existing customer ${existing.id}`
     );
   }
-  // GL-02: the lead is Won — close any open follow-up so it doesn't keep nagging
-  // sales about a customer who already booked. Best-effort and idempotent.
+  const verified = await client.models.Customer.get({ id: existing.id });
+  if (verified.data?.status !== "ACTIVE" || !verified.data.convertedAt) {
+    throw new Error(`finalizeBooking: conversion of ${existing.id} could not be verified`);
+  }
   await resolveOwnedWork({
     kind: "LEAD_FOLLOWUP",
     dedupeKey: existing.id,
     note: "Lead converted to a customer on a paid booking.",
   });
+  const fullClient = await dataClient();
+  const followup = await fullClient.models.WorkItem.get({
+    id: workItemId("LEAD_FOLLOWUP", existing.id),
+  });
+  if (followup.data?.status === "OPEN") {
+    throw new Error(`finalizeBooking: converted lead ${existing.id} still has an open follow-up`);
+  }
   return { id: updated.id, groupId: updated.groupId };
+}
+
+async function ownConversionIdentityDecision(
+  booking: BookingRecord,
+  candidates: ExistingCustomer[],
+  reason: string
+) {
+  const dueAt = (await oneBusinessDayDueAt(new Date())).toISOString();
+  const decision = await openOwnedWork({
+    kind: "DUPLICATE_LEAD",
+    dedupeKey: booking.id,
+    title: `Resolve paid conversion identity: ${booking.name}`,
+    detail: `Payment is real, but the originating lead could not be selected safely: ${reason}`,
+    relatedId: booking.id,
+    sourceUrl: "/leads",
+    resolutionAction:
+      "Use the booking reference and controlled match reasons to link the paid customer to the originating lead or confirm separate people; then close the redundant open lead.",
+    ownerTeam: "SALES",
+    dueAt,
+  });
+  if (!decision) throw new Error("The paid conversion identity decision could not be owned.");
+  for (const candidate of candidates.filter((row) => row.status === "LEAD")) {
+    await appendLeadActivity({
+      customerId: candidate.id,
+      channel: "LIFECYCLE",
+      outcome: "IDENTITY_REVIEW",
+      note: `Paid booking ${booking.id} needs an identity decision before this lead can continue aging.`,
+      actor: { sub: null, email: "system@pestbuzzkill.com" },
+      mutationId: `conversion-review:${booking.id}:${candidate.id}`,
+    });
+    const guarded = await casGuardedUpdate(
+      "Customer",
+      candidate.id,
+      {
+        conversionReviewBookingId: booking.id,
+        nextAction: "Resolve paid booking identity",
+        nextActionAt: dueAt,
+      },
+      [{ kind: "fieldEquals", field: "status", value: "LEAD" }]
+    );
+    if (!guarded.ok) {
+      throw new Error(`Lead ${candidate.id} changed during the paid identity decision; retry safely.`);
+    }
+    const verified = await (await dataClient()).models.Customer.get({
+      id: candidate.id,
+    });
+    if (
+      !verified.data ||
+      verified.data.status !== "LEAD" ||
+      verified.data.conversionReviewBookingId !== booking.id ||
+      verified.data.nextAction !== "Resolve paid booking identity" ||
+      verified.data.nextActionAt !== dueAt
+    ) {
+      throw new Error(
+        `Lead ${candidate.id} identity decision could not be durably confirmed.`
+      );
+    }
+    const followup = await openOwnedWork({
+      kind: "LEAD_FOLLOWUP",
+      dedupeKey: candidate.id,
+      title: `Resolve paid booking identity: ${candidate.displayName ?? candidate.id}`,
+      detail: `Paid booking ${booking.id} may represent this lead. Do not continue ordinary follow-up until identity is resolved.`,
+      customerId: candidate.id,
+      relatedId: candidate.id,
+      sourceUrl: `/customers/${candidate.id}`,
+      resolutionAction: "Resolve the paid booking identity and close or convert the redundant lead.",
+      ownerTeam: "SALES",
+      dueAt,
+    });
+    if (!followup) throw new Error(`Lead ${candidate.id} identity work could not be owned.`);
+  }
 }
 
 /**
@@ -1003,6 +1111,7 @@ async function finalizeClaimed(
   let hadPortalLogin = false;
   let reactivatedWithPortal = false;
   let matchFallbackReason: string | null = null;
+  let identityCandidates: ExistingCustomer[] = [];
   // Resume: a prior attempt already resolved (and checkpointed) the customer.
   // Reuse exactly that record — re-running the email match could now find the
   // fresh customer the last attempt created and, if a same-email lead also
@@ -1035,10 +1144,24 @@ async function finalizeClaimed(
       existing = data;
       if (!existing) {
         matchFallbackReason = `the booking link's lead reference (${booking.leadCustomerId}) no longer resolves to a customer record`;
+        // Do not guess that an email match is the referenced person, but do
+        // place every plausible open lead into the visible identity decision.
+        // Otherwise a paid conversion can leave a same-email lead aging as an
+        // ordinary follow-up forever.
+        identityCandidates = await findCustomersByContact(
+          matchClient,
+          booking.email,
+          booking.phone
+        );
       }
     }
     if (!existing && !matchFallbackReason) {
-      const matches = await findCustomersByEmail(matchClient, booking.email);
+      const matches = await findCustomersByContact(
+        matchClient,
+        booking.email,
+        booking.phone
+      );
+      identityCandidates = matches;
       if (matches.length === 1) {
         existing = matches[0];
       } else if (matches.length > 1) {
@@ -1048,22 +1171,48 @@ async function finalizeClaimed(
       }
     }
     if (existing) {
+      const wasInactive = existing.status === "INACTIVE";
       customer = await convertExistingCustomer(matchClient, existing, booking, {
         leadSource,
         leadNotes,
       });
       hadPortalLogin = Boolean(existing.portalUserSub);
       reactivatedWithPortal =
-        hadPortalLogin && existing.status === "INACTIVE";
+        hadPortalLogin && wasInactive;
     }
   } catch (err) {
-    matchFallbackReason = err instanceof Error ? err.message : String(err);
     console.error(
-      "finalizeBooking: lead matching failed — falling back to a fresh customer",
+      "finalizeBooking: lead matching failed closed — no ordinary customer will be created",
       err
     );
+    const dueAt = (await oneBusinessDayDueAt(new Date())).toISOString();
+    const recovery = await openOwnedWork({
+      kind: "LEAD_LIFECYCLE_RECOVERY",
+      dedupeKey: `paid-identity:${booking.id}`,
+      title: `Paid conversion needs safe identity recovery: ${booking.name}`,
+      detail: `No ordinary customer was created because lead identity or conversion could not be durably verified: ${err instanceof Error ? err.message : String(err)}`,
+      relatedId: booking.id,
+      sourceUrl: "/work",
+      resolutionAction:
+        "Use Retry finalization. It re-runs the same idempotent identity and conversion contract; then confirm the originating lead is Won or has a visible identity decision.",
+      ownerTeam: "SALES",
+      dueAt,
+    });
+    if (!recovery) {
+      throw new Error(
+        `Lead conversion failed and its shared-Office recovery could not be recorded: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    throw err;
   }
   if (!customer) {
+    if (matchFallbackReason) {
+      await ownConversionIdentityDecision(
+        booking,
+        identityCandidates,
+        matchFallbackReason
+      );
+    }
     // The fresh customer gets a deterministic id derived from the booking, and
     // we look for it before creating. This closes the one window the checkpoint
     // can't: if a prior attempt created this customer and died before writing
@@ -1190,7 +1339,7 @@ async function finalizeClaimed(
   }
 
   if (matchFallbackReason) {
-    await openOwnedWork({
+    const identityWork = await openOwnedWork({
       kind: "DUPLICATE_LEAD",
       dedupeKey: booking.id,
       title: `Check possible duplicate lead: ${booking.name}`,
@@ -1202,6 +1351,9 @@ async function finalizeClaimed(
         "Search for the existing lead by email, merge or cross-reference the records, and preserve the original source and pricing history.",
       ownerTeam: "SALES",
     });
+    if (!identityWork) {
+      throw new Error("The paid conversion identity decision could not be re-linked to the created customer.");
+    }
   }
 
   // R73: the booking is the outcome of this customer's pricing runs.

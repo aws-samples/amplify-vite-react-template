@@ -85,15 +85,19 @@ export async function sendEmail(opts: {
   // GL-03: never send to an address a bounce or complaint already killed. The
   // send is recorded SUPPRESSED and handed to an owned exception, so a message
   // to a dead address is a visible task, not a silent no-op.
-  if (await isSuppressed(toKey)) {
+  const suppression = await suppressionStatus(toKey);
+  if (suppression !== "CLEAR") {
     await recordEmailLog(opts, {
       status: "FAILED",
       deliveryStatus: "SUPPRESSED",
-      error: "Address is suppressed after a previous bounce or complaint.",
+      error:
+        suppression === "SUPPRESSED"
+          ? "Address is suppressed after a previous bounce or complaint."
+          : "Suppression status could not be read; non-essential outreach failed closed.",
     });
     await openEmailFailureWork(opts, {
       title: `Blocked email to a suppressed address: ${opts.to}`,
-      detail: `The ${opts.template} email was NOT sent: ${opts.to} is suppressed after a previous bounce or complaint. Nothing left our system.`,
+      detail: `The ${opts.template} email was NOT sent: ${opts.to} is ${suppression === "SUPPRESSED" ? "suppressed after a bounce or complaint" : "blocked because suppression status was unreadable"}. Nothing left our system.`,
       resolutionAction:
         "Get a working email or another way to reach them, deliver the message, and record how. Lift the suppression only if the address is confirmed good.",
     });
@@ -108,7 +112,7 @@ export async function sendEmail(opts: {
   if (
     opts.customerId &&
     NON_ESSENTIAL_TEMPLATES.has(opts.template) &&
-    (await isDoNotContact(opts.customerId))
+    (await doNotContactStatus(opts.customerId)) !== "CLEAR"
   ) {
     await recordEmailLog(opts, {
       status: "FAILED",
@@ -187,31 +191,34 @@ const NON_ESSENTIAL_TEMPLATES = new Set<string>([
 ]);
 
 /** Whether this customer asked not to be contacted (GL-02 do-not-contact). */
-async function isDoNotContact(customerId: string): Promise<boolean> {
+async function doNotContactStatus(
+  customerId: string
+): Promise<"CLEAR" | "BLOCKED" | "UNREADABLE"> {
   try {
     const client = await dataClient();
-    const { data } = await client.models.Customer.get({ id: customerId });
-    return Boolean(data?.doNotContact);
+    const { data, errors } = await client.models.Customer.get({ id: customerId });
+    if (errors?.length || !data) return "UNREADABLE";
+    return data.doNotContact ? "BLOCKED" : "CLEAR";
   } catch (err) {
-    // Fail open on a lookup error: a DNC check outage must not block all mail.
     console.error("do-not-contact check failed", customerId, err);
-    return false;
+    return "UNREADABLE";
   }
 }
 
 /** Whether a hard bounce or complaint has taken this address out of service. */
-async function isSuppressed(email: string): Promise<boolean> {
-  if (!email) return false;
+async function suppressionStatus(
+  email: string
+): Promise<"CLEAR" | "SUPPRESSED" | "UNREADABLE"> {
+  if (!email) return "UNREADABLE";
   try {
     const client = await dataClient();
-    if (!("SuppressedEmail" in client.models)) return false;
-    const { data } = await client.models.SuppressedEmail.get({ email });
-    return Boolean(data);
+    if (!("SuppressedEmail" in client.models)) return "UNREADABLE";
+    const { data, errors } = await client.models.SuppressedEmail.get({ email });
+    if (errors?.length) return "UNREADABLE";
+    return data ? "SUPPRESSED" : "CLEAR";
   } catch (err) {
-    // Fail open: a suppression-check outage must not stop all mail. A truly
-    // bad address will bounce again and re-suppress.
     console.error("suppression check failed", email, err);
-    return false;
+    return "UNREADABLE";
   }
 }
 

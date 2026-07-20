@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   api,
+  clientActionId,
   DEACTIVATION_REASONS,
   dueDateForTerms,
   listCustomerLifecycleEvents,
@@ -416,7 +417,11 @@ export default function CustomerDetail() {
           <Button
             block
             loading={busyAction === "bookinglink"}
-            disabled={!customer.email || Boolean(customer.doNotContact)}
+            disabled={
+              !customer.email ||
+              Boolean(customer.doNotContact) ||
+              !(customer.contactConsentChannels ?? []).includes("EMAIL")
+            }
             onClick={() =>
               void run(
                 "bookinglink",
@@ -425,6 +430,7 @@ export default function CustomerDetail() {
                     await api().mutations.sendCustomerEmail({
                       customerId: customer.id,
                       kind: "booking-link",
+                      idempotencyKey: clientActionId("booking-link"),
                     })
                   ),
                 `Booking link emailed to ${customer.email}`
@@ -485,6 +491,7 @@ export default function CustomerDetail() {
                       await api().mutations.sendCustomerEmail({
                         customerId: customer.id,
                         kind: "payment-request",
+                        idempotencyKey: clientActionId("payment-request"),
                       })
                     ),
                   `Payment request emailed to ${customer.email}`
@@ -577,6 +584,7 @@ export default function CustomerDetail() {
                           await api().mutations.sendCustomerEmail({
                             customerId: customer.id,
                             kind: "portal-reminder",
+                            idempotencyKey: clientActionId("portal-reminder"),
                           })
                         ),
                       `Portal link emailed to ${customer.email}`

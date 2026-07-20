@@ -15,7 +15,6 @@ import {
   Spinner,
   StatusBadge,
 } from "../ui/kit";
-import CustomerForm, { customerToForm } from "../components/CustomerForm";
 
 type Tab = "ACTIVE" | "INACTIVE" | "GROUPS";
 
@@ -26,7 +25,6 @@ export default function Customers() {
   const [groups, setGroups] = useState<CustomerGroup[] | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
   const [addingGroup, setAddingGroup] = useState(false);
 
   // Monotonic request id: rapid tab switches must not let a slower older
@@ -81,7 +79,7 @@ export default function Customers() {
             + Group
           </Button>
         ) : (
-          <Button small onClick={() => setAdding(true)}>
+          <Button small onClick={() => navigate("/leads")}>
             + Lead
           </Button>
         )
@@ -157,38 +155,6 @@ export default function Customers() {
           ))}
         </Card>
       )}
-
-      {/* Staff add a LEAD, never an ACTIVE customer. ACTIVE is reached one
-          way — a paid booking on the funnel (bookingFinalize converts the
-          lead) — so the office cannot mint a customer with no payment behind
-          it. A legacy migration into ACTIVE is a manager-approved path, not
-          this button. */}
-      <Sheet open={adding} onClose={() => setAdding(false)} title="New lead">
-        <CustomerForm
-          initial={customerToForm()}
-          submitLabel="Add lead"
-          showLeadSource
-          onSubmit={async (v) => {
-            const created = unwrap(
-              await api().models.Customer.create({
-                displayName: v.displayName.trim(),
-                contactName: v.contactName.trim() || undefined,
-                email: v.email.trim() || undefined,
-                phone: v.phone.trim() || undefined,
-                serviceStreet: v.serviceStreet.trim() || undefined,
-                serviceCity: v.serviceCity.trim() || undefined,
-                serviceState: v.serviceState.trim() || undefined,
-                serviceZip: v.serviceZip.trim() || undefined,
-                leadSource: v.leadSource.trim() || undefined,
-                notes: v.notes.trim() || undefined,
-                status: "LEAD",
-              })
-            );
-            setAdding(false);
-            if (created) navigate(`/customers/${created.id}`);
-          }}
-        />
-      </Sheet>
 
       <Sheet
         open={addingGroup}

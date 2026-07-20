@@ -32,6 +32,24 @@ vi.mock("../shared/dataClient", () => ({
   dataClient: async () => fakeDataClient,
 }));
 
+vi.mock("../shared/leadLifecycle", () => ({
+  createLead: async (input: Record<string, unknown>) => {
+    created.push({
+      ...input,
+      status: "LEAD",
+      leadNotes: input.notes,
+      contactConsent: (input.contactConsentChannels as string[] | undefined)?.includes("CALL") ?? false,
+      contactConsentAt: (input.contactConsentChannels as string[] | undefined)?.length
+        ? new Date().toISOString()
+        : undefined,
+    });
+    if (!createResult.data) {
+      throw new Error(createResult.errors?.map((e) => e.message).join("; ") || "create failed");
+    }
+    return { decision: "CREATED", id: (createResult.data as { id: string }).id };
+  },
+}));
+
 // R80: both lead-intake alerts (new-lead, write-failed) route to sales@ via
 // notifyLeads now. notifyOffice stays mocked so an accidental ops route here
 // would be caught (leadEmails would come up empty).
@@ -146,6 +164,7 @@ describe("lead-intake", () => {
     await post({ first: "Sam", email: "sam@example.com", consentToContact: false });
 
     expect(created[0].contactConsent).toBe(false);
+    expect(created[0].contactConsentChannels).toEqual(["EMAIL"]);
     expect(String(created[0].leadNotes)).toContain("do not call or text");
   });
 

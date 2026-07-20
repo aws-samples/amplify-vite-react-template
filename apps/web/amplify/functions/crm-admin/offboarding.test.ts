@@ -196,6 +196,7 @@ const workItems = new Map<string, Record<string, unknown>>();
 const staffCommands = new Map<string, Record<string, unknown>>();
 /** The owner-change mutex row(s) (OwnerChangeSerial). */
 const ownerSerial = new Map<string, Record<string, unknown>>();
+const leadLifecycleClaims = new Map<string, Record<string, unknown>>();
 /** Immutable lead activity rows written by the offboarding lead hand-over. */
 const leadActivities: Record<string, unknown>[] = [];
 /** Force the technician-deactivation write to fail, so a test can drive the
@@ -264,10 +265,27 @@ const fakeDataClient = {
       },
     },
     LeadActivity: {
+      get: async ({ id }: { id: string }) => ({
+        data: leadActivities.find((row) => row.id === id) ?? null,
+        errors: [],
+      }),
       create: async (row: Record<string, unknown>) => {
         leadActivities.push(row);
         return { data: row };
       },
+    },
+    LeadLifecycleClaim: {
+      create: async (row: Record<string, unknown> & { id: string }) => {
+        if (leadLifecycleClaims.has(row.id)) return { data: null };
+        leadLifecycleClaims.set(row.id, row);
+        return { data: row };
+      },
+      get: async ({ id }: { id: string }) => ({
+        data: leadLifecycleClaims.get(id) ?? null,
+      }),
+      delete: async ({ id }: { id: string }) => ({
+        data: leadLifecycleClaims.delete(id),
+      }),
     },
     StaffAccessCommand: {
       // Conditional create: an existing id loses, exactly like AppSync.
@@ -421,6 +439,9 @@ beforeEach(() => {
       StaffAccessCommand: staffCommands,
       OwnerChangeSerial: ownerSerial,
       Job: jobs,
+      Customer: customers as unknown as Map<string, Record<string, unknown>>,
+      WorkItem: workItems,
+      LeadLifecycleClaim: leadLifecycleClaims,
     })
   );
   sends.length = 0;
@@ -434,6 +455,7 @@ beforeEach(() => {
   workItems.clear();
   staffCommands.clear();
   ownerSerial.clear();
+  leadLifecycleClaims.clear();
   leadActivities.length = 0;
   technicianUpdateThrows = false;
   staffEventCreateThrows = false;

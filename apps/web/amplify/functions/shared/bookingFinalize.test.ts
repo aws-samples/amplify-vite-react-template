@@ -11,8 +11,8 @@ import { capacityFixtureModels } from "./capacityTestFixture";
  * person who now paid — finalization must CONVERT that record, not mint a
  * duplicate beside it, and must flip the lead's PENDING pricing runs to WON
  * (R73). And because the customer has already paid, nothing about the
- * matching may ever brick a finalization: any failure falls back to the
- * plain create and says so in the office alert.
+ * matching may create beside an unresolved lead: any read or conversion
+ * failure must fail closed into the shared Office recovery path.
  */
 
 type Row = Record<string, unknown> & { id: string };
@@ -41,6 +41,7 @@ const store = {
   Invoice: new Map<string, Row>(),
   Agreement: new Map<string, Row>(),
   BookingFinalization: new Map<string, Row>(),
+  LeadActivity: new Map<string, Row>(),
 };
 // Per-model injected failures — set true to make the next create(s) fail, the
 // way a throttled/validation-refused write would, so a retry can then succeed.
@@ -128,12 +129,15 @@ const fakeDataClient = {
         if (customerUpdateFails && patch.status) {
           return { data: null, errors: [{ message: "update refused" }] };
         }
-        // Deliberately non-mutating (returns a merged copy): finalization reads
-        // existing.status AFTER convert to decide reactivatedWithPortal, and a
-        // convert that flipped the in-store row to ACTIVE would erase that.
         const current = existingCustomers.find((c) => c.id === patch.id);
+        if (current) Object.assign(current, patch);
         return { data: { groupId: null, ...current, ...patch } };
       },
+    },
+    CompanyClosure: { get: async () => ({ data: null, errors: [] }) },
+    LeadActivity: statefulModel("LeadActivity"),
+    WorkItem: {
+      get: async () => ({ data: null }),
     },
     LeadPricingRun: {
       list: async ({
@@ -263,6 +267,7 @@ vi.mock("./ownedWork", () => ({
     workResolved.push(o);
     return true;
   },
+  workItemId: (kind: string, key: string) => `${kind}:${key}`,
 }));
 
 const { finalizeBooking, retryBookingFinalization } = await import(
@@ -316,6 +321,9 @@ beforeEach(() => {
       } as unknown as Map<string, Record<string, unknown>>,
       Job: store.Job,
       Invoice: store.Invoice,
+      Customer: {
+        get: (id: string) => existingCustomers.find((row) => row.id === id),
+      } as unknown as Map<string, Record<string, unknown>>,
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
     })
@@ -343,6 +351,7 @@ beforeEach(() => {
   store.Invoice.clear();
   store.Agreement.clear();
   store.BookingFinalization.clear();
+  store.LeadActivity.clear();
   failCreate.ServicePlan = false;
   failCreate.Job = false;
   failCreate.Invoice = false;
@@ -477,40 +486,37 @@ describe("R73 — the booking flips PENDING pricing runs to WON", () => {
   });
 });
 
-describe("matching failure never breaks a paid finalization", () => {
-  it("falls back to creating the customer when the scan blows up", async () => {
+describe("matching failure fails closed into paid recovery", () => {
+  it("creates no ordinary customer when the identity scan blows up", async () => {
     customerListError = new Error("DynamoDB flaked");
 
-    await finalize();
+    await expect(finalize()).rejects.toThrow(/DynamoDB flaked/i);
 
-    expect(customersCreated).toHaveLength(1);
-    expect(customersCreated[0]).toMatchObject({
-      email: "dana@example.com",
-      status: "ACTIVE",
-    });
+    expect(customersCreated).toHaveLength(0);
+    expect(workOpened).toContainEqual(
+      expect.objectContaining({ kind: "PAID_NOT_FINALIZED" })
+    );
   });
 
-  it("says so in the sales alert", async () => {
+  it("does not send a false new-booking success alert", async () => {
     customerListError = new Error("DynamoDB flaked");
 
-    await finalize();
+    await expect(finalize()).rejects.toThrow();
 
-    // R80: the new-booking alert routes to sales@ (notifyLeads), not info@.
-    expect(leadAlerts).toHaveLength(1);
-    expect(leadAlerts[0].template).toBe("office-booking-alert");
-    expect(leadAlerts[0].bodyHtml).toMatch(/matching this booking to an existing CRM lead failed/i);
-    expect(leadAlerts[0].bodyHtml).toContain("DynamoDB flaked");
+    expect(leadAlerts).toHaveLength(0);
+    expect(booking.status).toBe("QUOTED");
   });
 
-  it("falls back to create when the convert update is refused", async () => {
+  it("does not create beside a lead when conversion is refused", async () => {
     seedLead();
     customerUpdateFails = true;
 
-    await finalize();
+    await expect(finalize()).rejects.toThrow(/could not convert/i);
 
-    expect(customersCreated).toHaveLength(1);
-    expect(leadAlerts).toHaveLength(1);
-    expect(leadAlerts[0].bodyHtml).toMatch(/merge the two by hand/i);
+    expect(customersCreated).toHaveLength(0);
+    expect(workOpened).toContainEqual(
+      expect.objectContaining({ kind: "PAID_NOT_FINALIZED" })
+    );
   });
 
   it("a clean conversion carries no fallback warning", async () => {
@@ -606,6 +612,17 @@ describe("new booking shapes finalize into the right records", () => {
 });
 
 describe("the booking link's lead identity converts exactly that lead", () => {
+  it("a phone-only lead using the spoken bare link resolves by normalized phone", async () => {
+    seedLead({ email: null, phone: "+1 (413) 555-1234" });
+
+    await finalize();
+
+    expect(customersCreated).toHaveLength(0);
+    expect(customerUpdates.find((row) => row.status === "ACTIVE")).toMatchObject({
+      id: "lead-1",
+    });
+  });
+
   it("converts the referenced record even when the checkout email differs", async () => {
     // The lead's record carries the office's email; the customer paid with
     // another inbox — exactly the case email matching cannot solve.
@@ -649,6 +666,11 @@ describe("the booking link's lead identity converts exactly that lead", () => {
     const work = workOpened.find((w) => w.kind === "DUPLICATE_LEAD");
     expect(work).toBeDefined();
     expect(work!.detail).toContain("no longer resolves");
+    expect(existingCustomers.find((row) => row.id === "lead-1")).toMatchObject({
+      status: "LEAD",
+      conversionReviewBookingId: "b1",
+      nextAction: "Resolve paid booking identity",
+    });
   });
 
   it("several records sharing the checkout email means a fresh record and owned work, not an arbitrary conversion", async () => {
@@ -663,6 +685,15 @@ describe("the booking link's lead identity converts exactly that lead", () => {
     expect(work).toBeDefined();
     expect(work!.detail).toContain("lead-1");
     expect(work!.detail).toContain("lead-9");
+    expect(
+      existingCustomers
+        .filter((row) => row.id === "lead-1" || row.id === "lead-9")
+        .every(
+          (row) =>
+            row.conversionReviewBookingId === "b1" &&
+            row.nextAction === "Resolve paid booking identity"
+        )
+    ).toBe(true);
   });
 });
 
@@ -745,18 +776,13 @@ describe("R41 — the portal login is part of conversion", () => {
     expect(item!.title).toMatch(/may be disabled/i);
   });
 
-  it("still provisions when lead matching fails and finalization falls back to a fresh customer", async () => {
+  it("does not provision a second identity when lead matching is unreadable", async () => {
     customerListError = new Error("DynamoDB flaked");
 
-    await finalize();
+    await expect(finalize()).rejects.toThrow(/DynamoDB flaked/i);
 
-    expect(portalInvites).toEqual([
-      {
-        customerId: "cust-b1",
-        email: "dana@example.com",
-        name: "Dana Whitlock",
-      },
-    ]);
+    expect(portalInvites).toHaveLength(0);
+    expect(customersCreated).toHaveLength(0);
   });
 });
 

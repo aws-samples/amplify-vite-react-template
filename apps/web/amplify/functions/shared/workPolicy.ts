@@ -34,6 +34,7 @@ export type WorkKind =
   | "STAFF_OFFBOARD"
   | "STAFF_SECURITY"
   | "LEAD_FOLLOWUP"
+  | "LEAD_LIFECYCLE_RECOVERY"
   | "LIFECYCLE_RECOVERY"
   | "PLAN_CANCELLATION_RECOVERY"
   | "VISIT_CHANGE_RECOVERY"
@@ -318,6 +319,18 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "BOOKING_SENT", label: "Sent the booking link" },
       { code: "MARKED_LOST", label: "Marked the lead lost" },
       { code: "MARKED_DNC", label: "Set do-not-contact" },
+      OTHER,
+    ],
+  },
+  LEAD_LIFECYCLE_RECOVERY: {
+    severity: "HIGH",
+    customerImpact:
+      "A lead intake, mutation, consent decision, conversion identity decision, or sweep stopped before every required fact was verified.",
+    ownerTeam: "SALES",
+    verified: [],
+    manualReasons: [
+      { code: "RERUN_COMPLETE", label: "Re-ran the safe action and verified it" },
+      { code: "IDENTITY_RESOLVED", label: "Resolved the lead/customer identity" },
       OTHER,
     ],
   },

@@ -119,7 +119,10 @@ import {
   workPolicy,
   type VerifierId,
 } from "../shared/workPolicy";
-import { appendLeadActivity } from "../shared/leadLifecycle";
+import {
+  assertLeadOutreachAllowed,
+  logLeadTouch,
+} from "../shared/leadLifecycle";
 import { assertScheduleReason } from "../shared/visitChangeReasons";
 
 const s3 = new S3Client();
@@ -151,6 +154,7 @@ type Args = {
   customerId?: string;
   kind?: string;
   note?: string;
+  idempotencyKey?: string;
   notes?: string;
   contentType?: string;
   reason?: string;
@@ -643,6 +647,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         event.arguments.customerId!,
         event.arguments.kind!,
         event.arguments.note ?? undefined,
+        event.arguments.idempotencyKey!,
         { sub: callerSub(event.identity), email: callerEmail(event.identity) }
       );
     }
@@ -1651,8 +1656,10 @@ async function sendCustomerEmail(
   customerId: string,
   kind: string,
   note?: string,
+  idempotencyKey?: string,
   actor: { sub: string | null; email: string | null } = { sub: null, email: null }
 ) {
+  if (!idempotencyKey?.trim()) throw new Error("An idempotency key is required.");
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({
     id: customerId,
@@ -1716,6 +1723,15 @@ async function sendCustomerEmail(
     throw new Error(`Unknown email kind: ${kind}`);
   }
 
+  const isLead = customer.status === "LEAD";
+  const leadChannel = kind === "booking-link" ? "BOOKING_LINK" : "EMAIL";
+  if (isLead) {
+    await assertLeadOutreachAllowed(
+      customer as unknown as Record<string, unknown>,
+      leadChannel
+    );
+  }
+
   const sent = await sendEmail({
     to: customer.email,
     subject,
@@ -1724,27 +1740,17 @@ async function sendCustomerEmail(
     html: emailShell(heading, body),
   });
 
-  // GL-02: record the send as a lead touch (a failed send is logged as an
-  // attempt, never a touch). A sent booking link advances the derived pipeline
-  // stage to Booking-sent.
-  await appendLeadActivity({
-    customerId,
-    channel: kind === "booking-link" ? "BOOKING_LINK" : "EMAIL",
-    direction: "OUTBOUND",
-    outcome: sent ? "SENT" : "FAILED",
-    note: `${kind} email`,
-    actor,
-  });
-  if (kind === "booking-link" && sent) {
-    // Best-effort: failing to stamp the sent time must never fail the send.
-    try {
-      await client.models.Customer.update({
-        id: customerId,
-        bookingLinkSentAt: new Date().toISOString(),
-      });
-    } catch (err) {
-      console.error("could not stamp bookingLinkSentAt", customerId, err);
-    }
+  // GL-02: record provider acceptance as an attempted lead touch. It does not
+  // claim customer delivery; only a delivery event advances Booking-sent.
+  if (isLead) {
+    await logLeadTouch({
+      customerId,
+      channel: leadChannel,
+      direction: "OUTBOUND",
+      outcome: sent ? "SENT" : "FAILED",
+      note: `${kind} email`,
+      idempotencyKey: `office-email:${idempotencyKey.trim()}`,
+    }, actor);
   }
 
   return { sent, to: customer.email };
@@ -5324,4 +5330,3 @@ async function recordNoticeAlternateDelivery(
     message: "Alternate delivery recorded — the notice now reads as reached.",
   };
 }
-
