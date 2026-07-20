@@ -12,7 +12,7 @@ corrected by `c962f86` (genuine first contact, cohort-tied callback rates)
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **22 gates / 37 remaining requirements**, ordered by launch priority and
+**Remaining:** **22 gates / 36 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -149,7 +149,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
 | P0 | GL-15 | Production delivery wiring — report rules approved and engineering closed (`bbcf0c3`) | Compliance owner | Invalid or falsely "delivered" legal record reaches a customer | **15% — Very low (SES wiring)** |
 | P0 | GL-22 | Policy approval and production alarm delivery — engineering closed (`041f939`, `bc20401`) | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **15% — Very low (production setup + approvals)** |
-| P0 | GL-17 | Funnel sale path live — engineering REOPENED (checkout lifecycle fencing, all `/book` branches) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
+| P0 | GL-17 | Funnel sale path live — engineering closed (`04f4143`, corrected `b9d9efb`, `a68649e`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
 | P0 | GL-12 | Legacy-visit backfill and final service constraints — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (ops backfill + co-signs)** |
 | P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
 | P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export `136f02a`, corrected `4ede082`) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
@@ -289,27 +289,22 @@ accepts and pays the first month immediately, the plan starts that day billing m
 first April treatment obligation and a durable owned scheduling action are created (idempotent under
 payment/webhook retries), and every customer/office surface promises April as a month — the office
 confirms the exact day; no invented date. A missing yard size is rejected with a field error, never
-silently priced as half an acre. The date-less checkout sits behind the standard failure-safe payment
-contract (`b9d9efb`): a durable single-winner attempt claim, deterministic provider idempotency keys
-(one customer, one intent even under parallel double-clicks or replays), an explicit payable-reuse
-allowlist shared with the standard path (canceled/succeeded/processing intents are answered
-truthfully, never returned as chargeable), stale intents proven terminal before replacement, and the
-intent reference + terms acceptance durably confirmed before any client secret is returned — a
-persistence failure closes the intent or opens deduplicated owned Finance recovery. No other public
-page, metadata, SEO, or marketing copy changed.
+silently priced as half an acre. EVERY `/book` branch — dated, plan-only, and off-season — now runs
+behind one failure-safe payment contract (`b9d9efb`, completed `a68649e`): a single durable
+single-winner attempt boundary; deterministic generation-chained provider idempotency keys (one
+customer, one intent even under parallel double-clicks, replays, or a lease-expiry overlap — which
+converges on the one authoritative intent instead of canceling it); an explicit payable-reuse
+allowlist (canceled/succeeded/processing intents answered truthfully, never returned as chargeable);
+prior intents proven terminal before any replacement; and ONE fenced persistence write — conditioned
+on the exact attempt holder, a payable lifecycle state, and the expected prior intent — so a
+concurrent webhook's PROCESSING/BOOKED, a cancellation, or a newer attempt is never regressed to
+QUOTED, and a client secret is returned only after that confirmed write covers the intent's
+authority, selection, amount, terms, and capacity facts. A lost fence answers with the re-read truth;
+a failed write closes the intent and releases the capacity claim, or opens confirmed deduplicated
+Finance recovery. No other public page, metadata, SEO, or marketing copy changed.
 
 **Remaining requirements:**
 
-- REOPENED: checkout persistence must be lifecycle-safe and the single-winner contract must cover
-  EVERY `/book` branch (dated, plan-only, off-season) — one durable attempt boundary; persistence
-  fenced on the exact attempt holder, an allowed payable lifecycle state, and the expected prior
-  PaymentIntent (a concurrent webhook's PROCESSING/BOOKED, a CANCELED/EXPIRED booking, or a newer
-  intent is never regressed to QUOTED); a lost fenced write re-reads booking + provider state and
-  answers truthfully instead of returning a secret; a client secret is returned only after confirmed
-  persistence shows this exact intent authoritative, the booking payable, and
-  selection/amount/terms/capacity durable; old intents proven terminal before replacement on every
-  branch; provider-success-plus-persistence-failure closes the intent and compensates capacity or
-  opens confirmed deduplicated Finance recovery.
 - CEO and Compliance sign the live funnel offer as sold (labels, card prices, seasonal copy) — the
   bounded engineering change is complete.
 
