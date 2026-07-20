@@ -47,17 +47,15 @@ import {
   entryForLabel,
   SERVICE_CATALOG_VERSION,
 } from "./serviceCatalog";
+// The single shared window→label map (GL-08): the label stamped on job.timeWindow
+// here is the same string the public cancel path judges its 72-hour line from.
+import { WINDOW_LABEL } from "./bookingWindows";
 
 const s3 = new S3Client();
 
 // Derived from the single shared constant (R17) — the policy in the signed
 // agreement must be the rule /cancel enforces, not a copy that can drift.
 const CANCEL_POLICY_TEXT = `CANCELLATION POLICY. Cancel more than ${CANCEL_FULL_REFUND_DAYS} days before your appointment for a full refund. Cancellations ${CANCEL_FULL_REFUND_DAYS} days or less before the appointment are not refundable.`;
-
-const WINDOW_LABEL: Record<string, string> = {
-  MORNING: "morning (8am–12pm)",
-  AFTERNOON: "afternoon (12pm–5pm)",
-};
 
 /**
  * Called by the Stripe webhook when a booking-funnel PaymentIntent

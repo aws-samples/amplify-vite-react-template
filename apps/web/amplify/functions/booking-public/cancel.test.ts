@@ -25,6 +25,7 @@ type Booking = {
   servicePlanId?: string | null;
   stripePaymentIntentId?: string | null;
   cancelRequestedOn?: string | null;
+  cancelRequestedAt?: string | null;
 };
 
 let booking: Booking;
@@ -181,6 +182,7 @@ beforeEach(() => {
     servicePlanId: "p1",
     stripePaymentIntentId: "pi_1",
     cancelRequestedOn: null,
+    cancelRequestedAt: null,
   };
 });
 
@@ -213,9 +215,10 @@ describe("cancellation refund window", () => {
     expect(updates[0]).toMatchObject({ cancelRequestedOn: "2026-07-16" });
   });
 
-  it("honours the first attempt's date when a retry lands inside the no-refund window", async () => {
+  it("honours the first attempt's instant when a retry lands inside the no-refund window", async () => {
     // Asked on day 4 (refundable) and it failed; retried on day 2. Our outage
-    // must not move their money.
+    // must not move their money — the persisted instant is authoritative.
+    booking.cancelRequestedAt = "2026-07-16T12:00:00-04:00";
     booking.cancelRequestedOn = "2026-07-16";
     freezeEastern("2026-07-18"); // 2 days out — would be non-refundable today
 
@@ -225,14 +228,39 @@ describe("cancellation refund window", () => {
     expect(refundsCreate).toHaveBeenCalledOnce();
   });
 
-  it("does not overwrite the original request date on a retry", async () => {
+  it("backfills the instant for a legacy row that has only the date, keeping the refund", async () => {
+    // A first attempt that failed BEFORE this field existed left only the date.
+    // The instant is derived from the earliest moment of that Eastern day —
+    // never later than the true first attempt, so the refund can only be kept.
+    booking.cancelRequestedOn = "2026-07-16";
+    booking.cancelRequestedAt = null;
+    freezeEastern("2026-07-18");
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.body).toMatchObject({ canceled: true, refunded: true });
+    const stamped = updates.find((u) => u.cancelRequestedAt)?.cancelRequestedAt;
+    expect(stamped).toBeTruthy();
+    // Backfilled to Eastern midnight of the recorded date, not "now".
+    expect(Date.parse(stamped as string)).toBe(
+      Date.parse("2026-07-16T00:00:00-04:00")
+    );
+    // The original calendar date is preserved, never re-dated forward.
+    const dateWrite = updates.find((u) => u.cancelRequestedOn !== undefined);
+    expect(dateWrite?.cancelRequestedOn).toBe("2026-07-16");
+  });
+
+  it("does not re-stamp a booking whose instant is already recorded", async () => {
+    booking.cancelRequestedAt = "2026-07-16T12:00:00-04:00";
     booking.cancelRequestedOn = "2026-07-16";
     freezeEastern("2026-07-18");
 
     await call({ token: "tok", confirm: true });
 
     expect(
-      updates.filter((u) => u.cancelRequestedOn !== undefined)
+      updates.filter(
+        (u) => u.cancelRequestedAt !== undefined || u.cancelRequestedOn !== undefined
+      )
     ).toHaveLength(0);
   });
 
@@ -244,6 +272,57 @@ describe("cancellation refund window", () => {
 
     expect(res.body.refund).toMatchObject({ kind: "FULL", amountCents: 29900 });
     expect(cancelPlanBilling).not.toHaveBeenCalled();
+  });
+});
+
+describe("GL-08 — hour-exact 72-hour enforcement (matches the customer copy)", () => {
+  // Visit Monday 2026-07-20, MORNING window → 8:00 AM ET start. The 72-hour
+  // line therefore falls on Friday 8:00 AM ET — a boundary the whole-calendar-
+  // day rule could NEVER see: Monday − Friday is 3 calendar days, so the old
+  // `daysOut > 3` check refused every Friday cancel regardless of the hour.
+
+  it("refunds a cancel 73 hours out (Friday 7am) — which the day-based rule wrongly refused", async () => {
+    vi.setSystemTime(new Date("2026-07-17T07:00:00-04:00")); // 73h before Mon 8am
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.body).toMatchObject({ canceled: true, refunded: true });
+    expect(refundsCreate).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a cancel 71 hours out (Friday 9am) — exactly the same weekend, one boundary crossed", async () => {
+    vi.setSystemTime(new Date("2026-07-17T09:00:00-04:00")); // 71h before Mon 8am
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.body).toMatchObject({ canceled: true, refunded: false });
+    expect(refundsCreate).not.toHaveBeenCalled();
+  });
+
+  it("persists the exact cancel instant so a later retry judges the same boundary", async () => {
+    vi.setSystemTime(new Date("2026-07-17T07:00:00-04:00"));
+
+    await call({ token: "tok", confirm: true });
+
+    const stamp = updates.find((u) => u.cancelRequestedAt)?.cancelRequestedAt;
+    expect(stamp).toBeTruthy();
+    expect(Date.parse(stamp as string)).toBe(
+      Date.parse("2026-07-17T07:00:00-04:00")
+    );
+  });
+
+  it("judges an afternoon visit from its 12pm start, matching the job's stored label", async () => {
+    // AFTERNOON maps to "afternoon (12pm–5pm)" — a noon start. The 72-hour line
+    // is Friday 12pm; at Friday 11am we are 73h out. Judged from the raw
+    // "AFTERNOON" enum (no parseable hour) it would default to an 8am start and
+    // wrongly refuse — this proves the public path shares the office start hour.
+    booking.selectedWindow = "AFTERNOON";
+    vi.setSystemTime(new Date("2026-07-17T11:00:00-04:00")); // 73h before Mon 12pm
+
+    const res = await call({ token: "tok", confirm: true });
+
+    expect(res.body).toMatchObject({ canceled: true, refunded: true });
+    expect(refundsCreate).toHaveBeenCalledOnce();
   });
 });
 

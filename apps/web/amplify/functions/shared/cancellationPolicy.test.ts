@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addDays,
   computeVisitCancellationPolicy,
+  easternEpochMs,
   windowStartHour,
 } from "./cancellationPolicy";
 
@@ -145,6 +146,45 @@ describe("GL-07 R6 — the hour-exact 72-hour rule", () => {
       today: "2026-08-07",
     });
     expect(p.withinFreeWindow).toBe(false); // 3 days out, not MORE than 3
+  });
+
+  it("crosses a weekend hour-exactly where the whole-day rule cannot", () => {
+    // Visit Monday 2026-07-20, 8 AM ET. 72h before is Friday 8 AM ET. The
+    // whole-day rule sees Mon − Fri = 3 days and refuses ALL day Friday; the
+    // hour-exact rule refunds at 73h (Fri 7 AM) and refuses at 71h (Fri 9 AM).
+    const mondayVisit = "2026-07-20";
+    const at = (iso: string) => ({
+      scheduledDate: mondayVisit,
+      amountPaidCents: 15000,
+      today: "2026-07-17",
+      nowMs: Date.parse(iso),
+      timeWindow: "8-10am",
+    });
+    expect(
+      computeVisitCancellationPolicy(at("2026-07-17T07:00:00-04:00")).withinFreeWindow
+    ).toBe(true); // 73h out
+    expect(
+      computeVisitCancellationPolicy(at("2026-07-17T09:00:00-04:00")).withinFreeWindow
+    ).toBe(false); // 71h out
+    // The whole-day rule would refuse the 73h case too — proof they differ.
+    expect(
+      computeVisitCancellationPolicy({
+        scheduledDate: mondayVisit,
+        amountPaidCents: 15000,
+        today: "2026-07-17",
+      }).withinFreeWindow
+    ).toBe(false);
+  });
+
+  it("easternEpochMs is DST-correct (EDT in summer, EST in winter)", () => {
+    // Midnight Eastern is 04:00Z in July (EDT, −04:00)…
+    expect(easternEpochMs("2026-07-20", 0)).toBe(
+      Date.parse("2026-07-20T00:00:00-04:00")
+    );
+    // …and 05:00Z in January (EST, −05:00).
+    expect(easternEpochMs("2026-01-20", 8)).toBe(
+      Date.parse("2026-01-20T08:00:00-05:00")
+    );
   });
 });
 

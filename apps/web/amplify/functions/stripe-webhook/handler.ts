@@ -822,7 +822,11 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
   try {
     queued = await cancelQueuedPlanVisits(
       crmServicePlanId,
-      "the plan's subscription was canceled at Stripe"
+      "the plan's subscription was canceled at Stripe",
+      // GL-08: the SAME anchor written to cancellationRequestedAt above, so the
+      // hour-exact 72-hour line is judged from the subscription's real cancel
+      // moment (not webhook delivery/retry time).
+      Date.parse(sub.cancellationRequestedAt ?? canceledAtIso)
     );
   } catch (err) {
     console.error(

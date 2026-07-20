@@ -22,6 +22,11 @@ import {
 } from "../crm-pricing/rateCards";
 import { cancelPlanForCustomer } from "../shared/planCancellation";
 import {
+  computeVisitCancellationPolicy,
+  easternEpochMs,
+} from "../shared/cancellationPolicy";
+import { windowLabelFor } from "../shared/bookingWindows";
+import {
   claimWindowSlot,
   jobScheduleGuards,
   releaseJobCapacity,
@@ -1615,21 +1620,37 @@ async function cancel(body: Record<string, unknown>) {
     throw new HttpError(404, { error: "Booking not found or already canceled." });
   }
 
-  // Whole calendar days in the shop's timezone — "more than 3 days before"
-  // must hold all day, not from an arbitrary clock instant.
+  // The shop-timezone calendar date, kept for the office alerts and the
+  // reassurance copy (the customer reads a date, not a timestamp).
   const todayEt = new Date().toLocaleDateString("en-CA", {
     timeZone: "America/New_York",
   });
-  // Judged from the customer's FIRST cancellation attempt. If an earlier
-  // attempt failed on our side, they keep the refund they were entitled to
-  // then — our outage is not their forfeit.
-  const judgedOn = booking.cancelRequestedOn ?? todayEt;
-  const daysOut = Math.round(
-    (Date.parse(`${booking.selectedDate}T00:00:00Z`) -
-      Date.parse(`${judgedOn}T00:00:00Z`)) /
-      86_400_000
-  );
-  const refundable = daysOut > CANCEL_FULL_REFUND_DAYS;
+  // GL-08: the refund decision is HOUR-EXACT against the visit's Eastern
+  // scheduled start (the shared cancellation policy, same maths the office and
+  // plan cancel paths use). It is judged from the customer's FIRST cancellation
+  // attempt: prefer the persisted instant; otherwise the earliest moment of the
+  // persisted calendar date (customer-favorable — never later than the true
+  // first attempt, so our outage can never move them across the 72-hour line);
+  // and for a brand-new first attempt, now.
+  const nowMs = Date.now();
+  const judgedMs = booking.cancelRequestedAt
+    ? Date.parse(booking.cancelRequestedAt)
+    : booking.cancelRequestedOn
+      ? easternEpochMs(booking.cancelRequestedOn, 0)
+      : nowMs;
+  // The instant the refund is judged from, and — on the first attempt — the
+  // instant persisted so every later retry judges from exactly this moment.
+  const safeJudgedMs = Number.isFinite(judgedMs) ? judgedMs : nowMs;
+  const policy = computeVisitCancellationPolicy({
+    scheduledDate: booking.selectedDate ?? null,
+    amountPaidCents: booking.amountCents ?? 0,
+    today: todayEt,
+    nowMs: safeJudgedMs,
+    // Map the raw window enum to the SAME label the job carries, so the start
+    // hour (and thus the 72-hour boundary) matches the office and plan paths.
+    timeWindow: windowLabelFor(booking.selectedWindow),
+  });
+  const refundable = policy.withinFreeWindow;
 
   if (body.confirm !== true) {
     return {
@@ -1654,39 +1675,44 @@ async function cancel(body: Record<string, unknown>) {
 
   // Stamp the attempt before anything that can fail. This is what makes a
   // retry safe for the customer: if Stripe is down today and they succeed
-  // tomorrow, `judgedOn` above still reads today and they keep their refund.
+  // tomorrow, the persisted instant still reads NOW and they keep the refund
+  // the hour-exact rule gave them at this moment.
   //
   // The write is guarded because it is the thing that protects the refund, and
   // an unguarded failure here would fall through to the generic "please try
-  // again" — no date recorded, nobody told, and the day-three retry silently
+  // again" — no instant recorded, nobody told, and the day-three retry silently
   // loses the refund this whole mechanism exists to preserve. Amplify resolves
   // errors rather than throwing them, so both shapes have to be handled.
   const requestedOn = booking.cancelRequestedOn ?? todayEt;
-  let datePersisted = Boolean(booking.cancelRequestedOn);
+  // The authoritative anchor is the instant; a legacy row carrying only the
+  // date is topped up with the customer-favorable derived instant (safeJudgedMs)
+  // so it never re-dates later to the row's disadvantage.
+  let datePersisted = Boolean(booking.cancelRequestedAt);
   if (!datePersisted) {
     try {
       const { data, errors } = await client.models.BookingRequest.update({
         id: booking.id,
-        cancelRequestedOn: todayEt,
+        cancelRequestedOn: booking.cancelRequestedOn ?? todayEt,
+        cancelRequestedAt: new Date(safeJudgedMs).toISOString(),
       });
       datePersisted = Boolean(data) && !errors?.length;
       if (!datePersisted) {
         console.error(
-          `cancel: could not record cancelRequestedOn for booking ${booking.id}`,
+          `cancel: could not record cancelRequestedAt for booking ${booking.id}`,
           errors
         );
       }
     } catch (err) {
       console.error(
-        `cancel: could not record cancelRequestedOn for booking ${booking.id}`,
+        `cancel: could not record cancelRequestedAt for booking ${booking.id}`,
         err
       );
     }
   }
-  // Deliberately not fatal. Today's refund decision was already made from
-  // `judgedOn` above, so a customer whose cancellation succeeds is unaffected —
-  // the date only matters to a later retry. If the cancellation below also
-  // fails, its alert carries the date and says it was not saved.
+  // Deliberately not fatal. This attempt's refund decision was already made
+  // from the instant above, so a customer whose cancellation succeeds is
+  // unaffected — the anchor only matters to a later retry. If the cancellation
+  // below also fails, its alert carries the date and says it was not saved.
 
   // The visit's REAL state gates everything money-shaped: a completed
   // (billed, legally reported) or underway visit is never cancelable from
