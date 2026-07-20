@@ -235,6 +235,7 @@ beforeEach(() => {
       CapacityClaim: capacityFixture.maps.capacityClaims,
       TreatmentObligation: obligations,
       Job: jobs,
+      Route: routes,
     })
   );
   obligations.clear();
@@ -453,6 +454,7 @@ describe("cancelVisit — fail-safe", () => {
         CapacityClaim: capacityFixture.maps.capacityClaims,
         TreatmentObligation: obligations,
         Job: jobs,
+        Route: routes,
       });
     _setLockStoreForTests(
       memoryLockStore({
@@ -579,6 +581,53 @@ describe("rescheduleVisit", () => {
     expect(jobs.get("j1")).toMatchObject({ scheduledDate: newDate, routeId: "r-new" });
     expect(sendEmail).toHaveBeenCalledOnce();
     expect(visitEvents[0]).toMatchObject({ action: "RESCHEDULE", outcome: "COMPLETE" });
+  });
+
+  it("GL-07: two simultaneous moves onto one route serialize — one wins, one gets a plain refusal", async () => {
+    const newDate = daysFromNow(9);
+    seedForReschedule(newDate);
+    // Pre-hold the route's move lease, as a concurrent mover would.
+    routes.get("r-new")!.moveLeaseNonce = "other-mover";
+    routes.get("r-new")!.moveLeaseUntil = new Date(
+      Date.now() + 60_000
+    ).toISOString();
+
+    await expect(
+      rescheduleVisit({
+        jobId: "j1",
+        scheduledDate: newDate,
+        technicianId: "t1",
+        routeId: "r-new",
+        reason: "customer request",
+        actor: OFFICE,
+      })
+    ).rejects.toThrow(/Another schedule change is mid-flight/);
+    // Nothing moved, nothing held: the visit is untouched and the loser
+    // reserved no minutes.
+    expect(jobs.get("j1")!.routeId).not.toBe("r-new");
+  });
+
+  it("GL-07: an EXPIRED move lease is seized (a crashed mover cannot wedge the route), and the winner releases fenced", async () => {
+    const newDate = daysFromNow(9);
+    seedForReschedule(newDate);
+    routes.get("r-new")!.moveLeaseNonce = "crashed-mover";
+    routes.get("r-new")!.moveLeaseUntil = new Date(
+      Date.now() - 5_000
+    ).toISOString(); // expired
+
+    const res = await rescheduleVisit({
+      jobId: "j1",
+      scheduledDate: newDate,
+      technicianId: "t1",
+      routeId: "r-new",
+      reason: "customer request",
+      actor: OFFICE,
+    });
+
+    expect(res.assignedToRoute).toBe(true);
+    // The winner's fenced release cleared the lease for the next mover
+    // (null sets REMOVE the attribute in the CAS store).
+    expect(routes.get("r-new")!.moveLeaseUntil).toBeUndefined();
   });
 
   it("GL-17: a cross-month reschedule claims the target month and releases the prior month", async () => {

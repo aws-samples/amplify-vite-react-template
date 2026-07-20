@@ -153,6 +153,8 @@ const LOCK_MODELS = [
   // GL-03: the queued-email resend claim (exactly one sweeper re-sends a
   // throttled row).
   "EmailLog",
+  // GL-07: assigned reschedules serialize per-route behind a CAS move lease.
+  "Route",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],

@@ -1593,6 +1593,29 @@ export async function rescheduleVisit(args: {
         "The selected route doesn't belong to that technician and date."
       );
     }
+    // GL-07: the stop-count ceiling below is a read→act decision, so every
+    // move ONTO this route serializes behind a short single-winner CAS lease
+    // on the Route row — two simultaneous moves can no longer both pass one
+    // count read. (The minutes ledger stays independently atomic via
+    // reserveSlot.) A crashed move's lease expires on its own; a retry after
+    // the lease is idempotent — the guarded publish still refuses a stale
+    // move. The release below is FENCED on this holder's nonce, so an
+    // expired mover can never unlock a newer mover's lease.
+    const moveNonce = randomUUID();
+    const moveLease = await casTakeover("Route", route.id, {
+      nonceField: "moveLeaseNonce",
+      nonce: moveNonce,
+      leaseField: "moveLeaseUntil",
+      leaseMs: 60_000,
+    });
+    if (!moveLease.ok) {
+      throw new Error(
+        moveLease.reason === "UNSUPPORTED"
+          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
+          : "Another schedule change is mid-flight on that technician's day — wait a few seconds and try again. Nothing was changed."
+      );
+    }
+    try {
     // Revalidate capacity: a route is one technician-day; it can't exceed its
     // stop capacity. Count the stops already on it, excluding this visit.
     let stops = 0;
@@ -1712,6 +1735,15 @@ export async function rescheduleVisit(args: {
     }
     // The OLD slot's minutes come back only after the move landed.
     await releaseJobSlot(job);
+    } finally {
+      // Fenced release — an expired mover cannot unlock a newer mover.
+      await casFencedUpdate(
+        "Route",
+        route.id,
+        { field: "moveLeaseNonce", nonce: moveNonce },
+        { moveLeaseUntil: null }
+      ).catch(() => undefined);
+    }
   } else {
     // GL-07 R4: a dated move with no technician is NEVER published as a clean
     // SCHEDULED — the owned staffing case is CONFIRMED FIRST (a case that
