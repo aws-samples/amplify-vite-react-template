@@ -255,37 +255,11 @@ export function rateKeyFor(
   return `${service}#${areaKey}${bucket ? `#${bucket}` : ""}`;
 }
 
-/**
- * Which row serves for a rate key: a pinned row is the office's word and
- * always wins; otherwise the freshest research does. Expiry does not
- * disqualify anything — serve-last-known-good. Shared with the cron so
- * "the row that serves" and "the row that refreshes" are the same row.
- *
- * GL-16 rollback: with a `cutoffIso` set (the catalog-rollback state), AI
- * rows researched AFTER the cutoff are excluded, so the whole catalog serves
- * the prior coherent sheet in one flip. Pinned office rows still win — an
- * explicit office price is never silently rolled back.
- */
-export function pickLiveRow<
-  T extends {
-    active: boolean;
-    pinned?: boolean | null;
-    researchedAt?: string | null;
-  },
->(rows: T[], cutoffIso?: string | null): T | null {
-  const live = rows.filter((r) => r.active);
-  const eligible = cutoffIso
-    ? live.filter((r) => r.pinned || (r.researchedAt ?? "") <= cutoffIso)
-    : live;
-  return (
-    eligible.find((r) => r.pinned) ??
-    eligible.reduce<T | null>(
-      (best, r) =>
-        !best || (r.researchedAt ?? "") > (best.researchedAt ?? "") ? r : best,
-      null
-    )
-  );
-}
+// Which row serves for a rate key — ONE rule shared with the pricing worker
+// AND the CRM Market Rates screen (pure module, value-importable by the CRM
+// like serviceCatalog.ts). Re-exported so existing engine imports hold.
+import { pickLiveRow } from "./rateServing";
+export { pickLiveRow };
 
 // ------------------------------------------------------- rollback state
 
@@ -306,7 +280,10 @@ let rollbackMemo: { at: number; value: PricingRollback | null } | null = null;
  * screen confirms it took effect).
  */
 export async function readPricingRollback(): Promise<PricingRollback | null> {
-  if (rollbackMemo && Date.now() - rollbackMemo.at < 60_000) {
+  // 5s, not 60s: the gate requires the quote funnel and CRM to read a
+  // rollback (or its clearing) IMMEDIATELY — a minute of stale containers
+  // serving the wrong sheet is a demonstrable mixed catalog.
+  if (rollbackMemo && Date.now() - rollbackMemo.at < 5_000) {
     return rollbackMemo.value;
   }
   let value: PricingRollback | null = null;

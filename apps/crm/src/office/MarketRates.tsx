@@ -24,6 +24,7 @@ import {
   type PlanRate,
   type RateStatus,
 } from "../lib/marketRates";
+import { pickLiveRow } from "../../../web/amplify/functions/shared/rateServing";
 import { fmtDate, money } from "../lib/format";
 import { useRoles } from "../lib/auth";
 import {
@@ -99,19 +100,29 @@ function EnginePanel({
   coverage,
   rates,
   control,
+  rollbackCutoff,
   onChanged,
 }: {
   coverage: RateCoverage[];
   rates: MarketRate[];
   control: PricingControl | null;
+  rollbackCutoff: string | null;
   onChanged: () => Promise<void>;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const now = Date.now();
 
+  // Rollback-aware: a combo whose only sheet is post-cutoff is NOT serving
+  // while the catalog is rolled back — the engine view must match quoting.
   const liveKeys = new Set(
-    rates.filter((r) => r.active).map((r) => r.rateKey)
+    rates
+      .filter((r) =>
+        r.active && (rollbackCutoff
+          ? r.pinned || (r.researchedAt ?? "") <= rollbackCutoff
+          : true)
+      )
+      .map((r) => r.rateKey)
   );
   const active = coverage.filter((c) => c.active);
   const exhausted = active.filter((c) => c.exhaustedAt);
@@ -170,8 +181,12 @@ function EnginePanel({
     <Card>
       <div className="row-split">
         <strong>AI research engine — today</strong>
-        <Badge tone={exhausted.length ? "warn" : "ok"}>
-          {exhausted.length ? `${exhausted.length} parked` : "healthy"}
+        <Badge tone={rollbackCutoff ? "warn" : exhausted.length ? "warn" : "ok"}>
+          {rollbackCutoff
+            ? "research paused — catalog rolled back"
+            : exhausted.length
+              ? `${exhausted.length} parked`
+              : "healthy"}
         </Badge>
       </div>
       <p className="small" style={{ margin: "6px 0 0" }}>
@@ -267,6 +282,7 @@ export default function MarketRates() {
           coverage={coverage}
           rates={rates}
           control={control}
+          rollbackCutoff={rollback?.rollbackCutoff ?? null}
           onChanged={load}
         />
       ) : null}
@@ -279,8 +295,26 @@ export default function MarketRates() {
         />
       ) : (
         <Card>
-          {rates.map((r) => {
+          {(() => {
+            // The SAME serving rule the engine and funnel use (shared pure
+            // module): per rate key, which row actually quotes right now —
+            // rollback-aware, so during a rollback the office sees exactly
+            // what customers see, never the rolled-back sheet as "active".
+            const cutoff = rollback?.rollbackCutoff ?? null;
+            const byKey = new Map<string, MarketRate[]>();
+            for (const r of rates) {
+              const list = byKey.get(r.rateKey) ?? [];
+              list.push(r);
+              byKey.set(r.rateKey, list);
+            }
+            const servingIds = new Set<string>();
+            for (const rows of byKey.values()) {
+              const s = pickLiveRow(rows, cutoff);
+              if (s) servingIds.add(s.id);
+            }
+            return rates.map((r) => {
             const status = rateStatus(r);
+            const serving = servingIds.has(r.id);
             const sheet = sheetOf(r);
             const planMin = Math.min(
               ...PLAN_CADENCES.map(
@@ -298,11 +332,24 @@ export default function MarketRates() {
                 key={r.id}
                 title={scopeOf(r)}
                 subtitle={`${headline}${r.researchedAt ? ` · researched ${fmtDate(r.researchedAt, true)}` : ""}`}
-                meta={<Badge tone={STATUS_TONE[status]}>{status}</Badge>}
+                meta={
+                  !serving && r.active ? (
+                    <Badge tone="warn">
+                      {rollback?.rollbackCutoff &&
+                      !r.pinned &&
+                      (r.researchedAt ?? "") > rollback.rollbackCutoff
+                        ? "not serving — rolled back"
+                        : "not serving — superseded"}
+                    </Badge>
+                  ) : (
+                    <Badge tone={STATUS_TONE[status]}>{status}</Badge>
+                  )
+                }
                 onClick={() => setEditing(r)}
               />
             );
-          })}
+            });
+          })()}
         </Card>
       )}
 

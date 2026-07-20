@@ -1088,6 +1088,132 @@ describe("GL-16 — rollback pause and the daily change review", () => {
   });
 });
 
+describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", () => {
+  const rolledBackState = () => {
+    controlTable.set("catalog-rollback", {
+      id: "catalog-rollback",
+      kind: "ROLLBACK",
+      rollbackCutoff: iso(2 * 3600_000), // two hours ago
+      rollbackReason: "BAD_PROMPT_RESULT",
+    });
+    _resetRollbackMemoForTests();
+  };
+
+  it("does NOT email 'prices ready' for a sheet the rolled-back funnel refuses to serve", async () => {
+    await seedOnly();
+    quietAll();
+    // The combo's ONLY sheet was researched AFTER the cutoff — quoting
+    // will not serve it while the rollback is active.
+    rateRows.push({
+      id: "post-cutoff-row",
+      rateKey: "GENERAL_PEST#springfield-ma#2000",
+      service: "GENERAL_PEST",
+      areaKey: "springfield-ma",
+      priceCents: 39900,
+      active: true,
+      researchedAt: iso(30 * 60_000), // 30 min ago — inside the rollback
+    } as RateRow);
+    addCov(
+      demandRow({
+        id: "GENERAL_PEST#springfield-ma#2000",
+        service: "GENERAL_PEST",
+        band: 2000,
+        notify: JSON.stringify([
+          { email: "lead1@x.com", bookingRequestId: "bk1", ready: true },
+        ]),
+      })
+    );
+    rolledBackState();
+
+    await handler();
+
+    // No "your exact prices are ready" — clicking through would show the
+    // lead NO price at all. The claim stays queued for after the rollback.
+    expect(
+      sentEmails.filter((e) => e.template === "booking-rate-ready")
+    ).toHaveLength(0);
+    expect(
+      JSON.parse(cov("GENERAL_PEST#springfield-ma#2000")!.notify!)
+    ).toHaveLength(1);
+  });
+
+  it("still emails ready when a PRE-cutoff sheet serves during the rollback", async () => {
+    await seedOnly();
+    quietAll();
+    rateRows.push({
+      id: "pre-cutoff-row",
+      rateKey: "GENERAL_PEST#springfield-ma#2000",
+      service: "GENERAL_PEST",
+      areaKey: "springfield-ma",
+      priceCents: 34900,
+      active: true,
+      researchedAt: iso(3 * 3600_000), // three hours ago — before the cutoff
+    } as RateRow);
+    addCov(
+      demandRow({
+        id: "GENERAL_PEST#springfield-ma#2000",
+        service: "GENERAL_PEST",
+        band: 2000,
+        notify: JSON.stringify([
+          { email: "lead1@x.com", bookingRequestId: "bk1", ready: true },
+        ]),
+      })
+    );
+    rolledBackState();
+
+    await handler();
+
+    // The restored sheet IS serving — the promise is truthful.
+    expect(
+      sentEmails
+        .filter((e) => e.template === "booking-rate-ready")
+        .map((e) => e.to)
+    ).toEqual(["lead1@x.com"]);
+    expect(
+      JSON.parse(cov("GENERAL_PEST#springfield-ma#2000")!.notify!)
+    ).toEqual([]);
+  });
+
+  it("clearing the rollback releases the held ready-claim on the next run", async () => {
+    await seedOnly();
+    quietAll();
+    rateRows.push({
+      id: "post-cutoff-row",
+      rateKey: "GENERAL_PEST#springfield-ma#2000",
+      service: "GENERAL_PEST",
+      areaKey: "springfield-ma",
+      priceCents: 39900,
+      active: true,
+      researchedAt: iso(30 * 60_000),
+    } as RateRow);
+    addCov(
+      demandRow({
+        id: "GENERAL_PEST#springfield-ma#2000",
+        service: "GENERAL_PEST",
+        band: 2000,
+        notify: JSON.stringify([
+          { email: "lead1@x.com", bookingRequestId: "bk1", ready: true },
+        ]),
+      })
+    );
+    rolledBackState();
+    await handler();
+    expect(
+      sentEmails.filter((e) => e.template === "booking-rate-ready")
+    ).toHaveLength(0);
+
+    controlTable.delete("catalog-rollback");
+    _resetRollbackMemoForTests();
+    await handler();
+
+    expect(
+      sentEmails
+        .filter((e) => e.template === "booking-rate-ready")
+        .map((e) => e.to)
+    ).toEqual(["lead1@x.com"]);
+  });
+});
+
 describe("lock-layer infrastructure failure fails the run LOUDLY (July staging defect)", () => {
   // Staging demonstrated it: every deployed CAS write missed its table
   // (ResourceNotFoundException), the drain takeover reported LOST, and the

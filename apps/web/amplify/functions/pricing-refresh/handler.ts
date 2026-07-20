@@ -362,8 +362,14 @@ async function seedCoverage(): Promise<number> {
 
 // ------------------------------------------------------- work selection
 
-/** The live (serving) MarketRate row per rate key. */
-function liveRowsByKey(rates: RateRow[]): Map<string, RateRow> {
+/** The live (serving) MarketRate row per rate key. `cutoffIso` is the active
+ *  catalog-rollback cutoff: with it set, this map matches what quoting
+ *  actually serves — a post-cutoff row is NOT live, so notify-retries,
+ *  queue depth, and reports can never describe a sheet customers can't see. */
+function liveRowsByKey(
+  rates: RateRow[],
+  cutoffIso?: string | null
+): Map<string, RateRow> {
   const byKey = new Map<string, RateRow[]>();
   for (const r of rates) {
     const list = byKey.get(r.rateKey) ?? [];
@@ -372,7 +378,7 @@ function liveRowsByKey(rates: RateRow[]): Map<string, RateRow> {
   }
   const live = new Map<string, RateRow>();
   for (const [key, rows] of byKey) {
-    const row = pickLiveRow(rows);
+    const row = pickLiveRow(rows, cutoffIso);
     if (row) live.set(key, row);
   }
   return live;
@@ -621,7 +627,9 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
     });
   }
   const activeCov = coverage.filter((c) => c.active);
-  const live = liveRowsByKey(rates);
+  // Rollback-aware: the digest's queue depth and live view describe what is
+  // actually serving, not sheets a rollback has taken out of service.
+  const live = liveRowsByKey(rates, rollback?.cutoffIso ?? null);
   const queueDepth = selectWork(coverage, live, nowMs).length;
   const exhausted = activeCov.filter((c) => c.exhaustedAt);
   const backingOff = activeCov
@@ -732,8 +740,15 @@ async function sendWeeklyReport(): Promise<boolean> {
   ).length;
 
   const ageDays = (iso: string) => Math.floor((now - Date.parse(iso)) / DAY_MS);
+  // Honest under a rollback: "already live and quoting" is not true of
+  // post-cutoff sheets while the catalog is rolled back.
+  const rollback = await readPricingRollback();
 
-  const bodyHtml = `<p>The weekly look at what the AI pricer did. Every sheet below is <strong>already live and quoting</strong> — this is visibility, not an approval queue. To overrule any number, edit it on <a href="${process.env.CRM_APP_URL ?? ""}/market-rates">Market Rates</a>; an edit pins the row and the refresh never touches it again.</p>
+  const bodyHtml = `${
+    rollback
+      ? `<p style="background:#fef3c7;border-radius:8px;padding:10px;"><strong>Catalog rolled back</strong> to ${esc(rollback.cutoffIso)} — sheets researched after the cutoff are NOT serving, and research is paused until the rollback clears.</p>`
+      : ""
+  }<p>The weekly look at what the AI pricer did. Every sheet below is <strong>already live and quoting</strong> — this is visibility, not an approval queue. To overrule any number, edit it on <a href="${process.env.CRM_APP_URL ?? ""}/market-rates">Market Rates</a>; an edit pins the row and the refresh never touches it again.</p>
     ${section(
       `Price moves this week (${moves.length})`,
       moves.map(
@@ -889,7 +904,16 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
 
     const client = await dataClient();
     const coverage = await listAll<CoverageRow>(client.models.RateCoverage);
-    const live = liveRowsByKey(await listAll<RateRow>(client.models.MarketRate));
+    // GL-16 rollback: read the rollback state FIRST — the live map must
+    // match what quoting serves. During a rollback, a combo whose only
+    // sheet is post-cutoff is NOT ready: emailing "your exact prices are
+    // ready" for a sheet the funnel refuses is a demonstrable mixed
+    // catalog (the lead clicks through to no price at all).
+    const rollback = await readPricingRollback();
+    const live = liveRowsByKey(
+      await listAll<RateRow>(client.models.MarketRate),
+      rollback?.cutoffIso ?? null
+    );
     let notified = 0;
 
     // Email delivery has its own retry lifecycle. A rate can be fresh while a
@@ -909,12 +933,10 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
       await settleCoverageRow(cov.id, nonce, { leaseUntil: null });
     }
 
-    // GL-16 rollback: while the catalog is rolled back, quoting serves the
-    // prior sheet and research PUBLICATION pauses — a refresh from the same
-    // suspect prompt would immediately supersede the restored sheet. The
-    // work-list, leases, and notify retries keep running; research resumes
-    // the moment the rollback is cleared.
-    const rollback = await readPricingRollback();
+    // While the catalog is rolled back, research PUBLICATION also pauses —
+    // a refresh from the same suspect prompt would immediately supersede
+    // the restored sheet. The work-list, leases, and notify retries keep
+    // running; research resumes the moment the rollback is cleared.
 
     // A targeted wake-up researches ONLY its miss — and only when the combo
     // genuinely has no live sheet (fresh, pinned, exhausted, leased, and
