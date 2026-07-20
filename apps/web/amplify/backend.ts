@@ -491,6 +491,17 @@ opsAlarmsTopic.addSubscription(
   new LambdaSubscription(backend.opsAlerts.resources.lambda)
 );
 const alarmAction = new SnsAction(opsAlarmsTopic);
+// EVERY alarm gets BOTH transitions: ALARM opens the owned item / failure
+// email, OK auto-resolves it / sends the all-clear. The GL-22 staging drill
+// demonstrated the miss: with only addAlarmAction, CloudWatch never
+// notifies on recovery, so ops-alerts' auto-resolve path was unreachable.
+const wireAlarm = (
+  alarm: import("aws-cdk-lib/aws-cloudwatch").Alarm,
+  action: SnsAction
+): void => {
+  alarm.addAlarmAction(action);
+  alarm.addOkAction(action);
+};
 
 // GL-22: WHO WATCHES THE BRIDGE. If ops-alerts itself breaks, every alarm
 // routed through it silently stops becoming owned work — so its failures
@@ -511,6 +522,7 @@ bridgeFailureTopic.addSubscription(
   new EmailSubscription("info@pestbuzzkill.com")
 );
 const bridgeAction = new SnsAction(bridgeFailureTopic);
+wireAlarm(
 opsAlertsDlq
   .metricApproximateNumberOfMessagesVisible({
     period: Duration.minutes(15),
@@ -524,8 +536,10 @@ opsAlertsDlq
     evaluationPeriods: 1,
     comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     treatMissingData: TreatMissingData.NOT_BREACHING,
-  })
-  .addAlarmAction(bridgeAction);
+  }),
+  bridgeAction
+);
+wireAlarm(
 backend.opsAlerts.resources.lambda
   .metricErrors({ period: Duration.minutes(5), statistic: "Sum" })
   .createAlarm(opsAlarmsStack, "ops-alerts-errors-alarm", {
@@ -536,8 +550,10 @@ backend.opsAlerts.resources.lambda
     evaluationPeriods: 1,
     comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     treatMissingData: TreatMissingData.NOT_BREACHING,
-  })
-  .addAlarmAction(bridgeAction);
+  }),
+  bridgeAction
+);
+wireAlarm(
 backend.opsAlerts.resources.lambda
   .metricThrottles({ period: Duration.minutes(5), statistic: "Sum" })
   .createAlarm(opsAlarmsStack, "ops-alerts-throttles-alarm", {
@@ -548,8 +564,9 @@ backend.opsAlerts.resources.lambda
     evaluationPeriods: 1,
     comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     treatMissingData: TreatMissingData.NOT_BREACHING,
-  })
-  .addAlarmAction(bridgeAction);
+  }),
+  bridgeAction
+);
 
 // Lambda ERROR alarms: any error on a business function within 5 minutes is
 // a page. Booking/quote/webhook errors, email-send failure runs, resumer
@@ -569,6 +586,7 @@ const monitored: [string, { resources: { lambda: import("aws-cdk-lib/aws-lambda"
   ["ses-events", backend.sesEvents],
 ];
 for (const [name, fn] of monitored) {
+wireAlarm(
   fn.resources.lambda
     .metricErrors({ period: Duration.minutes(5), statistic: "Sum" })
     .createAlarm(fn.resources.lambda.stack, `${name}-errors-alarm`, {
@@ -579,10 +597,12 @@ for (const [name, fn] of monitored) {
       comparisonOperator:
         ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
-    })
-    .addAlarmAction(alarmAction);
+    }),
+  alarmAction
+);
   // GL-22 names "errors AND throttles": a throttled function fails callers
   // without ever producing an error metric of its own.
+wireAlarm(
   fn.resources.lambda
     .metricThrottles({ period: Duration.minutes(5), statistic: "Sum" })
     .createAlarm(fn.resources.lambda.stack, `${name}-throttles-alarm`, {
@@ -593,11 +613,13 @@ for (const [name, fn] of monitored) {
       comparisonOperator:
         ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
-    })
-    .addAlarmAction(alarmAction);
+    }),
+  alarmAction
+);
 }
 // A scheduled job that NEVER RAN is as bad as one that failed — missing
 // data is BREACHING, so a broken schedule cannot hide as silence.
+wireAlarm(
 backend.dailyReminders.resources.lambda
   .metricInvocations({ period: Duration.hours(24), statistic: "Sum" })
   .createAlarm(
@@ -612,8 +634,10 @@ backend.dailyReminders.resources.lambda
       comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
       treatMissingData: TreatMissingData.BREACHING,
     }
-  )
-  .addAlarmAction(alarmAction);
+  ),
+  alarmAction
+);
+wireAlarm(
 backend.pricingRefresh.resources.lambda
   .metricInvocations({ period: Duration.hours(1), statistic: "Sum" })
   .createAlarm(
@@ -628,8 +652,9 @@ backend.pricingRefresh.resources.lambda
       comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
       treatMissingData: TreatMissingData.BREACHING,
     }
-  )
-  .addAlarmAction(alarmAction);
+  ),
+  alarmAction
+);
 
 // GL-22: a mailbox delivery event may never be silently dropped. The
 // ses-events handler now THROWS on a failed write (no more ack-and-forget);
@@ -642,6 +667,7 @@ backend.sesEvents.resources.lambda.configureAsyncInvoke({
   retryAttempts: 2,
   onFailure: new SqsDestination(sesEventsDlq),
 });
+wireAlarm(
 sesEventsDlq
   .metricApproximateNumberOfMessagesVisible({
     period: Duration.minutes(15),
@@ -655,8 +681,9 @@ sesEventsDlq
     evaluationPeriods: 1,
     comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     treatMissingData: TreatMissingData.NOT_BREACHING,
-  })
-  .addAlarmAction(alarmAction);
+  }),
+  alarmAction
+);
 
 // GL-22 retention: point-in-time recovery on EVERY business table (35-day
 // continuous restore against human or provider error), and versioning on
