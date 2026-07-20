@@ -152,13 +152,19 @@ const fakeDataClient = {
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const sentEmails: { to: string; subject: string; template: string; html: string }[] =
-  [];
+type SentEmail = {
+  to: string;
+  subject: string;
+  template: string;
+  html: string;
+  attachments?: { filename: string; content: Uint8Array; contentType: string }[];
+};
+const sentEmails: SentEmail[] = [];
 const emailsThatFail = new Set<string>();
 const officeEmails: { subject: string; template: string; bodyHtml: string }[] = [];
 vi.mock("../shared/email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
-  sendEmail: async (o: { to: string; subject: string; template: string; html: string }) => {
+  sendEmail: async (o: SentEmail) => {
     sentEmails.push(o);
     return !emailsThatFail.has(o.to);
   },
@@ -1038,6 +1044,70 @@ describe("the self-heal email — a waiting lead hears exactly once", () => {
     sentEmails.length = 0;
     await handler();
     expect(sentEmails.filter((e) => e.template === "booking-rate-ready")).toHaveLength(0);
+  });
+
+  it("attaches a priced-quote PDF when the booking is already QUOTED", async () => {
+    await seedOnly();
+    quietAll();
+    // bk1 is priced (status QUOTED with a stored quote) so no booking-public
+    // invoke is needed — the PDF renders straight from quoteJson. bk2 is absent,
+    // so that lead still gets the link-only email (graceful degradation).
+    bookings.push({
+      id: "bk1",
+      status: "QUOTED",
+      cancelToken: "resume-token-1",
+      name: "Dana Rivera",
+      email: "lead1@x.com",
+      street: "12 Maple St",
+      city: "Springfield",
+      state: "MA",
+      zip: "01103",
+      expiresAt: "2026-07-21T15:00:00.000Z",
+      quoteJson: JSON.stringify({
+        days: [{ date: "2026-07-25", windows: ["AM"], priceCents: 18900 }],
+        baseCents: 18900,
+        serviceLabel: "General pest control",
+        recurringOffer: {
+          frequency: "QUARTERLY",
+          monthlyCents: 4900,
+          initialFeeCents: 4900,
+        },
+      }),
+    });
+    addCov(waitingRow());
+
+    await handler();
+
+    const ready = sentEmails.filter((e) => e.template === "booking-rate-ready");
+    const toLead1 = ready.find((e) => e.to === "lead1@x.com")!;
+    expect(toLead1.attachments).toHaveLength(1);
+    const att = toLead1.attachments![0];
+    expect(att.filename).toBe("BuzzKill-Quote.pdf");
+    expect(att.contentType).toBe("application/pdf");
+    expect(Buffer.from(att.content.slice(0, 5)).toString("latin1")).toBe("%PDF-");
+
+    // The unpriceable lead (no booking row) still hears — just without a PDF.
+    const toLead2 = ready.find((e) => e.to === "lead2@x.com")!;
+    expect(toLead2.attachments).toBeUndefined();
+  });
+
+  it("sends link-only when the quote can't be priced (no invoke configured)", async () => {
+    await seedOnly();
+    quietAll();
+    // A PENDING booking and no BOOKING_PUBLIC function wiring: the compute step
+    // is skipped and the lead still gets today's link-only email.
+    bookings.push({ id: "bk1", status: "PENDING", cancelToken: "resume-token-1" });
+    addCov(waitingRow());
+
+    await handler();
+
+    const toLead1 = sentEmails.find(
+      (e) => e.template === "booking-rate-ready" && e.to === "lead1@x.com"
+    )!;
+    expect(toLead1.attachments).toBeUndefined();
+    expect(toLead1.html).toContain(
+      "https://staging.example.test/quote#request=bk1&token=resume-token-1"
+    );
   });
 
   it("keeps a failed delivery queued and retries it without researching again", async () => {
