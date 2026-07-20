@@ -159,17 +159,37 @@ describe("quoteFieldNeeds", () => {
       sqft: true,
       nestCount: false,
       units: false,
+      lotHalfAcres: false,
     });
     expect(quoteFieldNeeds("WILDLIFE", "RESIDENTIAL")).toEqual({
       sqft: true,
       nestCount: false,
       units: false,
+      lotHalfAcres: false,
     });
     expect(quoteFieldNeeds("WASP_NEST", "RESIDENTIAL")).toEqual({
       sqft: false,
       nestCount: true,
       units: false,
+      lotHalfAcres: false,
     });
+  });
+
+  it("GL-17: mosquito plans need yard size only, at EVERY property kind", () => {
+    for (const kind of ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"]) {
+      expect(quoteFieldNeeds("MOSQUITO", kind)).toEqual({
+        sqft: false,
+        nestCount: false,
+        units: false,
+        lotHalfAcres: true,
+      });
+      expect(quoteFieldNeeds("MOSQUITO_TICK", kind)).toEqual({
+        sqft: false,
+        nestCount: false,
+        units: false,
+        lotHalfAcres: true,
+      });
+    }
   });
 
   it("community is a per-unit plan quote whatever the service", () => {
@@ -177,6 +197,7 @@ describe("quoteFieldNeeds", () => {
       sqft: false,
       nestCount: false,
       units: true,
+      lotHalfAcres: false,
     });
   });
 
@@ -185,6 +206,7 @@ describe("quoteFieldNeeds", () => {
       sqft: true,
       nestCount: false,
       units: false,
+      lotHalfAcres: false,
     });
   });
 });

@@ -222,7 +222,7 @@ export const SERVICE_CATALOG: Record<CatalogServiceId, CatalogEntry> = {
   MOSQUITO: {
     id: "MOSQUITO",
     label: "Mosquito plan (Apr–Oct)",
-    funnel: false, // GL-17: sale path is the CEO's open product decision
+    funnel: true, // GL-17: the CEO selected the public funnel as the sale path
     leadForm: true,
     propertyClasses: ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"],
     needsSqft: false,
@@ -238,7 +238,7 @@ export const SERVICE_CATALOG: Record<CatalogServiceId, CatalogEntry> = {
   MOSQUITO_TICK: {
     id: "MOSQUITO_TICK",
     label: "Mosquito + tick plan (Apr–Oct)",
-    funnel: false,
+    funnel: true, // GL-17: sold through the funnel alongside MOSQUITO
     leadForm: true,
     propertyClasses: ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"],
     needsSqft: false,
@@ -322,7 +322,9 @@ export function serviceLabelFor(
 /** A recurring enrollment's plan name — the label root + " plan", exactly
  *  what finalization has always derived by stripping the size suffix. */
 export function planNameFor(id: CatalogServiceId): string {
-  return `${serviceLabelFor(id).replace(/ — .*$/, "")} plan`;
+  const base = serviceLabelFor(id).replace(/ — .*$/, "");
+  // GL-17: seasonal labels already say "plan" — never "… plan plan".
+  return /\bplan\b/i.test(base) ? base : `${base} plan`;
 }
 
 /**

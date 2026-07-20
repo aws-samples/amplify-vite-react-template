@@ -72,6 +72,8 @@ export type QuoteRequest = {
   callConsent?: boolean;
   /** GL-03: which consent wording they agreed to (shared/consentText.ts). */
   callConsentTextVersion?: string;
+  /** GL-17: yard size for mosquito plans, in half-acres (1–8). */
+  lotHalfAcres?: number;
   service: ServiceCode;
   propertyKind?: PropertyKind;
   address: { street: string; city: string; state: string; zip?: string };

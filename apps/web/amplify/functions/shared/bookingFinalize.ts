@@ -45,6 +45,7 @@ import { oneBusinessDayDueAt } from "./businessDays";
 import { normalizePhone } from "./leadIdentity";
 import {
   entryForLabel,
+  planNameFor,
   SERVICE_CATALOG_VERSION,
 } from "./serviceCatalog";
 // The single shared window→label map (GL-08): the label stamped on job.timeWindow
@@ -1370,7 +1371,9 @@ async function finalizeClaimed(
         client.models.ServicePlan.create({
           id: planId,
           customerId: customer.id,
-          planName: serviceLabel.replace(/ — .*$/, "") + " plan",
+          planName: catalogService
+            ? planNameFor(catalogService.id)
+            : serviceLabel.replace(/ — .*$/, "") + " plan",
           serviceCode: catalogService?.id ?? undefined,
           catalogVersion: catalogService ? SERVICE_CATALOG_VERSION : undefined,
           priceCents: offer.monthlyCents,

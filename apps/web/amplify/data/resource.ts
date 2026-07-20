@@ -541,6 +541,10 @@ export const schema = a.schema({
         "ROACH",
         "TERMITE",
         "WILDLIFE",
+        // GL-17: the CEO-approved seasonal launch products, sold through the
+        // funnel as Apr–Oct plans billed monthly year-round.
+        "MOSQUITO",
+        "MOSQUITO_TICK",
       ]),
       name: a.string().required(),
       email: a.string().required(),
@@ -558,6 +562,9 @@ export const schema = a.schema({
       units: a.integer(),
       sqft: a.integer(),
       nestCount: a.integer(),
+      // GL-17: yard size for the mosquito plans, in half-acres (pricing is
+      // per additional half-acre over the first).
+      lotHalfAcres: a.integer(),
       comments: a.string(),
       recurringPreference: a.string(),
       // First-touch ad attribution carried from the site (utm fields, gclid,

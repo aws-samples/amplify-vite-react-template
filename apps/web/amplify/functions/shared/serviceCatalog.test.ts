@@ -30,7 +30,7 @@ describe("the catalog is the single source", () => {
     expect(catalogEntry(null)).toBeNull();
   });
 
-  it("the funnel dropdown derives from the catalog — exactly the six bookable services, wording preserved", () => {
+  it("the funnel dropdown derives from the catalog — the eight bookable services, wording preserved", () => {
     expect(funnelCatalog().map((e) => e.id)).toEqual([
       "GENERAL_PEST",
       "WASP_NEST",
@@ -38,9 +38,12 @@ describe("the catalog is the single source", () => {
       "ROACH",
       "TERMITE",
       "WILDLIFE",
+      "MOSQUITO",
+      "MOSQUITO_TICK",
     ]);
     // The dropdown wording (SERVICE_OPTIONS derives funnelLabel ?? label) is
-    // exactly what customers saw before the catalog existed.
+    // exactly what customers saw before the catalog existed, plus the two
+    // GL-17 seasonal plans the CEO chose to sell through the funnel.
     expect(
       funnelCatalog().map((e) => [e.id, e.funnelLabel ?? e.label])
     ).toEqual([
@@ -50,11 +53,15 @@ describe("the catalog is the single source", () => {
       ["ROACH", "Roach treatment"],
       ["TERMITE", "Termite inspection & treatment"],
       ["WILDLIFE", "Wildlife removal"],
+      ["MOSQUITO", "Mosquito plan (Apr–Oct)"],
+      ["MOSQUITO_TICK", "Mosquito + tick plan (Apr–Oct)"],
     ]);
-    // Mosquito plans are deliberately NOT bookable on the funnel — the sale
-    // path is the CEO's open GL-17 product decision.
-    expect(SERVICE_CATALOG.MOSQUITO.funnel).toBe(false);
-    expect(SERVICE_CATALOG.MOSQUITO_TICK.funnel).toBe(false);
+  });
+
+  it("planNameFor never doubles the word 'plan' on seasonal labels", () => {
+    expect(planNameFor("MOSQUITO")).toBe("Mosquito plan (Apr–Oct)");
+    expect(planNameFor("MOSQUITO_TICK")).toBe("Mosquito + tick plan (Apr–Oct)");
+    expect(planNameFor("GENERAL_PEST")).toBe("General pest control plan");
   });
 
   it("mosquito plans carry the locked seasonal facts; nothing else does", () => {

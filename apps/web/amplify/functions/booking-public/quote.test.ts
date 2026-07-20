@@ -1097,3 +1097,116 @@ describe("the booking link's lead identity rides on the booking", () => {
     });
   });
 });
+
+describe("GL-17 — mosquito seasonal plans on the funnel", () => {
+  const mosquitoInput = {
+    name: "Dana Whitlock",
+    email: "dana@example.com",
+    service: "MOSQUITO",
+    propertyKind: "RESIDENTIAL",
+    address: { street: "12 Main St", city: "Ware", state: "MA", zip: "01082" },
+  };
+
+  it("prices the plan from the DETERMINISTIC card — no rate sheet, no research", async () => {
+    // No mosquito entry exists in the fake rate world at all: pricing must
+    // come from the card, never the AI engine.
+    const res = await postQuote(mosquitoInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(res.body.planOnly).toBe(true);
+    expect(res.body.recurringOffer).toMatchObject({
+      frequency: "MONTHLY", // billed monthly year-round — no cadence choice
+      monthlyCents: 11900, // ½ acre, Zone A
+      initialFeeCents: 11900, // first month charged at booking
+    });
+    // The day board picks the first treatment; the price never varies by day.
+    for (const d of res.body.days as { priceCents: number }[]) {
+      expect(d.priceCents).toBe(11900);
+    }
+    expect(String(res.body.service)).toContain("Mosquito plan");
+  });
+
+  it("mosquito + tick and larger yards price by the card's half-acre steps", async () => {
+    const res = await postQuote({
+      ...mosquitoInput,
+      service: "MOSQUITO_TICK",
+      lotHalfAcres: 3, // 1½ acres: $139 + 2 × $30
+    });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(res.body.recurringOffer.monthlyCents).toBe(19900);
+    expect(String(res.body.service)).toContain("Mosquito + tick");
+  });
+
+  it("Zone B distance is priced inside the card exactly once", async () => {
+    hqMinutes = 80; // Zone B
+
+    const res = await postQuote(mosquitoInput);
+
+    expect(res.body.decision).toBe("PRICED");
+    // $119 + the $25 mosquito monthly Zone B adder — not double-added.
+    expect(res.body.recurringOffer.monthlyCents).toBe(14400);
+  });
+
+  it("a community asking for mosquito gets the MOSQUITO plan, not the HOA sheet — and needs no unit count", async () => {
+    const res = await postQuote({
+      ...mosquitoInput,
+      propertyKind: "COMMUNITY",
+      // no units on purpose
+    });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(res.body.recurringOffer.monthlyCents).toBe(11900);
+    expect(String(res.body.service)).toContain("Mosquito plan");
+  });
+
+  it("ignores a cadence preference — the locked rule is monthly billing", async () => {
+    const res = await postQuote({
+      ...mosquitoInput,
+      recurringPreference: "QUARTERLY",
+    });
+    expect(res.body.recurringOffer.frequency).toBe("MONTHLY");
+  });
+
+  it("refuses a yard size outside the card's range", async () => {
+    const res = await postQuote({ ...mosquitoInput, lotHalfAcres: 12 });
+    expect(res.status).toBe(400);
+    expect(res.body.errors.lotHalfAcres).toBeTruthy();
+  });
+
+  it("sells the FIRST TREATMENT only onto April–October dates", async () => {
+    vi.useFakeTimers();
+    try {
+      // Late October: the 42-day board crosses into November, but only the
+      // remaining in-season October days may be sold.
+      vi.setSystemTime(new Date("2026-10-20T15:00:00Z"));
+      const res = await postQuote({
+        ...mosquitoInput,
+        email: "dana+oct@example.com",
+      });
+      expect(res.body.decision).toBe("PRICED");
+      for (const d of res.body.days as { date: string }[]) {
+        const month = Number(d.date.slice(5, 7));
+        expect(month).toBeGreaterThanOrEqual(4);
+        expect(month).toBeLessThanOrEqual(10);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a fully off-season ask falls to the owned contact path with honest seasonal copy", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-12-09T15:00:00Z")); // deep off-season
+      const res = await postQuote({
+        ...mosquitoInput,
+        email: "dana+dec@example.com",
+      });
+      expect(res.body.decision).toBe("CONTACT");
+      expect(String(res.body.message)).toContain("Mosquito season");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

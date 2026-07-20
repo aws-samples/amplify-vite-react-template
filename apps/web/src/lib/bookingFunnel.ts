@@ -23,6 +23,8 @@ export type ServiceOption = {
   needsSqft: boolean;
   needsNestCount: boolean;
   offersRecurring: boolean;
+  /** GL-17: Apr–Oct treatment plan billed monthly year-round. */
+  seasonal: boolean;
 };
 
 // GL-01: the dropdown derives from the ONE versioned service catalog — the
@@ -34,6 +36,7 @@ export const SERVICE_OPTIONS: ServiceOption[] = funnelCatalog().map((e) => ({
   needsSqft: e.needsSqft,
   needsNestCount: e.needsNestCount,
   offersRecurring: e.offersRecurring,
+  seasonal: e.seasonal,
 }));
 
 export function serviceOption(code: string): ServiceOption | undefined {
@@ -55,23 +58,31 @@ export type QuoteFieldNeeds = {
   sqft: boolean;
   nestCount: boolean;
   units: boolean;
+  /** GL-17: mosquito plans price on yard size (half-acres). */
+  lotHalfAcres: boolean;
 };
 
 export function quoteFieldNeeds(
   service: string,
   propertyKind: string
 ): QuoteFieldNeeds {
+  const svc = serviceOption(service);
+  // GL-17: a seasonal plan prices on yard size alone at ANY property kind —
+  // the community/commercial overrides don't apply.
+  if (svc?.seasonal) {
+    return { sqft: false, nestCount: false, units: false, lotHalfAcres: true };
+  }
   if (propertyKind === "COMMUNITY") {
-    return { sqft: false, nestCount: false, units: true };
+    return { sqft: false, nestCount: false, units: true, lotHalfAcres: false };
   }
   if (propertyKind === "COMMERCIAL") {
-    return { sqft: true, nestCount: false, units: false };
+    return { sqft: true, nestCount: false, units: false, lotHalfAcres: false };
   }
-  const svc = serviceOption(service);
   return {
     sqft: svc?.needsSqft ?? false,
     nestCount: svc?.needsNestCount ?? false,
     units: false,
+    lotHalfAcres: false,
   };
 }
 

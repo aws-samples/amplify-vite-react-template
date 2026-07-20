@@ -20,6 +20,7 @@ import {
 import {
   FREQUENCY_LABELS,
   SERVICE_OPTIONS,
+  serviceOption,
   clearFunnelState,
   formatDay,
   hoaMoneyLine,
@@ -90,6 +91,8 @@ type Fields = {
   sqft: string;
   nestCount: string;
   units: string;
+  /** GL-17: yard size for mosquito plans, in half-acres ("1".."8"). */
+  lotHalfAcres: string;
   comments: string;
   /** "" = one-time visit only */
   recurringPreference: "" | RecurringFrequency;
@@ -109,6 +112,7 @@ const EMPTY_FIELDS: Fields = {
   sqft: "",
   nestCount: "1",
   units: "",
+  lotHalfAcres: "1",
   comments: "",
   recurringPreference: "",
 };
@@ -295,9 +299,11 @@ export default function QuotePage() {
   const isCommunity = fields.propertyKind === "COMMUNITY";
   // GP-style plan preference: residential general pest and every commercial
   // service (commercial prices like general pest, one-time + plans).
+  const isSeasonal = serviceOption(fields.service)?.seasonal === true;
   const offersPlanChoice =
-    fields.propertyKind === "COMMERCIAL" ||
-    (fields.propertyKind === "RESIDENTIAL" && fields.service === "GENERAL_PEST");
+    !isSeasonal &&
+    (fields.propertyKind === "COMMERCIAL" ||
+      (fields.propertyKind === "RESIDENTIAL" && fields.service === "GENERAL_PEST"));
 
   function acceptPricedQuote(
     response: PricedQuote,
@@ -347,12 +353,18 @@ export default function QuotePage() {
       sqft: needs.sqft ? parseInt(fields.sqft, 10) : undefined,
       nestCount: needs.nestCount ? parseInt(fields.nestCount, 10) : undefined,
       units: needs.units ? parseInt(fields.units, 10) : undefined,
+      lotHalfAcres: needs.lotHalfAcres
+        ? parseInt(fields.lotHalfAcres, 10) || 1
+        : undefined,
       comments: fields.comments.trim() || undefined,
-      recurringPreference: isCommunity
-        ? (cadence ?? "QUARTERLY")
-        : offersPlanChoice
-          ? cadence
-          : undefined,
+      // GL-17: seasonal plans bill monthly year-round — no cadence choice.
+      recurringPreference: isSeasonal
+        ? "MONTHLY"
+        : isCommunity
+          ? (cadence ?? "QUARTERLY")
+          : offersPlanChoice
+            ? cadence
+            : undefined,
     };
 
     setSubmitting(true);
@@ -805,7 +817,30 @@ export default function QuotePage() {
                   </div>
                 )}
 
-                {isCommunity && (
+                {needs.lotHalfAcres && (
+                  <div className="bk-field bk-full">
+                    <label htmlFor="bq-lot">Yard size *</label>
+                    <select
+                      id="bq-lot"
+                      value={fields.lotHalfAcres}
+                      onChange={(e) => set("lotHalfAcres")(e.target.value)}
+                    >
+                      <option value="1">Up to &frac12; acre</option>
+                      <option value="2">Up to 1 acre</option>
+                      <option value="3">Up to 1&frac12; acres</option>
+                      <option value="4">Up to 2 acres</option>
+                      <option value="6">Up to 3 acres</option>
+                      <option value="8">Up to 4 acres</option>
+                    </select>
+                    <p className="bk-field-hint">
+                      Treatments monthly April&ndash;October (7 per year), billed in
+                      equal monthly installments year-round.
+                    </p>
+                    {fieldError("lotHalfAcres")}
+                  </div>
+                )}
+
+                {isCommunity && !isSeasonal && (
                   <div className="bk-field bk-full">
                     <label htmlFor="bq-cadence">How often should we visit?</label>
                     <select

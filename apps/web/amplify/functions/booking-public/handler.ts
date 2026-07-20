@@ -17,6 +17,7 @@ import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
   zoneFromMinutes,
   money,
+  priceMosquito,
   ZONE_B,
   type Zone,
 } from "../crm-pricing/rateCards";
@@ -147,6 +148,8 @@ type QuoteInput = {
   /** The lead ticked "you may call/text me about my quote". */
   callConsent?: boolean;
   callConsentTextVersion?: string;
+  /** GL-17: yard size for mosquito plans, in half-acres (1–8). */
+  lotHalfAcres?: number;
   address?: { street?: string; city?: string; state?: string; zip?: string };
   units?: number;
   service?: string;
@@ -228,7 +231,14 @@ const SERVICES = new Set([
   "ROACH",
   "TERMITE",
   "WILDLIFE",
+  // GL-17: the CEO-approved seasonal plans, priced by the deterministic
+  // mosquito rate card — never the AI researcher.
+  "MOSQUITO",
+  "MOSQUITO_TICK",
 ]);
+
+/** GL-17: the funnel's seasonal plan products. */
+const SEASONAL_SERVICES = new Set(["MOSQUITO", "MOSQUITO_TICK"]);
 
 const PROPERTY_KINDS = new Set(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]);
 
@@ -755,7 +765,10 @@ async function quote(
   if (!addr.street?.trim()) errors["address.street"] = "Street address is required";
   if (!addr.city?.trim()) errors["address.city"] = "City is required";
   if (!addr.state?.trim()) errors["address.state"] = "State is required";
-  if (propertyKind === "COMMUNITY") {
+  if (SEASONAL_SERVICES.has(service)) {
+    // GL-17: mosquito plans price on yard size alone (half-acres), at any
+    // property kind — no sqft, nest, or unit inputs.
+  } else if (propertyKind === "COMMUNITY") {
     // A community asks for a common-area plan, priced per unit — the unit
     // count is the price input, so it is required.
     if (!input.units || input.units < 1) {
@@ -775,6 +788,13 @@ async function quote(
     if (service === "WASP_NEST" && (!input.nestCount || input.nestCount < 1)) {
       errors.nestCount = "How many nests need removal?";
     }
+  }
+  if (
+    SEASONAL_SERVICES.has(service) &&
+    input.lotHalfAcres != null &&
+    (input.lotHalfAcres < 1 || input.lotHalfAcres > 8)
+  ) {
+    errors.lotHalfAcres = "Yard size must be between ½ acre and 4 acres";
   }
   if (Object.keys(errors).length) throw new HttpError(400, { errors });
 
@@ -841,8 +861,13 @@ async function quote(
           | "RODENT"
           | "ROACH"
           | "TERMITE"
-          | "WILDLIFE",
+          | "WILDLIFE"
+          | "MOSQUITO"
+          | "MOSQUITO_TICK",
         units: input.units ?? undefined,
+        lotHalfAcres: SEASONAL_SERVICES.has(service)
+          ? Math.max(1, Math.ceil(input.lotHalfAcres ?? 1))
+          : undefined,
         sqft: input.sqft ?? undefined,
         nestCount: input.nestCount ?? undefined,
         comments: input.comments?.slice(0, 2000) || undefined,
@@ -1058,7 +1083,33 @@ async function quote(
     ? input.recurringPreference
     : "QUARTERLY") as PlanCadence;
 
-  if (propertyKind === "COMMUNITY") {
+  if (SEASONAL_SERVICES.has(service)) {
+    // GL-17: the seasonal mosquito plans — DETERMINISTIC rate card, never
+    // the AI researcher. Plan-only: billed monthly year-round, one treatment
+    // per April–October month; the day board picks the FIRST treatment and
+    // the price never varies by day. Zone B travel is priced inside the card.
+    const halfAcres = Math.max(1, Math.ceil(input.lotHalfAcres ?? 1));
+    const card = priceMosquito({
+      tick: service === "MOSQUITO_TICK",
+      halfAcres,
+      zone: priceZone === "B" ? "B" : "A",
+    });
+    const monthly = card.monthlyCents!;
+    baseCents = monthly;
+    planOnly = true;
+    serviceLabel = `${serviceLabelFor(service as "MOSQUITO" | "MOSQUITO_TICK")}${
+      halfAcres > 1 ? ` — up to ${halfAcres / 2} acre${halfAcres > 2 ? "s" : ""}` : ""
+    }`;
+    recurringOffer = {
+      // Locked rule: mosquito plans bill MONTHLY year-round — the cadence
+      // preference does not apply here.
+      frequency: "MONTHLY",
+      monthlyCents: monthly,
+      // Charged at booking: the first month's total, like every plan the
+      // funnel sells. Billing then continues monthly year-round.
+      initialFeeCents: monthly,
+    };
+  } else if (propertyKind === "COMMUNITY") {
     // Any service asked at a community is a common-area plan quote from the
     // HOA per-unit sheet: per-unit monthly × units for the chosen cadence.
     const rate = await getCachedRate({
@@ -1175,6 +1226,24 @@ async function quote(
     onsiteMinutes:
       propertyKind === "COMMERCIAL" || propertyKind === "COMMUNITY" ? 60 : 30,
   });
+  // GL-17: a seasonal plan's FIRST TREATMENT is only sold onto an
+  // April–October date — the same rule the office paths hard-refuse. Late
+  // in the season the board simply shrinks to the remaining in-season days;
+  // a fully off-season ask falls to the owned contact path (the office
+  // enrolls off-season starts by hand: billing begins now, first treatment
+  // next April).
+  if (SEASONAL_SERVICES.has(service)) {
+    days = days.filter((d) => {
+      const month = Number(d.date.slice(5, 7));
+      return month >= 4 && month <= 10;
+    });
+    if (days.length === 0) {
+      return contact(
+        "Mosquito season scheduling has closed for the year",
+        "to set up your plan so treatments start in April (billing can begin now, as advertised)"
+      );
+    }
+  }
   if (days.length === 0) {
     return contact(
       "We're fully booked this month",
@@ -1187,7 +1256,11 @@ async function quote(
     days = days.map((d) => ({
       ...d,
       priceCents: baseCents!,
-      factors: ["community plan, first month charged at booking, price fixed per day"],
+      factors: [
+        SEASONAL_SERVICES.has(service)
+          ? "seasonal plan (Apr–Oct treatments, billed monthly year-round), first month charged at booking, price fixed per day"
+          : "community plan, first month charged at booking, price fixed per day",
+      ],
     }));
   }
 
