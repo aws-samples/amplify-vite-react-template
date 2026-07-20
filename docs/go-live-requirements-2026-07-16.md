@@ -7,7 +7,7 @@ implementation commit `4a80b8e`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 69 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 68 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -488,14 +488,6 @@ catalog (fixed `f57817c`), which restores the bullet below.
 
 **Remaining requirements:**
 
-- Preserve immutable rate-sheet versions and provide one reasoned, authorized rollback that atomically
-  restores the complete prior compatible sheet without editing history or producing a mixed catalog.
-  The customer-facing quote and CRM immediately read the restored version, and rollback itself is
-  audited. *(Reopened: during a rollback the worker emailed "prices ready" for sheets quoting refused,
-  the CRM list badged rolled-back sheets as fresh, and a 60s memo delayed "immediately". Fix `f57817c`:
-  ONE shared serving rule for engine/worker/CRM, rollback-aware notify gating and reports, serving
-  badges, 5-second state reads. Open until a staged rollback flip is verified end-to-end on staging:
-  funnel quote, CRM view, worker pause, ready-email holdback.)*
 - CEO/Finance ratify the recorded operating values now live: the daily change-review cadence (one
   claimable review item per day of changes), the controlled office-edit and rollback reason vocabularies,
   OWNER as the sole rollback authority, and the accepted no-clamp/no-preapproval posture the mechanism
