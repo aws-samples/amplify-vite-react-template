@@ -25,7 +25,10 @@ const fakeDataClient = {
 const openOwnedWork = vi.fn(async () => "work-1");
 
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
-vi.mock("./ownedWork", () => ({ openOwnedWork: (...a: unknown[]) => openOwnedWork(...a) }));
+vi.mock("./ownedWork", () => ({
+  openOwnedWork: (...a: unknown[]) =>
+    (openOwnedWork as unknown as (...x: unknown[]) => Promise<string>)(...a),
+}));
 
 const { recordCustomerLifecycleEvent } = await import("./lifecycleLog");
 
