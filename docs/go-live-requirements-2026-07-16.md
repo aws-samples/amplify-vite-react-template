@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `b8ba8a4`; newest
-implementation commit `b8ba8a4`
+**Latest commit review:** every commit after `f70e621` through `a2a2fc2`; newest
+implementation commit `a2a2fc2`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 63 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 62 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -213,7 +213,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P1 | GL-10 | Workflow/promise sign-offs — engineering closed (`b8ba8a4`) | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **12% — Very low (sign-offs)** |
 | P1 | GL-03 | Finish durable fallback promises and email recovery | Head of Sales + Head of Operations | A promised follow-up disappears, or an undelivered message remains falsely complete | **68% — Medium** |
 | P1 | GL-02 | Finish a failure-safe lead lifecycle | Head of Sales | A lead bypasses ownership, is mislabeled as contacted, or duplicates during conversion | **70% — High** |
-| P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **84% — High** |
+| P1 | GL-11 | Workflow sign-off — engineering closed (`a2a2fc2`) | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **10% — Very low (sign-off)** |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner | **50% — Medium** |
 
 ---
@@ -774,19 +774,22 @@ customer and leave the original lead open.
 **Business outcome:** A customer or property manager can complete the tasks the business directs them to
 the portal for without calling the office.
 
+**Engineering:** closed (`a2a2fc2`). The portal Requests tab carries customer-initiated reschedule,
+guarantee-callback (every GL-10 locked rule server-enforced: active plan, completed visit, required
+photo, one per appointment, reference + 7-business-day promise), and general help; every submission is a
+durable portal-visible case PLUS a deduplicated shared-queue item on the common one-business-day clock —
+success only when both exist, so a failed submission errors loudly instead of falling back to an
+untracked call, and the office resolves "with an answer" the customer sees. Group managers act across
+their whole group via the same dynamic access every portal page uses, and membership changes now record
+who/when/why (CustomerLifecycleEvent) while the accessGroups rewrite removes stale access in the same
+pass. The public "residents schedule in-unit directly" claim remains an explicit GL-20 conflict on the
+CRM catalog screen. Only the item below remains.
+
 **Remaining requirements:**
 
-- **Customers cannot initiate a reschedule, callback/guarantee, or general help request.** Reschedule is
-  office-only, and there is no customer-facing callback, guarantee, or help path. The callback entrance
-  must verify an active residual subscription, identify the original appointment, enforce its one-callback
-  limit, require and retain a photo, promise no later than seven business days, and return a reference.
-  Reschedule and general help use the same visible case/pending behavior; a failed submission remains in
-  the shared Office queue instead of falling back to an untracked call.
-- A group manager has every portal view and action available to an individual, applied across every
-  customer and property currently linked to that group, and nothing outside the group. Group membership
-  changes remove stale access immediately and retain who changed it, when, and why. Any public claim that
-  residents can schedule in-unit service is backed by the approved property-scoped flow or remains an
-  explicit GL-20 conflict; public marketing copy is not edited without CEO approval.
+- Head of Operations signs the portal request/callback/help workflows and the customer-facing wording;
+  the in-unit-resident public claim is decided with the CEO under GL-20 (back it with a property-scoped
+  flow or remove it).
 
 **Pass owner:** Head of Operations.
 
