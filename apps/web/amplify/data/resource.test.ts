@@ -53,7 +53,7 @@ describe("custom operations vs generated model operations", () => {
 
   it("still sees the schema (regex rot guard)", () => {
     expect(models).toContain("Customer");
-    expect(customOps).toContain("priceLead");
+    expect(customOps).toContain("prepareLeadQuote");
     expect(customOps).toContain("requestPricingResearch");
   });
 
@@ -67,6 +67,8 @@ describe("custom operations vs generated model operations", () => {
       "authorAgreement",
       "sendAgreement",
       "voidAgreement",
+      "priceLead",
+      "getPricingUploadUrl",
     ]) {
       expect(customOps).not.toContain(op);
     }

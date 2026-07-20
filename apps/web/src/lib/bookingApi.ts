@@ -235,6 +235,13 @@ export type ApiErrorBody = {
 export type ApiFailure = { ok: false; status: number; body: ApiErrorBody };
 export type ApiResult<T> = { ok: true; status: number; body: T } | ApiFailure;
 
+export type LeadPrefill = {
+  name: string;
+  email: string;
+  phone: string;
+  address: { street: string; city: string; state: string; zip: string };
+};
+
 // ── Transport ────────────────────────────────────────────────────────
 
 async function post<T>(path: string, payload: unknown): Promise<ApiResult<T>> {
@@ -346,6 +353,13 @@ export function requestQuote(input: QuoteRequest): Promise<ApiResult<QuoteRespon
     ...(attribution ? { attribution } : {}),
     ...(leadToken ? { leadToken } : {}),
   });
+}
+
+/** Load only the contact/address facts needed for a staff-assisted quote. */
+export function getLeadPrefill(
+  leadToken: string
+): Promise<ApiResult<LeadPrefill>> {
+  return post<LeadPrefill>("/lead-prefill", { leadToken });
 }
 
 /** Poll a previously accepted cold-cache quote without resubmitting PII. */

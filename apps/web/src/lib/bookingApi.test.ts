@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   checkQuoteStatus,
+  getLeadPrefill,
   requestQuote,
   type QuoteRequest,
 } from "./bookingApi";
@@ -136,6 +137,21 @@ describe("checkQuoteStatus", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       bookingId: "bk-1",
       statusToken: "opaque-status-token",
+    });
+  });
+});
+
+describe("getLeadPrefill", () => {
+  it("sends only the lead capability to the dedicated prefill endpoint", async () => {
+    await getLeadPrefill("tok-prefill-abc123def456");
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("https://booking.test/lead-prefill");
+    expect(JSON.parse(String(init.body))).toEqual({
+      leadToken: "tok-prefill-abc123def456",
     });
   });
 });

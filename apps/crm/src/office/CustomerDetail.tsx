@@ -29,7 +29,6 @@ import {
   type ServiceReportAmendment,
 } from "../lib/api";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
-import { bookingFunnelSpoken, bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { daysPastDue } from "../lib/aging";
 import { dunningStateLabel, isOverdue } from "../lib/recovery";
@@ -60,7 +59,6 @@ import LeadPanel from "../components/LeadPanel";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import VisitCancelSheet from "../components/VisitCancelSheet";
 import DocButton from "../components/DocButton";
-import PriceLeadSheet from "../components/PriceLeadSheet";
 import { DateField, TimeWindowField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
 import { Icon } from "../ui/icons";
@@ -174,7 +172,6 @@ export default function CustomerDetail() {
     | "record"
     | "portal"
     | "group"
-    | "price"
   >(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   // GL-09 — the lifecycle transition ledger (deactivate/reactivate history) and
@@ -526,79 +523,7 @@ export default function CustomerDetail() {
         <LeadPanel customer={customer} onChanged={() => void load()} />
       ) : null}
 
-      {isLead && roles.office ? (
-        <Card
-          title="Convert this lead"
-          actions={
-            <Button small variant="subtle" onClick={() => setSheet("price")}>
-              ⚡ Price a lead
-            </Button>
-          }
-        >
-          {/* One road: the lead books themselves online. They pick a day,
-              accept the terms, and pay by card — the booking creates the
-              plan, the agreement, and the first visit, and this page fills
-              in on its own. There is deliberately no office-side convert
-              button: a conversion without a payment can't exist. */}
-          <p className="muted small" style={{ marginBottom: 10 }}>
-            Leads convert themselves at the online booking page: price in
-            seconds, pick a day, pay by card to book. If the funnel can't
-            price their property, it has a specialist call them. Once they
-            book, the plan, agreement, and first visit appear here.
-          </p>
-          <Button
-            block
-            loading={busyAction === "bookinglink"}
-            disabled={
-              !customer.email ||
-              Boolean(customer.doNotContact) ||
-              !(customer.contactConsentChannels ?? []).includes("EMAIL")
-            }
-            onClick={() =>
-              void run(
-                "bookinglink",
-                async () =>
-                  unwrap(
-                    await api().mutations.sendCustomerEmail({
-                      customerId: customer.id,
-                      kind: "booking-link",
-                      idempotencyKey: clientActionId("booking-link"),
-                    })
-                  ),
-                `Booking link emailed to ${customer.email}`
-              )
-            }
-          >
-            Email the booking link
-          </Button>
-          {!customer.email ? (
-            <p className="muted small" style={{ marginTop: 8 }}>
-              No email on this lead, so there is nothing to send it to — add
-              one, or read the address below out over the phone.
-            </p>
-          ) : null}
-          <p className="muted small" style={{ marginTop: 8 }}>
-            On the phone? Read it out:{" "}
-            {/* The href carries this lead's identity token when one has been
-                minted (first email send mints it), so a link copied from
-                here converts THIS lead exactly. The spoken form stays bare —
-                nobody dictates a token — and falls back to email matching. */}
-            <a
-              href={
-                customer.bookingLinkToken
-                  ? `${bookingFunnelUrl()}?lead=${customer.bookingLinkToken}`
-                  : bookingFunnelUrl()
-              }
-              target="_blank"
-              rel="noreferrer"
-            >
-              <strong>{bookingFunnelSpoken()}</strong>
-            </a>
-          </p>
-        </Card>
-      ) : null}
-
-      {roles.office ? (
+      {roles.office && !isLead ? (
         <Card
           title="Payment method"
           actions={<Badge tone={pm?.hasPaymentMethod ? "ok" : "warn"}>{pm?.hasPaymentMethod ? "on file" : "missing"}</Badge>}
@@ -651,7 +576,7 @@ export default function CustomerDetail() {
         </Card>
       ) : null}
 
-      {roles.office ? (
+      {roles.office && !isLead ? (
         <Card
           title="Portal access"
           actions={
@@ -1813,10 +1738,6 @@ export default function CustomerDetail() {
             await load();
           }}
         />
-      </Sheet>
-
-      <Sheet open={sheet === "price"} onClose={() => setSheet(null)} title="AI price this lead">
-        <PriceLeadSheet customer={customer} />
       </Sheet>
 
       <Sheet

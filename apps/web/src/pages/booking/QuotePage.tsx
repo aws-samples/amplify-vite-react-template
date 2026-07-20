@@ -6,6 +6,7 @@ import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
 import {
   checkQuoteStatus,
+  getLeadPrefill,
   requestQuote,
   saveLeadToken,
   type ContactQuote,
@@ -132,6 +133,7 @@ export default function QuotePage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [leadPrefilled, setLeadPrefilled] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [priced, setPriced] = useState<PricedQuote | null>(null);
   const [contact, setContact] = useState<ContactQuote | null>(null);
@@ -154,7 +156,29 @@ export default function QuotePage() {
     const search = new URLSearchParams(window.location.search);
     const leadToken = search.get("lead");
     if (leadToken !== null) {
-      if (leadToken) saveLeadToken(window.sessionStorage, leadToken);
+      if (leadToken && saveLeadToken(window.sessionStorage, leadToken)) {
+        void getLeadPrefill(leadToken).then((result) => {
+          if (!result.ok) return;
+          const loaded = result.body;
+          setFields((current) => ({
+            ...current,
+            name: current.name || loaded.name,
+            email: current.email || loaded.email,
+            phone: current.phone || loaded.phone,
+            street: current.street || loaded.address.street,
+            city: current.city || loaded.address.city,
+            state:
+              current.state === EMPTY_FIELDS.state
+                ? loaded.address.state || current.state
+                : current.state,
+            zip: current.zip || loaded.address.zip,
+            // Consent is never inferred from a CRM record. The person using
+            // this form must make the checkbox decision in this interaction.
+            callConsent: current.callConsent,
+          }));
+          setLeadPrefilled(true);
+        });
+      }
       search.delete("lead");
       const qs = search.toString();
       window.history.replaceState(
@@ -806,6 +830,13 @@ export default function QuotePage() {
           </p>
 
           <div className="bk-form-card">
+            {leadPrefilled && (
+              <div className="bk-notice" role="status">
+                Contact and address details were loaded from the CRM. Confirm
+                them, then choose the actual service and property details. Call
+                consent remains unchecked unless the customer gives it now.
+              </div>
+            )}
             <form className="bk-form-wizard" onSubmit={handleSubmit} noValidate>
               <div className="bk-form-step">
                 <h3 className="bk-form-step__title">What do you need?</h3>

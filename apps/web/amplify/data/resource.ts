@@ -404,8 +404,10 @@ export const schema = a.schema({
       // (?lead=<token> on the funnel URL). A paid booking that arrives with
       // it converts THIS record — exactly — instead of guessing by email,
       // which can pick the wrong duplicate or merge people who share an
-      // address. Minted lazily wherever a booking link is produced.
+      // address. Minted lazily wherever a booking link is produced and
+      // expires so a leaked old email cannot remain a permanent PII lookup.
       bookingLinkToken: a.string().authorization(fieldNoTech),
+      bookingLinkTokenExpiresAt: a.datetime().authorization(fieldNoTech),
       accessGroups: a.string().array().authorization(fieldNoTech),
       servicePlans: a.hasMany("ServicePlan", "customerId"),
       jobs: a.hasMany("Job", "customerId"),
@@ -3609,27 +3611,6 @@ export const schema = a.schema({
     .handler(a.handler.function(crmDocs)),
 
   /**
-   * AI lead pricing: paste a Thumbtack lead (or attach a screenshot) and the
-   * engine extracts the facts with Claude, determines the zone from real
-   * drive time, prices from the cached AI market-rate sheets (deterministic
-   * Zone B adders on top), and returns QUOTE / PASS / NEEDS_INFO or a
-   * resumable RESEARCHING state with a paste-ready reply once ready. Provider
-   * faults return a retryable ERROR; no pricing run is handed to a manager.
-   */
-  priceLead: a
-    .mutation()
-    .arguments({
-      inputText: a.string(),
-      screenshotKey: a.string(),
-      customerId: a.string(),
-      leadFeeCents: a.integer(),
-      resumeRunId: a.string(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
-    .handler(a.handler.function(crmPricing)),
-
-  /**
    * Explicit staff market review. This is the only non-quote path that may
    * request AI price research; it is reasoned, attributable, and targeted to
    * one existing rate key. It never expands to neighboring services/towns.
@@ -3641,14 +3622,6 @@ export const schema = a.schema({
       reasonCode: a.string().required(),
       note: a.string(),
     })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
-    .handler(a.handler.function(crmPricing)),
-
-  /** Presigned PUT for a lead screenshot to price (pricing/<uuid>.png). */
-  getPricingUploadUrl: a
-    .mutation()
-    .arguments({ contentType: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmPricing)),
@@ -3739,6 +3712,17 @@ export const schema = a.schema({
       note: a.string(),
       idempotencyKey: a.string().required(),
     })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * The CRM has no quote engine. This validates the minimum lead facts and
+   * returns an exact, lead-specific URL into the one public quote funnel.
+   */
+  prepareLeadQuote: a
+    .mutation()
+    .arguments({ customerId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
     .handler(a.handler.function(crmDocs)),

@@ -1,32 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  assignLeadOwner,
+  api,
   clientActionId,
   listLeadActivity,
-  logLeadTouch,
   opResult,
   setLeadDisposition,
   LEAD_LOST_REASONS,
-  LEAD_OUTCOME_CODES_BY_CHANNEL,
-  LEAD_TOUCH_CHANNELS,
-  LEAD_TOUCH_OUTCOMES,
   type Customer,
   type LeadActivity,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
-import {
-  deriveLeadStage,
-  LEAD_STAGE_LABEL,
-  LEAD_STAGE_TONE,
-  leadNextActionAt,
-} from "../lib/leadStage";
+import { isLeadOverdue, leadNextActionAt } from "../lib/leadStage";
 import { Badge, Button, Card, ErrorNote, Field } from "../ui/kit";
 
 /**
- * GL-02 — the office's lead workspace. The stage is derived (never set by hand);
- * the only deliberate actions are logging a real touch, marking the lead lost
- * (with a reason), and do-not-contact. Any real touch clears the follow-up task.
+ * The lead record is an exception-safe inbox, not a second sales system.
+ * Staff either continue through the canonical public quote funnel or record a
+ * terminal lost/DNC fact. Quote submission, email delivery, conversion, and
+ * next-action replacement are written by the system; employees never manage
+ * pipeline stages.
  */
 export default function LeadPanel({
   customer,
@@ -36,33 +29,16 @@ export default function LeadPanel({
   onChanged: () => void | Promise<void>;
 }) {
   const roles = useRoles();
-  const retainedChannels = customer.contactConsentChannels ?? [];
-  const initialChannel = retainedChannels.includes("CALL")
-    ? "CALL"
-    : retainedChannels.includes("EMAIL")
-      ? "EMAIL"
-      : "NOTE";
   const [activity, setActivity] = useState<LeadActivity[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [channel, setChannel] = useState(initialChannel);
-  const [outcome, setOutcome] = useState(
-    LEAD_OUTCOME_CODES_BY_CHANNEL[initialChannel]?.[0] ?? "NOTE"
-  );
-  const [touchNote, setTouchNote] = useState("");
+  const [preparedUrl, setPreparedUrl] = useState<string | null>(null);
   const [lostReason, setLostReason] = useState("");
   const [timelineError, setTimelineError] = useState<string | null>(null);
   const [activityQuery, setActivityQuery] = useState("");
   const [activityPage, setActivityPage] = useState(0);
   const [clearReason, setClearReason] = useState("CUSTOMER_RECONSENTED");
   const [clearEvidence, setClearEvidence] = useState("");
-
-  const availableOutcomes = LEAD_TOUCH_OUTCOMES.filter((item) =>
-    LEAD_OUTCOME_CODES_BY_CHANNEL[channel]?.includes(item.code)
-  );
-
-  const stage = deriveLeadStage(customer);
-  const mine = customer.leadOwnerSub === roles.sub;
 
   const loadActivity = useCallback(async () => {
     try {
@@ -75,7 +51,9 @@ export default function LeadPanel({
       );
     } catch (err) {
       setActivity(null);
-      setTimelineError(err instanceof Error ? err.message : "Lead timeline could not be read");
+      setTimelineError(
+        err instanceof Error ? err.message : "Lead history could not be read"
+      );
     }
   }, [customer.id]);
 
@@ -92,271 +70,331 @@ export default function LeadPanel({
       await loadActivity();
     } catch (err) {
       setError(err instanceof Error ? err.message : "That action did not complete");
+      throw err;
     } finally {
       setBusy(null);
     }
   };
 
+  const openQuote = async () => {
+    // Open synchronously so browser popup protection does not turn a
+    // successful token mint into a button that appears to do nothing.
+    const quoteTab = window.open("about:blank", "buzzkill-lead-quote");
+    if (quoteTab) quoteTab.opener = null;
+    try {
+      await act("quote", async () => {
+        const prepared = opResult<{ url: string }>(
+          await api().mutations.prepareLeadQuote({ customerId: customer.id })
+        );
+        if (!prepared?.url) throw new Error("The quote form link was not returned.");
+        setPreparedUrl(prepared.url);
+        if (quoteTab) quoteTab.location.replace(prepared.url);
+      });
+    } catch {
+      quoteTab?.close();
+    }
+  };
+
+  const due = leadNextActionAt(customer);
+  const terminal = Boolean(customer.doNotContact || customer.lostReason);
+  const canEmail =
+    Boolean(customer.email) &&
+    !customer.doNotContact &&
+    (customer.contactConsentChannels ?? []).includes("EMAIL");
+
   return (
     <Card
-      title="Lead pipeline"
-      actions={<Badge tone={LEAD_STAGE_TONE[stage]}>{LEAD_STAGE_LABEL[stage]}</Badge>}
+      title="Handle this inquiry"
+      actions={
+        terminal ? (
+          <Badge tone="muted">closed</Badge>
+        ) : isLeadOverdue(customer) ? (
+          <Badge tone="danger">overdue</Badge>
+        ) : (
+          <Badge tone="info">open</Badge>
+        )
+      }
     >
       <ErrorNote error={error} />
-      <p className="small" style={{ marginTop: 0 }}>
-        Owner:{" "}
-        <strong>{mine ? "you" : customer.leadOwnerEmail || "unassigned"}</strong>
-        {!mine ? (
-          <Button
-            small
-            variant="ghost"
-            loading={busy === "assign"}
-            onClick={() =>
-              void act("assign", async () => {
-                const r = opResult(
-                  await assignLeadOwner({
-                    customerId: customer.id,
-                    idempotencyKey: clientActionId("assign"),
-                  })
-                );
-                if (!r) throw new Error("Could not assign");
-              })
-            }
-          >
-            Assign to me
-          </Button>
-        ) : null}
-      </p>
-      <p className="small muted">
-        Current action: <strong>{customer.nextAction || "Work now — missing durable next action"}</strong>
-        {" · "}Due: <strong>{leadNextActionAt(customer) ? fmtDateTime(leadNextActionAt(customer)!.toISOString()) : "closed"}</strong>
-        {" · "}Age: <strong>{Math.max(0, Math.floor((Date.now() - new Date(customer.createdAt ?? Date.now()).getTime()) / 3_600_000))}h</strong>
-      </p>
 
-      {customer.doNotContact ? (
-        <p className="warn-note" style={{ marginTop: 8 }}>
-          ⚑ Do not contact — set by {customer.doNotContactBy || "staff"}. Non-essential
-          outreach is suppressed.
-          {roles.owner ? <div className="form-grid" style={{ marginTop: 8 }}>
-            <Field label="Controlled release reason">
-              <select value={clearReason} onChange={(e) => setClearReason(e.target.value)}>
-                <option value="CUSTOMER_RECONSENTED">Customer re-consented</option>
-                <option value="ENTERED_IN_ERROR">Entered in error</option>
-              </select>
-            </Field>
-            <Field label="Evidence (required)">
-              <textarea value={clearEvidence} onChange={(e) => setClearEvidence(e.target.value)} />
-            </Field>
-          <Button
-            small
-            variant="ghost"
-            disabled={!clearEvidence.trim()}
-            loading={busy === "clear"}
-            onClick={() =>
-              void act("clear", async () => {
-                const r = opResult(
-                  await setLeadDisposition({
-                    customerId: customer.id,
-                    disposition: "CLEAR",
-                    reasonCode: clearReason,
-                    note: clearEvidence.trim(),
-                    idempotencyKey: clientActionId("clear-dnc"),
-                  })
-                );
-                if (!r) throw new Error("Could not reopen");
-              })
-            }
-          >
-            Reopen
+      {!terminal ? (
+        <>
+          <p className="small" style={{ marginTop: 0 }}>
+            <strong>{customer.nextAction || "Handle this inquiry now"}</strong>
+            {" · "}Due {due ? fmtDateTime(due.toISOString()) : "now"}
+          </p>
+          <p className="muted small">
+            Confirm the email, phone, and MA/RI service address on this record.
+            Then use the same website form every customer uses. Contact and
+            address fields will be filled in; you choose the actual service,
+            property type, and size from what the lead told you.
+          </p>
+          <Button block loading={busy === "quote"} onClick={() => void openQuote()}>
+            Open prefilled website quote
           </Button>
-          </div> : <span className="nested-line">Only an owner can clear suppression with a controlled reason and evidence.</span>}
-        </p>
-      ) : customer.lostReason ? (
-        <p className="muted small" style={{ marginTop: 8 }}>
-          Marked lost ({customer.lostReason}).{" "}
+          {preparedUrl ? (
+            <p className="muted small" style={{ marginTop: 8 }}>
+              If the quote tab did not open, {" "}
+              <a href={preparedUrl} target="_blank" rel="noreferrer">
+                open it here
+              </a>
+              .
+            </p>
+          ) : null}
+
+          <div className="inline-actions" style={{ marginTop: 10 }}>
+            <Button
+              small
+              variant="subtle"
+              loading={busy === "bookinglink"}
+              disabled={!canEmail}
+              onClick={() =>
+                void act("bookinglink", async () => {
+                  const sent = opResult<{ sent: boolean }>(
+                    await api().mutations.sendCustomerEmail({
+                      customerId: customer.id,
+                      kind: "booking-link",
+                      idempotencyKey: clientActionId("booking-link"),
+                    })
+                  );
+                  if (!sent?.sent) throw new Error("The booking link was not sent.");
+                }).catch(() => undefined)
+              }
+            >
+              Email the customer their link
+            </Button>
+          </div>
+          {!canEmail ? (
+            <p className="muted small" style={{ marginTop: 6 }}>
+              Emailing is unavailable until this lead has an email address and
+              retained email permission. Staff can still complete the form
+              during an inbound conversation.
+            </p>
+          ) : null}
+
+          <details style={{ marginTop: 16 }}>
+            <summary className="small">Close without a booking</summary>
+            <div className="form-grid" style={{ marginTop: 10 }}>
+              <Field label="Why was the inquiry closed?">
+                <select
+                  value={lostReason}
+                  onChange={(event) => setLostReason(event.target.value)}
+                >
+                  <option value="">Choose a reason…</option>
+                  {LEAD_LOST_REASONS.map((reason) => (
+                    <option key={reason.code} value={reason.code}>
+                      {reason.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="inline-actions">
+                <Button
+                  small
+                  variant="subtle"
+                  disabled={!lostReason}
+                  loading={busy === "lost"}
+                  onClick={() =>
+                    void act("lost", async () => {
+                      const result = opResult(
+                        await setLeadDisposition({
+                          customerId: customer.id,
+                          disposition: "LOST",
+                          reasonCode: lostReason,
+                          idempotencyKey: clientActionId("lost"),
+                        })
+                      );
+                      if (!result) throw new Error("The inquiry was not closed.");
+                    }).catch(() => undefined)
+                  }
+                >
+                  Close inquiry
+                </Button>
+                <Button
+                  small
+                  variant="danger"
+                  loading={busy === "dnc"}
+                  onClick={() =>
+                    void act("dnc", async () => {
+                      const result = opResult(
+                        await setLeadDisposition({
+                          customerId: customer.id,
+                          disposition: "DNC",
+                          idempotencyKey: clientActionId("dnc"),
+                        })
+                      );
+                      if (!result) throw new Error("Do-not-contact was not saved.");
+                    }).catch(() => undefined)
+                  }
+                >
+                  Do not contact
+                </Button>
+              </div>
+            </div>
+          </details>
+        </>
+      ) : customer.doNotContact ? (
+        <div className="warn-note">
+          <strong>Do not contact.</strong> Non-essential outreach is suppressed.
+          {roles.owner ? (
+            <div className="form-grid" style={{ marginTop: 10 }}>
+              <Field label="Controlled release reason">
+                <select
+                  value={clearReason}
+                  onChange={(event) => setClearReason(event.target.value)}
+                >
+                  <option value="CUSTOMER_RECONSENTED">Customer re-consented</option>
+                  <option value="ENTERED_IN_ERROR">Entered in error</option>
+                </select>
+              </Field>
+              <Field label="Evidence (required)">
+                <textarea
+                  value={clearEvidence}
+                  onChange={(event) => setClearEvidence(event.target.value)}
+                />
+              </Field>
+              <Button
+                small
+                variant="ghost"
+                disabled={!clearEvidence.trim()}
+                loading={busy === "clear"}
+                onClick={() =>
+                  void act("clear", async () => {
+                    const result = opResult(
+                      await setLeadDisposition({
+                        customerId: customer.id,
+                        disposition: "CLEAR",
+                        reasonCode: clearReason,
+                        note: clearEvidence.trim(),
+                        idempotencyKey: clientActionId("clear-dnc"),
+                      })
+                    );
+                    if (!result) throw new Error("The suppression was not cleared.");
+                  }).catch(() => undefined)
+                }
+              >
+                Reopen inquiry
+              </Button>
+            </div>
+          ) : (
+            <span className="nested-line">
+              Only an owner can clear suppression with a reason and evidence.
+            </span>
+          )}
+        </div>
+      ) : (
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Closed: {customer.lostReason}. {" "}
           <Button
             small
             variant="ghost"
             loading={busy === "clear"}
             onClick={() =>
               void act("clear", async () => {
-                const r = opResult(
+                const result = opResult(
                   await setLeadDisposition({
                     customerId: customer.id,
                     disposition: "CLEAR",
                     idempotencyKey: clientActionId("reopen-lost"),
                   })
                 );
-                if (!r) throw new Error("Could not reopen");
-              })
+                if (!result) throw new Error("The inquiry was not reopened.");
+              }).catch(() => undefined)
             }
           >
-            Reopen
+            Reopen inquiry
           </Button>
         </p>
-      ) : (
-        <>
-          <div className="form-grid" style={{ marginTop: 12 }}>
-            <p className="small" style={{ margin: 0, fontWeight: 600 }}>Log a touch</p>
-            <Field label="Channel">
-              <select
-                value={channel}
-                onChange={(e) => {
-                  const nextChannel = e.target.value;
-                  setChannel(nextChannel);
-                  setOutcome(LEAD_OUTCOME_CODES_BY_CHANNEL[nextChannel]?.[0] ?? "NOTE");
-                }}
-              >
-                {LEAD_TOUCH_CHANNELS.map((c) => (
-                  <option
-                    key={c.code}
-                    value={c.code}
-                    disabled={
-                      c.code !== "NOTE" &&
-                      !retainedChannels.includes(c.code)
-                    }
-                  >
-                    {c.label}
-                    {c.code !== "NOTE" &&
-                    !retainedChannels.includes(c.code)
-                      ? " — no retained permission"
-                      : ""}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="What happened?">
-              <select value={outcome} onChange={(e) => setOutcome(e.target.value)}>
-                {availableOutcomes.map((o) => (
-                  <option key={o.code} value={o.code}>{o.label}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Note (optional)">
-              <textarea
-                rows={2}
-                value={touchNote}
-                onChange={(e) => setTouchNote(e.target.value)}
-                placeholder="Left a voicemail about quarterly plan…"
-              />
-            </Field>
-            <Button
-              block
-              loading={busy === "touch"}
-              onClick={() =>
-                void act("touch", async () => {
-                  const r = opResult(
-                    await logLeadTouch({
-                      customerId: customer.id,
-                      channel,
-                      outcome,
-                      note: touchNote.trim() || undefined,
-                      idempotencyKey: clientActionId("touch"),
-                    })
-                  );
-                  if (!r) throw new Error("Could not log the touch");
-                  setTouchNote("");
-                })
-              }
-            >
-              Log touch
-            </Button>
-          </div>
-
-          <div className="form-grid" style={{ marginTop: 16 }}>
-            <Field label="Mark lost (with a reason)">
-              <select value={lostReason} onChange={(e) => setLostReason(e.target.value)}>
-                <option value="">Choose a reason…</option>
-                {LEAD_LOST_REASONS.map((r) => (
-                  <option key={r.code} value={r.code}>{r.label}</option>
-                ))}
-              </select>
-            </Field>
-            <div className="inline-actions">
-              <Button
-                small
-                variant="subtle"
-                disabled={!lostReason}
-                loading={busy === "lost"}
-                onClick={() =>
-                  void act("lost", async () => {
-                    const r = opResult(
-                      await setLeadDisposition({
-                        customerId: customer.id,
-                        disposition: "LOST",
-                        reasonCode: lostReason,
-                        idempotencyKey: clientActionId("lost"),
-                      })
-                    );
-                    if (!r) throw new Error("Could not mark lost");
-                  })
-                }
-              >
-                Mark lost
-              </Button>
-              <Button
-                small
-                variant="danger"
-                loading={busy === "dnc"}
-                onClick={() =>
-                  void act("dnc", async () => {
-                    const r = opResult(
-                      await setLeadDisposition({
-                        customerId: customer.id,
-                        disposition: "DNC",
-                        idempotencyKey: clientActionId("dnc"),
-                      })
-                    );
-                    if (!r) throw new Error("Could not set do-not-contact");
-                  })
-                }
-              >
-                Do not contact
-              </Button>
-            </div>
-          </div>
-        </>
       )}
 
-      <details style={{ marginTop: 14 }}>
-        <summary className="small">
-          Activity ({activity?.length ?? 0})
-        </summary>
+      <details style={{ marginTop: 16 }}>
+        <summary className="small">Audit history ({activity?.length ?? 0})</summary>
         <ErrorNote error={timelineError} />
-        {activity ? <div className="inline-actions" style={{ marginTop: 8 }}>
-          <input
-            placeholder="Search complete timeline…"
-            value={activityQuery}
-            onChange={(e) => { setActivityQuery(e.target.value); setActivityPage(0); }}
-          />
-          <Button small variant="subtle" onClick={() => {
-            const rows = activity.map((a) => [a.occurredAt, a.channel, a.outcome, a.actorEmail, a.note]);
-            const csv = [["occurredAt", "channel", "outcome", "actor", "note"], ...rows]
-              .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(","))
-              .join("\n");
-            const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-            const link = document.createElement("a");
-            link.href = url;
-            link.download = `lead-${customer.id}-timeline.csv`;
-            link.click();
-            URL.revokeObjectURL(url);
-          }}>Export complete CSV</Button>
-        </div> : null}
+        {activity ? (
+          <div className="inline-actions" style={{ marginTop: 8 }}>
+            <input
+              placeholder="Search history…"
+              value={activityQuery}
+              onChange={(event) => {
+                setActivityQuery(event.target.value);
+                setActivityPage(0);
+              }}
+            />
+            <Button
+              small
+              variant="subtle"
+              onClick={() => {
+                const rows = activity.map((item) => [
+                  item.occurredAt,
+                  item.channel,
+                  item.outcome,
+                  item.actorEmail,
+                  item.note,
+                ]);
+                const csv = [
+                  ["occurredAt", "channel", "outcome", "actor", "note"],
+                  ...rows,
+                ]
+                  .map((row) =>
+                    row
+                      .map(
+                        (cell) =>
+                          `"${String(cell ?? "").replace(/"/g, '""')}"`
+                      )
+                      .join(",")
+                  )
+                  .join("\n");
+                const url = URL.createObjectURL(
+                  new Blob([csv], { type: "text/csv" })
+                );
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `lead-${customer.id}-timeline.csv`;
+                link.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              Export CSV
+            </Button>
+          </div>
+        ) : null}
         {(activity ?? [])
-          .filter((a) => !activityQuery.trim() || JSON.stringify(a).toLowerCase().includes(activityQuery.trim().toLowerCase()))
+          .filter(
+            (item) =>
+              !activityQuery.trim() ||
+              JSON.stringify(item)
+                .toLowerCase()
+                .includes(activityQuery.trim().toLowerCase())
+          )
           .slice(activityPage * 50, activityPage * 50 + 50)
-          .map((a) => (
-          <p className="muted small" key={a.id} style={{ marginTop: 6 }}>
-            {fmtDateTime(a.occurredAt)} · {a.channel?.toLowerCase()} ·{" "}
-            {a.outcome?.toLowerCase()} · {a.actorEmail}
-            {a.note ? <span className="nested-line">{a.note}</span> : null}
-          </p>
-        ))}
-        {activity && activity.length > 50 ? <div className="inline-actions">
-          <Button small variant="ghost" disabled={activityPage === 0} onClick={() => setActivityPage((p) => p - 1)}>Previous</Button>
-          <span className="small muted">Page {activityPage + 1}</span>
-          <Button small variant="ghost" disabled={(activityPage + 1) * 50 >= activity.length} onClick={() => setActivityPage((p) => p + 1)}>Next</Button>
-        </div> : null}
+          .map((item) => (
+            <p className="muted small" key={item.id} style={{ marginTop: 6 }}>
+              {fmtDateTime(item.occurredAt)} · {item.channel?.toLowerCase()} · {" "}
+              {item.outcome?.toLowerCase()} · {item.actorEmail}
+              {item.note ? <span className="nested-line">{item.note}</span> : null}
+            </p>
+          ))}
+        {activity && activity.length > 50 ? (
+          <div className="inline-actions">
+            <Button
+              small
+              variant="ghost"
+              disabled={activityPage === 0}
+              onClick={() => setActivityPage((page) => page - 1)}
+            >
+              Previous
+            </Button>
+            <span className="small muted">Page {activityPage + 1}</span>
+            <Button
+              small
+              variant="ghost"
+              disabled={(activityPage + 1) * 50 >= activity.length}
+              onClick={() => setActivityPage((page) => page + 1)}
+            >
+              Next
+            </Button>
+          </div>
+        ) : null}
       </details>
     </Card>
   );

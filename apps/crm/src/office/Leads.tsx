@@ -10,12 +10,9 @@ import {
 import { fmtDateTime } from "../lib/format";
 import { useRoles } from "../lib/auth";
 import {
-  deriveLeadStage,
+  isLeadOpen,
   isLeadOverdue,
   leadNextActionAt,
-  LEAD_STAGE_LABEL,
-  OPEN_LEAD_STAGES,
-  type LeadStage,
 } from "../lib/leadStage";
 import {
   Badge,
@@ -29,7 +26,6 @@ import {
   Spinner,
 } from "../ui/kit";
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
-import PriceLeadSheet from "../components/PriceLeadSheet";
 
 type DupeCandidate = {
   id: string;
@@ -47,7 +43,6 @@ export default function Leads() {
   const [leads, setLeads] = useState<Customer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [pricing, setPricing] = useState(false);
   const [mineOnly, setMineOnly] = useState(false);
   // The duplicate decision: candidates + the exact form values to re-submit.
   const [dupe, setDupe] = useState<{
@@ -74,30 +69,23 @@ export default function Leads() {
     void load();
   }, [load]);
 
-  const shown = useMemo(
-    () =>
-      (leads ?? []).filter((l) =>
-        mineOnly ? l.leadOwnerSub === roles.sub : true
-      ),
-    [leads, mineOnly, roles.sub]
-  );
-
-  // Group open leads by their derived stage; terminal ones collapse to the end.
-  const byStage = useMemo(() => {
-    const groups: Record<string, Customer[]> = {};
-    for (const l of shown) {
-      const stage = deriveLeadStage(l);
-      (groups[stage] ??= []).push(l);
-    }
-    for (const rows of Object.values(groups)) {
-      rows.sort(
-        (a, b) =>
-          (leadNextActionAt(a)?.getTime() ?? Number.MAX_SAFE_INTEGER) -
-          (leadNextActionAt(b)?.getTime() ?? Number.MAX_SAFE_INTEGER)
+  // The inbox is not a sales pipeline. It contains only inquiries that still
+  // need a human outcome, ordered by business risk: overdue first, then due.
+  const shown = useMemo(() => {
+    const rows = (leads ?? []).filter(
+      (lead) =>
+        isLeadOpen(lead) &&
+        (!mineOnly || lead.leadOwnerSub === roles.sub)
+    );
+    return rows.sort((a, b) => {
+      const overdueDelta = Number(isLeadOverdue(b)) - Number(isLeadOverdue(a));
+      if (overdueDelta) return overdueDelta;
+      return (
+        (leadNextActionAt(a)?.getTime() ?? Number.MAX_SAFE_INTEGER) -
+        (leadNextActionAt(b)?.getTime() ?? Number.MAX_SAFE_INTEGER)
       );
-    }
-    return groups;
-  }, [shown]);
+    });
+  }, [leads, mineOnly, roles.sub]);
 
   const submitLead = async (
     values: Parameters<typeof createLead>[0]
@@ -117,14 +105,17 @@ export default function Leads() {
     navigate(`/customers/${res.id}`);
   };
 
-  const stageBlock = (stage: LeadStage) => {
-    const rows = byStage[stage] ?? [];
-    if (rows.length === 0) return null;
-    return (
-      <Card key={stage} title={`${LEAD_STAGE_LABEL[stage]} (${rows.length})`}>
-        {rows.map((lead) => {
+  const inbox = (
+    <Card title={`Needs action (${shown.length})`}>
+      {shown.map((lead) => {
           const overdue = isLeadOverdue(lead);
           const due = leadNextActionAt(lead);
+          const missingContact = !lead.email || !lead.phone;
+          const missingAddress =
+            !lead.serviceStreet ||
+            !lead.serviceCity ||
+            !lead.serviceState ||
+            !lead.serviceZip;
           const ageHours = Math.max(
             0,
             Math.floor((Date.now() - new Date(lead.createdAt ?? Date.now()).getTime()) / 3_600_000)
@@ -135,8 +126,8 @@ export default function Leads() {
               title={lead.displayName}
               subtitle={[
                 `Action: ${lead.nextAction || "Work now — missing durable next action"}`,
-                `Due: ${due ? fmtDateTime(due.toISOString()) : "closed"}`,
-                `Owner: ${lead.leadOwnerEmail || "Sales team"}`,
+                `Due: ${due ? fmtDateTime(due.toISOString()) : "now"}`,
+                `Queue: ${lead.leadOwnerEmail || "Shared Sales"}`,
                 `${ageHours < 24 ? `${ageHours}h` : `${Math.floor(ageHours / 24)}d`} old`,
                 lead.serviceCity,
                 lead.leadSource,
@@ -146,32 +137,28 @@ export default function Leads() {
               meta={
                 <span className="inline-actions">
                   {overdue ? <Badge tone="danger">overdue</Badge> : null}
+                  {missingContact || missingAddress ? (
+                    <Badge tone="warn">details needed</Badge>
+                  ) : null}
                   {lead.leadOwnerSub === roles.sub ? (
                     <Badge tone="info">you</Badge>
                   ) : null}
-                  <span className="muted small">due {due ? fmtDateTime(due.toISOString()) : "—"}</span>
                 </span>
               }
               onClick={() => navigate(`/customers/${lead.id}`)}
             />
           );
         })}
-      </Card>
-    );
-  };
+    </Card>
+  );
 
   return (
     <Page
-      title="Leads"
+      title="Lead inbox"
       actions={
-        <>
-          <Button small variant="subtle" onClick={() => setPricing(true)}>
-            ⚡ Price a lead
-          </Button>
-          <Button small onClick={() => setAdding(true)}>
-            + Lead
-          </Button>
-        </>
+        <Button small onClick={() => setAdding(true)}>
+          + Lead
+        </Button>
       }
     >
       <ErrorNote error={error} />
@@ -189,20 +176,12 @@ export default function Leads() {
       ) : shown.length === 0 ? (
         <EmptyState
           title="No open leads"
-          body="New website inquiries and manually added leads show up here, grouped by where they are in the pipeline."
+          body="Every inquiry is handled. New website and staff-added inquiries will appear here automatically."
           action={<Button onClick={() => setAdding(true)}>Add a lead</Button>}
         />
       ) : (
-        <>
-          {OPEN_LEAD_STAGES.map((s) => stageBlock(s))}
-          {stageBlock("LOST")}
-          {stageBlock("DNC")}
-        </>
+        inbox
       )}
-
-      <Sheet open={pricing} onClose={() => setPricing(false)} title="Price a lead">
-        <PriceLeadSheet />
-      </Sheet>
 
       <Sheet open={adding} onClose={() => setAdding(false)} title="New lead">
         <CustomerForm

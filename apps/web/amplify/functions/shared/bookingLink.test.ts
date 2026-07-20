@@ -7,7 +7,7 @@ import {
 } from "./bookingLink";
 
 /**
- * The booking-link identity token — minted once per lead, carried as
+ * The booking-link identity token — minted for a bounded window, carried as
  * ?lead=<token>, resolved server-side so a paid booking converts exactly
  * the record the link was sent to.
  */
@@ -51,6 +51,7 @@ describe("ensureBookingLinkToken", () => {
     const token = await ensureBookingLinkToken(fakeClient("ok", updates), {
       id: "c1",
       bookingLinkToken: "tok-existing-0123456789",
+      bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z",
     });
     expect(token).toBe("tok-existing-0123456789");
     expect(updates).toHaveLength(0);
@@ -62,7 +63,24 @@ describe("ensureBookingLinkToken", () => {
       id: "c1",
     });
     expect(token).toMatch(BOOKING_LINK_TOKEN_RE);
-    expect(updates[0]).toMatchObject({ id: "c1", bookingLinkToken: token });
+    expect(updates[0]).toMatchObject({
+      id: "c1",
+      bookingLinkToken: token,
+      bookingLinkTokenExpiresAt: expect.any(String),
+    });
+  });
+
+  it("rotates an expired or legacy token before it can read lead PII", async () => {
+    const updates: Update[] = [];
+    const token = await ensureBookingLinkToken(fakeClient("ok", updates), {
+      id: "c1",
+      bookingLinkToken: "tok-expired-0123456789",
+      bookingLinkTokenExpiresAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    expect(token).toMatch(BOOKING_LINK_TOKEN_RE);
+    expect(token).not.toBe("tok-expired-0123456789");
+    expect(updates).toHaveLength(1);
   });
 
   it("a refused or failed write yields null — the caller sends the bare link", async () => {

@@ -123,8 +123,24 @@ const fakeDataClient = {
     },
   },
 };
-let customersByLinkToken: Record<string, { id: string } | { id: string }[]> =
-  {};
+type FakeLead = {
+  id: string;
+  status?: string;
+  displayName?: string;
+  contactName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  serviceStreet?: string | null;
+  serviceCity?: string | null;
+  serviceState?: string | null;
+  serviceZip?: string | null;
+  bookingLinkTokenExpiresAt?: string | null;
+  doNotContact?: boolean;
+  lostReason?: string | null;
+  leadSource?: string | null;
+  leadNotes?: string | null;
+};
+let customersByLinkToken: Record<string, FakeLead | FakeLead[]> = {};
 const leadLookups: string[] = [];
 Object.assign(fakeDataClient.models, capacityFixture.models);
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
@@ -245,6 +261,17 @@ vi.mock("@aws-sdk/client-lambda", () => ({
   },
 }));
 
+const quoteLifecycleCalls: { customerId: string; bookingRequestId: string }[] = [];
+vi.mock("../shared/leadLifecycle", () => ({
+  recordWebsiteQuoteRequested: async (input: {
+    customerId: string;
+    bookingRequestId: string;
+  }) => {
+    quoteLifecycleCalls.push(input);
+    return true;
+  },
+}));
+
 const { handler } = await import("./handler");
 
 const postQuote = async (input: unknown) => {
@@ -264,6 +291,18 @@ const postQuoteStatus = async (input: unknown) => {
     headers: {},
     requestContext: {
       http: { method: "POST", path: "/quote-status", sourceIp: "1.2.3.4" },
+    },
+    body: JSON.stringify(input),
+    isBase64Encoded: false,
+  } as never)) as { statusCode: number; body: string };
+  return { status: res.statusCode, body: JSON.parse(res.body) };
+};
+
+const postLeadPrefill = async (input: unknown) => {
+  const res = (await handler({
+    headers: {},
+    requestContext: {
+      http: { method: "POST", path: "/lead-prefill", sourceIp: "1.2.3.4" },
     },
     body: JSON.stringify(input),
     isBase64Encoded: false,
@@ -295,6 +334,7 @@ beforeEach(() => {
   coverageRows.clear();
   leadEmails.length = 0;
   customersByLinkToken = {};
+  quoteLifecycleCalls.length = 0;
   leadLookups.length = 0;
   marketRateCalls.length = 0;
   enqueueCalls.length = 0;
@@ -1163,7 +1203,10 @@ describe("first-touch attribution rides on the booking", () => {
 
 describe("the booking link's lead identity rides on the booking", () => {
   it("resolves a valid ?lead token to the lead's customer id", async () => {
-    customersByLinkToken["tok-lead-abc123def456"] = { id: "lead-77" };
+    customersByLinkToken["tok-lead-abc123def456"] = {
+      id: "lead-77",
+      bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+    };
 
     const { status } = await postQuote({
       ...rodentInput,
@@ -1172,6 +1215,9 @@ describe("the booking link's lead identity rides on the booking", () => {
 
     expect(status).toBe(200);
     expect(bookings[0].leadCustomerId).toBe("lead-77");
+    expect(quoteLifecycleCalls).toEqual([
+      { customerId: "lead-77", bookingRequestId: "b1" },
+    ]);
   });
 
   it("silently drops a token that resolves to nothing — identity is an upgrade, not a gate", async () => {
@@ -1200,8 +1246,8 @@ describe("the booking link's lead identity rides on the booking", () => {
 
   it("refuses a token that somehow matches more than one record", async () => {
     customersByLinkToken["tok-shared-0123456789"] = [
-      { id: "lead-a" },
-      { id: "lead-b" },
+      { id: "lead-a", bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z" },
+      { id: "lead-b", bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z" },
     ];
 
     const { status } = await postQuote({
@@ -1214,7 +1260,10 @@ describe("the booking link's lead identity rides on the booking", () => {
   });
 
   it("a resumed PENDING quote keeps the lead identity from the original submission", async () => {
-    customersByLinkToken["tok-lead-abc123def456"] = { id: "lead-77" };
+    customersByLinkToken["tok-lead-abc123def456"] = {
+      id: "lead-77",
+      bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+    };
     marketRateResult = null;
     const pending = await postQuote({
       ...rodentInput,
@@ -1240,6 +1289,87 @@ describe("the booking link's lead identity rides on the booking", () => {
     expect(bookings[0]).toMatchObject({
       status: "QUOTED",
       leadCustomerId: "lead-77",
+    });
+  });
+});
+
+describe("staff-assisted lead prefill", () => {
+  const token = "tok-prefill-abc123def456";
+
+  it("returns only open-lead contact and address facts", async () => {
+    customersByLinkToken[token] = {
+      id: "lead-77",
+      status: "LEAD",
+      bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+      displayName: "Dana Whitlock",
+      contactName: "Dana",
+      email: "dana@example.com",
+      phone: "413-555-0123",
+      serviceStreet: "12 Beacon St",
+      serviceCity: "Cambridge",
+      serviceState: "MA",
+      serviceZip: "02139",
+      leadSource: "Thumbtack",
+      leadNotes: "Internal note must not leak",
+    };
+
+    const result = await postLeadPrefill({ leadToken: token });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({
+      name: "Dana",
+      email: "dana@example.com",
+      phone: "413-555-0123",
+      address: {
+        street: "12 Beacon St",
+        city: "Cambridge",
+        state: "MA",
+        zip: "02139",
+      },
+    });
+    expect(JSON.stringify(result.body)).not.toMatch(/Thumbtack|Internal note/i);
+  });
+
+  it("does not reveal whether an invalid, closed, suppressed, or ambiguous token exists", async () => {
+    const unavailable: (FakeLead | FakeLead[])[] = [
+      {
+        id: "lost",
+        status: "LEAD",
+        lostReason: "PRICE",
+        bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+      {
+        id: "dnc",
+        status: "LEAD",
+        doNotContact: true,
+        bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+      {
+        id: "customer",
+        status: "ACTIVE",
+        bookingLinkTokenExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+      {
+        id: "expired",
+        status: "LEAD",
+        bookingLinkTokenExpiresAt: "2020-01-01T00:00:00.000Z",
+      },
+      [
+        { id: "a", status: "LEAD" },
+        { id: "b", status: "LEAD" },
+      ],
+    ];
+    for (const value of unavailable) {
+      customersByLinkToken[token] = value;
+      const result = await postLeadPrefill({ leadToken: token });
+      expect(result).toEqual({
+        status: 404,
+        body: { error: "Lead details are unavailable." },
+      });
+    }
+    expect(await postLeadPrefill({ leadToken: "junk" })).toEqual({
+      status: 404,
+      body: { error: "Lead details are unavailable." },
     });
   });
 });

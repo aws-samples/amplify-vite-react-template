@@ -13,6 +13,8 @@ import { defineFunction, secret } from "@aws-amplify/backend";
  *   sendCustomerEmail      — office-initiated transactional emails, including
  *                            the booking-link email that sends a lead to the
  *                            public funnel (their only conversion path)
+ *   prepareLeadQuote       — validate a lead and mint the exact prefilled
+ *                            public-funnel handoff used by office staff
  *
  * S3 + SES permissions and the DOCS_BUCKET + MARKETING_URL envs come from
  * backend.ts.

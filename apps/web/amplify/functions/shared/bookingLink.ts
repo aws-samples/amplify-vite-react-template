@@ -9,9 +9,11 @@ import { randomBytes } from "node:crypto";
  * share an inbox, or miss entirely when the checkout email differs — the
  * token makes conversion a fact instead of a guess.
  *
- * The token is a capability (it decides which record a payment converts and
- * where the portal grant lands), so it is unguessable and only ever resolved
- * server-side. It is NOT a secret worth rotating: it grants nothing to read.
+ * The token is a capability: it selects the lead whose contact/address facts
+ * prefill the public funnel and whose paid booking converts. It is therefore
+ * unguessable, short-lived in browser storage, stripped from browser history,
+ * and only resolved server-side. Do not log it or expose it outside the
+ * lead-specific funnel link.
  */
 
 /** URL-safe and unguessable; short enough to survive email link wrapping. */
@@ -21,6 +23,7 @@ export function mintBookingLinkToken(): string {
 
 /** Shape check before any lookup — reject junk without a table hit. */
 export const BOOKING_LINK_TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/;
+export const BOOKING_LINK_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** The funnel URL for a specific lead; the bare funnel when no token. */
 export function bookingLinkUrl(
@@ -33,6 +36,7 @@ export function bookingLinkUrl(
 type CustomerSlice = {
   id: string;
   bookingLinkToken?: string | null;
+  bookingLinkTokenExpiresAt?: string | null;
 };
 
 /**
@@ -66,12 +70,22 @@ export async function ensureBookingLinkToken(
   client: any,
   customer: CustomerSlice
 ): Promise<string | null> {
-  if (customer.bookingLinkToken) return customer.bookingLinkToken;
+  if (
+    customer.bookingLinkToken &&
+    customer.bookingLinkTokenExpiresAt &&
+    Date.parse(customer.bookingLinkTokenExpiresAt) > Date.now()
+  ) {
+    return customer.bookingLinkToken;
+  }
   try {
     const token = mintBookingLinkToken();
+    const bookingLinkTokenExpiresAt = new Date(
+      Date.now() + BOOKING_LINK_TOKEN_TTL_MS
+    ).toISOString();
     const { data } = await (client as BookingLinkDataClient).models.Customer.update({
       id: customer.id,
       bookingLinkToken: token,
+      bookingLinkTokenExpiresAt,
     });
     return data ? token : null;
   } catch (err) {

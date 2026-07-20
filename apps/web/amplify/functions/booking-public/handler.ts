@@ -59,6 +59,7 @@ import {
 } from "../shared/marketRate";
 import { serviceLabelFor } from "../shared/serviceCatalog";
 import { readOpsPause } from "../shared/opsPause";
+import { recordWebsiteQuoteRequested } from "../shared/leadLifecycle";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -308,6 +309,9 @@ export const handler = async (
         headers,
         await quote(body as QuoteInput, event.requestContext.http.sourceIp)
       );
+    }
+    if (path.endsWith("/lead-prefill")) {
+      return json(headers, await leadPrefill(body));
     }
     if (path.endsWith("/quote-status")) {
       return json(
@@ -797,12 +801,58 @@ async function resolveLeadToken(
     const { data } = (await client.models.Customer.listCustomerByBookingLinkToken(
       { bookingLinkToken: raw },
       { limit: 2 }
-    )) as { data: { id: string }[] };
-    return data.length === 1 ? data[0].id : null;
+    )) as {
+      data: { id: string; bookingLinkTokenExpiresAt?: string | null }[];
+    };
+    const lead = data.length === 1 ? data[0] : null;
+    return lead?.bookingLinkTokenExpiresAt &&
+      Date.parse(lead.bookingLinkTokenExpiresAt) > Date.now()
+      ? lead.id
+      : null;
   } catch (err) {
     console.error("resolveLeadToken: lookup failed — quoting without identity", err);
     return null;
   }
+}
+
+/**
+ * Staff-assisted quoting uses the same public funnel as a customer. The
+ * unguessable lead token is the only lookup key and this endpoint returns the
+ * smallest useful subset of the CRM record: contact and service address. It
+ * never returns notes, source, consent, lifecycle, pricing, or customer data.
+ */
+async function leadPrefill(body: Record<string, unknown>) {
+  const token = body.leadToken;
+  if (typeof token !== "string" || !BOOKING_LINK_TOKEN_RE.test(token)) {
+    throw new HttpError(404, { error: "Lead details are unavailable." });
+  }
+  const client = await dataClient();
+  const { data } = await client.models.Customer.listCustomerByBookingLinkToken(
+    { bookingLinkToken: token },
+    { limit: 2 }
+  );
+  const lead = data.length === 1 ? data[0] : null;
+  if (
+    !lead ||
+    lead.status !== "LEAD" ||
+    !lead.bookingLinkTokenExpiresAt ||
+    Date.parse(lead.bookingLinkTokenExpiresAt) <= Date.now() ||
+    lead.doNotContact === true ||
+    Boolean(lead.lostReason)
+  ) {
+    throw new HttpError(404, { error: "Lead details are unavailable." });
+  }
+  return {
+    name: lead.contactName?.trim() || lead.displayName,
+    email: lead.email ?? "",
+    phone: lead.phone ?? "",
+    address: {
+      street: lead.serviceStreet ?? "",
+      city: lead.serviceCity ?? "",
+      state: lead.serviceState ?? "",
+      zip: lead.serviceZip ?? "",
+    },
+  };
 }
 
 async function quote(
@@ -953,6 +1003,15 @@ async function quote(
         });
     if (!booking) {
       throw new Error(gqlErrors?.[0]?.message ?? "Could not store the request");
+    }
+    // A staff-assisted public form submission replaces manual pipeline/status
+    // work. Record the new obligation only after the durable request exists;
+    // lifecycle recovery owns a partial failure without withholding the quote.
+    if (!resume && leadCustomerId) {
+      await recordWebsiteQuoteRequested({
+        customerId: leadCustomerId,
+        bookingRequestId: booking.id,
+      });
     }
     return booking;
   };

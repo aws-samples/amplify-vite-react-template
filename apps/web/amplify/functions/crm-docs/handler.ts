@@ -658,6 +658,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         { sub: callerSub(event.identity), email: callerEmail(event.identity) }
       );
     }
+    case "prepareLeadQuote": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      return prepareLeadQuote(event.arguments.customerId!);
+    }
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);
   }
@@ -1698,6 +1702,49 @@ async function closeResolvedWorkItem(input: {
 
 /** Office-initiated transactional emails (payment request, portal reminder,
  *  booking link — the lead's one conversion path). */
+async function prepareLeadQuote(customerId: string) {
+  const client = await dataClient();
+  const { data: lead, errors } = await client.models.Customer.get({
+    id: customerId,
+  });
+  if (errors?.length || !lead || lead.status !== "LEAD") {
+    throw new Error("Open lead not found.");
+  }
+  if (lead.doNotContact || lead.lostReason) {
+    throw new Error("Reopen this lead before starting a quote.");
+  }
+  const missing = [
+    ["email", lead.email],
+    ["phone", lead.phone],
+    ["street address", lead.serviceStreet],
+    ["city", lead.serviceCity],
+    ["state", lead.serviceState],
+    ["ZIP code", lead.serviceZip],
+  ]
+    .filter(([, value]) => !String(value ?? "").trim())
+    .map(([label]) => label);
+  if (missing.length) {
+    throw new Error(
+      `Add the lead's ${missing.join(", ")} before building the quote.`
+    );
+  }
+  const state = String(lead.serviceState).trim().toUpperCase();
+  if (!new Set(["MA", "RI"]).has(state)) {
+    throw new Error("Online quoting is available only for MA and RI addresses.");
+  }
+  const token = await ensureBookingLinkToken(client, {
+    id: lead.id,
+    bookingLinkToken: lead.bookingLinkToken,
+    bookingLinkTokenExpiresAt: lead.bookingLinkTokenExpiresAt,
+  });
+  if (!token) {
+    throw new Error(
+      "The lead-specific quote link could not be created. Nothing was opened; retry."
+    );
+  }
+  return { url: bookingLinkUrl(FUNNEL_URL(), token) };
+}
+
 async function sendCustomerEmail(
   customerId: string,
   kind: string,
@@ -1745,8 +1792,8 @@ async function sendCustomerEmail(
       <p style="margin:20px 0;"><a href="${CRM_URL()}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open my portal</a></p>`;
   } else if (kind === "booking-link") {
     // The lead's one conversion path: the public funnel. Honest about what
-    // happens there — price in seconds, pick a day, pay to book — and about
-    // the fallback (a specialist calls when the funnel can't price it).
+    // happens there — price, pick a day, pay to book. An ordinary rate-cache
+    // miss remains owned by the automated pricing worker, not a manager.
     //
     // The link carries this lead's identity (?lead=<token>) so the paid
     // booking converts exactly this record — not whatever email matching
@@ -1755,6 +1802,7 @@ async function sendCustomerEmail(
     const token = await ensureBookingLinkToken(client, {
       id: customer.id,
       bookingLinkToken: customer.bookingLinkToken,
+      bookingLinkTokenExpiresAt: customer.bookingLinkTokenExpiresAt,
     });
     const funnelUrl = bookingLinkUrl(FUNNEL_URL(), token);
     subject = "Get your exact price and book your BuzzKill visit online";
@@ -1763,7 +1811,7 @@ async function sendCustomerEmail(
       <p>You can see your exact price in seconds, pick the day that works for you, and pay online to lock in your visit — no paperwork, no back-and-forth.</p>
       ${noteHtml}
       <p style="margin:20px 0;"><a href="${funnelUrl}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Get my price &amp; book my visit</a></p>
-      <p>If our online quote can't price your property, it will say so and a specialist will call you to sort it out.</p>
+      <p>If a fresh market rate is needed, the page will keep working on it and email you a secure link as soon as the price is ready.</p>
       <p style="color:#666;font-size:13px;">Or paste this link into your browser: ${funnelUrl}</p>`;
   } else {
     throw new Error(`Unknown email kind: ${kind}`);

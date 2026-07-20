@@ -123,6 +123,7 @@ const {
   logLeadTouch,
   setLeadDisposition,
   assignLeadOwner,
+  recordWebsiteQuoteRequested,
   reassignLeadsForSub,
 } = await import("./leadLifecycle");
 
@@ -312,6 +313,44 @@ describe("logLeadTouch (GL-02 R6)", () => {
       )
     ).rejects.toThrow(/permission is not retained/i);
     expect(activities).toHaveLength(0);
+  });
+});
+
+describe("recordWebsiteQuoteRequested", () => {
+  it("automatically replaces the obligation without claiming customer contact", async () => {
+    customers.set("l1", {
+      id: "l1",
+      status: "LEAD",
+      displayName: "Dana",
+      leadOwnerEmail: "sales@example.com",
+      nextAction: "Make first response",
+      nextActionAt: "2026-07-14T16:00:00Z",
+    });
+
+    await expect(
+      recordWebsiteQuoteRequested({
+        customerId: "l1",
+        bookingRequestId: "booking-1",
+      })
+    ).resolves.toBe(true);
+
+    expect(customers.get("l1")).toMatchObject({
+      nextAction: "Complete the next follow-up",
+      nextActionAt: "2026-07-15T16:00:00.000Z",
+    });
+    expect(customers.get("l1")?.lastReachedAt).toBeUndefined();
+    expect(activities).toContainEqual(
+      expect.objectContaining({
+        channel: "NOTE",
+        direction: "INBOUND",
+        outcome: "NOTE",
+        note: expect.stringContaining("booking-1"),
+      })
+    );
+    expect(workItems.get("LEAD_FOLLOWUP:l1")).toMatchObject({
+      status: "OPEN",
+      dueAt: "2026-07-15T16:00:00.000Z",
+    });
   });
 });
 

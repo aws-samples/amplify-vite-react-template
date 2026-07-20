@@ -505,6 +505,44 @@ export async function logLeadTouch(
   }
 }
 
+/**
+ * The public funnel, not a CSR, advances an identified lead after the quote
+ * form is actually submitted. This deliberately records a NOTE rather than a
+ * reached customer: staff may be filling the form on the lead's behalf. The
+ * existing lifecycle contract supplies the immutable activity, one-business-
+ * day next action, synchronized shared work, idempotency, and recovery.
+ *
+ * A lifecycle fault must not strand a customer after their BookingRequest was
+ * saved, so logLeadTouch's recovery item is authoritative and this wrapper
+ * returns false instead of turning a valid quote into a retry/duplicate loop.
+ */
+export async function recordWebsiteQuoteRequested(input: {
+  customerId: string;
+  bookingRequestId: string;
+}): Promise<boolean> {
+  try {
+    await logLeadTouch(
+      {
+        customerId: input.customerId,
+        channel: "NOTE",
+        direction: "INBOUND",
+        outcome: "NOTE",
+        note: `Public quote form submitted (booking request ${input.bookingRequestId}).`,
+        idempotencyKey: `website-quote:${input.bookingRequestId}`,
+      },
+      { sub: "booking-public", email: "system@pestbuzzkill.com" }
+    );
+    return true;
+  } catch (error) {
+    console.error(
+      "recordWebsiteQuoteRequested: lifecycle recovery owns the saved quote",
+      input.bookingRequestId,
+      error
+    );
+    return false;
+  }
+}
+
 async function followupIsClosed(customerId: string): Promise<boolean> {
   const client = await dataClient();
   if (!("WorkItem" in client.models)) return false;

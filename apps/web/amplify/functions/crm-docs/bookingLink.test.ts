@@ -6,8 +6,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * There is no quote to send and no agreement to e-sign anymore: every
  * outbound CTA drives the lead to the public funnel (MARKETING_URL +
  * "/quote"), where they see their price, pick their day, and pay to book.
- * The copy is honest about the fallback: if the funnel can't price the
- * property, a specialist calls.
+ * A missing market rate stays with the automated public-funnel worker and
+ * emails the customer when ready; there is no manager escalation.
  */
 
 let customer: Record<string, unknown> | null;
@@ -119,6 +119,13 @@ const send = (kind: string, note?: string, groups: string[] = ["OFFICE"]) =>
     identity: { sub: "sub-office", groups, claims: { email: "csr@x.com" } },
   } as never);
 
+const prepare = (groups: string[] = ["OFFICE"]) =>
+  (handler as unknown as (e: never) => Promise<unknown>)({
+    info: { fieldName: "prepareLeadQuote" },
+    arguments: { customerId: "c1" },
+    identity: { sub: "sub-office", groups, claims: { email: "csr@x.com" } },
+  } as never);
+
 beforeEach(() => {
   sentEmails.length = 0;
   customerUpdateFails = false;
@@ -167,6 +174,7 @@ describe("sendCustomerEmail kind booking-link", () => {
 
   it("reuses the already-minted token on a resend", async () => {
     customer!.bookingLinkToken = "tok-already-minted-0123";
+    customer!.bookingLinkTokenExpiresAt = "2099-01-01T00:00:00.000Z";
 
     await send("booking-link");
 
@@ -196,14 +204,16 @@ describe("sendCustomerEmail kind booking-link", () => {
     ).toBe(true);
   });
 
-  it("is honest about what happens: price, pick a day, pay — specialist calls if not", async () => {
+  it("is honest about what happens: price, pick a day, pay — AI owns a fresh-rate wait", async () => {
     await send("booking-link");
 
     const [email] = sentEmails;
     expect(email.html).toMatch(/exact price in seconds/i);
     expect(email.html).toMatch(/pick the day/i);
     expect(email.html).toMatch(/pay online/i);
-    expect(email.html).toMatch(/a specialist will call/i);
+    expect(email.html).toMatch(/keep working on it/i);
+    expect(email.html).toMatch(/email you a secure link/i);
+    expect(email.html).not.toMatch(/specialist|manager/i);
     // No promises the dead flow used to make.
     expect(email.html).not.toMatch(/sign|agreement/i);
   });
@@ -249,5 +259,53 @@ describe("sendCustomerEmail kind booking-link", () => {
     await expect(send("booking-link", undefined, ["TECH"])).rejects.toThrow(
       /office role required/i
     );
+  });
+});
+
+describe("prepareLeadQuote", () => {
+  beforeEach(() => {
+    Object.assign(customer!, {
+      phone: "413-555-0123",
+      serviceStreet: "12 Beacon St",
+      serviceCity: "Cambridge",
+      serviceState: "MA",
+      serviceZip: "02139",
+    });
+  });
+
+  it("returns the exact prefilled public-funnel link without sending anything", async () => {
+    const result = (await prepare()) as { url: string };
+
+    expect(result.url).toMatch(
+      /^https:\/\/staging\.d26qpsjewk0bee\.amplifyapp\.com\/quote\?lead=[A-Za-z0-9_-]{16,}$/
+    );
+    expect(sentEmails).toHaveLength(0);
+    expect(customerUpdates).toHaveLength(1);
+  });
+
+  it("fails closed when required staff-assist facts are missing", async () => {
+    customer!.phone = null;
+    customer!.serviceZip = null;
+
+    await expect(prepare()).rejects.toThrow(/phone, ZIP code/i);
+    expect(customerUpdates).toHaveLength(0);
+  });
+
+  it("refuses suppressed and out-of-footprint leads", async () => {
+    customer!.doNotContact = true;
+    await expect(prepare()).rejects.toThrow(/reopen/i);
+
+    customer!.doNotContact = false;
+    customer!.serviceState = "CT";
+    await expect(prepare()).rejects.toThrow(/only for MA and RI/i);
+  });
+
+  it("never falls back to an identity-less link when token persistence fails", async () => {
+    customerUpdateFails = true;
+    await expect(prepare()).rejects.toThrow(/could not be created/i);
+  });
+
+  it("still refuses a technician", async () => {
+    await expect(prepare(["TECH"])).rejects.toThrow(/office role required/i);
   });
 });
