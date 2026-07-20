@@ -11,7 +11,7 @@ contact, cohort-tied callback rates)
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **22 gates / 36 remaining requirements**, ordered by launch priority and
+**Remaining:** **22 gates / 38 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -148,11 +148,11 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
 | P0 | GL-15 | Production delivery wiring — report rules approved and engineering closed (`bbcf0c3`) | Compliance owner | Invalid or falsely "delivered" legal record reaches a customer | **15% — Very low (SES wiring)** |
 | P0 | GL-22 | Policy approval and production alarm delivery — engineering closed (`041f939`, `bc20401`) | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **15% — Very low (production setup + approvals)** |
-| P0 | GL-17 | Funnel sale path live — engineering closed (`f238d82`, corrected `04f4143`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
+| P0 | GL-17 | Funnel sale path live — engineering REOPENED (off-season checkout payment contract) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
 | P0 | GL-12 | Legacy-visit backfill and final service constraints — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (ops backfill + co-signs)** |
 | P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
 | P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export `136f02a`, corrected `4ede082`) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
-| P0 | GL-07 | Reschedule capacity fully atomic — engineering closed (`3f97ced`, superseded `8e420e2`) | Head of Operations | Two concurrent moves can consume the same last capacity | **10% — Very low (sign-offs)** |
+| P0 | GL-07 | Reschedule capacity fully atomic — engineering REOPENED (stop-ledger create contract, transition math) | Head of Operations | Two concurrent moves can consume the same last capacity | **10% — Very low (sign-offs)** |
 | P0 | GL-18 | Finance/Operations recovery sign-off and launch staffing | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-23 tie)** |
 | P0 | GL-04 | Travel-model calibration + operating data | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
 | P0 | GL-06 | Finance/Operations recovery-workflow sign-off — engineering closed (`1228822`) | Finance lead + Head of Operations | A processing customer is promised a nonexistent hold, or an async success oversells the day | **12% — Very low (sign-offs)** |
@@ -292,6 +292,13 @@ silently priced as half an acre. No other public page, metadata, SEO, or marketi
 
 **Remaining requirements:**
 
+- REOPENED: the off-season date-less checkout must sit behind the standard durable single-winner
+  payment-attempt contract — parallel double-clicks converge on exactly one provider customer/intent
+  (durable per-booking claim + deterministic provider idempotency key), an explicit reusable-status
+  allowlist (a canceled/succeeded/processing intent is never returned as a fresh payable secret),
+  stale intents proven terminal before replacement, and the booking's intent reference durably
+  confirmed before the client secret is returned (persistence failure after provider creation opens
+  deduplicated owned Finance recovery, never a blind second intent).
 - CEO and Compliance sign the live funnel offer as sold (labels, card prices, seasonal copy) — the
   bounded engineering change is complete.
 
@@ -374,6 +381,14 @@ fields. The Head of Operations/CEO approved the refusal and pending-assignment w
 
 **Remaining requirements:**
 
+- REOPENED: the deployed stop ledger must actually create its rows against the real AppSync contract
+  (the current create omits the required `date` field behind a type cast, so AppSync rejects it, the
+  error is swallowed, and every first assigned stop is refused as "day full") with honest
+  creation-failure handling; and the move transition math must be delta-correct — same technician-day
+  moves/reorders are stop-delta 0 (an eight-stop day can still be reordered), same-window moves
+  reserve only the positive minutes delta, cross-window moves swap window minutes without stop churn,
+  and only cross-technician/cross-day moves claim +1 destination / release −1 source after
+  publication.
 - Head of Operations signs the reschedule/cancel workflow as the queue norm; Finance approves the money
   dispositions the terminal workflow encodes.
 
