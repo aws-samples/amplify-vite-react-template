@@ -1,6 +1,6 @@
 # BuzzKill — remaining go-live requirements
 
-**Business review date:** 19 July 2026
+**Business review date:** 20 July 2026
 
 **Latest commit review:** every commit after `67df267` through the current branch head; newest
 implementation commits `f238d82` (GL-17 funnel) corrected by `04f4143` (off-season date-less sale,
@@ -12,11 +12,11 @@ corrected by `c962f86` (genuine first contact, cohort-tied callback rates)
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **22 gates / 36 remaining requirements**, ordered by launch priority and
+**Remaining:** **17 gates / 25 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
-**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **25.4%** (mean of the register column)
+**Average Opus 4.8 / Ultracode full-gate closure likelihood:** **14.9%** (mean of the register column)
 
 **Review seats:** CEO, leadership, operations, customer, technician
 
@@ -31,8 +31,8 @@ implementation detail, and proof-only tasks.
 failure-safe lead intake and lifecycle implementation (`b6d4e99`, merged through `632cdd5`) and
 GL-03's durable email recovery are also reconciled out of the remaining engineering work.
 
-The CEO/business-policy review has now ratified the GL-13 operating vocabularies, GL-15 report rules,
-GL-12 dispatch wording and authority, GL-07 cancellation/reschedule copy, GL-18 override map, GL-05
+The CEO/business-policy review has now ratified the GL-13 operating vocabularies, GL-07
+cancellation/reschedule copy, GL-18 override map, GL-05
 payment copy, GL-09 lifecycle policy, GL-16 no-clamp posture, GL-19 pause threshold and decision holder,
 GL-01 catalog, and the currently published GL-20 license/rating facts. Those completed decision items
 have been removed; outside co-signs, production configuration, operating data, and unresolved public
@@ -144,13 +144,8 @@ action, and physical operating setup as dependencies the agent cannot complete a
 
 | Priority | ID | Remaining gate | Accountable business owner | Impact if missed | Opus 4.8 / Ultracode likelihood |
 |---|---|---|---|---|---|
-| P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money | **38% — Low** |
 | P0 | GL-20 | Resolve unsupported public promises and approve legal terms | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
-| P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
-| P0 | GL-15 | Production delivery wiring — report rules approved and engineering closed (`bbcf0c3`) | Compliance owner | Invalid or falsely "delivered" legal record reaches a customer | **15% — Very low (SES wiring)** |
-| P0 | GL-22 | Policy approval and production alarm delivery — engineering closed (`041f939`, `bc20401`) | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **15% — Very low (production setup + approvals)** |
 | P0 | GL-17 | Funnel sale path live — engineering closed (`04f4143`, corrected `b9d9efb`, `a68649e`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
-| P0 | GL-12 | Legacy-visit backfill and final service constraints — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (ops backfill + co-signs)** |
 | P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
 | P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export `136f02a`, corrected `4ede082`) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
 | P0 | GL-07 | Reschedule capacity fully atomic — engineering closed (`8e420e2`, corrected `fd17f44`) | Head of Operations | Two concurrent moves can consume the same last capacity | **10% — Very low (sign-offs)** |
@@ -170,38 +165,6 @@ action, and physical operating setup as dependencies the agent cannot complete a
 ---
 
 ## Priority 0 — Largest-impact money, security, compliance, safety, and customer commitments
-
-### GL-21 — Production accounts and integration readiness
-
-**Business outcome:** Production does not depend on a staging assumption, missing mailbox, stale secret,
-or unconfigured provider event.
-
-**Remaining requirements:**
-
-- The previously exposed Buildium credential is rotated and revoked **at the provider**, its access logs
-  reviewed, and current credentials exist only in the approved secret store. Removing it from code does
-  not pass.
-- The **production** Stripe webhook endpoint is subscribed to all ten launch events, including
-  `payment_intent.processing` and `payment_intent.payment_failed`; production and staging use separate
-  approved keys, prices, webhook secrets, and customer data. Stripe automatic payment methods exactly
-  match the CEO/Finance GL-06 decision—no unapproved async method can appear at checkout.
-- A monitored `sales@pestbuzzkill.com` mailbox plus the operations/finance routes exist, feed the shared
-  Office queue, and own incoming replies, failed messages, alternate contact, and vacation coverage under
-  the common one-business-day response commitment.
-- Production SES is enabled for the required launch volume; the approved sending domain/identity has
-  DKIM, SPF, and DMARC in force; and the deployed configuration set, event destination, permissions, and
-  suppression policy apply to every production sender. Staging cannot send as production or alter the
-  production suppression list.
-- Delivered customer communications use the approved production URLs, portal and quote/cancel links,
-  sender identity, phone, service area, maps key, AI key, scheduler, and payment return URLs on supported
-  phone and desktop devices. The repository's existing `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-  `GOOGLE_ROUTES_API_KEY`, `VITE_STRIPE_PUBLISHABLE_KEY`, and `VITE_GOOGLE_MAPS_API_KEY` names are reused;
-  every new scheduling function receives only the least-privilege access it needs, and deployed branch
-  configuration is read back without printing secret values.
-- At least two named owners can access each key provider account with MFA and recovery codes; no
-  launch dependency is controlled by one personal account.
-
-**Pass owner:** Engineering lead and Finance lead jointly.
 
 ### GL-20 — Public promises and legal terms match operations
 
@@ -229,52 +192,6 @@ same offer, and no unsupported claim creates customer, regulatory, or brand expo
   approves the final public terms, privacy notice, and effective dates.
 
 **Pass owner:** CEO; Compliance/legal sign the regulated and contractual statements.
-
-### GL-14 — Create the second production owner
-
-**Business outcome:** A role change or departure cannot leave a person with unintended access, and
-leadership can retrieve the complete record of who changed access, why, and what work was reassigned.
-
-**Engineering:** closed (`3717092`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
-
-**Remaining requirements:**
-
-- Production has two named owners with MFA and separate recovery access. The last-owner guard and
-  owner-change serialization are enforced in code; creating and verifying the second production owner
-  login (with MFA and recovery codes) is an operating action for the CEO.
-
-**Pass owner:** CEO, with Operations and Sales verifying reassigned work.
-
-### GL-15 — Complete production report-delivery wiring
-
-**Business outcome:** Every issued service report and correction is an accurate, durable, correctly
-authored legal record with a truthful, non-duplicating customer-delivery state.
-
-**Engineering:** closed (`bbcf0c3`), and the CEO/Compliance seat approved the encoded capture window,
-distance thresholds, product-label rules, evidence, response rule, resolution policy, and issued formats.
-
-**Remaining requirements:**
-
-- Production SES configuration set + SNS topic must be wired (GL-21) for mailbox delivery events —
-  without them, reports remain truthfully at ACCEPTED rather than falsely at delivered.
-
-**Pass owner:** CEO as Compliance owner; Operations signs delivery and retrieval.
-
-### GL-22 — Monitoring, recovery, retention, and incident ownership
-
-**Business outcome:** A background failure is noticed before the customer reports it, and business records
-can be restored after human or provider error.
-
-**Engineering:** closed (`bc20401`) and verified on staging: per-function error/throttle alarms,
-seven-year AWS Backup coverage, PITR, the SES DLQ, and the alarm-to-owned-work bridge are deployed.
-
-**Remaining requirements:**
-
-- CEO/Compliance approve the written playbooks and the seven-year deletion/retention policy; production
-  alarm delivery routes every alarm and recovery to both an owned queue item and office email once
-  GL-21's production SES setup is enabled.
-
-**Pass owner:** CEO and Engineering lead jointly; Compliance approves retention.
 
 ### GL-17 — Add approved seasonal services to the lead funnel
 
@@ -311,24 +228,6 @@ Finance recovery. No other public page, metadata, SEO, or marketing copy changed
   bounded engineering change is complete.
 
 **Pass owner:** CEO as business and Compliance owner.
-
-### GL-12 — Complete dispatch backfill and constraint co-signs
-
-**Business outcome:** A technician is dispatched only with the service-specific facts and approved scope
-needed to complete the visit safely, and can exit an unperformable visit without inventing a workaround.
-
-**Engineering:** closed (`5c8c6ef`). The Head of Operations/CEO approved the scope-mismatch and
-prep-missing copy, reason vocabularies, and any-office-manager rule with a required reason.
-
-**Remaining requirements:**
-
-- Existing SCHEDULED visits created before this commit carry no property classification; the day-before
-  sweep flags each as DISPATCH_NOT_READY until the office sets it (a deliberate visible backfill, not a
-  silent default). Compliance signs the dispatch rule as a whole.
-- Operations, Finance, and Compliance co-sign the per-service product/scope constraint sets now shown
-  in the dispatch packet from the GL-01 catalog and GL-15 label rules.
-
-**Pass owner:** Head of Operations, with Compliance sign-off.
 
 ### GL-05 — Approve paid-booking recovery controls
 
@@ -457,9 +356,7 @@ below remain.
   "visit scheduled — payment processing, don't pay again" confirmation, the pre-service
   "visit canceled, no money collected, rebook" and post-service "outstanding balance" failure notices,
   the pending-cancel refund wording (refund completes after the debit settles), and the Finance-owned
-  balance-collection flow (case closes only on a verified money settle). The leadership
-  aging/reconciliation view is completed in GL-19, production webhook setup in GL-21, and durable
-  notification handling in GL-03.
+  balance-collection flow (case closes only on a verified money settle).
 
 **Pass owner:** CEO and Finance lead jointly; Head of Operations approves the recovery workflow.
 
