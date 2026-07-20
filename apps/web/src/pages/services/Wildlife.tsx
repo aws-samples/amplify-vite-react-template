@@ -260,7 +260,7 @@ export default function Wildlife() {
         </div>
       </section>
 
-      {/* 4. Why Your Property Attracts Ants */}
+      {/* 4. Why Wildlife Chooses Your Home */}
       <section id="attracts" className="bk-section bk-section-cream">
         <div className="bk-container">
           <div className="bk-attract-layout">

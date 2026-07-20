@@ -146,18 +146,18 @@ export default function Cockroach() {
   return (
     <>
       <SEO
-        title="Ant Control & Removal Services — MA & RI"
-        description="Professional ant and spider control for homes across Massachusetts and Rhode Island. Pet-safe, licensed technicians, lasting results. Get an instant quote."
+        title="Cockroach Control Services — MA & RI"
+        description="Professional cockroach control for Massachusetts and Rhode Island homes. We eliminate infestations at the source and help keep them from coming back. Get an instant quote."
         jsonLd={[
           buildServiceSchema(
-            "Ant Control & Removal Services",
-            "Professional ant and spider pest control for Massachusetts and Rhode Island homes. Pet-safe treatments, licensed technicians.",
-            "/services/general-pest",
+            "Cockroach Control Services",
+            "Professional cockroach control for Massachusetts and Rhode Island homes, eliminating infestations at the source with licensed technicians.",
+            "/services/cockroach",
           ),
           buildBreadcrumbSchema([
             { name: "Home", url: "/" },
-            { name: "Services", url: "/services/general-pest" },
-            { name: "Ant Control", url: "/services/general-pest" },
+            { name: "Services", url: "/services/cockroach" },
+            { name: "Cockroach Control", url: "/services/cockroach" },
           ]),
         ]}
       />
@@ -233,7 +233,7 @@ export default function Cockroach() {
         <div className="bk-container bk-narrow">
           <p className="bk-eyebrow" style={{ color: "var(--bk-green)" }}>The Real Issue</p>
           <h2 className="bk-h2 bk-on-dark">Here's What's Really Happening</h2>
-          <p className="bk-issue-intro">Most ant and spider problems don't start where you can see them. Understanding what's attracting pests to your home is the first step toward long-term ant control and spider control, not just temporary relief.</p>
+          <p className="bk-issue-intro">Most cockroach problems are bigger than the few you see. Understanding what's drawing them in and where they hide is the first step toward lasting control, not just temporary relief.</p>
 
           <div className="bk-issue-selector">
             {HAPPENING_CARDS.map((card, i) => (
@@ -258,7 +258,7 @@ export default function Cockroach() {
         </div>
       </section>
 
-      {/* 4. Why Your Property Attracts Ants */}
+      {/* 4. Why Cockroaches Keep Coming Back */}
       <section id="attracts" className="bk-section bk-section-cream">
         <div className="bk-container">
           <div className="bk-attract-layout">
@@ -398,8 +398,8 @@ export default function Cockroach() {
       <section id="related" className="bk-section bk-section-cream">
         <div className="bk-container">
           <p className="bk-eyebrow bk-center">More Protection</p>
-          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop With Ants</h2>
-          <p className="bk-body-lead bk-center">Ants and spiders are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
+          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop at Cockroaches</h2>
+          <p className="bk-body-lead bk-center">Cockroaches are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
           <div className="bk-related-grid">
             {RELATED_SERVICES.map((svc, i) => (
               <Link key={i} to={svc.to} className="bk-related-card">

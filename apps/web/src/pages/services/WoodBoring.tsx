@@ -146,18 +146,18 @@ export default function WoodBoring() {
   return (
     <>
       <SEO
-        title="Ant Control & Removal Services — MA & RI"
-        description="Professional ant and spider control for homes across Massachusetts and Rhode Island. Pet-safe, licensed technicians, lasting results. Get an instant quote."
+        title="Wood-Boring Insect Control — MA & RI"
+        description="Professional wood-boring insect control for Massachusetts and Rhode Island homes. Not every wood-destroying insect is a termite. We identify the pest and recommend the right treatment. Get an instant quote."
         jsonLd={[
           buildServiceSchema(
-            "Ant Control & Removal Services",
-            "Professional ant and spider pest control for Massachusetts and Rhode Island homes. Pet-safe treatments, licensed technicians.",
-            "/services/general-pest",
+            "Wood-Boring Insect Control",
+            "Professional wood-boring insect control for Massachusetts and Rhode Island homes, identifying carpenter ants, powderpost beetles, and other wood-destroying insects and recommending the right treatment.",
+            "/services/termite/wood-boring",
           ),
           buildBreadcrumbSchema([
             { name: "Home", url: "/" },
-            { name: "Services", url: "/services/general-pest" },
-            { name: "Ant Control", url: "/services/general-pest" },
+            { name: "Termite", url: "/services/termite" },
+            { name: "Wood-Boring Insects", url: "/services/termite/wood-boring" },
           ]),
         ]}
       />
@@ -231,7 +231,7 @@ export default function WoodBoring() {
         <div className="bk-container bk-narrow">
           <p className="bk-eyebrow" style={{ color: "var(--bk-green)" }}>The Real Issue</p>
           <h2 className="bk-h2 bk-on-dark">Here's What's Really Happening</h2>
-          <p className="bk-issue-intro">Most ant and spider problems don't start where you can see them. Understanding what's attracting pests to your home is the first step toward long-term ant control and spider control, not just temporary relief.</p>
+          <p className="bk-issue-intro">Wood-boring insects rarely show themselves until the damage is done. Understanding which insect is at work, and what's drawing it to your home's wood, is the first step toward real protection, not just a quick fix.</p>
 
           <div className="bk-issue-selector">
             {HAPPENING_CARDS.map((card, i) => (
@@ -256,7 +256,7 @@ export default function WoodBoring() {
         </div>
       </section>
 
-      {/* 4. Why Your Property Attracts Ants */}
+      {/* 4. Why Wood Destroying Insects Appear */}
       <section id="attracts" className="bk-section bk-section-cream">
         <div className="bk-container">
           <div className="bk-attract-layout">
@@ -396,8 +396,8 @@ export default function WoodBoring() {
       <section id="related" className="bk-section bk-section-cream">
         <div className="bk-container">
           <p className="bk-eyebrow bk-center">More Protection</p>
-          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop With Ants</h2>
-          <p className="bk-body-lead bk-center">Ants and spiders are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
+          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop at the Wood</h2>
+          <p className="bk-body-lead bk-center">Wood-boring insects are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
           <div className="bk-related-grid">
             {RELATED_SERVICES.map((svc, i) => (
               <Link key={i} to={svc.to} className="bk-related-card">
