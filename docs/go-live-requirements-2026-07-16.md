@@ -3,8 +3,11 @@
 **Business review date:** 19 July 2026
 
 **Latest commit review:** every commit after `67df267` through the current branch head; newest
-implementation commits `f238d82` (GL-17 funnel), `136f02a` (GL-09 export), `3f97ced` (GL-07 atomic
-reschedules), and the GL-19 metrics commit
+implementation commits `f238d82` (GL-17 funnel) corrected by `04f4143` (off-season date-less sale,
+required acreage), `136f02a` (GL-09 export) corrected by `4ede082` (Eastern business dates + formula
+neutralization), `3f97ced` (GL-07 atomic reschedules) superseded by `8e420e2` (atomic stop ledger
+replaces the route lease), and `1a671be` (GL-19 metrics) corrected by `c962f86` (genuine first
+contact, cohort-tied callback rates)
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
@@ -145,11 +148,11 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-14 | Production two-owner setup — engineering closed (`3717092`) | CEO | Partial access or handoff changes leave live privilege, stranded work, or missing history | **15% — Very low (ops setup only)** |
 | P0 | GL-15 | Production delivery wiring — report rules approved and engineering closed (`bbcf0c3`) | Compliance owner | Invalid or falsely "delivered" legal record reaches a customer | **15% — Very low (SES wiring)** |
 | P0 | GL-22 | Policy approval and production alarm delivery — engineering closed (`041f939`, `bc20401`) | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **15% — Very low (production setup + approvals)** |
-| P0 | GL-17 | Funnel sale path live — engineering closed (`f238d82`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
+| P0 | GL-17 | Funnel sale path live — engineering closed (`f238d82`, corrected `04f4143`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
 | P0 | GL-12 | Legacy-visit backfill and final service constraints — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (ops backfill + co-signs)** |
 | P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
-| P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export in-branch) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
-| P0 | GL-07 | Reschedule capacity fully atomic — engineering closed (in-branch) | Head of Operations | Two concurrent moves can consume the same last capacity | **10% — Very low (sign-offs)** |
+| P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export `136f02a`, corrected `4ede082`) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
+| P0 | GL-07 | Reschedule capacity fully atomic — engineering closed (`3f97ced`, superseded `8e420e2`) | Head of Operations | Two concurrent moves can consume the same last capacity | **10% — Very low (sign-offs)** |
 | P0 | GL-18 | Finance/Operations recovery sign-off and launch staffing | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-23 tie)** |
 | P0 | GL-04 | Travel-model calibration + operating data | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
 | P0 | GL-06 | Finance/Operations recovery-workflow sign-off — engineering closed (`1228822`) | Finance lead + Head of Operations | A processing customer is promised a nonexistent hold, or an async success oversells the day | **12% — Very low (sign-offs)** |
@@ -159,7 +162,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P1 | GL-02 | Sales/Compliance operating-policy approval — engineering closed (`b6d4e99`) | Head of Sales | A team can operate the correct lead controls inconsistently | **12% — Very low (approvals only)** |
 | P1 | GL-03 | Sales/Operations/Compliance approval — engineering closed (`8d322e4`, `f39de9e`) | Head of Sales + Head of Operations | Staff use inconsistent promises or recovery steps | **10% — Very low (approvals only)** |
 | P1 | GL-10 | Workflow/promise sign-offs — engineering closed (`b8ba8a4`) | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **12% — Very low (sign-offs)** |
-| P1 | GL-19 | Metrics complete — engineering closed (in-branch) | Finance lead | Leadership cannot rely on money, plan, or sales mismatches each morning | **10% — Very low (sign-offs)** |
+| P1 | GL-19 | Metrics complete — engineering closed (`1a671be`, corrected `c962f86`) | Finance lead | Leadership cannot rely on money, plan, or sales mismatches each morning | **10% — Very low (sign-offs)** |
 | P1 | GL-11 | Workflow sign-off — engineering closed (`a2a2fc2`) | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **10% — Very low (sign-off)** |
 | P2 | GL-23 | Production master data and launch-day operating model | Head of Operations | Correct software runs on wrong facts, or a queue has no owner | **50% — Medium** |
 
@@ -277,12 +280,15 @@ seven-year AWS Backup coverage, PITR, the SES DLQ, and the alarm-to-owned-work b
 **Business outcome:** Seasonal services bill and schedule exactly as customers were told, and every visit
 is assigned to a technician with a current license record without hard-coding changing state law.
 
-**Engineering:** closed (`dc39f74`, funnel sale path `e3ad99b`). Both mosquito products sell through
-the approved funnel: deterministic card pricing (never the AI researcher), plan-only monthly billing
-year-round, first treatment sold onto April–October dates only (fully off-season asks fall to the owned
-contact path), yard-size input, and the existing seasonal enrollment (obligation claim, off-season
-redirect) confirmed reachable from the funnel labels. No other public page, metadata, SEO, or marketing
-copy changed.
+**Engineering:** closed (`dc39f74`, funnel sale path `f238d82`, corrected `04f4143`). Both mosquito
+products sell through the approved funnel: deterministic card pricing (never the AI researcher),
+plan-only monthly billing year-round, and the first treatment sold onto April–October dates only. A
+fully off-season (November–March) ask is a REAL date-less sale, not a contact dead end: the customer
+accepts and pays the first month immediately, the plan starts that day billing monthly year-round, the
+first April treatment obligation and a durable owned scheduling action are created (idempotent under
+payment/webhook retries), and every customer/office surface promises April as a month — the office
+confirms the exact day; no invented date. A missing yard size is rejected with a field error, never
+silently priced as half an acre. No other public page, metadata, SEO, or marketing copy changed.
 
 **Remaining requirements:**
 
@@ -335,9 +341,13 @@ disagree, and an employee always sees the real outcome of deactivation or reacti
 `2026-07-19.1`, including its per-reason balance, retention, and notice dispositions; the deployed
 schema now durably stamps that version on every lifecycle event (`3483b5c`).
 
-**Engineering addendum:** the complete-history export is live on the Command view (`buildLifecycleCsv`):
-every matching event read to pagination exhaustion before download, read failures abort with nothing
-produced, fields customer/action/reason/actor/timestamp/result/policyVersion, optional date range.
+**Engineering addendum:** the complete-history export is live on the Command view (`136f02a`,
+corrected `4ede082`; `buildLifecycleCsv`): every matching event read to pagination exhaustion before
+download, read failures abort with nothing produced, fields
+customer/action/reason/actor/timestamp/result/policyVersion. The optional From/To range means Eastern
+(America/New_York) business dates — DST-correct boundary conversion to UTC instants, the To day
+inclusive through 23:59:59 Eastern — and every field is neutralized against spreadsheet formula
+injection (leading = + - @ TAB CR opens with an apostrophe, content preserved).
 
 **Remaining requirements:**
 
@@ -352,12 +362,15 @@ recovery policy.
 **Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
 capacity, route, audit, and customer-notification consequences in one guided action.
 
-**Engineering:** closed (`5b2fb76`; atomic stop-count race closed in-branch). The minutes ledger was
-already one guarded CapacityDay add; moves onto a route now additionally serialize behind a
-single-winner CAS lease on the Route row, so two simultaneous moves cannot both pass one stop-count
-read — losers get a plain-language refusal, crashed movers' leases expire, releases are fenced, and a
-failed publish returns its reservation. The Head of Operations/CEO approved the hour-exact refusal and
-pending-assignment wording.
+**Engineering:** closed (`5b2fb76`, `3f97ced`; superseded by `8e420e2`). The review found the interim
+Route-row lease was time-based and browser-writable — not an invariant — so it was replaced outright:
+the assigned-stop count now lives beside committedMinutes on the backend-only (IAM-written) CapacityDay
+ledger as a per-technician-day row, and every add, move, cancel, and release of an assigned stop claims
+or returns minutes AND the stop in guarded conditional writes. Two simultaneous claims for a day's last
+stop cannot both win; the loser gets a plain-language refusal; a failed publication compensates both
+resources; a guarded move releases the old stop only after the new one is published; and the nightly
+reconciliation rebuilds minutes and stops from ground truth. No browser role can write integrity
+fields. The Head of Operations/CEO approved the refusal and pending-assignment wording.
 
 **Remaining requirements:**
 
@@ -575,10 +588,16 @@ notice, replay-proof); no-access now matches the locked rule.
 **Business outcome:** Leadership can tell each morning whether customers, work, and money agree, without
 asking engineering to query production.
 
-**Engineering:** closed — the core Command view, the daily leadership reconciliations, and the final
-lifecycle-derived measures (true first-response time from activity timestamps, attempt-versus-reached,
-the qualification funnel, and callback/repeat-callback rates over completed visits — labeled 30-day
-window and denominators, all-or-nothing reads, never inferred from stage totals). The daily pass
+**Engineering:** closed (`1a671be`; reopened on review, corrected `c962f86`) — the core Command view,
+the daily leadership reconciliations, and the final lifecycle-derived measures. The correction fixed
+two review findings: first response is now the first GENUINE communication (call/text/email/booking
+link that was actually attempted) strictly after lead creation — intake LIFECYCLE rows, notes,
+assignment/disposition events never count and a pre-creation activity is never a zero-minute response —
+and callback/repeat rates are cohort-tied through each callback's original appointment
+(CallbackRequest.originalJobId): the denominator is original visits completed in the window, only
+callbacks linked to those exact visits count, and the rate is bounded at 100%. Attempt-versus-reached,
+the qualification funnel, labeled 30-day windows and denominators, and all-or-nothing reads stand —
+never inferred from stage totals. The daily pass
 now proves the FULL provider ledger against the CRM (every succeeded payment ↔ one paid invoice, every
 refund recorded, net cash explained — mismatches are owned Finance MONEY_MISMATCH cases), provider
 subscriptions against CRM plans (canceled-still-billing, active-but-provider-canceled, provider-only,
