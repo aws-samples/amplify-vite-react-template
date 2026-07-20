@@ -116,7 +116,7 @@ vi.mock("./email", () => ({
 
 /** The research pass: tests set the text Claude "returns". */
 let researchText: string;
-const messagesCreate = vi.fn(async () => ({
+const messagesCreate = vi.fn(async (_req?: Record<string, unknown>) => ({
   content: [{ type: "text", text: researchText }],
 }));
 vi.mock("@anthropic-ai/sdk", () => ({
@@ -127,6 +127,7 @@ vi.mock("@anthropic-ai/sdk", () => ({
 
 const {
   _resetRollbackMemoForTests,
+  DEMAND_PRICING_MODEL,
   enqueueRateResearch,
   getCachedRate,
   hoaBandFor,
@@ -135,6 +136,7 @@ const {
   pricingPromptHash,
   PRICING_MODEL,
   PRICING_PROMPT_VERSION,
+  RESEARCH_PROFILES,
   researchAndCacheRate,
 } = await import("./marketRate");
 
@@ -871,6 +873,9 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
     expect(row.promptVersion).toBe(PRICING_PROMPT_VERSION);
     expect(row.promptHash).toBe(pricingPromptHash());
     expect(row.model).toBe(PRICING_MODEL);
+    expect(messagesCreate.mock.calls[0]?.[0]).toMatchObject({
+      model: PRICING_MODEL,
+    });
     expect(JSON.parse(String(row.inputsJson))).toEqual({
       service: "GENERAL_PEST",
       city: "Ware",
@@ -881,6 +886,24 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
     expect(row.runId).toBe("run-abc");
     // The hash is stable content-addressing, not a per-run random.
     expect(pricingPromptHash()).toBe(pricingPromptHash());
+  });
+
+  it("the DEMAND profile researches on the fast model with fewer searches, and the row records it", async () => {
+    await researchAndCacheRate({
+      anthropicKey: "test-key",
+      ...gpArgs,
+      profile: "DEMAND",
+    });
+
+    const req = messagesCreate.mock.calls[0]?.[0] as {
+      model: string;
+      tools: { max_uses: number }[];
+    };
+    expect(req.model).toBe(DEMAND_PRICING_MODEL);
+    expect(req.tools[0].max_uses).toBe(RESEARCH_PROFILES.DEMAND.maxSearches);
+    // The audit stays honest: the row names the model that actually ran.
+    expect(created[0].model).toBe(DEMAND_PRICING_MODEL);
+    expect(created[0].promptHash).toBe(pricingPromptHash());
   });
 
   it("pickServingRow under a version manifest serves EXACTLY the named row; pinned still wins", () => {

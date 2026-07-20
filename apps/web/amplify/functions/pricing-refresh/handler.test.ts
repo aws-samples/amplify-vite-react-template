@@ -5,13 +5,18 @@ import { _resetRollbackMemoForTests } from "../shared/marketRate";
 /**
  * The pricing-refresh worker — the only place research runs.
  *
- * GL-16 (the July cost incident): every run first takes the SINGLE drain
- * lease, so overlapping invocations can never double-research the queue;
- * every provider request reserves ATOMIC daily budget before the call, so
- * failures/timeouts consume it too; failures back off exponentially and
- * exhaust into an owned Office item after MAX_RESEARCH_ATTEMPTS; office
- * visibility is a daily digest + Monday report, never one email per rate;
- * and waiting-lead emails are claim-based so replays cannot double-send.
+ * GL-16 (the July cost incident): every CRON run first takes the SINGLE
+ * drain lease, so overlapping queue scans can never double-research the
+ * queue; a TARGETED wake-up ({rateKey, source}) skips the drain and runs
+ * its one row under the row's own CAS lease, so a waiting lead never
+ * queues behind a long drain; every provider request reserves ATOMIC daily
+ * budget before the call, so failures/timeouts consume it too; DEMAND rows
+ * research on the fast Sonnet profile with one in-run retry and a short
+ * backoff ladder, staff-requested rows keep the deep Opus pass and the
+ * 30m ladder; failures exhaust into an owned Office item after
+ * MAX_RESEARCH_ATTEMPTS; office visibility is a daily digest + Monday
+ * report, never one email per rate; and waiting-lead emails are
+ * claim-based so replays cannot double-send.
  */
 
 type CovRow = Record<string, unknown> & {
@@ -199,7 +204,7 @@ UNITS_101_PLUS_BIMONTHLY_PER_UNIT_USD: 3.50
 UNITS_101_PLUS_QUARTERLY_PER_UNIT_USD: 2.75`;
 
 let researchText: string;
-const messagesCreate = vi.fn(async () => ({
+const messagesCreate = vi.fn(async (_req?: Record<string, unknown>) => ({
   content: [{ type: "text", text: researchText }],
 }));
 vi.mock("@anthropic-ai/sdk", () => ({
@@ -211,11 +216,15 @@ vi.mock("@anthropic-ai/sdk", () => ({
 const {
   handler,
   BACKOFF_BASE_MS,
+  DEMAND_BACKOFF_BASE_MS,
   DEMAND_RESEARCH_PER_DAY,
   MAX_RESEARCH_ATTEMPTS,
   RESEARCH_PER_DAY,
   RESEARCH_PER_RUN,
 } = await import("./handler");
+const { DEMAND_PRICING_MODEL, PRICING_MODEL } = await import(
+  "../shared/marketRate"
+);
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 const DAY = 24 * 3600_000;
@@ -361,7 +370,7 @@ afterEach(() => {
   delete process.env.ANTHROPIC_API_KEY;
 });
 
-describe("the drain lease — exactly one invocation researches at a time", () => {
+describe("the drain lease — one queue scan at a time (targeted wake-ups bypass it)", () => {
   it("an overlapping invocation exits without selecting or spending anything", async () => {
     await seedOnly();
     quietAll();
@@ -610,7 +619,7 @@ describe("the atomic budget — reserved before every provider call", () => {
     expect(controlTable.get("day#2026-07-15")?.attempts).toBe(RESEARCH_PER_DAY);
   });
 
-  it("a FAILED research consumes budget exactly like a success", async () => {
+  it("a FAILED research consumes budget exactly like a success — and the demand in-run retry reserves its own", async () => {
     await seedOnly();
     quietAll();
     addCov(demandRow());
@@ -618,7 +627,8 @@ describe("the atomic budget — reserved before every provider call", () => {
 
     await handler();
 
-    expect(dayCounters()).toMatchObject({ attempts: 1, failed: 1, succeeded: 0 });
+    // A DEMAND row gets one immediate in-run retry; BOTH attempts reserved.
+    expect(dayCounters()).toMatchObject({ attempts: 2, failed: 2, succeeded: 0 });
   });
 
   it("a THROWN provider call (timeout, overload) consumes budget too", async () => {
@@ -629,13 +639,26 @@ describe("the atomic budget — reserved before every provider call", () => {
 
     const summary = await handler();
 
+    expect(summary.failed).toBe(2); // the attempt and its demand retry
+    expect(dayCounters()).toMatchObject({ attempts: 2, failed: 2 });
+  });
+
+  it("a MANUAL (staff review) failure gets NO in-run retry — one reserved attempt", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow({ source: "MANUAL", researchRequestedBy: "owner@example.com" }));
+    researchText = "No conclusive pricing found.";
+
+    const summary = await handler();
+
     expect(summary.failed).toBe(1);
+    expect(messagesCreate).toHaveBeenCalledTimes(1);
     expect(dayCounters()).toMatchObject({ attempts: 1, failed: 1 });
   });
 });
 
 describe("failure backoff and exhaustion — one bad combo can never loop the queue", () => {
-  it("failures increment failCount, set a bounded backoff, and never crash the run", async () => {
+  it("DEMAND failures count every attempt and back off on the short minute ladder", async () => {
     await seedOnly();
     quietAll();
     addCov(demandRow({ id: "TERMITE#nowhere-ma#2000", areaKey: "nowhere-ma", city: "Nowhere", band: 2000, failCount: 1 }));
@@ -643,11 +666,41 @@ describe("failure backoff and exhaustion — one bad combo can never loop the qu
 
     const summary = await handler();
 
+    // The attempt AND its in-run retry both failed and both count.
+    expect(summary.failed).toBe(2);
+    const row = cov("TERMITE#nowhere-ma#2000")!;
+    expect(row.failCount).toBe(3);
+    expect(row.lastSuccessAt).toBeUndefined();
+    // Third failure on the DEMAND ladder → 2^2 × 1-minute base, not 30m —
+    // a waiting lead's retry lands with the next cron, not next hour.
+    expect(Date.parse(row.nextEligibleAt!)).toBe(
+      Date.now() + 4 * DEMAND_BACKOFF_BASE_MS
+    );
+    expect(createdRates).toHaveLength(0);
+  });
+
+  it("MANUAL failures keep the 30-minute review ladder and never crash the run", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(
+      demandRow({
+        id: "TERMITE#nowhere-ma#2000",
+        areaKey: "nowhere-ma",
+        city: "Nowhere",
+        band: 2000,
+        failCount: 1,
+        source: "MANUAL",
+        researchRequestedBy: "owner@example.com",
+      })
+    );
+    researchText = "No conclusive pricing found.";
+
+    const summary = await handler();
+
     expect(summary.failed).toBe(1);
     const row = cov("TERMITE#nowhere-ma#2000")!;
     expect(row.failCount).toBe(2);
-    expect(row.lastSuccessAt).toBeUndefined();
-    // Second failure → 2^1 × base backoff.
+    // Second failure → 2^1 × the 30-minute base backoff.
     expect(Date.parse(row.nextEligibleAt!)).toBe(Date.now() + 2 * BACKOFF_BASE_MS);
     expect(createdRates).toHaveLength(0);
   });
@@ -855,6 +908,100 @@ describe("the targeted quote wake-up — one miss, the demand reserve, no re-res
 
     expect(summary.attempted).toBe(0);
     expect(messagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("researches even while a cron drain holds the global lease — the lead never queues behind it", async () => {
+    addCov(demandRow());
+    controlTable.set("pricing-drain", {
+      id: "pricing-drain",
+      kind: "DRAIN",
+      holderNonce: "cron-run",
+      leaseUntil: iso(-10 * 60_000), // held for 10 more minutes
+    });
+
+    const summary = await handler({
+      rateKey: "TERMITE#springfield-ma#3000",
+      source: "quote",
+    });
+
+    expect(summary.attempted).toBe(1);
+    expect(createdRates[0].rateKey).toBe("TERMITE#springfield-ma#3000");
+    // The cron's drain lease is untouched — the wake-up never took or
+    // released it; the row's own CAS lease was the concurrency control.
+    expect(controlTable.get("pricing-drain")).toMatchObject({
+      holderNonce: "cron-run",
+    });
+    expect(controlTable.get("pricing-drain")?.leaseUntil).toBeTruthy();
+  });
+
+  it("never double-researches a row another worker holds a live lease on", async () => {
+    addCov(demandRow({ leaseUntil: iso(-2 * 60_000), leaseNonce: "other" }));
+
+    const summary = await handler({
+      rateKey: "TERMITE#springfield-ma#3000",
+      source: "quote",
+    });
+
+    expect(summary.attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("retries a junk first answer in-run — the lead is priced seconds later, not a cron-cycle later", async () => {
+    addCov(demandRow());
+    messagesCreate.mockImplementationOnce(async () => ({
+      content: [{ type: "text", text: "No conclusive pricing found." }],
+    }));
+
+    const summary = await handler({
+      rateKey: "TERMITE#springfield-ma#3000",
+      source: "quote",
+    });
+
+    expect(summary.attempted).toBe(2);
+    expect(summary.succeeded).toBe(1);
+    expect(createdRates).toHaveLength(1);
+    // Both attempts reserved their own budget; the outcome tally is honest.
+    expect(dayCounters()).toMatchObject({
+      attempts: 2,
+      demandAttempts: 2,
+      succeeded: 1,
+      failed: 1,
+    });
+    expect(cov("TERMITE#springfield-ma#3000")!.failCount).toBe(0);
+    // A publishing wake-up snapshots the catalog like any publishing run.
+    expect([...versionTable.values()].some((v) => v.trigger === "RUN")).toBe(
+      true
+    );
+  });
+
+  it("demand research runs the fast profile; staff reviews keep the deep pass", async () => {
+    addCov(demandRow());
+
+    await handler({ rateKey: "TERMITE#springfield-ma#3000", source: "quote" });
+
+    expect(messagesCreate.mock.calls[0]?.[0]).toMatchObject({
+      model: DEMAND_PRICING_MODEL,
+    });
+    expect(createdRates[0].model).toBe(DEMAND_PRICING_MODEL);
+
+    // A staff-requested review drained by the cron stays on the deep model.
+    messagesCreate.mockClear();
+    addCov(
+      demandRow({
+        id: "RODENT#ware-ma#2000",
+        service: "RODENT",
+        areaKey: "ware-ma",
+        city: "Ware",
+        band: 2000,
+        source: "MANUAL",
+        researchRequestedBy: "owner@example.com",
+        researchRequestReason: "MARGIN_REVIEW",
+      })
+    );
+    await handler();
+    expect(messagesCreate.mock.calls[0]?.[0]).toMatchObject({
+      model: PRICING_MODEL,
+    });
   });
 });
 

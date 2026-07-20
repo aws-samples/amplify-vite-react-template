@@ -69,8 +69,26 @@ export const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * computed from the actual spec content so an ad-hoc edit can never ship
  * unversioned (the recorded hash changes even when the label forgot to).
  */
-export const PRICING_PROMPT_VERSION = "2026-07-19.1";
+export const PRICING_PROMPT_VERSION = "2026-07-20.1";
 export const PRICING_MODEL = "claude-opus-4-8";
+export const DEMAND_PRICING_MODEL = "claude-sonnet-5";
+
+/**
+ * How a research call runs. DEEP is the staff-requested review pass: Opus,
+ * the full four searches, and the 4-minute ceiling. DEMAND is the live
+ * quote-miss pass — a lead is sitting on the quote page polling every few
+ * seconds, so it runs on Sonnet with fewer searches and a 2-minute ceiling
+ * (typically 20–60s). Both ceilings stay under the 5-minute coverage-row
+ * lease, DEMAND with enough headroom for the worker's one in-run retry.
+ */
+export type ResearchProfile = "DEEP" | "DEMAND";
+export const RESEARCH_PROFILES: Record<
+  ResearchProfile,
+  { model: string; maxSearches: number; timeoutMs: number }
+> = {
+  DEEP: { model: PRICING_MODEL, maxSearches: 4, timeoutMs: 240_000 },
+  DEMAND: { model: DEMAND_PRICING_MODEL, maxSearches: 3, timeoutMs: 120_000 },
+};
 
 export type MarketRateService =
   | "GENERAL_PEST"
@@ -680,8 +698,11 @@ export async function researchAndCacheRate(opts: {
   sqft?: number;
   /** GL-16: the drain run's identity, recorded on the row for the audit. */
   runId?: string;
+  /** DEMAND = the fast live-quote pass; DEEP (default) = the review pass. */
+  profile?: ResearchProfile;
 }): Promise<RefreshResult | null> {
   const { anthropicKey, service, city, state, sqft } = opts;
+  const profile = opts.profile ?? "DEEP";
   if (!anthropicKey) return null;
   const areaKey = areaKeyFor(city, state);
   const bucket = sqft != null ? sqftBucket(sqft) : null;
@@ -695,7 +716,14 @@ export async function researchAndCacheRate(opts: {
   // in depth so nothing can ever research over an office edit.
   if (prev?.pinned) return null;
 
-  const researched = await research(anthropicKey, service, city, state, bucket);
+  const researched = await research(
+    anthropicKey,
+    service,
+    city,
+    state,
+    bucket,
+    profile
+  );
   if (!researched) return null;
 
   const { sheet, floorNotes } = applyFloor(service, researched.sheet);
@@ -726,7 +754,7 @@ export async function researchAndCacheRate(opts: {
     // that paid for it — the live price is explainable and reproducible.
     promptVersion: PRICING_PROMPT_VERSION,
     promptHash: pricingPromptHash(),
-    model: PRICING_MODEL,
+    model: RESEARCH_PROFILES[profile].model,
     inputsJson: JSON.stringify({
       service,
       city: city.trim(),
@@ -936,6 +964,7 @@ export function pricingPromptHash(): string {
   if (!promptHashMemo) {
     const material = JSON.stringify([
       PRICING_MODEL,
+      DEMAND_PRICING_MODEL,
       LINE_INSTRUCTION,
       Object.entries(RESEARCH_SPECS).map(([kind, spec]) => [
         kind,
@@ -954,7 +983,8 @@ async function research(
   service: MarketRateService,
   city: string,
   state: string,
-  bucket: number | null
+  bucket: number | null,
+  profile: ResearchProfile = "DEEP"
 ): Promise<{
   sheet: RateSheet;
   basis: string;
@@ -962,18 +992,30 @@ async function research(
   rawText: string;
 } | null> {
   const spec = RESEARCH_SPECS[service];
-  // 4 minutes, not 55s: a research message runs up to four web searches and
-  // routinely needs 1–3 minutes — the 55s budget timed out EVERY deployed
-  // attempt (staging, 20 Jul) while still consuming daily budget. The cap
-  // stays under the 5-minute coverage-row lease so a stale-lease takeover
-  // can never overlap a live research, and the run's own 13-minute budget
-  // bounds how many long calls one drain attempts.
-  const anthropic = new Anthropic({ apiKey, timeout: 240_000, maxRetries: 0 });
+  const cfg = RESEARCH_PROFILES[profile];
+  // Minutes, not 55s: a research message runs multiple web searches and the
+  // 55s budget timed out EVERY deployed attempt (staging, 20 Jul) while
+  // still consuming daily budget. Each profile's cap stays under the
+  // 5-minute coverage-row lease so a stale-lease takeover can never overlap
+  // a live research (DEMAND at 120s leaves room for the worker's one in-run
+  // retry), and the run's own 13-minute budget bounds how many long calls
+  // one drain attempts.
+  const anthropic = new Anthropic({
+    apiKey,
+    timeout: cfg.timeoutMs,
+    maxRetries: 0,
+  });
   try {
     const researchMsg = await anthropic.messages.create({
-      model: PRICING_MODEL,
+      model: cfg.model,
       max_tokens: 3000,
-      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 4 }],
+      tools: [
+        {
+          type: "web_search_20260209",
+          name: "web_search",
+          max_uses: cfg.maxSearches,
+        },
+      ],
       messages: [{ role: "user", content: spec.ask(city, state, bucket) }],
     });
     const text = researchMsg.content

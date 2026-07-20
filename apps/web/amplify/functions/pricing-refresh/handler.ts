@@ -13,6 +13,7 @@ import {
   releaseDrain,
   reserveBudget,
   settleCoverageRow,
+  type BudgetLane,
 } from "../shared/pricingControl";
 import {
   parseNotify,
@@ -25,13 +26,17 @@ import {
 } from "../shared/marketRate";
 
 /**
- * The AI pricing-refresh worker. Every run:
+ * The AI pricing-refresh worker. Every CRON run:
  *
- *   0. Takes the SINGLE drain lease — exactly one invocation researches at
- *      a time. The cron fires every 5 minutes and a run can hold the line
+ *   0. Takes the SINGLE drain lease — exactly one QUEUE SCAN runs at a
+ *      time. The cron fires every 5 minutes and a run can hold the line
  *      for 13; without the lease, overlapping invocations each selected the
  *      same head-of-queue combos and each paid for its own provider call
  *      (the July cost incident). A loser exits without spending anything.
+ *      A TARGETED wake-up ({rateKey, source}) never scans the queue, so it
+ *      skips the drain lease entirely and researches its one row under the
+ *      row's own CAS lease + the atomic budget — a lead waiting on the
+ *      quote page no longer queues behind a 13-minute drain.
  *   1. Drains only durable quote-demand and explicit staff-review requests.
  *      Discovering a town, customer, booking, old rate, or missing neighboring
  *      service never creates work and never spends money.
@@ -71,6 +76,10 @@ export const MAX_RESEARCH_ATTEMPTS = 5;
 /** Bounded exponential backoff between failures: 30m, 1h, 2h, 4h (cap 8h). */
 export const BACKOFF_BASE_MS = 30 * 60_000;
 export const BACKOFF_MAX_MS = 8 * 60 * 60_000;
+/** DEMAND rows have a lead watching the quote page, so their ladder starts
+ *  at one minute (1m, 2m, 4m, 8m …) — the 5-minute recovery cron is the
+ *  practical floor on when a retry lands. Same exhaustion cap. */
+export const DEMAND_BACKOFF_BASE_MS = 60_000;
 
 /** Rough all-in provider cost per research, for the leadership spend
  *  estimate (an estimate, clearly labeled as one — not billing truth). */
@@ -94,8 +103,9 @@ const WEEKLY_REPORT_UTC_HOUR = 10;
  *  claim on the day row keeps the twelve runs in this hour to ONE email. */
 export const DIGEST_UTC_HOUR = 21;
 
-export function backoffMsFor(failCount: number): number {
-  return Math.min(BACKOFF_BASE_MS * 2 ** Math.max(0, failCount - 1), BACKOFF_MAX_MS);
+export function backoffMsFor(failCount: number, demand = false): number {
+  const base = demand ? DEMAND_BACKOFF_BASE_MS : BACKOFF_BASE_MS;
+  return Math.min(base * 2 ** Math.max(0, failCount - 1), BACKOFF_MAX_MS);
 }
 
 // ------------------------------------------------------------- api key
@@ -640,15 +650,19 @@ async function sendWeeklyReport(): Promise<boolean> {
 
 // ---------------------------------------------------------- failure path
 
-/** Settle a failed research on the leased row: bounded exponential backoff,
- *  and at MAX_RESEARCH_ATTEMPTS straight failures the combo is EXHAUSTED —
- *  parked out of the queue with a deduplicated, owned Office work item. */
+/** Settle failed research on the leased row: bounded exponential backoff
+ *  (the short DEMAND ladder when a lead is waiting), and at
+ *  MAX_RESEARCH_ATTEMPTS straight failures the combo is EXHAUSTED — parked
+ *  out of the queue with a deduplicated, owned Office work item. `failures`
+ *  is how many provider attempts this run failed (a demand in-run retry
+ *  counts both — each reserved and consumed its own budget). */
 async function settleResearchFailure(
   cov: CoverageRow,
   nonce: string,
-  nowIso: string
+  nowIso: string,
+  failures = 1
 ): Promise<void> {
-  const fails = (cov.failCount ?? 0) + 1;
+  const fails = (cov.failCount ?? 0) + Math.max(1, failures);
   const exhausted = fails >= MAX_RESEARCH_ATTEMPTS;
   await settleCoverageRow(cov.id, nonce, {
     lastAttemptAt: nowIso,
@@ -659,7 +673,7 @@ async function settleResearchFailure(
       : {
           exhaustedAt: null,
           nextEligibleAt: new Date(
-            Date.parse(nowIso) + backoffMsFor(fails)
+            Date.parse(nowIso) + backoffMsFor(fails, cov.source === "DEMAND")
           ).toISOString(),
         }),
   });
@@ -677,6 +691,123 @@ async function settleResearchFailure(
   }
 }
 
+// ---------------------------------------------------- one leased research
+
+const BUDGET_CAPS = {
+  perDay: RESEARCH_PER_DAY,
+  demandPerDay: DEMAND_RESEARCH_PER_DAY,
+};
+
+/**
+ * Research ONE coverage row the caller already holds the lease on, end to
+ * end: atomic budget reservation before every provider call, the fast
+ * DEMAND profile for waiting-lead rows (DEEP for staff reviews), success
+ * emails claimed under the lease, and demand-aware backoff on failure.
+ * A DEMAND row gets ONE immediate in-run retry on a failed attempt — a
+ * lead is polling the quote page, so a transient junk answer must not cost
+ * a cron-cycle wait. The retry reserves its own budget, both failures
+ * count toward exhaustion, and it is skipped when this failure would
+ * exhaust the combo anyway or the run is out of time. Two DEMAND calls
+ * (120s ceiling each) still fit the 5-minute row lease. Settles the lease
+ * on every path.
+ */
+async function researchLeasedRow(opts: {
+  cov: CoverageRow;
+  nonce: string;
+  anthropicKey: string;
+  lane: BudgetLane;
+  deadlineMs: number;
+}): Promise<{
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  budgetExhausted: boolean;
+  notified: number;
+}> {
+  const { cov, nonce, anthropicKey, lane } = opts;
+  const demand = cov.source === "DEMAND";
+  let attempted = 0;
+  let failed = 0;
+  let notified = 0;
+  const maxAttempts =
+    demand && (cov.failCount ?? 0) + 1 < MAX_RESEARCH_ATTEMPTS ? 2 : 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0 && Date.now() > opts.deadlineMs) break;
+    const reserved = await reserveBudget(new Date(), lane, BUDGET_CAPS);
+    if (!reserved) {
+      // Nothing was spent on THIS attempt; settle whatever already failed.
+      if (failed > 0) {
+        await settleResearchFailure(
+          cov,
+          nonce,
+          new Date().toISOString(),
+          failed
+        ).catch(() => undefined);
+      } else {
+        await settleCoverageRow(cov.id, nonce, { leaseUntil: null });
+      }
+      return { attempted, succeeded: 0, failed, budgetExhausted: true, notified };
+    }
+    attempted++;
+    const nowIso = new Date().toISOString();
+    try {
+      const res = await researchAndCacheRate({
+        anthropicKey,
+        service: cov.service as MarketRateService,
+        city: cov.city,
+        state: cov.state,
+        sqft: cov.band ?? undefined,
+        // The drain nonce is the run identity every row this run caches
+        // records for the audit.
+        runId: nonce,
+        profile: demand ? "DEMAND" : "DEEP",
+      });
+      if (res) {
+        await recordOutcome(new Date(), true);
+        // Waiting leads are claimed-then-emailed under the row lease —
+        // exactly once per lead, with failed sends kept for retry.
+        const delivery = await deliverRateReadyEmails(
+          cov.id,
+          nonce,
+          "UNREADY_ONLY"
+        );
+        notified += delivery.sent;
+        await settleCoverageRow(cov.id, nonce, {
+          lastAttemptAt: nowIso,
+          lastSuccessAt: nowIso,
+          failCount: 0,
+          nextEligibleAt: null,
+          exhaustedAt: null,
+          researchRequestedAt: null,
+          leaseUntil: null,
+        });
+        return {
+          attempted,
+          succeeded: 1,
+          failed,
+          budgetExhausted: false,
+          notified,
+        };
+      }
+      failed++;
+      await recordOutcome(new Date(), false);
+    } catch (err) {
+      // One bad attempt never takes down the run — but it was reserved,
+      // its failure is counted, and its backoff is recorded below.
+      failed++;
+      console.error("pricing-refresh: research failed", cov.id, err);
+      await recordOutcome(new Date(), false).catch(() => undefined);
+    }
+  }
+  await settleResearchFailure(
+    cov,
+    nonce,
+    new Date().toISOString(),
+    failed
+  ).catch(() => undefined);
+  return { attempted, succeeded: 0, failed, budgetExhausted: false, notified };
+}
+
 // --------------------------------------------------------------- handler
 
 type PricingRefreshEvent = {
@@ -684,6 +815,133 @@ type PricingRefreshEvent = {
   rateKey?: string;
   source?: "quote" | "manual";
 };
+
+type RunSummary = {
+  skipped: string | undefined;
+  targetedRateKey: string | null;
+  seeded: number;
+  queued: number;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  budgetExhausted: boolean;
+  rolledBack: boolean;
+  notified: number;
+  digested: boolean;
+  reported: boolean;
+};
+
+const emptySummary = (targetedRateKey: string | null): RunSummary => ({
+  skipped: undefined,
+  targetedRateKey,
+  seeded: 0,
+  queued: 0,
+  attempted: 0,
+  succeeded: 0,
+  failed: 0,
+  budgetExhausted: false,
+  rolledBack: false,
+  notified: 0,
+  digested: false,
+  reported: false,
+});
+
+/**
+ * A targeted wake-up: one quote miss (or one staff review) for one rate
+ * key, invoked async by the quoting paths the moment they enqueue the
+ * demand. It never scans the queue, so it does NOT take the global drain
+ * lease — the row's own CAS lease prevents double-research (including
+ * against a cron drain mid-run) and the atomic budget bounds spend exactly
+ * as on the cron path. This is what gets a waiting lead researched ~1s
+ * after the miss instead of behind a 13-minute drain + 5-minute cron.
+ */
+async function runTargetedWakeup(
+  rateKey: string,
+  source: "quote" | "manual",
+  startedAt: number
+): Promise<RunSummary> {
+  const summary = emptySummary(rateKey);
+  const done = () => {
+    console.log("pricing-refresh:", JSON.stringify(summary));
+    return summary;
+  };
+
+  const client = await dataClient();
+  // While the catalog is rolled back, research publication pauses.
+  const rollback = await readPricingRollback();
+  if (rollback) {
+    summary.rolledBack = true;
+    summary.skipped = "rollback-active";
+    return done();
+  }
+
+  // Same eligibility rules as the cron's targeted selection: a quote
+  // wake-up researches only a persisted cold-cache miss; a manual wake-up
+  // may replace a live unpinned sheet only when staff stamped that exact
+  // coverage row. Nothing else can become targeted work.
+  const { data: covData } = await client.models.RateCoverage.get({
+    id: rateKey,
+  });
+  const cov = (covData ?? null) as CoverageRow | null;
+  const { data: keyRows } =
+    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const serving = pickServingRow(
+    (keyRows ?? []) as RateRow[],
+    rateKey,
+    null
+  ) as RateRow | null;
+  const live = new Map<string, RateRow>();
+  if (serving) live.set(rateKey, serving);
+  const eligible =
+    cov &&
+    researchable(cov, startedAt) &&
+    Boolean(cov.researchRequestedAt) &&
+    ((source === "quote" &&
+      cov.source === "DEMAND" &&
+      demandNeedsResearch(cov, live)) ||
+      (source === "manual" && cov.source === "MANUAL" && !serving?.pinned));
+  if (!cov || !eligible) {
+    summary.skipped = "not-eligible";
+    return done();
+  }
+  summary.queued = 1;
+
+  const anthropicKey = await getSecret("ANTHROPIC_API_KEY");
+  if (!anthropicKey) {
+    console.error(
+      "pricing-refresh: no ANTHROPIC_API_KEY — targeted wake-up holds",
+      rateKey
+    );
+    summary.skipped = "no-api-key";
+    return done();
+  }
+
+  const nonce = freshNonce();
+  if (!(await leaseCoverageRow(rateKey, nonce, new Date()))) {
+    // Another worker (a cron drain or overlapping wake-up) holds this exact
+    // row — it owns the research; exit without spending anything.
+    summary.skipped = "row-lease-held";
+    return done();
+  }
+  const out = await researchLeasedRow({
+    cov,
+    nonce,
+    anthropicKey,
+    lane: source === "quote" ? "DEMAND" : "GENERAL",
+    deadlineMs: startedAt + RUN_TIME_BUDGET_MS,
+  });
+  summary.attempted = out.attempted;
+  summary.succeeded = out.succeeded;
+  summary.failed = out.failed;
+  summary.budgetExhausted = out.budgetExhausted;
+  summary.notified = out.notified;
+  // GL-16: every run that PUBLISHED rates snapshots the new complete
+  // serving catalog as an immutable version — the unit a rollback restores.
+  if (out.succeeded > 0) {
+    await writeCatalogSnapshot("RUN", openOwnedWork);
+  }
+  return done();
+}
 
 export const handler = async (event: PricingRefreshEvent = {}) => {
   const startedAt = Date.now();
@@ -693,10 +951,13 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
     typeof event.rateKey === "string"
       ? event.source
       : null;
-  const targetedRateKey = targetedSource ? event.rateKey! : null;
+  if (targetedSource) {
+    return runTargetedWakeup(event.rateKey!, targetedSource, startedAt);
+  }
+  const targetedRateKey = null;
   // The cron is only a recovery drain for persisted demand/manual requests.
   // The top-of-hour check exists solely to send the once-weekly report.
-  const topOfHour = !targetedRateKey && now.getUTCMinutes() < 5;
+  const topOfHour = now.getUTCMinutes() < 5;
 
   // GL-16: ONE drain at a time. The loser exits before selecting or spending
   // anything — an overlapping invocation (5-min cron + a 13-min run, or a
@@ -706,18 +967,8 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
   const nonce = freshNonce();
   if (!(await acquireDrain(nonce))) {
     const summary = {
+      ...emptySummary(targetedRateKey),
       skipped: "drain-lease-held" as string | undefined,
-      targetedRateKey,
-      seeded: 0,
-      queued: 0,
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
-      budgetExhausted: false,
-      rolledBack: false,
-      notified: 0,
-      digested: false,
-      reported: false,
     };
     console.log("pricing-refresh:", JSON.stringify(summary));
     return summary;
@@ -780,28 +1031,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
     // a refresh from the same suspect prompt would immediately supersede
     // the restored sheet. The work-list, leases, and notify retries keep
     // running; research resumes the moment the rollback is cleared.
-
-    // A quote wake-up researches only a persisted cold-cache miss. A manual
-    // wake-up may replace a live unpinned sheet, but only when staff stamped
-    // that exact coverage row. Nothing else can become targeted work.
-    const targetedRow = targetedRateKey
-      ? (coverage.find((row) => row.id === targetedRateKey) ?? null)
-      : null;
-    const queue = rollback
-      ? []
-      : targetedRateKey
-        ? targetedRow &&
-          researchable(targetedRow, startedAt) &&
-          Boolean(targetedRow.researchRequestedAt) &&
-          ((targetedSource === "quote" &&
-            targetedRow.source === "DEMAND" &&
-            demandNeedsResearch(targetedRow, live)) ||
-            (targetedSource === "manual" &&
-              targetedRow.source === "MANUAL" &&
-              !live.get(targetedRateKey)?.pinned))
-          ? [targetedRow]
-          : []
-        : selectWork(coverage, live, startedAt);
+    const queue = rollback ? [] : selectWork(coverage, live, startedAt);
 
     let attempted = 0;
     let succeeded = 0;
@@ -816,71 +1046,29 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
       );
     }
     if (anthropicKey) {
+      const deadlineMs = startedAt + RUN_TIME_BUDGET_MS;
       for (const cov of queue) {
         if (attempted >= RESEARCH_PER_RUN) break;
-        if (Date.now() - startedAt > RUN_TIME_BUDGET_MS) break;
-        const leaseNow = new Date();
+        if (Date.now() > deadlineMs) break;
         // Lease first (free), budget second (money): a row someone else
-        // holds is skipped without consuming anything.
-        if (!(await leaseCoverageRow(cov.id, nonce, leaseNow))) continue;
-        // Reserve ATOMIC daily budget BEFORE the provider call — successes,
-        // junk answers, thrown errors, and timeouts all consume it, and
-        // overlapping invocations can never jointly exceed the caps.
-        const reserved = await reserveBudget(
-          leaseNow,
-          targetedSource === "quote" ? "DEMAND" : "GENERAL",
-          { perDay: RESEARCH_PER_DAY, demandPerDay: DEMAND_RESEARCH_PER_DAY }
-        );
-        if (!reserved) {
+        // holds is skipped without consuming anything. The recovery drain
+        // spends the GENERAL budget — the DEMAND reserve belongs to live
+        // targeted wake-ups.
+        if (!(await leaseCoverageRow(cov.id, nonce, new Date()))) continue;
+        const out = await researchLeasedRow({
+          cov,
+          nonce,
+          anthropicKey,
+          lane: "GENERAL",
+          deadlineMs,
+        });
+        attempted += out.attempted;
+        succeeded += out.succeeded;
+        failed += out.failed;
+        notified += out.notified;
+        if (out.budgetExhausted) {
           budgetExhausted = true;
-          await settleCoverageRow(cov.id, nonce, { leaseUntil: null });
           break;
-        }
-        attempted++;
-        const nowIso = new Date().toISOString();
-        try {
-          const res = await researchAndCacheRate({
-            anthropicKey,
-            service: cov.service as MarketRateService,
-            city: cov.city,
-            state: cov.state,
-            sqft: cov.band ?? undefined,
-            // The drain nonce is the run identity every row this run caches
-            // records for the audit.
-            runId: nonce,
-          });
-          if (res) {
-            succeeded++;
-            await recordOutcome(new Date(), true);
-            // Waiting leads are claimed-then-emailed under the row lease —
-            // exactly once per lead, with failed sends kept for retry.
-            const delivery = await deliverRateReadyEmails(
-              cov.id,
-              nonce,
-              "UNREADY_ONLY"
-            );
-            notified += delivery.sent;
-            await settleCoverageRow(cov.id, nonce, {
-              lastAttemptAt: nowIso,
-              lastSuccessAt: nowIso,
-              failCount: 0,
-              nextEligibleAt: null,
-              exhaustedAt: null,
-              researchRequestedAt: null,
-              leaseUntil: null,
-            });
-          } else {
-            failed++;
-            await recordOutcome(new Date(), false);
-            await settleResearchFailure(cov, nonce, nowIso);
-          }
-        } catch (err) {
-          // One bad combo never takes down the run — but its attempt was
-          // reserved, its failure is counted, and its backoff is recorded.
-          failed++;
-          console.error("pricing-refresh: research failed", cov.id, err);
-          await recordOutcome(new Date(), false).catch(() => undefined);
-          await settleResearchFailure(cov, nonce, nowIso).catch(() => undefined);
         }
       }
     }
@@ -895,7 +1083,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
 
     // The consolidated daily digest — once, however many runs share the hour.
     let digested = false;
-    if (!targetedRateKey && now.getUTCHours() === DIGEST_UTC_HOUR) {
+    if (now.getUTCHours() === DIGEST_UTC_HOUR) {
       try {
         if (await claimDailyDigest(now)) {
           digested = await sendDailyDigest(now);
