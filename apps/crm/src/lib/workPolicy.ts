@@ -160,6 +160,19 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  PAYMENT_INTENT_ORPHAN: {
+    label: "Unrecorded payment intent",
+    severity: "CRITICAL",
+    customerImpact:
+      "A chargeable payment intent exists that the booking record does not reference — if the customer completes it, finalization will refuse the money as superseded.",
+    verified: [],
+    manualReasons: [
+      { code: "INTENT_CANCELED", label: "Canceled the intent in Stripe" },
+      { code: "REFUNDED", label: "Refunded the customer" },
+      { code: "RECONCILED", label: "Reconciled the booking to the intent" },
+      OTHER,
+    ],
+  },
   LOCATION_REVIEW: {
     label: "Location review",
     severity: "ROUTINE",

@@ -22,6 +22,7 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // Money is already in Stripe with no complete booking behind it — the
   // shortest clock in the system.
   PAID_NOT_FINALIZED: 30,
+  PAYMENT_INTENT_ORPHAN: 30,
   // A finalized report whose GPS looked imprecise or far from the address. The
   // record already stands — this is an after-the-fact presence review, never a
   // block — so it carries a routine clock.

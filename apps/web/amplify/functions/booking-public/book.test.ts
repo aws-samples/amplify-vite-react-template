@@ -24,6 +24,7 @@ import {
 type Stop = { customerId: string; serviceType: string; status: string };
 
 let booking: Record<string, unknown>;
+const bookingRows = new Map<string, Record<string, unknown>>();
 let stopsOnDay: Stop[];
 let jobRow: Record<string, unknown> | null = null;
 let opsPauseRow: Record<string, unknown> | null = null;
@@ -96,14 +97,30 @@ vi.mock("../shared/driveTime", () => ({
 }));
 
 let existingIntent: Record<string, unknown> | null = null;
-const intentCreate = vi.fn(async (args: { amount: number }) => ({
+const defaultIntentCreateImpl = async (
+  args: { amount: number },
+  _opts?: { idempotencyKey?: string }
+) => ({
   id: "pi_new",
   client_secret: "cs_new",
   status: "requires_payment_method",
   amount: args.amount,
-}));
+});
+const intentCreate = vi.fn(defaultIntentCreateImpl);
 const intentRetrieve = vi.fn(async () => existingIntent);
-const intentCancel = vi.fn(async () => ({}));
+// A realistic cancel: the provider answers with the CANCELED intent — the
+// contract verifies that status instead of trusting a silent void.
+const defaultIntentCancelImpl = async (id: string) => ({
+  id,
+  status: "canceled" as const,
+});
+const intentCancel = vi.fn(defaultIntentCancelImpl);
+const customerCreate = vi.fn(
+  async (
+    _args: Record<string, unknown>,
+    _opts?: { idempotencyKey?: string }
+  ) => ({ id: "cus_1" })
+);
 vi.mock("stripe", () => ({
   default: class {
     paymentIntents = {
@@ -111,7 +128,7 @@ vi.mock("stripe", () => ({
       retrieve: intentRetrieve,
       cancel: intentCancel,
     };
-    customers = { create: async () => ({ id: "cus_1" }) };
+    customers = { create: customerCreate };
   },
 }));
 
@@ -177,11 +194,15 @@ beforeEach(() => {
   capacityFixture.maps.techDayStops.clear();
   capacityFixture.maps.closures.clear();
   capacityFixture.maps.exceptions.clear();
+  bookingRows.clear();
   _setLockStoreForTests(
     memoryLockStore({
       CapacityDay: capacityFixture.maps.capacityDays,
       CapacityClaim: capacityFixture.maps.capacityClaims,
       TechDayStops: capacityFixture.maps.techDayStops,
+      // GL-17: the single-winner payment-attempt lease lives on the
+      // BookingRequest row — same map object the fake model serves.
+      BookingRequest: bookingRows,
     })
   );
   vi.useFakeTimers();
@@ -190,8 +211,11 @@ beforeEach(() => {
   stopsOnDay = [];
   existingIntent = null;
   intentCreate.mockClear();
+  intentCreate.mockImplementation(defaultIntentCreateImpl);
   intentRetrieve.mockClear();
   intentCancel.mockClear();
+  intentCancel.mockImplementation(defaultIntentCancelImpl);
+  customerCreate.mockClear();
   jobRow = null;
   opsPauseRow = null;
   _resetOpsPauseMemoForTests();
@@ -222,6 +246,7 @@ beforeEach(() => {
     selectedDate: null,
     selectedWindow: null,
   };
+  bookingRows.set("b1", booking);
 });
 
 afterEach(() => vi.useRealTimers());
@@ -243,7 +268,8 @@ describe("booking re-checks live availability (R29)", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ clientSecret: "cs_new", amountCents: 31300 });
     expect(intentCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ amount: 31300 })
+      expect.objectContaining({ amount: 31300 }),
+      expect.anything()
     );
     expect(bookingUpdates[0]).toMatchObject({
       selectedDate: "2026-07-22",
@@ -339,7 +365,8 @@ describe("plan-only quotes always book the plan", () => {
     expect(res.status).toBe(200);
     expect(res.body.amountCents).toBe(28800);
     expect(intentCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ amount: 28800 })
+      expect.objectContaining({ amount: 28800 }),
+      expect.anything()
     );
     expect(bookingUpdates[0]).toMatchObject({
       recurring: true,
@@ -511,7 +538,9 @@ describe("GL-17 — off-season enrollment checks out date-less, paid TODAY", () 
     expect(String(res.body.summary)).toContain("April");
     expect(String(res.body.summary)).toContain("confirm the exact day");
     expect(intentCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ amount: 11900, setup_future_usage: "off_session" })
+      expect.objectContaining({ amount: 11900, setup_future_usage: "off_session" }),
+      // The deterministic first-generation idempotency key.
+      expect.objectContaining({ idempotencyKey: "bk-intent-b1-first" })
     );
     // The enrollment holds no slot: nothing touched the capacity ledgers.
     expect(capacityFixture.maps.capacityDays.size).toBe(0);
@@ -592,5 +621,224 @@ describe("GL-17 — off-season enrollment checks out date-less, paid TODAY", () 
 
     expect(res.status).toBe(400);
     expect(String(res.body.error)).toContain("No recurring plan");
+  });
+});
+
+describe("GL-17 corrective — off-season checkout behind the failure-safe payment contract", () => {
+  const offSeasonQuote = () => {
+    freezeEastern("2026-12-09");
+    booking.service = "MOSQUITO";
+    booking.expiresAt = "2026-12-10T12:00:00Z";
+    booking.quoteJson = JSON.stringify({
+      days: [],
+      baseCents: 11900,
+      serviceLabel: "Mosquito plan — up to ½ acre",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 11900,
+        initialFeeCents: 11900,
+      },
+      planOnly: true,
+      offSeason: true,
+    });
+  };
+  const enroll = () =>
+    postBook({
+      bookingId: "b1",
+      recurring: true,
+      tcAccepted: true,
+      tcVersion: BOOKING_TERMS_VERSION,
+    });
+  const flush = async (rounds = 60) => {
+    for (let i = 0; i < rounds; i++) await Promise.resolve();
+  };
+
+  it("TWO PARALLEL clicks: exactly one attempt proceeds — one customer, one intent", async () => {
+    offSeasonQuote();
+    // Barrier: hold the winner INSIDE the provider create so the second
+    // click arrives while the attempt lease is genuinely held.
+    let releaseCreate!: () => void;
+    const gate = new Promise<void>((resolve) => (releaseCreate = resolve));
+    intentCreate.mockImplementation(async (args: { amount: number }) => {
+      await gate;
+      return {
+        id: "pi_new",
+        client_secret: "cs_new",
+        status: "requires_payment_method",
+        amount: args.amount,
+      };
+    });
+
+    const first = enroll();
+    await flush(); // the winner is now parked inside paymentIntents.create
+    expect(intentCreate).toHaveBeenCalledTimes(1);
+
+    const second = await enroll(); // the racing duplicate
+    expect(second.status).toBe(409);
+    expect(String(second.body.error)).toContain("already being prepared");
+
+    releaseCreate();
+    const winner = await first;
+    expect(winner.status).toBe(200);
+    expect(winner.body.clientSecret).toBe("cs_new");
+    // Exactly ONE provider customer and ONE intent were ever created.
+    expect(customerCreate).toHaveBeenCalledTimes(1);
+    expect(intentCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a CANCELED same-amount intent is never reused — a fresh generation replaces it", async () => {
+    offSeasonQuote();
+    booking.stripePaymentIntentId = "pi_dead";
+    existingIntent = {
+      id: "pi_dead",
+      amount: 11900,
+      status: "canceled",
+      client_secret: "cs_dead", // present, matching amount — still dead
+    };
+
+    const res = await enroll();
+
+    expect(res.status).toBe(200);
+    expect(res.body.clientSecret).toBe("cs_new");
+    expect(res.body.clientSecret).not.toBe("cs_dead");
+    // The replacement is keyed on the dead generation — deterministic.
+    expect(intentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 11900 }),
+      expect.objectContaining({ idempotencyKey: "bk-intent-b1-pi_dead" })
+    );
+  });
+
+  it("a PROCESSING intent is answered truthfully — never replaced, never re-charged", async () => {
+    offSeasonQuote();
+    booking.stripePaymentIntentId = "pi_proc";
+    existingIntent = {
+      id: "pi_proc",
+      amount: 11900,
+      status: "processing",
+      client_secret: "cs_proc",
+    };
+
+    const res = await enroll();
+
+    expect(res.status).toBe(409);
+    expect(String(res.body.error)).toContain("still processing");
+    expect(intentCreate).not.toHaveBeenCalled();
+    expect(intentCancel).not.toHaveBeenCalled();
+  });
+
+  it("a stale intent that CANNOT be proven terminal blocks any replacement", async () => {
+    offSeasonQuote();
+    booking.stripePaymentIntentId = "pi_stuck";
+    existingIntent = {
+      id: "pi_stuck",
+      amount: 99900, // mismatched — must be closed before replacement
+      status: "requires_payment_method",
+      client_secret: "cs_stuck",
+    };
+    intentCancel.mockImplementation(async () => {
+      throw new Error("provider timeout");
+    });
+    // The verification re-read still shows it live.
+
+    const res = await enroll();
+
+    expect(res.status).toBe(503);
+    expect(String(res.body.error)).toContain("couldn't safely close");
+    // No new chargeable intent exists while the old one is unproven.
+    expect(intentCreate).not.toHaveBeenCalled();
+  });
+
+  it("provider create OK + persistence FAILURE: the intent is closed, no secret leaves", async () => {
+    offSeasonQuote();
+    const realUpdate = fakeDataClient.models.BookingRequest.update;
+    fakeDataClient.models.BookingRequest.update = (async () => ({
+      data: null,
+      errors: [{ message: "write refused" }],
+    })) as unknown as typeof realUpdate;
+    try {
+      const res = await enroll();
+      expect(res.status).toBe(503);
+      expect(res.body.clientSecret).toBeUndefined();
+      // The fresh intent was closed safely instead of left chargeable.
+      expect(intentCancel).toHaveBeenCalledWith("pi_new");
+    } finally {
+      fakeDataClient.models.BookingRequest.update = realUpdate;
+    }
+  });
+
+  it("persistence failure then RETRY: the idempotency chain replays the dead generation and mints exactly one new intent", async () => {
+    offSeasonQuote();
+    // A replay-faithful provider: same key ⇒ same intent; cancel marks it.
+    const byKey = new Map<
+      string,
+      { id: string; client_secret: string; status: string; amount: number }
+    >();
+    let minted = 0;
+    intentCreate.mockImplementation(
+      async (args: { amount: number }, opts?: { idempotencyKey?: string }) => {
+        const key = opts?.idempotencyKey ?? `anon-${minted}`;
+        if (!byKey.has(key)) {
+          minted++;
+          byKey.set(key, {
+            id: `pi_${minted}`,
+            client_secret: `cs_${minted}`,
+            status: "requires_payment_method",
+            amount: args.amount,
+          });
+        }
+        return { ...byKey.get(key)! };
+      }
+    );
+    intentCancel.mockImplementation(async (id: string) => {
+      for (const intent of byKey.values()) {
+        if (intent.id === id) intent.status = "canceled";
+      }
+      return { id, status: "canceled" };
+    });
+
+    // Attempt 1: the booking write fails after pi_1 exists — pi_1 is closed.
+    const realUpdate = fakeDataClient.models.BookingRequest.update;
+    fakeDataClient.models.BookingRequest.update = (async () => ({
+      data: null,
+      errors: [{ message: "write refused" }],
+    })) as unknown as typeof realUpdate;
+    const first = await enroll();
+    fakeDataClient.models.BookingRequest.update = realUpdate;
+    expect(first.status).toBe(503);
+
+    // Attempt 2: the same first-generation key REPLAYS canceled pi_1; the
+    // chain advances deterministically to one fresh pi_2 — never a blind
+    // pile of chargeable intents.
+    const second = await enroll();
+
+    expect(second.status).toBe(200);
+    expect(second.body.clientSecret).toBe("cs_2");
+    expect(minted).toBe(2); // pi_1 (dead) + pi_2 — nothing else, ever
+    expect(byKey.has("bk-intent-b1-first")).toBe(true);
+    expect(byKey.has("bk-intent-b1-pi_1")).toBe(true);
+    expect(bookingUpdates.at(-1)).toMatchObject({
+      stripePaymentIntentId: "pi_2",
+      tcVersion: BOOKING_TERMS_VERSION,
+    });
+  });
+});
+
+describe("GL-17 corrective — the STANDARD path shares the payable-reuse allowlist", () => {
+  it("a canceled same-slot same-amount intent is not handed back — a fresh one replaces it", async () => {
+    booking.stripePaymentIntentId = "pi_dead";
+    booking.selectedDate = "2026-07-22";
+    booking.selectedWindow = "MORNING";
+    existingIntent = {
+      id: "pi_dead",
+      amount: 31300,
+      status: "canceled",
+      client_secret: "cs_dead",
+    };
+
+    const res = await bookIt();
+
+    expect(res.status).toBe(200);
+    expect(res.body.clientSecret).toBe("cs_new");
+    expect(res.body.clientSecret).not.toBe("cs_dead");
   });
 });

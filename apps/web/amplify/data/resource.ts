@@ -182,6 +182,7 @@ export const schema = a.schema({
     // behind it — the highest-harm state the funnel can reach — so it is a
     // durable, office-visible exception, never a log line.
     "PAID_NOT_FINALIZED",
+    "PAYMENT_INTENT_ORPHAN",
     // GL-15: a finalized report whose captured GPS was imprecise or far from the
     // service address. An after-the-fact on-site-presence review — the record is
     // never blocked and never waits on a manager.
@@ -576,6 +577,11 @@ export const schema = a.schema({
       quoteJson: a.json(),
       selectedDate: a.date(),
       selectedWindow: a.string(),
+      // GL-17: the single-winner checkout-attempt lease (CAS, backend-only
+      // writes). Serializes concurrent /book attempts for one booking; the
+      // deterministic provider idempotency keys make even an expiry overlap
+      // converge on the same provider objects.
+      paymentAttemptLeaseUntil: a.datetime(),
       // GL-04: the checkout claim's slot facts, stamped when the hold is
       // taken. If the claim row is gone by the time payment lands (expired
       // hold, swept row), finalize re-reserves from THESE instead of booking

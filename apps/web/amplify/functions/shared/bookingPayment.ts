@@ -25,6 +25,63 @@ export type BookingTransition =
   | { ok: true }
   | { ok: false; reason: "LOST" | "UNSUPPORTED" };
 
+/** GL-17 — the ONLY PaymentIntent statuses a /book retry may hand back as a
+ *  fresh payable secret. Everything else — canceled, succeeded, processing,
+ *  requires_capture — is either terminal, in flight, or not payable, and is
+ *  answered truthfully instead of returned as chargeable. */
+export const PAYABLE_REUSE_STATUSES: ReadonlySet<string> = new Set([
+  "requires_payment_method",
+  "requires_confirmation",
+  "requires_action",
+]);
+
+export const PAYMENT_ATTEMPT_LEASE_MS = 30_000;
+
+export type PaymentAttempt =
+  | { ok: true; release: () => Promise<void> }
+  | { ok: false; unavailable: boolean };
+
+/**
+ * GL-17 — the durable single-winner checkout-attempt claim: one guarded CAS
+ * write on the BookingRequest row (a not-live-lease condition, backend-only).
+ * Parallel double-clicks: exactly one attempt proceeds; the loser is told to
+ * retry in a moment. A crashed winner's claim expires on its own. This
+ * serializes ATTEMPTS; the invariant "one chargeable intent per booking" is
+ * carried by the deterministic provider idempotency keys and the
+ * persist-before-secret rule, so even a lease-expiry overlap converges.
+ */
+export async function acquirePaymentAttempt(
+  bookingId: string
+): Promise<PaymentAttempt> {
+  const nowIso = new Date().toISOString();
+  const until = new Date(Date.now() + PAYMENT_ATTEMPT_LEASE_MS).toISOString();
+  const res = await casGuardedUpdate(
+    "BookingRequest",
+    bookingId,
+    { paymentAttemptLeaseUntil: until },
+    [{ kind: "notLiveLease", field: "paymentAttemptLeaseUntil", nowIso }]
+  );
+  if (!res.ok) return { ok: false, unavailable: res.reason === "UNSUPPORTED" };
+  return {
+    ok: true,
+    release: async () => {
+      // Only THIS holder releases — a later winner's lease is never cleared.
+      await casGuardedUpdate(
+        "BookingRequest",
+        bookingId,
+        { paymentAttemptLeaseUntil: null },
+        [
+          {
+            kind: "fieldEquals",
+            field: "paymentAttemptLeaseUntil",
+            value: until,
+          },
+        ]
+      ).catch(() => undefined);
+    },
+  };
+}
+
 const attemptGuard = (intentId: string | null): LockCondition[] =>
   intentId
     ? [{ kind: "fieldEquals", field: "stripePaymentIntentId", value: intentId }]

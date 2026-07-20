@@ -30,6 +30,7 @@ export type WorkKind =
   | "PRICING_ESCALATION"
   | "MISSING_CONTACT"
   | "PAID_NOT_FINALIZED"
+  | "PAYMENT_INTENT_ORPHAN"
   | "LOCATION_REVIEW"
   | "STAFF_OFFBOARD"
   | "STAFF_SECURITY"
@@ -262,6 +263,19 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "REFUNDED", label: "Refunded the customer" },
       { code: "FINALIZED_OFFLINE", label: "Finished the booking by hand" },
       { code: "DUPLICATE_PAYMENT", label: "Duplicate payment — handled" },
+      OTHER,
+    ],
+  },
+  PAYMENT_INTENT_ORPHAN: {
+    severity: "CRITICAL",
+    customerImpact:
+      "A chargeable payment intent exists that the booking record does not reference — if the customer completes it, finalization will refuse the money as superseded.",
+    ownerTeam: "FINANCE",
+    verified: [],
+    manualReasons: [
+      { code: "INTENT_CANCELED", label: "Canceled the intent in Stripe" },
+      { code: "REFUNDED", label: "Refunded the customer" },
+      { code: "RECONCILED", label: "Reconciled the booking to the intent" },
       OTHER,
     ],
   },
