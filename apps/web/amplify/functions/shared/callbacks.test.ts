@@ -55,6 +55,55 @@ vi.mock("./email", () => ({
   },
   notifyOffice: async () => true,
 }));
+// GL-10 reopened: the photo must be a VERIFIED upload and scheduling must
+// take a real capacity slot. Both are mocked with controllable outcomes so
+// the failure paths are testable.
+let photoVerifyFails: string | null = null;
+const photoVerified: { key: string; customerId: string }[] = [];
+vi.mock("./photoVerify", () => ({
+  verifyCallbackPhoto: async (key: string, customerId: string) => {
+    if (photoVerifyFails) throw new Error(photoVerifyFails);
+    photoVerified.push({ key, customerId });
+  },
+}));
+
+let techBase: string | null = "12 Depot St, Ware, MA";
+let slotSoldOut = false;
+const reserved: Record<string, unknown>[] = [];
+const released: Record<string, unknown>[] = [];
+vi.mock("./capacity", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  onsiteMinutes: (pc: string | null | undefined) =>
+    pc === "RESIDENTIAL" ? 30 : 60,
+  windowOfTimeWindow: (tw: string | null) =>
+    tw === "12-5" ? "AFTERNOON" : "MORNING",
+  techBaseFor: async () => techBase,
+  reserveSlot: async (
+    date: string,
+    window: string,
+    technicianId: string,
+    minutes: number
+  ) => {
+    if (slotSoldOut)
+      return { ok: false, soldOut: true, message: "That morning is now fully booked — pick another window or day." };
+    reserved.push({ date, window, technicianId, minutes });
+    return { ok: true };
+  },
+  releaseSlot: async (
+    date: string,
+    window: string,
+    technicianId: string,
+    minutes: number
+  ) => {
+    released.push({ date, window, technicianId, minutes });
+  },
+}));
+
+vi.mock("./dispatchReadiness", () => ({
+  assertDispatchFacts: () => undefined,
+  proveRoutable: async () => ({ driveMinutes: 15, checkedAt: "2026-07-15T14:00:00Z" }),
+}));
+
 const workOpened: Record<string, unknown>[] = [];
 const workResolved: Record<string, unknown>[] = [];
 vi.mock("./ownedWork", () => ({
@@ -86,6 +135,12 @@ beforeEach(() => {
   emailFails = false;
   workOpened.length = 0;
   workResolved.length = 0;
+  photoVerifyFails = null;
+  photoVerified.length = 0;
+  techBase = "12 Depot St, Ware, MA";
+  slotSoldOut = false;
+  reserved.length = 0;
+  released.length = 0;
   _setLockStoreForTests(memoryLockStore({ CallbackRequest: callbacks }));
   customers.set("c1", {
     id: "c1",
@@ -184,6 +239,7 @@ describe("scheduling — $0 by construction, inside the promise", () => {
     const res = await scheduleCallback({
       callbackRequestId: "cb-j1",
       scheduledDate: "2026-07-22",
+      technicianId: "t1",
     });
 
     expect(res.callbackJobId).toBe("cbjob-cb-j1");
@@ -203,22 +259,128 @@ describe("scheduling — $0 by construction, inside the promise", () => {
     await request(); // promisedBy 2026-07-24
 
     await expect(
-      scheduleCallback({ callbackRequestId: "cb-j1", scheduledDate: "2026-07-28" })
+      scheduleCallback({
+        callbackRequestId: "cb-j1",
+        scheduledDate: "2026-07-28",
+        technicianId: "t1",
+      })
     ).rejects.toThrow(/after the promised return/);
 
     const ok = await scheduleCallback({
       callbackRequestId: "cb-j1",
       scheduledDate: "2026-07-28",
+      technicianId: "t1",
       customerRequestedLater: true,
     });
     expect(ok.callbackJobId).toBe("cbjob-cb-j1");
+  });
+
+  it("the visit consumes REAL capacity: onsite + round-trip drive reserved on the technician's window", async () => {
+    await request();
+    await scheduleCallback({
+      callbackRequestId: "cb-j1",
+      scheduledDate: "2026-07-22",
+      timeWindow: "12-5",
+      technicianId: "t1",
+    });
+
+    // RESIDENTIAL 30 onsite + 15 drive * 2 = 60 minutes on the AFTERNOON slot.
+    expect(reserved).toEqual([
+      { date: "2026-07-22", window: "AFTERNOON", technicianId: "t1", minutes: 60 },
+    ]);
+    const job = jobs.get("cbjob-cb-j1")!;
+    expect(job.technicianId).toBe("t1");
+    expect(job.capacityWindow).toBe("AFTERNOON");
+    expect(job.capacityMinutes).toBe(60);
+  });
+
+  it("refuses without a technician — a callback is never free-floating schedule text", async () => {
+    await request();
+    await expect(
+      scheduleCallback({
+        callbackRequestId: "cb-j1",
+        scheduledDate: "2026-07-22",
+        technicianId: "",
+      })
+    ).rejects.toThrow(/technician/i);
+    expect(jobs.has("cbjob-cb-j1")).toBe(false);
+    expect(reserved).toHaveLength(0);
+  });
+
+  it("refuses when the window is sold out — the $0 visit cannot oversell a day", async () => {
+    await request();
+    slotSoldOut = true;
+    await expect(
+      scheduleCallback({
+        callbackRequestId: "cb-j1",
+        scheduledDate: "2026-07-22",
+        technicianId: "t1",
+      })
+    ).rejects.toThrow(/fully booked/);
+    expect(jobs.has("cbjob-cb-j1")).toBe(false);
+  });
+
+  it("refuses a technician who isn't schedulable that day", async () => {
+    await request();
+    techBase = null;
+    await expect(
+      scheduleCallback({
+        callbackRequestId: "cb-j1",
+        scheduledDate: "2026-07-22",
+        technicianId: "t9",
+      })
+    ).rejects.toThrow(/isn't schedulable/);
+    expect(reserved).toHaveLength(0);
+  });
+
+  it("a replay that finds the visit already created gives its duplicate reservation back", async () => {
+    await request();
+    await scheduleCallback({
+      callbackRequestId: "cb-j1",
+      scheduledDate: "2026-07-22",
+      technicianId: "t1",
+    });
+    // Simulate the crash-after-create replay: the callback row lost its
+    // pointer but the job exists.
+    delete callbacks.get("cb-j1")!.callbackJobId;
+    callbacks.get("cb-j1")!.status = "REQUESTED";
+
+    await scheduleCallback({
+      callbackRequestId: "cb-j1",
+      scheduledDate: "2026-07-22",
+      technicianId: "t1",
+    });
+
+    expect(reserved).toHaveLength(2); // both attempts reserved first…
+    expect(released).toHaveLength(1); // …and the duplicate gave its hold back
+  });
+});
+
+describe("the photo is a VERIFIED upload, not a plausible string", () => {
+  it("verifies the submitted key against the customer's own prefix and bucket object", async () => {
+    await request();
+    expect(photoVerified).toEqual([
+      { key: "callbacks/c1/photo1", customerId: "c1" },
+    ]);
+  });
+
+  it("refuses the callback when the photo cannot be verified", async () => {
+    photoVerifyFails =
+      "The photo upload didn't finish — try the upload again, then resubmit the callback.";
+    await expect(request()).rejects.toThrow(/upload didn't finish/);
+    expect(callbacks.size).toBe(0);
+    expect(workOpened).toHaveLength(0);
   });
 });
 
 describe("the technician's finding — controlled, evidenced, terminal-guarded", () => {
   beforeEach(async () => {
     await request();
-    await scheduleCallback({ callbackRequestId: "cb-j1", scheduledDate: "2026-07-22" });
+    await scheduleCallback({
+      callbackRequestId: "cb-j1",
+      scheduledDate: "2026-07-22",
+      technicianId: "t1",
+    });
     emails.length = 0;
   });
 

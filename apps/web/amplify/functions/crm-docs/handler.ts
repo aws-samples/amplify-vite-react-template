@@ -418,12 +418,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         callbackRequestId?: string;
         scheduledDate?: string;
         timeWindow?: string | null;
+        technicianId?: string;
         customerRequestedLater?: boolean | null;
       };
       return scheduleCallback({
         callbackRequestId: String(scArgs.callbackRequestId ?? ""),
         scheduledDate: String(scArgs.scheduledDate ?? ""),
         timeWindow: scArgs.timeWindow,
+        technicianId: String(scArgs.technicianId ?? ""),
         customerRequestedLater: scArgs.customerRequestedLater,
       });
     }

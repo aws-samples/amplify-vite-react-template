@@ -39,7 +39,7 @@ export function normalizePropertyClass(
     : null;
 }
 
-type DispatchCustomer = {
+export type DispatchCustomer = {
   displayName?: string | null;
   serviceStreet?: string | null;
   serviceCity?: string | null;

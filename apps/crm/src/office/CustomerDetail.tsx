@@ -3235,6 +3235,9 @@ function CallbacksSection({
   const [rows, setRows] = useState<CallbackRow[] | null>(null);
   const [scheduling, setScheduling] = useState<CallbackRow | null>(null);
   const [date, setDate] = useState("");
+  const [window, setWindow] = useState("8-12");
+  const [technicianId, setTechnicianId] = useState("");
+  const [techs, setTechs] = useState<{ id: string; displayName?: string | null }[]>([]);
   const [laterOk, setLaterOk] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -3266,11 +3269,28 @@ function CallbacksSection({
   useEffect(() => {
     void loadRows();
   }, [loadRows]);
+  // The callback visit takes real technician minutes — scheduling it picks
+  // a real technician whose capacity the backend reserves atomically.
+  useEffect(() => {
+    if (!scheduling) return;
+    void (async () => {
+      try {
+        const { data } = await api().models.Technician.list({ limit: 200 });
+        setTechs(
+          (data ?? [])
+            .filter((t) => t.active !== false)
+            .map((t) => ({ id: t.id, displayName: t.name }))
+        );
+      } catch {
+        setTechs([]);
+      }
+    })();
+  }, [scheduling]);
 
   if (!rows || rows.length === 0) return null;
 
   const schedule = async () => {
-    if (!scheduling || !date) return;
+    if (!scheduling || !date || !technicianId) return;
     setBusy(true);
     setError(null);
     try {
@@ -3280,17 +3300,22 @@ function CallbacksSection({
             scheduleCallback: (a: {
               callbackRequestId: string;
               scheduledDate: string;
+              timeWindow?: string;
+              technicianId: string;
               customerRequestedLater?: boolean;
             }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
           }
         ).scheduleCallback({
           callbackRequestId: scheduling.id,
           scheduledDate: date,
+          timeWindow: window,
+          technicianId,
           customerRequestedLater: laterOk || undefined,
         })
       );
       setScheduling(null);
       setDate("");
+      setTechnicianId("");
       setLaterOk(false);
       await loadRows();
       await onChanged();
@@ -3358,6 +3383,32 @@ function CallbacksSection({
             <Field label="Date">
               <DateField value={date} onChange={setDate} />
             </Field>
+            <Field label="Arrival window">
+              <SegControl
+                value={window}
+                onChange={setWindow}
+                options={[
+                  { value: "8-12", label: "Morning (8–12)" },
+                  { value: "12-5", label: "Afternoon (12–5)" },
+                ]}
+              />
+            </Field>
+            <Field
+              label="Technician"
+              hint="The visit reserves real minutes on their day — same capacity rules as any visit"
+            >
+              <select
+                value={technicianId}
+                onChange={(e) => setTechnicianId(e.target.value)}
+              >
+                <option value="">Pick a technician…</option>
+                {techs.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.displayName ?? t.id}
+                  </option>
+                ))}
+              </select>
+            </Field>
             {scheduling.promisedBy && date > scheduling.promisedBy ? (
               <label className="inline-check small">
                 <input
@@ -3372,7 +3423,7 @@ function CallbacksSection({
             <Button
               block
               loading={busy}
-              disabled={!date}
+              disabled={!date || !technicianId}
               onClick={() => void schedule()}
             >
               Schedule the callback visit

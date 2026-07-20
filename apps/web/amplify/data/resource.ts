@@ -3367,14 +3367,16 @@ export const schema = a.schema({
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
     .handler(a.handler.function(crmDocs)),
 
-  /** GL-10 — the office schedules the callback visit ($0 by construction),
-   *  no later than the promised return unless the customer chose later. */
+  /** GL-10 — the office schedules the callback visit ($0 by construction)
+   *  onto a REAL technician-window capacity slot, no later than the
+   *  promised return unless the customer chose later. */
   scheduleCallback: a
     .mutation()
     .arguments({
       callbackRequestId: a.string().required(),
       scheduledDate: a.date().required(),
       timeWindow: a.string(),
+      technicianId: a.string().required(),
       customerRequestedLater: a.boolean(),
     })
     .returns(a.json())

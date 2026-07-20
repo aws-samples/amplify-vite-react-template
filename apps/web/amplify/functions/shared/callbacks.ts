@@ -4,6 +4,19 @@ import { customerAccessGroups } from "./dynamicGroups";
 import { emailShell, notifyOffice, sendEmail } from "./email";
 import { casGuardedUpdate } from "./atomicLock";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
+import { verifyCallbackPhoto } from "./photoVerify";
+import {
+  onsiteMinutes,
+  releaseSlot,
+  reserveSlot,
+  techBaseFor,
+  windowOfTimeWindow,
+} from "./capacity";
+import {
+  assertDispatchFacts,
+  proveRoutable,
+  type DispatchCustomer,
+} from "./dispatchReadiness";
 
 /**
  * GL-10 — the guarantee callback lifecycle.
@@ -66,6 +79,10 @@ export async function requestCallback(
       "A photo of what you're seeing is required before a callback can be scheduled."
     );
   }
+  // "Required" means a VERIFIED upload: the key must live under this
+  // customer's callback prefix and reference a real image object — a
+  // plausible-looking string (or another customer's key) is refused.
+  await verifyCallbackPhoto(opts.photoKey, opts.customerId);
   const { data: customer } = await client.models.Customer.get({
     id: opts.customerId,
   });
@@ -175,6 +192,9 @@ export async function scheduleCallback(opts: {
   callbackRequestId: string;
   scheduledDate: string;
   timeWindow?: string | null;
+  /** The technician whose real capacity the visit consumes — a callback is
+   *  a real slot on a real route, never free-floating schedule text. */
+  technicianId: string;
   /** The customer explicitly asked for a date beyond the promise — recorded,
    *  never assumed. */
   customerRequestedLater?: boolean | null;
@@ -202,32 +222,101 @@ export async function scheduleCallback(opts: {
       `That date is after the promised return (${cb.promisedBy}). Pick an earlier day — or, if the customer asked for a later date, record that choice.`
     );
   }
+  if (!opts.technicianId?.trim()) {
+    throw new Error(
+      "Pick the technician for the callback visit — it takes real minutes on a real route, so it schedules onto real capacity like every other visit."
+    );
+  }
   const { data: original } = await client.models.Job.get({
     id: cb.originalJobId,
   });
-  const callbackJobId = `cbjob-${cb.id}`;
-  const { data: job } = await client.models.Job.create({
-    id: callbackJobId,
-    customerId: cb.customerId,
-    servicePlanId: cb.servicePlanId ?? undefined,
-    type: "ONE_TIME",
-    serviceType: `${original?.serviceType ?? "Service"} — guarantee callback`,
-    serviceCode: (original as { serviceCode?: string | null } | null)?.serviceCode ?? undefined,
-    catalogVersion:
-      (original as { catalogVersion?: string | null } | null)?.catalogVersion ??
-      undefined,
-    // $0 by construction — nobody chooses or calculates a fee anywhere.
-    priceCents: null,
-    status: "SCHEDULED",
-    scheduledDate: opts.scheduledDate,
-    timeWindow: opts.timeWindow ?? undefined,
-    propertyClass:
-      (original as { propertyClass?: string | null } | null)?.propertyClass ??
-      undefined,
-    notes: `Guarantee callback for visit ${cb.originalJobId} (request ${cb.id}). Customer photo: ${cb.photoKey}. Original technician: ${(original as { technicianId?: string | null } | null)?.technicianId ?? "n/a"}. The technician records a controlled finding on site.`,
-    accessGroups: cb.accessGroups ?? undefined,
+  const { data: customer } = await client.models.Customer.get({
+    id: cb.customerId,
   });
+  if (!customer) throw new Error("Customer not found");
+
+  // GL-10 + GL-04: a callback visit is CAPACITY-SAFE — the same dispatch
+  // facts, routability proof, and ONE atomic technician-window slot claim
+  // as every other assignment. $0 changes the price, not the minutes.
+  assertDispatchFacts(customer as DispatchCustomer, {
+    propertyClass: (original as { propertyClass?: string | null } | null)
+      ?.propertyClass,
+    serviceType: original?.serviceType ?? "guarantee callback",
+  });
+  const base = await techBaseFor(opts.technicianId, opts.scheduledDate);
+  if (!base) {
+    throw new Error(
+      "That technician isn't schedulable that day (inactive, unlicensed, or not a working day). Pick another technician or day."
+    );
+  }
+  const routeProof = await proveRoutable(
+    process.env.GOOGLE_ROUTES_API_KEY,
+    base,
+    customer as DispatchCustomer
+  );
+  const targetWindow = windowOfTimeWindow(opts.timeWindow ?? null);
+  const slotMinutes =
+    onsiteMinutes(
+      (original as { propertyClass?: string | null } | null)?.propertyClass
+    ) + (routeProof ? routeProof.driveMinutes * 2 : 0);
+  const reserved = await reserveSlot(
+    opts.scheduledDate,
+    targetWindow,
+    opts.technicianId,
+    slotMinutes
+  );
+  if (!reserved.ok) throw new Error(reserved.message);
+  const giveBack = () =>
+    releaseSlot(
+      opts.scheduledDate,
+      targetWindow,
+      opts.technicianId,
+      slotMinutes
+    ).catch(() => undefined);
+
+  const callbackJobId = `cbjob-${cb.id}`;
+  let job: Record<string, unknown> | null = null;
+  try {
+    job = (
+      await client.models.Job.create({
+        id: callbackJobId,
+        customerId: cb.customerId,
+        servicePlanId: cb.servicePlanId ?? undefined,
+        type: "ONE_TIME",
+        serviceType: `${original?.serviceType ?? "Service"} — guarantee callback`,
+        serviceCode: (original as { serviceCode?: string | null } | null)?.serviceCode ?? undefined,
+        catalogVersion:
+          (original as { catalogVersion?: string | null } | null)?.catalogVersion ??
+          undefined,
+        // $0 by construction — nobody chooses or calculates a fee anywhere.
+        priceCents: null,
+        status: "SCHEDULED",
+        scheduledDate: opts.scheduledDate,
+        timeWindow: opts.timeWindow ?? undefined,
+        technicianId: opts.technicianId,
+        capacityWindow: targetWindow,
+        capacityMinutes: slotMinutes,
+        ...(routeProof
+          ? {
+              dispatchDriveMinutes: routeProof.driveMinutes,
+              dispatchRouteCheckedAt: routeProof.checkedAt,
+            }
+          : {}),
+        propertyClass:
+          (original as { propertyClass?: string | null } | null)?.propertyClass ??
+          undefined,
+        notes: `Guarantee callback for visit ${cb.originalJobId} (request ${cb.id}). Customer photo: ${cb.photoKey}. Original technician: ${(original as { technicianId?: string | null } | null)?.technicianId ?? "n/a"}. The technician records a controlled finding on site.`,
+        accessGroups: cb.accessGroups ?? undefined,
+      })
+    ).data as Record<string, unknown> | null;
+  } catch (err) {
+    await giveBack();
+    throw err;
+  }
   if (!job) {
+    // A previous attempt already created (and reserved for) this visit —
+    // give back THIS attempt's duplicate reservation.
+    await giveBack();
     const { data: existing } = await client.models.Job.get({
       id: callbackJobId,
     });
@@ -244,9 +333,6 @@ export async function scheduleCallback(opts: {
     kind: "CALLBACK_PROMISE",
     dedupeKey: cb.id,
     note: `Callback visit ${callbackJobId} scheduled for ${opts.scheduledDate}.`,
-  });
-  const { data: customer } = await client.models.Customer.get({
-    id: cb.customerId,
   });
   if (customer?.email) {
     await sendEmail({
