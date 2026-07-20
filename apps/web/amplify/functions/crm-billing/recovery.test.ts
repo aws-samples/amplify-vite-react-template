@@ -94,7 +94,7 @@ const event = (
   field: string,
   args: Record<string, unknown>,
   identity: { groups: string[]; sub?: string; email?: string } = {
-    groups: ["FINANCE"],
+    groups: ["OWNER"],
     sub: "sub-finance",
     email: "csr@pestbuzzkill.com",
   }
@@ -195,15 +195,15 @@ describe("settleInvoice — OFFLINE", () => {
     ).rejects.toThrow(/only an open or failed invoice/i);
   });
 
-  it("refuses an office user — settling takes/records money", async () => {
+  it("refuses a tech user — settling takes/records money, an owner action", async () => {
     invoices.push({ id: "inv_1", customerId: "cA", amountCents: 100, status: "OPEN" });
     await expect(
       call(
         "settleInvoice",
         { invoiceId: "inv_1", method: "OFFLINE" },
-        { groups: ["OFFICE"], sub: "s" }
+        { groups: ["TECH"], sub: "s" }
       )
-    ).rejects.toThrow(/finance role required/i);
+    ).rejects.toThrow(/owner role required — this action moves money/i);
   });
 });
 
@@ -260,7 +260,7 @@ describe("settleInvoice — CARD", () => {
 });
 
 describe("payInvoice — the customer pay button", () => {
-  it("lets finance pay any customer's invoice on the saved card", async () => {
+  it("lets an owner pay any customer's invoice on the saved card", async () => {
     invoices.push({
       id: "inv_1",
       customerId: "cA",
@@ -329,7 +329,7 @@ describe("assignRecoveryOwner", () => {
     await call(
       "assignRecoveryOwner",
       { kind: "INVOICE", id: "inv_1" },
-      { groups: ["OFFICE"], sub: "sub-olga", email: "olga@pestbuzzkill.com" }
+      { groups: ["OWNER"], sub: "sub-olga", email: "olga@pestbuzzkill.com" }
     );
 
     expect(invoices[0]).toMatchObject({
@@ -344,7 +344,7 @@ describe("assignRecoveryOwner", () => {
     await call(
       "assignRecoveryOwner",
       { kind: "DISPUTE", id: "dp_1" },
-      { groups: ["FINANCE"], sub: "sub-fin", email: "fin@pestbuzzkill.com" }
+      { groups: ["OWNER"], sub: "sub-fin", email: "fin@pestbuzzkill.com" }
     );
 
     expect(disputes[0]).toMatchObject({

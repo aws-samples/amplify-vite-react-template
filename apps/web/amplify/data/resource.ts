@@ -17,8 +17,10 @@ import { leadSweep } from "../functions/lead-sweep/resource";
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
  *
- * Authorization pattern:
- *   - OFFICE staff: full CRUD on everything.
+ * Authorization pattern (staff roles consolidated to OWNER + TECH):
+ *   - OWNER staff: full CRUD on everything, including money movement. This is
+ *     the single office/finance/management seat; OFFICE and FINANCE were folded
+ *     into OWNER, so every rule that once admitted them now grants OWNER.
  *   - TECH: read scheduling/customer context; create+update the records a
  *     technician produces in the field (routes, jobs, service reports).
  *   - Customers: every customer-visible record carries `accessGroups`, an
@@ -35,7 +37,7 @@ import { leadSweep } from "../functions/lead-sweep/resource";
  * no quotes, no e-sign, no hand-created plans.
  */
 // GL-13 field-level least-privilege. A field carrying this rule is readable by
-// the office (OWNER/OFFICE) and the portal customer (the accessGroups dynamic
+// the office (OWNER) and the portal customer (the accessGroups dynamic
 // group) exactly as the model already allows, but NOT by TECH — even though the
 // model grants TECH a blanket read. AppSync nulls the field for a TECH token on
 // every path: get, list, subscription, and pagination alike. `create` is kept
@@ -46,7 +48,7 @@ type FieldAllow = Parameters<
   Parameters<ReturnType<typeof a.string>["authorization"]>[0]
 >[0];
 const fieldNoTech = (allow: FieldAllow) => [
-  allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
+  allow.groups(["OWNER"]).to(["create", "read"]),
   allow.groupsDefinedIn("accessGroups").to(["read"]),
 ];
 
@@ -54,7 +56,7 @@ const fieldNoTech = (allow: FieldAllow) => [
 // applicator's credential PII, office-only. The Technician model has no portal
 // (accessGroups) reader, so office read is the whole rule.
 const fieldOfficeOnly = (allow: FieldAllow) => [
-  allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+  allow.groups(["OWNER"]).to(["read"]),
 ];
 
 // Exported for resource.test.ts, which checks that no custom operation
@@ -318,7 +320,7 @@ export const schema = a.schema({
     // tech app never reads. TECH's blanket read is dropped entirely; office
     // curates the group, the portal (accessGroups) sees its own.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -444,7 +446,7 @@ export const schema = a.schema({
     // sees a customer only through the scoped technicianDay/technicianJob
     // queries — and then only the visit fields (the field-level @auth above).
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -516,7 +518,7 @@ export const schema = a.schema({
     // dropped; the tech app reads jobs and customers, never plans. Office and
     // the portal customer (accessGroups) keep their read.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -670,7 +672,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("cancelToken"), index("status")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read", "update"]),
+      allow.groups(["OWNER"]).to(["read", "update"]),
     ]),
 
   // Atomic finalization claim: create is conditional on the id not
@@ -686,7 +688,7 @@ export const schema = a.schema({
       holder: a.string(),
       leaseUntil: a.datetime(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   /**
    * GL-05 — the outbox claim for one booking communication (id =
@@ -703,7 +705,7 @@ export const schema = a.schema({
       holder: a.string(),
       leaseUntil: a.datetime(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   // GL-08: the durable, single-winner claim for a customer plan cancellation
   // (id = servicePlanId). An atomic create is taken BEFORE the Stripe call, so
@@ -742,7 +744,7 @@ export const schema = a.schema({
       stripeSubscriptionId: a.string(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -789,7 +791,7 @@ export const schema = a.schema({
       leaseUntil: a.datetime(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -813,7 +815,7 @@ export const schema = a.schema({
       holder: a.string(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /** Per-identity intake mutex. Conditional create serializes two concurrent
@@ -849,7 +851,7 @@ export const schema = a.schema({
       scanned: a.integer(),
       failed: a.integer(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   /**
    * GL-09 — the durable customer lifecycle command (id = the caller's
@@ -887,7 +889,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("customerId").sortKeys(["requestedAt"])])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -920,7 +922,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("customerId").sortKeys(["requestedAt"])])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -995,7 +997,7 @@ export const schema = a.schema({
       leaseUntil: a.datetime(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -1021,7 +1023,7 @@ export const schema = a.schema({
       index("technicianId").sortKeys(["date"]),
       index("date"),
     ])
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])]),
+    .authorization((allow) => [allow.groups(["OWNER"])]),
 
   /** GL-04 — a company holiday/closure (id = YYYY-MM-DD): the whole day
    *  sells and dispatches nothing. Office-maintained, reason required. */
@@ -1031,7 +1033,7 @@ export const schema = a.schema({
       reason: a.string().required(),
     })
     .secondaryIndexes((index) => [index("date")])
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])]),
+    .authorization((allow) => [allow.groups(["OWNER"])]),
 
   /**
    * GL-04 — the per-day capacity ledger (id = YYYY-MM-DD). committedMinutes
@@ -1058,7 +1060,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("date")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -1079,7 +1081,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("date")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -1104,7 +1106,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("date")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   // Best-effort per-IP throttle for the public quote endpoint (id =
@@ -1115,7 +1117,7 @@ export const schema = a.schema({
       count: a.integer().required(),
       windowStart: a.datetime(),
     })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   /**
    * GL-17 — one visible treatment obligation per in-season calendar month of a
@@ -1140,7 +1142,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("servicePlanId").sortKeys(["monthKey"])])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1169,7 +1171,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("technicianId")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   // AI-researched market rates — the base price for every quoted service.
@@ -1224,7 +1226,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("rateKey")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
     ]),
 
   // The demand/manual work-list for pricing research: one row per
@@ -1266,7 +1268,7 @@ export const schema = a.schema({
       notify: a.json(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
     ]),
 
   // GL-16: the pricing engine's control rows — ONE drain lease (id "drain",
@@ -1297,7 +1299,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("customerId")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1328,7 +1330,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("customerId")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1345,7 +1347,7 @@ export const schema = a.schema({
       healthy: a.boolean(),
     })
     .secondaryIndexes((index) => [index("kind").sortKeys(["runDate"])])
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   PricingControl: a
     .model({
@@ -1375,7 +1377,7 @@ export const schema = a.schema({
       rollbackClearedAt: a.datetime(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /** GL-16 — an immutable, complete snapshot of the serving catalog: a
@@ -1393,7 +1395,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   LeadPricingRun: a
@@ -1425,7 +1427,7 @@ export const schema = a.schema({
       modelPriceMismatch: a.boolean(),
     })
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
     ]),
 
   Technician: a
@@ -1465,7 +1467,7 @@ export const schema = a.schema({
     .authorization((allow) => [
       // Browser writes go through saveTechnician, which conditionally requires
       // current license data before active:true can ever be stored.
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   Route: a
@@ -1487,7 +1489,7 @@ export const schema = a.schema({
     // their own route, and only through the technicianDay query (scoped
     // server-side). No TECH grant on the raw model.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
+      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
     ]),
 
   Job: a
@@ -1640,7 +1642,7 @@ export const schema = a.schema({
       // technician reaches a job only through technicianDay (their route's
       // stops) and technicianJob (a job they are currently assigned), both
       // scoped server-side; the field-action mutations remain assignment-gated.
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1675,7 +1677,7 @@ export const schema = a.schema({
     // Only bookingFinalize (inside the Stripe webhook, behind a real payment)
     // writes one now.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1718,7 +1720,7 @@ export const schema = a.schema({
       // Browser writes go through saveProduct, which is the conditional
       // active-product compliance gate. Keep historical inactive rows instead
       // of deleting products referenced by pesticide records.
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groups(["TECH"]).to(["read"]),
     ]),
 
@@ -1787,7 +1789,7 @@ export const schema = a.schema({
     // they are currently assigned, returned by the scoped technicianJob query.
     // Writes still flow through the assignment-gated draft/finalize mutations.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1822,7 +1824,7 @@ export const schema = a.schema({
     // amendments — they are issued by the office and read by the office and the
     // customer's portal). Office and portal access are unchanged.
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1923,7 +1925,7 @@ export const schema = a.schema({
     // Delete is gone too. An invoice is withdrawn with VOID, which leaves the
     // row, the reason and the actor behind.
     .authorization((allow) => [
-      allow.groups(["OWNER", "FINANCE", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1963,7 +1965,7 @@ export const schema = a.schema({
       index("status"),
     ])
     .authorization((allow) => [
-      allow.groups(["OWNER", "FINANCE", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -1992,7 +1994,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("messageId"), index("relatedId")])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
+      allow.groups(["OWNER"]).to(["create", "read"]),
     ]),
 
   /**
@@ -2012,7 +2014,7 @@ export const schema = a.schema({
       suppressedAt: a.datetime().required(),
     })
     .identifier(["email"])
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   /**
    * Durable exception work. Alerts may accompany these rows, but the row is
@@ -2058,7 +2060,7 @@ export const schema = a.schema({
       index("kind").sortKeys(["lastOccurredAt"]),
     ])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /** Permanent, append-only history for a WorkItem. */
@@ -2076,7 +2078,7 @@ export const schema = a.schema({
       index("workItemId").sortKeys(["occurredAt"]),
     ])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -2123,7 +2125,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("customerId").sortKeys(["occurredAt"])])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /** Immutable evidence for a suppression/DNC release. Written before the
@@ -2162,7 +2164,7 @@ export const schema = a.schema({
       index("customerId").sortKeys(["occurredAt"]),
     ])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -2252,7 +2254,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("jobId").sortKeys(["occurredAt"])])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -2276,7 +2278,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("jobId").sortKeys(["occurredAt"])])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -2313,7 +2315,7 @@ export const schema = a.schema({
     })
     .secondaryIndexes((index) => [index("jobId").sortKeys(["occurredAt"])])
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+      allow.groups(["OWNER"]).to(["read"]),
     ]),
 
   /**
@@ -2363,7 +2365,7 @@ export const schema = a.schema({
       evidenceNote: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2400,7 +2402,7 @@ export const schema = a.schema({
       baseZip: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2412,7 +2414,7 @@ export const schema = a.schema({
     .query()
     .arguments({ date: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2429,7 +2431,7 @@ export const schema = a.schema({
       reason: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2446,7 +2448,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ customerId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2459,7 +2461,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ customerId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2479,7 +2481,7 @@ export const schema = a.schema({
       idempotencyKey: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2510,7 +2512,7 @@ export const schema = a.schema({
       notes: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2543,7 +2545,7 @@ export const schema = a.schema({
       contactConsentPolicyVersion: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2566,7 +2568,7 @@ export const schema = a.schema({
       idempotencyKey: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2587,7 +2589,7 @@ export const schema = a.schema({
       idempotencyKey: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2604,7 +2606,7 @@ export const schema = a.schema({
       idempotencyKey: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2651,7 +2653,7 @@ export const schema = a.schema({
       note: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   deactivateTechnician: a
@@ -2746,7 +2748,7 @@ export const schema = a.schema({
       sortOrder: a.integer(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2765,7 +2767,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Create an unassigned office job; assignments use updateJobSchedule. */
@@ -2790,7 +2792,7 @@ export const schema = a.schema({
       propertyClass: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2815,7 +2817,7 @@ export const schema = a.schema({
       managerReason: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2842,7 +2844,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2854,7 +2856,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2870,7 +2872,7 @@ export const schema = a.schema({
     .returns(a.json())
     // FINANCE too: PAID_NOT_FINALIZED is a finance-owned exception, and this is
     // the recovery action its queue item prescribes.
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2883,7 +2885,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ servicePlanId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -2895,14 +2897,14 @@ export const schema = a.schema({
     .mutation()
     .arguments({ customerId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .authorization((allow) => [allow.groups(["OWNER", "CUSTOMER"])])
     .handler(a.handler.function(crmBilling)),
 
   getPaymentMethodSummary: a
     .query()
     .arguments({ customerId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .authorization((allow) => [allow.groups(["OWNER", "CUSTOMER"])])
     .handler(a.handler.function(crmBilling)),
 
   // ── Money movement: OWNER or FINANCE only ────────────────────────────
@@ -2913,14 +2915,14 @@ export const schema = a.schema({
     .mutation()
     .arguments({ servicePlanId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   cancelSubscription: a
     .mutation()
     .arguments({ servicePlanId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -2950,7 +2952,7 @@ export const schema = a.schema({
       idempotencyKey: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2967,7 +2969,7 @@ export const schema = a.schema({
       reasonCode: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -2979,21 +2981,21 @@ export const schema = a.schema({
     .mutation()
     .arguments({ servicePlanId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   resumePlan: a
     .mutation()
     .arguments({ servicePlanId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   chargeOneTimeJob: a
     .mutation()
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3017,7 +3019,7 @@ export const schema = a.schema({
       idempotencyKey: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3047,7 +3049,7 @@ export const schema = a.schema({
       poNumber: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3072,7 +3074,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3090,7 +3092,7 @@ export const schema = a.schema({
     .arguments({ invoiceId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [
-      allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),
+      allow.groups(["OWNER", "CUSTOMER"]),
     ])
     .handler(a.handler.function(crmBilling)),
 
@@ -3110,7 +3112,7 @@ export const schema = a.schema({
     .arguments({ servicePlanId: a.string().required() })
     .returns(a.json())
     .authorization((allow) => [
-      allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),
+      allow.groups(["OWNER", "CUSTOMER"]),
     ])
     .handler(a.handler.function(crmBilling)),
 
@@ -3133,7 +3135,7 @@ export const schema = a.schema({
     })
     .returns(a.json())
     .authorization((allow) => [
-      allow.groups(["OWNER", "FINANCE", "CUSTOMER"]),
+      allow.groups(["OWNER", "CUSTOMER"]),
     ])
     .handler(a.handler.function(crmBilling)),
 
@@ -3151,7 +3153,7 @@ export const schema = a.schema({
     .query()
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3174,7 +3176,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3197,7 +3199,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3211,7 +3213,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3229,7 +3231,7 @@ export const schema = a.schema({
       id: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3253,7 +3255,7 @@ export const schema = a.schema({
       reasonCode: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3273,7 +3275,7 @@ export const schema = a.schema({
       reason: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3290,7 +3292,7 @@ export const schema = a.schema({
       reason: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "FINANCE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmBilling)),
 
   /**
@@ -3320,7 +3322,7 @@ export const schema = a.schema({
       geoCapturedAt: a.datetime(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Attach or remove report photos. Refuses once the report is FINALIZED. */
@@ -3331,7 +3333,7 @@ export const schema = a.schema({
       photoKeys: a.string().required().array().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3360,7 +3362,7 @@ export const schema = a.schema({
       officeReason: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Presigned PUT for the no-access door photo, before the job has a report. */
@@ -3382,7 +3384,7 @@ export const schema = a.schema({
       officeReason: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   reportPrepMissing: a
@@ -3395,7 +3397,7 @@ export const schema = a.schema({
       officeReason: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /** GL-12 — the technician's acknowledgement of the packet version they have
@@ -3407,7 +3409,7 @@ export const schema = a.schema({
       version: a.integer().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   getNoAccessPhotoUploadUrl: a
@@ -3418,7 +3420,7 @@ export const schema = a.schema({
       officeReason: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3433,7 +3435,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ jobId: a.string().required(), officeReason: a.string() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3446,7 +3448,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ jobId: a.string().required(), officeReason: a.string() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3458,7 +3460,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ reportId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Issue an append-only correction to a finalized report. Office/owner only —
@@ -3472,7 +3474,7 @@ export const schema = a.schema({
       changes: a.json().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Office-side job completion without a field report — marks COMPLETED and
@@ -3481,7 +3483,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3499,7 +3501,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .authorization((allow) => [allow.groups(["OWNER", "CUSTOMER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3518,7 +3520,7 @@ export const schema = a.schema({
       message: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .authorization((allow) => [allow.groups(["OWNER", "CUSTOMER"])])
     .handler(a.handler.function(crmDocs)),
 
   /** GL-11 — the office resolves a portal request with a recorded outcome
@@ -3530,7 +3532,7 @@ export const schema = a.schema({
       note: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /** GL-10 — presigned PUT for the callback's required customer photo. */
@@ -3541,7 +3543,7 @@ export const schema = a.schema({
       contentType: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "CUSTOMER"])])
+    .authorization((allow) => [allow.groups(["OWNER", "CUSTOMER"])])
     .handler(a.handler.function(crmDocs)),
 
   /** GL-03 — resend the EXACT stored message from its outbox row (no
@@ -3550,7 +3552,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ emailLogId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /** GL-10 — the office schedules the callback visit ($0 by construction)
@@ -3566,7 +3568,7 @@ export const schema = a.schema({
       customerRequestedLater: a.boolean(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /** GL-10 — the callback technician's controlled, evidenced finding. */
@@ -3579,7 +3581,7 @@ export const schema = a.schema({
       photoKey: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3595,7 +3597,7 @@ export const schema = a.schema({
       note: a.string(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmPricing)),
 
   /**
@@ -3639,7 +3641,7 @@ export const schema = a.schema({
       contentType: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Entitlement-checked, short-lived presigned URL for a stored PDF. */
@@ -3647,7 +3649,7 @@ export const schema = a.schema({
     .query()
     .arguments({ key: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH", "CUSTOMER"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH", "CUSTOMER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3664,14 +3666,14 @@ export const schema = a.schema({
     .query()
     .arguments({ date: a.string(), technicianId: a.string() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   technicianJob: a
     .query()
     .arguments({ jobId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE", "TECH"])])
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
   /** Office-initiated transactional emails: payment-request, portal-reminder,
@@ -3685,7 +3687,7 @@ export const schema = a.schema({
       idempotencyKey: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
   /**
@@ -3696,7 +3698,7 @@ export const schema = a.schema({
     .mutation()
     .arguments({ customerId: a.string().required() })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 }).authorization((allow) => [
   allow.resource(crmAdmin),

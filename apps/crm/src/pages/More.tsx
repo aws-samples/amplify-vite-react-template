@@ -32,8 +32,6 @@ export default function More() {
           meta={
             <span style={{ display: "inline-flex", gap: 4 }}>
               {roles.owner ? <Badge tone="ok">owner</Badge> : null}
-              {roles.office && !roles.owner ? <Badge tone="ok">office</Badge> : null}
-              {roles.finance && !roles.owner ? <Badge tone="ok">finance</Badge> : null}
               {roles.tech ? <Badge tone="info">tech</Badge> : null}
               {roles.customer ? <Badge tone="muted">customer</Badge> : null}
             </span>

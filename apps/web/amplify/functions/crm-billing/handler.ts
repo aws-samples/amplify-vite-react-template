@@ -121,31 +121,24 @@ async function assertCanActForPlan(
 }
 
 /**
- * What a BuzzKill job can plausibly cost, with room above the rate card's own
- * ceiling: AI-priced rodent work clamps at $2,500 and a large HOA one-time can
- * exceed that, so a lower bar would send real work to the owner for approval —
- * which is the bottleneck this product is supposed to remove.
- *
- * This is a backstop, not the control. It catches the classic hundred-fold slip
- * ($149.00 typed as 14900) on anything over $50; the confirmation the CRM shows
- * before calling this is what catches the rest.
+ * The one hard ceiling on a single card charge — a fat-finger backstop, not a
+ * role gate. With staff roles consolidated to owner + technician, every login
+ * that can charge is an owner, so there is no junior-vs-owner tier to enforce:
+ * the old "over $5k needs an owner" approval step is gone. What remains is a
+ * universal sanity limit that catches the classic hundred-fold slip ($149.00
+ * typed as 14900). The confirmation the CRM shows before calling this is what
+ * catches the rest.
  */
-const MANUAL_CHARGE_CEILING_CENTS = 500_000; // $5,000
 /** Nothing this business does is a single $20,000 card charge. */
 const ABSOLUTE_CHARGE_CEILING_CENTS = 2_000_000;
 
-function assertChargeableAmount(actor: Actor, amountCents: number) {
+function assertChargeableAmount(_actor: Actor, amountCents: number) {
   if (!Number.isInteger(amountCents) || amountCents <= 0) {
     throw new Error("Enter a valid amount to charge");
   }
   if (amountCents > ABSOLUTE_CHARGE_CEILING_CENTS) {
     throw new Error(
       `$${(amountCents / 100).toLocaleString("en-US")} is beyond anything this business charges to a card. If it is genuinely owed, take it another way — do not split it into smaller charges.`
-    );
-  }
-  if (amountCents > MANUAL_CHARGE_CEILING_CENTS && !actor.isOwner) {
-    throw new Error(
-      `$${(amountCents / 100).toLocaleString("en-US")} is over the $${(MANUAL_CHARGE_CEILING_CENTS / 100).toLocaleString("en-US")} limit for a single charge. An owner can take it — do not split it into smaller charges.`
     );
   }
 }

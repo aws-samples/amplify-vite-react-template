@@ -372,7 +372,7 @@ describe("regulated assignment", () => {
             routeOrder: 1,
             scheduledDate: "2026-07-20",
           },
-          ["OFFICE"]
+          ["OWNER"]
         )
       ).rejects.toThrow(/GOOGLE_ROUTES_API_KEY/);
       expect(jobs[0].status).toBe("UNSCHEDULED");
@@ -397,7 +397,7 @@ describe("regulated assignment", () => {
           routeOrder: 1,
           scheduledDate: "2026-07-20",
         },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/license number/i);
     expect(jobs[0].status).toBe("UNSCHEDULED");
@@ -417,7 +417,7 @@ describe("regulated assignment", () => {
         routeOrder: 1,
         scheduledDate: "2026-07-20",
       },
-      ["OFFICE"]
+      ["OWNER"]
     );
 
     expect(jobs[0]).toMatchObject({
@@ -464,7 +464,7 @@ describe("regulated assignment", () => {
         routeOrder: 1,
         scheduledDate: "2026-07-20",
       },
-      ["OFFICE"]
+      ["OWNER"]
     );
 
     expect(jobs[0]).toMatchObject({
@@ -504,7 +504,7 @@ describe("regulated assignment", () => {
           routeOrder: 1,
           scheduledDate: "2026-07-20",
         },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/deliverable service address.*street.*ZIP/is);
     // Never dispatched: the stop stays in the unscheduled pool, unrouted.
@@ -531,7 +531,7 @@ describe("regulated assignment", () => {
           routeOrder: 1,
           scheduledDate: "2026-07-20",
         },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/deliverable service address/i);
   });
@@ -549,7 +549,7 @@ describe("dispatch packet capture (GL-12)", () => {
           serviceType: "General pest",
           scheduledDate: "2026-07-25",
         },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/can't be dispatched yet.*ZIP/is);
   });
@@ -566,7 +566,7 @@ describe("dispatch packet capture (GL-12)", () => {
         prepConfirmed: true,
         paymentExpectation: "COLLECT_NOTHING",
       },
-      ["OFFICE"]
+      ["OWNER"]
     )) as { jobId: string };
 
     const created = jobs.find((j) => j.id === res.jobId)!;
@@ -587,7 +587,7 @@ describe("dispatch packet capture (GL-12)", () => {
         serviceType: "General pest",
         paymentExpectation: "COLLECT_ON_SITE",
       },
-      ["OFFICE"]
+      ["OWNER"]
     )) as { jobId: string };
 
     const created = jobs.find((j) => j.id === res.jobId)!;
@@ -605,7 +605,7 @@ describe("dispatch packet capture (GL-12)", () => {
         hazardNotes: "Wasp-allergic occupant",
         paymentExpectation: "DUE_THROUGH_OFFICE",
       },
-      ["OFFICE"]
+      ["OWNER"]
     );
 
     expect(jobs[0]).toMatchObject({
@@ -618,7 +618,7 @@ describe("dispatch packet capture (GL-12)", () => {
     jobs[0].status = "COMPLETED";
 
     await expect(
-      call("updateJobPacket", { jobId: "j1", hazardNotes: "too late" }, ["OFFICE"])
+      call("updateJobPacket", { jobId: "j1", hazardNotes: "too late" }, ["OWNER"])
     ).rejects.toThrow(/closed|record/i);
   });
 });
@@ -1428,7 +1428,7 @@ describe("issued reports are corrected by append-only amendments", () => {
     const res = (await call(
       "amendServiceReport",
       { reportId: "rep_1", reason: "Missed two treated areas", changes: CHANGES },
-      ["OFFICE"]
+      ["OWNER"]
     )) as { amendmentId: string; deliveryStatus: string };
 
     expect(amendments).toHaveLength(1);
@@ -1452,7 +1452,7 @@ describe("issued reports are corrected by append-only amendments", () => {
     await call(
       "amendServiceReport",
       { reportId: "rep_1", reason: "Typo in areas", changes: CHANGES },
-      ["OFFICE"]
+      ["OWNER"]
     );
 
     // The original is preserved exactly — an amendment appends, it does not edit.
@@ -1470,7 +1470,7 @@ describe("issued reports are corrected by append-only amendments", () => {
       call(
         "amendServiceReport",
         { reportId: "rep_1", reason: "x", changes: CHANGES },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/only an issued report|draft/i);
     expect(amendments).toHaveLength(0);
@@ -1483,7 +1483,7 @@ describe("issued reports are corrected by append-only amendments", () => {
       call(
         "amendServiceReport",
         { reportId: "rep_1", reason: "   ", changes: CHANGES },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/reason/i);
     expect(amendments).toHaveLength(0);
@@ -1500,20 +1500,20 @@ describe("issued reports are corrected by append-only amendments", () => {
           reason: "Fixing something",
           changes: JSON.stringify([{ label: "Areas treated", from: "Kitchen", to: "  " }]),
         },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/corrected fact|what changed/i);
     expect(amendments).toHaveLength(0);
   });
 
-  it("a technician cannot issue an amendment — that is the office's to do", async () => {
+  it("a technician cannot issue an amendment — that is the owner's to do", async () => {
     reports.push(finalizedReport());
 
     await expect(
       call("amendServiceReport", { reportId: "rep_1", reason: "x", changes: CHANGES }, [
         "TECH",
       ])
-    ).rejects.toThrow(/office role required/i);
+    ).rejects.toThrow(/owner role required/i);
     expect(amendments).toHaveLength(0);
   });
 
@@ -1524,7 +1524,7 @@ describe("issued reports are corrected by append-only amendments", () => {
     const res = (await call(
       "amendServiceReport",
       { reportId: "rep_1", reason: "Correcting the rate", changes: CHANGES },
-      ["OFFICE"]
+      ["OWNER"]
     )) as { amendmentId: string; deliveryStatus: string };
 
     expect(res.deliveryStatus).toBe("NO_EMAIL");
@@ -1541,7 +1541,7 @@ describe("issued reports are corrected by append-only amendments", () => {
     await call(
       "amendServiceReport",
       { reportId: "rep_1", reason: "Correcting the areas", changes: CHANGES },
-      ["OFFICE"],
+      ["OWNER"],
       { name: "Priya Okafor", email: "priya@x.com" }
     );
 
@@ -1558,7 +1558,7 @@ describe("issued reports are corrected by append-only amendments", () => {
     await call(
       "amendServiceReport",
       { reportId: "rep_1", reason: "Correcting the areas", changes: CHANGES },
-      ["OFFICE"]
+      ["OWNER"]
     );
 
     // No name claim on the token, so the document names the issuer by email —
@@ -1574,10 +1574,10 @@ describe("issued reports are corrected by append-only amendments", () => {
       changes: CHANGES,
     };
 
-    const first = (await call("amendServiceReport", args, ["OFFICE"])) as {
+    const first = (await call("amendServiceReport", args, ["OWNER"])) as {
       amendmentId: string;
     };
-    const again = (await call("amendServiceReport", args, ["OFFICE"])) as {
+    const again = (await call("amendServiceReport", args, ["OWNER"])) as {
       amendmentId: string;
       alreadyIssued: boolean;
     };
@@ -1597,12 +1597,12 @@ describe("issued reports are corrected by append-only amendments", () => {
     };
     vi.mocked(sendEmail).mockResolvedValueOnce(false);
 
-    const first = (await call("amendServiceReport", args, ["OFFICE"])) as {
+    const first = (await call("amendServiceReport", args, ["OWNER"])) as {
       deliveryStatus: string;
     };
     expect(first.deliveryStatus).toBe("FAILED");
 
-    const retry = (await call("amendServiceReport", args, ["OFFICE"])) as {
+    const retry = (await call("amendServiceReport", args, ["OWNER"])) as {
       deliveryStatus: string;
     };
 
@@ -1617,7 +1617,7 @@ describe("office completion is for administrative job types only", () => {
   it("refuses to complete field/pesticide work from the office — that needs a finalized report", async () => {
     // jobs[0] is "General pest": field work. No administrative type is defined,
     // so the office cannot complete it; the technician's report is the only path.
-    await expect(call("completeJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow(
+    await expect(call("completeJob", { jobId: "j1" }, ["OWNER"])).rejects.toThrow(
       /finalized service report|administrative job types/i
     );
     expect(jobs[0].status).toBe("IN_PROGRESS"); // untouched — no COMPLETED, no billing
@@ -1628,7 +1628,7 @@ describe("office completion is for administrative job types only", () => {
     const { scheduleNextRecurringVisit } = await import("../shared/recurring");
     vi.mocked(scheduleNextRecurringVisit).mockClear(); // earlier finalize tests called it
 
-    await expect(call("completeJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow();
+    await expect(call("completeJob", { jobId: "j1" }, ["OWNER"])).rejects.toThrow();
 
     expect(scheduleNextRecurringVisit).not.toHaveBeenCalled();
   });
@@ -1661,7 +1661,7 @@ describe("terminal visits are immutable — rebooking makes a new linked attempt
       call(
         "updateJobSchedule",
         { jobId: "j1", operation: "ASSIGN", technicianId: "t1", routeId: "r1", routeOrder: 1, scheduledDate: "2026-07-25" },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/terminal record|rebook/i);
 
@@ -1679,7 +1679,7 @@ describe("terminal visits are immutable — rebooking makes a new linked attempt
     jobs = [{ id: "j1", customerId: "c1", type: "ONE_TIME", serviceType: "General pest", status: "CANCELED", routeId: "r1", technicianId: "t1" }];
 
     await expect(
-      call("updateJobSchedule", { jobId: "j1", operation: "UNASSIGN" }, ["OFFICE"])
+      call("updateJobSchedule", { jobId: "j1", operation: "UNASSIGN" }, ["OWNER"])
     ).rejects.toThrow(/terminal record|rebook/i);
     expect(jobs[0].status).toBe("CANCELED");
   });
@@ -1687,7 +1687,7 @@ describe("terminal visits are immutable — rebooking makes a new linked attempt
   it("rebooks a no-access visit as a NEW unscheduled job linked to the original", async () => {
     jobs = [noAccessJob()];
 
-    const res = (await call("rebookJob", { jobId: "j1" }, ["OFFICE"])) as {
+    const res = (await call("rebookJob", { jobId: "j1" }, ["OWNER"])) as {
       jobId: string;
       rebookedFromJobId: string;
     };
@@ -1712,7 +1712,7 @@ describe("terminal visits are immutable — rebooking makes a new linked attempt
 
     // A retried click/Lambda invocation returns the same new attempt instead
     // of quietly putting two visits into the scheduling pool.
-    const retry = (await call("rebookJob", { jobId: "j1" }, ["OFFICE"])) as {
+    const retry = (await call("rebookJob", { jobId: "j1" }, ["OWNER"])) as {
       jobId: string;
       alreadyRebooked: boolean;
     };
@@ -1723,7 +1723,7 @@ describe("terminal visits are immutable — rebooking makes a new linked attempt
   it("refuses to rebook a completed visit — a finished visit is not retried", async () => {
     jobs = [{ id: "j1", customerId: "c1", type: "ONE_TIME", serviceType: "General pest", status: "COMPLETED" }];
 
-    await expect(call("rebookJob", { jobId: "j1" }, ["OFFICE"])).rejects.toThrow(
+    await expect(call("rebookJob", { jobId: "j1" }, ["OWNER"])).rejects.toThrow(
       /terminal outcome/i
     );
     expect(jobs).toHaveLength(1);
@@ -1930,7 +1930,7 @@ describe("GL-12 — the honest one-tap exits and the versioned packet", () => {
     await call(
       "updateJobPacket",
       { jobId: "j1", hazardNotes: "Aggressive dog on site" },
-      ["OFFICE"]
+      ["OWNER"]
     );
     expect(jobs[0].packetVersion).toBe(2);
     expect(packetEvents).toHaveLength(1);
@@ -1958,7 +1958,7 @@ describe("GL-12 — the honest one-tap exits and the versioned packet", () => {
       call(
         "updateJobPacket",
         { jobId: "j1", hazardNotes: "New hazard mid-visit" },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/manager reason/i);
     await call(
@@ -1968,7 +1968,7 @@ describe("GL-12 — the honest one-tap exits and the versioned packet", () => {
         hazardNotes: "New hazard mid-visit",
         managerReason: "Customer reported a wasp allergy after start",
       },
-      ["OFFICE"]
+      ["OWNER"]
     );
     expect(jobs[0].packetVersion).toBe(2);
     expect(packetEvents[0].afterStart).toBe(true);
@@ -1997,7 +1997,7 @@ describe("GL-12 — the honest one-tap exits and the versioned packet", () => {
         routeOrder: 1,
         scheduledDate: "2026-07-20",
       },
-      ["OFFICE"]
+      ["OWNER"]
     );
     expect(jobs[0].dispatchDriveMinutes).toBe(37);
     expect(jobs[0].dispatchRouteCheckedAt).toBeTruthy();
@@ -2010,7 +2010,7 @@ describe("GL-01 — office jobs are controlled catalog selections", () => {
     const res = (await call(
       "createOfficeJob",
       { customerId: "c1", serviceType: "General pest control", serviceCode: "GENERAL_PEST" },
-      ["OFFICE"]
+      ["OWNER"]
     )) as { jobId: string };
 
     const created = jobs.find((j) => j.id === res.jobId)!;
@@ -2023,7 +2023,7 @@ describe("GL-01 — office jobs are controlled catalog selections", () => {
     const res = (await call(
       "createOfficeJob",
       { customerId: "c1", serviceType: "General Pest Treatment" },
-      ["OFFICE"]
+      ["OWNER"]
     )) as { jobId: string };
 
     const created = jobs.find((j) => j.id === res.jobId)!;
@@ -2035,7 +2035,7 @@ describe("GL-01 — office jobs are controlled catalog selections", () => {
       call(
         "createOfficeJob",
         { customerId: "c1", serviceType: "Whatever", serviceCode: "SNAKE_CHARMING" },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/Unknown catalog service/);
   });
@@ -2046,7 +2046,7 @@ describe("GL-01 — office jobs are controlled catalog selections", () => {
       call(
         "createOfficeJob",
         { customerId: "c1", serviceType: "attic insulation restoration" },
-        ["OFFICE"]
+        ["OWNER"]
       )
     ).rejects.toThrow(/doesn't match a catalog service/);
     expect(jobs).toHaveLength(before);
@@ -2061,7 +2061,7 @@ describe("GL-01 — office jobs are controlled catalog selections", () => {
         serviceType: "attic insulation restoration",
         serviceCode: "NOT_IN_CATALOG",
       },
-      ["OFFICE"]
+      ["OWNER"]
     )) as { catalogDecisionOpened?: boolean };
 
     expect(res.catalogDecisionOpened).toBe(true);
@@ -2216,7 +2216,7 @@ describe("GL-11 — portal requests are durable cases, never untracked calls", (
     await call(
       "resolvePortalRequest",
       { portalRequestId: res.reference, note: "Yes — April through October." },
-      ["OFFICE"]
+      ["OWNER"]
     );
 
     expect(portalRequests.get(res.reference)).toMatchObject({

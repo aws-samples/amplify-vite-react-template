@@ -207,7 +207,7 @@ const FUNNEL = "https://staging.d26qpsjewk0bee.amplifyapp.com/quote";
 const priceLead = async (args: Record<string, unknown>) =>
   (await handler({
     arguments: args,
-    identity: { sub: "u1", groups: ["OFFICE"] },
+    identity: { sub: "u1", groups: ["OWNER"] },
     fieldName: "priceLead",
   } as never)) as Record<string, unknown>;
 
@@ -835,7 +835,7 @@ describe("explicit staff market research — exactly one existing rate", () => {
       arguments: args,
       identity: {
         sub: "u1",
-        groups: ["OFFICE"],
+        groups: ["OWNER"],
         claims: { email: "office@example.com" },
       },
       fieldName: "requestPricingResearch",
@@ -1029,14 +1029,14 @@ describe("GL-16 — the one reasoned, authorized catalog rollback", () => {
     expect(row.rollbackAppliedAt).toBeTruthy();
   });
 
-  it("price authority stays role-controlled — OFFICE cannot roll back or clear", async () => {
+  it("price authority stays role-controlled — TECH cannot roll back or clear", async () => {
     await expect(
       rollback(
         { versionId: "cv-good", reasonCode: "OTHER", note: "x" },
-        ["OFFICE"]
+        ["TECH"]
       )
     ).rejects.toThrow(/Owner role required/);
-    await expect(clear(["OFFICE"])).rejects.toThrow(/Owner role required/);
+    await expect(clear(["TECH"])).rejects.toThrow(/Owner role required/);
     expect(controlRows.has("catalog-rollback")).toBe(false);
   });
 

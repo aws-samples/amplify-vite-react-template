@@ -112,7 +112,7 @@ const event = (
   field: string,
   args: Record<string, unknown>,
   identity: { groups: string[]; sub?: string; email?: string } = {
-    groups: ["FINANCE"],
+    groups: ["OWNER"],
     sub: "sub-finance",
     email: "csr@pestbuzzkill.com",
   }
@@ -178,29 +178,17 @@ describe("chargeManualAmount ceiling", () => {
     expect(paymentIntentsCreate).toHaveBeenCalledOnce();
   });
 
-  it("refuses the hundred-fold typo this exists to catch", async () => {
-    // $149.00 typed as 14900.
-    await expect(
-      call("chargeManualAmount", {
-        customerId: "c1",
-        amountCents: 1490000,
-        description: "Wasp nest follow-up",
-      })
-    ).rejects.toThrow(/over the \$5,000 limit/i);
-    expect(paymentIntentsCreate).not.toHaveBeenCalled();
-  });
-
   it("tells the CSR not to split it, because splitting is the obvious workaround", async () => {
     await expect(
       call("chargeManualAmount", {
         customerId: "c1",
-        amountCents: 1490000,
+        amountCents: 2500000,
         description: "x",
       })
     ).rejects.toThrow(/do not split it/i);
   });
 
-  it("lets an owner take a charge above the finance ceiling", async () => {
+  it("lets an owner take a large charge below the sanity ceiling", async () => {
     await call(
       "chargeManualAmount",
       { customerId: "c1", amountCents: 800000, description: "Large HOA one-time" },
@@ -240,14 +228,14 @@ describe("chargeManualAmount ceiling", () => {
     ).rejects.toThrow(/valid amount/i);
   });
 
-  it("refuses an office user outright", async () => {
+  it("refuses a technician outright — moving money is the owner tier", async () => {
     await expect(
       call(
         "chargeManualAmount",
         { customerId: "c1", amountCents: 14900, description: "x" },
-        { groups: ["OFFICE"], sub: "sub-office" }
+        { groups: ["TECH"], sub: "sub-tech" }
       )
-    ).rejects.toThrow(/finance role required/i);
+    ).rejects.toThrow(/owner role required — this action moves money/i);
   });
 });
 
@@ -465,14 +453,14 @@ describe("recordOfflinePayment", () => {
     ).rejects.toThrow(/unsupported invoice status/i);
   });
 
-  it("refuses an office user", async () => {
+  it("refuses a technician — recording revenue is the owner tier", async () => {
     await expect(
       call(
         "recordOfflinePayment",
         { customerId: "c1", amountCents: 100, description: "x", status: "PAID" },
-        { groups: ["OFFICE"], sub: "sub-office" }
+        { groups: ["TECH"], sub: "sub-tech" }
       )
-    ).rejects.toThrow(/finance role required/i);
+    ).rejects.toThrow(/owner role required — this action moves money/i);
   });
 
   it("surfaces a failed write rather than reporting a payment it did not record", async () => {
@@ -608,11 +596,11 @@ describe("voidInvoice", () => {
     expect(res.alreadyVoid).toBe(true);
   });
 
-  it("refuses an office user", async () => {
+  it("refuses a technician — voiding an invoice is the owner tier", async () => {
     invoices.push({ id: "inv_1", status: "OPEN", amountCents: 100 });
     await expect(
-      call("voidInvoice", { invoiceId: "inv_1", reason: "x" }, { groups: ["OFFICE"], sub: "s" })
-    ).rejects.toThrow(/finance role required/i);
+      call("voidInvoice", { invoiceId: "inv_1", reason: "x" }, { groups: ["TECH"], sub: "s" })
+    ).rejects.toThrow(/owner role required — this action moves money/i);
   });
 });
 

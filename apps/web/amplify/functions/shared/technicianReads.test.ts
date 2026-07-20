@@ -97,7 +97,8 @@ const identity = (sub: string | null, groups: string[]): AppSyncIdentity =>
 
 const TECH_A = identity("sub-a", ["TECH"]);
 const TECH_B = identity("sub-b", ["TECH"]);
-const OFFICE = identity("sub-office", ["OFFICE"]);
+// Office work is the OWNER tier now (OFFICE/FINANCE consolidated into OWNER).
+const OFFICE = identity("sub-office", ["OWNER"]);
 const UNLINKED = identity("sub-nobody", ["TECH"]);
 
 beforeEach(() => {

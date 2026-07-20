@@ -436,7 +436,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "resolvePortalRequest": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       const rpArgs = event.arguments as unknown as {
         portalRequestId?: string;
         note?: string;
@@ -448,12 +448,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "resendEmailLog": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       const reArgs = event.arguments as unknown as { emailLogId?: string };
       return resendEmailLogExact(String(reArgs.emailLogId ?? ""));
     }
     case "scheduleCallback": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       const scArgs = event.arguments as unknown as {
         callbackRequestId?: string;
         scheduledDate?: string;
@@ -502,7 +502,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "amendServiceReport": {
       // The office issues amendments; a technician asks the office. No role
       // overwrites the issued record, so this only ever appends a new one.
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return amendServiceReport(event.arguments.reportId!, {
         reason: event.arguments.reason,
         changes: event.arguments.changes,
@@ -512,7 +512,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "recordReportDelivery": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return recordReportDelivery({
         reportId: event.arguments.reportId,
         amendmentId: event.arguments.amendmentId,
@@ -522,25 +522,25 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "saveProduct": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return saveProduct(event.arguments);
     }
     case "createOfficeJob": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return createOfficeJob(event.arguments);
     }
     case "updateJobSchedule": {
       // GL-13: the actor and controlled reason travel with the change into the
       // immutable assignment audit.
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return updateJobSchedule(event.identity, event.arguments);
     }
     case "updateJobPacket": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return updateJobPacket(event.identity, event.arguments);
     }
     case "rebookJob": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return rebookJob(
         event.arguments.jobId!,
         callerSub(event.identity),
@@ -579,7 +579,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "recordNoticeAlternateDelivery": {
       if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office role required");
+        throw new Error("Owner role required");
       }
       const altArgs = event.arguments as unknown as {
         relatedId?: string;
@@ -597,7 +597,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "capacityDayFacts": {
       if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office role required");
+        throw new Error("Owner role required");
       }
       const date = String(event.arguments.date ?? "");
       const [eligibility, slots, claims] = await Promise.all([
@@ -678,7 +678,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "sendCustomerEmail": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return sendCustomerEmail(
         event.arguments.customerId!,
         event.arguments.kind!,
@@ -688,7 +688,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "prepareLeadQuote": {
-      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
       return prepareLeadQuote(event.arguments.customerId!);
     }
     default:

@@ -58,8 +58,10 @@ export function callerName(
 }
 
 /**
- * OWNER is a superset of every staff role, so an owner never needs a second
- * login to do office or finance work.
+ * The staff roles were consolidated to OWNER + TECH: OFFICE and FINANCE folded
+ * into OWNER, so all office and money-movement work is now the owner tier.
+ * callerIsOffice/callerIsFinance are kept as names for the dozens of call sites
+ * that read as "office work" or "finance work" — both now mean OWNER.
  */
 export function callerIsOwner(
   identity: AppSyncIdentity | undefined | null
@@ -67,28 +69,28 @@ export function callerIsOwner(
   return callerGroups(identity).includes("OWNER");
 }
 
+/** Day-to-day office work — now the owner tier (OFFICE folded into OWNER). */
 export function callerIsOffice(
   identity: AppSyncIdentity | undefined | null
 ): boolean {
-  const g = callerGroups(identity);
-  return g.includes("OFFICE") || g.includes("OWNER");
+  return callerIsOwner(identity);
 }
 
-/** May move money: charges, subscription start/stop, invoice voids. */
+/** May move money: charges, subscription start/stop, invoice voids. Now the
+ *  owner tier (FINANCE folded into OWNER). */
 export function callerIsFinance(
   identity: AppSyncIdentity | undefined | null
 ): boolean {
-  const g = callerGroups(identity);
-  return g.includes("FINANCE") || g.includes("OWNER");
+  return callerIsOwner(identity);
 }
 
 export function assertOffice(
   identity: AppSyncIdentity | undefined | null
 ): void {
-  if (!callerIsOffice(identity)) throw new Error("Office role required");
+  if (!callerIsOffice(identity)) throw new Error("Owner role required");
 }
 
-const STAFF_GROUPS = ["OWNER", "OFFICE", "FINANCE", "TECH"];
+const STAFF_GROUPS = ["OWNER", "TECH"];
 
 /** Any internal staff member, as opposed to a portal customer. */
 export function isStaff(groups: string[]): boolean {
@@ -100,7 +102,7 @@ export function assertFinance(
 ): void {
   if (!callerIsFinance(identity)) {
     throw new Error(
-      "Finance role required — this action moves money. Ask an owner, or someone with the finance role."
+      "Owner role required — this action moves money. Ask an owner."
     );
   }
 }
@@ -111,17 +113,13 @@ export function assertOwner(
   if (!callerIsOwner(identity)) throw new Error("Owner role required");
 }
 
-/** Office staff, or the portal user whose dynamic cus-<id> group matches. */
+/** An owner (staff), or the portal user whose dynamic cus-<id> group matches. */
 export function assertCanActForCustomer(
   identity: AppSyncIdentity | undefined | null,
   customerId: string
 ): void {
   const groups = callerGroups(identity);
-  if (
-    groups.includes("OFFICE") ||
-    groups.includes("OWNER") ||
-    groups.includes(cusGroup(customerId))
-  ) {
+  if (groups.includes("OWNER") || groups.includes(cusGroup(customerId))) {
     return;
   }
   throw new Error("Not authorized for this customer");

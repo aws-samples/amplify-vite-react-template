@@ -18,10 +18,9 @@ describe("normalizeRoles", () => {
 });
 
 describe("staffRolesIn / isStaffRole", () => {
-  it("keeps only staff roles in canonical order", () => {
+  it("keeps only staff roles in canonical order (legacy OFFICE dropped)", () => {
     expect(staffRolesIn(["TECH", "CUSTOMER", "OWNER", "OFFICE"])).toEqual([
       "OWNER",
-      "OFFICE",
       "TECH",
     ]);
   });
@@ -37,7 +36,7 @@ describe("assertValidRoleSet", () => {
   });
   it("rejects an unknown role and names the valid ones", () => {
     expect(() => assertValidRoleSet(["OFFICE", "ADMIN"])).toThrow(/Unknown role/);
-    expect(() => assertValidRoleSet(["SUPERUSER"])).toThrow(/OWNER, OFFICE, FINANCE, TECH/);
+    expect(() => assertValidRoleSet(["SUPERUSER"])).toThrow(/OWNER, TECH/);
   });
 });
 

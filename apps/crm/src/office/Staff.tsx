@@ -43,34 +43,35 @@ import {
  */
 
 /**
- * Roles are additive in Cognito, so each choice maps to the group list it
- * grants. OWNER is a superset and never needs pairing with OFFICE/FINANCE.
- * Shared by the invite and change-role forms so both speak the same language.
+ * Two staff roles, consolidated from the old office/finance/manager lattice:
+ *   Owner      — everything (office work, money, invites, approvals)
+ *   Technician — field only (routes, jobs, service reports)
+ *   Owner + technician — a working owner who also runs routes (both groups)
+ * Each choice maps to the group list it grants. Shared by the invite and
+ * change-role forms so both speak the same language.
  */
 const ROLE_CHOICES = {
-  OFFICE: { label: "Office — leads, pricing, scheduling", groups: ["OFFICE"] },
-  FINANCE: { label: "Finance — charges, refunds, invoices", groups: ["FINANCE"] },
-  OFFICE_FINANCE: { label: "Office + finance", groups: ["OFFICE", "FINANCE"] },
-  TECH: { label: "Technician", groups: ["TECH"] },
-  OFFICE_TECH: { label: "Office + technician", groups: ["OFFICE", "TECH"] },
   OWNER: {
-    label: "Owner — everything, incl. approvals and invites",
+    label: "Owner — everything, incl. billing, approvals and invites",
     groups: ["OWNER"],
+  },
+  TECH: { label: "Technician — field work only", groups: ["TECH"] },
+  OWNER_TECH: {
+    label: "Owner + technician — full access and runs routes",
+    groups: ["OWNER", "TECH"],
   },
 } satisfies Record<string, { label: string; groups: string[] }>;
 
 type RoleChoice = keyof typeof ROLE_CHOICES;
 
 /** Best-fit choice key for an existing role set, so the change-role form opens
- *  on what the person already is. */
+ *  on what the person already is. Legacy OFFICE/FINANCE members read as owners. */
 function choiceForRoles(roles: string[]): RoleChoice {
   const set = new Set(roles);
-  if (set.has("OWNER")) return "OWNER";
-  if (set.has("OFFICE") && set.has("TECH")) return "OFFICE_TECH";
-  if (set.has("OFFICE") && set.has("FINANCE")) return "OFFICE_FINANCE";
+  const isOwner = set.has("OWNER") || set.has("OFFICE") || set.has("FINANCE");
+  if (isOwner && set.has("TECH")) return "OWNER_TECH";
   if (set.has("TECH")) return "TECH";
-  if (set.has("FINANCE")) return "FINANCE";
-  return "OFFICE";
+  return "OWNER";
 }
 
 /** Human-friendly label for a controlled reason code (DEPARTURE_VOLUNTARY →
@@ -674,7 +675,7 @@ function StaffActions({
 function InviteForm({ onDone }: { onDone: () => Promise<void> }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<RoleChoice>("OFFICE");
+  const [role, setRole] = useState<RoleChoice>("OWNER");
   const [techs, setTechs] = useState<Technician[]>([]);
   const [technicianId, setTechnicianId] = useState("");
   const [busy, setBusy] = useState(false);

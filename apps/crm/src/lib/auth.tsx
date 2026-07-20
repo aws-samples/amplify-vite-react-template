@@ -9,11 +9,13 @@ import {
 import { fetchAuthSession } from "aws-amplify/auth";
 
 export type Roles = {
-  /** Everything, including approvals and staff invites. Superset of the rest. */
+  /** Every staff capability: office work, money movement, invites, role
+   *  changes. The consolidated staff seat (OFFICE + FINANCE folded in). */
   owner: boolean;
-  /** Day-to-day: leads, quotes, scheduling, plans. True for owners too. */
+  /** Day-to-day office work. Alias of `owner` now that OFFICE folded into it —
+   *  kept so the many `roles.office` UI branches read as intent. */
   office: boolean;
-  /** May move money: charges, subscriptions, invoice voids. True for owners. */
+  /** May move money. Alias of `owner` now that FINANCE folded into it. */
   finance: boolean;
   tech: boolean;
   customer: boolean;
@@ -46,14 +48,14 @@ export function RolesProvider({ children }: { children: ReactNode }) {
       const payload = session.tokens?.accessToken.payload;
       const groups = (payload?.["cognito:groups"] as string[] | undefined) ?? [];
       const idPayload = session.tokens?.idToken?.payload;
-      // OWNER is a superset: an owner should never be told they lack a role
-      // they implicitly hold, so office/finance are true for owners too. This
-      // mirrors callerIsOffice/callerIsFinance in amplify/functions/shared/authz.
+      // Staff roles are consolidated to OWNER + TECH. office/finance are aliases
+      // of owner now that OFFICE/FINANCE folded into it — this mirrors
+      // callerIsOffice/callerIsFinance in amplify/functions/shared/authz.
       const owner = groups.includes("OWNER");
       setState({
         owner,
-        office: owner || groups.includes("OFFICE"),
-        finance: owner || groups.includes("FINANCE"),
+        office: owner,
+        finance: owner,
         tech: groups.includes("TECH"),
         customer: groups.includes("CUSTOMER"),
         groups,

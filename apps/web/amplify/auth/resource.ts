@@ -11,26 +11,28 @@ import {
 /**
  * Shared auth for the marketing site and the CRM.
  *
- * Static groups map to BuzzKill roles:
- *   OWNER    — everything, including approvals and staff invites
- *   OFFICE   — day-to-day: leads, quotes, scheduling, plans. May NOT move
- *              money or invite staff.
- *   FINANCE  — money movement: charges, refunds, invoice voids
- *   TECH     — technicians (routes, jobs, service reports)
- *   CUSTOMER — portal users (their own records + their customer-group's)
+ * Static groups map to BuzzKill roles. The staff side is deliberately just two
+ * tiers — a small business does not need a role lattice:
+ *   OWNER    — every staff capability: leads, quotes, scheduling, plans, and
+ *              money movement (charges, refunds, invoice voids), plus staff
+ *              invites and role changes. This is the office/finance/manager
+ *              seat; there is no separate junior staff role.
+ *   TECH     — technicians (routes, jobs, service reports). Field-only: the
+ *              schema masks sensitive customer/pricing fields from TECH tokens.
+ *   CUSTOMER — portal users (their own records + their customer-group's). Not a
+ *              staff seat; provisioned automatically when a booking converts.
  *
- * Roles are additive: a user who does office work and handles billing is a
- * member of both OFFICE and FINANCE. OWNER is a superset — every rule that
- * admits OFFICE or FINANCE also admits OWNER, so an owner never needs a
- * second login. "Both" office+tech users are simply members of both.
- *
- * Separation of duties: a manual charge above CHARGE_APPROVAL_THRESHOLD_CENTS
- * (crm-billing) requires an OWNER approver who is not the initiator. Approval
- * and role changes are recorded as AuditEvents.
+ * History: OWNER was once a superset of two junior staff roles (OFFICE and
+ * FINANCE). Those were consolidated into OWNER — everything that used to admit
+ * OFFICE or FINANCE now simply means "staff owner." A user is a member of at
+ * most one staff role (OWNER or TECH); a working owner-technician is in both.
  *
  * DEPLOY STEP: after this ships, add the owner's Cognito user to the OWNER
  * group by hand. Nothing else can invite staff, so skipping this locks
- * everyone out of provisioning new logins.
+ * everyone out of provisioning new logins. MIGRATION: any existing OFFICE or
+ * FINANCE member must be moved to OWNER before this deploys — removing the two
+ * groups here deletes them, and a member left only in a deleted group loses
+ * staff access. See docs/role-consolidation-runbook.md.
  *
  * Row-level customer visibility uses *dynamic* Cognito groups created at
  * runtime by the crm-admin function (`cus-<customerId>`, `grp-<groupId>`)
@@ -49,11 +51,11 @@ export const auth = defineAuth({
     "custom:loginTokenExp": { dataType: "String", mutable: true },
     // GL-14: last successful sign-in, stamped by the post-auth trigger. Cognito
     // does not record a last-login natively, so the staff roster reads it here —
-    // the one place that covers every staff role (OWNER/OFFICE/FINANCE/TECH)
-    // without inventing a staff-profile table just to hold one timestamp.
+    // the one place that covers every staff role (OWNER/TECH) without inventing
+    // a staff-profile table just to hold one timestamp.
     "custom:lastLoginAt": { dataType: "String", mutable: true },
   },
-  groups: ["OWNER", "OFFICE", "FINANCE", "TECH", "CUSTOMER"],
+  groups: ["OWNER", "TECH", "CUSTOMER"],
   triggers: {
     postAuthentication: postAuth,
     // NOTE: the pre-token-generation trigger is wired in backend.ts, not here.

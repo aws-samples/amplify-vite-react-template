@@ -6,9 +6,10 @@
  * allowed.
  */
 
-/** The internal staff roles, in canonical display order. CUSTOMER is a portal
- *  role and is handled separately — it is never a "staff" role here. */
-export const STAFF_ROLES = ["OWNER", "OFFICE", "FINANCE", "TECH"] as const;
+/** The internal staff roles, in canonical display order. Consolidated to two:
+ *  OWNER (all office/finance/management work) and TECH (field). CUSTOMER is a
+ *  portal role and is handled separately — it is never a "staff" role here. */
+export const STAFF_ROLES = ["OWNER", "TECH"] as const;
 export type StaffRole = (typeof STAFF_ROLES)[number];
 
 export function isStaffRole(role: string): role is StaffRole {

@@ -531,7 +531,7 @@ describe("adminCreateUser — atomic technician linking (GL-14)", () => {
       call("adminCreateUser", {
         email: "office@buzzkill.com",
         name: "Office",
-        roles: ["OFFICE"],
+        roles: ["OWNER"],
         technicianId: "t1",
       })
     ).rejects.toThrow(/no TECH role/i);
@@ -567,19 +567,19 @@ describe("changeStaffRoles (GL-14)", () => {
       username: "dana@x.com",
       sub: "sub-dana",
       email: "dana@x.com",
-      groups: ["OFFICE"],
+      groups: ["TECH"],
     });
     const res = (await call("changeStaffRoles", {
       email: "dana@x.com",
-      roles: ["OFFICE", "FINANCE"],
+      roles: ["TECH", "OWNER"],
     })) as { added: string[]; removed: string[] };
 
-    expect(res.added).toEqual(["FINANCE"]);
+    expect(res.added).toEqual(["OWNER"]);
     expect(res.removed).toEqual([]);
     const added = sends
       .filter((s) => s.type === "AddToGroup")
       .map((s) => s.input.GroupName);
-    expect(added).toContain("FINANCE");
+    expect(added).toContain("OWNER");
   });
 
   it("refuses granting TECH to a login with no linked technician", async () => {
@@ -587,10 +587,10 @@ describe("changeStaffRoles (GL-14)", () => {
       username: "dana@x.com",
       sub: "sub-dana",
       email: "dana@x.com",
-      groups: ["OFFICE"],
+      groups: ["OWNER"],
     });
     await expect(
-      call("changeStaffRoles", { email: "dana@x.com", roles: ["OFFICE", "TECH"] })
+      call("changeStaffRoles", { email: "dana@x.com", roles: ["OWNER", "TECH"] })
     ).rejects.toThrow(/isn't linked to a technician record/i);
   });
 
@@ -614,7 +614,7 @@ describe("changeStaffRoles (GL-14)", () => {
       groups: ["OWNER"],
     });
     await expect(
-      call("changeStaffRoles", { email: "solo@x.com", roles: ["OFFICE"] })
+      call("changeStaffRoles", { email: "solo@x.com", roles: ["TECH"] })
     ).rejects.toThrow(/last active owner/i);
   });
 
@@ -623,7 +623,7 @@ describe("changeStaffRoles (GL-14)", () => {
       username: "solo@x.com",
       sub: "sub-solo",
       email: "solo@x.com",
-      groups: ["OWNER"],
+      groups: ["OWNER", "TECH"],
     });
     pool.set("second@x.com", {
       username: "second@x.com",
@@ -633,7 +633,7 @@ describe("changeStaffRoles (GL-14)", () => {
     });
     const res = (await call("changeStaffRoles", {
       email: "solo@x.com",
-      roles: ["OFFICE"],
+      roles: ["TECH"],
     })) as { removed: string[] };
     expect(res.removed).toContain("OWNER");
   });
@@ -643,18 +643,18 @@ describe("changeStaffRoles (GL-14)", () => {
       username: "dana@x.com",
       sub: "sub-dana",
       email: "dana@x.com",
-      groups: ["OFFICE"],
+      groups: ["TECH"],
     });
 
     const res = (await call("changeStaffRoles", {
       email: "dana@x.com",
-      roles: ["OFFICE", "FINANCE"],
+      roles: ["TECH", "OWNER"],
       reason: "took over refunds",
     })) as { effectiveRoles: string[]; converged: boolean };
 
     // The end state is read back from Cognito, not assumed from the request.
     expect(res.converged).toBe(true);
-    expect(res.effectiveRoles.sort()).toEqual(["FINANCE", "OFFICE"]);
+    expect(res.effectiveRoles.sort()).toEqual(["OWNER", "TECH"]);
 
     expect(staffAccessEvents).toHaveLength(1);
     expect(staffAccessEvents[0]).toMatchObject({
@@ -662,10 +662,10 @@ describe("changeStaffRoles (GL-14)", () => {
       action: "CHANGE_ROLES",
       actorEmail: "owner@x.com",
       reason: "took over refunds",
-      priorRoles: "OFFICE",
+      priorRoles: "TECH",
       outcome: "COMPLETE",
     });
-    expect(staffAccessEvents[0].newRoles).toMatch(/FINANCE/);
+    expect(staffAccessEvents[0].newRoles).toMatch(/OWNER/);
   });
 });
 
@@ -675,7 +675,14 @@ describe("offboardStaff (GL-14)", () => {
       username: "finance@x.com",
       sub: "sub-fin",
       email: "finance@x.com",
-      groups: ["FINANCE", "OFFICE", "cus-c1"],
+      groups: ["OWNER", "TECH", "cus-c1"],
+    });
+    // A second owner so offboarding this owner isn't refused by the last-owner guard.
+    pool.set("owner@x.com", {
+      username: "owner@x.com",
+      sub: "owner-1",
+      email: "owner@x.com",
+      groups: ["OWNER"],
     });
     const res = (await call("offboardStaff", { email: "finance@x.com" })) as {
       loginDisabled: boolean;
@@ -688,8 +695,8 @@ describe("offboardStaff (GL-14)", () => {
     const removed = sends
       .filter((s) => s.type === "RemoveFromGroup")
       .map((s) => s.input.GroupName);
-    expect(removed).toEqual(expect.arrayContaining(["FINANCE", "OFFICE", "cus-c1"]));
-    expect(res.rolesRemoved.sort()).toEqual(["FINANCE", "OFFICE"]);
+    expect(removed).toEqual(expect.arrayContaining(["OWNER", "TECH", "cus-c1"]));
+    expect(res.rolesRemoved.sort()).toEqual(["OWNER", "TECH"]);
   });
 
   it("returns a linked technician's future work to the pool and flips them inactive", async () => {
@@ -801,7 +808,7 @@ describe("offboardStaff (GL-14)", () => {
       username: "finance@x.com",
       sub: "sub-fin",
       email: "finance@x.com",
-      groups: ["FINANCE", "OFFICE"],
+      groups: ["TECH"],
     });
 
     await call("offboardStaff", { email: "finance@x.com", reason: "left the company" });
@@ -864,19 +871,19 @@ describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back
       username: "dana@x.com",
       sub: "sub-dana",
       email: "dana@x.com",
-      groups: ["OFFICE"],
+      groups: ["TECH"],
     });
     await expect(
       call("changeStaffRoles", {
         email: "dana@x.com",
-        roles: ["OFFICE", "FINANCE"],
+        roles: ["TECH", "OWNER"],
         reasonCode: "",
       })
     ).rejects.toThrow(/reason is required/i);
     await expect(
       call("changeStaffRoles", {
         email: "dana@x.com",
-        roles: ["OFFICE", "FINANCE"],
+        roles: ["TECH", "OWNER"],
         reasonCode: "OTHER",
       })
     ).rejects.toThrow(/needs a short written note/i);
@@ -889,12 +896,12 @@ describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back
       username: "dana@x.com",
       sub: "sub-dana",
       email: "dana@x.com",
-      groups: ["OFFICE"],
+      groups: ["TECH"],
     });
     await expect(
       call("changeStaffRoles", {
         email: "dana@x.com",
-        roles: ["FINANCE"],
+        roles: ["OWNER"],
         reasonCode: "BECAUSE",
       })
     ).rejects.toThrow(/isn't a valid reason/i);
@@ -905,14 +912,14 @@ describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back
       username: "dana@x.com",
       sub: "sub-dana",
       email: "dana@x.com",
-      groups: ["OFFICE", "FINANCE"],
+      groups: ["OWNER", "TECH"],
     });
     const res = (await call("changeStaffRoles", {
       email: "dana@x.com",
-      roles: ["OFFICE"],
+      roles: ["OWNER"],
       reasonCode: "REDUCE_ACCESS",
     })) as { sessionsInvalidated: boolean; removed: string[] };
-    expect(res.removed).toEqual(["FINANCE"]);
+    expect(res.removed).toEqual(["TECH"]);
     expect(res.sessionsInvalidated).toBe(true);
     expect(sentTypes()).toContain("SignOut");
     expect(staffAccessEvents[0]).toMatchObject({
@@ -926,11 +933,11 @@ describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back
       username: "dana@x.com",
       sub: "sub-dana",
       email: "dana@x.com",
-      groups: ["OFFICE"],
+      groups: ["TECH"],
     });
     const res = (await call("changeStaffRoles", {
       email: "dana@x.com",
-      roles: ["OFFICE", "FINANCE"],
+      roles: ["TECH", "OWNER"],
       reasonCode: "PROMOTION",
     })) as { sessionsInvalidated: boolean };
     expect(res.sessionsInvalidated).toBe(false);
@@ -942,7 +949,7 @@ describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back
       username: "finance@x.com",
       sub: "sub-fin",
       email: "finance@x.com",
-      groups: ["FINANCE", "OFFICE"],
+      groups: ["TECH"],
     });
     await call("offboardStaff", { email: "finance@x.com", reasonCode: "DEPARTURE_VOLUNTARY" });
     const disableAt = timeline.indexOf("Disable");
@@ -1017,7 +1024,7 @@ describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back
       username: "finance@x.com",
       sub: "sub-fin",
       email: "finance@x.com",
-      groups: ["FINANCE"],
+      groups: ["TECH"],
     });
     await call("offboardStaff", {
       email: "finance@x.com",
@@ -1042,7 +1049,7 @@ describe("GL-14 hardening — reason, sessions, ordering, idempotency, read-back
       username: "finance@x.com",
       sub: "sub-fin",
       email: "finance@x.com",
-      groups: ["FINANCE"],
+      groups: ["TECH"],
     });
     staffEventCreateThrows = true;
     const res = (await call("offboardStaff", {
@@ -1314,7 +1321,7 @@ describe("GL-14 — the durable access-change command", () => {
       username: "finance@x.com",
       sub: "sub-fin",
       email: "finance@x.com",
-      groups: ["FINANCE"],
+      groups: ["TECH"],
     });
     pool.set("owner@x.com", {
       username: "owner@x.com",
@@ -1401,11 +1408,12 @@ describe("GL-14 — the durable access-change command", () => {
 
   it("a failed group op in a role change returns a truthful PARTIAL with a confirmed security case — never a raw throw", async () => {
     finLogin();
-    // FINANCE -> OFFICE: the remove of FINANCE will fail.
+    // OWNER+TECH -> OWNER: the remove of TECH will fail.
+    pool.get("finance@x.com")!.groups = ["OWNER", "TECH"];
     const send = sends; // silence lint unused
     void send;
     const origPool = pool.get("finance@x.com")!;
-    // Inject: RemoveFromGroup throws once for FINANCE.
+    // Inject: RemoveFromGroup throws once for TECH.
     const { CognitoIdentityProviderClient } = await import(
       "@aws-sdk/client-cognito-identity-provider"
     );
@@ -1414,7 +1422,7 @@ describe("GL-14 — the durable access-change command", () => {
     };
     const realSend = proto.send;
     proto.send = async function (c) {
-      if (c.__type === "RemoveFromGroup" && c.input.GroupName === "FINANCE") {
+      if (c.__type === "RemoveFromGroup" && c.input.GroupName === "TECH") {
         throw new Error("Cognito remove failed (injected)");
       }
       return realSend.call(this, c);
@@ -1422,7 +1430,7 @@ describe("GL-14 — the durable access-change command", () => {
     try {
       const res = (await call("changeStaffRoles", {
         email: "finance@x.com",
-        roles: ["OFFICE"],
+        roles: ["OWNER"],
         idempotencyKey: "partial-role-key",
       })) as {
         outcome: string;
@@ -1439,20 +1447,20 @@ describe("GL-14 — the durable access-change command", () => {
       expect(caseRows.length).toBeGreaterThan(0);
       // The read-back shows the REAL mixed role set (both roles present).
       expect(res.effectiveRoles).toEqual(
-        expect.arrayContaining(["OFFICE", "FINANCE"])
+        expect.arrayContaining(["OWNER", "TECH"])
       );
       expect(origPool.groups).toEqual(
-        expect.arrayContaining(["OFFICE", "FINANCE"])
+        expect.arrayContaining(["OWNER", "TECH"])
       );
       // Resume with the same key converges once the provider recovers.
       proto.send = realSend;
       const resumed = (await call("changeStaffRoles", {
         email: "finance@x.com",
-        roles: ["OFFICE"],
+        roles: ["OWNER"],
         idempotencyKey: "partial-role-key",
       })) as { outcome: string; effectiveRoles?: string[] };
       expect(resumed.outcome).toBe("COMPLETE");
-      expect(resumed.effectiveRoles).toEqual(["OFFICE"]);
+      expect(resumed.effectiveRoles).toEqual(["OWNER"]);
     } finally {
       proto.send = realSend;
     }

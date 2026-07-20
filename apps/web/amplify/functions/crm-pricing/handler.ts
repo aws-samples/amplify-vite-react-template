@@ -76,7 +76,7 @@ type Args = {
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
-  if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+  if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
   switch (opFieldName(event)) {
     case "priceLead":
       return priceLead(event.arguments);
@@ -187,7 +187,7 @@ async function requestPricingResearch(
       active: true,
       source: "MANUAL",
       researchRequestedAt: requestedAt,
-      researchRequestedBy: actor ?? "OFFICE",
+      researchRequestedBy: actor ?? "STAFF",
       researchRequestReason: requestReason,
       exhaustedAt: null,
       nextEligibleAt: null,
@@ -208,7 +208,7 @@ async function requestPricingResearch(
       active: true,
       failCount: 0,
       researchRequestedAt: requestedAt,
-      researchRequestedBy: actor ?? "OFFICE",
+      researchRequestedBy: actor ?? "STAFF",
       researchRequestReason: requestReason,
       notify: JSON.stringify([]),
     });

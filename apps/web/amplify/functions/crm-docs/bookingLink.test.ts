@@ -107,7 +107,7 @@ vi.mock("@aws-sdk/s3-request-presigner", () => ({
 const { handler } = await import("./handler");
 
 let actionSequence = 0;
-const send = (kind: string, note?: string, groups: string[] = ["OFFICE"]) =>
+const send = (kind: string, note?: string, groups: string[] = ["OWNER"]) =>
   (handler as unknown as (e: never) => Promise<unknown>)({
     info: { fieldName: "sendCustomerEmail" },
     arguments: {
@@ -119,7 +119,7 @@ const send = (kind: string, note?: string, groups: string[] = ["OFFICE"]) =>
     identity: { sub: "sub-office", groups, claims: { email: "csr@x.com" } },
   } as never);
 
-const prepare = (groups: string[] = ["OFFICE"]) =>
+const prepare = (groups: string[] = ["OWNER"]) =>
   (handler as unknown as (e: never) => Promise<unknown>)({
     info: { fieldName: "prepareLeadQuote" },
     arguments: { customerId: "c1" },
@@ -256,8 +256,9 @@ describe("sendCustomerEmail kind booking-link", () => {
   });
 
   it("still refuses a technician", async () => {
+    // TECH is now the only non-owner staff role; office work is owner-tier.
     await expect(send("booking-link", undefined, ["TECH"])).rejects.toThrow(
-      /office role required/i
+      /owner role required/i
     );
   });
 });
@@ -306,6 +307,7 @@ describe("prepareLeadQuote", () => {
   });
 
   it("still refuses a technician", async () => {
-    await expect(prepare(["TECH"])).rejects.toThrow(/office role required/i);
+    // TECH is now the only non-owner staff role; office work is owner-tier.
+    await expect(prepare(["TECH"])).rejects.toThrow(/owner role required/i);
   });
 });

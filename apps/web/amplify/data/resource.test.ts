@@ -135,7 +135,7 @@ describe("GL-13 technician least-privilege (SDL @auth)", () => {
 
   it("raw staff Customer.create is denied; lead intake is named-action only", () => {
     const header = modelHeader("Customer");
-    expect(header).toContain('groups: ["OWNER", "OFFICE"]');
+    expect(header).toContain('groups: ["OWNER"]');
     expect(header).toContain("operations: [read]");
     expect(header).not.toContain("operations: [create, read]");
   });
@@ -158,7 +158,7 @@ describe("GL-13 technician least-privilege (SDL @auth)", () => {
         "TECH"
       );
       expect(modelHeader(model), `${model} keeps office read`).toContain(
-        'groups: ["OWNER", "OFFICE"]'
+        'groups: ["OWNER"]'
       );
     }
   });
@@ -196,7 +196,7 @@ describe("GL-13 technician least-privilege (SDL @auth)", () => {
       expect(t, `Customer.${f} must have a field-level @auth`).toContain("@auth");
       expect(t, `Customer.${f} must not grant TECH`).not.toContain("TECH");
       // Office and the portal customer keep their read.
-      expect(t, `Customer.${f} keeps office read`).toContain('groups: ["OWNER", "OFFICE"]');
+      expect(t, `Customer.${f} keeps office read`).toContain('groups: ["OWNER"]');
       expect(t, `Customer.${f} keeps portal read`).toContain('groupsField: "accessGroups"');
     }
   });
