@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
 
 /**
  * R80 — the lead/ops inbox partition lives in this module.
@@ -26,6 +27,8 @@ vi.mock("@aws-sdk/client-ses", () => ({
 }));
 
 const emailLogs: Record<string, unknown>[] = [];
+let emailLogCreateFails = false;
+let emailLogUpdateFails = false;
 const workRows: (Record<string, unknown> & { id: string })[] = [];
 const workHistory: Record<string, unknown>[] = [];
 const suppressedRows: Record<string, Record<string, unknown>> = {};
@@ -34,8 +37,22 @@ vi.mock("./dataClient", () => ({
     models: {
       EmailLog: {
         create: async (input: Record<string, unknown>) => {
+          if (emailLogCreateFails) {
+            return { data: null, errors: [{ message: "refused" }] };
+          }
           emailLogs.push(input);
           return { data: input };
+        },
+        // GL-03 outbox: the attempt row is settled in place after the
+        // provider call — tests read the final state off the same row.
+        update: async (patch: Record<string, unknown> & { id?: string }) => {
+          if (emailLogUpdateFails) return { data: null };
+          const row = emailLogs.find((r) => r.id === patch.id);
+          if (!row) return { data: null };
+          for (const [k, v] of Object.entries(patch)) {
+            if (v !== undefined) row[k] = v;
+          }
+          return { data: { ...row } };
         },
       },
       SuppressedEmail: {
@@ -100,6 +117,8 @@ beforeEach(() => {
   sesSend.mockClear();
   sesSend.mockResolvedValue({ MessageId: "ses-default" });
   emailLogs.length = 0;
+  emailLogCreateFails = false;
+  emailLogUpdateFails = false;
   workRows.length = 0;
   workHistory.length = 0;
   for (const k of Object.keys(suppressedRows)) delete suppressedRows[k];
@@ -285,5 +304,108 @@ describe("GL-03 delivery pipeline", () => {
       status: "FAILED",
     });
     expect(workRows[0]).toMatchObject({ kind: "EMAIL_FAILURE" });
+  });
+});
+
+describe("GL-03 — the outbox: provider acceptance can never become untracked", () => {
+  it("REFUSES the send when the outbox row cannot be written first", async () => {
+    emailLogCreateFails = true;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ok = await sendEmail({
+      to: "dana@example.com",
+      subject: "s",
+      html: "<p>x</p>",
+      template: "t",
+    });
+
+    expect(ok).toBe(false);
+    expect(sesSend).not.toHaveBeenCalled(); // nothing left the system
+    expect(workRows[0]).toMatchObject({ kind: "EMAIL_FAILURE" });
+    expect(String(workRows[0].title)).toContain("record could not be written");
+  });
+
+  it("writes the attempt BEFORE the provider call and settles it SENT in place", async () => {
+    sesSend.mockResolvedValueOnce({ MessageId: "ses-outbox-1" });
+
+    const ok = await sendEmail({
+      to: "dana@example.com",
+      subject: "s",
+      html: "<p>exact body</p>",
+      template: "t",
+    });
+
+    expect(ok).toBe(true);
+    expect(emailLogs).toHaveLength(1); // ONE row: pre-created, then settled
+    expect(emailLogs[0]).toMatchObject({
+      status: "SENT",
+      deliveryStatus: "SENT",
+      messageId: "ses-outbox-1",
+      bodyHtml: "<p>exact body</p>", // stored for exact resend
+    });
+  });
+
+  it("a settle failure after provider accept is owned work that forbids blind resends", async () => {
+    sesSend.mockResolvedValueOnce({ MessageId: "ses-outbox-2" });
+    emailLogUpdateFails = true;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await sendEmail({
+      to: "dana@example.com",
+      subject: "s",
+      html: "<p>x</p>",
+      template: "t",
+    });
+
+    // The row still reads SENDING — the unknown outcome is visible…
+    expect(emailLogs[0]).toMatchObject({ deliveryStatus: "SENDING" });
+    // …and the owned item says exactly what NOT to do.
+    const item = workRows.find((w) =>
+      String(w.title).includes("outcome could not be recorded")
+    )!;
+    expect(item).toBeTruthy();
+    expect(String(item.detail)).toContain("Do NOT blind-resend");
+  });
+
+  it("resendQueuedEmail re-sends a throttled row exactly once and settles it RESENT", async () => {
+    const { resendQueuedEmail } = await import("./email");
+    emailLogs.push({
+      id: "el-q1",
+      toEmail: "dana@example.com",
+      subject: "held",
+      template: "t",
+      deliveryStatus: "QUEUED",
+      bodyHtml: "<p>the exact original body</p>",
+    });
+    _setLockStoreForTests(
+      memoryLockStore({
+        EmailLog: new Map(
+          emailLogs.map((r) => [String(r.id), r as Record<string, unknown>])
+        ),
+      })
+    );
+    sesSend.mockResolvedValueOnce({ MessageId: "ses-resend-1" });
+
+    const outcome = await resendQueuedEmail(emailLogs[0] as never);
+
+    expect(outcome).toBe("RESENT");
+    // A FRESH attempt row carries the resend; the original settles RESENT.
+    expect(emailLogs.some((r) => r.messageId === "ses-resend-1")).toBe(true);
+    expect(emailLogs[0].deliveryStatus).toBe("RESENT");
+    _setLockStoreForTests(null);
+  });
+
+  it("resendQueuedEmail refuses attachment rows — no blind reconstruction", async () => {
+    const { resendQueuedEmail } = await import("./email");
+    const outcome = await resendQueuedEmail({
+      id: "el-att",
+      toEmail: "d@x.com",
+      subject: "s",
+      template: "t",
+      bodyHtml: "<p>x</p>",
+      hasAttachments: true,
+    });
+    expect(outcome).toBe("UNRESENDABLE");
+    expect(sesSend).not.toHaveBeenCalled();
   });
 });

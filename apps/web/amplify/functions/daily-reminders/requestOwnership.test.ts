@@ -14,8 +14,12 @@ let portalRows: Row[] = [];
 let callbackRows: Row[] = [];
 const workItems = new Map<string, Row>();
 
+let bookingRows: Row[] = [];
 const fakeDataClient = {
   models: {
+    BookingRequest: {
+      list: async () => ({ data: bookingRows, nextToken: null }),
+    },
     PortalRequest: {
       list: async () => ({ data: portalRows, nextToken: null }),
     },
@@ -54,6 +58,7 @@ const { reconcileRequestOwnership } = await import("./handler");
 beforeEach(() => {
   portalRows = [];
   callbackRows = [];
+  bookingRows = [];
   workItems.clear();
   opened.length = 0;
 });
@@ -101,6 +106,39 @@ describe("reconcileRequestOwnership", () => {
     const res = await reconcileRequestOwnership();
 
     expect(res.portalRepaired).toBe(1);
+  });
+
+  it("GL-03: re-enters a CONTACT promise whose owned action never landed, deadline anchored to creation", async () => {
+    bookingRows = [
+      {
+        id: "bk-orphan",
+        status: "CONTACT",
+        name: "Lead Lee",
+        email: "lead@example.com",
+        createdAt: "2026-07-14T14:00:00.000Z", // Tue 10:00 ET
+      },
+    ];
+
+    const res = await reconcileRequestOwnership();
+
+    expect(res.contactRepaired).toBe(1);
+    const item = opened.find((o) => o.dedupeKey === "bk-orphan")! as Record<string, unknown>;
+    expect(item.kind).toBe("CALLBACK_PROMISE");
+    // One business day from when the promise was MADE: Wed 10:00 ET.
+    expect(item.dueAt).toBe("2026-07-15T14:00:00.000Z");
+  });
+
+  it("GL-03: skips CONTACT promises whose action is already open, and non-CONTACT bookings", async () => {
+    bookingRows = [
+      { id: "bk-owned", status: "CONTACT", createdAt: "2026-07-14T14:00:00.000Z" },
+      { id: "bk-quoted", status: "QUOTED", createdAt: "2026-07-14T14:00:00.000Z" },
+    ];
+    workItems.set("work#CALLBACK_PROMISE#bk-owned", { id: "w", status: "OPEN" });
+
+    const res = await reconcileRequestOwnership();
+
+    expect(res.contactRepaired).toBe(0);
+    expect(opened).toHaveLength(0);
   });
 
   it("ignores answered/scheduled/terminal rows", async () => {

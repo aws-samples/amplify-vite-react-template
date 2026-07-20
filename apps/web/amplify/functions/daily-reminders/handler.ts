@@ -1,6 +1,12 @@
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
+import { contactDueAt } from "../shared/businessHours";
 import { dataClient } from "../shared/dataClient";
-import { emailShell, notifyOffice, sendEmail } from "../shared/email";
+import {
+  emailShell,
+  notifyOffice,
+  resendQueuedEmail,
+  sendEmail,
+} from "../shared/email";
 import { licenseFactsFor } from "../shared/licenses";
 import { ensureObligation, markObligation } from "../shared/obligations";
 import { isWeekday, reconcileCapacityDay } from "../shared/capacity";
@@ -227,6 +233,9 @@ export const handler = async () => {
   // re-driven to a VERIFIED completion through crm-admin, and one that
   // keeps failing becomes visible owned work.
   const groupChanges = await run("reconcileGroupChanges", reconcileGroupChanges);
+  // GL-03: QUEUED means retried — throttled sends are re-sent from their
+  // stored bodies; stuck/expired/unresendable ones become owned work.
+  const emailRetries = await run("retryQueuedEmails", retryQueuedEmails);
   console.log("Reminder totals:", JSON.stringify(totals));
   const results = [
     ...totals,
@@ -254,6 +263,7 @@ export const handler = async () => {
     lifecycle,
     requestOwnership,
     groupChanges,
+    emailRetries,
   ];
   if (failures.length) {
     await openOwnedWork({
@@ -2114,6 +2124,7 @@ export async function reconcileRequestOwnership() {
   const client = await dataClient();
   let portalRepaired = 0;
   let callbacksRepaired = 0;
+  let contactRepaired = 0;
 
   const itemMissingOrResolved = async (
     kind: "CUSTOMER_REQUEST" | "CALLBACK_PROMISE",
@@ -2154,6 +2165,42 @@ export async function reconcileRequestOwnership() {
     } while (token);
   }
 
+  // GL-03: a website CONTACT promise (the funnel's review fallback) may
+  // never exist without its owned SALES action. The deadline is anchored to
+  // when the promise was MADE (the booking's creation), not to when this
+  // sweep found it — the customer's one-business-day clock never restarts.
+  if ("BookingRequest" in client.models) {
+    let token: string | null | undefined;
+    do {
+      const page = await (
+        client.models.BookingRequest.list as (a: object) => Promise<{
+          data: Record<string, unknown>[];
+          nextToken?: string | null;
+        }>
+      )({ limit: 200, nextToken: token });
+      for (const b of page.data ?? []) {
+        if (b.status !== "CONTACT") continue;
+        const id = String(b.id);
+        if (!(await itemMissingOrResolved("CALLBACK_PROMISE", id))) continue;
+        const madeAt = b.createdAt ? new Date(String(b.createdAt)) : new Date();
+        const opened = await openOwnedWork({
+          kind: "CALLBACK_PROMISE",
+          dedupeKey: id,
+          title: `Website contact promise without an owner: ${b.name ?? id}`,
+          detail: `Booking request ${id} promised ${b.name ?? "a lead"} (${b.email ?? "no email"}) a follow-up, but no live owned action existed — its creation never reached the queue. The one-business-day clock started ${madeAt.toISOString()}.`,
+          relatedId: id,
+          sourceUrl: "/work",
+          dueAt: contactDueAt(madeAt).toISOString(),
+          resolutionAction:
+            "Reach the lead by their promised deadline (call if consented, otherwise email), record the outcome, and send the correct next step.",
+          ownerTeam: "SALES",
+        });
+        if (opened) contactRepaired++;
+      }
+      token = page.nextToken;
+    } while (token);
+  }
+
   if ("CallbackRequest" in client.models) {
     let token: string | null | undefined;
     do {
@@ -2182,7 +2229,12 @@ export async function reconcileRequestOwnership() {
     } while (token);
   }
 
-  return { task: "reconcileRequestOwnership", portalRepaired, callbacksRepaired };
+  return {
+    task: "reconcileRequestOwnership",
+    portalRepaired,
+    callbacksRepaired,
+    contactRepaired,
+  };
 }
 
 /**
@@ -2281,6 +2333,113 @@ export async function reconcileGroupChanges() {
     token = page.nextToken;
   } while (token);
   return { task: "reconcileGroupChanges", resumed, escalated };
+}
+
+/**
+ * GL-03 — every outbox row reaches a truthful terminal outcome:
+ *  - QUEUED (provider throttle) rows are RE-SENT from their stored body,
+ *    exactly once (guarded claim); still-throttled rows stay QUEUED for the
+ *    next sweep; rows older than three days EXPIRE to FAILED with owned
+ *    work — a throttle that lasts days is not a throttle.
+ *  - QUEUED rows that cannot be machine-resent (attachments / no stored
+ *    body) become owned work for a human resend.
+ *  - SENDING rows older than an hour are UNKNOWN outcomes (the settle after
+ *    the provider call never landed) — escalated, never blind-resent.
+ */
+export async function retryQueuedEmails() {
+  const client = await dataClient();
+  if (!("EmailLog" in client.models)) {
+    return { task: "retryQueuedEmails", resent: 0, stillQueued: 0, escalated: 0, expired: 0 };
+  }
+  const now = Date.now();
+  const EXPIRE_MS = 3 * 24 * 60 * 60_000;
+  const STUCK_SENDING_MS = 60 * 60_000;
+  let resent = 0;
+  let stillQueued = 0;
+  let escalated = 0;
+  let expired = 0;
+  const model = (
+    client.models as unknown as {
+      EmailLog: {
+        list: (a: object) => Promise<{
+          data: Record<string, unknown>[];
+          nextToken?: string | null;
+        }>;
+        update: (a: object) => Promise<{ data: unknown }>;
+      };
+    }
+  ).EmailLog;
+  let token: string | null | undefined;
+  do {
+    const page = await model.list({ limit: 200, nextToken: token });
+    for (const row of page.data ?? []) {
+      const status = String(row.deliveryStatus ?? "");
+      const at = row.sentAt ? Date.parse(String(row.sentAt)) : now;
+      if (status === "SENDING" && now - at > STUCK_SENDING_MS) {
+        const opened = await openOwnedWork({
+          kind: "EMAIL_FAILURE",
+          dedupeKey: `email-unknown-outcome:${row.id}`,
+          title: `An email's outcome is UNKNOWN: ${row.subject}`,
+          detail: `Outbox row ${row.id} (${row.template} to ${row.toEmail}) has read SENDING for over an hour — the provider call's outcome was never recorded. It may or may not have been sent. Do NOT blind-resend.`,
+          customerId: (row.customerId as string | null) ?? undefined,
+          relatedId: String(row.id),
+          resolutionAction:
+            "Verify with the provider/recipient whether it arrived, correct the EmailLog row, and resend only if it truly never left.",
+          ownerTeam: "OPS",
+        });
+        if (opened) escalated++;
+        continue;
+      }
+      if (status !== "QUEUED") continue;
+      if (now - at > EXPIRE_MS) {
+        await model.update({ id: row.id, deliveryStatus: "FAILED", status: "FAILED" }).catch(() => undefined);
+        const opened = await openOwnedWork({
+          kind: "EMAIL_FAILURE",
+          dedupeKey: `email-expired:${row.id}`,
+          title: `A held email EXPIRED unsent: ${row.subject}`,
+          detail: `The ${row.template} email to ${row.toEmail} sat throttled for over three days and never went out. The customer never received it.`,
+          customerId: (row.customerId as string | null) ?? undefined,
+          relatedId: String(row.id),
+          resolutionAction:
+            "Deliver the message another way (fresh send or a call), record how, and check why the provider throttled for days.",
+          ownerTeam: "OPS",
+        });
+        expired++;
+        if (opened) escalated++;
+        continue;
+      }
+      const outcome = await resendQueuedEmail(
+        row as {
+          id: string;
+          toEmail: string;
+          subject: string;
+          template: string;
+          customerId?: string | null;
+          relatedId?: string | null;
+          bodyHtml?: string | null;
+          hasAttachments?: boolean | null;
+        }
+      );
+      if (outcome === "RESENT") resent++;
+      else if (outcome === "STILL_QUEUED") stillQueued++;
+      else if (outcome === "UNRESENDABLE") {
+        const opened = await openOwnedWork({
+          kind: "EMAIL_FAILURE",
+          dedupeKey: `email-manual-resend:${row.id}`,
+          title: `A held email needs a HUMAN resend: ${row.subject}`,
+          detail: `The ${row.template} email to ${row.toEmail} was throttled, and it cannot be machine-resent (it carried attachments or its body was too large to store). It has NOT been delivered.`,
+          customerId: (row.customerId as string | null) ?? undefined,
+          relatedId: String(row.id),
+          resolutionAction:
+            "Re-generate and resend the message from its source screen (the attachment can be rebuilt there), then record delivery.",
+          ownerTeam: "OPS",
+        });
+        if (opened) escalated++;
+      }
+    }
+    token = page.nextToken;
+  } while (token);
+  return { task: "retryQueuedEmails", resent, stillQueued, escalated, expired };
 }
 
 export async function reconcilePaidBookings() {

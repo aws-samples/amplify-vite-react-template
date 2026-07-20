@@ -1,11 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
 import { dataClient } from "./dataClient";
+import { casGuardedUpdate } from "./atomicLock";
 import {
   openOwnedWork,
   type WorkOwnerTeam,
 } from "./ownedWork";
 
 const ses = new SESClient();
+
+/** The stored-body cap: big enough for every templated email, small enough
+ *  for a DynamoDB row. Attachments are never stored (hasAttachments marks
+ *  the rows a sweep must not blind-resend). */
+const BODY_STORE_CAP = 120_000;
 
 export type EmailAttachment = {
   filename: string;
@@ -118,6 +125,39 @@ export async function sendEmail(opts: {
     return false;
   }
 
+  // GL-03 OUTBOX: the attempt row is written BEFORE the provider call — a
+  // send whose record cannot be written is REFUSED, so provider acceptance
+  // can never become untracked. The row carries the exact rendered body so
+  // a throttled attempt can be re-sent verbatim later.
+  const outboxId = `el-${randomUUID()}`;
+  try {
+    const client = await dataClient();
+    const { data: preRow } = await client.models.EmailLog.create({
+      id: outboxId,
+      customerId: opts.customerId ?? undefined,
+      toEmail: opts.to,
+      subject: opts.subject,
+      template: opts.template,
+      status: "PENDING",
+      deliveryStatus: "SENDING",
+      relatedId: opts.relatedId,
+      sentAt: new Date().toISOString(),
+      bodyHtml:
+        opts.html.length <= BODY_STORE_CAP ? opts.html : undefined,
+      hasAttachments: Boolean(opts.attachments?.length),
+    });
+    if (!preRow) throw new Error("outbox row create returned no data");
+  } catch (outboxErr) {
+    console.error("sendEmail: outbox pre-create failed — send refused", outboxErr);
+    await openEmailFailureWork(opts, {
+      title: `Email refused — its record could not be written: ${opts.subject}`,
+      detail: `The ${opts.template} email to ${opts.to} was NOT sent: the outbox record could not be written first, and an unrecorded send is not allowed. Nothing left our system.`,
+      resolutionAction:
+        "Check the EmailLog store, then resend the message and verify it was recorded.",
+    });
+    return false;
+  }
+
   const configurationSet = process.env.SES_CONFIGURATION_SET;
   let error: string | undefined;
   let transient = false;
@@ -149,15 +189,32 @@ export async function sendEmail(opts: {
   }
 
   // GL-03: three honest outcomes, not a boolean. SENT — the provider accepted
-  // it. QUEUED — a transient throttle held it; it must be resent, not lost.
-  // FAILED — a permanent synchronous failure.
+  // it. QUEUED — a transient throttle held it; the daily sweep RE-SENDS it
+  // from the stored body. FAILED — a permanent synchronous failure. The
+  // outcome lands on the SAME outbox row; if that settle fails after the
+  // provider accepted, the row stays SENDING (unknown outcome) and the sweep
+  // escalates it — it never quietly becomes a double-send or a lost record.
   const deliveryStatus = !error ? "SENT" : transient ? "QUEUED" : "FAILED";
-  await recordEmailLog(opts, {
-    status: error ? "FAILED" : "SENT",
-    deliveryStatus,
-    error,
-    messageId,
-  });
+  try {
+    const client = await dataClient();
+    const { data: settled } = await client.models.EmailLog.update({
+      id: outboxId,
+      status: error ? "FAILED" : "SENT",
+      deliveryStatus,
+      error,
+      messageId,
+      sentAt: new Date().toISOString(),
+    });
+    if (!settled) throw new Error("outbox settle returned no data");
+  } catch (settleErr) {
+    console.error("sendEmail: outbox settle failed", outboxId, settleErr);
+    await openEmailFailureWork(opts, {
+      title: `An email's outcome could not be recorded: ${opts.subject}`,
+      detail: `The ${opts.template} email to ${opts.to} ${messageId ? `WAS accepted by the provider (message ${messageId})` : `resolved (${deliveryStatus})`}, but its outbox row ${outboxId} could not be updated and still reads SENDING. Do NOT blind-resend — verify with the provider first.`,
+      resolutionAction:
+        "Verify with the provider/customer whether the message arrived, correct the EmailLog row, and only then resend if it truly never left.",
+    });
+  }
 
   // A send that did not leave is owned work — nothing stays silently unsent.
   if (error) {
@@ -174,6 +231,62 @@ export async function sendEmail(opts: {
   }
 
   return !error;
+}
+
+/**
+ * GL-03 — QUEUED means RETRIED: re-send one throttled outbox row from its
+ * stored body, exactly once across concurrent sweepers (a guarded claim on
+ * the row). Returns what happened so the sweep can count and escalate.
+ * Rows with attachments are never blind-resent (the attachment bytes are
+ * not stored) — the caller escalates those to owned work.
+ */
+export async function resendQueuedEmail(row: {
+  id: string;
+  toEmail: string;
+  subject: string;
+  template: string;
+  customerId?: string | null;
+  relatedId?: string | null;
+  bodyHtml?: string | null;
+  hasAttachments?: boolean | null;
+}): Promise<"RESENT" | "STILL_QUEUED" | "UNRESENDABLE" | "LOST"> {
+  if (row.hasAttachments || !row.bodyHtml) return "UNRESENDABLE";
+  // Exactly one sweeper owns the retry: QUEUED → SENDING, guarded.
+  const claim = await casGuardedUpdate(
+    "EmailLog",
+    row.id,
+    { deliveryStatus: "SENDING" },
+    [{ kind: "fieldEquals", field: "deliveryStatus", value: "QUEUED" }]
+  );
+  if (!claim.ok) return "LOST";
+  const ok = await sendEmail({
+    to: row.toEmail,
+    subject: row.subject,
+    template: row.template,
+    customerId: row.customerId ?? undefined,
+    relatedId: row.relatedId ?? undefined,
+    html: row.bodyHtml,
+  });
+  try {
+    const client = await dataClient();
+    if (ok) {
+      // The fresh attempt row carries the live outcome; this row is history.
+      await client.models.EmailLog.update({
+        id: row.id,
+        deliveryStatus: "RESENT",
+      });
+      return "RESENT";
+    }
+    // Give the claim back so a later sweep (or a recovered throttle) retries.
+    await client.models.EmailLog.update({
+      id: row.id,
+      deliveryStatus: "QUEUED",
+    });
+    return "STILL_QUEUED";
+  } catch (err) {
+    console.error("resendQueuedEmail: settle failed", row.id, err);
+    return ok ? "RESENT" : "STILL_QUEUED";
+  }
 }
 
 // GL-02: templates that are marketing/nudges, not transactional or legal — the

@@ -22,15 +22,12 @@ describe("business hours (GL-03)", () => {
     expect(isWithinBusinessHours(SAT_10AM)).toBe(false);
   });
 
-  it("promises 'within the hour' only during business hours", () => {
-    expect(nextContactPhrase(TUE_10AM)).toBe("within the hour");
-  });
-
-  it("gives a truthful next-window phrase after hours and on weekends", () => {
-    expect(nextContactPhrase(TUE_7PM)).toBe("first thing tomorrow morning");
-    expect(nextContactPhrase(WED_6AM)).toBe("as soon as we open this morning");
-    expect(nextContactPhrase(FRI_7PM)).toBe("on Monday morning");
-    expect(nextContactPhrase(SAT_10AM)).toBe("on Monday morning");
+  it("promises the APPROVED one-business-day commitment, naming the real day", () => {
+    // GL-03: no hourly promise exists — one business day, every source.
+    expect(nextContactPhrase(TUE_10AM)).toBe("within one business day (by tomorrow)");
+    expect(nextContactPhrase(TUE_7PM)).toContain("within one business day");
+    expect(nextContactPhrase(FRI_7PM)).toContain("within one business day");
+    expect(nextContactPhrase(SAT_10AM)).toContain("within one business day");
   });
 
   it("computes the next open instant, skipping the weekend", () => {
@@ -41,10 +38,12 @@ describe("business hours (GL-03)", () => {
     expect(nextBusinessOpen(SAT_10AM).toISOString()).toBe("2026-07-20T12:00:00.000Z"); // Mon 8am ET
   });
 
-  it("sets the exception deadline inside a real business window", () => {
-    // Open now → within the hour.
-    expect(contactDueAt(TUE_10AM).toISOString()).toBe("2026-07-14T15:00:00.000Z");
-    // After hours → first hour of the next window, never overnight.
-    expect(contactDueAt(FRI_7PM).toISOString()).toBe("2026-07-20T13:00:00.000Z");
+  it("sets the deadline ONE BUSINESS DAY out, never overnight and never over a weekend", () => {
+    // Tue 10am → Wed 10am ET.
+    expect(contactDueAt(TUE_10AM).toISOString()).toBe("2026-07-15T14:00:00.000Z");
+    // Fri 7pm → clock starts Mon 8am ET open → due Tue 8am ET.
+    expect(contactDueAt(FRI_7PM).toISOString()).toBe("2026-07-21T12:00:00.000Z");
+    // Sat → same as Friday evening.
+    expect(contactDueAt(SAT_10AM).toISOString()).toBe("2026-07-21T12:00:00.000Z");
   });
 });

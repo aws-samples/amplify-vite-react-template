@@ -4,10 +4,9 @@ import {
   AdminUpdateUserAttributesCommand,
   CognitoIdentityProviderClient,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
+import { sendEmail } from "../shared/email";
 
 const cognito = new CognitoIdentityProviderClient();
-const ses = new SESClient();
 
 const LINK_TTL_MINUTES = 60;
 
@@ -98,25 +97,21 @@ async function emailSignInLink(
 
   const crmUrl = process.env.CRM_APP_URL ?? "";
   const link = `${crmUrl}/welcome#email=${encodeURIComponent(email)}&token=${token}`;
-  await ses.send(
-    new SendEmailCommand({
-      Source: process.env.SES_FROM_EMAIL,
-      Destination: { ToAddresses: [email] },
-      Message: {
-        Subject: { Data: "Your BuzzKill sign-in link" },
-        Body: {
-          Html: {
-            Data: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+  // GL-03: the sign-in link goes through the ONE email contract — outbox
+  // record, suppression check, configuration set (bounce/complaint events),
+  // and owned-work recovery — instead of a raw side-channel SES call that
+  // no recovery path could see.
+  await sendEmail({
+    to: email,
+    subject: "Your BuzzKill sign-in link",
+    template: "auth-magic-link",
+    html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
   <h2 style="color:#176b2c">Sign in to BuzzKill</h2>
   <p>Tap the button below to sign in — no password needed. The link works once and expires in ${LINK_TTL_MINUTES} minutes.</p>
   <p style="margin:24px 0"><a href="${link}" style="background:#176b2c;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600">Sign in</a></p>
   <p style="color:#666;font-size:13px">If you didn't request this, you can ignore this email.</p>
 </div>`,
-          },
-        },
-      },
-    })
-  );
+  });
 
   // The one breadcrumb this flow leaves: today's defect was diagnosable only
   // by its absence from CloudTrail. No address in the log — userName is the

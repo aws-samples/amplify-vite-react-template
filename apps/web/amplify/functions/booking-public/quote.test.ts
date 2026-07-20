@@ -51,6 +51,16 @@ const fakeDataClient = {
       create: async () => ({ data: { id: "t1" } }),
       update: async () => ({ data: { id: "t1" } }),
     },
+    // GL-03: the CONTACT promise is returned only when its owned action
+    // durably exists — the fake queue accepts it like production does.
+    WorkItem: {
+      get: async () => ({ data: null }),
+      create: async (input: Record<string, unknown>) => ({ data: input }),
+      update: async (input: Record<string, unknown>) => ({ data: input }),
+    },
+    WorkEvent: {
+      create: async (input: Record<string, unknown>) => ({ data: input }),
+    },
     MarketRate: { list: async () => ({ data: [] }) },
     BookingRequest: {
       create: async (input: Record<string, unknown>) => {

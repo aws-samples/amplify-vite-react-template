@@ -145,6 +145,9 @@ const LOCK_MODELS = [
   // GL-11: the durable group-membership change command (claim/lease/fenced
   // stage writes).
   "GroupChangeCommand",
+  // GL-03: the queued-email resend claim (exactly one sweeper re-sends a
+  // throttled row).
+  "EmailLog",
 ] as const;
 const lockTablePolicy = new PolicyStatement({
   actions: ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],

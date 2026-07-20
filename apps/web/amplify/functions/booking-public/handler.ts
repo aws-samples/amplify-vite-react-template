@@ -11,6 +11,7 @@ import { BOOKING_LINK_TOKEN_RE } from "../shared/bookingLink";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
 import { openOwnedWork, workItemId } from "../shared/ownedWork";
 import { contactDueAt, nextContactPhrase } from "../shared/businessHours";
+import { CALL_CONSENT_TEXT_VERSION } from "../shared/consentText";
 import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
 import {
   zoneFromMinutes,
@@ -139,6 +140,7 @@ type QuoteInput = {
   phone?: string;
   /** The lead ticked "you may call/text me about my quote". */
   callConsent?: boolean;
+  callConsentTextVersion?: string;
   address?: { street?: string; city?: string; state?: string; zip?: string };
   units?: number;
   service?: string;
@@ -861,8 +863,8 @@ async function quote(
   // GL-03: a review fallback must promise a channel it can actually keep. A call
   // is promised only when the lead gave a valid phone AND consent to be called;
   // otherwise the promise is an email (the funnel always has a valid email). The
-  // timing is truthful too: "within the hour" during business hours, and a real
-  // next-window time ("first thing tomorrow morning") after hours.
+  // timing is the ONE approved commitment — one business day — from every
+  // entrance, with the concrete day named.
   const canCall = Boolean(phone) && input.callConsent === true;
   const contact = async (
     situation: string,
@@ -882,10 +884,15 @@ async function quote(
     const booking = await makeBooking({
       status: "CONTACT",
       callConsent: input.callConsent === true,
+      callConsentTextVersion:
+        input.callConsent === true
+          ? (input.callConsentTextVersion?.slice(0, 40) ??
+            CALL_CONSENT_TEXT_VERSION)
+          : undefined,
       quoteJson: JSON.stringify({ contactMessage: message }),
       ...extra,
     });
-    await openOwnedWork({
+    const opened = await openOwnedWork({
       kind: "CALLBACK_PROMISE",
       dedupeKey: booking.id,
       title: `Website ${channelWord} promised: ${name}`,
@@ -898,6 +905,16 @@ async function quote(
         : "Email the lead their options by the promised time, record the outcome, and send the correct booking or referral next step.",
       ownerTeam: "SALES",
     });
+    if (!opened) {
+      // GL-03: the promise may not be RETURNED unless someone owns keeping
+      // it. The CONTACT row stays (the daily sweep rebuilds its owned action
+      // with the deadline anchored to THIS moment), but the customer hears
+      // the truth instead of a promise nobody is holding yet.
+      throw new HttpError(503, {
+        error:
+          "We saved your request, but our follow-up queue didn't confirm it. Please try again in a moment — or call the office and we'll take it from there.",
+      });
+    }
     await notifyLeads({
       subject: `Website lead needs ${canCall ? "a call" : "an email"}`,
       heading: `Website lead needs ${canCall ? "a call" : "an email"}`,

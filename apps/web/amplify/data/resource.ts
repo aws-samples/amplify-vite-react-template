@@ -11,6 +11,7 @@ import { leadIntake } from "../functions/lead-intake/resource";
 import { pricingRefresh } from "../functions/pricing-refresh/resource";
 import { sesEvents } from "../functions/ses-events/resource";
 import { opsAlerts } from "../functions/ops-alerts/resource";
+import { verifyChallenge } from "../functions/auth-challenge/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -138,7 +139,8 @@ export const schema = a.schema({
   // member: BuzzKill does not take card or cash in the field, and a free-text
   // instruction is exactly the improper-collection risk this gate closes.
   PaymentExpectation: a.enum(["COLLECT_NOTHING", "DUE_THROUGH_OFFICE"]),
-  EmailStatus: a.enum(["SENT", "FAILED"]),
+  // PENDING — the outbox row exists but the provider call hasn't resolved.
+  EmailStatus: a.enum(["PENDING", "SENT", "FAILED"]),
   // GL-03: the true delivery lifecycle, beyond the synchronous accept/reject of
   // EmailStatus. QUEUED — a transient provider throttle held the send for retry.
   // SENT — the provider accepted it (not yet proof of delivery). DELIVERED — the
@@ -146,6 +148,10 @@ export const schema = a.schema({
   // back or was marked spam (address suppressed). SUPPRESSED — we refused to
   // send to a known-bad address. FAILED — a permanent synchronous failure.
   EmailDelivery: a.enum([
+    // GL-03 outbox: the attempt row is written BEFORE the provider call, so
+    // provider acceptance can never become untracked. A row stuck SENDING is
+    // an unknown outcome the daily sweep escalates (never blind-resends).
+    "SENDING",
     "QUEUED",
     "SENT",
     "DELIVERED",
@@ -156,6 +162,9 @@ export const schema = a.schema({
     // GL-08/GL-18: the office reached the customer another way and recorded
     // how — the approved terminal alternative to a mailbox DELIVERED.
     "ALTERNATE_DELIVERED",
+    // GL-03: a QUEUED (throttled) send was successfully re-sent — the fresh
+    // attempt row carries the live outcome; this one is settled history.
+    "RESENT",
   ]),
   WorkKind: a.enum([
     "NO_ACCESS",
@@ -524,6 +533,8 @@ export const schema = a.schema({
       // when this is true AND a valid phone is present; otherwise the fallback
       // promise is an email.
       callConsent: a.boolean(),
+      // GL-03: WHICH wording they agreed to (shared/consentText.ts version).
+      callConsentTextVersion: a.string(),
       street: a.string(),
       city: a.string(),
       state: a.string(),
@@ -1878,6 +1889,11 @@ export const schema = a.schema({
       // function advances this as the provider reports back; a send starts SENT
       // (or QUEUED/SUPPRESSED/FAILED) and only reaches DELIVERED on proof.
       deliveryStatus: a.ref("EmailDelivery"),
+      // GL-03 outbox: the exact rendered body (size-capped; attachments are
+      // NOT stored), so a throttled QUEUED send is re-sent EXACTLY — never
+      // re-rendered from state that may have moved on.
+      bodyHtml: a.string(),
+      hasAttachments: a.boolean(),
     })
     .secondaryIndexes((index) => [index("messageId"), index("relatedId")])
     .authorization((allow) => [
@@ -3580,6 +3596,9 @@ export const schema = a.schema({
   allow.resource(pricingRefresh),
   allow.resource(sesEvents),
   allow.resource(opsAlerts),
+  // GL-03: the magic-link sender now records its sends in EmailLog through
+  // the shared email contract.
+  allow.resource(verifyChallenge),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

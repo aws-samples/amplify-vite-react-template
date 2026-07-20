@@ -100,35 +100,36 @@ export function nextBusinessOpen(now: Date = new Date()): Date {
 }
 
 /**
- * A truthful phrase for when a lead will next be contacted. "within the hour"
- * only during business hours; otherwise the next window ("first thing tomorrow
- * morning", "on Monday morning").
+ * GL-03 — the APPROVED customer commitment is ONE BUSINESS DAY for every
+ * accepted request, from every source, with no faster or slower classes.
+ * The phrase names the real day so the promise is concrete without
+ * promising an hour the approved rule doesn't.
  */
 export function nextContactPhrase(now: Date = new Date()): string {
-  if (isWithinBusinessHours(now)) return "within the hour";
-  const open = nextBusinessOpen(now);
+  const due = contactDueAt(now);
   const nowP = etParts(now);
-  const openP = etParts(open);
-  if (
-    nowP.year === openP.year &&
-    nowP.month === openP.month &&
-    nowP.day === openP.day
-  ) {
-    return "as soon as we open this morning";
-  }
+  const dueP = etParts(due);
   const nowMid = Date.UTC(nowP.year, nowP.month - 1, nowP.day);
-  const openMid = Date.UTC(openP.year, openP.month - 1, openP.day);
-  const diffDays = Math.round((openMid - nowMid) / 86_400_000);
-  if (diffDays === 1) return "first thing tomorrow morning";
-  return `on ${DAY_NAME_FMT.format(open)} morning`;
+  const dueMid = Date.UTC(dueP.year, dueP.month - 1, dueP.day);
+  const diffDays = Math.round((dueMid - nowMid) / 86_400_000);
+  if (diffDays <= 0) return "within one business day";
+  if (diffDays === 1) return "within one business day (by tomorrow)";
+  return `within one business day (by ${DAY_NAME_FMT.format(due)})`;
 }
 
 /**
- * When the office must have contacted the lead by — the exception's deadline.
- * Within the hour during business hours; otherwise the first hour of the next
- * window, so a deadline never falls in the middle of the night.
+ * GL-03 — when the office must have responded: ONE BUSINESS DAY after the
+ * request was accepted (an after-hours request's clock starts at the next
+ * open). The deadline lands at the equivalent time on the next weekday, so
+ * it never falls in the middle of the night.
  */
 export function contactDueAt(now: Date = new Date()): Date {
   const base = isWithinBusinessHours(now) ? now : nextBusinessOpen(now);
-  return new Date(base.getTime() + 60 * 60 * 1000);
+  // One business day later: the next weekday at the same wall-clock time.
+  const p = etParts(base);
+  for (let i = 1; i <= 4; i++) {
+    const cand = etWallToUtc(p.year, p.month, p.day + i, p.hour);
+    if (isWeekday(etParts(cand).weekday)) return cand;
+  }
+  return etWallToUtc(p.year, p.month, p.day + 1, p.hour);
 }

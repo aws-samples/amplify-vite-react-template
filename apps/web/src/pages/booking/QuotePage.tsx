@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "../../../amplify/functions/shared/consentText";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
@@ -334,6 +335,7 @@ export default function QuotePage() {
       email: fields.email.trim(),
       phone: fields.phone.trim() || undefined,
       callConsent: fields.callConsent,
+      callConsentTextVersion: CALL_CONSENT_TEXT_VERSION,
       service: fields.service as ServiceCode,
       propertyKind: fields.propertyKind,
       address: {
@@ -896,11 +898,7 @@ export default function QuotePage() {
                       }
                       style={{ marginTop: 3 }}
                     />
-                    <span>
-                      You can call or text me about my quote. If we can&rsquo;t
-                      price your address on the spot, this lets us reach you by
-                      phone; otherwise we&rsquo;ll email you.
-                    </span>
+                    <span>{CALL_CONSENT_TEXT}</span>
                   </label>
                 </div>
 

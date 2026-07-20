@@ -36,6 +36,16 @@ vi.mock("@aws-sdk/client-ses", () => ({
   },
 }));
 
+// GL-03: the link now travels through the ONE email contract (outbox record,
+// suppression, recovery) — the tests assert on that boundary.
+const sentEmails: { to: string; subject: string; html: string; template: string }[] = [];
+vi.mock("../shared/email", () => ({
+  sendEmail: async (o: { to: string; subject: string; html: string; template: string }) => {
+    sentEmails.push(o);
+    return true;
+  },
+}));
+
 const { handler, REQUEST_LINK_ANSWER } = await import("./verify");
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -74,6 +84,7 @@ const sentAttributes = (call: number) => {
 beforeEach(() => {
   cognitoSend.mockClear();
   sesSend.mockClear();
+  sentEmails.length = 0;
   process.env.SES_FROM_EMAIL = "info@pestbuzzkill.com";
   process.env.CRM_APP_URL = "https://crm.example.com";
 });
@@ -95,14 +106,11 @@ describe("the request leg (REQUEST_LINK sentinel)", () => {
     );
 
     // The email carries a /welcome link whose token hashes to the stored hash.
-    const mail = (sesSend.mock.calls[0] as unknown[])[0] as {
-      input: {
-        Destination: { ToAddresses: string[] };
-        Message: { Body: { Html: { Data: string } } };
-      };
-    };
-    expect(mail.input.Destination.ToAddresses).toEqual(["dana@example.com"]);
-    const html = mail.input.Message.Body.Html.Data;
+    expect(sentEmails[0]).toMatchObject({
+      to: "dana@example.com",
+      template: "auth-magic-link",
+    });
+    const html = sentEmails[0].html;
     expect(html).toContain(
       "https://crm.example.com/welcome#email=dana%40example.com&token="
     );
@@ -123,7 +131,7 @@ describe("the request leg (REQUEST_LINK sentinel)", () => {
 
     expect(res.response.answerCorrect).toBe(false);
     // It ran the request leg (minted + emailed), not the redeem leg.
-    expect(sesSend).toHaveBeenCalledOnce();
+    expect(sentEmails).toHaveLength(1);
   });
 });
 
@@ -141,7 +149,7 @@ describe("the redeem leg (a real token)", () => {
     );
 
     expect(res.response.answerCorrect).toBe(true);
-    expect(sesSend).not.toHaveBeenCalled();
+    expect(sentEmails).toHaveLength(0);
     const burned = sentAttributes(0);
     expect(burned.attrs["custom:loginTokenHash"]).toBe("");
     expect(burned.attrs["custom:loginTokenExp"]).toBe("0");
@@ -180,6 +188,6 @@ describe("the redeem leg (a real token)", () => {
 
     expect(res.response.answerCorrect).toBe(false);
     expect(cognitoSend).not.toHaveBeenCalled();
-    expect(sesSend).not.toHaveBeenCalled();
+    expect(sentEmails).toHaveLength(0);
   });
 });
