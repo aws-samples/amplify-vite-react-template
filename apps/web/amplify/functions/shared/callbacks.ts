@@ -292,7 +292,9 @@ export async function scheduleCallback(opts: {
     opts.scheduledDate,
     targetWindow,
     opts.technicianId,
-    slotMinutes
+    slotMinutes,
+    // GL-07: the $0 callback visit is an assigned stop like any other.
+    { stops: 1 }
   );
   if (!reserved.ok) throw new Error(reserved.message);
   const giveBack = () =>
@@ -300,7 +302,8 @@ export async function scheduleCallback(opts: {
       opts.scheduledDate,
       targetWindow,
       opts.technicianId,
-      slotMinutes
+      slotMinutes,
+      { stops: 1 }
     ).catch(() => undefined);
 
   const callbackJobId = `cbjob-${cb.id}`;

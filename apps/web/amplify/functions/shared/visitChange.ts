@@ -68,9 +68,10 @@ export const MAX_VISIT_CHANGE_RESUME_ATTEMPTS = 5;
  * does.
  */
 
-// The per-technician daily stop capacity — one route is one technician-day of
-// capacity. Kept in step with booking-public/availability.ts (STOPS_PER_TECH).
-export const STOPS_PER_TECH = 8;
+// The per-technician daily stop capacity now lives on the CapacityDay
+// ledger (capacity.ts STOPS_PER_TECH) and is enforced ATOMICALLY by
+// reserveSlot — re-exported for existing consumers.
+export { STOPS_PER_TECH } from "./capacity";
 
 export type VisitChangeActor = {
   sub: string | null;
@@ -1593,49 +1594,10 @@ export async function rescheduleVisit(args: {
         "The selected route doesn't belong to that technician and date."
       );
     }
-    // GL-07: the stop-count ceiling below is a read→act decision, so every
-    // move ONTO this route serializes behind a short single-winner CAS lease
-    // on the Route row — two simultaneous moves can no longer both pass one
-    // count read. (The minutes ledger stays independently atomic via
-    // reserveSlot.) A crashed move's lease expires on its own; a retry after
-    // the lease is idempotent — the guarded publish still refuses a stale
-    // move. The release below is FENCED on this holder's nonce, so an
-    // expired mover can never unlock a newer mover's lease.
-    const moveNonce = randomUUID();
-    const moveLease = await casTakeover("Route", route.id, {
-      nonceField: "moveLeaseNonce",
-      nonce: moveNonce,
-      leaseField: "moveLeaseUntil",
-      leaseMs: 60_000,
-    });
-    if (!moveLease.ok) {
-      throw new Error(
-        moveLease.reason === "UNSUPPORTED"
-          ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
-          : "Another schedule change is mid-flight on that technician's day — wait a few seconds and try again. Nothing was changed."
-      );
-    }
-    try {
-    // Revalidate capacity: a route is one technician-day; it can't exceed its
-    // stop capacity. Count the stops already on it, excluding this visit.
-    let stops = 0;
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.list({
-        filter: { routeId: { eq: route.id } },
-        nextToken: token,
-        limit: 200,
-      });
-      stops += page.data.filter(
-        (j) => j.id !== job.id && j.status !== "CANCELED"
-      ).length;
-      token = page.nextToken;
-    } while (token);
-    if (stops >= STOPS_PER_TECH) {
-      throw new Error(
-        `That route is full (${stops} of ${STOPS_PER_TECH} stops). Pick another day or technician.`
-      );
-    }
+    // GL-07: the stop ceiling is enforced ATOMICALLY inside reserveSlot
+    // below — one guarded conditional add on the technician-day stop ledger
+    // per claim, so two simultaneous moves can never both take the last
+    // stop, no lease and no read→act count involved.
     // GL-04: the ATOMIC technician-window slot claim. The minutes are the
     // locked on-site duration + REAL Routes legs measured from the assigned
     // technician's private base (or that day's override); a base or Routes
@@ -1684,7 +1646,9 @@ export async function rescheduleVisit(args: {
       newDate!,
       targetWindow,
       technician.id,
-      slotMinutes
+      slotMinutes,
+      // GL-07: one assigned stop claimed with the minutes, atomically.
+      { stops: 1 }
     );
     if (!reserved.ok) {
       throw new Error(reserved.message);
@@ -1702,7 +1666,7 @@ export async function rescheduleVisit(args: {
         timeWindow: args.timeWindow?.trim() || null,
         technicianId: technician.id,
         routeId: route.id,
-        routeOrder: args.routeOrder ?? stops + 1,
+        routeOrder: args.routeOrder ?? 999,
         status: "SCHEDULED",
         capacityWindow: targetWindow,
         capacityMinutes: slotMinutes,
@@ -1711,11 +1675,11 @@ export async function rescheduleVisit(args: {
       jobScheduleGuards(job)
     );
     if (!published.ok) {
-      // Compensation: the freshly reserved slot must not stay held for a
-      // publish that never landed.
-      await releaseSlot(newDate!, targetWindow, technician.id, slotMinutes).catch(
-        () => undefined
-      );
+      // Compensation: the freshly reserved minutes AND stop must not stay
+      // held for a publish that never landed.
+      await releaseSlot(newDate!, targetWindow, technician.id, slotMinutes, {
+        stops: 1,
+      }).catch(() => undefined);
       throw new Error(
         published.reason === "UNSUPPORTED"
           ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
@@ -1733,17 +1697,10 @@ export async function rescheduleVisit(args: {
         note: "Visit moved to a different month.",
       }).catch(() => undefined);
     }
-    // The OLD slot's minutes come back only after the move landed.
+    // The OLD slot's minutes — and its assigned stop — come back only
+    // after the move landed (releaseJobCapacity releases the stop when the
+    // prior row carried a real technicianId).
     await releaseJobSlot(job);
-    } finally {
-      // Fenced release — an expired mover cannot unlock a newer mover.
-      await casFencedUpdate(
-        "Route",
-        route.id,
-        { field: "moveLeaseNonce", nonce: moveNonce },
-        { moveLeaseUntil: null }
-      ).catch(() => undefined);
-    }
   } else {
     // GL-07 R4: a dated move with no technician is NEVER published as a clean
     // SCHEDULED — the owned staffing case is CONFIRMED FIRST (a case that

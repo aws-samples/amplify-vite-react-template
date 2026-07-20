@@ -1028,6 +1028,11 @@ export const schema = a.schema({
       window: a.string(),
       technicianId: a.string(),
       committedMinutes: a.integer(),
+      /** GL-07: assigned stops on the technician's DAY (rows with the
+       *  `stops#date#tech` id shape carry this; they deliberately omit
+       *  `date` so slot readers never see them). Enforced atomically by
+       *  the backend CAS store; browsers are read-only on this model. */
+      committedStops: a.integer(),
       /** False ⇒ the nightly Routes rebuild could not verify this slot's
        *  travel legs — it sells NOTHING until it verifies (fail closed). */
       verified: a.boolean(),
@@ -1444,12 +1449,6 @@ export const schema = a.schema({
       status: a.ref("RouteStatus").required(),
       notes: a.string(),
       jobs: a.hasMany("Job", "routeId"),
-      // GL-07: assigned reschedules onto this route serialize behind this
-      // short CAS lease — the stop-count ceiling is a read→act decision, and
-      // two simultaneous moves must not both pass one count read. Written
-      // only by the backend CAS store.
-      moveLeaseNonce: a.string(),
-      moveLeaseUntil: a.datetime(),
     })
     .secondaryIndexes((index) => [
       index("technicianId").sortKeys(["date"]),

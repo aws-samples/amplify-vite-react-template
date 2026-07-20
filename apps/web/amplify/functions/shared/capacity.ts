@@ -59,6 +59,18 @@ export const PROCESSING_CLAIM_MS = 7 * 24 * 60 * 60_000;
  *  visit becomes a confirmed commitment only through the real assign claim. */
 export const POOL_TECH = "POOL";
 
+/** GL-07: one route is one technician-day of at most this many ASSIGNED
+ *  stops — the coarse day ceiling alongside the per-window minutes ledger. */
+export const STOPS_PER_TECH = 8;
+
+/** GL-07: the per-technician-DAY assigned-stop ledger row. Deliberately
+ *  carries NO `date` attribute, so the by-date index (slot readers, the
+ *  availability matrix) never sees it — it exists only for the atomic
+ *  stop-count invariant and the nightly rebuild. */
+export function dayStopId(date: string, technicianId: string): string {
+  return `stops#${date}#${technicianId}`;
+}
+
 export function isWeekday(date: string): boolean {
   const dow = new Date(`${date}T00:00:00Z`).getUTCDay();
   return dow >= 1 && dow <= 5;
@@ -430,9 +442,41 @@ export async function reserveSlot(
   date: string,
   window: CapacityWindow,
   technicianId: string,
-  minutes: number
+  minutes: number,
+  opts?: {
+    /** GL-07: reserve this many ASSIGNED stops on the technician's DAY in
+     *  the same claim (0 for checkout holds and window shifts). Each
+     *  ceiling is one guarded conditional write; a minutes refusal after a
+     *  won stop compensates the stop, so a failed claim never leaks. */
+    stops?: number;
+  }
 ): Promise<ClaimOutcome> {
   if (!(await capacityModelsReady())) return UNAVAILABLE;
+  const stops = opts?.stops ?? 0;
+  if (stops > 0) {
+    const stopRowId = dayStopId(date, technicianId);
+    await ensureDayStopRow(date, technicianId);
+    const stopRes = await casGuardedAdd(
+      "CapacityDay",
+      stopRowId,
+      { committedStops: stops },
+      [
+        {
+          kind: "fieldAtMostOrMissing",
+          field: "committedStops",
+          value: STOPS_PER_TECH - stops,
+        },
+      ]
+    );
+    if (!stopRes.ok) {
+      if (stopRes.reason === "UNSUPPORTED") return UNAVAILABLE;
+      return {
+        ok: false,
+        soldOut: true,
+        message: `That technician's day is full (${STOPS_PER_TECH} stops). Pick another day or technician.`,
+      };
+    }
+  }
   await ensureSlot(date, window, technicianId);
   const id = slotId(date, window, technicianId);
   const res = await casGuardedAdd(
@@ -448,12 +492,37 @@ export async function reserveSlot(
     ]
   );
   if (res.ok) return { ok: true };
+  if (stops > 0) {
+    // The minutes ceiling refused after the stop was won — give the stop
+    // back so a failed claim leaks nothing.
+    await casGuardedAdd(
+      "CapacityDay",
+      dayStopId(date, technicianId),
+      { committedStops: -stops },
+      [{ kind: "fieldAtLeast", field: "committedStops", value: stops }]
+    ).catch(() => undefined);
+  }
   if (res.reason === "UNSUPPORTED") return UNAVAILABLE;
   return {
     ok: false,
     soldOut: true,
     message: `That ${window.toLowerCase()} is now fully booked — pick another window or day.`,
   };
+}
+
+async function ensureDayStopRow(
+  date: string,
+  technicianId: string
+): Promise<void> {
+  const client = await dataClient();
+  if (!("CapacityDay" in client.models)) return;
+  await client.models.CapacityDay.create({
+    id: dayStopId(date, technicianId),
+    // No `date` attribute on purpose — see dayStopId.
+    technicianId,
+    committedStops: 0,
+    verified: true,
+  } as never).catch(() => undefined);
 }
 
 /** Give slot minutes back (a canceled/moved-off visit or a released claim).
@@ -463,7 +532,8 @@ export async function releaseSlot(
   date: string,
   window: CapacityWindow,
   technicianId: string,
-  minutes: number
+  minutes: number,
+  opts?: { stops?: number }
 ): Promise<void> {
   const client = await dataClient();
   if (!("CapacityDay" in client.models)) return;
@@ -473,6 +543,17 @@ export async function releaseSlot(
     { committedMinutes: -minutes },
     [{ kind: "fieldAtLeast", field: "committedMinutes", value: minutes }]
   );
+  const stops = opts?.stops ?? 0;
+  if (stops > 0) {
+    // Independently guarded so drift in one counter can never leak the
+    // other; the nightly rebuild converges both from ground truth.
+    await casGuardedAdd(
+      "CapacityDay",
+      dayStopId(date, technicianId),
+      { committedStops: -stops },
+      [{ kind: "fieldAtLeast", field: "committedStops", value: stops }]
+    ).catch(() => undefined);
+  }
 }
 
 /** Account for a pending-assignment (pool) visit on the readout. Never
@@ -749,7 +830,10 @@ export async function releaseJobCapacity(job: {
       facts.date,
       facts.window,
       facts.technicianId,
-      facts.minutes
+      facts.minutes,
+      // GL-07: an ASSIGNED visit (technicianId, not a checkout hold) held
+      // one stop on the technician's day — it comes back with the minutes.
+      { stops: job.technicianId && job.technicianId !== POOL_TECH ? 1 : 0 }
     ).catch(() => undefined);
   } else {
     await releasePoolMinutes(facts.date, facts.window, facts.minutes).catch(
@@ -966,6 +1050,7 @@ export async function reconcileCapacityDay(
     onsite: number;
   };
   const jobsBySlot = new Map<string, StopJob[]>();
+  const assignedStopsByTech = new Map<string, number>();
   let token: string | null | undefined;
   do {
     const page = await client.models.Job.listJobByScheduledDate(
@@ -1018,10 +1103,20 @@ export async function reconcileCapacityDay(
         onsite: onsiteMinutes(job.propertyClass),
       });
       jobsBySlot.set(key, list);
+      // GL-07: ground truth for the assigned-stop day ledger — a stop is
+      // ASSIGNED only when the job carries a real technicianId (checkout
+      // holds and pending-assignment pool visits are not stops).
+      if (!pendingAssignment && job.technicianId && job.technicianId !== POOL_TECH) {
+        assignedStopsByTech.set(
+          job.technicianId,
+          (assignedStopsByTech.get(job.technicianId) ?? 0) + 1
+        );
+      }
     }
     token = page.nextToken;
   } while (token);
 
+  const assignedStopsByTechFinal = assignedStopsByTech;
   const liveClaims = await liveClaimsOn(date);
   const claimMinutesBySlot = new Map<string, number>();
   for (const claim of liveClaims) {
@@ -1095,6 +1190,43 @@ export async function reconcileCapacityDay(
     }
     slots++;
     if (!verified) unverified++;
+  }
+  // GL-07: rebuild every technician's assigned-stop day ledger from ground
+  // truth — drifted counters (a crashed compensation, a legacy row)
+  // converge here every night. Techs with a stale row but no stops today
+  // are reset to zero.
+  const stopRowTechs = new Set<string>(assignedStopsByTechFinal.keys());
+  {
+    let token2: string | null | undefined;
+    do {
+      const page = await (
+        client.models.CapacityDay.list as (a: object) => Promise<{
+          data: { id: string; technicianId?: string | null }[];
+          nextToken?: string | null;
+        }>
+      )({ limit: 500, nextToken: token2 });
+      for (const row of page.data ?? []) {
+        if (row.id.startsWith(`stops#${date}#`) && row.technicianId) {
+          stopRowTechs.add(row.technicianId);
+        }
+      }
+      token2 = page.nextToken;
+    } while (token2);
+  }
+  for (const techId of stopRowTechs) {
+    const trueStops = assignedStopsByTechFinal.get(techId) ?? 0;
+    const id = dayStopId(date, techId);
+    await ensureDayStopRow(date, techId);
+    const sets = {
+      committedStops: trueStops,
+      reconciledAt: new Date().toISOString(),
+    };
+    const written = await casGuardedUpdate("CapacityDay", id, sets, []);
+    if (!written.ok && written.reason === "UNSUPPORTED") {
+      await client.models.CapacityDay.update({ id, ...sets }).catch(
+        () => undefined
+      );
+    }
   }
   return { slots, expiredClaims, unverified };
 }

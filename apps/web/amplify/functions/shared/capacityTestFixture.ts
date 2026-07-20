@@ -41,6 +41,10 @@ export function capacityFixtureModels() {
     models: {
       CapacityDay: {
         ...rowModel(capacityDays),
+        list: async () => ({
+          data: [...capacityDays.values()],
+          nextToken: null,
+        }),
         listCapacityDayByDate: async ({ date }: { date: string }) => ({
           data: [...capacityDays.values()].filter((r) => r.date === date),
           nextToken: null,

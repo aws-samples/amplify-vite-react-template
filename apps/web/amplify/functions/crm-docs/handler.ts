@@ -2530,7 +2530,10 @@ async function updateJobSchedule(
       args.scheduledDate,
       targetWindow,
       technician.id,
-      slotMinutes
+      slotMinutes,
+      // GL-07: an assignment claims one stop on the technician-day ledger
+      // in the same atomic pass as its minutes.
+      { stops: 1 }
     );
     if (!reserved.ok) {
       await compensateMonth();
@@ -2569,7 +2572,8 @@ async function updateJobSchedule(
         args.scheduledDate,
         targetWindow,
         technician.id,
-        slotMinutes
+        slotMinutes,
+        { stops: 1 }
       ).catch(() => undefined);
       throw new Error(
         published.reason === "UNSUPPORTED"

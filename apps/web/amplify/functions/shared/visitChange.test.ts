@@ -41,7 +41,12 @@ const fakeDataClient = {
         data: [...jobs.values()].filter((j) => j.scheduledDate === scheduledDate),
         nextToken: null,
       }),
-      get: async ({ id }: { id: string }) => ({ data: jobs.get(id) ?? null }),
+      // A COPY, like a real AppSync read — the CAS store mutates rows in
+      // place, and a live reference would let post-publish facts leak into
+      // code that captured the pre-publish job.
+      get: async ({ id }: { id: string }) => ({
+        data: jobs.has(id) ? { ...jobs.get(id)! } : null,
+      }),
       update: async (patch: Row) => {
         if (!jobs.has(patch.id)) return { data: null, errors: [{ message: "no job" }] };
         jobs.set(patch.id, { ...jobs.get(patch.id)!, ...patch });
@@ -583,14 +588,18 @@ describe("rescheduleVisit", () => {
     expect(visitEvents[0]).toMatchObject({ action: "RESCHEDULE", outcome: "COMPLETE" });
   });
 
-  it("GL-07: two simultaneous moves onto one route serialize — one wins, one gets a plain refusal", async () => {
+  it("GL-07: the day's LAST STOP cannot be double-taken — the loser gets a plain refusal and holds nothing", async () => {
     const newDate = daysFromNow(9);
     seedForReschedule(newDate);
-    // Pre-hold the route's move lease, as a concurrent mover would.
-    routes.get("r-new")!.moveLeaseNonce = "other-mover";
-    routes.get("r-new")!.moveLeaseUntil = new Date(
-      Date.now() + 60_000
-    ).toISOString();
+    // The technician's day already carries the full stop count (as a
+    // concurrent winner would leave it) — this move must refuse atomically.
+    const stopRow = `stops#${newDate}#t1`;
+    capacityFixture.maps.capacityDays.set(stopRow, {
+      id: stopRow,
+      technicianId: "t1",
+      committedStops: 8,
+      verified: true,
+    });
 
     await expect(
       rescheduleVisit({
@@ -601,19 +610,18 @@ describe("rescheduleVisit", () => {
         reason: "customer request",
         actor: OFFICE,
       })
-    ).rejects.toThrow(/Another schedule change is mid-flight/);
-    // Nothing moved, nothing held: the visit is untouched and the loser
-    // reserved no minutes.
+    ).rejects.toThrow(/day is full \(8 stops\)/);
+    // Nothing moved, nothing held: the counter is untouched and the visit
+    // stays where it was.
+    expect(
+      capacityFixture.maps.capacityDays.get(stopRow)!.committedStops
+    ).toBe(8);
     expect(jobs.get("j1")!.routeId).not.toBe("r-new");
   });
 
-  it("GL-07: an EXPIRED move lease is seized (a crashed mover cannot wedge the route), and the winner releases fenced", async () => {
+  it("GL-07: a successful move claims one stop on the new day and releases the old day's stop", async () => {
     const newDate = daysFromNow(9);
     seedForReschedule(newDate);
-    routes.get("r-new")!.moveLeaseNonce = "crashed-mover";
-    routes.get("r-new")!.moveLeaseUntil = new Date(
-      Date.now() - 5_000
-    ).toISOString(); // expired
 
     const res = await rescheduleVisit({
       jobId: "j1",
@@ -625,9 +633,10 @@ describe("rescheduleVisit", () => {
     });
 
     expect(res.assignedToRoute).toBe(true);
-    // The winner's fenced release cleared the lease for the next mover
-    // (null sets REMOVE the attribute in the CAS store).
-    expect(routes.get("r-new")!.moveLeaseUntil).toBeUndefined();
+    expect(
+      capacityFixture.maps.capacityDays.get(`stops#${newDate}#t1`)!
+        .committedStops
+    ).toBe(1);
   });
 
   it("GL-17: a cross-month reschedule claims the target month and releases the prior month", async () => {

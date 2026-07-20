@@ -80,9 +80,12 @@ const {
   makeLegResolver,
   onsiteMinutes,
   reconcileCapacityDay,
+  dayStopId,
+  STOPS_PER_TECH,
   releaseCapacityClaim,
   releaseJobCapacity,
   reserveSlot,
+  releaseSlot,
   slotId,
   slotStates,
   stopsBySlotOn,
@@ -438,6 +441,102 @@ describe("claim moves + strict releases — adversarial", () => {
     expect(slot).toBeTruthy();
     expect(slot!.committedMinutes).toBe(60);
     expect(capacityDays.get(slotId(WED, "MORNING", "POOL"))?.committedMinutes ?? 0).toBe(0);
+  });
+});
+
+describe("GL-07 — the atomic assigned-stop day ledger", () => {
+  it("two concurrent claims for the day's LAST STOP: exactly one wins", async () => {
+    capacityDays.set(dayStopId(WED, "t1"), {
+      id: dayStopId(WED, "t1"),
+      technicianId: "t1",
+      committedStops: STOPS_PER_TECH - 1,
+      verified: true,
+    });
+
+    const [a, b] = await Promise.all([
+      reserveSlot(WED, "MORNING", "t1", 30, { stops: 1 }),
+      reserveSlot(WED, "AFTERNOON", "t1", 30, { stops: 1 }),
+    ]);
+
+    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+    const loser = a.ok ? b : a;
+    expect(String((loser as { message?: string }).message)).toContain(
+      "day is full"
+    );
+    expect(
+      capacityDays.get(dayStopId(WED, "t1"))!.committedStops
+    ).toBe(STOPS_PER_TECH); // exactly one landed
+  });
+
+  it("a minutes refusal returns the stop it had already won — a failed claim leaks nothing", async () => {
+    capacityDays.set(slotId(WED, "MORNING", "t1"), {
+      id: slotId(WED, "MORNING", "t1"),
+      date: WED,
+      window: "MORNING",
+      technicianId: "t1",
+      committedMinutes: 235, // 5 left of 240 — 30 won't fit
+      verified: true,
+    });
+
+    const res = await reserveSlot(WED, "MORNING", "t1", 30, { stops: 1 });
+
+    expect(res.ok).toBe(false);
+    expect(
+      capacityDays.get(dayStopId(WED, "t1"))?.committedStops ?? 0
+    ).toBe(0); // the stop it won was compensated
+  });
+
+  it("release returns the minutes AND the assigned stop", async () => {
+    const ok = await reserveSlot(WED, "MORNING", "t1", 45, { stops: 1 });
+    expect(ok.ok).toBe(true);
+    expect(capacityDays.get(dayStopId(WED, "t1"))!.committedStops).toBe(1);
+
+    await releaseSlot(WED, "MORNING", "t1", 45, { stops: 1 });
+
+    expect(
+      capacityDays.get(slotId(WED, "MORNING", "t1"))!.committedMinutes
+    ).toBe(0);
+    expect(capacityDays.get(dayStopId(WED, "t1"))!.committedStops).toBe(0);
+  });
+
+  it("the nightly rebuild repairs a DRIFTED stop counter from ground truth", async () => {
+    customers.set("c1", {
+      id: "c1",
+      serviceStreet: "9 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
+    // Ground truth: exactly ONE assigned visit for t1 on WED…
+    jobs.set("j1", {
+      id: "j1",
+      customerId: "c1",
+      scheduledDate: WED,
+      status: "SCHEDULED",
+      technicianId: "t1",
+      timeWindow: "MORNING",
+      routeOrder: 1,
+      propertyClass: "RESIDENTIAL",
+    });
+    // …but the counter drifted to 5, and a second tech has a stale row
+    // with no stops at all.
+    capacityDays.set(dayStopId(WED, "t1"), {
+      id: dayStopId(WED, "t1"),
+      technicianId: "t1",
+      committedStops: 5,
+      verified: true,
+    });
+    capacityDays.set(dayStopId(WED, "t9"), {
+      id: dayStopId(WED, "t9"),
+      technicianId: "t9",
+      committedStops: 3,
+      verified: true,
+    });
+
+    await reconcileCapacityDay(WED, "routes-key");
+
+    expect(capacityDays.get(dayStopId(WED, "t1"))!.committedStops).toBe(1);
+    expect(capacityDays.get(dayStopId(WED, "t9"))!.committedStops).toBe(0);
   });
 });
 
