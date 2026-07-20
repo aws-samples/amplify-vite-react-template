@@ -26,6 +26,8 @@ const customerUpdates: Row[] = [];
 const runUpdates: Row[] = [];
 const plansCreated: Row[] = [];
 const jobsCreated: Row[] = [];
+// GL-17: the seasonal month ledger — finalize must claim the first visit's month.
+const obligationsCreated: Row[] = [];
 const emails: { to: string; subject: string; html: string }[] = [];
 // R80: the new-booking-landed alert routes to sales@ via notifyLeads now.
 const leadAlerts: { subject: string; heading: string; bodyHtml: string; template: string }[] = [];
@@ -42,6 +44,7 @@ const store = {
   Agreement: new Map<string, Row>(),
   BookingFinalization: new Map<string, Row>(),
   LeadActivity: new Map<string, Row>(),
+  TreatmentObligation: new Map<string, Row>(),
 };
 // Per-model injected failures — set true to make the next create(s) fail, the
 // way a throttled/validation-refused write would, so a retry can then succeed.
@@ -161,6 +164,7 @@ const fakeDataClient = {
     Job: statefulModel("Job", jobsCreated),
     Invoice: statefulModel("Invoice"),
     Agreement: statefulModel("Agreement"),
+    TreatmentObligation: statefulModel("TreatmentObligation", obligationsCreated),
   },
 };
 // GL-04: real capacity models for the expired-hold fallback tests.
@@ -352,6 +356,8 @@ beforeEach(() => {
   store.Agreement.clear();
   store.BookingFinalization.clear();
   store.LeadActivity.clear();
+  store.TreatmentObligation.clear();
+  obligationsCreated.length = 0;
   failCreate.ServicePlan = false;
   failCreate.Job = false;
   failCreate.Invoice = false;
@@ -1469,5 +1475,121 @@ describe("GL-06 — a pending bank debit is a real commitment with honest state"
         w.title.includes("Pending bank debit does not match")
       )
     ).toBe(true);
+  });
+});
+
+describe("GL-17 — a date-less off-season enrollment finalizes with an April obligation and truthful copy", () => {
+  const offSeasonEnrollment = () => {
+    // A December customer accepted and PAID with no first-visit day to pick.
+    vi.setSystemTime(new Date("2026-12-09T15:00:00Z"));
+    booking.quoteJson = JSON.stringify({
+      serviceLabel: "Mosquito plan (Apr–Oct)",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 11900,
+        initialFeeCents: 11900,
+      },
+      planOnly: true,
+      offSeason: true,
+    });
+    booking.selectedDate = null;
+    booking.selectedWindow = null;
+    booking.recurring = true;
+    booking.amountCents = 11900;
+  };
+  const finalizeEnrollment = () =>
+    finalizeBooking({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_1",
+      amountReceived: 11900,
+    });
+
+  it("creates the plan NOW (billing started today), the April-targeted visit, its month's obligation, and the owned scheduling action", async () => {
+    vi.useFakeTimers();
+    try {
+      offSeasonEnrollment();
+
+      await finalizeEnrollment();
+
+      // The plan exists immediately, billing from today, monthly year-round.
+      expect(plansCreated).toHaveLength(1);
+      expect(plansCreated[0]).toMatchObject({
+        serviceFrequency: "MONTHLY",
+        priceCents: 11900,
+        status: "ACTIVE",
+        startDate: "2026-12-09",
+        seasonal: true,
+      });
+      // The first treatment targets next season's first weekday — UNSCHEDULED,
+      // pending assignment; never a SCHEDULED visit on an invented day.
+      expect(jobsCreated).toHaveLength(1);
+      expect(jobsCreated[0]).toMatchObject({
+        status: "UNSCHEDULED",
+        scheduledDate: "2027-04-01",
+        type: "RECURRING",
+      });
+      expect(String(jobsCreated[0].notes)).toContain("OFF-SEASON enrollment");
+      // April's month is CLAIMED on the obligation ledger by this visit.
+      expect(obligationsCreated).toHaveLength(1);
+      expect(obligationsCreated[0]).toMatchObject({
+        id: `${plansCreated[0].id}#2027-04`,
+        monthKey: "2027-04",
+        status: "SCHEDULED",
+        jobId: "job-b1",
+      });
+      // A durable owned action makes the office confirm the real date.
+      const unstaffed = workOpened.find(
+        (w) => w.kind === "UNSTAFFED_VISIT" && w.dedupeKey === "booking-off-season:b1"
+      );
+      expect(unstaffed).toBeTruthy();
+      expect(unstaffed!.detail).toContain("2027-04-01");
+      expect(unstaffed!.detail).not.toContain("null");
+      expect(booking.status).toBe("BOOKED");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tells the customer and the office the TRUTH — a month promise, never an invented exact day", async () => {
+    vi.useFakeTimers();
+    try {
+      offSeasonEnrollment();
+
+      await finalizeEnrollment();
+
+      expect(emails).toHaveLength(1);
+      expect(emails[0].subject).toContain("You're enrolled");
+      expect(emails[0].subject).toContain("April 2027");
+      expect(emails[0].html).toContain("First treatment in April 2027");
+      expect(emails[0].html).toContain("confirm the exact day");
+      expect(emails[0].html).not.toContain("null");
+      // Year-round billing is stated, not hidden behind "starts after visit".
+      expect(emails[0].html).toContain("year-round");
+      expect(leadAlerts).toHaveLength(1);
+      expect(leadAlerts[0].subject).toContain("off-season enrollment");
+      expect(leadAlerts[0].bodyHtml).toContain("OFF-SEASON");
+      expect(leadAlerts[0].bodyHtml).not.toContain("null");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is IDEMPOTENT under payment/webhook retries — one plan, one visit, one obligation, one email", async () => {
+    vi.useFakeTimers();
+    try {
+      offSeasonEnrollment();
+
+      await finalizeEnrollment();
+      await finalizeEnrollment();
+      await finalizeEnrollment();
+
+      expect(plansCreated).toHaveLength(1);
+      expect(jobsCreated).toHaveLength(1);
+      expect(obligationsCreated).toHaveLength(1);
+      expect(emails).toHaveLength(1);
+      expect(leadAlerts).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

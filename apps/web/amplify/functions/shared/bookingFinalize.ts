@@ -675,6 +675,22 @@ type BookingRecord = {
   processingExpectedBy?: string | null;
 };
 
+/** GL-17: the customer-facing promise for a date-less off-season enrollment —
+ *  the next service month BY NAME ("April 2027"), never an invented exact
+ *  day. The office owns confirming the real date with the customer. */
+function firstTreatmentMonthLabel(): string {
+  const monthKey = nextServiceMonth(
+    { seasonal: true },
+    new Date().toISOString().slice(0, 7)
+  );
+  const [y, m] = monthKey.split("-").map(Number);
+  const names = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+  ];
+  return `${names[(m ?? 1) - 1]} ${y}`;
+}
+
 /** First-touch ad attribution as sanitized and stored at /quote. */
 type Attribution = {
   source?: string;
@@ -1382,7 +1398,10 @@ async function finalizeClaimed(
             | "BIMONTHLY"
             | "QUARTERLY",
           status: "ACTIVE",
-          startDate: booking.selectedDate ?? undefined,
+          // A date-less off-season enrollment's plan starts TODAY — billing
+          // began at checkout even though the first treatment is next season.
+          startDate:
+            booking.selectedDate ?? new Date().toISOString().slice(0, 10),
           // GL-17: seasonal facts are stamped at enrollment from the accepted
           // offer — mosquito / mosquito+tick bills monthly year-round and owes
           // one treatment per month April–October. Billing starts immediately
@@ -1420,21 +1439,23 @@ async function finalizeClaimed(
   // paid" is true the instant the job exists.
   const paidAtIso = new Date().toISOString();
   const jobId = `job-${booking.id}`;
-  // GL-17 (defense-in-depth): no funnel service can currently mint a seasonal
-  // plan, but if one ever does, an off-season selected date must not become a
-  // SCHEDULED off-season treatment — the office paths hard-refuse the same
-  // date. The first visit targets the next service month instead, pending
-  // assignment, and the office owns confirming the real date with the
-  // customer.
+  // GL-17: BOTH off-season shapes — an off-season SELECTED date, and the
+  // date-LESS off-season enrollment the funnel now sells (billing started at
+  // checkout; no first-visit day existed to pick). Either way the first
+  // visit targets the next service month, pending assignment, with the
+  // office owning the real date — never an invented exact April day.
   const offSeasonFirstVisit = Boolean(
     (catalogService?.seasonal ?? isSeasonalPlanName(serviceLabel)) &&
       plan?.id &&
-      booking.selectedDate &&
-      !isServiceMonth({ seasonal: true }, booking.selectedDate.slice(0, 7))
+      (!booking.selectedDate ||
+        !isServiceMonth({ seasonal: true }, booking.selectedDate.slice(0, 7)))
   );
   const firstVisitDate = offSeasonFirstVisit
     ? firstWeekdayOf(
-        nextServiceMonth({ seasonal: true }, booking.selectedDate!.slice(0, 7))
+        nextServiceMonth(
+          { seasonal: true },
+          (booking.selectedDate ?? paidAtIso).slice(0, 7)
+        )
       )
     : (booking.selectedDate ?? undefined);
   const job = await createOrGet(
@@ -1466,7 +1487,7 @@ async function finalizeClaimed(
           !pending && booking.amountCents ? paymentIntentId : undefined,
         paymentPendingIntentId: pending ? paymentIntentId : undefined,
         notes: offSeasonFirstVisit
-          ? `Website booking ${booking.id}. ${pending ? `Bank debit processing (${paymentIntentId}) — payment pending.` : `Paid up front (${paymentIntentId}).`} The selected date ${booking.selectedDate} is OFF-SEASON for this seasonal plan — the first treatment targets ${firstVisitDate}; confirm the date with the customer.`
+          ? `Website booking ${booking.id}. ${pending ? `Bank debit processing (${paymentIntentId}) — payment pending.` : `Paid up front (${paymentIntentId}).`} ${booking.selectedDate ? `The selected date ${booking.selectedDate} is OFF-SEASON for this seasonal plan` : "OFF-SEASON enrollment (no first-visit day existed to pick)"} — the first treatment targets ${firstVisitDate}; confirm the date with the customer.`
           : `Website booking ${booking.id}. ${pending ? `Bank debit processing (${paymentIntentId}) — payment pending.` : `Paid up front (${paymentIntentId}).`}`,
         accessGroups,
       }),
@@ -1540,7 +1561,7 @@ async function finalizeClaimed(
       kind: "UNSTAFFED_VISIT",
       dedupeKey: `booking-off-season:${booking.id}`,
       title: `Confirm a seasonal plan's first treatment date: ${booking.name ?? booking.email ?? booking.id}`,
-      detail: `Booking ${booking.id} enrolled a seasonal plan with an off-season selected date (${booking.selectedDate}). Billing started as approved; the first treatment was targeted to ${firstVisitDate} (the next service month) and is pending assignment. Confirm the date with the customer and assign it.`,
+      detail: `Booking ${booking.id} enrolled a seasonal plan off-season${booking.selectedDate ? ` (selected date ${booking.selectedDate})` : ""}. Billing started as approved — verify with Finance that the monthly subscription is running; the first treatment was targeted to ${firstVisitDate} (the next service month) and is pending assignment. Confirm the real date with the customer and assign it.`,
       customerId: customer.id,
       relatedId: jobId,
       sourceUrl: `/schedule`,
@@ -1622,9 +1643,11 @@ async function finalizeClaimed(
   // 4. T&C acceptance becomes the signed agreement + PDF on file.
   const signedAtIso = new Date().toISOString();
   const bodyText = [
-    `SERVICE AGREEMENT. BuzzKill Pest Control will provide: ${serviceLabel} at ${[booking.street, booking.city, booking.state, booking.zip].filter(Boolean).join(", ")} on ${booking.selectedDate} (${windowLabel}).`,
+    `SERVICE AGREEMENT. BuzzKill Pest Control will provide: ${serviceLabel} at ${[booking.street, booking.city, booking.state, booking.zip].filter(Boolean).join(", ")} ${booking.selectedDate ? `on ${booking.selectedDate} (${windowLabel})` : `with the first treatment in ${firstTreatmentMonthLabel()}; BuzzKill will contact the customer to agree the exact day`}.`,
     booking.recurring && stored.recurringOffer
-      ? `RECURRING PLAN. After the initial visit, service continues ${stored.recurringOffer.frequency.toLowerCase()} at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed automatically. Cancel anytime.`
+      ? booking.selectedDate
+        ? `RECURRING PLAN. After the initial visit, service continues ${stored.recurringOffer.frequency.toLowerCase()} at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed automatically. Cancel anytime.`
+        : `RECURRING PLAN. Billing starts today at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed monthly year-round. Treatments run April through October (one per month); the first treatment will be scheduled for ${firstTreatmentMonthLabel()}. Cancel anytime.`
       : null,
     pending
       ? `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} authorized by bank debit (ACH) at booking; the debit may take several business days to settle. If it does not settle before the visit, the visit is canceled and the customer notified; if it fails after service, the amount is an outstanding balance.`
@@ -1978,7 +2001,9 @@ async function deliverBookingComms(
     try {
       sent = await sendEmail({
         to: booking.email,
-        subject: `You're booked: ${booking.selectedDate} — BuzzKill Pest Control`,
+        subject: booking.selectedDate
+          ? `You're booked: ${booking.selectedDate} — BuzzKill Pest Control`
+          : `You're enrolled — first treatment in ${firstTreatmentMonthLabel()} — BuzzKill Pest Control`,
         template: "booking-confirmation",
         customerId,
         relatedId: booking.id,
@@ -1993,17 +2018,19 @@ async function deliverBookingComms(
               ]
             : undefined,
         html: emailShell(
-          "Your visit is booked",
+          booking.selectedDate ? "Your visit is booked" : "Your plan is active",
           `<p>Hi ${booking.name},</p>
        <p><strong>${serviceLabel}</strong><br/>
-       ${booking.selectedDate} · ${windowLabel}<br/>
+       ${booking.selectedDate ? `${booking.selectedDate} · ${windowLabel}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
        <p>Payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> is confirmed${
          booking.recurring && recurringOffer
-           ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+           ? booking.selectedDate
+             ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+             : ` — that's your first month. Your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round, with treatments April through October`
            : ""
        }.${pdfKey && pdf ? " Your service agreement is attached." : ""}</p>
-       <p>We'll remind you 7 days and 1 day before the visit.</p>${
+       <p>${booking.selectedDate ? "We'll remind you 7 days and 1 day before the visit." : "We'll reach out before the season starts to schedule your first treatment, and we'll remind you 7 days and 1 day before every visit."}</p>${
          portalInvited
            ? `
        <p>Your customer portal sign-in link is on its way in a separate email — your visits, service reports, and receipts live there.</p>`
@@ -2043,13 +2070,13 @@ async function deliverBookingComms(
     let sent = false;
     try {
       sent = await notifyLeads({
-        subject: `Website booking: ${booking.name} — ${booking.selectedDate}`,
+        subject: `Website booking: ${booking.name} — ${booking.selectedDate ?? `off-season enrollment (first treatment ${firstTreatmentMonthLabel()})`}`,
         template: "office-booking-alert",
         heading: "New paid website booking",
         customerId,
         relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
-         <p>The job is on the Needs-scheduling board for route assignment.</p>${
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate} (${windowLabel})` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing started at checkout; agree the first treatment date with the customer.") : ""}</p>
+         <p>${booking.selectedDate ? "The job is on the Needs-scheduling board for route assignment." : "The first visit is UNSCHEDULED with an owned action to confirm the date — do not leave it unassigned."}</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
          <p style="color:#666;font-size:13px;">Reason: ${matchFallbackReason}</p>`
@@ -2208,7 +2235,9 @@ async function deliverPendingComms(
       try {
         sent = await sendEmail({
           to: booking.email,
-          subject: `Your visit is scheduled: ${booking.selectedDate} — payment processing`,
+          subject: booking.selectedDate
+            ? `Your visit is scheduled: ${booking.selectedDate} — payment processing`
+            : `You're enrolled (first treatment in ${firstTreatmentMonthLabel()}) — payment processing`,
           template: "booking-pending-confirmation",
           customerId,
           relatedId: booking.id,
@@ -2226,12 +2255,14 @@ async function deliverPendingComms(
             "Your visit is scheduled — payment processing",
             `<p>Hi ${booking.name},</p>
        <p><strong>${serviceLabel}</strong><br/>
-       ${booking.selectedDate} · ${windowLabel}<br/>
+       ${booking.selectedDate ? `${booking.selectedDate} · ${windowLabel}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
-       <p>Your payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> by ${methodLabel ?? "bank transfer"} is <strong>still processing</strong> — a bank debit can take a few business days${booking.processingExpectedBy ? ` (expected by ${booking.processingExpectedBy})` : ""}. Your visit is scheduled and <strong>you don't need to do anything</strong>. Please don't pay again.</p>
+       <p>Your payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> by ${methodLabel ?? "bank transfer"} is <strong>still processing</strong> — a bank debit can take a few business days${booking.processingExpectedBy ? ` (expected by ${booking.processingExpectedBy})` : ""}. ${booking.selectedDate ? "Your visit is scheduled" : "Your enrollment is locked in"} and <strong>you don't need to do anything</strong>. Please don't pay again.</p>
        <p>We'll email you the moment the payment clears${
          booking.recurring && recurringOffer
-           ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+           ? booking.selectedDate
+             ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
+             : `, and your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round with treatments April through October`
            : ""
        }. If the payment doesn't go through, we'll let you know right away with what to do next.${pdfKey && pdf ? " Your service agreement is attached." : ""}</p>
        <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than ${CANCEL_FULL_REFUND_DAYS} days out is a full refund; ${CANCEL_FULL_REFUND_DAYS} days or less is non-refundable.</p>`
@@ -2264,13 +2295,13 @@ async function deliverPendingComms(
     let sent = false;
     try {
       sent = await notifyLeads({
-        subject: `Website booking (payment pending): ${booking.name} — ${booking.selectedDate}`,
+        subject: `Website booking (payment pending): ${booking.name} — ${booking.selectedDate ?? `off-season enrollment (first treatment ${firstTreatmentMonthLabel()})`}`,
         template: "office-booking-alert",
         heading: "New website booking — payment pending",
         customerId,
         relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> for ${booking.selectedDate} (${windowLabel}) at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} by bank debit, <strong>payment pending</strong> (not settled yet). The visit is real and dispatchable; every screen shows "Payment pending" until the debit clears.${booking.recurring ? " Recurring plan starts after the first visit." : ""}</p>
-         <p>The job is on the Needs-scheduling board for route assignment.</p>${
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate} (${windowLabel})` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} by bank debit, <strong>payment pending</strong> (not settled yet). ${booking.selectedDate ? "The visit is real and dispatchable; every" : "Every"} screen shows "Payment pending" until the debit clears.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing starts when the debit settles; agree the first treatment date with the customer.") : ""}</p>
+         <p>${booking.selectedDate ? "The job is on the Needs-scheduling board for route assignment." : "The first visit is UNSCHEDULED with an owned action to confirm the date — do not leave it unassigned."}</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
          <p style="color:#666;font-size:13px;">Reason: ${matchFallbackReason}</p>`

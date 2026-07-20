@@ -386,3 +386,55 @@ describe("amountDueCents", () => {
     ).toBeNull();
   });
 });
+
+// ── GL-17 — date-less off-season selections ─────────────────────────
+
+describe("off-season (date-less) funnel selections", () => {
+  const offSeasonQuote: PricedQuote = {
+    ...pricedQuote,
+    days: [],
+    offSeason: true,
+    offSeasonMessage: "Mosquito season runs April–October.",
+    recurringOffer: {
+      frequency: "MONTHLY",
+      monthlyCents: 11900,
+      initialFeeCents: 11900,
+    },
+  };
+
+  it("round-trips a null date/window selection for an off-season quote", () => {
+    const storage = fakeStorage();
+    saveFunnelState(storage, {
+      quote: offSeasonQuote,
+      selection: { date: null, window: null, recurring: true },
+    });
+    const loaded = loadFunnelState(storage);
+    expect(loaded?.selection).toEqual({
+      date: null,
+      window: null,
+      recurring: true,
+    });
+  });
+
+  it("REJECTS a null-date selection on a normal quote — it cannot price", () => {
+    const storage = fakeStorage();
+    saveFunnelState(storage, {
+      quote: pricedQuote,
+      selection: { date: null, window: null, recurring: true },
+    });
+    // The quote survives; the impossible selection is treated as absent.
+    const loaded = loadFunnelState(storage);
+    expect(loaded?.quote.bookingId).toBe("bk-1");
+    expect(loaded?.selection).toBeUndefined();
+  });
+
+  it("charges the plan's first month today with no day on the board", () => {
+    expect(
+      amountDueCents(offSeasonQuote, {
+        date: null,
+        window: null,
+        recurring: true,
+      })
+    ).toBe(11900);
+  });
+});

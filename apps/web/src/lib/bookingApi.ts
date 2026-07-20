@@ -130,6 +130,15 @@ export type PricedQuote = {
    * still renders correctly.
    */
   planOnly?: boolean;
+  /**
+   * GL-17: an off-season seasonal quote — there is no day board (days is
+   * empty), checkout enrolls the PLAN with no date, billing starts today,
+   * and the first treatment is scheduled for the next season's start (the
+   * office confirms the exact day). offSeasonMessage is the server's
+   * customer-facing explanation, rendered verbatim.
+   */
+  offSeason?: boolean;
+  offSeasonMessage?: string;
   /** GL-05: the customer token /booking-status authenticates with. */
   statusToken?: string;
 };
@@ -170,8 +179,9 @@ export type QuoteResponse =
 
 export type BookRequest = {
   bookingId: string;
-  date: string;
-  window: WindowCode;
+  /** null on a GL-17 off-season enrollment — no first-visit day exists. */
+  date: string | null;
+  window: WindowCode | null;
   recurring: boolean;
   tcAccepted: true;
   /** R17 — the exact terms version rendered above the pay button. */

@@ -353,8 +353,10 @@ export default function QuotePage() {
       sqft: needs.sqft ? parseInt(fields.sqft, 10) : undefined,
       nestCount: needs.nestCount ? parseInt(fields.nestCount, 10) : undefined,
       units: needs.units ? parseInt(fields.units, 10) : undefined,
+      // GL-17: never silently default the yard size — an unparsable value
+      // goes up as missing and the server's field error asks for it.
       lotHalfAcres: needs.lotHalfAcres
-        ? parseInt(fields.lotHalfAcres, 10) || 1
+        ? parseInt(fields.lotHalfAcres, 10) || undefined
         : undefined,
       comments: fields.comments.trim() || undefined,
       // GL-17: seasonal plans bill monthly year-round — no cadence choice.
@@ -426,7 +428,11 @@ export default function QuotePage() {
   }
 
   function continueToCheckout() {
-    if (!priced || !selDate || !selWindow) return;
+    if (!priced) return;
+    // GL-17: an off-season enrollment has no day board — checkout is the
+    // plan itself, date-less, billing starting today.
+    const offSeasonCheckout = Boolean(priced.offSeason && priced.recurringOffer);
+    if (!offSeasonCheckout && (!selDate || !selWindow)) return;
     if (isQuoteExpired(priced.expiresAt)) {
       startOver();
       setNotice(
@@ -436,14 +442,16 @@ export default function QuotePage() {
     }
     saveFunnelState(window.sessionStorage, {
       quote: priced,
-      selection: {
-        date: selDate,
-        window: selWindow,
-        // A plan-only (community) quote always checks out as the plan.
-        recurring:
-          (plan === "PLAN" || Boolean(priced.planOnly)) &&
-          Boolean(priced.recurringOffer),
-      },
+      selection: offSeasonCheckout
+        ? { date: null, window: null, recurring: true }
+        : {
+            date: selDate,
+            window: selWindow,
+            // A plan-only (community) quote always checks out as the plan.
+            recurring:
+              (plan === "PLAN" || Boolean(priced.planOnly)) &&
+              Boolean(priced.recurringOffer),
+          },
     });
     navigate("/book");
   }
@@ -558,6 +566,10 @@ export default function QuotePage() {
     // Community/HOA: a plan-only quote — the day board picks the first
     // visit, the plan price itself does not vary by day.
     const planOnly = Boolean(priced.planOnly && offer);
+    // GL-17: off-season seasonal enrollment — no day board at all; the
+    // checkout is the plan, billing starts today, first treatment next
+    // season (the office confirms the exact day).
+    const offSeason = Boolean(priced.offSeason && offer);
     const expiresText = new Date(priced.expiresAt).toLocaleString("en-US", {
       weekday: "short",
       month: "short",
@@ -574,13 +586,37 @@ export default function QuotePage() {
             <div className="bk-eyebrow">Your instant quote</div>
             <h1 className="bk-h2">{priced.service}</h1>
             <p className="bk-body-lead">
-              {planOnly
-                ? "Pick your first visit day and arrival window. This quote is held until "
-                : "Pick a day and arrival window. This quote is held until "}
+              {offSeason
+                ? "Enroll now — no date to pick today. This quote is held until "
+                : planOnly
+                  ? "Pick your first visit day and arrival window. This quote is held until "
+                  : "Pick a day and arrival window. This quote is held until "}
               {expiresText}.
             </p>
 
             <div className="bk-form-card">
+              {offSeason && offer && (
+                <>
+                  <h3 className="bk-form-step__title">Your seasonal plan</h3>
+                  <div className="bk-quote-card">
+                    <div className="bk-quote-card__label">
+                      Monthly plan — billed year-round
+                    </div>
+                    <div className="bk-quote-card__price">
+                      {money(offer.monthlyCents)}
+                      <span className="bk-quote-card__per">/mo</span>
+                    </div>
+                    <div className="bk-quote-card__meta">
+                      {priced.offSeasonMessage ??
+                        "Mosquito season runs April–October. Enroll now and your plan starts today, billed monthly year-round, and we'll schedule your first treatment for April and confirm the exact day with you."}{" "}
+                      {money(offer.initialFeeCents)} is due today (your first
+                      month).
+                    </div>
+                  </div>
+                </>
+              )}
+              {!offSeason && (
+              <>
               <h3 className="bk-form-step__title">
                 {planOnly ? "1. Pick your first visit day" : "1. Pick your day"}
               </h3>
@@ -677,6 +713,8 @@ export default function QuotePage() {
                   </div>
                 </>
               )}
+              </>
+              )}
 
               {notice && <div className="bk-notice">{notice}</div>}
 
@@ -687,7 +725,7 @@ export default function QuotePage() {
                 <button
                   type="button"
                   className="bk-btn bk-btn-primary"
-                  disabled={!selDate || !selWindow}
+                  disabled={offSeason ? false : !selDate || !selWindow}
                   onClick={continueToCheckout}
                 >
                   Continue to booking &rarr;

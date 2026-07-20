@@ -225,8 +225,9 @@ export function isQuoteExpired(expiresAt: string, now: number = Date.now()): boo
 // treated as absent, never thrown.
 
 export type FunnelSelection = {
-  date: string;
-  window: WindowCode;
+  /** Both null on a GL-17 off-season enrollment (no day board existed). */
+  date: string | null;
+  window: WindowCode | null;
   recurring: boolean;
 };
 
@@ -264,11 +265,16 @@ export function decodeFunnelState(raw: string | null): FunnelState | null {
     }
     const sel = parsed.selection;
     if (sel) {
-      if (
-        typeof sel.date !== "string" ||
-        (sel.window !== "MORNING" && sel.window !== "AFTERNOON") ||
-        typeof sel.recurring !== "boolean"
-      ) {
+      // Date-less selections are valid ONLY for an off-season enrollment —
+      // anything else with a null day cannot price and is treated as absent.
+      const dateOk =
+        typeof sel.date === "string" ||
+        (sel.date === null && q.offSeason === true);
+      const windowOk =
+        sel.window === "MORNING" ||
+        sel.window === "AFTERNOON" ||
+        (sel.window === null && q.offSeason === true);
+      if (!dateOk || !windowOk || typeof sel.recurring !== "boolean") {
         return { quote: q };
       }
     }

@@ -1104,6 +1104,7 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
     email: "dana@example.com",
     service: "MOSQUITO",
     propertyKind: "RESIDENTIAL",
+    lotHalfAcres: 1,
     address: { street: "12 Main St", city: "Ware", state: "MA", zip: "01082" },
   };
 
@@ -1174,6 +1175,15 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
     expect(res.body.errors.lotHalfAcres).toBeTruthy();
   });
 
+  it("REJECTS a missing yard size — never silently prices half an acre", async () => {
+    const { lotHalfAcres: _omit, ...noAcreage } = mosquitoInput;
+    const res = await postQuote(noAcreage);
+    expect(res.status).toBe(400);
+    expect(res.body.errors.lotHalfAcres).toBeTruthy();
+    // Nothing was quoted or stored under a guessed size.
+    expect(bookings).toHaveLength(0);
+  });
+
   it("sells the FIRST TREATMENT only onto April–October dates", async () => {
     vi.useFakeTimers();
     try {
@@ -1195,7 +1205,7 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
     }
   });
 
-  it("a fully off-season ask falls to the owned contact path with honest seasonal copy", async () => {
+  it("a fully off-season ask is a REAL date-less sale: PRICED, empty day board, truthful copy", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-12-09T15:00:00Z")); // deep off-season
@@ -1203,8 +1213,23 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
         ...mosquitoInput,
         email: "dana+dec@example.com",
       });
-      expect(res.body.decision).toBe("CONTACT");
-      expect(String(res.body.message)).toContain("Mosquito season");
+      // The November–March customer can accept and PAY immediately — never
+      // a "we'll call you" dead end.
+      expect(res.body.decision).toBe("PRICED");
+      expect(res.body.offSeason).toBe(true);
+      expect(res.body.days).toEqual([]);
+      expect(res.body.recurringOffer).toMatchObject({
+        frequency: "MONTHLY",
+        monthlyCents: 11900,
+        initialFeeCents: 11900,
+      });
+      // Truthful copy: year-round billing, April as a MONTH, no exact day.
+      expect(String(res.body.offSeasonMessage)).toContain("billed monthly year-round");
+      expect(String(res.body.offSeasonMessage)).toContain("April");
+      expect(String(res.body.offSeasonMessage)).toContain("confirm the exact day");
+      expect(res.body.terms?.version).toBeTruthy();
+      expect(bookings[0]).toMatchObject({ status: "QUOTED" });
+      expect(String(bookings[0].quoteJson)).toContain('"offSeason":true');
     } finally {
       vi.useRealTimers();
     }

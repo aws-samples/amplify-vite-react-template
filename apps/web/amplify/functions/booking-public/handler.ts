@@ -392,6 +392,7 @@ function parseStoredQuote(raw: unknown): {
     initialFeeCents: number;
   } | null;
   planOnly?: boolean;
+  offSeason?: boolean;
   contactMessage?: string;
 } {
   try {
@@ -402,12 +403,18 @@ function parseStoredQuote(raw: unknown): {
   }
 }
 
+/** GL-17: the one customer-facing explanation of an off-season enrollment —
+ *  truthful about immediate year-round billing and about April being a
+ *  month, not a promised exact day. */
+const OFF_SEASON_MESSAGE =
+  "Mosquito season runs April–October. Enroll now and your plan starts today — billed monthly year-round — and we'll schedule your first treatment for April and confirm the exact day with you.";
+
 /** Rehydrate the exact stored day board without recalculating its price. */
 function pricedResponse(booking: StoredQuoteBooking) {
   const stored = parseStoredQuote(booking.quoteJson);
   if (
     !stored.serviceLabel ||
-    !stored.days?.length ||
+    (!stored.days?.length && !stored.offSeason) ||
     !booking.expiresAt
   ) {
     throw new HttpError(409, {
@@ -420,7 +427,12 @@ function pricedResponse(booking: StoredQuoteBooking) {
     service: stored.serviceLabel,
     recurringOffer: stored.recurringOffer ?? null,
     planOnly: stored.planOnly || undefined,
-    days: stored.days.map(({ date, windows, priceCents }) => ({
+    // GL-17: an off-season seasonal enrollment has NO first-visit day board —
+    // billing starts now and April's exact day is confirmed by the office,
+    // never invented here.
+    offSeason: stored.offSeason || undefined,
+    offSeasonMessage: stored.offSeason ? OFF_SEASON_MESSAGE : undefined,
+    days: (stored.days ?? []).map(({ date, windows, priceCents }) => ({
       date,
       windows,
       priceCents,
@@ -789,12 +801,14 @@ async function quote(
       errors.nestCount = "How many nests need removal?";
     }
   }
-  if (
-    SEASONAL_SERVICES.has(service) &&
-    input.lotHalfAcres != null &&
-    (input.lotHalfAcres < 1 || input.lotHalfAcres > 8)
-  ) {
-    errors.lotHalfAcres = "Yard size must be between ½ acre and 4 acres";
+  if (SEASONAL_SERVICES.has(service)) {
+    // GL-17: the yard size IS the price input — an omitted value is never
+    // silently priced as half an acre.
+    if (input.lotHalfAcres == null) {
+      errors.lotHalfAcres = "Yard size is required for mosquito plans";
+    } else if (input.lotHalfAcres < 1 || input.lotHalfAcres > 8) {
+      errors.lotHalfAcres = "Yard size must be between ½ acre and 4 acres";
+    }
   }
   if (Object.keys(errors).length) throw new HttpError(400, { errors });
 
@@ -866,7 +880,7 @@ async function quote(
           | "MOSQUITO_TICK",
         units: input.units ?? undefined,
         lotHalfAcres: SEASONAL_SERVICES.has(service)
-          ? Math.max(1, Math.ceil(input.lotHalfAcres ?? 1))
+          ? Math.ceil(input.lotHalfAcres!)
           : undefined,
         sqft: input.sqft ?? undefined,
         nestCount: input.nestCount ?? undefined,
@@ -1088,7 +1102,7 @@ async function quote(
     // the AI researcher. Plan-only: billed monthly year-round, one treatment
     // per April–October month; the day board picks the FIRST treatment and
     // the price never varies by day. Zone B travel is priced inside the card.
-    const halfAcres = Math.max(1, Math.ceil(input.lotHalfAcres ?? 1));
+    const halfAcres = Math.ceil(input.lotHalfAcres!); // validated required
     const card = priceMosquito({
       tick: service === "MOSQUITO_TICK",
       halfAcres,
@@ -1229,22 +1243,23 @@ async function quote(
   // GL-17: a seasonal plan's FIRST TREATMENT is only sold onto an
   // April–October date — the same rule the office paths hard-refuse. Late
   // in the season the board simply shrinks to the remaining in-season days;
-  // a fully off-season ask falls to the owned contact path (the office
-  // enrolls off-season starts by hand: billing begins now, first treatment
-  // next April).
+  // a fully off-season ask stays a REAL date-less sale (offSeason below):
+  // billing begins now, first treatment next April, office confirms the day.
+  let offSeason = false;
   if (SEASONAL_SERVICES.has(service)) {
     days = days.filter((d) => {
       const month = Number(d.date.slice(5, 7));
       return month >= 4 && month <= 10;
     });
     if (days.length === 0) {
-      return contact(
-        "Mosquito season scheduling has closed for the year",
-        "to set up your plan so treatments start in April (billing can begin now, as advertised)"
-      );
+      // GL-17 locked rule: an off-season enrollment is a REAL sale — billing
+      // begins immediately and the first treatment lands next April. No
+      // exact April day is promised before capacity is known; the office
+      // owns confirming it (finalize opens that owned action).
+      offSeason = true;
     }
   }
-  if (days.length === 0) {
+  if (days.length === 0 && !offSeason) {
     return contact(
       "We're fully booked this month",
       "to find you the first opening"
@@ -1275,6 +1290,7 @@ async function quote(
       serviceLabel,
       recurringOffer,
       planOnly: planOnly || undefined,
+      offSeason: offSeason || undefined,
     }),
     monthlyCents: recurringOffer?.monthlyCents ?? undefined,
     expiresAt,
@@ -1310,6 +1326,10 @@ async function quote(
     // Plan-only quotes (community common-area) carry no one-time offer: the
     // day picks the first visit and the amount charged is the first month.
     planOnly: planOnly || undefined,
+    // GL-17: an off-season enrollment ships an EMPTY day board plus the
+    // truthful explanation — checkout is the plan itself, date-less.
+    offSeason: offSeason || undefined,
+    offSeasonMessage: offSeason ? OFF_SEASON_MESSAGE : undefined,
     days: days.map(({ date, windows, priceCents }) => ({
       date,
       windows,
@@ -1322,6 +1342,108 @@ async function quote(
 }
 
 // ----------------------------------------------------------------- /book
+
+/**
+ * GL-17 — check out an OFF-SEASON seasonal-plan enrollment: the customer
+ * pays the first month now (billing starts immediately, as advertised), no
+ * first-visit day exists yet, and no capacity is claimed — finalization
+ * creates the April-targeted visit, its treatment obligation, and the owned
+ * office action that confirms the real date with the customer. Idempotent:
+ * a repeat call reuses a live same-amount intent and never leaves a second
+ * chargeable intent behind.
+ */
+async function bookOffSeasonEnrollment(opts: {
+  booking: {
+    id: string;
+    email: string;
+    name: string;
+    phone?: string | null;
+    cancelToken?: string | null;
+    stripeCustomerId?: string | null;
+    stripePaymentIntentId?: string | null;
+  };
+  stored: {
+    serviceLabel?: string;
+    recurringOffer: { frequency: string; monthlyCents: number; initialFeeCents: number };
+  };
+  req: { sourceIp?: string; userAgent?: string };
+  tcVersion: string;
+  // Deliberately untyped V6Client (TS2321 depth ceiling) — one update call.
+  client: { models: Record<string, unknown> };
+}) {
+  const { booking, stored, req, tcVersion, client } = opts;
+  const amountCents = stored.recurringOffer.initialFeeCents;
+  const s = await stripeClient();
+  let existing: Stripe.PaymentIntent | null = null;
+  if (booking.stripePaymentIntentId) {
+    existing = await s.paymentIntents.retrieve(booking.stripePaymentIntentId);
+    if (existing.status === "succeeded") {
+      throw new HttpError(409, {
+        error: "This enrollment is already paid — check your email for the confirmation.",
+      });
+    }
+    if (existing.amount === amountCents && existing.client_secret) {
+      return {
+        clientSecret: existing.client_secret,
+        amountCents,
+        statusToken: booking.cancelToken ?? undefined,
+        summary: `${stored.serviceLabel ?? "Seasonal plan"} — billing starts today; first treatment scheduled for April (we'll confirm the exact day).`,
+      };
+    }
+    try {
+      await s.paymentIntents.cancel(existing.id);
+    } catch {
+      /* already canceled/expired — fine */
+    }
+  }
+  const customerId =
+    booking.stripeCustomerId ??
+    (
+      await s.customers.create({
+        email: booking.email,
+        name: booking.name,
+        phone: booking.phone ?? undefined,
+        metadata: { bookingRequestId: booking.id },
+      })
+    ).id;
+  const intent = await s.paymentIntents.create({
+    amount: amountCents,
+    currency: "usd",
+    customer: customerId,
+    setup_future_usage: "off_session",
+    automatic_payment_methods: { enabled: true },
+    description: `${stored.serviceLabel ?? "Seasonal plan"} — off-season enrollment (first treatment next April)`,
+    metadata: { bookingRequestId: booking.id },
+  });
+  await (
+    client.models.BookingRequest as {
+      update: (input: Record<string, unknown>) => Promise<unknown>;
+    }
+  ).update({
+    id: booking.id,
+    status: "QUOTED",
+    selectedDate: null,
+    selectedWindow: null,
+    capacityTechnicianId: null,
+    capacityMinutes: null,
+    recurring: true,
+    amountCents,
+    stripeCustomerId: customerId,
+    stripePaymentIntentId: intent.id,
+    paymentFailedReason: null,
+    paymentFailedNoticeSentAt: null,
+    tcVersion,
+    tcAcceptedAt: new Date().toISOString(),
+    tcIp: req.sourceIp || undefined,
+    tcUserAgent: req.userAgent?.slice(0, 512) || undefined,
+  });
+  return {
+    clientSecret: intent.client_secret,
+    amountCents,
+    statusToken: booking.cancelToken ?? undefined,
+    summary: `${stored.serviceLabel ?? "Seasonal plan"} — billing starts today; first treatment scheduled for April (we'll confirm the exact day).`,
+  };
+}
 
 async function book(
   body: Record<string, unknown>,
@@ -1398,12 +1520,17 @@ async function book(
     serviceLabel?: string;
     recurringOffer?: { frequency: string; monthlyCents: number; initialFeeCents: number } | null;
     planOnly?: boolean;
+    offSeason?: boolean;
   };
   // A plan-only quote (community common-area) has no one-time offer — the
   // booking is always the plan, whatever the client sent.
   const recurring = body.recurring === true || stored.planOnly === true;
-  const day = stored.days?.find((d) => d.date === date);
-  if (!day || !day.windows.includes(window)) {
+  // GL-17: an off-season seasonal enrollment books the PLAN with no first-
+  // visit day — no date, no window, no capacity claim; the first treatment
+  // is scheduled by the office next April (finalize owns that action).
+  const offSeason = stored.offSeason === true;
+  const day = offSeason ? null : stored.days?.find((d) => d.date === date);
+  if (!offSeason && (!day || !day.windows.includes(window))) {
     throw new HttpError(409, {
       error: "That day is no longer available — request a fresh quote.",
     });
@@ -1411,12 +1538,31 @@ async function book(
   if (recurring && !stored.recurringOffer) {
     throw new HttpError(400, { error: "No recurring plan was offered on this quote." });
   }
+  if (offSeason) {
+    // An off-season enrollment IS the plan — a quote stored without its
+    // recurring offer cannot price the first month and must not 500.
+    if (!stored.recurringOffer) {
+      throw new HttpError(400, {
+        error: "No recurring plan was offered on this quote.",
+      });
+    }
+    return bookOffSeasonEnrollment({
+      booking,
+      stored: stored as {
+        serviceLabel?: string;
+        recurringOffer: { frequency: string; monthlyCents: number; initialFeeCents: number };
+      },
+      req,
+      tcVersion,
+      client,
+    });
+  }
 
   // Server-side price: one-time pays the day price; recurring pays the
   // initial fee now and the subscription starts after the first visit.
   const amountCents = recurring
     ? stored.recurringOffer!.initialFeeCents
-    : day.priceCents;
+    : day!.priceCents;
 
   const s = await stripeClient();
 
@@ -1450,7 +1596,7 @@ async function book(
     routesKey: await getSecret("GOOGLE_ROUTES_API_KEY"),
     candidateAddress: address,
     service: String(booking.service),
-    baseCents: day.priceCents, // availability only — the quoted price stands
+    baseCents: day!.priceCents, // availability only — the quoted price stands
     zone:
       booking.zone === "A" || booking.zone === "B" ? booking.zone : undefined,
     onlyDate: date,

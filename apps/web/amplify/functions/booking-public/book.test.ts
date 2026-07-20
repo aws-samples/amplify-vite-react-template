@@ -469,3 +469,126 @@ describe("GL-22 — the booking pause refuses new commitments honestly", () => {
     expect(intentCreate).not.toHaveBeenCalled();
   });
 });
+
+describe("GL-17 — off-season enrollment checks out date-less, paid TODAY", () => {
+  const offSeasonQuote = () => {
+    freezeEastern("2026-12-09"); // deep off-season: a November–March customer
+    booking.service = "MOSQUITO";
+    booking.expiresAt = "2026-12-10T12:00:00Z";
+    booking.quoteJson = JSON.stringify({
+      days: [], // no in-season day existed to offer
+      baseCents: 11900,
+      serviceLabel: "Mosquito plan — up to ½ acre",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 11900,
+        initialFeeCents: 11900,
+      },
+      planOnly: true,
+      offSeason: true,
+    });
+  };
+  const enroll = () =>
+    postBook({
+      bookingId: "b1",
+      // No date, no window — none exists to pick.
+      recurring: true,
+      tcAccepted: true,
+      tcVersion: BOOKING_TERMS_VERSION,
+    });
+
+  it("charges the FIRST MONTH immediately with no date, no window, no capacity claim", async () => {
+    offSeasonQuote();
+
+    const res = await enroll();
+
+    expect(res.status).toBe(200);
+    expect(res.body.amountCents).toBe(11900); // pays now — never a dead end
+    expect(res.body.clientSecret).toBe("cs_new");
+    expect(String(res.body.summary)).toContain("billing starts today");
+    expect(String(res.body.summary)).toContain("April");
+    expect(String(res.body.summary)).toContain("confirm the exact day");
+    expect(intentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 11900, setup_future_usage: "off_session" })
+    );
+    // The enrollment holds no slot: nothing touched the capacity ledgers.
+    expect(capacityFixture.maps.capacityDays.size).toBe(0);
+    expect(capacityFixture.maps.capacityClaims.size).toBe(0);
+    const update = bookingUpdates.at(-1)!;
+    expect(update).toMatchObject({
+      selectedDate: null,
+      selectedWindow: null,
+      recurring: true,
+      amountCents: 11900,
+      tcVersion: BOOKING_TERMS_VERSION,
+    });
+  });
+
+  it("a RETRY reuses the live same-amount intent — never a second chargeable intent", async () => {
+    offSeasonQuote();
+    booking.stripePaymentIntentId = "pi_live";
+    existingIntent = {
+      id: "pi_live",
+      amount: 11900,
+      status: "requires_payment_method",
+      client_secret: "cs_live",
+    };
+
+    const res = await enroll();
+
+    expect(res.status).toBe(200);
+    expect(res.body.clientSecret).toBe("cs_live");
+    expect(intentCreate).not.toHaveBeenCalled();
+    expect(intentCancel).not.toHaveBeenCalled();
+  });
+
+  it("a stale different-amount intent is CANCELED before the fresh one exists", async () => {
+    offSeasonQuote();
+    booking.stripePaymentIntentId = "pi_stale";
+    existingIntent = {
+      id: "pi_stale",
+      amount: 99900,
+      status: "requires_payment_method",
+      client_secret: "cs_stale",
+    };
+
+    const res = await enroll();
+
+    expect(res.status).toBe(200);
+    expect(res.body.clientSecret).toBe("cs_new");
+    expect(intentCancel).toHaveBeenCalledTimes(1);
+    expect(intentCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("an already-succeeded intent means PAID — 409, don't charge twice", async () => {
+    offSeasonQuote();
+    booking.stripePaymentIntentId = "pi_done";
+    existingIntent = {
+      id: "pi_done",
+      amount: 11900,
+      status: "succeeded",
+      client_secret: "cs_done",
+    };
+
+    const res = await enroll();
+
+    expect(res.status).toBe(409);
+    expect(String(res.body.error)).toContain("already paid");
+    expect(intentCreate).not.toHaveBeenCalled();
+  });
+
+  it("an off-season quote stored WITHOUT its plan offer refuses cleanly, never 500s", async () => {
+    offSeasonQuote();
+    booking.quoteJson = JSON.stringify({
+      days: [],
+      serviceLabel: "Mosquito plan — up to ½ acre",
+      recurringOffer: null,
+      offSeason: true,
+    });
+
+    const res = await enroll();
+
+    expect(res.status).toBe(400);
+    expect(String(res.body.error)).toContain("No recurring plan");
+  });
+});

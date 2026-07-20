@@ -591,20 +591,37 @@ export default function BookPage() {
             <span className="bk-summary-key">Service</span>
             <span className="bk-summary-val">{quote.service}</span>
           </li>
-          <li>
-            <span className="bk-summary-key">Day</span>
-            <span className="bk-summary-val">{formatDay(selection.date)}</span>
-          </li>
-          <li>
-            <span className="bk-summary-key">Arrival window</span>
-            <span className="bk-summary-val">{windowLabel(selection.window)}</span>
-          </li>
+          {selection.date && selection.window ? (
+            <>
+              <li>
+                <span className="bk-summary-key">Day</span>
+                <span className="bk-summary-val">{formatDay(selection.date)}</span>
+              </li>
+              <li>
+                <span className="bk-summary-key">Arrival window</span>
+                <span className="bk-summary-val">
+                  {windowLabel(selection.window)}
+                </span>
+              </li>
+            </>
+          ) : (
+            // GL-17 off-season enrollment: no first-visit day exists yet —
+            // never invent one; the office confirms the real April date.
+            <li>
+              <span className="bk-summary-key">First treatment</span>
+              <span className="bk-summary-val">
+                April — we&rsquo;ll confirm the exact day with you
+              </span>
+            </li>
+          )}
           <li>
             <span className="bk-summary-key">Due today</span>
             <span className="bk-summary-val">
               {amountCents != null ? money(amountCents) : "—"}
-              {/* Community/HOA plans: today's charge is the first month. */}
-              {quote.planOnly && selection.recurring && amountCents != null
+              {/* Community/HOA + off-season plans: today = first month. */}
+              {(quote.planOnly || quote.offSeason) &&
+              selection.recurring &&
+              amountCents != null
                 ? " (your first month)"
                 : null}
             </span>
@@ -614,8 +631,9 @@ export default function BookPage() {
               <span className="bk-summary-key">Then</span>
               <span className="bk-summary-val">
                 {money(offer.monthlyCents)}/mo &mdash;{" "}
-                {FREQUENCY_LABELS[offer.frequency]} plan, starts after your
-                first completed visit
+                {quote.offSeason
+                  ? "billed monthly year-round; treatments run April through October"
+                  : `${FREQUENCY_LABELS[offer.frequency]} plan, starts after your first completed visit`}
               </span>
             </li>
           )}
