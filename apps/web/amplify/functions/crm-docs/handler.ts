@@ -412,6 +412,11 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         callerEmail(event.identity)
       );
     }
+    case "resendEmailLog": {
+      if (!callerIsOffice(event.identity)) throw new Error("Office role required");
+      const reArgs = event.arguments as unknown as { emailLogId?: string };
+      return resendEmailLogExact(String(reArgs.emailLogId ?? ""));
+    }
     case "scheduleCallback": {
       if (!callerIsOffice(event.identity)) throw new Error("Office role required");
       const scArgs = event.arguments as unknown as {
@@ -659,6 +664,45 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
  * never a silent fallback to an untracked phone call.
  */
 const PORTAL_REQUEST_KINDS = new Set(["RESCHEDULE", "HELP"]);
+/** GL-03 — the office's routine recovery action: resend the EXACT message
+ *  from its outbox row. Refuses rows it cannot honestly reproduce
+ *  (attachments, uncaptured body) and rows whose outcome is UNKNOWN
+ *  (SENDING) — a blind resend can double-send. Suppression and DNC are
+ *  re-checked by the send contract itself. */
+async function resendEmailLogExact(emailLogId: string) {
+  if (!emailLogId) throw new Error("Which email should be resent?");
+  const client = await dataClient();
+  const models = client.models as unknown as {
+    EmailLog?: {
+      get: (a: { id: string }) => Promise<{
+        data: Record<string, unknown> | null;
+      }>;
+    };
+  };
+  if (!models.EmailLog) throw new Error("The email log is unavailable");
+  const { data: row } = await models.EmailLog.get({ id: emailLogId });
+  if (!row) throw new Error("That email record was not found");
+  if (row.deliveryStatus === "SENDING") {
+    throw new Error(
+      "This email's outcome is UNKNOWN (its provider call never settled) — verify with the provider or the customer before resending, or it may arrive twice."
+    );
+  }
+  if (row.hasAttachments || !row.bodyHtml) {
+    throw new Error(
+      "This message carried attachments (or its body was too large to store), so it can't be resent verbatim — re-generate it from its source screen."
+    );
+  }
+  const ok = await sendEmail({
+    to: String(row.toEmail),
+    subject: String(row.subject),
+    template: String(row.template),
+    customerId: (row.customerId as string | null) ?? undefined,
+    relatedId: (row.relatedId as string | null) ?? undefined,
+    html: String(row.bodyHtml),
+  });
+  return { resent: ok };
+}
+
 async function submitPortalRequest(opts: {
   customerId: string;
   kind: string;
