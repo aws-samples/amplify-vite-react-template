@@ -62,7 +62,7 @@ type Args = {
   customerId?: string | null;
   leadFeeCents?: number | null;
   contentType?: string;
-  cutoffIso?: string;
+  versionId?: string;
   reasonCode?: string;
   note?: string | null;
 };
@@ -106,25 +106,51 @@ const ROLLBACK_REASONS = new Set([
 async function rollbackPricing(
   args: Args,
   actor: string | null
-): Promise<{ ok: true; cutoffIso: string }> {
-  const cutoffIso = String(args.cutoffIso ?? "");
+): Promise<{ ok: true; versionId: string }> {
+  const versionId = String(args.versionId ?? "");
   const reasonCode = String(args.reasonCode ?? "");
-  if (Number.isNaN(Date.parse(cutoffIso))) {
-    throw new Error("A valid cutoff date/time is required");
-  }
-  if (Date.parse(cutoffIso) > Date.now()) {
-    throw new Error("The cutoff must be in the past");
+  if (!versionId) {
+    throw new Error("Pick the catalog version to restore");
   }
   if (!ROLLBACK_REASONS.has(reasonCode)) {
     throw new Error("A controlled rollback reason is required");
   }
   const reason = `${reasonCode}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}`;
   const client = await dataClient();
+  // The version must EXIST and parse before the pointer moves — a rollback
+  // to an unreadable version would serve pinned rows only, silently.
+  const versionModels = client.models as unknown as {
+    CatalogVersion?: {
+      get: (a: { id: string }) => Promise<{
+        data: { manifestJson?: string | null; keyCount?: number | null } | null;
+      }>;
+    };
+  };
+  if (!versionModels.CatalogVersion) {
+    throw new Error("Catalog versions are unavailable — nothing changed");
+  }
+  const { data: version } = await versionModels.CatalogVersion.get({
+    id: versionId,
+  });
+  if (!version?.manifestJson) {
+    throw new Error("That catalog version doesn't exist — nothing changed");
+  }
+  try {
+    const parsed = JSON.parse(version.manifestJson) as Record<string, string>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("not an object");
+    }
+  } catch {
+    throw new Error(
+      "That catalog version's manifest is unreadable — pick another version; nothing changed"
+    );
+  }
   const nowIso = new Date().toISOString();
   const sets = {
     id: "catalog-rollback",
     kind: "ROLLBACK",
-    rollbackCutoff: cutoffIso,
+    rollbackVersionId: versionId,
+    rollbackCutoff: null,
     rollbackReason: reason.slice(0, 500),
     rollbackActor: actor ?? "OWNER",
     rollbackAppliedAt: nowIso,
@@ -147,12 +173,12 @@ async function rollbackPricing(
   }
   _resetRollbackMemoForTests();
   await notifyLeads({
-    subject: `PRICING ROLLED BACK to ${cutoffIso}`,
+    subject: `PRICING ROLLED BACK to version ${versionId}`,
     heading: "AI pricing catalog rolled back",
     template: "ops-pricing-rollback",
-    bodyHtml: `<p>${actor ?? "An owner"} rolled the rate catalog back to <strong>${cutoffIso}</strong> (${reason}). Quotes now serve the sheet as it stood then (office-pinned rows still win), and AI research is paused until the rollback is cleared from Market Rates.</p>`,
+    bodyHtml: `<p>${actor ?? "An owner"} rolled the rate catalog back to immutable version <strong>${versionId}</strong> (${reason}; ${version.keyCount ?? "?"} rate keys). Quotes now serve exactly that version's rows (office-pinned rows still win), and AI research is paused until the rollback is cleared from Market Rates.</p>`,
   }).catch(() => undefined);
-  return { ok: true, cutoffIso };
+  return { ok: true, versionId };
 }
 
 async function clearPricingRollback(
@@ -163,9 +189,12 @@ async function clearPricingRollback(
   const { data: existing } = await client.models.PricingControl.get({
     id: "catalog-rollback",
   });
-  if (!existing?.rollbackCutoff) return { ok: true }; // idempotent
+  if (!existing?.rollbackVersionId && !existing?.rollbackCutoff) {
+    return { ok: true }; // idempotent
+  }
   const { data, errors } = await client.models.PricingControl.update({
     id: "catalog-rollback",
+    rollbackVersionId: null,
     rollbackCutoff: null,
     rollbackClearedBy: `${actor ?? "OWNER"}${args.note?.trim() ? ` — ${args.note.trim()}` : ""}`.slice(0, 500),
     rollbackClearedAt: new Date().toISOString(),

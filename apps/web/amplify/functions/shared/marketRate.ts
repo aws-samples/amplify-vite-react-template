@@ -258,13 +258,21 @@ export function rateKeyFor(
 // Which row serves for a rate key — ONE rule shared with the pricing worker
 // AND the CRM Market Rates screen (pure module, value-importable by the CRM
 // like serviceCatalog.ts). Re-exported so existing engine imports hold.
-import { pickLiveRow } from "./rateServing";
-export { pickLiveRow };
+import {
+  pickLiveRow,
+  pickServingRow,
+  type CatalogManifest,
+} from "./rateServing";
+export { pickLiveRow, pickServingRow };
+export type { CatalogManifest };
 
 // ------------------------------------------------------- rollback state
 
 export type PricingRollback = {
-  cutoffIso: string;
+  /** The immutable CatalogVersion whose complete manifest serves. */
+  versionId: string;
+  /** rateKey → serving MarketRate row id, from that version. */
+  manifest: CatalogManifest;
   reason?: string | null;
   actor?: string | null;
   appliedAt?: string | null;
@@ -273,11 +281,15 @@ export type PricingRollback = {
 let rollbackMemo: { at: number; value: PricingRollback | null } | null = null;
 
 /**
- * The live catalog-rollback state (PricingControl "catalog-rollback"),
- * memoized briefly per container — every quote read consults it. Null when
- * no rollback is active, and null on any read fault (serving the newest
- * sheet is the normal state; a rollback is an explicit operator action whose
- * screen confirms it took effect).
+ * The live catalog-rollback state (PricingControl "catalog-rollback" →
+ * CatalogVersion manifest), memoized briefly per container — every quote
+ * read consults it. Null when no rollback is active, and null on a CONTROL
+ * read fault (serving the newest sheet is the normal state; a rollback is
+ * an explicit operator action whose screen confirms it took effect). If the
+ * control row names a version whose MANIFEST cannot be read, the rollback
+ * stays ACTIVE with an empty manifest — only pinned rows serve — because
+ * quietly serving the exact sheet the owner rolled back is the one wrong
+ * answer.
  */
 export async function readPricingRollback(): Promise<PricingRollback | null> {
   // 5s, not 60s: the gate requires the quote funnel and CRM to read a
@@ -293,9 +305,40 @@ export async function readPricingRollback(): Promise<PricingRollback | null> {
       const { data } = await client.models.PricingControl.get({
         id: "catalog-rollback",
       });
-      if (data?.rollbackCutoff) {
+      if (data?.rollbackVersionId) {
+        let manifest: CatalogManifest = {};
+        try {
+          const models = client.models as unknown as {
+            CatalogVersion?: {
+              get: (a: { id: string }) => Promise<{
+                data: { manifestJson?: string | null } | null;
+              }>;
+            };
+          };
+          const version = models.CatalogVersion
+            ? (await models.CatalogVersion.get({ id: data.rollbackVersionId }))
+                .data
+            : null;
+          const parsed = version?.manifestJson
+            ? (JSON.parse(version.manifestJson) as CatalogManifest)
+            : null;
+          if (parsed && typeof parsed === "object") manifest = parsed;
+          else {
+            console.error(
+              "readPricingRollback: version manifest unreadable — serving pinned rows only",
+              data.rollbackVersionId
+            );
+          }
+        } catch (err) {
+          console.error(
+            "readPricingRollback: version manifest unreadable — serving pinned rows only",
+            data.rollbackVersionId,
+            err
+          );
+        }
         value = {
-          cutoffIso: data.rollbackCutoff,
+          versionId: data.rollbackVersionId,
+          manifest,
           reason: data.rollbackReason,
           actor: data.rollbackActor,
           appliedAt: data.rollbackAppliedAt,
@@ -307,6 +350,96 @@ export async function readPricingRollback(): Promise<PricingRollback | null> {
   }
   rollbackMemo = { at: Date.now(), value };
   return value;
+}
+
+// ------------------------------------------------- catalog version snapshots
+
+/**
+ * Write an immutable CatalogVersion: the complete manifest of which row
+ * serves each rate key RIGHT NOW (live rule — pinned wins, else freshest).
+ * The worker calls this after every run that published rates, and once at
+ * bootstrap when no version exists, so a rollback always has a complete
+ * prior version to point at. Failure never blocks quoting or publication,
+ * but it is never silent: it opens deduplicated owned work, because a day
+ * without snapshots is a day the owner cannot roll back to.
+ */
+export async function writeCatalogSnapshot(
+  trigger: "RUN" | "BOOTSTRAP",
+  openWork?: (input: {
+    kind: "INFRA_ALERT";
+    dedupeKey: string;
+    title: string;
+    detail: string;
+    relatedId: string;
+    resolutionAction: string;
+    ownerTeam: "OPS";
+  }) => Promise<string | null>
+): Promise<string | null> {
+  try {
+    const client = await dataClient();
+    const models = client.models as unknown as {
+      CatalogVersion?: {
+        create: (input: Record<string, unknown>) => Promise<{
+          data: { id: string } | null;
+        }>;
+      };
+    };
+    if (!models.CatalogVersion) return null;
+    const rows: {
+      id: string;
+      rateKey: string;
+      active: boolean;
+      pinned?: boolean | null;
+      researchedAt?: string | null;
+    }[] = [];
+    let token: string | null | undefined;
+    do {
+      const page = (await (
+        client.models.MarketRate.list as (a: object) => Promise<{
+          data: typeof rows;
+          nextToken?: string | null;
+        }>
+      )({ limit: 500, nextToken: token })) as {
+        data: typeof rows;
+        nextToken?: string | null;
+      };
+      rows.push(...(page.data ?? []));
+      token = page.nextToken;
+    } while (token);
+    const byKey = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const list = byKey.get(r.rateKey) ?? [];
+      list.push(r);
+      byKey.set(r.rateKey, list);
+    }
+    const manifest: CatalogManifest = {};
+    for (const [key, keyRows] of byKey) {
+      const serving = pickLiveRow(keyRows);
+      if (serving) manifest[key] = serving.id;
+    }
+    const id = `cv-${new Date().toISOString()}`;
+    const { data } = await models.CatalogVersion.create({
+      id,
+      manifestJson: JSON.stringify(manifest),
+      keyCount: Object.keys(manifest).length,
+      trigger,
+    });
+    return data?.id ?? null;
+  } catch (err) {
+    console.error("writeCatalogSnapshot failed", err);
+    await openWork?.({
+      kind: "INFRA_ALERT",
+      dedupeKey: `catalog-snapshot:${new Date().toISOString().slice(0, 10)}`,
+      relatedId: "catalog-snapshot",
+      title: "Catalog snapshot failed — rollback coverage is aging",
+      detail:
+        "The pricing worker could not write today's CatalogVersion snapshot. Until one succeeds, an OWNER rollback can only reach OLDER versions of the catalog.",
+      resolutionAction:
+        "Check the pricing-refresh logs for the snapshot error; a later run that snapshots successfully resolves this.",
+      ownerTeam: "OPS",
+    })?.catch(() => null);
+    return null;
+  }
 }
 
 /** Tests (and the rollback mutation itself) reset the memo so a state change
@@ -336,9 +469,9 @@ export async function getCachedRate(opts: {
   const client = await dataClient();
   const { data: existing } =
     await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
-  // GL-16: an active rollback serves the prior coherent sheet everywhere.
+  // GL-16: an active rollback serves the named immutable version everywhere.
   const rollback = await readPricingRollback();
-  const live = pickLiveRow(existing, rollback?.cutoffIso ?? null);
+  const live = pickServingRow(existing, rateKey, rollback?.manifest ?? null);
   if (!live) return null;
 
   const stored = parseSheet(live.ratesJson);
@@ -794,7 +927,13 @@ async function research(
   rawText: string;
 } | null> {
   const spec = RESEARCH_SPECS[service];
-  const anthropic = new Anthropic({ apiKey, timeout: 55_000, maxRetries: 0 });
+  // 4 minutes, not 55s: a research message runs up to four web searches and
+  // routinely needs 1–3 minutes — the 55s budget timed out EVERY deployed
+  // attempt (staging, 20 Jul) while still consuming daily budget. The cap
+  // stays under the 5-minute coverage-row lease so a stale-lease takeover
+  // can never overlap a live research, and the run's own 13-minute budget
+  // bounds how many long calls one drain attempts.
+  const anthropic = new Anthropic({ apiKey, timeout: 240_000, maxRetries: 0 });
   try {
     const researchMsg = await anthropic.messages.create({
       model: PRICING_MODEL,

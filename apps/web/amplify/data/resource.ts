@@ -1221,19 +1221,40 @@ export const schema = a.schema({
       succeeded: a.integer(),
       failed: a.integer(),
       digestSentAt: a.datetime(),
-      // GL-16 rollback (row id "catalog-rollback"): while rollbackCutoff is
-      // set, quoting serves the freshest AI row researched AT OR BEFORE the
-      // cutoff (pinned office rows still win — the office's word stands),
-      // and research publication pauses. One atomic write flips the whole
-      // catalog back coherently; clearing it (also one write) resumes.
-      // OWNER-only via the rollbackPricing/clearPricingRollback mutations —
-      // browsers cannot write this model directly.
+      // GL-16 rollback (row id "catalog-rollback"): while rollbackVersionId
+      // names a CatalogVersion, quoting serves EXACTLY the rows that
+      // version's immutable manifest lists (pinned office rows still win —
+      // the office's word stands), and research publication pauses. One
+      // atomic write flips the whole catalog back coherently; clearing it
+      // (also one write) resumes. OWNER-only via the rollbackPricing/
+      // clearPricingRollback mutations — browsers cannot write this model.
+      // rollbackCutoff is the retired timestamp-filter mechanism, kept only
+      // so an old active rollback can be cleared.
+      rollbackVersionId: a.string(),
       rollbackCutoff: a.datetime(),
       rollbackReason: a.string(),
       rollbackActor: a.string(),
       rollbackAppliedAt: a.datetime(),
       rollbackClearedBy: a.string(),
       rollbackClearedAt: a.datetime(),
+    })
+    .authorization((allow) => [
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
+    ]),
+
+  /** GL-16 — an immutable, complete snapshot of the serving catalog: a
+   *  manifest of rateKey → the exact MarketRate row id that was serving
+   *  when the snapshot was taken. The pricing worker writes one after
+   *  every run that published rates (plus a bootstrap when none exist);
+   *  rollback points the catalog at one of these versions — never a
+   *  timestamp filter over mutable rows. Rows are never edited or
+   *  deleted; browsers read-only. */
+  CatalogVersion: a
+    .model({
+      manifestJson: a.string().required(),
+      keyCount: a.integer(),
+      trigger: a.string(), // RUN | BOOTSTRAP
+      note: a.string(),
     })
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
@@ -3436,8 +3457,8 @@ export const schema = a.schema({
   rollbackPricing: a
     .mutation()
     .arguments({
-      /** Serve the catalog as it stood at this instant (ISO datetime). */
-      cutoffIso: a.string().required(),
+      /** The immutable CatalogVersion whose complete manifest serves. */
+      versionId: a.string().required(),
       /** Controlled reason code (BAD_PROMPT_RESULT | MODEL_ERROR | BULK_MISTAKE | OTHER). */
       reasonCode: a.string().required(),
       note: a.string(),

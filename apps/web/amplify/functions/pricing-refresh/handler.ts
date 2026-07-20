@@ -17,8 +17,10 @@ import {
 import {
   enqueueRateResearch,
   parseNotify,
-  pickLiveRow,
+  pickServingRow,
   readPricingRollback,
+  writeCatalogSnapshot,
+  type CatalogManifest,
   researchAndCacheRate,
   REFRESH_AFTER_MS,
   type MarketRateService,
@@ -362,13 +364,14 @@ async function seedCoverage(): Promise<number> {
 
 // ------------------------------------------------------- work selection
 
-/** The live (serving) MarketRate row per rate key. `cutoffIso` is the active
- *  catalog-rollback cutoff: with it set, this map matches what quoting
- *  actually serves — a post-cutoff row is NOT live, so notify-retries,
- *  queue depth, and reports can never describe a sheet customers can't see. */
+/** The live (serving) MarketRate row per rate key. `manifest` is the active
+ *  rollback version's manifest: with it set, this map matches what quoting
+ *  actually serves — a row the version doesn't name is NOT live, so
+ *  notify-retries, queue depth, and reports can never describe a sheet
+ *  customers can't see. */
 function liveRowsByKey(
   rates: RateRow[],
-  cutoffIso?: string | null
+  manifest?: CatalogManifest | null
 ): Map<string, RateRow> {
   const byKey = new Map<string, RateRow[]>();
   for (const r of rates) {
@@ -378,7 +381,7 @@ function liveRowsByKey(
   }
   const live = new Map<string, RateRow>();
   for (const [key, rows] of byKey) {
-    const row = pickLiveRow(rows, cutoffIso);
+    const row = pickServingRow(rows, key, manifest ?? null);
     if (row) live.set(key, row);
   }
   return live;
@@ -629,7 +632,7 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
   const activeCov = coverage.filter((c) => c.active);
   // Rollback-aware: the digest's queue depth and live view describe what is
   // actually serving, not sheets a rollback has taken out of service.
-  const live = liveRowsByKey(rates, rollback?.cutoffIso ?? null);
+  const live = liveRowsByKey(rates, rollback?.manifest ?? null);
   const queueDepth = selectWork(coverage, live, nowMs).length;
   const exhausted = activeCov.filter((c) => c.exhaustedAt);
   const backingOff = activeCov
@@ -642,7 +645,7 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
   const bodyHtml = `<p>Today's AI pricing run, consolidated. Every sheet below is <strong>already live and quoting</strong> — this is visibility, not an approval queue. Override any line on <a href="${process.env.CRM_APP_URL ?? ""}/market-rates">Market Rates</a>; an edit pins the row.</p>
     ${
       rollback
-        ? `<p style="background:#fef3c7;border-radius:8px;padding:10px;"><strong>Catalog rolled back</strong> to ${esc(rollback.cutoffIso)} by ${esc(rollback.actor ?? "OWNER")} (${esc(rollback.reason ?? "no reason recorded")}). Quotes serve the prior sheet, research is paused, and clearing the rollback resumes both.</p>`
+        ? `<p style="background:#fef3c7;border-radius:8px;padding:10px;"><strong>Catalog rolled back</strong> to version ${esc(rollback.versionId)} by ${esc(rollback.actor ?? "OWNER")} (${esc(rollback.reason ?? "no reason recorded")}). Quotes serve exactly that version's rows, research is paused, and clearing the rollback resumes both.</p>`
         : ""
     }
     ${section(
@@ -746,7 +749,7 @@ async function sendWeeklyReport(): Promise<boolean> {
 
   const bodyHtml = `${
     rollback
-      ? `<p style="background:#fef3c7;border-radius:8px;padding:10px;"><strong>Catalog rolled back</strong> to ${esc(rollback.cutoffIso)} — sheets researched after the cutoff are NOT serving, and research is paused until the rollback clears.</p>`
+      ? `<p style="background:#fef3c7;border-radius:8px;padding:10px;"><strong>Catalog rolled back</strong> to version ${esc(rollback.versionId)} — only that version's rows are serving, and research is paused until the rollback clears.</p>`
       : ""
   }<p>The weekly look at what the AI pricer did. Every sheet below is <strong>already live and quoting</strong> — this is visibility, not an approval queue. To overrule any number, edit it on <a href="${process.env.CRM_APP_URL ?? ""}/market-rates">Market Rates</a>; an edit pins the row and the refresh never touches it again.</p>
     ${section(
@@ -912,9 +915,30 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
     const rollback = await readPricingRollback();
     const live = liveRowsByKey(
       await listAll<RateRow>(client.models.MarketRate),
-      rollback?.cutoffIso ?? null
+      rollback?.manifest ?? null
     );
     let notified = 0;
+
+    // GL-16: a rollback can only point at versions that EXIST. Bootstrap:
+    // the first run with live rates and no CatalogVersion writes one, so
+    // the owner is never a bad batch away from having nothing to restore.
+    if (!rollback && live.size > 0) {
+      try {
+        const versionModels = client.models as unknown as {
+          CatalogVersion?: {
+            list: (a: { limit: number }) => Promise<{ data: { id: string }[] }>;
+          };
+        };
+        const any = versionModels.CatalogVersion
+          ? await versionModels.CatalogVersion.list({ limit: 1 })
+          : null;
+        if (any && (any.data ?? []).length === 0) {
+          await writeCatalogSnapshot("BOOTSTRAP", openOwnedWork);
+        }
+      } catch (err) {
+        console.error("pricing-refresh: bootstrap snapshot check failed", err);
+      }
+    }
 
     // Email delivery has its own retry lifecycle. A rate can be fresh while a
     // transient SES failure still leaves waiting leads on the coverage row;
@@ -1033,6 +1057,14 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
           await settleResearchFailure(cov, nonce, nowIso).catch(() => undefined);
         }
       }
+    }
+
+    // GL-16: every run that PUBLISHED rates snapshots the new complete
+    // serving catalog as an immutable version — the unit a rollback
+    // restores. (Office pins don't need snapshots: pinned rows win in
+    // every mode, and a retire stays retired in every mode.)
+    if (succeeded > 0) {
+      await writeCatalogSnapshot("RUN", openOwnedWork);
     }
 
     // The consolidated daily digest — once, however many runs share the hour.

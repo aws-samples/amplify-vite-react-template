@@ -42,6 +42,7 @@ const rows: Row[] = [];
 const created: Row[] = [];
 const covRows: CovRow[] = [];
 const controlRows = new Map<string, Record<string, unknown>>();
+const versionRows = new Map<string, Record<string, unknown>>();
 let covGetThrows = false;
 
 const fakeDataClient = {
@@ -50,6 +51,7 @@ const fakeDataClient = {
       listMarketRateByRateKey: async ({ rateKey }: { rateKey: string }) => ({
         data: rows.filter((r) => r.rateKey === rateKey),
       }),
+      list: async () => ({ data: [...rows], nextToken: null }),
       create: async (input: Record<string, unknown>) => {
         const row = { id: `mr${rows.length + 1}`, ...input } as Row;
         rows.push(row);
@@ -67,6 +69,17 @@ const fakeDataClient = {
       get: async ({ id }: { id: string }) => ({
         data: controlRows.get(id) ?? null,
       }),
+    },
+    // GL-16: immutable catalog versions — rollback's unit of restore.
+    CatalogVersion: {
+      get: async ({ id }: { id: string }) => ({
+        data: versionRows.get(id) ?? null,
+      }),
+      create: async (input: Record<string, unknown> & { id: string }) => {
+        versionRows.set(input.id, { ...input });
+        return { data: versionRows.get(input.id) };
+      },
+      list: async () => ({ data: [...versionRows.values()], nextToken: null }),
     },
     RateCoverage: {
       get: async ({ id }: { id: string }) => {
@@ -119,6 +132,7 @@ const {
   hoaBandFor,
   NOTIFY_CAP,
   pickLiveRow,
+  pickServingRow,
   pricingPromptHash,
   PRICING_MODEL,
   PRICING_PROMPT_VERSION,
@@ -151,6 +165,7 @@ beforeEach(() => {
   created.length = 0;
   covRows.length = 0;
   controlRows.clear();
+  versionRows.clear();
   _resetRollbackMemoForTests();
   covGetThrows = false;
   officeEmails.length = 0;
@@ -839,7 +854,7 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
     expect(pricingPromptHash()).toBe(pricingPromptHash());
   });
 
-  it("pickLiveRow with a cutoff serves the prior sheet; pinned office rows still win", () => {
+  it("pickServingRow under a version manifest serves EXACTLY the named row; pinned still wins", () => {
     const older = {
       id: "old",
       active: true,
@@ -851,21 +866,32 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
       researchedAt: "2026-07-19T10:00:00.000Z",
     };
     // Normal serving: freshest wins.
-    expect(pickLiveRow([older, newer])?.id).toBe("new");
-    // Rolled back to the 18th: the suspect newer row stops serving.
-    expect(pickLiveRow([older, newer], "2026-07-18T00:00:00.000Z")?.id).toBe("old");
+    expect(pickServingRow([older, newer], "K", null)?.id).toBe("new");
+    // Rolled back to a version naming the older row: the suspect newer row
+    // stops serving — by IDENTITY, not by timestamp arithmetic.
+    expect(pickServingRow([older, newer], "K", { K: "old" })?.id).toBe("old");
+    // A key the version doesn't name serves nothing — it didn't exist then.
+    expect(pickServingRow([older, newer], "K", {})).toBeNull();
     // A pinned office row is the office's word — never silently rolled back.
     const pinned = { id: "pin", active: true, pinned: true, researchedAt: "2026-07-19T12:00:00.000Z" };
+    expect(pickServingRow([older, newer, pinned], "K", { K: "old" })?.id).toBe("pin");
+    // A row the office RETIRED after the snapshot stays retired.
     expect(
-      pickLiveRow([older, newer, pinned], "2026-07-18T00:00:00.000Z")?.id
-    ).toBe("pin");
+      pickServingRow([{ ...older, active: false }, newer], "K", { K: "old" })
+    ).toBeNull();
   });
 
-  it("getCachedRate under an active rollback serves the prior coherent sheet in one flip", async () => {
+  it("getCachedRate under a version rollback serves the named prior sheet in one flip", async () => {
     await gpResearch(); // the good sheet (older)
     rows[0].researchedAt = "2026-07-17T10:00:00.000Z";
+    // The immutable version captured while the good sheet served.
+    versionRows.set("cv-good", {
+      id: "cv-good",
+      manifestJson: JSON.stringify({ [rows[0].rateKey as string]: rows[0].id }),
+      keyCount: 1,
+    });
     researchText = GP_TEXT.replace("ONE_TIME_USD: 320", "ONE_TIME_USD: 990");
-    await gpResearch(); // the suspect refresh (newer, $999 after tidy)
+    await gpResearch(); // the suspect refresh (newer, $989 after tidy)
     rows[1].researchedAt = "2026-07-19T10:00:00.000Z";
     rows[0].active = true; // both retained — versions, not edits
 
@@ -874,14 +900,47 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
     controlRows.set("catalog-rollback", {
       id: "catalog-rollback",
       kind: "ROLLBACK",
-      rollbackCutoff: "2026-07-18T00:00:00.000Z",
+      rollbackVersionId: "cv-good",
     });
     _resetRollbackMemoForTests();
 
-    expect((await gpRead())?.priceCents).toBe(31900); // the prior sheet, everywhere
+    expect((await gpRead())?.priceCents).toBe(31900); // the named version, everywhere
 
     controlRows.delete("catalog-rollback");
     _resetRollbackMemoForTests();
     expect((await gpRead())?.priceCents).toBe(98900); // clearing restores atomically
+  });
+
+  it("an UNREADABLE version manifest serves pinned rows only — never the rolled-back sheet", async () => {
+    await gpResearch();
+    controlRows.set("catalog-rollback", {
+      id: "catalog-rollback",
+      kind: "ROLLBACK",
+      rollbackVersionId: "cv-missing", // no such version row
+    });
+    _resetRollbackMemoForTests();
+
+    // The AI sheet the owner rolled back must NOT serve.
+    expect(await gpRead()).toBeNull();
+
+    // A pinned office row still serves — the office's word stands.
+    rows[0].pinned = true;
+    expect((await gpRead())?.priceCents).toBe(31900);
+    controlRows.delete("catalog-rollback");
+    _resetRollbackMemoForTests();
+  });
+
+  it("writeCatalogSnapshot records the complete serving manifest", async () => {
+    await gpResearch();
+    const { writeCatalogSnapshot } = await import("./marketRate");
+
+    const id = await writeCatalogSnapshot("RUN");
+
+    expect(id).toBeTruthy();
+    const version = versionRows.get(id!)!;
+    const manifest = JSON.parse(String(version.manifestJson));
+    expect(manifest[rows[0].rateKey as string]).toBe(rows[0].id);
+    expect(version.keyCount).toBe(1);
+    expect(version.trigger).toBe("RUN");
   });
 });

@@ -150,18 +150,31 @@ export async function requestCallback(
       ownerTeam: "OPS",
     });
   if (!created) {
+    // A failed create is only a DUPLICATE if the prior row actually exists.
+    // A provider/database fault also returns no row — telling that customer
+    // "already requested" would be a lie that strands them with no case.
+    const { data: existing } = await client.models.CallbackRequest.get({ id });
+    if (!existing) {
+      throw new Error(
+        "Your callback request couldn't be saved — please try again in a moment, or call the office. Nothing was recorded."
+      );
+    }
     // One callback per original appointment — the deterministic id makes the
     // second submission collapse onto the first, and the customer is told.
-    // GL-11: the collapse ALSO re-ensures office ownership (deduplicated),
-    // so a request whose first submission crashed before reaching the queue
-    // converges to owned on the retry instead of staying invisible.
-    const { data: existing } = await client.models.CallbackRequest.get({ id });
-    if (!existing || existing.status === "REQUESTED") {
-      await ensureOwnership().catch(() => null);
+    // GL-11: the collapse ALSO re-ensures office ownership (deduplicated) —
+    // and a failed re-ensure is LOUD, never swallowed: the row exists, so
+    // the customer must know the office queue still hasn't got it.
+    if (existing.status === "REQUESTED") {
+      const ensured = await ensureOwnership();
+      if (!ensured) {
+        throw new Error(
+          "Your earlier callback request exists but still couldn't reach the office queue — please try again, or call the office."
+        );
+      }
     }
     return {
       reference: id,
-      promisedBy: existing?.promisedBy ?? promisedBy,
+      promisedBy: existing.promisedBy ?? promisedBy,
       status: "ALREADY_REQUESTED",
     };
   }
@@ -444,22 +457,35 @@ export async function recordCallbackFinding(opts: {
       }).catch(() => false);
       if (!sent) {
         // Clear the claim so the next attempt (or the office resend) can own
-        // the notice — the guard is just "the row exists".
-        await casGuardedUpdate(
-          "CallbackRequest",
-          cb.id,
-          { terminalNoticeSentAt: null },
-          []
-        ).catch(() => undefined);
+        // the notice — the guard is just "the row exists". A FAILED release
+        // is never swallowed: the claim would still be held, silently
+        // blocking every future resend, so the owned item must say so.
+        let claimReleased = false;
+        try {
+          const release = await casGuardedUpdate(
+            "CallbackRequest",
+            cb.id,
+            { terminalNoticeSentAt: null },
+            []
+          );
+          claimReleased = release.ok;
+        } catch {
+          claimReleased = false;
+        }
         await openOwnedWork({
           kind: "EMAIL_FAILURE",
           dedupeKey: `callback-final:${cb.id}`,
           title: "A guarantee-ended notice didn't send",
-          detail: `The technician ended the guarantee on callback ${cb.id} (${opts.finding}), but the final customer notice failed to send. The customer doesn't yet know the outcome.`,
+          detail: `The technician ended the guarantee on callback ${cb.id} (${opts.finding}), but the final customer notice failed to send. The customer doesn't yet know the outcome.${
+            claimReleased
+              ? ""
+              : ` ADDITIONALLY: the send-once claim could NOT be released — resends are blocked until engineering clears terminalNoticeSentAt on CallbackRequest ${cb.id}.`
+          }`,
           customerId: cb.customerId,
           relatedId: cb.id,
-          resolutionAction:
-            "Resend the guarantee outcome to the customer (or record an alternate delivery), then verify it arrived.",
+          resolutionAction: claimReleased
+            ? "Resend the guarantee outcome to the customer (or record an alternate delivery), then verify it arrived."
+            : "FIRST have engineering clear terminalNoticeSentAt on the callback row (the send-once claim is stuck), THEN resend the outcome and verify it arrived.",
           ownerTeam: "OPS",
         });
       }

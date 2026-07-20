@@ -24,6 +24,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const pricingRuns: Record<string, unknown>[] = [];
 // GL-16: the rollback mutations read/write the PricingControl control row.
 const controlRows = new Map<string, Record<string, unknown>>();
+const versionRows = new Map<string, Record<string, unknown>>();
 const fakeDataClient = {
   models: {
     LeadPricingRun: {
@@ -31,6 +32,11 @@ const fakeDataClient = {
         pricingRuns.push(input);
         return { data: { id: "run_1", ...input } };
       },
+    },
+    CatalogVersion: {
+      get: async ({ id }: { id: string }) => ({
+        data: versionRows.get(id) ?? null,
+      }),
     },
     PricingControl: {
       get: async ({ id }: { id: string }) => ({
@@ -709,6 +715,14 @@ describe("the composed reply's next step is the funnel too", () => {
 });
 
 describe("GL-16 — the one reasoned, authorized catalog rollback", () => {
+  beforeEach(() => {
+    versionRows.clear();
+    versionRows.set("cv-good", {
+      id: "cv-good",
+      manifestJson: JSON.stringify({ "GENERAL_PEST#ware-ma#2000": "mr-1" }),
+      keyCount: 1,
+    });
+  });
   const rollback = async (
     args: Record<string, unknown>,
     groups: string[] = ["OWNER"]
@@ -725,16 +739,16 @@ describe("GL-16 — the one reasoned, authorized catalog rollback", () => {
       fieldName: "clearPricingRollback",
     } as never)) as Record<string, unknown>;
 
-  it("an OWNER rolls the catalog back in one write, with actor/reason/time recorded", async () => {
+  it("an OWNER rolls the catalog back to an immutable VERSION in one write, recorded", async () => {
     const res = await rollback({
-      cutoffIso: "2026-07-18T00:00:00.000Z",
+      versionId: "cv-good",
       reasonCode: "BAD_PROMPT_RESULT",
       note: "Friday's run tripled HOA rates",
     });
 
-    expect(res).toMatchObject({ ok: true, cutoffIso: "2026-07-18T00:00:00.000Z" });
+    expect(res).toMatchObject({ ok: true, versionId: "cv-good" });
     const row = controlRows.get("catalog-rollback")!;
-    expect(row.rollbackCutoff).toBe("2026-07-18T00:00:00.000Z");
+    expect(row.rollbackVersionId).toBe("cv-good");
     expect(String(row.rollbackReason)).toContain("BAD_PROMPT_RESULT");
     expect(String(row.rollbackReason)).toContain("tripled HOA rates");
     expect(row.rollbackAppliedAt).toBeTruthy();
@@ -743,7 +757,7 @@ describe("GL-16 — the one reasoned, authorized catalog rollback", () => {
   it("price authority stays role-controlled — OFFICE cannot roll back or clear", async () => {
     await expect(
       rollback(
-        { cutoffIso: "2026-07-18T00:00:00.000Z", reasonCode: "OTHER", note: "x" },
+        { versionId: "cv-good", reasonCode: "OTHER", note: "x" },
         ["OFFICE"]
       )
     ).rejects.toThrow(/Owner role required/);
@@ -751,26 +765,33 @@ describe("GL-16 — the one reasoned, authorized catalog rollback", () => {
     expect(controlRows.has("catalog-rollback")).toBe(false);
   });
 
-  it("refuses an uncontrolled reason and a future cutoff — nothing changes", async () => {
+  it("refuses an uncontrolled reason, a missing version, and an unreadable manifest", async () => {
     await expect(
-      rollback({ cutoffIso: "2026-07-18T00:00:00.000Z", reasonCode: "FELT_LIKE_IT" })
+      rollback({ versionId: "cv-good", reasonCode: "FELT_LIKE_IT" })
     ).rejects.toThrow(/controlled rollback reason/);
     await expect(
-      rollback({ cutoffIso: "2099-01-01T00:00:00.000Z", reasonCode: "OTHER", note: "x" })
-    ).rejects.toThrow(/must be in the past/);
+      rollback({ versionId: "cv-nope", reasonCode: "OTHER", note: "x" })
+    ).rejects.toThrow(/doesn't exist/);
+    versionRows.set("cv-bad", {
+      id: "cv-bad",
+      manifestJson: "not json at all",
+    });
+    await expect(
+      rollback({ versionId: "cv-bad", reasonCode: "OTHER", note: "x" })
+    ).rejects.toThrow(/unreadable/);
     expect(controlRows.has("catalog-rollback")).toBe(false);
   });
 
   it("clearing resumes the newest rates and records who cleared; clearing twice is harmless", async () => {
     await rollback({
-      cutoffIso: "2026-07-18T00:00:00.000Z",
+      versionId: "cv-good",
       reasonCode: "MODEL_ERROR",
     });
 
     const res = await clear();
     expect(res).toMatchObject({ ok: true });
     const row = controlRows.get("catalog-rollback")!;
-    expect(row.rollbackCutoff).toBeUndefined();
+    expect(row.rollbackVersionId).toBeUndefined();
     expect(row.rollbackClearedAt).toBeTruthy();
 
     await expect(clear()).resolves.toMatchObject({ ok: true });

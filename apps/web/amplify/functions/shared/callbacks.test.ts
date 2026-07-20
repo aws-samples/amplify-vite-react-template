@@ -33,13 +33,25 @@ const model = (table: Map<string, Row>, created?: Row[]) => ({
   },
 });
 
+let cbCreateFails = false;
+const callbackModel = () => {
+  const base = model(callbacks);
+  return {
+    ...base,
+    create: async (input: Row) => {
+      if (cbCreateFails) return { data: null, errors: [{ message: "provider down" }] };
+      return base.create(input);
+    },
+  };
+};
+
 vi.mock("./dataClient", () => ({
   dataClient: async () => ({
     models: {
       Customer: model(customers),
       Job: model(jobs, jobsCreated),
       ServicePlan: model(plans),
-      CallbackRequest: model(callbacks),
+      CallbackRequest: callbackModel(),
       CompanyClosure: model(closures),
     },
   }),
@@ -47,9 +59,11 @@ vi.mock("./dataClient", () => ({
 
 const emails: { to: string; subject: string; html: string }[] = [];
 let emailFails = false;
+let onSendHook: (() => void) | null = null;
 vi.mock("./email", () => ({
   emailShell: (h: string, b: string) => `${h}${b}`,
   sendEmail: async (o: { to: string; subject: string; html: string }) => {
+    onSendHook?.();
     emails.push(o);
     return !emailFails;
   },
@@ -140,6 +154,8 @@ beforeEach(() => {
   photoVerifyFails = null;
   photoVerified.length = 0;
   workOpenFails = false;
+  cbCreateFails = false;
+  onSendHook = null;
   techBase = "12 Depot St, Ware, MA";
   slotSoldOut = false;
   reserved.length = 0;
@@ -239,6 +255,33 @@ describe("eligibility — the locked rules refuse before anything schedules", ()
       dedupeKey: "cb-j1",
     });
     expect(emails).toHaveLength(0); // no duplicate customer email
+  });
+
+  it("a provider/database create failure is NOT reported as a duplicate", async () => {
+    cbCreateFails = true;
+
+    // The create failed AND no prior row exists — the customer must hear
+    // "couldn't be saved", never "already requested".
+    await expect(request()).rejects.toThrow(/couldn't be saved/);
+    expect(callbacks.size).toBe(0);
+    expect(workOpened).toHaveLength(0);
+  });
+
+  it("a real duplicate still collapses when the create fails but the row EXISTS", async () => {
+    await request();
+    workOpened.length = 0;
+    cbCreateFails = true; // the conditional-create refusal path
+
+    const second = await request();
+    expect(second.status).toBe("ALREADY_REQUESTED");
+    expect(second.reference).toBe("cb-j1");
+  });
+
+  it("a failed ownership re-ensure on the collapse is LOUD, never swallowed", async () => {
+    await request();
+    // Simulate: row exists, but the queue re-ensure fails on the retry.
+    workOpenFails = true;
+    await expect(request()).rejects.toThrow(/still couldn't reach the office queue/);
   });
 
   it("a queue-write failure is LOUD, and the retry converges onto the same owned request", async () => {
@@ -417,6 +460,24 @@ describe("the technician's finding — controlled, evidenced, terminal-guarded",
     expect(res.status).toBe("COMPLETED");
     expect(callbacks.get("cb-j1")!.terminalNoticeSentAt).toBeUndefined();
     expect(emails).toHaveLength(0);
+  });
+
+  it("a stuck send-once claim is surfaced in the owned item, never swallowed", async () => {
+    emailFails = true;
+    // The claim-release after the failed send hits a dead lock layer — the
+    // owned item must say resends are BLOCKED until the claim is cleared.
+    onSendHook = () => _setLockStoreForTests(memoryLockStore({}));
+
+    await recordCallbackFinding({
+      callbackRequestId: "cb-j1",
+      finding: "EXPECTED_BEHAVIOR",
+      note: "Cluster flies — expected behavior.",
+    });
+
+    const item = workOpened.find((w) => w.kind === "EMAIL_FAILURE")!;
+    expect(item).toBeTruthy();
+    expect(String(item.detail)).toContain("could NOT be released");
+    expect(String(item.resolutionAction)).toContain("terminalNoticeSentAt");
   });
 
   it("EXPECTED_BEHAVIOR ends the guarantee with evidence and ONE final notice", async () => {

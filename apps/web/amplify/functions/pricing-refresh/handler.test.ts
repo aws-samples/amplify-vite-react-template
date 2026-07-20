@@ -51,6 +51,7 @@ type RateRow = Record<string, unknown> & {
 // see one truth — exactly the production arrangement.
 const covTable = new Map<string, CovRow>();
 const controlTable = new Map<string, Record<string, unknown>>();
+const versionTable = new Map<string, Record<string, unknown>>();
 const rateRows: RateRow[] = [];
 const createdRates: RateRow[] = [];
 const customers: Record<string, unknown>[] = [];
@@ -95,6 +96,16 @@ const fakeDataClient = {
         const row = cov(input.id);
         if (row) Object.assign(row, input);
         return { data: row ?? null };
+      },
+    },
+    CatalogVersion: {
+      list: async () => ({ data: [...versionTable.values()], nextToken: null }),
+      get: async ({ id }: { id: string }) => ({
+        data: versionTable.get(id) ?? null,
+      }),
+      create: async (input: Record<string, unknown> & { id: string }) => {
+        versionTable.set(input.id, { ...input });
+        return { data: versionTable.get(input.id) };
       },
     },
     PricingControl: {
@@ -271,6 +282,7 @@ const demandRow = (over: Partial<CovRow> = {}): CovRow => ({
 beforeEach(() => {
   covTable.clear();
   controlTable.clear();
+  versionTable.clear();
   workItems.clear();
   _resetRollbackMemoForTests();
   rateRows.length = 0;
@@ -1026,10 +1038,15 @@ describe("GL-16 — rollback pause and the daily change review", () => {
     await seedOnly();
     quietAll();
     addCov(demandRow());
+    versionTable.set("cv-prior", {
+      id: "cv-prior",
+      manifestJson: "{}",
+      keyCount: 0,
+    });
     controlTable.set("catalog-rollback", {
       id: "catalog-rollback",
       kind: "ROLLBACK",
-      rollbackCutoff: iso(2 * 3600_000),
+      rollbackVersionId: "cv-prior",
       rollbackReason: "BAD_PROMPT_RESULT",
     });
     _resetRollbackMemoForTests();
@@ -1089,11 +1106,17 @@ describe("GL-16 — rollback pause and the daily change review", () => {
 });
 
 describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", () => {
-  const rolledBackState = () => {
+  /** Roll back to an immutable version naming exactly `rowIds` per key. */
+  const rolledBackState = (manifest: Record<string, string>) => {
+    versionTable.set("cv-prior", {
+      id: "cv-prior",
+      manifestJson: JSON.stringify(manifest),
+      keyCount: Object.keys(manifest).length,
+    });
     controlTable.set("catalog-rollback", {
       id: "catalog-rollback",
       kind: "ROLLBACK",
-      rollbackCutoff: iso(2 * 3600_000), // two hours ago
+      rollbackVersionId: "cv-prior",
       rollbackReason: "BAD_PROMPT_RESULT",
     });
     _resetRollbackMemoForTests();
@@ -1102,16 +1125,16 @@ describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", 
   it("does NOT email 'prices ready' for a sheet the rolled-back funnel refuses to serve", async () => {
     await seedOnly();
     quietAll();
-    // The combo's ONLY sheet was researched AFTER the cutoff — quoting
-    // will not serve it while the rollback is active.
+    // The combo's ONLY sheet arrived AFTER the restored version was
+    // snapshotted — the version doesn't name it, so quoting won't serve it.
     rateRows.push({
-      id: "post-cutoff-row",
+      id: "post-version-row",
       rateKey: "GENERAL_PEST#springfield-ma#2000",
       service: "GENERAL_PEST",
       areaKey: "springfield-ma",
       priceCents: 39900,
       active: true,
-      researchedAt: iso(30 * 60_000), // 30 min ago — inside the rollback
+      researchedAt: iso(30 * 60_000),
     } as RateRow);
     addCov(
       demandRow({
@@ -1123,7 +1146,7 @@ describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", 
         ]),
       })
     );
-    rolledBackState();
+    rolledBackState({}); // the restored version predates this combo
 
     await handler();
 
@@ -1137,17 +1160,17 @@ describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", 
     ).toHaveLength(1);
   });
 
-  it("still emails ready when a PRE-cutoff sheet serves during the rollback", async () => {
+  it("still emails ready when the restored version's sheet serves during the rollback", async () => {
     await seedOnly();
     quietAll();
     rateRows.push({
-      id: "pre-cutoff-row",
+      id: "version-named-row",
       rateKey: "GENERAL_PEST#springfield-ma#2000",
       service: "GENERAL_PEST",
       areaKey: "springfield-ma",
       priceCents: 34900,
       active: true,
-      researchedAt: iso(3 * 3600_000), // three hours ago — before the cutoff
+      researchedAt: iso(3 * 3600_000),
     } as RateRow);
     addCov(
       demandRow({
@@ -1159,7 +1182,9 @@ describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", 
         ]),
       })
     );
-    rolledBackState();
+    rolledBackState({
+      "GENERAL_PEST#springfield-ma#2000": "version-named-row",
+    });
 
     await handler();
 
@@ -1178,7 +1203,7 @@ describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", 
     await seedOnly();
     quietAll();
     rateRows.push({
-      id: "post-cutoff-row",
+      id: "post-version-row",
       rateKey: "GENERAL_PEST#springfield-ma#2000",
       service: "GENERAL_PEST",
       areaKey: "springfield-ma",
@@ -1196,7 +1221,7 @@ describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", 
         ]),
       })
     );
-    rolledBackState();
+    rolledBackState({});
     await handler();
     expect(
       sentEmails.filter((e) => e.template === "booking-rate-ready")
@@ -1211,6 +1236,44 @@ describe("GL-16 — a rollback governs the COMPLETE catalog, not just quoting", 
         .filter((e) => e.template === "booking-rate-ready")
         .map((e) => e.to)
     ).toEqual(["lead1@x.com"]);
+  });
+});
+
+describe("GL-16 — immutable catalog versions", () => {
+  it("a run that publishes rates snapshots the complete serving manifest", async () => {
+    await seedOnly();
+    quietAll();
+    addCov(demandRow());
+
+    await handler();
+
+    const versions = [...versionTable.values()];
+    expect(versions.length).toBeGreaterThan(0);
+    const latest = versions[versions.length - 1];
+    expect(latest.trigger).toBe("RUN");
+    const manifest = JSON.parse(String(latest.manifestJson));
+    // The manifest names the exact row that now serves the researched key.
+    const cached = createdRates[createdRates.length - 1];
+    expect(manifest[String(cached.rateKey)]).toBe(cached.id);
+  });
+
+  it("bootstrap: live rates with NO versions get a snapshot even when nothing new publishes", async () => {
+    await seedOnly();
+    quietAll();
+    rateRows.push({
+      id: "existing-row",
+      rateKey: "GENERAL_PEST#ware-ma#2000",
+      service: "GENERAL_PEST",
+      areaKey: "ware-ma",
+      priceCents: 30000,
+      active: true,
+      researchedAt: iso(24 * 3600_000),
+    } as RateRow);
+
+    await handler(); // off-hour drain, nothing to research
+
+    const versions = [...versionTable.values()];
+    expect(versions.some((v) => v.trigger === "BOOTSTRAP")).toBe(true);
   });
 });
 

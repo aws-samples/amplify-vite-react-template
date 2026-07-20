@@ -24,7 +24,10 @@ import {
   type PlanRate,
   type RateStatus,
 } from "../lib/marketRates";
-import { pickLiveRow } from "../../../web/amplify/functions/shared/rateServing";
+import {
+  pickServingRow,
+  type CatalogManifest,
+} from "../../../web/amplify/functions/shared/rateServing";
 import { fmtDate, money } from "../lib/format";
 import { useRoles } from "../lib/auth";
 import {
@@ -100,30 +103,32 @@ function EnginePanel({
   coverage,
   rates,
   control,
-  rollbackCutoff,
+  rollbackManifest,
   onChanged,
 }: {
   coverage: RateCoverage[];
   rates: MarketRate[];
   control: PricingControl | null;
-  rollbackCutoff: string | null;
+  rollbackManifest: CatalogManifest | null;
   onChanged: () => Promise<void>;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const now = Date.now();
 
-  // Rollback-aware: a combo whose only sheet is post-cutoff is NOT serving
-  // while the catalog is rolled back — the engine view must match quoting.
-  const liveKeys = new Set(
-    rates
-      .filter((r) =>
-        r.active && (rollbackCutoff
-          ? r.pinned || (r.researchedAt ?? "") <= rollbackCutoff
-          : true)
-      )
-      .map((r) => r.rateKey)
-  );
+  // Rollback-aware: a combo the restored version doesn't name is NOT
+  // serving while the catalog is rolled back — the engine view must match
+  // quoting exactly (same shared serving rule).
+  const byKey = new Map<string, MarketRate[]>();
+  for (const r of rates) {
+    const list = byKey.get(r.rateKey) ?? [];
+    list.push(r);
+    byKey.set(r.rateKey, list);
+  }
+  const liveKeys = new Set<string>();
+  for (const [key, keyRows] of byKey) {
+    if (pickServingRow(keyRows, key, rollbackManifest)) liveKeys.add(key);
+  }
   const active = coverage.filter((c) => c.active);
   const exhausted = active.filter((c) => c.exhaustedAt);
   const backingOff = active
@@ -181,8 +186,8 @@ function EnginePanel({
     <Card>
       <div className="row-split">
         <strong>AI research engine — today</strong>
-        <Badge tone={rollbackCutoff ? "warn" : exhausted.length ? "warn" : "ok"}>
-          {rollbackCutoff
+        <Badge tone={rollbackManifest ? "warn" : exhausted.length ? "warn" : "ok"}>
+          {rollbackManifest
             ? "research paused — catalog rolled back"
             : exhausted.length
               ? `${exhausted.length} parked`
@@ -233,6 +238,10 @@ export default function MarketRates() {
   const [coverage, setCoverage] = useState<RateCoverage[]>([]);
   const [control, setControl] = useState<PricingControl | null>(null);
   const [rollback, setRollback] = useState<PricingControl | null>(null);
+  const [versions, setVersions] = useState<
+    { id: string; keyCount?: number | null; trigger?: string | null; createdAt?: string }[]
+  >([]);
+  const [manifest, setManifest] = useState<CatalogManifest | null>(null);
   const [editing, setEditing] = useState<MarketRate | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -261,6 +270,50 @@ export default function MarketRates() {
           id: "catalog-rollback",
         });
         setRollback(rb ?? null);
+        const versionModels = api().models as unknown as {
+          CatalogVersion?: {
+            list: (a: { limit: number }) => Promise<{
+              data: {
+                id: string;
+                keyCount?: number | null;
+                trigger?: string | null;
+                createdAt?: string;
+              }[];
+            }>;
+            get: (a: { id: string }) => Promise<{
+              data: { manifestJson?: string | null } | null;
+            }>;
+          };
+        };
+        if (versionModels.CatalogVersion) {
+          const { data: vs } = await versionModels.CatalogVersion.list({
+            limit: 200,
+          });
+          setVersions(
+            (vs ?? []).sort((a, b) =>
+              (b.createdAt ?? b.id).localeCompare(a.createdAt ?? a.id)
+            )
+          );
+          const activeVersionId = (
+            rb as { rollbackVersionId?: string | null } | null
+          )?.rollbackVersionId;
+          if (activeVersionId) {
+            const { data: v } = await versionModels.CatalogVersion.get({
+              id: activeVersionId,
+            });
+            try {
+              setManifest(
+                v?.manifestJson
+                  ? (JSON.parse(v.manifestJson) as CatalogManifest)
+                  : {}
+              );
+            } catch {
+              setManifest({});
+            }
+          } else {
+            setManifest(null);
+          }
+        }
       } catch {
         /* engine stats unavailable — rates remain editable */
       }
@@ -276,13 +329,13 @@ export default function MarketRates() {
   return (
     <Page title="Market rates" back="/more">
       <ErrorNote error={error} />
-      <RollbackPanel rollback={rollback} onChanged={load} />
+      <RollbackPanel rollback={rollback} versions={versions} onChanged={load} />
       {rates !== null ? (
         <EnginePanel
           coverage={coverage}
           rates={rates}
           control={control}
-          rollbackCutoff={rollback?.rollbackCutoff ?? null}
+          rollbackManifest={manifest}
           onChanged={load}
         />
       ) : null}
@@ -300,7 +353,6 @@ export default function MarketRates() {
             // module): per rate key, which row actually quotes right now —
             // rollback-aware, so during a rollback the office sees exactly
             // what customers see, never the rolled-back sheet as "active".
-            const cutoff = rollback?.rollbackCutoff ?? null;
             const byKey = new Map<string, MarketRate[]>();
             for (const r of rates) {
               const list = byKey.get(r.rateKey) ?? [];
@@ -308,8 +360,8 @@ export default function MarketRates() {
               byKey.set(r.rateKey, list);
             }
             const servingIds = new Set<string>();
-            for (const rows of byKey.values()) {
-              const s = pickLiveRow(rows, cutoff);
+            for (const [key, keyRows] of byKey) {
+              const s = pickServingRow(keyRows, key, manifest);
               if (s) servingIds.add(s.id);
             }
             return rates.map((r) => {
@@ -335,9 +387,7 @@ export default function MarketRates() {
                 meta={
                   !serving && r.active ? (
                     <Badge tone="warn">
-                      {rollback?.rollbackCutoff &&
-                      !r.pinned &&
-                      (r.researchedAt ?? "") > rollback.rollbackCutoff
+                      {manifest && !r.pinned
                         ? "not serving — rolled back"
                         : "not serving — superseded"}
                     </Badge>
@@ -762,32 +812,43 @@ const ROLLBACK_REASONS = [
 
 /**
  * GL-16 — the one reasoned, authorized recovery from a bad model/prompt
- * result: an OWNER rolls the WHOLE catalog back to how it stood at a chosen
- * moment in one atomic action. Quotes immediately serve that prior coherent
- * sheet (office-pinned rows still win), research pauses, history is
- * untouched, and clearing the rollback resumes everything.
+ * result: an OWNER points the catalog at a prior IMMUTABLE version (a
+ * complete manifest of exactly which row served each rate key when the
+ * snapshot was taken) in one atomic action. Quotes immediately serve that
+ * version's rows (office-pinned rows still win), research pauses, history
+ * is untouched, and clearing the rollback resumes everything.
  */
 function RollbackPanel({
   rollback,
+  versions,
   onChanged,
 }: {
   rollback: PricingControl | null;
+  versions: {
+    id: string;
+    keyCount?: number | null;
+    trigger?: string | null;
+    createdAt?: string;
+  }[];
   onChanged: () => Promise<void>;
 }) {
   const roles = useRoles();
   const [open, setOpen] = useState(false);
-  const [cutoffLocal, setCutoffLocal] = useState("");
+  const [versionId, setVersionId] = useState("");
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<null | "apply" | "clear">(null);
   const [error, setError] = useState<string | null>(null);
 
-  const active = Boolean(rollback?.rollbackCutoff);
+  const activeVersionId = (
+    rollback as { rollbackVersionId?: string | null } | null
+  )?.rollbackVersionId;
+  const active = Boolean(activeVersionId || rollback?.rollbackCutoff);
   if (!active && !roles.owner) return null;
 
   const apply = async () => {
-    if (!cutoffLocal) {
-      setError("Pick the moment to roll back to");
+    if (!versionId) {
+      setError("Pick the catalog version to restore");
       return;
     }
     if (!reason) {
@@ -802,14 +863,22 @@ function RollbackPanel({
     setError(null);
     try {
       unwrap(
-        await api().mutations.rollbackPricing({
-          cutoffIso: new Date(cutoffLocal).toISOString(),
+        await (
+          api().mutations as unknown as {
+            rollbackPricing: (a: {
+              versionId: string;
+              reasonCode: string;
+              note?: string;
+            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
+          }
+        ).rollbackPricing({
+          versionId,
           reasonCode: reason,
           note: note.trim() || undefined,
         })
       );
       setOpen(false);
-      setCutoffLocal("");
+      setVersionId("");
       setReason("");
       setNote("");
       await onChanged();
@@ -851,8 +920,8 @@ function RollbackPanel({
       {active ? (
         <>
           <p className="small" style={{ margin: "6px 0 0" }}>
-            Quoting the catalog as it stood at{" "}
-            <strong>{fmtDate(rollback!.rollbackCutoff!, true)}</strong>
+            Quoting immutable catalog version{" "}
+            <strong>{activeVersionId ?? rollback?.rollbackCutoff}</strong>
             {rollback?.rollbackActor ? ` — by ${rollback.rollbackActor}` : ""}
             {rollback?.rollbackReason ? ` (${rollback.rollbackReason})` : ""}.
             Office-pinned rows still serve; AI research is paused until this is
@@ -873,14 +942,22 @@ function RollbackPanel({
       ) : open ? (
         <>
           <Field
-            label="Serve the catalog as it stood at"
-            hint="Every AI rate researched after this moment stops serving; pinned office rates still win"
+            label="Restore this catalog version"
+            hint="Each version is a complete immutable snapshot of exactly which sheet served every rate key; pinned office rates still win"
           >
-            <input
-              type="datetime-local"
-              value={cutoffLocal}
-              onChange={(e) => setCutoffLocal(e.target.value)}
-            />
+            <select
+              value={versionId}
+              onChange={(e) => setVersionId(e.target.value)}
+            >
+              <option value="">Pick a version…</option>
+              {versions.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.createdAt ? fmtDate(v.createdAt, true) : v.id} —{" "}
+                  {v.keyCount ?? "?"} rate keys
+                  {v.trigger ? ` (${v.trigger.toLowerCase()})` : ""}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="Why?">
             <select value={reason} onChange={(e) => setReason(e.target.value)}>

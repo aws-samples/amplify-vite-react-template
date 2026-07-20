@@ -16,7 +16,10 @@ import {
 import { SqsDestination } from "aws-cdk-lib/aws-lambda-destinations";
 import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { Topic } from "aws-cdk-lib/aws-sns";
-import { LambdaSubscription } from "aws-cdk-lib/aws-sns-subscriptions";
+import {
+  EmailSubscription,
+  LambdaSubscription,
+} from "aws-cdk-lib/aws-sns-subscriptions";
 import {
   ComparisonOperator,
   TreatMissingData,
@@ -474,6 +477,65 @@ opsAlarmsTopic.addSubscription(
   new LambdaSubscription(backend.opsAlerts.resources.lambda)
 );
 const alarmAction = new SnsAction(opsAlarmsTopic);
+
+// GL-22: WHO WATCHES THE BRIDGE. If ops-alerts itself breaks, every alarm
+// routed through it silently stops becoming owned work — so its failures
+// must reach a channel with NO Lambda in the path. Its async invocations
+// (SNS deliveries) retry twice then dead-letter; the DLQ depth and the
+// bridge's own errors/throttles alarm to a SEPARATE topic whose only
+// subscriber is a direct SNS EMAIL to the office (subscription must be
+// confirmed once from the info@ inbox).
+const opsAlertsDlq = new Queue(opsAlarmsStack, "OpsAlertsDlq", {
+  retentionPeriod: Duration.days(14),
+});
+backend.opsAlerts.resources.lambda.configureAsyncInvoke({
+  retryAttempts: 2,
+  onFailure: new SqsDestination(opsAlertsDlq),
+});
+const bridgeFailureTopic = new Topic(opsAlarmsStack, "OpsBridgeFailureTopic");
+bridgeFailureTopic.addSubscription(
+  new EmailSubscription("info@pestbuzzkill.com")
+);
+const bridgeAction = new SnsAction(bridgeFailureTopic);
+opsAlertsDlq
+  .metricApproximateNumberOfMessagesVisible({
+    period: Duration.minutes(15),
+    statistic: "Maximum",
+  })
+  .createAlarm(opsAlarmsStack, "ops-alerts-dlq-alarm", {
+    alarmName: `buzzkill-${branch}-ops-alerts-dead-letter`,
+    alarmDescription:
+      "Alarm notifications failed processing in the ops-alerts bridge and are parked on its dead-letter queue — alarms are firing but NOT becoming owned work until these are replayed.",
+    threshold: 1,
+    evaluationPeriods: 1,
+    comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: TreatMissingData.NOT_BREACHING,
+  })
+  .addAlarmAction(bridgeAction);
+backend.opsAlerts.resources.lambda
+  .metricErrors({ period: Duration.minutes(5), statistic: "Sum" })
+  .createAlarm(opsAlarmsStack, "ops-alerts-errors-alarm", {
+    alarmName: `buzzkill-${branch}-ops-alerts-errors`,
+    alarmDescription:
+      "The ops-alerts bridge (alarms → owned work) is failing — background failures may be going unnoticed.",
+    threshold: 1,
+    evaluationPeriods: 1,
+    comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: TreatMissingData.NOT_BREACHING,
+  })
+  .addAlarmAction(bridgeAction);
+backend.opsAlerts.resources.lambda
+  .metricThrottles({ period: Duration.minutes(5), statistic: "Sum" })
+  .createAlarm(opsAlarmsStack, "ops-alerts-throttles-alarm", {
+    alarmName: `buzzkill-${branch}-ops-alerts-throttles`,
+    alarmDescription:
+      "The ops-alerts bridge is being throttled — alarm notifications are being refused before processing.",
+    threshold: 1,
+    evaluationPeriods: 1,
+    comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: TreatMissingData.NOT_BREACHING,
+  })
+  .addAlarmAction(bridgeAction);
 
 // Lambda ERROR alarms: any error on a business function within 5 minutes is
 // a page. Booking/quote/webhook errors, email-send failure runs, resumer
