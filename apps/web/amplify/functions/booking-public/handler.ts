@@ -46,7 +46,7 @@ import {
   BOOKING_TERMS_VERSION,
   CANCEL_FULL_REFUND_DAYS,
 } from "../shared/bookingTerms";
-import { buildDayMatrix, type DayQuote } from "./availability";
+import { addDays, buildDayMatrix, type DayQuote } from "./availability";
 import {
   enqueueRateResearch,
   areaKeyFor,
@@ -1257,13 +1257,24 @@ async function quote(
       const month = Number(d.date.slice(5, 7));
       return month >= 4 && month <= 10;
     });
-    if (days.length === 0) {
-      // GL-17 locked rule: an off-season enrollment is a REAL sale — billing
-      // begins immediately and the first treatment lands next April. No
-      // exact April day is promised before capacity is known; the office
-      // owns confirming it (finalize opens that owned action).
-      offSeason = true;
-    }
+    // GL-17 locked rule: an off-season enrollment is a REAL sale — billing
+    // begins immediately and the first treatment lands next April. But
+    // "off-season" is a CALENDAR fact: it is claimed only when NO day in
+    // the quote horizon falls in April–October, independent of capacity.
+    // A fully-booked (or capacity-starved) in-season week stays the honest
+    // "fully booked" contact path below — never a false "come back in
+    // April" while the season is running.
+    const todayEt = new Date().toLocaleDateString("en-CA", {
+      timeZone: "America/New_York",
+    });
+    const horizonHasSeasonDay = Array.from({ length: 32 }, (_, i) =>
+      addDays(todayEt, i + 1)
+    ).some((d) => {
+      const month = Number(d.slice(5, 7));
+      return month >= 4 && month <= 10;
+    });
+    offSeason = !horizonHasSeasonDay;
+    if (offSeason) days = [];
   }
   if (days.length === 0 && !offSeason) {
     return contact(
