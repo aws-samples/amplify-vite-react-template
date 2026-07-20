@@ -591,10 +591,15 @@ export const schema = a.schema({
       tcIp: a.string(),
       tcUserAgent: a.string(),
       // The calendar date (shop timezone) the customer FIRST asked to cancel.
-      // Refundability is judged from this, not from when the cancellation
-      // finally succeeded: an attempt that fails on day 4 because Stripe is
-      // down must not cost the customer their refund when it retries on day 3.
+      // Kept for the human-readable office alerts and reassurance copy.
       cancelRequestedOn: a.date(),
+      // GL-08: the exact INSTANT of that first cancel attempt. The 72-hour
+      // refund line is enforced hour-exact (America/New_York), so the money
+      // decision is judged from this timestamp — not the whole calendar date —
+      // matching the office and plan cancel paths and the customer-facing copy.
+      // Stamped once (server-side) on the first attempt and never re-dated, so
+      // a retry after our outage judges the moment the customer was entitled to.
+      cancelRequestedAt: a.datetime(),
       // GL-05 durable communication outbox markers. Stamped only after the
       // corresponding send actually succeeds, so a finalization hard-killed
       // after BOOKED but before (or between) its sends is detected on the next
