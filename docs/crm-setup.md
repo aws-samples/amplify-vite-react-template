@@ -56,11 +56,12 @@ service reports, agreement links, reminders, and payment requests. If email
 volume grows or messages land in spam, add DKIM for the domain in SES.
 Cognito login invites use Cognito's default mailer.
 
-## 4. Custom domain (optional, later)
+## 4. Customer portal domain
 
-When the CRM gets a real domain, set the `CRM_APP_URL` env var on the WEB
-app's branches (it's baked into agreement links, portal links, and the
-Cognito invite email) and rebuild. Defaults to the Amplify staging domain.
+The production CRM and customer portal use `https://app.pestbuzzkill.com`.
+Set `CRM_APP_URL=https://app.pestbuzzkill.com` on the WEB app's production
+branch; it is baked into agreement links, billing links, and Cognito invite
+emails. Staging continues to use the staging Amplify hostname.
 
 ## 5. Bootstrapping the first office user
 

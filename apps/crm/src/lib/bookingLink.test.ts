@@ -12,12 +12,19 @@ import {
  * point a test lead at the real checkout.
  */
 
-const PROD_CRM = "main.d5ln2hbbp9s2j.amplifyapp.com";
+const PROD_CRM = "app.pestbuzzkill.com";
+const LEGACY_PROD_CRM = "main.d5ln2hbbp9s2j.amplifyapp.com";
 const STAGING_CRM = "staging.d5ln2hbbp9s2j.amplifyapp.com";
 
 describe("marketingSiteUrl", () => {
   it("maps the production CRM host to the production marketing site", () => {
     expect(marketingSiteUrl(PROD_CRM)).toBe("https://www.pestbuzzkill.com");
+  });
+
+  it("keeps the direct production Amplify host in production", () => {
+    expect(marketingSiteUrl(LEGACY_PROD_CRM)).toBe(
+      "https://www.pestbuzzkill.com"
+    );
   });
 
   it("maps the staging CRM host to the staging marketing site", () => {

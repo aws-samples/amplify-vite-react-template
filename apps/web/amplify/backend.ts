@@ -245,7 +245,7 @@ const sesPolicy = new PolicyStatement({
 const crmUrlEnv =
   process.env.CRM_APP_URL ??
   (process.env.AWS_BRANCH === "main"
-    ? "https://main.d5ln2hbbp9s2j.amplifyapp.com"
+    ? "https://app.pestbuzzkill.com"
     : "https://staging.d5ln2hbbp9s2j.amplifyapp.com");
 
 for (const fn of [

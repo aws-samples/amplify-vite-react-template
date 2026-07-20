@@ -134,7 +134,7 @@ const BUCKET = () => {
   return b;
 };
 const CRM_URL = () =>
-  process.env.CRM_APP_URL ?? "https://staging.d5ln2hbbp9s2j.amplifyapp.com";
+  process.env.CRM_APP_URL ?? "https://app.pestbuzzkill.com";
 /** The public booking funnel — the only path a lead converts down. */
 const FUNNEL_URL = () =>
   `${process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com"}/quote`;

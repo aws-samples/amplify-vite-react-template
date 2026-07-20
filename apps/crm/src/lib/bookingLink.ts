@@ -10,13 +10,18 @@
  * "booking-link" email carries.
  */
 
-/** The production CRM host (the `main` branch build in backend.ts). */
-const PRODUCTION_CRM_HOST = "main.d5ln2hbbp9s2j.amplifyapp.com";
+/** Both hostnames that can serve the production CRM. The custom domain is
+ * canonical; retaining the Amplify hostname keeps direct/legacy sessions in
+ * the production environment instead of accidentally handing out QA links. */
+const PRODUCTION_CRM_HOSTS = new Set([
+  "app.pestbuzzkill.com",
+  "main.d5ln2hbbp9s2j.amplifyapp.com",
+]);
 
 export function marketingSiteUrl(
   hostname: string = window.location.hostname
 ): string {
-  return hostname === PRODUCTION_CRM_HOST
+  return PRODUCTION_CRM_HOSTS.has(hostname.toLowerCase())
     ? "https://www.pestbuzzkill.com"
     : "https://staging.d26qpsjewk0bee.amplifyapp.com";
 }
