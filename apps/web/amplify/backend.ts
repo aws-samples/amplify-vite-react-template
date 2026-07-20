@@ -2,6 +2,13 @@ import { defineBackend } from "@aws-amplify/backend";
 import { Duration, Stack } from "aws-cdk-lib";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import {
+  BackupPlan,
+  BackupPlanRule,
+  BackupResource,
+  BackupVault,
+} from "aws-cdk-lib/aws-backup";
+import { Schedule } from "aws-cdk-lib/aws-events";
+import {
   FunctionUrlAuthType,
   HttpMethod,
   InvokeMode,
@@ -498,6 +505,20 @@ for (const [name, fn] of monitored) {
       treatMissingData: TreatMissingData.NOT_BREACHING,
     })
     .addAlarmAction(alarmAction);
+  // GL-22 names "errors AND throttles": a throttled function fails callers
+  // without ever producing an error metric of its own.
+  fn.resources.lambda
+    .metricThrottles({ period: Duration.minutes(5), statistic: "Sum" })
+    .createAlarm(fn.resources.lambda.stack, `${name}-throttles-alarm`, {
+      alarmName: `buzzkill-${branch}-${name}-throttles`,
+      alarmDescription: `The ${name} function is being throttled — requests are being refused before the code even runs.`,
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    })
+    .addAlarmAction(alarmAction);
 }
 // A scheduled job that NEVER RAN is as bad as one that failed — missing
 // data is BREACHING, so a broken schedule cannot hide as silence.
@@ -564,8 +585,7 @@ sesEventsDlq
 // GL-22 retention: point-in-time recovery on EVERY business table (35-day
 // continuous restore against human or provider error), and versioning on
 // the documents bucket so an overwritten/deleted agreement, report PDF, or
-// photo remains recoverable. The seven-year retention itself is a
-// no-delete policy — nothing here expires business records.
+// photo remains recoverable.
 const amplifyTables =
   backend.data.resources.cfnResources.amplifyDynamoDbTables;
 for (const table of Object.values(amplifyTables)) {
@@ -573,3 +593,41 @@ for (const table of Object.values(amplifyTables)) {
 }
 const cfnDocsBucket = docsBucket.node.defaultChild as CfnBucket;
 cfnDocsBucket.versioningConfiguration = { status: "Enabled" };
+
+// GL-22 SEVEN-YEAR retention: PITR (35 days) and bucket versioning are
+// recovery tools, not the legal/financial retention period. AWS Backup
+// takes a monthly snapshot of every business table and the documents
+// bucket into a dedicated vault and RETAINS each for 7 years (84 monthly
+// restore points), so a record deleted by human or provider error years
+// later is still restorable. Created in the DATA stack so the apiId table
+// pattern is a same-stack token (no function↔data edge); the storage
+// bucket reference adds only a one-way data→storage edge.
+const backupStack = Stack.of(backend.data.resources.graphqlApi);
+const backupVault = new BackupVault(backupStack, "BuzzKillBackupVault", {
+  backupVaultName: `buzzkill-${lockBranch}-retention`,
+});
+const backupPlan = new BackupPlan(backupStack, "BuzzKillRetentionPlan", {
+  backupVault,
+  backupPlanRules: [
+    new BackupPlanRule({
+      ruleName: "monthly-seven-years",
+      // 03:10 UTC on the 1st — off business hours in every US zone.
+      scheduleExpression: Schedule.cron({
+        minute: "10",
+        hour: "3",
+        day: "1",
+        month: "*",
+        year: "*",
+      }),
+      deleteAfter: Duration.days(7 * 365 + 2),
+    }),
+  ],
+});
+backupPlan.addSelection("BuzzKillRetentionSelection", {
+  resources: [
+    BackupResource.fromArn(
+      `arn:aws:dynamodb:us-east-1:${backupStack.account}:table/*-${backend.data.resources.graphqlApi.apiId}-NONE`
+    ),
+    BackupResource.fromArn(docsBucket.bucketArn),
+  ],
+});
