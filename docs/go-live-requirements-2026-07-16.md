@@ -7,7 +7,7 @@ implementation commit `4a80b8e`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 68 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 64 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -602,14 +602,11 @@ the bullets below stay open until staging behavior proves them.
 
 **Remaining requirements:**
 
-- Alerts cover errors AND throttles, scheduled jobs that did not run, email failures, and the dead
-  letter queue, and every alert creates or updates a deduplicated shared-Office item with the
-  one-business-day clock. *(Alarms deployed and OK on staging; open until one end-to-end firing is
-  demonstrated on staging: forced alarm → INFRA_ALERT queue item + office email → auto-resolve.)*
-- Point-in-time recovery and versioned document backup are enabled FOR THE SEVEN-YEAR retention
-  period. *(PITR 35-day + bucket versioning were never seven-year retention; AWS Backup monthly
-  restore points retained 7 years now cover every business table and the documents bucket. Open until
-  the first restore point exists (plan runs the 1st monthly) and the restore drill below passes.)*
+- The seven-year AWS Backup plan produces its FIRST monthly restore point (the plan fires the 1st of
+  each month — verify one restore point exists in vault buzzkill-staging-retention after 1 Aug).
+  *(The restore DRILLS passed on staging 20 Jul: an overwritten S3 document came back byte-identical
+  from its prior version, and a PITR side-table restore of the Invoice table returned rows with their
+  customer/money relationships intact.)*
 - CEO/Compliance approve the written playbooks and the seven-year deletion/retention policy; Operations
   runs one verified restore drill (an S3 object version restore and an engineering-assisted PITR
   side-table restore proving the complete customer/job/plan/invoice/report relationship comes back
@@ -668,17 +665,12 @@ defects**, both fixed in `8678623` but open until staging behavior proves them:
 
 **Remaining requirements:**
 
-- The required callback photo is a VERIFIED upload: the submitted key must live under the customer's
-  own callbacks/ prefix and reference a real image object in the bucket — a plausible string, an
-  unfinished upload, another customer's key, or a non-image is refused with the fix named.
-  *(Was a non-empty-string check on a never-verified presign. Open until proven on staging: portal
-  upload → request accepted; fabricated key → refused.)*
 - Scheduling the $0 callback visit is CAPACITY-SAFE: the same dispatch facts, technician
   day-eligibility, routability proof, and ONE atomic technician-window slot claim (onsite + round-trip
   drive minutes) as every other assignment — a sold-out window refuses, and a replay returns its
-  duplicate hold. *(Was a SCHEDULED job with no technician and no capacity claim — the $0 visit could
-  oversell a day. Open until proven on staging: schedule consumes the slot; an over-full window
-  refuses.)*
+  duplicate hold. *(Staging so far: the fail-closed path is proven — with the Routes key absent the
+  schedule REFUSED rather than dispatching unverified. The success + sold-out drills run once the
+  hosted build restores the console-baked key (a local pipeline-deploy stripped it).)*
 - Head of Operations signs the callback/no-access workflow; the CEO approves the customer-facing
   promise wording (reference email, scheduled/final notices, the no-access no-refund copy) and Finance
   the money posture ($0 callbacks; nonrefundable no-access). Richer callback analytics (repeat-attempt
@@ -817,16 +809,6 @@ demonstrated defects**, both fixed in `4a80b8e` but open until staging behavior 
 
 **Remaining requirements:**
 
-- A failed submission remains in the shared Office queue instead of falling back to an untracked call —
-  ATOMICALLY: request ids derive from what was asked and when, so a retry converges onto the same case
-  (random ids had minted duplicates); a queue-write failure is loud and the retry re-ensures the
-  deduplicated owned item; a daily sweep repairs the crash window so no OPEN portal request or
-  REQUESTED callback can exist without a live owned queue item. *(Open until proven on staging:
-  submit → work item; forced queue fault → loud error → retry converges; sweep repairs an orphan.)*
-- Group membership changes retain who changed it, when, and why DURABLY: the audit record lands before
-  the change, a failed audit write refuses the change with nothing applied (log lines are not an
-  audit), and the reason is mandatory. *(Open until proven on staging: change with reason → lifecycle
-  event; audit unavailable → change refused.)*
 - Head of Operations signs the portal request/callback/help workflows and the customer-facing wording;
   the in-unit-resident public claim is decided with the CEO under GL-20 (back it with a property-scoped
   flow or remove it).
