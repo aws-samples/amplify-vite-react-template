@@ -362,8 +362,11 @@ disagree, and an employee always sees the real outcome of deactivation or reacti
   (`LIFECYCLE_POLICY_VERSION 2026-07-19.1`): for each deactivation reason (customer request,
   nonpayment, moved, property sold, service ended, duplicate, other) and reactivation reason, the
   balance handling (collect / report-only / write-off review), document retention on a duplicate, and
-  the customer-notice wording (a duplicate record sends no notice by design). Every action records the
-  policy version it ran under; sign-off ratifies or amends the recorded values.
+  the customer-notice wording (a duplicate record sends no notice by design). Every action durably
+  records the policy version it ran under — now a dedicated, queryable `policyVersion` field on the
+  immutable `CustomerLifecycleEvent`, stamped inside `recordCustomerLifecycleEvent` on both
+  deactivation and reactivation from `LIFECYCLE_POLICY_VERSION` (fast-follow closed, `95e39d3`; pending
+  staging deploy); sign-off ratifies or amends the recorded values.
 - Leadership's page/search/**export** of the complete lifecycle history lands with the GL-19
   reconciliation and command view (the history itself is durable, paged, and read-failure-honest
   today; only the export surface is outstanding).
