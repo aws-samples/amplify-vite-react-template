@@ -852,6 +852,12 @@ async function setCustomerGroup(
     id: args.customerId,
   });
   if (!customer) throw new Error(`Customer ${args.customerId} not found`);
+  // GL-11: membership changes RETAIN who/when/WHY — the why is not optional.
+  if (!args.reason?.trim()) {
+    throw new Error(
+      "A reason is required to change group membership — it is retained on the audit record."
+    );
+  }
 
   const newGroupId = args.groupId || null;
   if (newGroupId) {
@@ -869,32 +875,38 @@ async function setCustomerGroup(
     }
   }
 
+  // GL-11: the audit record is DURABLE — it lands BEFORE the change, and a
+  // failed audit write refuses the change with nothing applied. A membership
+  // change whose only evidence is a log line is not "retained who changed
+  // it, when, and why". (If the apply below then fails, the operator sees
+  // the error and retries — the retry re-applies idempotently and records
+  // its own attempt.)
+  if (!("CustomerLifecycleEvent" in client.models)) {
+    throw new Error(
+      "Group membership can't be changed right now: the audit log is unavailable, and an unaudited change is not allowed."
+    );
+  }
+  const { data: audited } = await client.models.CustomerLifecycleEvent.create({
+    customerId: args.customerId,
+    action: "GROUP_CHANGE",
+    actorSub: actor.sub ?? undefined,
+    actorEmail: actor.email ?? "office",
+    reason: args.reason.trim(),
+    effects: `group: ${customer.groupId ?? "none"} → ${newGroupId ?? "none"}`,
+    occurredAt: new Date().toISOString(),
+  });
+  if (!audited) {
+    throw new Error(
+      "Group membership was NOT changed: the audit record could not be written. Try again."
+    );
+  }
+
   const accessGroups = customerAccessGroups(args.customerId, newGroupId);
   await client.models.Customer.update({
     id: args.customerId,
     groupId: newGroupId,
     accessGroups,
   });
-
-  // GL-11: membership changes are audited — who changed it, when, and why —
-  // and the accessGroups rewrite below removes stale group access in the
-  // same pass. Best-effort: an audit-write fault must not strand the change
-  // half-applied, but it is never silent.
-  try {
-    if ("CustomerLifecycleEvent" in client.models) {
-      await client.models.CustomerLifecycleEvent.create({
-        customerId: args.customerId,
-        action: "GROUP_CHANGE",
-        actorSub: actor.sub ?? undefined,
-        actorEmail: actor.email ?? "office",
-        reason: args.reason?.trim() || undefined,
-        effects: `group: ${customer.groupId ?? "none"} → ${newGroupId ?? "none"}`,
-        occurredAt: new Date().toISOString(),
-      });
-    }
-  } catch (err) {
-    console.error("setCustomerGroup: audit write failed", err);
-  }
 
   // Rewrite accessGroups on all child records.
   const filter = { customerId: { eq: args.customerId } };

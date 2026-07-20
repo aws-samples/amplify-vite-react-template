@@ -28,6 +28,7 @@ import {
   openMissingContactWork,
   openOwnedWork,
   resolveOwnedWork,
+  workItemId,
 } from "../shared/ownedWork";
 import {
   danglingChildRecords,
@@ -214,6 +215,13 @@ export const handler = async () => {
   // GL-17: seasonal obligations — month rollover marks missed months (no
   // catch-up) and ensures the current in-season month is visible.
   const seasonal = await run("sweepSeasonalObligations", sweepSeasonalObligations);
+  // GL-11: a customer request may never exist without deduplicated office
+  // ownership — this repairs the crash window between "row saved" and
+  // "queue item opened" for portal requests and guarantee callbacks.
+  const requestOwnership = await run(
+    "reconcileRequestOwnership",
+    reconcileRequestOwnership
+  );
   console.log("Reminder totals:", JSON.stringify(totals));
   const results = [
     ...totals,
@@ -239,6 +247,7 @@ export const handler = async () => {
     seasonal,
     readiness,
     lifecycle,
+    requestOwnership,
   ];
   if (failures.length) {
     await openOwnedWork({
@@ -2085,6 +2094,89 @@ function todayEasternDate(): string {
   return new Date().toLocaleDateString("en-CA", {
     timeZone: "America/New_York",
   });
+}
+
+/**
+ * GL-11 — atomic request ownership, repaired: an OPEN portal request or a
+ * REQUESTED guarantee callback whose owned queue item never landed (a crash
+ * between "row saved" and "queue item opened", with no customer retry) is
+ * re-entered into the shared Office queue here. openOwnedWork is
+ * deduplicated by (kind, dedupeKey), and rows whose item is already OPEN
+ * are skipped, so the sweep never spams working items.
+ */
+export async function reconcileRequestOwnership() {
+  const client = await dataClient();
+  let portalRepaired = 0;
+  let callbacksRepaired = 0;
+
+  const itemMissingOrResolved = async (
+    kind: "CUSTOMER_REQUEST" | "CALLBACK_PROMISE",
+    dedupeKey: string
+  ): Promise<boolean> => {
+    if (!("WorkItem" in client.models)) return false;
+    const { data } = await client.models.WorkItem.get({
+      id: workItemId(kind, dedupeKey),
+    });
+    return !data || data.status === "RESOLVED";
+  };
+
+  if ("PortalRequest" in client.models) {
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.PortalRequest.list({
+        limit: 200,
+        nextToken: token,
+      });
+      for (const req of page.data ?? []) {
+        if (req.status !== "OPEN") continue;
+        if (!(await itemMissingOrResolved("CUSTOMER_REQUEST", req.id))) continue;
+        const opened = await openOwnedWork({
+          kind: "CUSTOMER_REQUEST",
+          dedupeKey: req.id,
+          title: `Portal request without an owner: ${req.customerId}`,
+          detail: `Portal request ${req.id} (${req.kind ?? "HELP"}) is OPEN but had no live queue item — its submission never reached the office. ${req.message ? `"${String(req.message)}"` : ""} Answer within one business day; the customer watches this request in the portal.`,
+          customerId: req.customerId ?? undefined,
+          relatedId: req.id,
+          sourceUrl: req.customerId ? `/customers/${req.customerId}` : undefined,
+          resolutionAction:
+            "Handle the request with the customer, then resolve it WITH AN ANSWER from the customer screen (the portal shows your note).",
+          ownerTeam: "OPS",
+        });
+        if (opened) portalRepaired++;
+      }
+      token = page.nextToken;
+    } while (token);
+  }
+
+  if ("CallbackRequest" in client.models) {
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.CallbackRequest.list({
+        limit: 200,
+        nextToken: token,
+      });
+      for (const cb of page.data ?? []) {
+        if (cb.status !== "REQUESTED") continue;
+        if (!(await itemMissingOrResolved("CALLBACK_PROMISE", cb.id))) continue;
+        const opened = await openOwnedWork({
+          kind: "CALLBACK_PROMISE",
+          dedupeKey: cb.id,
+          title: `Guarantee callback without an owner: ${cb.customerId}`,
+          detail: `Callback ${cb.id} is REQUESTED but had no live queue item — its submission never reached the office. Promised return by ${cb.promisedBy ?? "(unset)"}; schedule it from the customer screen (the visit is $0 by construction).`,
+          customerId: cb.customerId ?? undefined,
+          relatedId: cb.id,
+          sourceUrl: cb.customerId ? `/customers/${cb.customerId}` : undefined,
+          resolutionAction:
+            "Open the customer, schedule the callback visit onto a technician (no later than the promised date), and confirm the customer knows the day.",
+          ownerTeam: "OPS",
+        });
+        if (opened) callbacksRepaired++;
+      }
+      token = page.nextToken;
+    } while (token);
+  }
+
+  return { task: "reconcileRequestOwnership", portalRepaired, callbacksRepaired };
 }
 
 export async function reconcilePaidBookings() {

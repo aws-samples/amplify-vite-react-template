@@ -106,8 +106,10 @@ vi.mock("./dispatchReadiness", () => ({
 
 const workOpened: Record<string, unknown>[] = [];
 const workResolved: Record<string, unknown>[] = [];
+let workOpenFails = false;
 vi.mock("./ownedWork", () => ({
   openOwnedWork: async (o: Record<string, unknown>) => {
+    if (workOpenFails) return null;
     workOpened.push(o);
     return "w1";
   },
@@ -137,6 +139,7 @@ beforeEach(() => {
   workResolved.length = 0;
   photoVerifyFails = null;
   photoVerified.length = 0;
+  workOpenFails = false;
   techBase = "12 Depot St, Ware, MA";
   slotSoldOut = false;
   reserved.length = 0;
@@ -227,8 +230,28 @@ describe("eligibility — the locked rules refuse before anything schedules", ()
     expect(second.status).toBe("ALREADY_REQUESTED");
     expect(second.reference).toBe(first.reference);
     expect(second.promisedBy).toBe(first.promisedBy);
-    expect(workOpened).toHaveLength(0); // no duplicate owned work
+    // GL-11: the collapse RE-ENSURES office ownership — openOwnedWork is
+    // deduplicated by (kind, dedupeKey), so this can never mint a second
+    // case, but it repairs a first submission that died before the queue.
+    expect(workOpened).toHaveLength(1);
+    expect(workOpened[0]).toMatchObject({
+      kind: "CALLBACK_PROMISE",
+      dedupeKey: "cb-j1",
+    });
     expect(emails).toHaveLength(0); // no duplicate customer email
+  });
+
+  it("a queue-write failure is LOUD, and the retry converges onto the same owned request", async () => {
+    workOpenFails = true;
+    await expect(request()).rejects.toThrow(/couldn't reach the office queue/);
+    // The request row survives the failure — the promise is durable…
+    expect(callbacks.has("cb-j1")).toBe(true);
+
+    // …and the retry collapses onto it and re-ensures ownership.
+    workOpenFails = false;
+    const retry = await request();
+    expect(retry.status).toBe("ALREADY_REQUESTED");
+    expect(workOpened.some((w) => w.dedupeKey === "cb-j1")).toBe(true);
   });
 });
 

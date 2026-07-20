@@ -689,7 +689,19 @@ async function submitPortalRequest(opts: {
   } else if (!opts.message?.trim()) {
     throw new Error("Tell us what you need help with");
   }
-  const id = `pr-${randomUUID()}`;
+  // GL-11: the id is derived from WHAT was asked and WHEN (day) — a retry
+  // of a failed submission converges onto the same row and the same owned
+  // work item instead of minting duplicates, while a genuinely new request
+  // on another day (or with different content) gets its own case.
+  const requestFacts = [
+    opts.customerId,
+    opts.kind,
+    opts.jobId ?? "",
+    opts.preferredDate ?? "",
+    opts.message?.trim() ?? "",
+    new Date().toISOString().slice(0, 10),
+  ].join("|");
+  const id = `pr-${createHash("sha256").update(requestFacts).digest("hex").slice(0, 24)}`;
   const { data: created } = await client.models.PortalRequest.create({
     id,
     customerId: opts.customerId,
@@ -703,7 +715,13 @@ async function submitPortalRequest(opts: {
       customer.groupId ?? undefined
     ),
   });
-  if (!created) throw new Error("The request could not be saved — try again");
+  if (!created) {
+    // The same request already exists (a retry, or a double-tap): converge
+    // onto it and RE-ENSURE its office ownership — a first submission that
+    // crashed before reaching the queue becomes owned on the retry.
+    const { data: existing } = await client.models.PortalRequest.get({ id });
+    if (!existing) throw new Error("The request could not be saved — try again");
+  }
   const opened = await openOwnedWork({
     kind: "CUSTOMER_REQUEST",
     dedupeKey: id,
@@ -725,10 +743,14 @@ async function submitPortalRequest(opts: {
   if (!opened) {
     // The case exists but the queue item does not — the promise would be
     // invisible to the office. Fail loudly so the customer retries (the
-    // deduped id means a retry converges, never duplicates).
-    await client.models.PortalRequest.delete({ id }).catch(() => undefined);
+    // content-derived id means a retry converges, never duplicates). Only a
+    // row THIS call minted is rolled back; a pre-existing row from an
+    // earlier submission is never deleted by a later retry's queue fault.
+    if (created) {
+      await client.models.PortalRequest.delete({ id }).catch(() => undefined);
+    }
     throw new Error(
-      "The request couldn't reach the office queue — nothing was saved. Please try again, or call us."
+      "The request couldn't reach the office queue — please try again, or call us. (Retrying is safe: it attaches to the same request.)"
     );
   }
   return { reference: id };

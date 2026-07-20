@@ -2089,6 +2089,37 @@ describe("GL-11 — portal requests are durable cases, never untracked calls", (
     expect(portalRequests.size).toBe(0); // no half-saved promise
   });
 
+  it("a retry of the same request CONVERGES: same reference, one row, one owned case", async () => {
+    const args = { customerId: "c1", kind: "HELP", message: "Is my plan seasonal?" };
+    const first = (await call("submitPortalRequest", args, ["CUSTOMER", "cus-c1"])) as {
+      reference: string;
+    };
+    const second = (await call("submitPortalRequest", args, ["CUSTOMER", "cus-c1"])) as {
+      reference: string;
+    };
+
+    expect(second.reference).toBe(first.reference);
+    expect(portalRequests.size).toBe(1);
+    expect(
+      workItems.filter((w) => w.kind === "CUSTOMER_REQUEST")
+    ).toHaveLength(1); // deduplicated — re-ensured, never duplicated
+  });
+
+  it("a queue failure then a retry: the retry lands the SAME request in the queue", async () => {
+    const args = { customerId: "c1", kind: "HELP", message: "hello again" };
+    workItemBlocked = true;
+    await expect(
+      call("submitPortalRequest", args, ["CUSTOMER", "cus-c1"])
+    ).rejects.toThrow(/couldn't reach the office queue/);
+
+    workItemBlocked = false;
+    const retry = (await call("submitPortalRequest", args, ["CUSTOMER", "cus-c1"])) as {
+      reference: string;
+    };
+    expect(portalRequests.get(retry.reference)).toMatchObject({ status: "OPEN" });
+    expect(workItems.some((w) => w.kind === "CUSTOMER_REQUEST")).toBe(true);
+  });
+
   it("resolving records the customer-visible answer and closes the queue item", async () => {
     const res = (await call(
       "submitPortalRequest",

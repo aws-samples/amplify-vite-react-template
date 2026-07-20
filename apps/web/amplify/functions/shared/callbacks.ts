@@ -136,10 +136,29 @@ export async function requestCallback(
     promisedBy,
     accessGroups,
   });
+  const ensureOwnership = () =>
+    openOwnedWork({
+      kind: "CALLBACK_PROMISE",
+      dedupeKey: id,
+      title: `Schedule a guarantee callback: ${customer.displayName ?? opts.customerId}`,
+      detail: `A guarantee callback was requested for completed visit ${opts.originalJobId} (plan ${original.servicePlanId}). The photo is on the request. Promise: an owned response within one business day, and the return visit no later than ${promisedBy} (${CALLBACK_RETURN_BUSINESS_DAYS} business days). Schedule it from the customer screen — the visit is $0 by construction.`,
+      customerId: opts.customerId,
+      relatedId: id,
+      sourceUrl: `/customers/${opts.customerId}`,
+      resolutionAction:
+        "Open the customer, schedule the callback visit onto a technician (no later than the promised date), and confirm the customer knows the day.",
+      ownerTeam: "OPS",
+    });
   if (!created) {
     // One callback per original appointment — the deterministic id makes the
     // second submission collapse onto the first, and the customer is told.
+    // GL-11: the collapse ALSO re-ensures office ownership (deduplicated),
+    // so a request whose first submission crashed before reaching the queue
+    // converges to owned on the retry instead of staying invisible.
     const { data: existing } = await client.models.CallbackRequest.get({ id });
+    if (!existing || existing.status === "REQUESTED") {
+      await ensureOwnership().catch(() => null);
+    }
     return {
       reference: id,
       promisedBy: existing?.promisedBy ?? promisedBy,
@@ -147,18 +166,15 @@ export async function requestCallback(
     };
   }
 
-  await openOwnedWork({
-    kind: "CALLBACK_PROMISE",
-    dedupeKey: id,
-    title: `Schedule a guarantee callback: ${customer.displayName ?? opts.customerId}`,
-    detail: `A guarantee callback was requested for completed visit ${opts.originalJobId} (plan ${original.servicePlanId}). The photo is on the request. Promise: an owned response within one business day, and the return visit no later than ${promisedBy} (${CALLBACK_RETURN_BUSINESS_DAYS} business days). Schedule it from the customer screen — the visit is $0 by construction.`,
-    customerId: opts.customerId,
-    relatedId: id,
-    sourceUrl: `/customers/${opts.customerId}`,
-    resolutionAction:
-      "Open the customer, schedule the callback visit onto a technician (no later than the promised date), and confirm the customer knows the day.",
-    ownerTeam: "OPS",
-  });
+  // GL-11: the promise may not exist without deduplicated office ownership.
+  // A failed queue write fails LOUDLY — the request row stays, and the
+  // customer's retry collapses onto it and re-ensures ownership above.
+  const owned = await ensureOwnership();
+  if (!owned) {
+    throw new Error(
+      "Your request couldn't reach the office queue — please resubmit, or call the office. (Resubmitting is safe: it attaches to the same request.)"
+    );
+  }
 
   if (customer.email) {
     await sendEmail({
