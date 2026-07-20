@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `041f939`; newest
-implementation commit `041f939`
+**Latest commit review:** every commit after `f70e621` through `b8ba8a4`; newest
+implementation commit `b8ba8a4`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 72 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 63 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -29,8 +29,12 @@ driving funnel/labels/plans/seasonal/pricing sources, immutable serviceCode+vers
 plan, controlled office selection with owned catalog decisions, and the CRM catalog + public-conflict
 screen), and GL-22 (`041f939` — alarms that open/auto-resolve owned INFRA_ALERT items, honest failed
 scheduled runs, never-acked-unrecorded email events with a visible DLQ, PITR + document versioning,
-the OWNER pause switchboard, and the seven incident playbooks). The prior commits close GL-09's
-engineering (`82f5fbf`)
+the OWNER pause switchboard, and the seven incident playbooks). `b8ba8a4` additionally closes GL-19
+(daily money/plan/state reconciliations with owned mismatch cases, ReconRun summaries, and the CRM
+Command view with codified pause thresholds) and GL-10 (the full guarantee-callback lifecycle with the
+required photo, one-per-appointment rule, 7-business-day promise, $0 visits, controlled evidenced
+findings, and the nonrefundable no-access outcome told to the customer directly). The prior commits
+close GL-09's engineering (`82f5fbf`)
 and land a systemic remediation (`d546c10`) that every earlier "single-winner" closure claim depended
 on: stale-lease takeover on every operational lock and durable command (staff access, owner serial,
 lifecycle claim/command, plan cancellation, visit change, booking finalization, booking communications,
@@ -205,8 +209,8 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-20 | Public promises and legal terms match operations | CEO | Contract, regulatory, and brand exposure from unbacked claims | **22% — Low** |
 | P0 | GL-21 | Production accounts and integration readiness | Engineering lead + Finance lead | A staging assumption, stale secret, or unstaffed mailbox fails with real money | **38% — Low** |
 | P0 | GL-22 | Playbook/retention sign-off + restore drill — engineering closed (`041f939`) | CEO + Engineering lead | A background failure stays silent, or records cannot be restored | **15% — Very low (sign-offs + drill)** |
-| P1 | GL-19 | Launch reconciliation and command view | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning | **70% — High** |
-| P1 | GL-10 | Guarantee, callback, and no-access lifecycle | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **82% — High** |
+| P1 | GL-19 | Threshold/view sign-offs — engineering closed | CEO + Finance lead | Leadership cannot see money, plan, or sales mismatches each morning | **15% — Very low (sign-offs)** |
+| P1 | GL-10 | Workflow/promise sign-offs — engineering closed (`b8ba8a4`) | Head of Operations | A public promise becomes uncontrolled free work or a dispute | **12% — Very low (sign-offs)** |
 | P1 | GL-03 | Finish durable fallback promises and email recovery | Head of Sales + Head of Operations | A promised follow-up disappears, or an undelivered message remains falsely complete | **68% — Medium** |
 | P1 | GL-02 | Finish a failure-safe lead lifecycle | Head of Sales | A lead bypasses ownership, is mislabeled as contacted, or duplicates during conversion | **70% — High** |
 | P1 | GL-11 | Minimum complete customer/group portal | Head of Operations | Reschedule, callback, and help requests fall back to phone calls | **84% — High** |
@@ -599,40 +603,26 @@ carries the seven one-page playbooks and the deletion/retention policy. Only the
 **Business outcome:** Leadership can tell each morning whether customers, work, and money agree, without
 asking engineering to query production.
 
+**Engineering:** closed with the Command view and the daily leadership reconciliations. The daily pass
+now proves the FULL provider ledger against the CRM (every succeeded payment ↔ one paid invoice, every
+refund recorded, net cash explained — mismatches are owned Finance MONEY_MISMATCH cases), provider
+subscriptions against CRM plans (canceled-still-billing, active-but-provider-canceled, provider-only,
+delinquent-still-scheduled → owned PLAN_MISMATCH cases), and lifecycle/visit state against money
+(deactivated-with-live-work, canceled-visit-open-money → owned STATE_MISMATCH cases), persisting one
+ReconRun summary per kind per day. The CRM **Command** screen reads those summaries plus the shared
+payments-in-flight truth (age, expected settlement, notice state, safe next action), the sales command
+measures (stage counts, overdue, touched/untouched, per-owner load, loss reasons, duplicate/contact
+exception aging), the service-quality measures (completions, no-access, cancels, open callback promises,
+per-technician trend), and the codified pause/rollback threshold defaults with their levers. Only the
+items below remain.
+
 **Remaining requirements:**
 
-- **No daily money reconciliation** proving successful provider payments equal CRM paid invoices with net
-  cash explainable and every mismatch an owned, Finance-signed case (today only *booking* payment intents
-  are matched, not the full charge/invoice/refund ledger).
-- **No processing-payment aging view.** Leadership cannot see attempts still processing, their selected
-  capacity/hold, how long they have waited, whether the provider and CRM agree, whether the customer was
-  notified, or which attempts exceeded the approved GL-06 promise. Stale, failed, late-succeeded, and
-  customer-retried attempts must reconcile without an engineering query.
-- **No plan reconciliation** — the new daily pass re-drives retained cancellation commands, but it does
-  not prove provider subscriptions agree with CRM or give leadership a business view. Canceled-still-
-  billing, delinquent-still-scheduled, active-plan-without-next-service, racing/stale/false-terminal
-  commands, pending cancellations past promise, exact post-request charges/refunds, stranded visits, and
-  missing final notices must appear in one owned reconciliation view.
-- **No visit-change reconciliation** — the new history screen is an audit list, and the daily pass only
-  re-drives retained cancellation claims while treating an already-canceled job as terminal. Leadership
-  cannot see a canceled visit with an open/processing charge, incomplete refund or invoice void; a
-  reschedule stranded without a resumable command, staffing case, or valid capacity; a missing audit or
-  final notice; or stale/racing commands. Each mismatch needs one accountable owner, age, customer and
-  money impact, and a safe next action.
-- **No customer-lifecycle reconciliation** — leadership cannot see stale lifecycle claims/commands,
-  partial transitions, ACTIVE customers whose billing or access was stopped, INACTIVE customers with live
-  access or scheduled/paid work, missing transition audits/notices, or recovery cases that closed while
-  those facts still disagree. Each mismatch needs one accountable owner, age, customer impact, and safe
-  next action.
-- **The new Sales board is an operating list, not yet a leadership command view.** It groups leads by
-  derived stage and flags overdue rows, but does not show the actual next action/due time or provide
-  first-response performance, attempt-vs-reached, qualification, conversion/loss, duplicate/contact-data
-  exception aging, source/owner trends, or manager workload totals. Leadership needs those measures plus
-  a **service-quality view** covering completion, report delivery, no-access, callbacks, repeat-callback
-  rate, and technician trends.
-- **No codified pause/rollback thresholds.** The CEO defines the launch thresholds that force
-  pause/rollback — any double charge, paid customer without a job, unauthorized access, unlicensed
-  assignment, or unexplained money mismatch — and names who decides.
+- CEO/Finance ratify the codified pause/rollback thresholds (recorded on the Command view) and name the
+  decision holder; Sales and Operations sign their command/service-quality views; Finance signs the
+  money-reconciliation workflow. Deeper sales analytics (true first-response clock from activity
+  timestamps, attempt-vs-reached rates, qualification funnel) and callback/repeat-callback rates mature
+  with GL-02's stage definitions and GL-10's callback lifecycle and surface on the same screen.
 
 **Pass owner:** CEO and Finance lead jointly; Sales and Operations sign their views.
 
@@ -642,27 +632,25 @@ asking engineering to query production.
 failed access visit cannot be "resolved" without actually completing the approved customer and money
 outcome.
 
+**Engineering:** closed (`b8ba8a4`). The callback lifecycle enforces every locked rule server-side
+(active residual plan only, completed original visit, required retained photo, one callback per
+appointment via a conditional create, instant reference, owned one-business-day response, and a
+promised return ≤7 business days excluding weekends and tracked closures); scheduling creates the $0
+callback visit carrying the original context and refuses dates beyond the promise unless the customer's
+later choice is recorded; the callback technician records one controlled evidenced finding in the field
+app (treatable continues; untreatable/expected ends the guarantee with evidence and exactly one final
+notice, replay-proof); no-access now matches the locked rule — a nonrefundable cancellation with the
+customer told the no-refund result and rebooking path directly, and no refund disposition offered
+anywhere. Routine Office/tech actions need no OWNER; Ops sees callback volume/compliance on the Command
+view and full detail per customer. The customer-facing PORTAL entrance rides GL-11. Only the item
+below remains.
+
 **Remaining requirements:**
 
-- Create a distinct callback lifecycle linked to the original completed appointment and active
-  residual-service subscription. One-time work is ineligible. A customer or Office employee cannot submit
-  or schedule it without a retained photo, and one original appointment can create at most one callback.
-  The customer receives a reference and owned response within one business day, plus an eligibility result
-  and a return date no later than seven business days after the accepted request; tracked holidays/closures
-  do not count as business days.
-- The callback job carries the original service, report, product, findings, technician, photo, and prior
-  callback count. The callback technician records a controlled, evidenced finding: **treatable unexpected
-  activity** continues through completion, while **untreatable condition** or **expected behavior** ends
-  the guarantee with the technician's evidence and a final customer notice. The CRM does not promise an
-  additional callback or appeal after that terminal finding.
-- A no-access outcome is the original appointment's nonrefundable cancellation under the 72-hour policy.
-  The technician records controlled reason and evidence; the customer receives the no-refund result and
-  next paid-rebooking path; and Operations can open the evidence. No employee chooses or calculates a fee,
-  refund, or account credit.
-- Callback and no-access cases have verified routine Office/technician actions for eligibility, photo
-  deficiency, scheduling, completion, terminal technician finding, notice, rebook, and unreachable
-  customer. They do not require OWNER closure. Operations sees callback volume, seven-business-day
-  compliance, original technician/service, finding, repeat attempts, and margin impact.
+- Head of Operations signs the callback/no-access workflow; the CEO approves the customer-facing
+  promise wording (reference email, scheduled/final notices, the no-access no-refund copy) and Finance
+  the money posture ($0 callbacks; nonrefundable no-access). Richer callback analytics (repeat-attempt
+  and margin trends) accrue on the Command view as real volume exists.
 
 **Pass owner:** Head of Operations; CEO approves promises and Finance approves money policy.
 
