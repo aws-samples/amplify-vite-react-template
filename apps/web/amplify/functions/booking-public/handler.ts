@@ -166,6 +166,10 @@ type QuoteInput = {
   service?: string;
   sqft?: number;
   nestCount?: number;
+  /** WILDLIFE: what needs removed (a WILDLIFE_REMOVAL_KINDS label) and how
+   *  many — the count sets the price, like nestCount does for wasp. */
+  removalKind?: string;
+  removalCount?: number;
   comments?: string;
   recurringPreference?: string | null;
   botToken?: string;
@@ -253,13 +257,13 @@ const SEASONAL_SERVICES = new Set(["MOSQUITO", "MOSQUITO_TICK"]);
 
 const PROPERTY_KINDS = new Set(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]);
 
-/** Residential services priced from a sqft-banded sheet. */
+/** Residential services priced from a sqft-banded sheet. (WASP_NEST prices
+ *  by nest count and WILDLIFE by animal count, so neither is here.) */
 const SQFT_SERVICES = new Set([
   "GENERAL_PEST",
   "RODENT",
   "ROACH",
   "TERMITE",
-  "WILDLIFE",
 ]);
 
 export const handler = async (
@@ -687,6 +691,8 @@ async function quoteStatus(
       service: booking.service ?? undefined,
       sqft: booking.sqft ?? undefined,
       nestCount: booking.nestCount ?? undefined,
+      removalKind: booking.removalKind ?? undefined,
+      removalCount: booking.removalCount ?? undefined,
       comments: booking.comments ?? undefined,
       recurringPreference: booking.recurringPreference ?? undefined,
       attribution: booking.attribution,
@@ -886,6 +892,8 @@ function quoteLeadNotes(
   add("Square footage", input.sqft);
   add("Units", input.units);
   add("Nests", input.nestCount);
+  add("Wildlife — what needs removed", input.removalKind);
+  add("Wildlife — how many", input.removalCount);
   add("Yard size (½ acres)", input.lotHalfAcres);
   add("Recurring preference", input.recurringPreference);
   add("Comments", input.comments?.slice(0, 2000));
@@ -933,6 +941,21 @@ async function quote(
   if (SEASONAL_SERVICES.has(service)) {
     // GL-17: mosquito plans price on yard size alone (half-acres), at any
     // property kind — no sqft, nest, or unit inputs.
+  } else if (service === "WASP_NEST") {
+    // Nest removal prices by the number of nests at every property class —
+    // the service sets the price, so no sqft/units is collected.
+    if (!input.nestCount || input.nestCount < 1) {
+      errors.nestCount = "How many nests need removal?";
+    }
+  } else if (service === "WILDLIFE") {
+    // Wildlife prices by what needs removed and how many, at every property
+    // class — the animal count sets the price, so no sqft/units is collected.
+    if (!input.removalKind || !input.removalKind.trim()) {
+      errors.removalKind = "What needs to be removed?";
+    }
+    if (!input.removalCount || input.removalCount < 1) {
+      errors.removalCount = "How many animals need removal?";
+    }
   } else if (propertyKind === "COMMUNITY") {
     // A community asks for a common-area plan, priced per unit — the unit
     // count is the price input, so it is required.
@@ -949,9 +972,6 @@ async function quote(
       if (!input.sqft || input.sqft < 100 || input.sqft > 50000) {
         errors.sqft = "Square footage is required for this service";
       }
-    }
-    if (service === "WASP_NEST" && (!input.nestCount || input.nestCount < 1)) {
-      errors.nestCount = "How many nests need removal?";
     }
   }
   if (SEASONAL_SERVICES.has(service)) {
@@ -1060,6 +1080,8 @@ async function quote(
           : undefined,
         sqft: input.sqft ?? undefined,
         nestCount: input.nestCount ?? undefined,
+        removalKind: input.removalKind?.trim() || undefined,
+        removalCount: input.removalCount ?? undefined,
         comments: input.comments?.slice(0, 2000) || undefined,
         recurringPreference: input.recurringPreference ?? undefined,
         attribution: attribution ? JSON.stringify(attribution) : undefined,
@@ -1355,6 +1377,59 @@ async function quote(
       // funnel sells. Billing then continues monthly year-round.
       initialFeeCents: monthly,
     };
+  } else if (service === "WASP_NEST") {
+    // Nest removal prices by nest count at EVERY property class — a one-time
+    // visit from the WASP sheet (base + per-extra-nest), never per unit/sqft.
+    const rate = await getCachedRate({
+      service: "WASP_NEST",
+      city: addr.city!,
+      state: addr.state!,
+    });
+    const extraNests = (input.nestCount ?? 1) - 1;
+    // The sheet must actually price what was asked: a multi-nest job with
+    // no extra-nest component on the sheet is an unpriceable request.
+    if (!rate || (extraNests > 0 && rate.sheet.extraNestCents == null)) {
+      return contactForPrice(
+        "WASP_NEST",
+        undefined,
+        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
+        Boolean(rate?.pinned)
+      );
+    }
+    baseCents =
+      rate.priceCents + extraNests * (rate.sheet.extraNestCents ?? 0);
+    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    serviceLabel = serviceLabelFor("WASP_NEST", {
+      nestCount: input.nestCount ?? 1,
+    });
+  } else if (service === "WILDLIFE") {
+    // Wildlife prices by animal count at EVERY property class — a one-time
+    // exclusion/removal visit from the WILDLIFE sheet (base + per-extra-
+    // animal), never per unit/sqft. The animal type rides along on the label.
+    const rate = await getCachedRate({
+      service: "WILDLIFE",
+      city: addr.city!,
+      state: addr.state!,
+    });
+    const count = input.removalCount ?? 1;
+    const extraAnimals = count - 1;
+    // A multi-animal job with no extra-animal component on the sheet is an
+    // unpriceable request — send it to the honest research/contact path.
+    if (!rate || (extraAnimals > 0 && rate.sheet.extraAnimalCents == null)) {
+      return contactForPrice(
+        "WILDLIFE",
+        undefined,
+        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
+        Boolean(rate?.pinned)
+      );
+    }
+    baseCents =
+      rate.priceCents + extraAnimals * (rate.sheet.extraAnimalCents ?? 0);
+    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    serviceLabel = serviceLabelFor("WILDLIFE", {
+      removalKind: input.removalKind,
+      removalCount: count,
+    });
   } else if (propertyKind === "COMMUNITY") {
     // Any service asked at a community is a common-area plan quote from the
     // HOA per-unit sheet: per-unit monthly × units for the chosen cadence.
@@ -1442,33 +1517,10 @@ async function quote(
       initialFeeCents:
         plan.initialFeeCents + (priceZone === "B" ? ZONE_B.ONE_TIME_FLAT : 0),
     };
-  } else if (service === "WASP_NEST") {
-    const rate = await getCachedRate({
-      service: "WASP_NEST",
-      city: addr.city!,
-      state: addr.state!,
-    });
-    const extraNests = (input.nestCount ?? 1) - 1;
-    // The sheet must actually price what was asked: a multi-nest job with
-    // no extra-nest component on the sheet is an unpriceable request.
-    if (!rate || (extraNests > 0 && rate.sheet.extraNestCents == null)) {
-      return contactForPrice(
-        "WASP_NEST",
-        undefined,
-        rate ? "INCOMPLETE_RATE_SHEET" : "MISSING_RATE_SHEET",
-        Boolean(rate?.pinned)
-      );
-    }
-    baseCents =
-      rate.priceCents + extraNests * (rate.sheet.extraNestCents ?? 0);
-    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
-    serviceLabel = serviceLabelFor("WASP_NEST", {
-      nestCount: input.nestCount ?? 1,
-    });
   } else {
-    // RODENT / ROACH / TERMITE / WILDLIFE — one-time treatments priced from
-    // their sqft-banded sheets.
-    const engineService = service as "RODENT" | "ROACH" | "TERMITE" | "WILDLIFE";
+    // RODENT / ROACH / TERMITE — one-time treatments priced from their
+    // sqft-banded sheets. (WASP_NEST and WILDLIFE are priced above, by count.)
+    const engineService = service as "RODENT" | "ROACH" | "TERMITE";
     const rate = await getCachedRate({
       service: engineService,
       city: addr.city!,
@@ -1572,7 +1624,7 @@ async function quote(
     source: "website",
     decision: "QUOTE",
     outcome: "PENDING",
-    inputText: `[website ${service}] ${name}, ${address}${input.sqft ? `, ${input.sqft} sqft` : ""}${input.nestCount ? `, ${input.nestCount} nests` : ""}`,
+    inputText: `[website ${service}] ${name}, ${address}${input.sqft ? `, ${input.sqft} sqft` : ""}${input.nestCount ? `, ${input.nestCount} nests` : ""}${input.removalKind ? `, remove ${input.removalCount ?? 1} ${input.removalKind}` : ""}`,
     zone,
     driveMinutes: minutes ?? undefined,
     town: addr.city,

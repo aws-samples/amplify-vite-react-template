@@ -223,6 +223,7 @@ const baseExtraction = {
   sqft: 3200,
   units: null,
   nestCount: null,
+  animalCount: null,
   halfAcres: null,
   tick: false,
   frequencyInterest: "quarterly",
@@ -672,7 +673,7 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
     );
   });
 
-  it("prices a wildlife lead as an exclusion/removal visit — the wildlife pass is retired", async () => {
+  it("prices a wildlife lead by animal count — not sqft — as an exclusion/removal visit", async () => {
     extraction = {
       ...baseExtraction,
       eligibility: "wildlife",
@@ -682,11 +683,29 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("QUOTE");
-    expect(run.oneTimePriceCents).toBe(59900);
+    expect(run.oneTimePriceCents).toBe(59900); // base visit (single animal)
     expect(String(run.service)).toContain("Wildlife exclusion and removal");
-    expect(marketRateMock).toHaveBeenCalledWith(
-      expect.objectContaining({ service: "WILDLIFE", sqft: 3200 })
-    );
+    // Priced by animal count — the cache lookup carries no sqft band.
+    const wildlifeCall = marketRateMock.mock.calls
+      .map((c: unknown[]) => c[0] as { service: string; sqft?: number })
+      .find((a) => a.service === "WILDLIFE");
+    expect(wildlifeCall).toBeDefined();
+    expect(wildlifeCall!.sqft).toBeUndefined();
+  });
+
+  it("adds the sheet's extra-animal increment per additional wildlife animal", async () => {
+    sheets.WILDLIFE = { oneTimeCents: 59900, extraAnimalCents: 12900 };
+    extraction = {
+      ...baseExtraction,
+      eligibility: "wildlife",
+      pest: "a family of raccoons",
+      animalCount: 3, // base + 2 extra
+    };
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.oneTimePriceCents).toBe(85700); // 59900 + 2 × 12900
   });
 
   it("prices a commercial monthly plan from the COMMERCIAL sheet — the deterministic card retired", async () => {

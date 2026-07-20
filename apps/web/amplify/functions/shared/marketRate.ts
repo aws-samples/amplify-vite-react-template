@@ -145,6 +145,9 @@ export type RateSheet = {
   oneTimeCents?: number;
   /** WASP_NEST: incremental price per additional nest on the same visit. */
   extraNestCents?: number;
+  /** WILDLIFE: incremental price per additional animal removed on the same
+   *  visit (the base oneTimeCents covers the visit plus the first animal). */
+  extraAnimalCents?: number;
   /** GENERAL_PEST: recurring plans, each billed as a flat monthly price. */
   plans?: Record<PlanCadence, PlanRate>;
   /** HOA: per-unit monthly rate by unit-count band and visit cadence. */
@@ -237,6 +240,11 @@ function applyFloor(
   if (sheet.extraNestCents != null) {
     notes.push(
       "extra-nest price carries no variable-cost floor (no incremental cost model)"
+    );
+  }
+  if (sheet.extraAnimalCents != null) {
+    notes.push(
+      "extra-animal price carries no variable-cost floor (no incremental cost model)"
     );
   }
   if (sheet.hoaPerUnitMonthly) {
@@ -871,11 +879,15 @@ ONE_TIME_USD: <number>`,
     assemble: (c) => ({ oneTimeCents: c.ONE_TIME_USD }),
   },
   WILDLIFE: {
-    ask: (city, state, bucket) =>
-      `What do pest and wildlife companies near ${city}, ${state} charge for a one-time wildlife exclusion and removal visit at a ~${bucket ?? 2000} sqft single-family home (squirrels, raccoons, bats, or similar — getting the animals out and sealing the entry points)? Give the realistic local going rate for the complete visit including the exclusion work, not an inspection-only fee. ${LINE_INSTRUCTION}
-ONE_TIME_USD: <number>`,
-    lines: ["ONE_TIME_USD"],
-    assemble: (c) => ({ oneTimeCents: c.ONE_TIME_USD }),
+    ask: (city, state) =>
+      `What do pest and wildlife companies near ${city}, ${state} charge for wildlife exclusion and removal (squirrels, raccoons, bats, birds, or similar — getting the animals out and sealing the entry points)? Price BOTH: (1) the complete visit including removal of the FIRST animal and the exclusion work; (2) the incremental price for EACH ADDITIONAL animal removed during the same visit. Give the realistic local going rate for the complete visit, not an inspection-only fee. ${LINE_INSTRUCTION}
+FIRST_ANIMAL_USD: <number>
+EXTRA_ANIMAL_USD: <number>`,
+    lines: ["FIRST_ANIMAL_USD", "EXTRA_ANIMAL_USD"],
+    assemble: (c) => ({
+      oneTimeCents: c.FIRST_ANIMAL_USD,
+      extraAnimalCents: c.EXTRA_ANIMAL_USD,
+    }),
   },
   COMMERCIAL: {
     ask: (city, state, bucket) =>

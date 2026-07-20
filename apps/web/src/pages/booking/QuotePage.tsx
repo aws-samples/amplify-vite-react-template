@@ -4,6 +4,7 @@ import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
+import { WILDLIFE_REMOVAL_KINDS } from "../../../amplify/functions/shared/serviceCatalog";
 import {
   checkQuoteStatus,
   getLeadPrefill,
@@ -93,6 +94,9 @@ type Fields = {
   zip: string;
   sqft: string;
   nestCount: string;
+  /** WILDLIFE: what needs removed + how many (the count sets the price). */
+  removalKind: string;
+  removalCount: string;
   units: string;
   /** GL-17: yard size for mosquito plans, in half-acres ("1".."8"). */
   lotHalfAcres: string;
@@ -114,6 +118,8 @@ const EMPTY_FIELDS: Fields = {
   zip: "",
   sqft: "",
   nestCount: "1",
+  removalKind: "",
+  removalCount: "1",
   units: "",
   lotHalfAcres: "1",
   comments: "",
@@ -332,11 +338,16 @@ export default function QuotePage() {
 
   const needs = quoteFieldNeeds(fields.service, fields.propertyKind);
   const isCommunity = fields.propertyKind === "COMMUNITY";
+  // Wasp and wildlife are one-time visits priced by count at EVERY property
+  // class — they carry no plan/cadence choice (the server never offers one).
+  const isCountOneTime =
+    fields.service === "WASP_NEST" || fields.service === "WILDLIFE";
   // GP-style plan preference: residential general pest and every commercial
   // service (commercial prices like general pest, one-time + plans).
   const isSeasonal = serviceOption(fields.service)?.seasonal === true;
   const offersPlanChoice =
     !isSeasonal &&
+    !isCountOneTime &&
     (fields.propertyKind === "COMMERCIAL" ||
       (fields.propertyKind === "RESIDENTIAL" && fields.service === "GENERAL_PEST"));
 
@@ -389,6 +400,10 @@ export default function QuotePage() {
       },
       sqft: needs.sqft ? parseInt(fields.sqft, 10) : undefined,
       nestCount: needs.nestCount ? parseInt(fields.nestCount, 10) : undefined,
+      removalKind: needs.removalKind ? fields.removalKind || undefined : undefined,
+      removalCount: needs.removalCount
+        ? parseInt(fields.removalCount, 10)
+        : undefined,
       units: needs.units ? parseInt(fields.units, 10) : undefined,
       // GL-17: never silently default the yard size — an unparsable value
       // goes up as missing and the server's field error asks for it.
@@ -870,6 +885,43 @@ export default function QuotePage() {
                   </div>
                 )}
 
+                {needs.removalKind && (
+                  <div className="bk-field bk-full">
+                    <label htmlFor="bq-removal-kind">What needs removed? *</label>
+                    <select
+                      id="bq-removal-kind"
+                      value={fields.removalKind}
+                      onChange={(e) => set("removalKind")(e.target.value)}
+                    >
+                      <option value="" disabled>
+                        Select what needs removed
+                      </option>
+                      {WILDLIFE_REMOVAL_KINDS.map((kind) => (
+                        <option key={kind} value={kind}>
+                          {kind}
+                        </option>
+                      ))}
+                    </select>
+                    {fieldError("removalKind")}
+                  </div>
+                )}
+
+                {needs.removalCount && (
+                  <div className="bk-field bk-full">
+                    <label htmlFor="bq-removal-count">How many? *</label>
+                    <input
+                      id="bq-removal-count"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={fields.removalCount}
+                      onChange={(e) => set("removalCount")(onlyDigits(e.target.value).slice(0, 2))}
+                      placeholder="1"
+                    />
+                    {fieldError("removalCount")}
+                  </div>
+                )}
+
                 {needs.units && (
                   <div className="bk-field bk-full">
                     <label htmlFor="bq-units">How many units? *</label>
@@ -909,7 +961,7 @@ export default function QuotePage() {
                   </div>
                 )}
 
-                {isCommunity && !isSeasonal && (
+                {isCommunity && !isSeasonal && !isCountOneTime && (
                   <div className="bk-field bk-full">
                     <label htmlFor="bq-cadence">How often should we visit?</label>
                     <select

@@ -100,9 +100,17 @@ describe("labels — byte-identical to what the funnel has always sold", () => {
     expect(serviceLabelFor("TERMITE", { sqftBucket: 3000 })).toBe(
       "Termite treatment — up to 3,000 sqft"
     );
-    expect(serviceLabelFor("WILDLIFE", { sqftBucket: 2500 })).toBe(
-      "Wildlife exclusion and removal — up to 2,500 sqft"
+    // Wildlife prices by what needs removed + how many, not sqft.
+    expect(serviceLabelFor("WILDLIFE", { removalKind: "Raccoons", removalCount: 1 })).toBe(
+      "Wildlife exclusion and removal — raccoons"
     );
+    expect(serviceLabelFor("WILDLIFE", { removalKind: "Squirrels", removalCount: 3 })).toBe(
+      "Wildlife exclusion and removal — 3 squirrels"
+    );
+    expect(serviceLabelFor("WILDLIFE", { removalKind: "Other / not sure", removalCount: 2 })).toBe(
+      "Wildlife exclusion and removal — 2 animals"
+    );
+    expect(serviceLabelFor("WILDLIFE")).toBe("Wildlife exclusion and removal");
     expect(serviceLabelFor("COMMERCIAL_PEST", { sqftBucket: 5000 })).toBe(
       "Commercial pest control — up to 5,000 sqft"
     );

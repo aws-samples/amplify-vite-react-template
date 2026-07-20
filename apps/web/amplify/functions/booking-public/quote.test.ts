@@ -175,6 +175,7 @@ vi.mock("../shared/driveTime", () => ({
 type FakeSheet = {
   oneTimeCents?: number;
   extraNestCents?: number;
+  extraAnimalCents?: number;
   plans?: Record<string, { monthlyCents: number; initialFeeCents: number }>;
   hoaPerUnitMonthly?: Record<string, Record<string, number>>;
 };
@@ -800,12 +801,54 @@ describe("TERMITE and WILDLIFE price from their sheets — no specialist callbac
   it("adds the Zone B one-time adder to a wildlife quote (R60)", async () => {
     hqMinutes = 80; // Zone B
 
-    const res = await postQuote({ ...rodentInput, service: "WILDLIFE" });
+    const res = await postQuote({
+      ...rodentInput,
+      service: "WILDLIFE",
+      removalKind: "Raccoons",
+      removalCount: 1,
+    });
 
     expect(res.body.decision).toBe("PRICED");
+    // WILDLIFE prices by animal count, not sqft — the cache lookup carries no
+    // sqft band.
     expect(marketRateCalls[0]).toMatchObject({ service: "WILDLIFE" });
+    expect(marketRateCalls[0].sqft).toBeUndefined();
     expect(pricingRuns[0]).toMatchObject({ zone: "B", oneTimePriceCents: 87400 });
     expect(res.body.service).toContain("Wildlife exclusion and removal");
+  });
+
+  it("adds the sheet's extra-animal increment per additional animal", async () => {
+    marketRateResult = {
+      priceCents: 59900,
+      sheet: { oneTimeCents: 59900, extraAnimalCents: 12900 },
+      basis: "test sheet",
+      cached: true,
+    };
+
+    const res = await postQuote({
+      ...rodentInput,
+      service: "WILDLIFE",
+      removalKind: "Squirrels",
+      removalCount: 3, // base + 2 extra
+    });
+
+    expect(res.body.decision).toBe("PRICED");
+    // 59900 + 2 × 12900 = 85700 (Zone A, no travel adder)
+    expect(pricingRuns[0]).toMatchObject({ oneTimePriceCents: 85700 });
+    expect(res.body.service).toContain("3 squirrels");
+  });
+
+  it("requires what needs removed and how many — not sqft", async () => {
+    const res = await postQuote({
+      ...rodentInput,
+      service: "WILDLIFE",
+      sqft: undefined,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors.removalKind).toBeDefined();
+    expect(res.body.errors.removalCount).toBeDefined();
+    expect(res.body.errors.sqft).toBeUndefined();
   });
 
   it("returns PENDING only when research is unavailable", async () => {
@@ -987,8 +1030,10 @@ describe("COMMERCIAL prices like residential GP from the COMMERCIAL sheet", () =
     expect(res.body.errors.sqft).toBeDefined();
   });
 
-  it("any pest asked at a commercial property prices from the COMMERCIAL sheet", async () => {
-    const res = await postQuote({ ...commercialInput, service: "WASP_NEST" });
+  it("a sqft-priced pest at a commercial property prices from the COMMERCIAL sheet", async () => {
+    // RODENT still follows the property class; WASP_NEST/WILDLIFE are the
+    // exceptions — they price by count from their own sheets at any class.
+    const res = await postQuote({ ...commercialInput, service: "RODENT" });
 
     expect(res.body.decision).toBe("PRICED");
     expect(marketRateCalls[0]).toMatchObject({ service: "COMMERCIAL" });
@@ -1051,6 +1096,8 @@ describe("every ask is priced — the full service × property-kind sweep", () =
           sqft: 2000,
           nestCount: 2,
           units: 24,
+          removalKind: "Raccoons",
+          removalCount: 1,
         });
 
         expect(res.status, `${service} × ${propertyKind}`).toBe(200);

@@ -637,21 +637,27 @@ describe("TERMITE and WILDLIFE — sqft-banded one-time sheets with no cost floo
     );
   });
 
-  it("ships a low researched WILDLIFE price unfloored — no cost model, no invented economics", async () => {
-    researchText = "Exclusion visits in this area.\nONE_TIME_USD: 60";
+  it("ships a low researched WILDLIFE price unfloored — priced by animal count, not sqft", async () => {
+    researchText =
+      "Exclusion visits in this area.\nFIRST_ANIMAL_USD: 60\nEXTRA_ANIMAL_USD: 40";
 
     const res = await researchAndCacheRate({
       anthropicKey: "test-key",
       service: "WILDLIFE",
       city: "Ware",
       state: "MA",
-      sqft: 2400,
     });
 
-    expect(created[0].rateKey).toBe("WILDLIFE#ware-ma#2500");
-    expect(res!.priceCents).toBe(5900); // tidy($60), deliberately unfloored
+    // Priced by animal count — the cache key carries no sqft band.
+    expect(created[0].rateKey).toBe("WILDLIFE#ware-ma");
+    expect(res!.sheet.oneTimeCents).toBe(5900); // tidy($60), deliberately unfloored
+    expect(res!.sheet.extraAnimalCents).toBe(3900); // tidy($40)
+    expect(res!.priceCents).toBe(5900);
     expect(String(created[0].basis)).toContain(
       "one-time price carries no variable-cost floor"
+    );
+    expect(String(created[0].basis)).toContain(
+      "extra-animal price carries no variable-cost floor"
     );
   });
 

@@ -36,6 +36,8 @@ const validFields: QuoteFormFields = {
   zip: "01082",
   sqft: "2400",
   nestCount: "",
+  removalKind: "",
+  removalCount: "",
   units: "",
 };
 
@@ -107,12 +109,12 @@ describe("validateQuoteForm", () => {
   });
 
   it("requires sqft in 100..50000 for every sqft-banded service", () => {
+    // WASP_NEST (by nest count) and WILDLIFE (by animal count) are not here.
     for (const service of [
       "GENERAL_PEST",
       "RODENT",
       "ROACH",
       "TERMITE",
-      "WILDLIFE",
     ]) {
       expect(validateQuoteForm({ ...validFields, service, sqft: "" }).sqft).toBeTruthy();
       expect(validateQuoteForm({ ...validFields, service, sqft: "99" }).sqft).toBeTruthy();
@@ -122,14 +124,31 @@ describe("validateQuoteForm", () => {
     }
   });
 
-  it("requires nestCount >= 1 only for wasp nests", () => {
-    const wasp = { ...validFields, service: "WASP_NEST", sqft: "" };
-    expect(validateQuoteForm({ ...wasp, nestCount: "" }).nestCount).toBeTruthy();
-    expect(validateQuoteForm({ ...wasp, nestCount: "0" }).nestCount).toBeTruthy();
-    expect(validateQuoteForm({ ...wasp, nestCount: "2" })).toEqual({});
+  it("requires nestCount >= 1 for wasp nests at every property kind", () => {
+    for (const propertyKind of ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"]) {
+      const wasp = { ...validFields, service: "WASP_NEST", propertyKind, sqft: "" };
+      expect(validateQuoteForm({ ...wasp, nestCount: "" }).nestCount).toBeTruthy();
+      expect(validateQuoteForm({ ...wasp, nestCount: "0" }).nestCount).toBeTruthy();
+      // Nest count alone prices it — no sqft/units error at any property kind.
+      expect(validateQuoteForm({ ...wasp, nestCount: "2" })).toEqual({});
+    }
   });
 
-  it("COMMUNITY requires units and drops the sqft/nest requirements", () => {
+  it("requires what needs removed + how many for wildlife at every kind", () => {
+    for (const propertyKind of ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"]) {
+      const wild = { ...validFields, service: "WILDLIFE", propertyKind, sqft: "" };
+      const missing = validateQuoteForm({ ...wild, removalKind: "", removalCount: "" });
+      expect(missing.removalKind).toBeTruthy();
+      expect(missing.removalCount).toBeTruthy();
+      expect(missing.sqft).toBeUndefined();
+      expect(missing.units).toBeUndefined();
+      expect(
+        validateQuoteForm({ ...wild, removalKind: "Raccoons", removalCount: "2" })
+      ).toEqual({});
+    }
+  });
+
+  it("COMMUNITY requires units for the sqft/unit-priced services", () => {
     const hoa = {
       ...validFields,
       propertyKind: "COMMUNITY",
@@ -139,77 +158,73 @@ describe("validateQuoteForm", () => {
     expect(validateQuoteForm({ ...hoa, units: "" }).units).toBeTruthy();
     expect(validateQuoteForm({ ...hoa, units: "0" }).units).toBeTruthy();
     expect(validateQuoteForm({ ...hoa, units: "48" })).toEqual({});
-    // Even a wasp-nest ask at a community is a per-unit plan quote.
+    // But a wasp-nest ask at a community prices by nests, not units.
     expect(
-      validateQuoteForm({ ...hoa, service: "WASP_NEST", units: "48" })
+      validateQuoteForm({ ...hoa, service: "WASP_NEST", units: "", nestCount: "2" })
     ).toEqual({});
   });
 
-  it("COMMERCIAL requires sqft for every service and never nests or units", () => {
+  it("COMMERCIAL requires sqft for the sqft-priced services", () => {
     const biz = { ...validFields, propertyKind: "COMMERCIAL", nestCount: "" };
+    // Wasp at a commercial property prices by nests — no sqft required.
     expect(
-      validateQuoteForm({ ...biz, service: "WASP_NEST", sqft: "" }).sqft
+      validateQuoteForm({ ...biz, service: "WASP_NEST", sqft: "", nestCount: "2" })
+    ).toEqual({});
+    // A sqft-priced pest still needs sqft at a commercial property.
+    expect(
+      validateQuoteForm({ ...biz, service: "TERMITE", sqft: "" }).sqft
     ).toBeTruthy();
-    expect(validateQuoteForm({ ...biz, service: "WASP_NEST", sqft: "3000" })).toEqual({});
     expect(validateQuoteForm({ ...biz, service: "TERMITE", sqft: "3000" })).toEqual({});
   });
 });
 
 describe("quoteFieldNeeds", () => {
+  const needs = (over: Partial<ReturnType<typeof quoteFieldNeeds>>) => ({
+    sqft: false,
+    nestCount: false,
+    units: false,
+    removalKind: false,
+    removalCount: false,
+    lotHalfAcres: false,
+    ...over,
+  });
+
   it("residential follows the service catalog", () => {
-    expect(quoteFieldNeeds("TERMITE", "RESIDENTIAL")).toEqual({
-      sqft: true,
-      nestCount: false,
-      units: false,
-      lotHalfAcres: false,
-    });
-    expect(quoteFieldNeeds("WILDLIFE", "RESIDENTIAL")).toEqual({
-      sqft: true,
-      nestCount: false,
-      units: false,
-      lotHalfAcres: false,
-    });
-    expect(quoteFieldNeeds("WASP_NEST", "RESIDENTIAL")).toEqual({
-      sqft: false,
-      nestCount: true,
-      units: false,
-      lotHalfAcres: false,
-    });
+    expect(quoteFieldNeeds("TERMITE", "RESIDENTIAL")).toEqual(needs({ sqft: true }));
+    expect(quoteFieldNeeds("WASP_NEST", "RESIDENTIAL")).toEqual(
+      needs({ nestCount: true })
+    );
+  });
+
+  it("wasp prices by nest count at EVERY property kind", () => {
+    for (const kind of ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"]) {
+      expect(quoteFieldNeeds("WASP_NEST", kind)).toEqual(needs({ nestCount: true }));
+    }
+  });
+
+  it("wildlife prices by what + how many at EVERY property kind", () => {
+    for (const kind of ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"]) {
+      expect(quoteFieldNeeds("WILDLIFE", kind)).toEqual(
+        needs({ removalKind: true, removalCount: true })
+      );
+    }
   });
 
   it("GL-17: mosquito plans need yard size only, at EVERY property kind", () => {
     for (const kind of ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"]) {
-      expect(quoteFieldNeeds("MOSQUITO", kind)).toEqual({
-        sqft: false,
-        nestCount: false,
-        units: false,
-        lotHalfAcres: true,
-      });
-      expect(quoteFieldNeeds("MOSQUITO_TICK", kind)).toEqual({
-        sqft: false,
-        nestCount: false,
-        units: false,
-        lotHalfAcres: true,
-      });
+      expect(quoteFieldNeeds("MOSQUITO", kind)).toEqual(needs({ lotHalfAcres: true }));
+      expect(quoteFieldNeeds("MOSQUITO_TICK", kind)).toEqual(
+        needs({ lotHalfAcres: true })
+      );
     }
   });
 
-  it("community is a per-unit plan quote whatever the service", () => {
-    expect(quoteFieldNeeds("RODENT", "COMMUNITY")).toEqual({
-      sqft: false,
-      nestCount: false,
-      units: true,
-      lotHalfAcres: false,
-    });
+  it("community is a per-unit plan quote for the sqft/unit-priced services", () => {
+    expect(quoteFieldNeeds("RODENT", "COMMUNITY")).toEqual(needs({ units: true }));
   });
 
-  it("commercial is sqft-banded whatever the service", () => {
-    expect(quoteFieldNeeds("WASP_NEST", "COMMERCIAL")).toEqual({
-      sqft: true,
-      nestCount: false,
-      units: false,
-      lotHalfAcres: false,
-    });
+  it("commercial is sqft-banded for the sqft-priced services", () => {
+    expect(quoteFieldNeeds("RODENT", "COMMERCIAL")).toEqual(needs({ sqft: true }));
   });
 });
 
@@ -267,9 +282,9 @@ describe("labels", () => {
     expect(serviceOption("WASP_NEST")?.needsNestCount).toBe(true);
     expect(serviceOption("GENERAL_PEST")?.offersRecurring).toBe(true);
     expect(serviceOption("RODENT")?.offersRecurring).toBe(false);
-    // Termite and wildlife price like rodent/roach now: sqft-banded.
+    // Termite is sqft-banded; wildlife prices by animal count, not sqft.
     expect(serviceOption("TERMITE")?.needsSqft).toBe(true);
-    expect(serviceOption("WILDLIFE")?.needsSqft).toBe(true);
+    expect(serviceOption("WILDLIFE")?.needsSqft).toBe(false);
     expect(serviceOption("BOGUS")).toBeUndefined();
   });
 });

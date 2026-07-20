@@ -432,6 +432,7 @@ type Extraction = {
   sqft: number | null;
   units: number | null;
   nestCount: number | null;
+  animalCount: number | null;
   halfAcres: number | null;
   tick: boolean;
   frequencyInterest: "monthly" | "bimonthly" | "quarterly" | "one_time" | "unspecified";
@@ -448,7 +449,7 @@ const EXTRACTION_SCHEMA = {
   additionalProperties: false,
   required: [
     "eligibility", "propertyType", "specialtyKind", "pest", "customerName",
-    "town", "state", "fullAddress", "sqft", "units", "nestCount", "halfAcres",
+    "town", "state", "fullAddress", "sqft", "units", "nestCount", "animalCount", "halfAcres",
     "tick", "frequencyInterest", "leadFeeCents", "rodentInterest",
     "multiProperty", "competitorMatchBelowFloor", "complianceDocsRequested",
     "assumptions",
@@ -465,6 +466,7 @@ const EXTRACTION_SCHEMA = {
     sqft: { type: ["number", "null"] },
     units: { type: ["number", "null"] },
     nestCount: { type: ["number", "null"] },
+    animalCount: { type: ["number", "null"] },
     halfAcres: { type: ["number", "null"] },
     tick: { type: "boolean" },
     frequencyInterest: { type: "string", enum: ["monthly", "bimonthly", "quarterly", "one_time", "unspecified"] },
@@ -492,6 +494,7 @@ Property type: "association" for HOA/condo-association COMMON AREAS (unit counts
 Extraction rules:
 - sqft: null when not stated (the engine assumes 2,000 sqft and states the assumption). Do not guess.
 - nestCount: how many wasp/hornet nests the lead mentions; null when not stated (the engine assumes one and states the assumption).
+- animalCount: for wildlife work, how many animals need removed; null when not stated (the engine assumes one and states the assumption).
 - halfAcres: yard size in half-acre increments for mosquito/tick leads; null when unknown (engine assumes up to ½ acre).
 - leadFeeCents: the Thumbtack lead fee, in CENTS, when visible in the text/screenshot; null otherwise.
 - frequencyInterest: only when the lead stated one.
@@ -1118,30 +1121,44 @@ async function priceLead(args: Args) {
   const town = extracted.town;
 
   if (extracted.eligibility === "wildlife") {
-    // Wildlife exclusion/removal prices from its sheet like every other
-    // one-time service — the every-wildlife-passes policy is retired.
+    // Wildlife exclusion/removal prices by HOW MANY animals need removed — a
+    // base visit (first animal) plus a per-extra-animal increment from the
+    // WILDLIFE sheet. Not sqft-priced.
     if (!town) return needsTown();
-    const sqft = extracted.sqft ?? 2000;
-    if (extracted.sqft == null)
-      addAssumption("based on a typical ~2,000 sqft home — we'll confirm on the first visit");
+    const count = extracted.animalCount ?? 1;
+    if (extracted.animalCount == null)
+      addAssumption("assumed a single animal — we'll confirm on the first visit");
     const rate = await getCachedRate({
       service: "WILDLIFE",
       city: town,
       state: extracted.state,
-      sqft,
     });
     if (!rate) {
-      return researchRate("Wildlife exclusion and removal", "WILDLIFE", sqft);
+      return researchRate("Wildlife exclusion and removal", "WILDLIFE");
     }
+    const extraAnimals = count - 1;
+    if (extraAnimals > 0 && rate.sheet.extraAnimalCents == null) {
+      return researchRate(
+        "Wildlife exclusion and removal",
+        "WILDLIFE",
+        undefined,
+        "INCOMPLETE_RATE_SHEET",
+        Boolean(rate.pinned)
+      );
+    }
+    const wildlifeCents =
+      rate.priceCents + extraAnimals * (rate.sheet.extraAnimalCents ?? 0);
     priced = oneTimeFromSheet({
       service: "Wildlife exclusion and removal",
       lines: [
         {
-          label: "AI market rate — one-time exclusion/removal visit",
-          cents: rate.priceCents,
+          label: `AI market rate — exclusion/removal visit${
+            count > 1 ? ` (${count} animals)` : ""
+          }`,
+          cents: wildlifeCents,
         },
       ],
-      baseCents: rate.priceCents,
+      baseCents: wildlifeCents,
       zone,
     });
     // No deterministic cost model exists for wildlife work; the exclusion

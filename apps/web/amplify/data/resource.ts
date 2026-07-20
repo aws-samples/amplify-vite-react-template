@@ -576,6 +576,10 @@ export const schema = a.schema({
       units: a.integer(),
       sqft: a.integer(),
       nestCount: a.integer(),
+      // WILDLIFE: what needs removed (a WILDLIFE_REMOVAL_KINDS label) and how
+      // many — the animal count sets the price, like nestCount does for wasp.
+      removalKind: a.string(),
+      removalCount: a.integer(),
       // GL-17: yard size for the mosquito plans, in half-acres (pricing is
       // per additional half-acre over the first).
       lotHalfAcres: a.integer(),

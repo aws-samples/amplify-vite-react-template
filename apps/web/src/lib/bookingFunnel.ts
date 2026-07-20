@@ -58,8 +58,20 @@ export type QuoteFieldNeeds = {
   sqft: boolean;
   nestCount: boolean;
   units: boolean;
+  /** WILDLIFE: what needs removed + how many (the count sets the price). */
+  removalKind: boolean;
+  removalCount: boolean;
   /** GL-17: mosquito plans price on yard size (half-acres). */
   lotHalfAcres: boolean;
+};
+
+const NO_NEEDS: QuoteFieldNeeds = {
+  sqft: false,
+  nestCount: false,
+  units: false,
+  removalKind: false,
+  removalCount: false,
+  lotHalfAcres: false,
 };
 
 export function quoteFieldNeeds(
@@ -70,19 +82,27 @@ export function quoteFieldNeeds(
   // GL-17: a seasonal plan prices on yard size alone at ANY property kind —
   // the community/commercial overrides don't apply.
   if (svc?.seasonal) {
-    return { sqft: false, nestCount: false, units: false, lotHalfAcres: true };
+    return { ...NO_NEEDS, lotHalfAcres: true };
+  }
+  // Nest removal (by nest count) and wildlife (by animal type + count) are
+  // priced by the SERVICE at every property class — the community/commercial
+  // sqft/units overrides below don't apply to them.
+  if (service === "WASP_NEST") {
+    return { ...NO_NEEDS, nestCount: true };
+  }
+  if (service === "WILDLIFE") {
+    return { ...NO_NEEDS, removalKind: true, removalCount: true };
   }
   if (propertyKind === "COMMUNITY") {
-    return { sqft: false, nestCount: false, units: true, lotHalfAcres: false };
+    return { ...NO_NEEDS, units: true };
   }
   if (propertyKind === "COMMERCIAL") {
-    return { sqft: true, nestCount: false, units: false, lotHalfAcres: false };
+    return { ...NO_NEEDS, sqft: true };
   }
   return {
+    ...NO_NEEDS,
     sqft: svc?.needsSqft ?? false,
     nestCount: svc?.needsNestCount ?? false,
-    units: false,
-    lotHalfAcres: false,
   };
 }
 
@@ -185,6 +205,8 @@ export type QuoteFormFields = {
   zip: string;
   sqft: string;
   nestCount: string;
+  removalKind: string;
+  removalCount: string;
   units: string;
 };
 
@@ -214,6 +236,13 @@ export function validateQuoteForm(f: QuoteFormFields): Record<string, string> {
   if (needs.nestCount) {
     const nests = parseInt(f.nestCount, 10);
     if (!nests || nests < 1) errors.nestCount = "How many nests need removal?";
+  }
+  if (needs.removalKind && !f.removalKind.trim()) {
+    errors.removalKind = "What needs to be removed?";
+  }
+  if (needs.removalCount) {
+    const count = parseInt(f.removalCount, 10);
+    if (!count || count < 1) errors.removalCount = "How many animals need removal?";
   }
   if (needs.units) {
     const units = parseInt(f.units, 10);

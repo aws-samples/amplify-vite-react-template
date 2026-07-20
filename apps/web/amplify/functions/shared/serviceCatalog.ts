@@ -32,7 +32,7 @@ import type { MarketRateService, PlanCadence } from "./marketRate";
  * old record's meaning never drifts with a later catalog edit.
  */
 
-export const SERVICE_CATALOG_VERSION = "2026-07-19.1";
+export const SERVICE_CATALOG_VERSION = "2026-07-20.1";
 
 export type PropertyClass = "RESIDENTIAL" | "COMMERCIAL" | "COMMUNITY";
 
@@ -87,6 +87,23 @@ export type CatalogEntry = {
 
 const ALL_CADENCES: PlanCadence[] = ["MONTHLY", "BIMONTHLY", "QUARTERLY"];
 
+/** The "what needs removed" choices the wildlife quote collects. The customer
+ *  picks one; the count sets the price. Kept here so the funnel select and the
+ *  lead-intake vocabulary read from the one catalog. */
+export const WILDLIFE_OTHER_KIND = "Other / not sure";
+export const WILDLIFE_REMOVAL_KINDS: string[] = [
+  "Squirrels",
+  "Raccoons",
+  "Bats",
+  "Birds",
+  "Skunks",
+  "Opossums",
+  "Snakes",
+  "Groundhog",
+  "Chipmunks",
+  WILDLIFE_OTHER_KIND,
+];
+
 export const SERVICE_CATALOG: Record<CatalogServiceId, CatalogEntry> = {
   GENERAL_PEST: {
     id: "GENERAL_PEST",
@@ -109,7 +126,10 @@ export const SERVICE_CATALOG: Record<CatalogServiceId, CatalogEntry> = {
     label: "Wasp / hornet nest removal",
     funnel: true,
     leadForm: true,
-    propertyClasses: ["RESIDENTIAL", "COMMERCIAL"],
+    // Nest removal prices by the number of nests at EVERY property class —
+    // the service, not the property, sets the price here (a commercial or
+    // community wasp job is still priced per nest, never by sqft/units).
+    propertyClasses: ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"],
     needsSqft: false,
     needsNestCount: true,
     needsUnits: false,
@@ -176,8 +196,11 @@ export const SERVICE_CATALOG: Record<CatalogServiceId, CatalogEntry> = {
     funnel: true,
     funnelLabel: "Wildlife removal",
     leadForm: true,
-    propertyClasses: ["RESIDENTIAL", "COMMERCIAL"],
-    needsSqft: true,
+    // Priced by WHAT needs removed and HOW MANY at every property class —
+    // the animal count sets the price (base removal + per-extra-animal), so
+    // sqft is not collected and the property class doesn't override it.
+    propertyClasses: ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"],
+    needsSqft: false,
     needsNestCount: false,
     needsUnits: false,
     offersRecurring: false,
@@ -285,7 +308,13 @@ export function onsiteMinutesForClass(
  */
 export function serviceLabelFor(
   id: CatalogServiceId,
-  opts: { sqftBucket?: number; nestCount?: number; units?: number } = {}
+  opts: {
+    sqftBucket?: number;
+    nestCount?: number;
+    units?: number;
+    removalKind?: string;
+    removalCount?: number;
+  } = {}
 ): string {
   const sizeLabel =
     opts.sqftBucket != null
@@ -304,8 +333,17 @@ export function serviceLabelFor(
       return `Specialized roach treatment${sizeLabel ? ` — ${sizeLabel}` : ""}`;
     case "TERMITE":
       return `Termite treatment${sizeLabel ? ` — ${sizeLabel}` : ""}`;
-    case "WILDLIFE":
-      return `Wildlife exclusion and removal${sizeLabel ? ` — ${sizeLabel}` : ""}`;
+    case "WILDLIFE": {
+      const kind = opts.removalKind?.trim();
+      const count = opts.removalCount ?? 1;
+      const named = kind && kind.toLowerCase() !== WILDLIFE_OTHER_KIND.toLowerCase();
+      const scope = named
+        ? ` — ${count > 1 ? `${count} ` : ""}${kind!.toLowerCase()}`
+        : count > 1
+          ? ` — ${count} animals`
+          : "";
+      return `Wildlife exclusion and removal${scope}`;
+    }
     case "COMMERCIAL_PEST":
       return `Commercial pest control${sizeLabel ? ` — ${sizeLabel}` : ""}`;
     case "HOA_COMMON_AREA":

@@ -79,6 +79,10 @@ export type QuoteRequest = {
   address: { street: string; city: string; state: string; zip?: string };
   sqft?: number;
   nestCount?: number;
+  /** WILDLIFE: what needs removed (a WILDLIFE_REMOVAL_KINDS label) and how
+   *  many — the animal count sets the price, like nestCount does for wasp. */
+  removalKind?: string;
+  removalCount?: number;
   /** Unit count — required when propertyKind is COMMUNITY (per-unit plan). */
   units?: number;
   comments?: string;
