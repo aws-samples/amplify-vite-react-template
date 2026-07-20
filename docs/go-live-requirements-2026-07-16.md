@@ -147,7 +147,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-17 | Funnel sale path live — engineering closed (`f238d82`) | CEO + Compliance owner | A launch service cannot be sold through the approved path | **12% — Very low (sign-off)** |
 | P0 | GL-12 | Legacy-visit backfill and final service constraints — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (ops backfill + co-signs)** |
 | P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
-| P0 | GL-09 | Lifecycle-history export — policy and engineering closed (`95e39d3`) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **85% — Very high (bounded export)** |
+| P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export in-branch) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
 | P0 | GL-07 | Atomic capacity on assigned reschedules | Head of Operations | Two concurrent moves can consume the same last capacity | **65% — Medium** |
 | P0 | GL-18 | Finance/Operations recovery sign-off and launch staffing | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-23 tie)** |
 | P0 | GL-04 | Travel-model calibration + operating data | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
@@ -334,10 +334,14 @@ disagree, and an employee always sees the real outcome of deactivation or reacti
 `2026-07-19.1`, including its per-reason balance, retention, and notice dispositions; the deployed
 schema now durably stamps that version on every lifecycle event (`3483b5c`).
 
+**Engineering addendum:** the complete-history export is live on the Command view (`buildLifecycleCsv`):
+every matching event read to pagination exhaustion before download, read failures abort with nothing
+produced, fields customer/action/reason/actor/timestamp/result/policyVersion, optional date range.
+
 **Remaining requirements:**
 
-- Add leadership's **export** of the complete lifecycle history to the existing GL-19 Command view
-  (the history itself is durable, paged, searchable, and read-failure-honest today).
+- Head of Operations signs the export's field set and access (OWNER/OFFICE/FINANCE read) as the
+  retrieval record leadership will rely on.
 
 **Pass owner:** Head of Operations; Finance and CEO approve protected fields, transition policy, and
 recovery policy.
