@@ -1,4 +1,5 @@
 import { dataClient } from "./dataClient";
+import { LIFECYCLE_POLICY_VERSION } from "./lifecycleReasons";
 import { openOwnedWork } from "./ownedWork";
 
 /**
@@ -54,6 +55,11 @@ export async function recordCustomerLifecycleEvent(input: {
         priorStatus: input.priorStatus ?? undefined,
         newStatus: input.newStatus ?? undefined,
         effects: input.effects ?? undefined,
+        // GL-09 fast-follow: durably record the policy version this action ran
+        // under, sourced from the module constant in effect at write time — not
+        // free text. Stamped here so every lifecycle write carries it and no
+        // caller can forget or pass a stale value.
+        policyVersion: LIFECYCLE_POLICY_VERSION,
         occurredAt,
       });
     if (!data) {

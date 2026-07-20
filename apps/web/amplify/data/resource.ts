@@ -2108,6 +2108,10 @@ export const schema = a.schema({
       priorStatus: a.string(),
       newStatus: a.string(),
       effects: a.string(),
+      // GL-09 fast-follow: the versioned per-reason lifecycle policy this action
+      // ran under, stamped from LIFECYCLE_POLICY_VERSION at write time — a durable,
+      // queryable field, not free text buried in `effects`.
+      policyVersion: a.string(),
       occurredAt: a.datetime().required(),
     })
     .secondaryIndexes((index) => [
