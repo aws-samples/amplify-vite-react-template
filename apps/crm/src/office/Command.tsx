@@ -16,6 +16,14 @@ import {
   type LeadStage,
 } from "../lib/leadStage";
 import { money } from "../lib/format";
+import {
+  attemptVsReached,
+  callbackStats,
+  firstResponseStats,
+  qualificationFunnel,
+  type MetricActivity,
+  type MetricCallback,
+} from "../lib/commandMetrics";
 import { PaymentsInFlight } from "./Work";
 import {
   Badge,
@@ -253,11 +261,13 @@ export default function Command() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [plans, setPlans] = useState<ServicePlan[]>([]);
+  const [activities, setActivities] = useState<MetricActivity[]>([]);
+  const [callbacks, setCallbacks] = useState<MetricCallback[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [rr, wi, cus, jb, pl] = await Promise.all([
+      const [rr, wi, cus, jb, pl, acts, cbs] = await Promise.all([
         listAll<ReconRunRow>((t) =>
           (api().models as unknown as {
             ReconRun: {
@@ -275,12 +285,39 @@ export default function Command() {
         listAll((t) =>
           api().models.ServicePlan.list({ limit: 1000, nextToken: t })
         ),
+        // GL-19: the lifecycle-derived measures read DURABLE rows — every
+        // page or nothing; a failure lands in the shared error banner and
+        // no partial number is ever shown as a complete metric.
+        listAll<MetricActivity>((t) =>
+          (api().models as unknown as {
+            LeadActivity: {
+              list: (a: { limit?: number; nextToken?: string }) => Promise<{
+                data: MetricActivity[];
+                nextToken?: string | null;
+                errors?: { message: string }[];
+              }>;
+            };
+          }).LeadActivity.list({ limit: 1000, nextToken: t })
+        ),
+        listAll<MetricCallback>((t) =>
+          (api().models as unknown as {
+            CallbackRequest: {
+              list: (a: { limit?: number; nextToken?: string }) => Promise<{
+                data: MetricCallback[];
+                nextToken?: string | null;
+                errors?: { message: string }[];
+              }>;
+            };
+          }).CallbackRequest.list({ limit: 1000, nextToken: t })
+        ),
       ]);
       setRuns(rr);
       setWork(wi);
       setCustomers(cus);
       setJobs(jb);
       setPlans(pl);
+      setActivities(acts);
+      setCallbacks(cbs);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not load the command view"
@@ -449,6 +486,55 @@ export default function Command() {
       )}
 
       <LifecycleExport customers={customers} />
+
+      {(() => {
+        // GL-19: true lifecycle-derived measures over a NAMED 30-day window
+        // with explicit denominators — from durable activity timestamps and
+        // fact fields, never stage totals or open work-item counts.
+        const since = Date.now() - 30 * 24 * 60 * 60_000;
+        const fr = firstResponseStats(customers, activities, since);
+        const ar = attemptVsReached(customers, since);
+        const funnel = qualificationFunnel(customers, since);
+        const cb = callbackStats(callbacks, jobs, since);
+        const min = (m: number | null) =>
+          m == null ? "—" : m >= 120 ? `${Math.round(m / 60)}h` : `${m}m`;
+        return (
+          <Card>
+            <div className="row-split">
+              <strong>Response &amp; funnel — last 30 days</strong>
+              <Badge tone={fr.notYetResponded ? "warn" : "ok"}>
+                {fr.notYetResponded
+                  ? `${fr.notYetResponded} unanswered`
+                  : "all answered"}
+              </Badge>
+            </div>
+            <p className="small" style={{ margin: "6px 0 0" }}>
+              First response (creation → first recorded activity, median):{" "}
+              <strong>{min(fr.medianMinutes)}</strong> · worst {min(fr.worstMinutes)}{" "}
+              · {fr.responded} of {fr.leadsCreated} leads created got a response
+            </p>
+            <p className="small" style={{ margin: "4px 0 0" }}>
+              Attempt → reached: <strong>{ar.reached}</strong> of {ar.attempted}{" "}
+              attempted{ar.reachedPct != null ? ` (${ar.reachedPct}%)` : ""} — an
+              attempt is not a conversation
+            </p>
+            <p className="muted small" style={{ margin: "4px 0 0" }}>
+              Funnel (leads created in window): {funnel.created} created →{" "}
+              {funnel.attempted} attempted → {funnel.reached} reached →{" "}
+              {funnel.qualified} qualified ({funnel.unqualified} unqualified) →{" "}
+              {funnel.bookingSent} booking sent → {funnel.won} won ·{" "}
+              {funnel.lost} lost
+            </p>
+            <p className="muted small" style={{ margin: "4px 0 0" }}>
+              Guarantee callbacks: {cb.callbacksRequested} requested over{" "}
+              {cb.completedVisits} completed visits
+              {cb.callbackPct != null ? ` (${cb.callbackPct}%)` : ""} ·{" "}
+              {cb.repeatCallbackCustomers} of {cb.callbackCustomers} callback
+              customers repeated{cb.repeatPct != null ? ` (${cb.repeatPct}%)` : ""}
+            </p>
+          </Card>
+        );
+      })()}
 
       <Card>
         <div className="row-split">
