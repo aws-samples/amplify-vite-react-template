@@ -14,6 +14,9 @@ export type CustomerFormValues = {
   serviceZip: string;
   leadSource: string;
   notes: string;
+  emailPermission: boolean;
+  callPermission: boolean;
+  consentEvidence: string;
 };
 
 export function customerToForm(c?: Customer | null): CustomerFormValues {
@@ -28,6 +31,9 @@ export function customerToForm(c?: Customer | null): CustomerFormValues {
     serviceZip: c?.serviceZip ?? "",
     leadSource: c?.leadSource ?? "",
     notes: c?.notes ?? "",
+    emailPermission: (c?.contactConsentChannels ?? []).includes("EMAIL"),
+    callPermission: (c?.contactConsentChannels ?? []).includes("CALL"),
+    consentEvidence: c?.contactConsentText ?? "",
   };
 }
 
@@ -36,11 +42,13 @@ export default function CustomerForm({
   initial,
   submitLabel,
   showLeadSource,
+  showLeadConsent,
   onSubmit,
 }: {
   initial: CustomerFormValues;
   submitLabel: string;
   showLeadSource?: boolean;
+  showLeadConsent?: boolean;
   onSubmit: (values: CustomerFormValues) => Promise<void>;
 }) {
   const [values, setValues] = useState(initial);
@@ -57,6 +65,14 @@ export default function CustomerForm({
     }
     if (values.email && !/^\S+@\S+\.\S+$/.test(values.email)) {
       setError("Email doesn't look valid");
+      return;
+    }
+    if (
+      showLeadConsent &&
+      (values.emailPermission || values.callPermission) &&
+      !values.consentEvidence.trim()
+    ) {
+      setError("Record the exact evidence authorizing each selected contact channel. Contact details alone are not permission.");
       return;
     }
     setBusy(true);
@@ -123,6 +139,40 @@ export default function CustomerForm({
         <Field label="Lead source">
           <input value={values.leadSource} onChange={set("leadSource")} placeholder="Website, referral, Thumbtack…" />
         </Field>
+      ) : null}
+      {showLeadConsent ? (
+        <>
+          <label className="inline-check small">
+            <input
+              type="checkbox"
+              checked={values.emailPermission}
+              onChange={(e) =>
+                setValues((v) => ({ ...v, emailPermission: e.target.checked }))
+              }
+            />{" "}
+            Customer authorized a non-essential email response
+          </label>
+          <label className="inline-check small">
+            <input
+              type="checkbox"
+              checked={values.callPermission}
+              onChange={(e) =>
+                setValues((v) => ({ ...v, callPermission: e.target.checked }))
+              }
+            />{" "}
+            Customer authorized a phone call
+          </label>
+          {values.emailPermission || values.callPermission ? (
+            <Field
+              label="Contact-permission evidence"
+              hint="Exact retained permission and source for the selected channels. This never authorizes text messages."
+            >
+              <textarea value={values.consentEvidence} onChange={set("consentEvidence")} />
+            </Field>
+          ) : (
+            <p className="muted small">Non-essential email, call, and text actions stay disabled until exact permission is retained.</p>
+          )}
+        </>
       ) : null}
       <Field label="Notes">
         <textarea value={values.notes} onChange={set("notes")} />

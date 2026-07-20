@@ -7,11 +7,12 @@ import {
   opResult,
   type Customer,
 } from "../lib/api";
-import { fmtDate } from "../lib/format";
+import { fmtDateTime } from "../lib/format";
 import { useRoles } from "../lib/auth";
 import {
   deriveLeadStage,
   isLeadOverdue,
+  leadNextActionAt,
   LEAD_STAGE_LABEL,
   OPEN_LEAD_STAGES,
   type LeadStage,
@@ -88,6 +89,13 @@ export default function Leads() {
       const stage = deriveLeadStage(l);
       (groups[stage] ??= []).push(l);
     }
+    for (const rows of Object.values(groups)) {
+      rows.sort(
+        (a, b) =>
+          (leadNextActionAt(a)?.getTime() ?? Number.MAX_SAFE_INTEGER) -
+          (leadNextActionAt(b)?.getTime() ?? Number.MAX_SAFE_INTEGER)
+      );
+    }
     return groups;
   }, [shown]);
 
@@ -116,11 +124,23 @@ export default function Leads() {
       <Card key={stage} title={`${LEAD_STAGE_LABEL[stage]} (${rows.length})`}>
         {rows.map((lead) => {
           const overdue = isLeadOverdue(lead);
+          const due = leadNextActionAt(lead);
+          const ageHours = Math.max(
+            0,
+            Math.floor((Date.now() - new Date(lead.createdAt ?? Date.now()).getTime()) / 3_600_000)
+          );
           return (
             <ListRow
               key={lead.id}
               title={lead.displayName}
-              subtitle={[lead.serviceCity, lead.leadSource]
+              subtitle={[
+                `Action: ${lead.nextAction || "Work now — missing durable next action"}`,
+                `Due: ${due ? fmtDateTime(due.toISOString()) : "closed"}`,
+                `Owner: ${lead.leadOwnerEmail || "Sales team"}`,
+                `${ageHours < 24 ? `${ageHours}h` : `${Math.floor(ageHours / 24)}d`} old`,
+                lead.serviceCity,
+                lead.leadSource,
+              ]
                 .filter(Boolean)
                 .join(" · ")}
               meta={
@@ -129,7 +149,7 @@ export default function Leads() {
                   {lead.leadOwnerSub === roles.sub ? (
                     <Badge tone="info">you</Badge>
                   ) : null}
-                  <span className="muted small">{fmtDate(lead.createdAt)}</span>
+                  <span className="muted small">due {due ? fmtDateTime(due.toISOString()) : "—"}</span>
                 </span>
               }
               onClick={() => navigate(`/customers/${lead.id}`)}
@@ -189,6 +209,7 @@ export default function Leads() {
           initial={customerToForm()}
           submitLabel="Add lead"
           showLeadSource
+          showLeadConsent
           onSubmit={(v) =>
             submitLead({
               displayName: v.displayName.trim(),
@@ -201,6 +222,20 @@ export default function Leads() {
               serviceZip: v.serviceZip.trim() || undefined,
               leadSource: v.leadSource.trim() || undefined,
               notes: v.notes.trim() || undefined,
+              idempotencyKey: crypto.randomUUID(),
+              contactConsentChannels: [
+                ...(v.emailPermission ? ["EMAIL"] : []),
+                ...(v.callPermission ? ["CALL"] : []),
+              ],
+              contactConsentSource:
+                v.emailPermission || v.callPermission ? "office-recorded" : undefined,
+              contactConsentText:
+                v.emailPermission || v.callPermission
+                  ? v.consentEvidence.trim()
+                  : undefined,
+              contactConsentPolicyVersion: v.emailPermission || v.callPermission
+                ? "office-lead-consent-2026-07-19"
+                : undefined,
             })
           }
         />

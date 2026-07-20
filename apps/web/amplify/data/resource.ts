@@ -12,6 +12,7 @@ import { pricingRefresh } from "../functions/pricing-refresh/resource";
 import { sesEvents } from "../functions/ses-events/resource";
 import { opsAlerts } from "../functions/ops-alerts/resource";
 import { verifyChallenge } from "../functions/auth-challenge/resource";
+import { leadSweep } from "../functions/lead-sweep/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -201,6 +202,7 @@ export const schema = a.schema({
     // lead is genuinely worked (a logged touch, a booking link, lost, DNC, or
     // conversion). The mechanism that guarantees no lead silently disappears.
     "LEAD_FOLLOWUP",
+    "LEAD_LIFECYCLE_RECOVERY",
     // GL-09: a customer deactivation/reactivation left access, billing, or the
     // audit record in a mixed state, or a lost audit write must be reconstructed.
     // A critical recovery case whose resume is a safe re-run of the idempotent
@@ -338,6 +340,10 @@ export const schema = a.schema({
       // Absent or false means email-only follow-up.
       contactConsent: a.boolean().authorization(fieldNoTech),
       contactConsentAt: a.datetime().authorization(fieldNoTech),
+      contactConsentChannels: a.string().array().authorization(fieldNoTech),
+      contactConsentSource: a.string().authorization(fieldNoTech),
+      contactConsentText: a.string().authorization(fieldNoTech),
+      contactConsentPolicyVersion: a.string().authorization(fieldNoTech),
       convertedAt: a.datetime().authorization(fieldNoTech),
       // GL-02 lead lifecycle. The pipeline STAGE is never stored or manually set
       // (a status employees must remember to update goes stale); it is DERIVED
@@ -346,18 +352,25 @@ export const schema = a.schema({
       // lastTouchedAt: most-recent real touch (distinct from createdAt=arrival,
       //   convertedAt=won). Set by every logged LeadActivity.
       lastTouchedAt: a.datetime().authorization(fieldNoTech),
-      // bookingLinkSentAt: the booking link was actually sent (→ Booking-sent
-      //   stage). Distinct from bookingLinkToken, which is merely minted.
+      // Attempted is not reached. These facts keep the board from labeling a
+      // no-answer/voicemail/provider acceptance as customer contact.
+      lastAttemptedAt: a.datetime().authorization(fieldNoTech),
+      lastReachedAt: a.datetime().authorization(fieldNoTech),
+      qualificationStatus: a.string().authorization(fieldNoTech),
+      // Legacy provider-acceptance timestamp. It is intentionally ignored by
+      // the derived stage; provider acceptance is not customer delivery.
       bookingLinkSentAt: a.datetime().authorization(fieldNoTech),
+      bookingLinkDeliveredAt: a.datetime().authorization(fieldNoTech),
       // The assigned lead owner (optional; unassigned = the SALES team queue).
       // Stamped server-side from the caller's identity, never from the request.
       leadOwnerSub: a.string().authorization(fieldNoTech),
       leadOwnerEmail: a.string().authorization(fieldNoTech),
-      // An optional explicit next step + due time the office committed to. When
-      // unset, the due time is DERIVED from the stage SLA (leadStage.ts) — so the
-      // system always has a next action without anyone having to type one.
+      leadOwnerTeam: a.string().authorization(fieldNoTech),
+      // Every controlled mutation persists the obligation it created and its
+      // idempotency key. Legacy missing obligations are shown due-now.
       nextAction: a.string().authorization(fieldNoTech),
       nextActionAt: a.datetime().authorization(fieldNoTech),
+      leadMutationId: a.string().authorization(fieldNoTech),
       // Lost: a controlled reason code (validated in the Lambda, not an enum, per
       // the CustomerLifecycleEvent/StaffAccessEvent precedent) + when.
       lostReason: a.string().authorization(fieldNoTech),
@@ -367,6 +380,7 @@ export const schema = a.schema({
       doNotContact: a.boolean().authorization(fieldNoTech),
       doNotContactAt: a.datetime().authorization(fieldNoTech),
       doNotContactBy: a.string().authorization(fieldNoTech),
+      conversionReviewBookingId: a.string().authorization(fieldNoTech),
       notes: a.string().authorization(fieldNoTech),
       groupId: a.id(),
       group: a.belongsTo("CustomerGroup", "groupId"),
@@ -408,13 +422,15 @@ export const schema = a.schema({
     // setCustomerGroup (accessGroups + Cognito), the booking funnel and billing
     // Lambdas (Stripe ids, paid state). The office keeps its safe edits —
     // contact name, email, phone, address, notes — through updateCustomerContact,
-    // which can touch only those fields. create stays so a lead can be added.
+    // which can touch only those fields. Browser create is also closed: every
+    // staff/UI/API lead must use createLead, while IAM conversion functions keep
+    // their backend-only model access.
     // GL-13 row-scoping: TECH holds no model read. Knowing a customer id must
     // not reveal a customer a technician has no assignment for. A technician
     // sees a customer only through the scoped technicianDay/technicianJob
     // queries — and then only the visit fields (the field-level @auth above).
     .authorization((allow) => [
-      allow.groups(["OWNER", "OFFICE"]).to(["create", "read"]),
+      allow.groups(["OWNER", "OFFICE"]).to(["read"]),
       allow.groupsDefinedIn("accessGroups").to(["read"]),
     ]),
 
@@ -764,6 +780,41 @@ export const schema = a.schema({
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE", "FINANCE"]).to(["read"]),
     ]),
+
+  /** Per-identity intake mutex. Conditional create serializes two concurrent
+   * submissions whose normalized identity would otherwise both observe no
+   * duplicate and create two ordinary leads. */
+  LeadIntakeClaim: a
+    .model({
+      requestedAt: a.datetime(),
+      leaseUntil: a.datetime(),
+      holder: a.string(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
+
+  /** Per-lead mutation mutex. All touch/disposition/owner writes use this one
+   * customer-keyed claim so concurrent state transitions cannot overwrite the
+   * next obligation chosen by the winner. */
+  LeadLifecycleClaim: a
+    .model({
+      mutationId: a.string(),
+      requestedAt: a.datetime(),
+      leaseUntil: a.datetime(),
+      holder: a.string(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
+
+  /** Fifteen-minute lead sweep heartbeat. A partial run never stamps complete;
+   * the next run and the invocation alarm can therefore distinguish healthy,
+   * partial, and missed sweeps. */
+  LeadSweepState: a
+    .model({
+      lastStartedAt: a.datetime(),
+      lastCompletedAt: a.datetime(),
+      scanned: a.integer(),
+      failed: a.integer(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
 
   /**
    * GL-09 — the durable customer lifecycle command (id = the caller's
@@ -2024,11 +2075,28 @@ export const schema = a.schema({
       outcome: a.string().required(),
       note: a.string(),
       occurredAt: a.datetime().required(),
+      mutationId: a.string(),
     })
     .secondaryIndexes((index) => [index("customerId").sortKeys(["occurredAt"])])
     .authorization((allow) => [
       allow.groups(["OWNER", "OFFICE"]).to(["read"]),
     ]),
+
+  /** Immutable evidence for a suppression/DNC release. Written before the
+   * release and readable by owners; no browser update/delete route exists. */
+  ConsentAudit: a
+    .model({
+      subjectKey: a.string().required(),
+      action: a.string().required(),
+      channel: a.string().required(),
+      reasonCode: a.string().required(),
+      evidence: a.string().required(),
+      actorSub: a.string(),
+      actorEmail: a.string().required(),
+      occurredAt: a.datetime().required(),
+    })
+    .secondaryIndexes((index) => [index("subjectKey").sortKeys(["occurredAt"])])
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   CustomerLifecycleEvent: a
     .model({
@@ -2438,6 +2506,11 @@ export const schema = a.schema({
       leadSource: a.string(),
       notes: a.string(),
       force: a.boolean(),
+      idempotencyKey: a.string(),
+      contactConsentChannels: a.string().array(),
+      contactConsentSource: a.string(),
+      contactConsentText: a.string(),
+      contactConsentPolicyVersion: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2460,6 +2533,7 @@ export const schema = a.schema({
       note: a.string(),
       nextAction: a.string(),
       nextActionAt: a.datetime(),
+      idempotencyKey: a.string().required(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2480,6 +2554,7 @@ export const schema = a.schema({
       disposition: a.string().required(),
       reasonCode: a.string(),
       note: a.string(),
+      idempotencyKey: a.string().required(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2496,6 +2571,7 @@ export const schema = a.schema({
       customerId: a.string().required(),
       toSub: a.string(),
       toEmail: a.string(),
+      idempotencyKey: a.string().required(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -2523,10 +2599,11 @@ export const schema = a.schema({
     .mutation()
     .arguments({
       email: a.string().required(),
-      note: a.string().required(),
+      reasonCode: a.string().required(),
+      evidence: a.string().required(),
     })
     .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
 
   /**
@@ -3579,6 +3656,7 @@ export const schema = a.schema({
       customerId: a.string().required(),
       kind: a.string().required(),
       note: a.string(),
+      idempotencyKey: a.string().required(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
@@ -3599,6 +3677,7 @@ export const schema = a.schema({
   // GL-03: the magic-link sender now records its sends in EmailLog through
   // the shared email contract.
   allow.resource(verifyChallenge),
+  allow.resource(leadSweep),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

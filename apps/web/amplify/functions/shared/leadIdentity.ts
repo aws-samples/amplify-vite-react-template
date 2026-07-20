@@ -5,7 +5,9 @@
  * duplicate detection at exactly ONE point (bookingFinalize, post-payment). The
  * gate requires normalization + a duplicate lookup BEFORE creation on every lead
  * path, and the system must never silently merge people — so a match returns
- * candidates for a human decision, it does not auto-merge.
+ * candidates for a human decision, it does not auto-merge. A read failure is
+ * deliberately thrown: "could not check" is not evidence that no duplicate
+ * exists.
  */
 
 import { dataClient } from "./dataClient";
@@ -64,8 +66,9 @@ type CustomerRow = {
  * Find existing customers a new lead might duplicate. Matches on exact
  * normalized email OR exact normalized phone OR (normalized name AND same zip) —
  * never on address alone, since two people share a household. One paginated scan
- * (no email/phone index yet; fine at BuzzKill's volume). Never throws into the
- * caller: a lookup outage returns no candidates rather than blocking the lead.
+ * (no email/phone index yet; fine at BuzzKill's volume). The collection is
+ * paged to completion. Any page error fails closed rather than authorizing an
+ * ordinary create with an unknown duplicate state.
  */
 export async function findLeadDuplicates(input: {
   email?: string | null;
@@ -80,15 +83,17 @@ export async function findLeadDuplicates(input: {
   const zip = normalizeZip(input.zip);
   if (!email && !phone && !(name && zip)) return [];
 
-  try {
-    const client = await dataClient();
-    const out: LeadCandidate[] = [];
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Customer.list({
-        limit: 200,
-        nextToken: token,
-      });
+  const client = await dataClient();
+  const out: LeadCandidate[] = [];
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.Customer.list({
+      limit: 200,
+      nextToken: token,
+    });
+    if (page.errors?.length) {
+      throw new Error(page.errors.map((error) => error.message).join("; "));
+    }
       for (const raw of (page.data ?? []) as CustomerRow[]) {
         if (input.excludeId && raw.id === input.excludeId) continue;
         const cEmail = normalizeEmail(raw.email);
@@ -113,11 +118,7 @@ export async function findLeadDuplicates(input: {
           });
         }
       }
-      token = page.nextToken;
-    } while (token);
-    return out;
-  } catch (err) {
-    console.error("findLeadDuplicates failed", err);
-    return [];
-  }
+    token = page.nextToken;
+  } while (token);
+  return out;
 }

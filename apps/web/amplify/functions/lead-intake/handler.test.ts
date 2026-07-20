@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CALL_CONSENT_TEXT,
+  CALL_CONSENT_TEXT_VERSION,
+} from "../shared/consentText";
 
 /**
  * Lead intake has exactly two outcomes: the lead is durably in the CRM, or the
@@ -30,6 +34,24 @@ const fakeDataClient = {
 
 vi.mock("../shared/dataClient", () => ({
   dataClient: async () => fakeDataClient,
+}));
+
+vi.mock("../shared/leadLifecycle", () => ({
+  createLead: async (input: Record<string, unknown>) => {
+    created.push({
+      ...input,
+      status: "LEAD",
+      leadNotes: input.notes,
+      contactConsent: (input.contactConsentChannels as string[] | undefined)?.includes("CALL") ?? false,
+      contactConsentAt: (input.contactConsentChannels as string[] | undefined)?.length
+        ? new Date().toISOString()
+        : undefined,
+    });
+    if (!createResult.data) {
+      throw new Error(createResult.errors?.map((e) => e.message).join("; ") || "create failed");
+    }
+    return { decision: "CREATED", id: (createResult.data as { id: string }).id };
+  },
 }));
 
 // R80: both lead-intake alerts (new-lead, write-failed) route to sales@ via
@@ -136,16 +158,26 @@ describe("lead-intake", () => {
   });
 
   it("records consent when granted", async () => {
-    await post({ ...lpCallPayload, consentToContact: true });
+    await post({
+      ...lpCallPayload,
+      consentToContact: true,
+      // A caller cannot replace the evidence text retained by the server.
+      consentText: "I agree to texts forever",
+    });
 
     expect(created[0].contactConsent).toBe(true);
     expect(created[0].contactConsentAt).toBeTruthy();
+    expect(created[0].contactConsentText).toBe(CALL_CONSENT_TEXT);
+    expect(created[0].contactConsentPolicyVersion).toBe(
+      CALL_CONSENT_TEXT_VERSION
+    );
   });
 
   it("marks a lead email-only when consent was not given", async () => {
     await post({ first: "Sam", email: "sam@example.com", consentToContact: false });
 
     expect(created[0].contactConsent).toBe(false);
+    expect(created[0].contactConsentChannels).toEqual(["EMAIL"]);
     expect(String(created[0].leadNotes)).toContain("do not call or text");
   });
 

@@ -130,6 +130,13 @@ describe("GL-13 technician least-privilege (SDL @auth)", () => {
     expect(fieldText("Customer", "displayName")).toContain("displayName");
   });
 
+  it("raw staff Customer.create is denied; lead intake is named-action only", () => {
+    const header = modelHeader("Customer");
+    expect(header).toContain('groups: ["OWNER", "OFFICE"]');
+    expect(header).toContain("operations: [read]");
+    expect(header).not.toContain("operations: [create, read]");
+  });
+
   it("grants TECH no model read on any tech-served model (row-scoping)", () => {
     // A known customer/job/route/report/technician id must not reveal another
     // worker's rows through the model API. TECH reads only via the scoped

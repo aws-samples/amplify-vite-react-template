@@ -1,8 +1,10 @@
 import type { Handler } from "aws-lambda";
-import { dataClient } from "../shared/dataClient";
 import { notifyLeads } from "../shared/email";
-import { findLeadDuplicates } from "../shared/leadIdentity";
-import { openOwnedWork } from "../shared/ownedWork";
+import { createLead } from "../shared/leadLifecycle";
+import {
+  CALL_CONSENT_TEXT,
+  CALL_CONSENT_TEXT_VERSION,
+} from "../shared/consentText";
 
 /**
  * Lead intake for every public form on the marketing site.
@@ -25,6 +27,8 @@ type Attribution = {
 };
 
 type LeadInput = {
+  /** Stable browser submission identity; retries reuse it. */
+  idempotencyKey?: string;
   propertyType?: "Association" | "Residential" | "Specialty";
   first?: string;
   last?: string;
@@ -135,7 +139,9 @@ function buildLeadNotes(input: LeadInput, dropped: string[]): string {
 
   if (input.consentToContact) {
     add("Consent", `granted at ${new Date().toISOString()}`);
-    add("Consent wording", input.consentText);
+    // The server-owned GL-03 wording is authoritative. Do not trust a caller
+    // to supply the evidence text that will later authorize outreach.
+    add("Consent wording", CALL_CONSENT_TEXT);
   } else {
     lines.push("Consent: NOT granted — do not call or text; reply by email only");
   }
@@ -224,23 +230,46 @@ export const handler: Handler = async (event) => {
     serviceCity: input.city?.trim() || undefined,
     serviceState: input.state?.trim() || undefined,
     serviceZip: input.zip?.trim() || undefined,
-    status: "LEAD" as const,
     leadSource: sourceLabel(input),
     leadNotes: buildLeadNotes(input, dropped),
-    contactConsent: input.consentToContact === true,
-    contactConsentAt: input.consentToContact === true ? new Date().toISOString() : undefined,
   };
 
   let leadId: string | undefined;
   let writeError: string | undefined;
   try {
-    const client = await dataClient();
-    const { data, errors } = await client.models.Customer.create(record);
-    if (errors?.length) {
-      writeError = errors.map((e) => e.message).join("; ");
-    } else {
-      leadId = data?.id;
-    }
+    const result = await createLead(
+      {
+        displayName: record.displayName,
+        contactName: record.contactName,
+        email: record.email,
+        phone: record.phone,
+        serviceStreet: record.serviceStreet,
+        serviceCity: record.serviceCity,
+        serviceState: record.serviceState,
+        serviceZip: record.serviceZip,
+        leadSource: record.leadSource,
+        notes: record.leadNotes,
+        // Public intake always retains the submission as a separate record and
+        // opens the controlled duplicate decision. The visitor never chooses a
+        // merge on behalf of the Office.
+        force: true,
+        idempotencyKey: input.idempotencyKey,
+        contactConsentChannels: [
+          ...(record.email ? ["EMAIL"] : []),
+          ...(input.consentToContact ? ["CALL"] : []),
+        ],
+        contactConsentSource: input.formId ?? "website",
+        contactConsentText: input.consentToContact
+          ? CALL_CONSENT_TEXT
+          : "Customer supplied an email address in a direct service inquiry and requested an email response; no call or text permission was granted.",
+        contactConsentPolicyVersion: input.consentToContact
+          ? CALL_CONSENT_TEXT_VERSION
+          : "website-email-response-2026-07-20.1",
+      },
+      { sub: null, email: null }
+    );
+    if (result.decision === "CREATED") leadId = result.id;
+    else writeError = "The duplicate identity decision did not finish.";
   } catch (err) {
     writeError = err instanceof Error ? err.message : String(err);
   }
@@ -267,35 +296,6 @@ export const handler: Handler = async (event) => {
     return jsonResponse(502, {
       error: `We couldn't submit your request. Please call us at ${SUPPORT_PHONE} and we'll take care of it.`,
     });
-  }
-
-  // GL-02: detect a possible duplicate at INTAKE, not only after payment. Never
-  // drop a website lead — it is already created — but open DUPLICATE_LEAD so a
-  // human reconciles the two before both get worked. The system never merges.
-  try {
-    const dupes = await findLeadDuplicates({
-      email: input.email,
-      phone: input.phone,
-      name: record.displayName,
-      zip: record.serviceZip,
-      excludeId: leadId,
-    });
-    if (dupes.length > 0) {
-      await openOwnedWork({
-        kind: "DUPLICATE_LEAD",
-        dedupeKey: leadId,
-        title: `Possible duplicate website lead: ${record.displayName}`,
-        detail: `A new website lead for ${record.displayName} matches ${dupes.length} existing record${dupes.length === 1 ? "" : "s"} (${dupes.map((d) => d.displayName).join(", ")}). Confirm whether it's the same person before working both.`,
-        customerId: leadId,
-        relatedId: leadId,
-        sourceUrl: `/customers/${leadId}`,
-        resolutionAction:
-          "Compare the new lead to the match. If they are the same person, keep one record and note the decision; if distinct, confirm and close.",
-        ownerTeam: "SALES",
-      });
-    }
-  } catch (err) {
-    console.error("lead-intake: duplicate check failed", err);
   }
 
   await notifyLeads({

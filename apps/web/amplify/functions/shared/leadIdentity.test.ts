@@ -2,12 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = Record<string, unknown> & { id: string };
 let customers: Row[];
+let paginate: boolean;
+let listFails: boolean;
 
 vi.mock("./dataClient", () => ({
   dataClient: async () => ({
     models: {
       Customer: {
-        list: async () => ({ data: customers, nextToken: null }),
+        list: async ({ nextToken }: { nextToken?: string | null }) =>
+          listFails
+            ? { data: [], nextToken: null, errors: [{ message: "read unavailable" }] }
+            : paginate && !nextToken
+              ? { data: customers.slice(0, 1), nextToken: "next" }
+              : { data: paginate ? customers.slice(1) : customers, nextToken: null },
       },
     },
   }),
@@ -23,6 +30,8 @@ const {
 
 beforeEach(() => {
   customers = [];
+  paginate = false;
+  listFails = false;
 });
 
 describe("normalizers (GL-02)", () => {
@@ -86,5 +95,21 @@ describe("findLeadDuplicates", () => {
     expect(
       await findLeadDuplicates({ email: "dana@example.com", excludeId: "c1" })
     ).toHaveLength(0);
+  });
+
+  it("pages the complete customer collection", async () => {
+    paginate = true;
+    customers = [
+      { id: "c1", displayName: "Other", email: "other@example.com", status: "LEAD" },
+      { id: "c2", displayName: "Dana", email: "dana@example.com", status: "LEAD" },
+    ];
+    await expect(findLeadDuplicates({ email: "dana@example.com" }))
+      .resolves.toMatchObject([{ id: "c2" }]);
+  });
+
+  it("fails closed when any duplicate page is unreadable", async () => {
+    listFails = true;
+    await expect(findLeadDuplicates({ email: "dana@example.com" }))
+      .rejects.toThrow(/read unavailable/i);
   });
 });

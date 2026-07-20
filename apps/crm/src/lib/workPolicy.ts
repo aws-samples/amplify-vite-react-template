@@ -213,6 +213,18 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  LEAD_LIFECYCLE_RECOVERY: {
+    label: "Lead lifecycle recovery",
+    severity: "HIGH",
+    customerImpact:
+      "A lead intake, action, consent decision, conversion identity decision, or sweep did not finish safely.",
+    verified: [],
+    manualReasons: [
+      { code: "RERUN_COMPLETE", label: "Re-ran and verified the safe action" },
+      { code: "IDENTITY_RESOLVED", label: "Resolved the identity decision" },
+      OTHER,
+    ],
+  },
   LIFECYCLE_RECOVERY: {
     label: "Lifecycle recovery",
     severity: "CRITICAL",

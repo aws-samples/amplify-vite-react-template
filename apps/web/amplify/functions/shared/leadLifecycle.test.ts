@@ -3,14 +3,28 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type Row = Record<string, unknown> & { id: string };
 let customers: Map<string, Row>;
 let activities: Record<string, unknown>[];
+let activityRows: Map<string, Row>;
 let createdSeq: number;
+let failActivityCreate: boolean;
+let customerUpdateCount: number;
+let workItems: Map<string, Row>;
 
 const { findLeadDuplicates } = vi.hoisted(() => ({
   findLeadDuplicates: vi.fn(async () => [] as unknown[]),
 }));
 const { openOwnedWork, openMissingContactWork, resolveOwnedWork } = vi.hoisted(
   () => ({
-    openOwnedWork: vi.fn(async () => "work-1"),
+    openOwnedWork: vi.fn(async (input: Record<string, unknown>) => {
+      const id = `${input.kind}:${input.dedupeKey}`;
+      const row = {
+        id,
+        status: "OPEN",
+        title: input.title,
+        dueAt: input.dueAt,
+      } as Row;
+      workItems.set(id, row);
+      return id;
+    }),
     openMissingContactWork: vi.fn(async () => "work-2"),
     resolveOwnedWork: vi.fn(async () => true),
   })
@@ -21,18 +35,19 @@ vi.mock("./dataClient", () => ({
     models: {
       Customer: {
         create: async (input: Record<string, unknown>) => {
-          const id = `lead-${++createdSeq}`;
+          const id = String(input.id ?? `lead-${++createdSeq}`);
           const row = { ...input, id };
           customers.set(id, row);
           return { data: row };
         },
         update: async (patch: Row) => {
+          customerUpdateCount++;
           const row = customers.get(patch.id) ?? { id: patch.id };
           Object.assign(row, patch);
           customers.set(patch.id, row);
           return { data: row };
         },
-        get: async ({ id }: { id: string }) => ({ data: customers.get(id) ?? null }),
+        get: async ({ id }: { id: string }) => ({ data: customers.get(id) ?? null, errors: [] }),
         listCustomerByStatusAndDisplayName: async ({
           status,
         }: {
@@ -44,8 +59,28 @@ vi.mock("./dataClient", () => ({
       },
       LeadActivity: {
         create: async (input: Record<string, unknown>) => {
+          if (failActivityCreate) {
+            failActivityCreate = false;
+            return {
+              data: null,
+              errors: [{ message: "activity write failed" }],
+            };
+          }
           activities.push(input);
-          return { data: input };
+          const row = input as Row;
+          activityRows.set(row.id, row);
+          return { data: row };
+        },
+        get: async ({ id }: { id: string }) => ({ data: activityRows.get(id) ?? null, errors: [] }),
+      },
+      SuppressedEmail: { get: async () => ({ data: null, errors: [] }) },
+      ConsentAudit: { create: async (input: Row) => ({ data: input }) },
+      WorkItem: {
+        get: async ({ id }: { id: string }) => ({ data: workItems.get(id) ?? null }),
+        update: async (input: Row) => {
+          const row = { ...(workItems.get(input.id) ?? { id: input.id }), ...input } as Row;
+          workItems.set(input.id, row);
+          return { data: row };
         },
       },
     },
@@ -61,6 +96,26 @@ vi.mock("./ownedWork", () => ({
   openOwnedWork,
   openMissingContactWork,
   resolveOwnedWork,
+  workItemId: (kind: string, key: string) => `${kind}:${key}`,
+  defaultWorkOwner: () => "sales@example.com",
+}));
+
+vi.mock("./businessDays", () => ({
+  oneBusinessDayDueAt: async () => new Date("2026-07-15T16:00:00Z"),
+}));
+
+vi.mock("./leadClaim", () => ({
+  acquireLeadIntakeClaim: async () => ({ won: true, holder: "holder" }),
+  releaseLeadIntakeClaim: async () => undefined,
+  acquireLeadLifecycleClaim: async () => ({ won: true, holder: "holder" }),
+  releaseLeadLifecycleClaim: async () => undefined,
+}));
+
+vi.mock("./atomicLock", () => ({
+  casGuardedUpdate: async (model: string, id: string, sets: Record<string, unknown>) => {
+    if (model === "Customer") Object.assign(customers.get(id)!, sets);
+    return { ok: true, prior: {} };
+  },
 }));
 
 const {
@@ -76,7 +131,11 @@ const actor = { sub: "sub-1", email: "olga@example.com" };
 beforeEach(() => {
   customers = new Map();
   activities = [];
+  activityRows = new Map();
   createdSeq = 0;
+  failActivityCreate = false;
+  customerUpdateCount = 0;
+  workItems = new Map();
   findLeadDuplicates.mockClear();
   findLeadDuplicates.mockResolvedValue([]);
   openOwnedWork.mockClear();
@@ -117,7 +176,7 @@ describe("createLead — dedup gate (GL-02 R3)", () => {
       actor
     );
     expect(res.decision).toBe("CREATED");
-    expect(findLeadDuplicates).not.toHaveBeenCalled(); // force skips the lookup
+    expect(findLeadDuplicates).toHaveBeenCalled();
     expect(openOwnedWork).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "DUPLICATE_LEAD" })
     );
@@ -128,11 +187,41 @@ describe("createLead — dedup gate (GL-02 R3)", () => {
     expect(res.decision).toBe("CREATED");
     expect(openMissingContactWork).toHaveBeenCalledOnce();
   });
+
+  it("a retry with the same intake id converges on one lead and one intake activity", async () => {
+    const input = {
+      displayName: "Retry Dana",
+      email: "retry@example.com",
+      idempotencyKey: "submission-1",
+    };
+    const first = await createLead(input, actor);
+    const retry = await createLead(input, actor);
+    expect(first).toEqual(retry);
+    expect(customers.size).toBe(1);
+    expect(activities.filter((row) => String(row.mutationId).includes("submission-1")))
+      .toHaveLength(1);
+  });
+
+  it("duplicate lookup failure fails closed and creates no ordinary lead", async () => {
+    findLeadDuplicates.mockRejectedValueOnce(new Error("duplicate page unreadable"));
+    await expect(
+      createLead({ displayName: "Dana", email: "dana@example.com" }, actor)
+    ).rejects.toThrow(/duplicate page unreadable/i);
+    expect(customers.size).toBe(0);
+    expect(openOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "LEAD_LIFECYCLE_RECOVERY" })
+    );
+  });
 });
 
 describe("logLeadTouch (GL-02 R6)", () => {
-  it("records the touch, bumps lastTouchedAt, and clears the follow-up", async () => {
-    customers.set("l1", { id: "l1", status: "LEAD" });
+  it("records an attempt without labeling the customer reached, then replaces the obligation", async () => {
+    customers.set("l1", {
+      id: "l1",
+      status: "LEAD",
+      displayName: "Dana",
+      contactConsentChannels: ["CALL"],
+    });
     await logLeadTouch(
       { customerId: "l1", channel: "CALL", outcome: "NO_ANSWER" },
       actor
@@ -142,8 +231,9 @@ describe("logLeadTouch (GL-02 R6)", () => {
       outcome: "NO_ANSWER",
       actorEmail: "olga@example.com",
     });
-    expect(customers.get("l1")?.lastTouchedAt).toBeTruthy();
-    expect(resolveOwnedWork).toHaveBeenCalledWith(
+    expect(customers.get("l1")?.lastAttemptedAt).toBeTruthy();
+    expect(customers.get("l1")?.lastReachedAt).toBeUndefined();
+    expect(openOwnedWork).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "LEAD_FOLLOWUP", dedupeKey: "l1" })
     );
   });
@@ -153,11 +243,81 @@ describe("logLeadTouch (GL-02 R6)", () => {
       logLeadTouch({ customerId: "l1", channel: "CALL", outcome: "WHATEVER" }, actor)
     ).rejects.toThrow(/what actually happened/i);
   });
+
+  it("does not advance lead state when the immutable activity write fails", async () => {
+    customers.set("l1", {
+      id: "l1",
+      status: "LEAD",
+      displayName: "Dana",
+      contactConsentChannels: ["CALL"],
+      nextAction: "Make the first contact attempt",
+      nextActionAt: "2026-07-15T16:00:00Z",
+    });
+    failActivityCreate = true;
+
+    await expect(
+      logLeadTouch(
+        { customerId: "l1", channel: "CALL", outcome: "NO_ANSWER" },
+        actor
+      )
+    ).rejects.toThrow(/activity write failed/i);
+
+    expect(customers.get("l1")).toMatchObject({
+      nextAction: "Make the first contact attempt",
+      nextActionAt: "2026-07-15T16:00:00Z",
+    });
+    expect(customers.get("l1")?.lastAttemptedAt).toBeUndefined();
+    expect(openOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "LEAD_LIFECYCLE_RECOVERY" })
+    );
+  });
+
+  it("a mutation retry adopts the already-confirmed state instead of moving its deadline", async () => {
+    customers.set("l1", {
+      id: "l1",
+      status: "LEAD",
+      displayName: "Dana",
+      contactConsentChannels: ["CALL"],
+    });
+    const action = {
+      customerId: "l1",
+      channel: "CALL",
+      outcome: "NO_ANSWER",
+      idempotencyKey: "same-touch",
+    };
+    const first = await logLeadTouch(action, actor);
+    const writesAfterFirst = customerUpdateCount;
+    const retry = await logLeadTouch(action, actor);
+
+    expect(retry).toEqual(first);
+    expect(customerUpdateCount).toBe(writesAfterFirst);
+    expect(activities).toHaveLength(1);
+  });
+
+  it("rejects channel/outcome combinations that would misstate the event", async () => {
+    await expect(
+      logLeadTouch(
+        { customerId: "l1", channel: "CALL", outcome: "SENT" },
+        actor
+      )
+    ).rejects.toThrow(/selected contact channel/i);
+  });
+
+  it("fails closed when call consent is absent", async () => {
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "Dana" });
+    await expect(
+      logLeadTouch(
+        { customerId: "l1", channel: "CALL", outcome: "NO_ANSWER" },
+        actor
+      )
+    ).rejects.toThrow(/permission is not retained/i);
+    expect(activities).toHaveLength(0);
+  });
 });
 
 describe("setLeadDisposition (GL-02 R5)", () => {
   it("marks lost only with a controlled reason, and closes the follow-up", async () => {
-    customers.set("l1", { id: "l1", status: "LEAD" });
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "Dana" });
     await expect(
       setLeadDisposition({ customerId: "l1", disposition: "LOST" }, actor)
     ).rejects.toThrow(/controlled reason/i);
@@ -173,12 +333,33 @@ describe("setLeadDisposition (GL-02 R5)", () => {
   });
 
   it("do-not-contact records who decided", async () => {
-    customers.set("l1", { id: "l1", status: "LEAD" });
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "Dana" });
     await setLeadDisposition({ customerId: "l1", disposition: "DNC" }, actor);
     expect(customers.get("l1")).toMatchObject({
       doNotContact: true,
       doNotContactBy: "olga@example.com",
     });
+  });
+
+  it("only an owner can clear DNC, with controlled evidence", async () => {
+    customers.set("l1", {
+      id: "l1",
+      status: "LEAD",
+      displayName: "Dana",
+      doNotContact: true,
+    });
+    await expect(
+      setLeadDisposition(
+        {
+          customerId: "l1",
+          disposition: "CLEAR",
+          reasonCode: "CUSTOMER_RECONSENTED",
+          note: "Recorded inbound call on 2026-07-19",
+        },
+        actor
+      )
+    ).rejects.toThrow(/owner role required/i);
+    expect(customers.get("l1")?.doNotContact).toBe(true);
   });
 });
 
@@ -203,7 +384,7 @@ describe("reassignLeadsForSub (GL-14 R6)", () => {
 
     expect(res).toMatchObject({ reassigned: 1, failed: 0 });
     // The leaver's open lead is unassigned (→ Sales team queue).
-    expect(customers.get("l1")).toMatchObject({ leadOwnerSub: null, leadOwnerEmail: null });
+    expect(customers.get("l1")).toMatchObject({ leadOwnerSub: null, leadOwnerEmail: "sales@example.com" });
     // A peer's lead and a converted (ACTIVE) record are untouched.
     expect(customers.get("l2")).toMatchObject({ leadOwnerSub: "someone-else" });
     expect(customers.get("l3")).toMatchObject({ leadOwnerSub: "leaver" });

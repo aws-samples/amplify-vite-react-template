@@ -49,6 +49,7 @@ import { bookingPublic } from "./functions/booking-public/resource";
 import { pricingRefresh } from "./functions/pricing-refresh/resource";
 import { sesEvents } from "./functions/ses-events/resource";
 import { opsAlerts } from "./functions/ops-alerts/resource";
+import { leadSweep } from "./functions/lead-sweep/resource";
 
 const backend = defineBackend({
   auth,
@@ -67,6 +68,7 @@ const backend = defineBackend({
   pricingRefresh,
   sesEvents,
   opsAlerts,
+  leadSweep,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
@@ -116,6 +118,9 @@ const LOCK_MODELS = [
   "OwnerChangeSerial",
   "CustomerLifecycleClaim",
   "CustomerLifecycleCommand",
+  "LeadIntakeClaim",
+  "LeadLifecycleClaim",
+  "Customer",
   "PlanCancellationClaim",
   "VisitChangeClaim",
   "BookingFinalization",
@@ -188,6 +193,8 @@ for (const fn of [
   backend.bookingPublic,
   // GL-16: the pricing drain lease, budget counters, and research-row leases.
   backend.pricingRefresh,
+  backend.leadIntake,
+  backend.leadSweep,
 ]) {
   fn.resources.lambda.addToRolePolicy(lockTablePolicy);
   fn.resources.lambda.addToRolePolicy(dataApiIdParamPolicy);
@@ -612,6 +619,7 @@ const monitored: [string, { resources: { lambda: import("aws-cdk-lib/aws-lambda"
   ["crm-admin", backend.crmAdmin],
   ["crm-pricing", backend.crmPricing],
   ["lead-intake", backend.leadIntake],
+  ["lead-sweep", backend.leadSweep],
   ["ses-events", backend.sesEvents],
 ];
 for (const [name, fn] of monitored) {
@@ -658,6 +666,24 @@ backend.dailyReminders.resources.lambda
       alarmName: `buzzkill-${branch}-daily-reminders-did-not-run`,
       alarmDescription:
         "The daily operations run (reminders, dunning, reconciliation, sweeps) did not fire in the last 24 hours. Every obligation it watches is going unwatched.",
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.BREACHING,
+    }
+  ),
+  alarmAction
+);
+wireAlarm(
+backend.leadSweep.resources.lambda
+  .metricInvocations({ period: Duration.minutes(30), statistic: "Sum" })
+  .createAlarm(
+    backend.leadSweep.resources.lambda.stack,
+    "lead-sweep-did-not-run",
+    {
+      alarmName: `buzzkill-${branch}-lead-sweep-did-not-run`,
+      alarmDescription:
+        "The fifteen-minute lead lifecycle sweep did not run in the last 30 minutes; lead deadlines may not be escalating on time.",
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
