@@ -6,17 +6,14 @@ duty — there are no critical/high/routine response classes and no
 permanently named primary. Impact facts change the CONTAINMENT steps below,
 never the response class or deadline.
 
-**The levers (CRM → Dashboard → Emergency controls, OWNER-only, reason
-required, announced to the office):**
-
-- **Pause new online bookings** — the website funnel refuses new quotes and
-  payments with an honest message; status polls, cancellations, and
-  in-flight payment resolution keep working.
-- **Pause new dispatch** — no new visit can be scheduled or assigned;
-  cancels and unassigns still work so containment can pull work back.
-- **Pause billing initiation** — no new charge, dunning retry, or
-  subscription start; refunds, voids, and offline-payment records still
-  work so money can be given back during containment.
+**The levers:** the in-app emergency pause switchboard (Dashboard →
+Emergency controls) was REMOVED by owner decision on 20 Jul 2026 — there is
+no self-serve pause in the CRM. Where a playbook step below says "pause new
+online bookings", "pause new dispatch", or "pause billing initiation", that
+now means: **escalate to engineering immediately** to stop that path at the
+source (disable the endpoint/cron in the AWS console or ship the stopping
+change), with the reason recorded on the owned work item. Pricing keeps its
+own in-app lever: Market Rates → Catalog rollback (OWNER-only).
 
 **Evidence:** never delete anything. Every business table has point-in-time
 recovery and the documents bucket is versioned; CloudWatch logs and the

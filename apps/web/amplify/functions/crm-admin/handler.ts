@@ -15,7 +15,6 @@ import {
   claimGroupChange,
   executeGroupChange,
 } from "../shared/groupChange";
-import { writeOpsPause } from "../shared/opsPause";
 import { casGuardedUpdate } from "../shared/atomicLock";
 import { jobScheduleGuards } from "../shared/capacity";
 import { assertTechnicianCanBeSaved } from "../shared/compliance";
@@ -216,23 +215,6 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         }
         throw err;
       }
-    }
-    case "setOpsPause": {
-      // GL-22: OWNER-only at the schema; the identity's email is the audit.
-      const args = event.arguments as {
-        bookingPaused?: boolean | null;
-        dispatchPaused?: boolean | null;
-        billingPaused?: boolean | null;
-        reason?: string;
-      };
-      if (!args.reason?.trim()) throw new Error("A reason is required");
-      return writeOpsPause({
-        bookingPaused: args.bookingPaused,
-        dispatchPaused: args.dispatchPaused,
-        billingPaused: args.billingPaused,
-        reason: args.reason.trim(),
-        actorEmail: callerEmail(event.identity),
-      });
     }
     case "setCustomerGroup":
       return setCustomerGroup(event.arguments as SetCustomerGroupArgs, {

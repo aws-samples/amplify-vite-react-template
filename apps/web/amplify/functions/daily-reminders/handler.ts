@@ -53,7 +53,6 @@ import {
 import { finalizeBooking } from "../shared/bookingFinalize";
 import { recordFunnelPaymentFailure } from "../shared/bookingPaymentFailure";
 import { stampProcessingNextCheck } from "../shared/bookingPayment";
-import { readOpsPause } from "../shared/opsPause";
 import {
   computeMoneyMismatches,
   computePlanMismatches,
@@ -1346,13 +1345,6 @@ async function remind(date: string, phrasing: string, staffingGate: boolean) {
  * suspension (shared/recovery clearPlanDelinquency, via the webhook).
  */
 async function runDunningRetries() {
-  // GL-22: while billing is paused by an incident owner, no charge is
-  // INITIATED — the retries hold (visibly) and resume when the pause lifts.
-  const pause = await readOpsPause();
-  if (pause.billingPaused) {
-    console.log("Dunning: billing is paused — no retries initiated");
-    return { dunningSkipped: "billing-paused" };
-  }
   const client = await dataClient();
   const nowIso = new Date().toISOString();
   const failed = await allInvoicesByStatus("FAILED");

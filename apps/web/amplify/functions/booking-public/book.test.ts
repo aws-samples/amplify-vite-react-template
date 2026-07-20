@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _setLockStoreForTests, memoryLockStore } from "../shared/atomicLock";
-import { _resetOpsPauseMemoForTests } from "../shared/opsPause";
 import { capacityFixtureModels } from "../shared/capacityTestFixture";
 import {
   BOOKING_TERMS_TEXT,
@@ -28,7 +27,6 @@ const bookingRows = new Map<string, Record<string, unknown>>();
 let failCheckoutPersistWrites = false;
 let stopsOnDay: Stop[];
 let jobRow: Record<string, unknown> | null = null;
-let opsPauseRow: Record<string, unknown> | null = null;
 const bookingUpdates: Record<string, unknown>[] = [];
 
 const capacityFixture = capacityFixtureModels();
@@ -61,11 +59,6 @@ const fakeDataClient = {
       // re-payable pre-service failure from a post-service balance.
       get: async ({ id }: { id: string }) => ({
         data: jobRow && jobRow.id === id ? jobRow : null,
-      }),
-    },
-    OpsControl: {
-      get: async ({ id }: { id: string }) => ({
-        data: opsPauseRow && id === "pause" ? opsPauseRow : null,
       }),
     },
     Customer: {
@@ -235,8 +228,6 @@ beforeEach(() => {
   intentCancel.mockImplementation(defaultIntentCancelImpl);
   customerCreate.mockClear();
   jobRow = null;
-  opsPauseRow = null;
-  _resetOpsPauseMemoForTests();
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   process.env.STRIPE_SECRET_KEY = "sk_test_x";
   process.env.GOOGLE_ROUTES_API_KEY = "test-routes-key";
@@ -503,18 +494,6 @@ describe("GL-06 — /book retrieves the durable payment state, never a dead-end 
     // not dead-end the retry as "Quote not found".
     expect(res.status).not.toBe(404);
     expect(String(res.body.error ?? "")).not.toContain("Quote not found");
-  });
-});
-
-describe("GL-22 — the booking pause refuses new commitments honestly", () => {
-  it("a paused funnel refuses /book with the incident message, not an error page", async () => {
-    opsPauseRow = { id: "pause", bookingPaused: true, reason: "incident" };
-
-    const res = await bookIt();
-
-    expect(res.status).toBe(503);
-    expect(res.body.error).toContain("temporarily paused");
-    expect(intentCreate).not.toHaveBeenCalled();
   });
 });
 

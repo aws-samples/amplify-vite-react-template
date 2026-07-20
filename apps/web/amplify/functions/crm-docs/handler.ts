@@ -105,7 +105,6 @@ import {
   entryForLabel,
   SERVICE_CATALOG_VERSION,
 } from "../shared/serviceCatalog";
-import { readOpsPause } from "../shared/opsPause";
 import {
   defaultWorkOwner,
   openMissingContactWork,
@@ -2095,13 +2094,6 @@ async function createOfficeJob(args: Args) {
   // first place. A date-less job (scheduled later) is allowed through;
   // updateJobSchedule enforces the full gate before it can reach a technician.
   if (args.scheduledDate) {
-    // GL-22: a dispatch pause also stops NEW dated visits from being minted.
-    const pause = await readOpsPause();
-    if (pause.dispatchPaused) {
-      throw new Error(
-        `Dispatch is paused by an incident owner${pause.reason ? ` (${pause.reason})` : ""} — create the job without a date, or wait for the pause to lift.`
-      );
-    }
     assertDispatchFacts(customer, {
       propertyClass: (args as { propertyClass?: string | null }).propertyClass,
       serviceType,
@@ -2354,16 +2346,6 @@ async function updateJobSchedule(
   const { data: job } = await client.models.Job.get({ id: args.jobId! });
   if (!job) throw new Error(`Job ${args.jobId} not found`);
   const operation = args.operation?.trim().toUpperCase();
-  // GL-22: while dispatch is paused, NEW assignments are refused honestly.
-  // Cancels/unassigns still work — containment must be able to pull work.
-  if (operation === "ASSIGN") {
-    const pause = await readOpsPause();
-    if (pause.dispatchPaused) {
-      throw new Error(
-        `Dispatch is paused by an incident owner${pause.reason ? ` (${pause.reason})` : ""} — no new visit may be assigned until the pause is lifted from the Dashboard's emergency controls.`
-      );
-    }
-  }
   const reasonCode = assertScheduleReason(
     operation ?? "",
     (args as { reasonCode?: string | null }).reasonCode,

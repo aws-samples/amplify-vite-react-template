@@ -58,8 +58,10 @@ type ReconRunRow = {
 };
 
 /** GL-19 — the codified launch pause/rollback thresholds. The CEO ratifies
- *  (or amends) these recorded defaults; the levers live on the Dashboard's
- *  emergency controls and Market Rates' catalog rollback. */
+ *  (or amends) these recorded defaults. The in-app pause switchboard was
+ *  removed by owner decision (20 Jul 2026): pricing has its lever on
+ *  Market Rates' catalog rollback; every other containment action runs
+ *  through engineering per docs/incident-playbooks-2026-07.md. */
 export const PAUSE_THRESHOLDS: { trigger: string; action: string }[] = [
   {
     trigger: "Any confirmed double charge",
@@ -657,8 +659,8 @@ export default function Command() {
           <Badge tone="info">CEO ratifies</Badge>
         </div>
         <p className="muted small" style={{ margin: "6px 0 0" }}>
-          The recorded launch defaults. Levers: Dashboard → Emergency controls
-          (OWNER) and Market Rates → Catalog rollback (OWNER). Playbooks:
+          The recorded launch defaults. Lever: Market Rates → Catalog rollback
+          (OWNER). Other containment runs through engineering — playbooks:
           docs/incident-playbooks-2026-07.md.
         </p>
         {PAUSE_THRESHOLDS.map((t, i) => (

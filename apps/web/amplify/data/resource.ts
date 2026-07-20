@@ -1341,22 +1341,6 @@ export const schema = a.schema({
     .secondaryIndexes((index) => [index("kind").sortKeys(["runDate"])])
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
 
-  // GL-22: the emergency pause switchboard (one row, id "pause"). Authorized
-  // incident owners flip these through the OWNER-only setOpsPause mutation;
-  // the funnel refuses new bookings, scheduling refuses new dispatch, and
-  // the billing engines stop initiating charges while the matching flag is
-  // set. Read-only from browsers — the mutation is the only writer.
-  OpsControl: a
-    .model({
-      bookingPaused: a.boolean(),
-      dispatchPaused: a.boolean(),
-      billingPaused: a.boolean(),
-      reason: a.string(),
-      actorEmail: a.string(),
-      changedAt: a.datetime(),
-    })
-    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"]).to(["read"])]),
-
   PricingControl: a
     .model({
       kind: a.string().required(), // DRAIN | DAY | ROLLBACK
@@ -2345,24 +2329,6 @@ export const schema = a.schema({
       customerId: a.string(),
       technicianId: a.string(),
       resend: a.boolean(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER"])])
-    .handler(a.handler.function(crmAdmin)),
-
-  /**
-   * GL-22 — flip the emergency pause switches (new bookings / new dispatch /
-   * billing initiation), with a required reason. OWNER-only: the incident
-   * playbooks name who may pull these levers; everything each pause refuses
-   * says so honestly to the person it refuses.
-   */
-  setOpsPause: a
-    .mutation()
-    .arguments({
-      bookingPaused: a.boolean(),
-      dispatchPaused: a.boolean(),
-      billingPaused: a.boolean(),
-      reason: a.string().required(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
