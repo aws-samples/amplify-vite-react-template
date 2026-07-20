@@ -21,8 +21,33 @@ export type MetricLead = {
 
 export type MetricActivity = {
   customerId: string;
+  channel: string;
+  direction?: string | null;
+  outcome: string;
   occurredAt: string;
 };
+
+/** Channels that are a real attempt to communicate with the lead. Intake,
+ *  lifecycle, assignment, and note events are administrative — a lead is
+ *  not "answered" because the system logged its own creation. */
+const COMMUNICATION_CHANNELS = new Set(["CALL", "TEXT", "EMAIL", "BOOKING_LINK"]);
+
+/** Outcomes that are NOT a communication attempt even on a real channel —
+ *  mirrors the server's GL-02 attempted rule exactly. */
+const NON_ATTEMPT_OUTCOMES = new Set(["NOTE", "QUALIFIED", "UNQUALIFIED"]);
+
+/**
+ * The approved sales definition of "first response": the first genuine
+ * ATTEMPTED CONTACT — a call, text, email, or booking link the team actually
+ * tried (reached or not) — matching the server's GL-02 `attempted` rule.
+ * The Command card labels it "first attempted contact" for the same reason
+ * attempt-vs-reached exists: an attempt is not a conversation.
+ */
+export function isGenuineResponse(a: MetricActivity): boolean {
+  return (
+    COMMUNICATION_CHANNELS.has(a.channel) && !NON_ATTEMPT_OUTCOMES.has(a.outcome)
+  );
+}
 
 export type MetricJob = {
   id: string;
@@ -35,6 +60,7 @@ export type MetricJob = {
 export type MetricCallback = {
   id: string;
   customerId?: string | null;
+  originalJobId?: string | null;
   createdAt?: string | null;
   acceptedOn?: string | null;
 };
@@ -60,31 +86,39 @@ export type FirstResponseStats = {
   notYetResponded: number;
 };
 
-/** True first-response time: earliest LeadActivity.occurredAt after the
- *  lead's createdAt — never a stage total. */
+/** True first-response time: the earliest GENUINE communication attempt
+ *  (isGenuineResponse) strictly after the lead's creation. Administrative
+ *  events (intake LIFECYCLE/NOTE rows, assignment notes, dispositions)
+ *  never count, and an activity recorded before creation is ignored — it
+ *  is never converted into a zero-minute response. */
 export function firstResponseStats(
   leads: MetricLead[],
   activities: MetricActivity[],
   sinceMs: number
 ): FirstResponseStats {
   const created = windowLeads(leads, sinceMs);
+  const createdMsByLead = new Map(
+    created.map((l) => [l.id, Date.parse(l.createdAt!)])
+  );
   const earliestByLead = new Map<string, number>();
   for (const a of activities) {
+    if (!isGenuineResponse(a)) continue;
+    const createdMs = createdMsByLead.get(a.customerId);
     const t = Date.parse(a.occurredAt);
+    // Only activities AFTER the lead existed can answer it.
+    if (createdMs == null || t < createdMs) continue;
     const prev = earliestByLead.get(a.customerId);
     if (prev == null || t < prev) earliestByLead.set(a.customerId, t);
   }
   const minutes: number[] = [];
   let notYet = 0;
   for (const l of created) {
-    const createdMs = Date.parse(l.createdAt!);
     const first = earliestByLead.get(l.id);
-    if (first == null || first < createdMs) {
-      if (first == null) notYet++;
-      else minutes.push(0); // recorded activity at/before creation — instant
+    if (first == null) {
+      notYet++;
       continue;
     }
-    minutes.push((first - createdMs) / 60_000);
+    minutes.push((first - createdMsByLead.get(l.id)!) / 60_000);
   }
   minutes.sort((a, b) => a - b);
   const median =
@@ -160,49 +194,66 @@ export function qualificationFunnel(
 }
 
 export type CallbackStats = {
-  /** Visits COMPLETED in the window — the callback-rate denominator. */
+  /** Original visits COMPLETED in the window — the cohort denominator. */
   completedVisits: number;
-  /** Guarantee callbacks requested in the window. */
-  callbacksRequested: number;
-  /** callbacksRequested / completedVisits, whole percent. */
+  /** Callbacks LINKED (originalJobId) to a cohort visit — the numerator. */
+  callbacksOnCohort: number;
+  /** callbacksOnCohort / completedVisits, whole percent. Cohort-tied, so a
+   *  mismatch of time windows can never push it past 100. */
   callbackPct: number | null;
-  /** Customers with 2+ callbacks in the window. */
+  /** Customers whose callbacks tie to 2+ cohort original appointments. */
   repeatCallbackCustomers: number;
-  /** Customers with 1+ callback in the window — the repeat denominator. */
+  /** Customers with a callback on 1+ cohort appointment — the repeat
+   *  denominator. */
   callbackCustomers: number;
   repeatPct: number | null;
 };
 
-/** Callback + repeat-callback rates from the GL-10 lifecycle rows. */
+/**
+ * Callback + repeat-callback rates from the GL-10 lifecycle rows, COHORT
+ * style: the denominator is original visits completed in the window, and
+ * only callbacks LINKED to those exact visits (CallbackRequest.originalJobId)
+ * count — a callback against an older visit never inflates this window's
+ * rate, and one-callback-per-appointment bounds it at 100%.
+ */
 export function callbackStats(
   callbacks: MetricCallback[],
   jobs: MetricJob[],
   sinceMs: number
 ): CallbackStats {
-  const completed = jobs.filter(
+  const cohort = jobs.filter(
     (j) =>
       j.status === "COMPLETED" &&
       inWindow(j.completedAt ?? j.scheduledDate, sinceMs)
   );
-  const requested = callbacks.filter((c) =>
-    inWindow(c.createdAt ?? c.acceptedOn, sinceMs)
+  const cohortIds = new Set(cohort.map((j) => j.id));
+  const linked = callbacks.filter(
+    (c) => c.originalJobId && cohortIds.has(c.originalJobId)
   );
-  const byCustomer = new Map<string, number>();
-  for (const c of requested) {
+  // One callback per original appointment is server-enforced; dedupe
+  // defensively so replayed rows still cannot exceed the cohort.
+  const byOriginal = new Map<string, MetricCallback>();
+  for (const c of linked) byOriginal.set(c.originalJobId!, c);
+  const appointmentsByCustomer = new Map<string, Set<string>>();
+  for (const c of byOriginal.values()) {
     const key = c.customerId ?? c.id;
-    byCustomer.set(key, (byCustomer.get(key) ?? 0) + 1);
+    const set = appointmentsByCustomer.get(key) ?? new Set<string>();
+    set.add(c.originalJobId!);
+    appointmentsByCustomer.set(key, set);
   }
-  const repeat = [...byCustomer.values()].filter((n) => n >= 2).length;
+  const repeat = [...appointmentsByCustomer.values()].filter(
+    (set) => set.size >= 2
+  ).length;
   return {
-    completedVisits: completed.length,
-    callbacksRequested: requested.length,
-    callbackPct: completed.length
-      ? Math.round((requested.length / completed.length) * 100)
+    completedVisits: cohort.length,
+    callbacksOnCohort: byOriginal.size,
+    callbackPct: cohort.length
+      ? Math.round((byOriginal.size / cohort.length) * 100)
       : null,
     repeatCallbackCustomers: repeat,
-    callbackCustomers: byCustomer.size,
-    repeatPct: byCustomer.size
-      ? Math.round((repeat / byCustomer.size) * 100)
+    callbackCustomers: appointmentsByCustomer.size,
+    repeatPct: appointmentsByCustomer.size
+      ? Math.round((repeat / appointmentsByCustomer.size) * 100)
       : null,
   };
 }

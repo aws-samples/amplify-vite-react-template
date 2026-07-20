@@ -509,9 +509,10 @@ export default function Command() {
               </Badge>
             </div>
             <p className="small" style={{ margin: "6px 0 0" }}>
-              First response (creation → first recorded activity, median):{" "}
-              <strong>{min(fr.medianMinutes)}</strong> · worst {min(fr.worstMinutes)}{" "}
-              · {fr.responded} of {fr.leadsCreated} leads created got a response
+              First attempted contact (creation → first real call/text/email/
+              booking-link attempt, median): <strong>{min(fr.medianMinutes)}</strong>{" "}
+              · worst {min(fr.worstMinutes)} · {fr.responded} of {fr.leadsCreated}{" "}
+              leads created were attempted — intake and notes never count
             </p>
             <p className="small" style={{ margin: "4px 0 0" }}>
               Attempt → reached: <strong>{ar.reached}</strong> of {ar.attempted}{" "}
@@ -526,9 +527,10 @@ export default function Command() {
               {funnel.lost} lost
             </p>
             <p className="muted small" style={{ margin: "4px 0 0" }}>
-              Guarantee callbacks: {cb.callbacksRequested} requested over{" "}
-              {cb.completedVisits} completed visits
-              {cb.callbackPct != null ? ` (${cb.callbackPct}%)` : ""} ·{" "}
+              Guarantee callbacks: {cb.callbacksOnCohort} on the{" "}
+              {cb.completedVisits} visits completed this window
+              {cb.callbackPct != null ? ` (${cb.callbackPct}%)` : ""} — linked by
+              original appointment, so unrelated callbacks never inflate it ·{" "}
               {cb.repeatCallbackCustomers} of {cb.callbackCustomers} callback
               customers repeated{cb.repeatPct != null ? ` (${cb.repeatPct}%)` : ""}
             </p>
