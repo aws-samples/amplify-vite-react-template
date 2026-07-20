@@ -112,24 +112,85 @@ export type LifecycleEventRow = {
   occurredAt: string;
 };
 
+/** GL-09: the shop's business timezone. From/To are BUSINESS dates — what
+ *  the office means by "July 10" — so each boundary is that calendar day in
+ *  Eastern time (DST included), converted to a UTC instant before comparing
+ *  against the stored UTC occurredAt. */
+const BUSINESS_TZ = "America/New_York";
+
+/** The zone's UTC offset (ms, positive = behind UTC) at a UTC instant. */
+function businessTzOffsetMs(utcMs: number): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: BUSINESS_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(utcMs));
+  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+  const wallAsUtc = Date.parse(
+    `${p.year}-${p.month}-${p.day}T${p.hour === "24" ? "00" : p.hour}:${p.minute}:${p.second}Z`
+  );
+  return utcMs - wallAsUtc;
+}
+
+/** The UTC instant of Eastern midnight starting the given business date.
+ *  Two-pass: guess with the offset at UTC midnight, then re-derive at the
+ *  guessed instant so a DST transition on the boundary resolves correctly. */
+export function businessDateStartUtcMs(date: string): number {
+  const guess = Date.parse(`${date}T00:00:00Z`);
+  const adjusted = guess + businessTzOffsetMs(guess);
+  return guess + businessTzOffsetMs(adjusted);
+}
+
+/** The exclusive end of the business date: Eastern midnight of the NEXT day
+ *  (a DST day is honestly 23 or 25 hours long — never a fixed 24h add). */
+export function businessDateEndUtcMs(date: string): number {
+  const nextDay = new Date(Date.parse(`${date}T00:00:00Z`) + 24 * 3600 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  return businessDateStartUtcMs(nextDay);
+}
+
+/** GL-09: neutralize spreadsheet formula injection. If the first meaningful
+ *  character (after leading spaces/double-quotes) is =, +, -, @, TAB, or CR,
+ *  the field opens with an apostrophe — spreadsheets then render the
+ *  original text instead of executing it, and nothing is removed. */
+function neutralizeFormula(str: string): string {
+  let i = 0;
+  while (i < str.length && (str[i] === " " || str[i] === '"')) i++;
+  const c = str[i];
+  return c !== undefined && "=+-@\t\r".includes(c) ? `'${str}` : str;
+}
+
 /** Pure CSV assembly for the export — exported for tests. Filters to the
- *  inclusive date range, sorts oldest-first, and escapes RFC-4180 style. */
+ *  inclusive Eastern business-date range, sorts oldest-first, neutralizes
+ *  formula injection, and escapes RFC-4180 style. */
 export function buildLifecycleCsv(
   rows: LifecycleEventRow[],
   customers: { id: string; displayName?: string | null }[],
   from: string,
   to: string
 ): { csv: string; count: number } {
+  const fromMs = from ? businessDateStartUtcMs(from) : null;
+  const toMs = to ? businessDateEndUtcMs(to) : null;
   const matching = rows
-    .filter(
-      (r) =>
-        (!from || r.occurredAt >= `${from}T00:00:00.000Z`) &&
-        (!to || r.occurredAt <= `${to}T23:59:59.999Z`)
-    )
+    .filter((r) => {
+      if (fromMs == null && toMs == null) return true;
+      const t = Date.parse(r.occurredAt);
+      return (
+        Number.isFinite(t) &&
+        (fromMs == null || t >= fromMs) &&
+        (toMs == null || t < toMs)
+      );
+    })
     .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
   const nameOf = new Map(customers.map((c) => [c.id, c.displayName ?? ""]));
   const esc = (v: unknown) => {
-    const str = v == null ? "" : String(v);
+    const str = v == null ? "" : neutralizeFormula(String(v));
     return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
   };
   const header = [
@@ -231,7 +292,7 @@ function LifecycleExport({ customers }: { customers: Customer[] }) {
       </p>
       <div className="form-row-2" style={{ marginTop: 8 }}>
         <label className="small">
-          From{" "}
+          From (Eastern){" "}
           <input
             type="date"
             value={from}
@@ -239,7 +300,7 @@ function LifecycleExport({ customers }: { customers: Customer[] }) {
           />
         </label>
         <label className="small">
-          To{" "}
+          To (Eastern){" "}
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
         </label>
       </div>
