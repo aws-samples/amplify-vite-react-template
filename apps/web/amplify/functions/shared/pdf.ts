@@ -423,14 +423,19 @@ export async function renderAgreementPdf(opts: {
   const d = await AgreementDoc.create();
   const co = opts.company ?? { name: "BuzzKill Pest Control" };
 
-  // ---- Masthead: wordmark (left) · SERVICE AGREEMENT (center) · contact (right)
+  // ---- Masthead: logo (left) · SERVICE AGREEMENT (center) · contact (right)
   const topY = d.y;
-  d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
-  d.write("PEST CONTROL", A_M + 2, topY - 24, {
-    font: d.bold,
-    size: 7.5,
-    color: MUTED,
-  });
+  const logoH = await drawLogo(d, A_M, topY, 150);
+  if (logoH == null) {
+    // Asset failed to embed — fall back to the text wordmark so the agreement
+    // still renders a branded masthead.
+    d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
+    d.write("PEST CONTROL", A_M + 2, topY - 24, {
+      font: d.bold,
+      size: 7.5,
+      color: MUTED,
+    });
+  }
   d.write("SERVICE AGREEMENT", A_M, topY - 6, {
     font: d.bold,
     size: 17,
@@ -456,9 +461,9 @@ export async function renderAgreementPdf(opts: {
     align: "right",
     lineGap: 1.5,
   });
-  // The rule sits below the taller of the wordmark and the contact block, so a
-  // multi-line company block (address + phone + license) never overruns it.
-  d.y = Math.min(topY - 44, contactBottom) - 6;
+  // The rule sits below the taller of the logo (or wordmark fallback) and the
+  // contact block, so a multi-line company block never overruns it.
+  d.y = Math.min(topY - (logoH ?? 44), contactBottom) - 6;
   d.hline(A_M, PAGE.width - A_M, d.y, BK_GREEN, 1.5);
   d.y -= 14;
 
