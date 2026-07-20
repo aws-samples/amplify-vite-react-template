@@ -148,7 +148,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-12 | Legacy-visit backfill and final service constraints — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (ops backfill + co-signs)** |
 | P0 | GL-05 | Alternate-delivery authority and reconciliation window — engineering closed (`cc76773`) | Finance lead + Head of Operations | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (business sign-offs)** |
 | P0 | GL-09 | Export live — policy and engineering closed (`95e39d3`, export in-branch) | Head of Operations | Leadership cannot retrieve the complete lifecycle record | **10% — Very low (sign-off)** |
-| P0 | GL-07 | Atomic capacity on assigned reschedules | Head of Operations | Two concurrent moves can consume the same last capacity | **65% — Medium** |
+| P0 | GL-07 | Reschedule capacity fully atomic — engineering closed (in-branch) | Head of Operations | Two concurrent moves can consume the same last capacity | **10% — Very low (sign-offs)** |
 | P0 | GL-18 | Finance/Operations recovery sign-off and launch staffing | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-23 tie)** |
 | P0 | GL-04 | Travel-model calibration + operating data | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
 | P0 | GL-06 | Finance/Operations recovery-workflow sign-off — engineering closed (`1228822`) | Finance lead + Head of Operations | A processing customer is promised a nonexistent hold, or an async success oversells the day | **12% — Very low (sign-offs)** |
@@ -351,14 +351,17 @@ recovery policy.
 **Business outcome:** An employee cannot cancel or move a paid visit without completing the money,
 capacity, route, audit, and customer-notification consequences in one guided action.
 
-**Engineering:** the terminal workflow is closed (`5b2fb76`), and the Head of Operations/CEO approved
-the hour-exact refusal and pending-assignment wording. One capacity race remains.
+**Engineering:** closed (`5b2fb76`; atomic stop-count race closed in-branch). The minutes ledger was
+already one guarded CapacityDay add; moves onto a route now additionally serialize behind a
+single-winner CAS lease on the Route row, so two simultaneous moves cannot both pass one stop-count
+read — losers get a plain-language refusal, crashed movers' leases expire, releases are fenced, and a
+failed publish returns its reservation. The Head of Operations/CEO approved the hour-exact refusal and
+pending-assignment wording.
 
 **Remaining requirements:**
 
-- The single ATOMIC capacity claim for assigned reschedules lands with GL-04 (today the route's stop
-  count is re-validated but two simultaneous moves could still pass one count read); the full
-  dispatch-facts/licence gate already runs on the new date.
+- Head of Operations signs the reschedule/cancel workflow as the queue norm; Finance approves the money
+  dispositions the terminal workflow encodes.
 
 **Pass owner:** Head of Operations; Finance approves money dispositions.
 
