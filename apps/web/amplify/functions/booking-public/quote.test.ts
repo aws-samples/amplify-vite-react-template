@@ -409,6 +409,62 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     });
   });
 
+  it("returns a monthly lead's monthly plan first — including after async pricing", async () => {
+    marketRateResult = null;
+    const pending = await postQuote({
+      ...gpInput,
+      address: {
+        street: "1 Cambridge St",
+        city: "Cambridge",
+        state: "MA",
+        zip: "02139",
+      },
+      recurringPreference: "MONTHLY",
+    });
+    expect(pending.body.decision).toBe("PENDING");
+
+    marketRateResult = {
+      priceCents: 27400,
+      sheet: {
+        oneTimeCents: 27400,
+        plans: {
+          MONTHLY: { monthlyCents: 9400, initialFeeCents: 25400 },
+        },
+      },
+      basis: "Cambridge cached sheet",
+      cached: true,
+    };
+    const ready = await postQuoteStatus({
+      bookingId: pending.body.bookingId,
+      statusToken: pending.body.statusToken,
+    });
+
+    expect(ready.body.decision).toBe("PRICED");
+    expect(ready.body.requestedFrequency).toBe("MONTHLY");
+    expect(ready.body.service).toBe("General pest control — Monthly plan");
+    expect(ready.body.recurringOffer).toEqual({
+      frequency: "MONTHLY",
+      monthlyCents: 9400,
+      initialFeeCents: 25400,
+    });
+
+    // A later status read must preserve the monthly-first presentation too;
+    // it cannot depend on the browser still holding the original form state.
+    const replay = await postQuoteStatus({
+      bookingId: pending.body.bookingId,
+      statusToken: pending.body.statusToken,
+    });
+    expect(replay.body.requestedFrequency).toBe("MONTHLY");
+    expect(replay.body.service).toBe("General pest control — Monthly plan");
+  });
+
+  it("keeps a one-time request one-time", async () => {
+    const res = await postQuote(gpInput);
+
+    expect(res.body.requestedFrequency).toBeUndefined();
+    expect(res.body.service).toBe("General pest control — one-time treatment");
+  });
+
   it("keeps the deterministic Zone B adders on top of the AI base", async () => {
     hqMinutes = 80; // Zone B
 

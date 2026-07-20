@@ -22,7 +22,9 @@ import {
   SERVICE_OPTIONS,
   serviceOption,
   clearFunnelState,
+  defaultQuoteChoice,
   formatDay,
+  hasRequestedPlan,
   hoaMoneyLine,
   isQuoteExpired,
   loadFunnelState,
@@ -208,6 +210,8 @@ export default function QuotePage() {
       setSelDate(stored.selection.date);
       setSelWindow(stored.selection.window);
       setPlan(stored.selection.recurring ? "PLAN" : "ONE_TIME");
+    } else {
+      setPlan(defaultQuoteChoice(stored.quote));
     }
   }, []);
 
@@ -318,7 +322,9 @@ export default function QuotePage() {
     setSelDate(null);
     setSelWindow(null);
     setPlan(
-      quote.planOnly || fields.recurringPreference ? "PLAN" : "ONE_TIME"
+      defaultQuoteChoice(quote) === "PLAN" || fields.recurringPreference
+        ? "PLAN"
+        : "ONE_TIME"
     );
     saveFunnelState(window.sessionStorage, { quote });
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -566,6 +572,10 @@ export default function QuotePage() {
     // Community/HOA: a plan-only quote — the day board picks the first
     // visit, the plan price itself does not vary by day.
     const planOnly = Boolean(priced.planOnly && offer);
+    const requestedPlan = hasRequestedPlan(priced);
+    const serviceChoices: ("ONE_TIME" | "PLAN")[] = requestedPlan
+      ? ["PLAN", "ONE_TIME"]
+      : ["ONE_TIME", "PLAN"];
     // GL-17: off-season seasonal enrollment — no day board at all; the
     // checkout is the plan, billing starts today, first treatment next
     // season (the office confirms the exact day).
@@ -617,6 +627,24 @@ export default function QuotePage() {
               )}
               {!offSeason && (
               <>
+              {requestedPlan && offer && !planOnly && !selectedDay && (
+                <>
+                  <h3 className="bk-form-step__title">Your requested plan</h3>
+                  <div className="bk-quote-card">
+                    <div className="bk-quote-card__label">
+                      {FREQUENCY_LABELS[offer.frequency]} plan
+                    </div>
+                    <div className="bk-quote-card__price">
+                      {money(offer.monthlyCents)}
+                      <span className="bk-quote-card__per">/mo</span>
+                    </div>
+                    <div className="bk-quote-card__meta">
+                      {money(offer.initialFeeCents)} is due for your first visit;
+                      the subscription starts after that visit is completed.
+                    </div>
+                  </div>
+                </>
+              )}
               <h3 className="bk-form-step__title">
                 {planOnly ? "1. Pick your first visit day" : "1. Pick your day"}
               </h3>
@@ -635,7 +663,7 @@ export default function QuotePage() {
                     }}
                   >
                     <div className="bk-day-card__date">{formatDay(d.date)}</div>
-                    {(!planOnly || d.priceCents > 0) && (
+                    {!requestedPlan && (!planOnly || d.priceCents > 0) && (
                       <div className="bk-day-card__price">{money(d.priceCents)}</div>
                     )}
                   </button>
@@ -682,34 +710,45 @@ export default function QuotePage() {
 
               {selectedDay && selWindow && offer && !planOnly && (
                 <>
-                  <h3 className="bk-form-step__title">3. One-time or a plan?</h3>
+                  <h3 className="bk-form-step__title">
+                    {requestedPlan
+                      ? `3. Confirm your ${FREQUENCY_LABELS[offer.frequency].toLowerCase()} plan`
+                      : "3. One-time or a plan?"}
+                  </h3>
                   <div className="bk-choice-row">
-                    <button
-                      type="button"
-                      className={`bk-choice-card ${plan === "ONE_TIME" ? "is-active" : ""}`}
-                      aria-pressed={plan === "ONE_TIME"}
-                      onClick={() => setPlan("ONE_TIME")}
-                    >
-                      <div className="bk-choice-card__title">
-                        {money(selectedDay.priceCents)} today
-                      </div>
-                      <div className="bk-choice-card__meta">One-time treatment</div>
-                    </button>
-                    <button
-                      type="button"
-                      className={`bk-choice-card ${plan === "PLAN" ? "is-active" : ""}`}
-                      aria-pressed={plan === "PLAN"}
-                      onClick={() => setPlan("PLAN")}
-                    >
-                      <div className="bk-choice-card__title">
-                        {money(offer.initialFeeCents)} today, then{" "}
-                        {money(offer.monthlyCents)}/mo
-                      </div>
-                      <div className="bk-choice-card__meta">
-                        {FREQUENCY_LABELS[offer.frequency]} plan — the monthly
-                        subscription starts after your first completed visit
-                      </div>
-                    </button>
+                    {serviceChoices.map((choice) =>
+                      choice === "PLAN" ? (
+                        <button
+                          key={choice}
+                          type="button"
+                          className={`bk-choice-card ${plan === "PLAN" ? "is-active" : ""}`}
+                          aria-pressed={plan === "PLAN"}
+                          onClick={() => setPlan("PLAN")}
+                        >
+                          <div className="bk-choice-card__title">
+                            {money(offer.initialFeeCents)} today, then{" "}
+                            {money(offer.monthlyCents)}/mo
+                          </div>
+                          <div className="bk-choice-card__meta">
+                            {FREQUENCY_LABELS[offer.frequency]} plan — the monthly
+                            subscription starts after your first completed visit
+                          </div>
+                        </button>
+                      ) : (
+                        <button
+                          key={choice}
+                          type="button"
+                          className={`bk-choice-card ${plan === "ONE_TIME" ? "is-active" : ""}`}
+                          aria-pressed={plan === "ONE_TIME"}
+                          onClick={() => setPlan("ONE_TIME")}
+                        >
+                          <div className="bk-choice-card__title">
+                            {money(selectedDay.priceCents)} today
+                          </div>
+                          <div className="bk-choice-card__meta">One-time treatment</div>
+                        </button>
+                      )
+                    )}
                   </div>
                 </>
               )}

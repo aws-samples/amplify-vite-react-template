@@ -118,6 +118,9 @@ export type PricedQuote = {
   decision: "PRICED";
   service: string; // human label, e.g. "Wasp / hornet nest removal"
   recurringOffer: RecurringOffer | null;
+  /** The cadence explicitly requested on the lead form. When present, the
+   *  quote must lead with this plan—not the optional one-time alternative. */
+  requestedFrequency?: RecurringFrequency;
   days: QuoteDay[];
   expiresAt: string;
   /** R17 — the checkout terms this quote was issued under. */

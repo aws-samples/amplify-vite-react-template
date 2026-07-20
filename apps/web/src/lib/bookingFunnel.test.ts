@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { PricedQuote } from "./bookingApi";
 import {
   amountDueCents,
+  defaultQuoteChoice,
   decodeFunnelState,
   encodeFunnelState,
   formatDay,
   hoaMoneyLine,
   humanizeServiceEnum,
+  hasRequestedPlan,
   isQuoteExpired,
   loadFunnelState,
   money,
@@ -384,6 +386,32 @@ describe("amountDueCents", () => {
         { date: "2026-07-21", window: "MORNING", recurring: true }
       )
     ).toBeNull();
+  });
+});
+
+describe("requested plan presentation", () => {
+  it("keeps an explicitly requested cadence plan-first across response storage", () => {
+    const monthlyQuote: PricedQuote = {
+      ...pricedQuote,
+      service: "General pest control — Monthly plan",
+      requestedFrequency: "MONTHLY",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 9400,
+        initialFeeCents: 25400,
+      },
+    };
+
+    expect(hasRequestedPlan(monthlyQuote)).toBe(true);
+    expect(defaultQuoteChoice(monthlyQuote)).toBe("PLAN");
+    const storage = fakeStorage();
+    saveFunnelState(storage, { quote: monthlyQuote });
+    expect(loadFunnelState(storage)?.quote.requestedFrequency).toBe("MONTHLY");
+  });
+
+  it("does not turn an optional plan offer into a requested plan", () => {
+    expect(hasRequestedPlan(pricedQuote)).toBe(false);
+    expect(defaultQuoteChoice(pricedQuote)).toBe("ONE_TIME");
   });
 });
 

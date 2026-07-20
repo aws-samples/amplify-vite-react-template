@@ -140,6 +140,21 @@ export function hoaMoneyLine(offer: RecurringOffer): string {
   return `Your first month (${money(offer.initialFeeCents)}) is charged today to lock in your first visit, then ${money(offer.monthlyCents)}/mo.`;
 }
 
+/** True only when this quote carries the plan cadence the visitor explicitly
+ *  requested. Kept pure so async/resumed quote presentation cannot fall back
+ *  to a component's empty initial form state. */
+export function hasRequestedPlan(quote: PricedQuote): boolean {
+  return Boolean(
+    quote.requestedFrequency &&
+      quote.recurringOffer &&
+      quote.recurringOffer.frequency === quote.requestedFrequency
+  );
+}
+
+export function defaultQuoteChoice(quote: PricedQuote): "ONE_TIME" | "PLAN" {
+  return quote.planOnly || hasRequestedPlan(quote) ? "PLAN" : "ONE_TIME";
+}
+
 // ── Client-side validation (mirrors booking-public/handler.ts) ──────
 
 /** Same pattern the server enforces (AWSEmail compatibility). */

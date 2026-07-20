@@ -409,6 +409,46 @@ function parseStoredQuote(raw: unknown): {
   }
 }
 
+type QuoteFrequency = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
+
+function quoteFrequency(value: string | null | undefined): QuoteFrequency | undefined {
+  return value === "MONTHLY" || value === "BIMONTHLY" || value === "QUARTERLY"
+    ? value
+    : undefined;
+}
+
+/** The plan cadence the customer actually requested. Plan-only offers use
+ *  their one available/selected cadence even if an older caller omitted the
+ *  preference field. A normal quote with no recurring request stays one-time. */
+function requestedQuoteFrequency(
+  requested: string | null | undefined,
+  offer: { frequency: string } | null | undefined,
+  planOnly = false
+): QuoteFrequency | undefined {
+  const normalized = quoteFrequency(requested);
+  if (normalized && offer?.frequency === normalized) return normalized;
+  return planOnly ? quoteFrequency(offer?.frequency) : undefined;
+}
+
+/** `serviceLabel` remains the canonical sold-service label used if the
+ *  customer changes to one-time. The public response gets a truthful display
+ *  label for the option they requested instead of calling a monthly lead a
+ *  "one-time treatment" before showing their plan price. */
+function quoteDisplayService(
+  serviceLabel: string,
+  requestedFrequency: QuoteFrequency | undefined
+): string {
+  if (!requestedFrequency || /\bplan\b/i.test(serviceLabel)) return serviceLabel;
+  const base = serviceLabel.replace(/\s+—\s+one-time treatment$/i, "");
+  const cadence =
+    requestedFrequency === "MONTHLY"
+      ? "Monthly"
+      : requestedFrequency === "BIMONTHLY"
+        ? "Every-2-months"
+        : "Quarterly";
+  return `${base} — ${cadence} plan`;
+}
+
 /** GL-17: the one customer-facing explanation of an off-season enrollment —
  *  truthful about immediate year-round billing and about April being a
  *  month, not a promised exact day. */
@@ -427,11 +467,17 @@ function pricedResponse(booking: StoredQuoteBooking) {
       error: "This quote is incomplete — we're fixing it and will email you when it is ready.",
     });
   }
+  const requestedFrequency = requestedQuoteFrequency(
+    booking.recurringPreference,
+    stored.recurringOffer,
+    Boolean(stored.planOnly)
+  );
   return {
     bookingId: booking.id,
     decision: "PRICED" as const,
-    service: stored.serviceLabel,
+    service: quoteDisplayService(stored.serviceLabel, requestedFrequency),
     recurringOffer: stored.recurringOffer ?? null,
+    requestedFrequency,
     planOnly: stored.planOnly || undefined,
     // GL-17: an off-season seasonal enrollment has NO first-visit day board —
     // billing starts now and April's exact day is confirmed by the office,
@@ -1312,6 +1358,11 @@ async function quote(
     monthlyCents: recurringOffer?.monthlyCents ?? undefined,
     expiresAt,
   });
+  const requestedFrequency = requestedQuoteFrequency(
+    input.recurringPreference,
+    recurringOffer,
+    planOnly
+  );
 
   // Weekly pricing review sees the website channel too.
   await client.models.LeadPricingRun.create({
@@ -1338,8 +1389,9 @@ async function quote(
   return {
     bookingId: booking.id,
     decision: "PRICED",
-    service: serviceLabel,
+    service: quoteDisplayService(serviceLabel, requestedFrequency),
     recurringOffer,
+    requestedFrequency,
     // Plan-only quotes (community common-area) carry no one-time offer: the
     // day picks the first visit and the amount charged is the first month.
     planOnly: planOnly || undefined,
