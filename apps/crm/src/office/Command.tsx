@@ -19,6 +19,7 @@ import { money } from "../lib/format";
 import { PaymentsInFlight } from "./Work";
 import {
   Badge,
+  Button,
   Card,
   EmptyState,
   ErrorNote,
@@ -88,6 +89,162 @@ function parseSummary(raw: unknown): Record<string, unknown> {
 }
 
 const num = (v: unknown): number => (typeof v === "number" ? v : 0);
+
+export type LifecycleEventRow = {
+  id: string;
+  customerId: string;
+  action: string;
+  reason?: string | null;
+  actorEmail: string;
+  actorSub?: string | null;
+  priorStatus?: string | null;
+  newStatus?: string | null;
+  effects?: string | null;
+  policyVersion?: string | null;
+  occurredAt: string;
+};
+
+/** Pure CSV assembly for the export — exported for tests. Filters to the
+ *  inclusive date range, sorts oldest-first, and escapes RFC-4180 style. */
+export function buildLifecycleCsv(
+  rows: LifecycleEventRow[],
+  customers: { id: string; displayName?: string | null }[],
+  from: string,
+  to: string
+): { csv: string; count: number } {
+  const matching = rows
+    .filter(
+      (r) =>
+        (!from || r.occurredAt >= `${from}T00:00:00.000Z`) &&
+        (!to || r.occurredAt <= `${to}T23:59:59.999Z`)
+    )
+    .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+  const nameOf = new Map(customers.map((c) => [c.id, c.displayName ?? ""]));
+  const esc = (v: unknown) => {
+    const str = v == null ? "" : String(v);
+    return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+  const header = [
+    "occurredAt",
+    "customerId",
+    "customerName",
+    "action",
+    "reason",
+    "actorEmail",
+    "actorSub",
+    "priorStatus",
+    "newStatus",
+    "result",
+    "policyVersion",
+  ];
+  const lines = [header.join(",")];
+  for (const r of matching) {
+    lines.push(
+      [
+        r.occurredAt,
+        r.customerId,
+        nameOf.get(r.customerId) ?? "",
+        r.action,
+        r.reason,
+        r.actorEmail,
+        r.actorSub,
+        r.priorStatus,
+        r.newStatus,
+        r.effects,
+        r.policyVersion,
+      ]
+        .map(esc)
+        .join(",")
+    );
+  }
+  return { csv: lines.join("\r\n"), count: matching.length };
+}
+
+/**
+ * GL-09 — leadership's COMPLETE lifecycle-history export. Every matching
+ * event is read to pagination exhaustion before a single byte downloads; a
+ * read failure aborts with the error named and produces NOTHING — a partial
+ * export is never silently handed over as the record.
+ */
+function LifecycleExport({ customers }: { customers: Customer[] }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<string | null>(null);
+
+  const exportCsv = async () => {
+    setBusy(true);
+    setError(null);
+    setSummary(null);
+    try {
+      const models = api().models as unknown as {
+        CustomerLifecycleEvent: {
+          list: (a: { limit?: number; nextToken?: string }) => Promise<{
+            data: LifecycleEventRow[];
+            nextToken?: string | null;
+            errors?: { message: string }[];
+          }>;
+        };
+      };
+      // listAll throws on ANY page error — completeness or nothing.
+      const rows = await listAll<LifecycleEventRow>((t) =>
+        models.CustomerLifecycleEvent.list({ limit: 1000, nextToken: t })
+      );
+      const { csv, count } = buildLifecycleCsv(rows, customers, from, to);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `lifecycle-history-${from || "all"}-to-${to || "now"}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setSummary(
+        `Exported ${count} event${count === 1 ? "" : "s"} — complete (every page read${from || to ? ", filtered to the chosen dates" : ""}).`
+      );
+    } catch (err) {
+      setError(
+        `Export FAILED — nothing was downloaded (a partial export is never produced): ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="row-split">
+        <strong>Lifecycle history export</strong>
+      </div>
+      <p className="muted small" style={{ margin: "6px 0 0" }}>
+        Every deactivation, reactivation, and group change — customer, action,
+        reason, actor, timestamp, result, and the policy version it ran under.
+      </p>
+      <div className="form-row-2" style={{ marginTop: 8 }}>
+        <label className="small">
+          From{" "}
+          <input
+            type="date"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+          />
+        </label>
+        <label className="small">
+          To{" "}
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </label>
+      </div>
+      <Button small loading={busy} onClick={() => void exportCsv()}>
+        Export CSV (complete history)
+      </Button>
+      {summary ? (
+        <p className="small" style={{ margin: "6px 0 0" }}>{summary}</p>
+      ) : null}
+      <ErrorNote error={error} />
+    </Card>
+  );
+}
 
 export default function Command() {
   const navigate = useNavigate();
@@ -290,6 +447,8 @@ export default function Command() {
         ],
         ["STATE_MISMATCH", "LIFECYCLE_RECOVERY", "VISIT_CHANGE_RECOVERY"]
       )}
+
+      <LifecycleExport customers={customers} />
 
       <Card>
         <div className="row-split">
