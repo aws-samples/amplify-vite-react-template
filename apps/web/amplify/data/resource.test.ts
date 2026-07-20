@@ -54,6 +54,7 @@ describe("custom operations vs generated model operations", () => {
   it("still sees the schema (regex rot guard)", () => {
     expect(models).toContain("Customer");
     expect(customOps).toContain("priceLead");
+    expect(customOps).toContain("requestPricingResearch");
   });
 
   it("the office-sold conversion branch stays dead", () => {

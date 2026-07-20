@@ -7,6 +7,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
@@ -32,6 +33,8 @@ import {
   enqueueRateResearch,
   getCachedRate,
   hoaBandFor,
+  pickServingRow,
+  readPricingRollback,
   type MarketRateResult,
   type MarketRateService,
   type PlanCadence,
@@ -39,6 +42,7 @@ import {
 
 const s3 = new S3Client();
 const ssm = new SSMClient();
+const lambda = new LambdaClient();
 
 const BUCKET = () => {
   const b = process.env.DOCS_BUCKET;
@@ -65,6 +69,7 @@ type Args = {
   versionId?: string;
   reasonCode?: string;
   note?: string | null;
+  rateKey?: string;
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
@@ -74,6 +79,8 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return priceLead(event.arguments);
     case "getPricingUploadUrl":
       return getPricingUploadUrl(event.arguments.contentType!);
+    case "requestPricingResearch":
+      return requestPricingResearch(event.arguments, callerEmail(event.identity));
     case "rollbackPricing":
       // GL-16: price authority stays role-controlled — OWNER only, checked
       // server-side on top of the schema's group rule.
@@ -86,6 +93,130 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       throw new Error(`Unknown field ${opFieldName(event)}`);
   }
 };
+
+// ---------------------------------------- explicit market-research request
+
+const RESEARCH_REASONS = new Set([
+  "COMPETITOR_CHANGE",
+  "MARGIN_REVIEW",
+  "CONVERSION_REVIEW",
+  "PROMPT_CHANGE",
+  "OTHER",
+]);
+
+function townFromAreaKey(areaKey: string): { city: string; state: string } | null {
+  const split = areaKey.lastIndexOf("-");
+  if (split <= 0 || split === areaKey.length - 1) return null;
+  return {
+    city: areaKey.slice(0, split).replace(/-/g, " "),
+    state: areaKey.slice(split + 1).toUpperCase(),
+  };
+}
+
+async function wakePricingResearch(
+  rateKey: string,
+  source: "manual"
+): Promise<void> {
+  const functionName = process.env.PRICING_REFRESH_FUNCTION_NAME;
+  if (!functionName) return;
+  await lambda
+    .send(
+      new InvokeCommand({
+        FunctionName: functionName,
+        InvocationType: "Event",
+        Payload: Buffer.from(JSON.stringify({ rateKey, source })),
+      })
+    )
+    .catch((err) => {
+      // The durable request remains queued; the five-minute recovery worker
+      // will still pick it up.
+      console.error("manual pricing wake-up failed; scheduled recovery remains", err);
+    });
+}
+
+/**
+ * One attributable staff request for one existing market-rate key. No town
+ * expansion, neighboring service, size band, or age-based refresh can ride
+ * along with it.
+ */
+async function requestPricingResearch(
+  args: Args,
+  actor: string | null
+): Promise<{ ok: true; rateKey: string }> {
+  const rateKey = String(args.rateKey ?? "").trim();
+  const reasonCode = String(args.reasonCode ?? "").trim();
+  const note = args.note?.trim() ?? "";
+  if (!rateKey) throw new Error("Pick the rate to research");
+  if (!RESEARCH_REASONS.has(reasonCode)) {
+    throw new Error("Pick a business reason for the market review");
+  }
+  if (reasonCode === "OTHER" && !note) {
+    throw new Error("Explain the market-review reason");
+  }
+  if (await readPricingRollback()) {
+    throw new Error(
+      "AI research is paused while the catalog is rolled back — clear the rollback first"
+    );
+  }
+
+  const client = await dataClient();
+  const { data: rows } =
+    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const serving = pickServingRow(rows, rateKey, null);
+  if (!serving) throw new Error("This rate is not currently serving");
+  if (serving.pinned) {
+    throw new Error("Unpin the office rate before requesting new AI research");
+  }
+  const location = townFromAreaKey(serving.areaKey);
+  if (!location) throw new Error("The rate's service area could not be read");
+  const bandPart = rateKey.split("#")[2];
+  const band = bandPart ? Number(bandPart) : null;
+  if (bandPart && !Number.isFinite(band)) {
+    throw new Error("The rate's size band could not be read");
+  }
+
+  const requestedAt = new Date().toISOString();
+  const requestReason = `${reasonCode}${note ? ` — ${note}` : ""}`.slice(0, 500);
+  const { data: existing } = await client.models.RateCoverage.get({ id: rateKey });
+  if (existing) {
+    const { data, errors } = await client.models.RateCoverage.update({
+      id: rateKey,
+      active: true,
+      source: "MANUAL",
+      researchRequestedAt: requestedAt,
+      researchRequestedBy: actor ?? "OFFICE",
+      researchRequestReason: requestReason,
+      exhaustedAt: null,
+      nextEligibleAt: null,
+      failCount: 0,
+    });
+    if (!data || errors?.length) {
+      throw new Error(errors?.[0]?.message ?? "Could not queue market research");
+    }
+  } else {
+    const { data, errors } = await client.models.RateCoverage.create({
+      id: rateKey,
+      service: serving.service,
+      areaKey: serving.areaKey,
+      city: location.city,
+      state: location.state,
+      band: band ?? undefined,
+      source: "MANUAL",
+      active: true,
+      failCount: 0,
+      researchRequestedAt: requestedAt,
+      researchRequestedBy: actor ?? "OFFICE",
+      researchRequestReason: requestReason,
+      notify: JSON.stringify([]),
+    });
+    if (!data || errors?.length) {
+      throw new Error(errors?.[0]?.message ?? "Could not queue market research");
+    }
+  }
+
+  await wakePricingResearch(rateKey, "manual");
+  return { ok: true, rateKey };
+}
 
 // ------------------------------------------------- GL-16 catalog rollback
 
@@ -457,13 +588,13 @@ const PASS_SCRIPTS: Record<string, string> = {
 
 /**
  * Escalation reason when no cached sheet exists for the combo. The live
- * path is a pure read now — it never researches inline. The miss is queued
- * on the RateCoverage ledger and the hourly pricing-refresh cron researches
- * DEMAND rows first, so the honest instruction to the office is: re-price
- * in an hour. Never a silent skip, never an invented price.
+ * path is a pure read now — it never researches inline. The exact miss is
+ * persisted on the RateCoverage ledger and wakes the demand worker; the
+ * five-minute schedule is recovery only. Never a silent skip or invented
+ * price, and the office remains responsible for the lead while it runs.
  */
 export const AI_RATE_QUEUED_REASON =
-  "AI rate queued — re-price this lead in an hour";
+  "AI rate research requested — exact sheet is not ready; follow up with this lead now";
 
 // GL-03: no promise of a channel/timing we can't guarantee here (this reply
 // has no phone/consent context). The owner follows up; the funnel's own
@@ -826,9 +957,9 @@ async function priceLead(args: Args) {
   // Kept for the value-fallback plan strings in the reply.
   let gpRate: MarketRateResult | null = null;
 
-  // No cached sheet → queue the research and hand the lead to a human for
-  // now. The hourly pricing-refresh cron picks DEMAND rows up first, so the
-  // office re-runs this lead in an hour and gets a real price. Never a
+  // No cached sheet → persist the exact research request and hand the lead
+  // to a human for now. The worker wakes immediately and the five-minute
+  // schedule recovers persisted requests. Never a
   // silent skip, never an invented number: the office gets the escalation
   // with the holding script.
   const escalateRateQueued = async (
@@ -836,25 +967,28 @@ async function priceLead(args: Args) {
     engineService: MarketRateService,
     sqft?: number
   ) => {
-    // Never throws (its own contract) — the escalation below reaches a
-    // human either way. town is guaranteed by the needsTown gate at every
-    // call site, and state by the R75 gate.
-    await enqueueRateResearch({
+    // The escalation below reaches a human either way. town is guaranteed
+    // by the needsTown gate at every call site, and state by the R75 gate.
+    const queued = await enqueueRateResearch({
       service: engineService,
       city: extracted.town!,
       state: extracted.state!,
       sqft,
+      requestedBy: "CRM_LEAD",
     });
+    const reason = queued
+      ? AI_RATE_QUEUED_REASON
+      : "The exact AI rate request could not be persisted. Price this lead manually; do not wait for the pricing worker.";
     const run = await persist({
       decision: "ESCALATE",
-      reason: AI_RATE_QUEUED_REASON,
+      reason,
       zone,
       driveMinutes: minutes ?? undefined,
       leadFeeCents,
       service: serviceLabel,
       replyText: CUSTOM_QUOTE_SCRIPT,
     });
-    await notifyEscalation(run?.id, extracted, AI_RATE_QUEUED_REASON, null);
+    await notifyEscalation(run?.id, extracted, reason, null);
     return run;
   };
   // The engine caches per service + area; the area key needs the town.

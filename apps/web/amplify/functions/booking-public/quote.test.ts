@@ -25,8 +25,8 @@ import {
  * commercial one-time + plans, community per-unit plans) comes from the
  * cached AI rate sheet via the PURE-READ getCachedRate API
  * (shared/marketRate) — the live path never researches, and a stale sheet
- * still serves. No sheet at all → the miss is queued for the hourly
- * pricing-refresh worker (with the lead's email + booking id), returns a
+ * still serves. No sheet at all → the exact miss is durably queued for the
+ * demand worker (with the lead's email + booking id), returns a
  * token-authenticated PENDING request for the loading screen, and emails a
  * secure resume link if the lead leaves — never a made-up price. The deterministic
  * overlay (Zone B adders, day pricing) stays on top of the AI base.
@@ -172,6 +172,7 @@ let marketRateByService: Record<string, FakeRate>;
 const marketRateCalls: Record<string, unknown>[] = [];
 /** Every enqueueRateResearch call — the live path's only research surface. */
 const enqueueCalls: Record<string, unknown>[] = [];
+let enqueueSucceeds = true;
 vi.mock("../shared/marketRate", () => ({
   // The pure-read API: never researches, serves stale — the handler must
   // trust whatever comes back and never fall to any research path.
@@ -184,6 +185,7 @@ vi.mock("../shared/marketRate", () => ({
   },
   enqueueRateResearch: async (opts: Record<string, unknown>) => {
     enqueueCalls.push(opts);
+    return enqueueSucceeds;
   },
   sqftBucket: (sqft: number) => Math.max(500, Math.ceil(sqft / 500) * 500),
   areaKeyFor: (city: string, state: string) =>
@@ -279,6 +281,7 @@ beforeEach(() => {
   leadLookups.length = 0;
   marketRateCalls.length = 0;
   enqueueCalls.length = 0;
+  enqueueSucceeds = true;
   pricingInvokes.length = 0;
   stopsEveryDay = [];
   hqMinutes = 20;
@@ -522,6 +525,7 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
         sqft: 2000,
         notifyEmail: "dana@example.com",
         bookingRequestId: res.body.bookingId,
+        requestedBy: "PUBLIC_QUOTE",
       },
     ]);
     // The honest holding copy: the loading screen stays attached to this
@@ -532,6 +536,24 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
     expect(leadEmails[0].subject).toBe("Website lead waiting on AI pricing");
     // R80: the rate-queued alert is a lead alert — it routes to sales@.
     expect(leadEmails[0].template).toBe("ops-booking-rate-queued");
+  });
+
+  it("a miss that cannot be persisted becomes one owned office follow-up, never fake PENDING", async () => {
+    marketRateResult = null;
+    enqueueSucceeds = false;
+
+    const res = await postQuote(gpInput);
+
+    expect(res.body.decision).toBe("CONTACT");
+    expect(String(res.body.message)).toMatch(/couldn't start.*price research/i);
+    expect(bookings).toHaveLength(1);
+    expect(bookings[0]).toMatchObject({
+      id: res.body.bookingId,
+      status: "CONTACT",
+    });
+    expect(pricingInvokes).toHaveLength(0);
+    expect(leadEmails).toHaveLength(1);
+    expect(leadEmails[0].template).toBe("ops-booking-contact");
   });
 
   it("the secure status poll turns the same PENDING request into its day board", async () => {
@@ -1233,6 +1255,7 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
 
   it("REJECTS a missing yard size — never silently prices half an acre", async () => {
     const { lotHalfAcres: _omit, ...noAcreage } = mosquitoInput;
+    void _omit;
     const res = await postQuote(noAcreage);
     expect(res.status).toBe(400);
     expect(res.body.errors.lotHalfAcres).toBeTruthy();

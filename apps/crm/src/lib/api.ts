@@ -802,8 +802,8 @@ export function listWorkEvents(args?: {
 
 /**
  * Contract boundary with the backend wave landing alongside this one:
- * MarketRate gains `pinned` (an office-edited row never expires or
- * re-researches until the office un-pins it). Intersected here so the CRM
+ * MarketRate gains `pinned` (an office-edited row cannot be replaced by AI
+ * until the office unpins it and explicitly requests research). Intersected here so the CRM
  * compiles against the contract before the generated schema catches up; once
  * the schema lands the extra member is redundant and harmless.
  */

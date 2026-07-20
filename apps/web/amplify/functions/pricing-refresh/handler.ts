@@ -15,14 +15,12 @@ import {
   settleCoverageRow,
 } from "../shared/pricingControl";
 import {
-  enqueueRateResearch,
   parseNotify,
   pickServingRow,
   readPricingRollback,
   writeCatalogSnapshot,
   type CatalogManifest,
   researchAndCacheRate,
-  REFRESH_AFTER_MS,
   type MarketRateService,
 } from "../shared/marketRate";
 
@@ -34,19 +32,16 @@ import {
  *      for 13; without the lease, overlapping invocations each selected the
  *      same head-of-queue combos and each paid for its own provider call
  *      (the July cost incident). A loser exits without spending anything.
- *   1. Seeds the RateCoverage work-list, idempotently (top of hour only).
- *   2. Drains due research — DEMAND misses first (self-heal: a lead who hit
- *      a sheet-less combo is priced within minutes and emailed), then
- *      never-researched seeded combos, then sheets past their weekly
- *      refresh. Pinned, fresh, exhausted, backing-off, and currently leased
- *      rows are never researched.
- *   3. Every provider request RESERVES atomic daily budget BEFORE the call,
+ *   1. Drains only durable quote-demand and explicit staff-review requests.
+ *      Discovering a town, customer, booking, old rate, or missing neighboring
+ *      service never creates work and never spends money.
+ *   2. Every provider request RESERVES atomic daily budget BEFORE the call,
  *      so failures, junk answers, and timeouts all consume it and no
  *      interleaving of invocations can exceed the shared caps.
- *   4. Failures back off exponentially; MAX_RESEARCH_ATTEMPTS straight
+ *   3. Failures back off exponentially; MAX_RESEARCH_ATTEMPTS straight
  *      failures parks the combo (EXHAUSTED) with an owned Office work item
  *      — one bad combo can never loop the queue.
- *   5. Office visibility is a consolidated DAILY digest (plus the Monday
+ *   4. Office visibility is a consolidated DAILY digest (plus the Monday
  *      weekly report) — never one email per cached rate. Waiting-lead
  *      "your exact prices are ready" emails stay separate, claim-based,
  *      and idempotent.
@@ -58,14 +53,13 @@ import {
  *
  * Economics: one research is one Opus call with up to 4 web searches,
  * roughly $0.20–0.40. RESEARCH_PER_DAY = 150 caps worst-case spend around
- * $50–60/day; the steady state is far lower — a few hundred covered combos
- * on a weekly cadence is ~45 researches/day. RESEARCH_PER_RUN = 20 keeps a
+ * $50–60/day. RESEARCH_PER_RUN = 20 keeps a
  * single run inside the Lambda window (each research can take 10–60s).
  */
 export const RESEARCH_PER_RUN = 20;
 export const RESEARCH_PER_DAY = 150;
-/** Live quote misses retain a small daily reserve even when background
- *  seeding/refresh has consumed the normal budget. The public endpoint is
+/** Live quote misses retain a small daily reserve even when staff-requested
+ *  research has consumed the normal budget. The public endpoint is
  *  separately throttled, so this restores conversion without opening an
  *  unbounded research surface. */
 export const DEMAND_RESEARCH_PER_DAY = 25;
@@ -82,9 +76,6 @@ export const BACKOFF_MAX_MS = 8 * 60 * 60_000;
  *  estimate (an estimate, clearly labeled as one — not billing truth). */
 export const COST_PER_RESEARCH_USD = 0.35;
 
-/** lastSuccess older than this makes the weekly report's stale list —
- *  the age ceiling alert (three missed weekly refreshes). */
-export const STALE_AFTER_DAYS = 21;
 /** failCount at/above this makes the weekly report's failing list. */
 export const FAILING_THRESHOLD = 2;
 
@@ -93,7 +84,7 @@ export const FAILING_THRESHOLD = 2;
 const RUN_TIME_BUDGET_MS = 13 * 60_000;
 
 /** The weekly report slot: Monday 10:00 UTC. The cron fires every 5
- *  minutes, so the report (and seeding) are additionally gated to the top
+ *  minutes, so the report is additionally gated to the top
  *  of the hour — see topOfHour in the handler — to fire exactly once. */
 const WEEKLY_REPORT_UTC_DAY = 1;
 const WEEKLY_REPORT_UTC_HOUR = 10;
@@ -106,40 +97,6 @@ export const DIGEST_UTC_HOUR = 21;
 export function backoffMsFor(failCount: number): number {
   return Math.min(BACKOFF_BASE_MS * 2 ** Math.max(0, failCount - 1), BACKOFF_MAX_MS);
 }
-
-/**
- * Core service-area towns around Ware MA, seeded every run so the funnel's
- * likely asks are researched before anyone asks. A short starter list —
- * Jake curates it (add or remove towns freely; seeding is idempotent, and
- * a removed town's existing coverage rows simply stop being re-ensured).
- */
-export const SEED_TOWNS: { city: string; state: string }[] = [
-  { city: "Ware", state: "MA" },
-  { city: "Palmer", state: "MA" },
-  { city: "Belchertown", state: "MA" },
-  { city: "Warren", state: "MA" },
-  { city: "West Brookfield", state: "MA" },
-  { city: "North Brookfield", state: "MA" },
-  { city: "Hardwick", state: "MA" },
-  { city: "Monson", state: "MA" },
-  { city: "Wilbraham", state: "MA" },
-  { city: "Ludlow", state: "MA" },
-];
-
-/** Common size bands seeded per town (sqft-bucket ceilings — most funnel
- *  asks land in one of these; odd sizes arrive as DEMAND rows). */
-export const SEED_SQFT_BUCKETS = [1500, 2000, 2500];
-
-/** Engine service kinds by whether their rate key carries a sqft band. */
-const BANDED_SERVICES: MarketRateService[] = [
-  "GENERAL_PEST",
-  "RODENT",
-  "ROACH",
-  "TERMITE",
-  "WILDLIFE",
-  "COMMERCIAL",
-];
-const UNBANDED_SERVICES: MarketRateService[] = ["WASP_NEST", "HOA"];
 
 // ------------------------------------------------------------- api key
 
@@ -182,6 +139,9 @@ type CoverageRow = {
   state: string;
   band?: number | null;
   source: string;
+  researchRequestedAt?: string | null;
+  researchRequestedBy?: string | null;
+  researchRequestReason?: string | null;
   lastAttemptAt?: string | null;
   lastSuccessAt?: string | null;
   failCount?: number | null;
@@ -230,138 +190,6 @@ async function listAll<T>(model: Lister): Promise<T[]> {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// -------------------------------------------------------------- seeding
-
-/** "west-brookfield-ma" → { city: "west brookfield", state: "MA" } — good
- *  enough for a research prompt, and it round-trips through areaKeyFor. */
-function townFromAreaKey(
-  areaKey: string
-): { city: string; state: string } | null {
-  const i = areaKey.lastIndexOf("-");
-  if (i <= 0) return null;
-  return {
-    city: areaKey.slice(0, i).replace(/-/g, " "),
-    state: areaKey.slice(i + 1).toUpperCase(),
-  };
-}
-
-/**
- * Ensure coverage exists for everything we should keep priced. Idempotent
- * (enqueueRateResearch upserts, deduped within the run) and additive only —
- * it never deactivates, and it can never resurrect a combo the office
- * retired or re-arm one that exhausted its attempts (enqueue refuses both).
- *
- *   - SEED_TOWNS × every service kind × the common size bands.
- *   - SERVED: towns where actual customers live, towns and exact combos
- *     from booking requests, and combos already carrying a MarketRate row
- *     (so pre-existing sheets join the weekly refresh cycle).
- */
-async function seedCoverage(): Promise<number> {
-  const client = await dataClient();
-
-  // Towns to cross with the full service × band grid.
-  const towns = new Map<
-    string,
-    { city: string; state: string; source: "SEED" | "SERVED" }
-  >();
-  const addTown = (
-    city: string | null | undefined,
-    state: string | null | undefined,
-    source: "SEED" | "SERVED"
-  ) => {
-    if (!city?.trim() || !state?.trim()) return;
-    const key = `${city.trim().toLowerCase()}|${state.trim().toLowerCase()}`;
-    // SEED (the curated list) wins over a derived SERVED duplicate.
-    if (!towns.has(key) || source === "SEED") {
-      towns.set(key, { city: city.trim(), state: state.trim(), source });
-    }
-  };
-  for (const t of SEED_TOWNS) addTown(t.city, t.state, "SEED");
-
-  const customers = await listAll<{
-    serviceCity?: string | null;
-    serviceState?: string | null;
-  }>(client.models.Customer);
-  for (const c of customers) addTown(c.serviceCity, c.serviceState, "SERVED");
-
-  // Booking requests contribute their town AND their exact asked combo.
-  const bookings = await listAll<{
-    propertyKind?: string | null;
-    service?: string | null;
-    city?: string | null;
-    state?: string | null;
-    sqft?: number | null;
-  }>(client.models.BookingRequest);
-  const exact: {
-    service: MarketRateService;
-    city: string;
-    state: string;
-    sqft?: number;
-  }[] = [];
-  for (const b of bookings) {
-    if (!b.city?.trim() || !b.state?.trim()) continue;
-    addTown(b.city, b.state, "SERVED");
-    const city = b.city.trim();
-    const state = b.state.trim();
-    if (b.propertyKind === "COMMUNITY") {
-      exact.push({ service: "HOA", city, state });
-    } else if (b.propertyKind === "COMMERCIAL") {
-      if (b.sqft) exact.push({ service: "COMMERCIAL", city, state, sqft: b.sqft });
-    } else if (b.service === "WASP_NEST") {
-      exact.push({ service: "WASP_NEST", city, state });
-    } else if (b.service && b.sqft) {
-      exact.push({
-        service: b.service as MarketRateService,
-        city,
-        state,
-        sqft: b.sqft,
-      });
-    }
-  }
-
-  // Combos that already have a sheet join the refresh cycle.
-  const rates = await listAll<RateRow>(client.models.MarketRate);
-  for (const r of rates) {
-    const town = townFromAreaKey(r.areaKey);
-    if (!town) continue;
-    const parts = r.rateKey.split("#");
-    const band = parts.length > 2 ? Number(parts[2]) : undefined;
-    exact.push({
-      service: r.service as MarketRateService,
-      city: town.city,
-      state: town.state,
-      ...(band && Number.isFinite(band) ? { sqft: band } : {}),
-    });
-  }
-
-  // One upsert per distinct combo, however many sources produced it — the
-  // work-list can never multiply the same work within a run.
-  const ensured = new Set<string>();
-  for (const combo of exact) {
-    const key = `${combo.service}|${combo.city.toLowerCase()}|${combo.state.toLowerCase()}|${combo.sqft ?? ""}`;
-    if (ensured.has(key)) continue;
-    ensured.add(key);
-    await enqueueRateResearch({ ...combo, source: "SERVED" });
-  }
-  for (const { city, state, source } of towns.values()) {
-    for (const service of BANDED_SERVICES) {
-      for (const sqft of SEED_SQFT_BUCKETS) {
-        const key = `${service}|${city.toLowerCase()}|${state.toLowerCase()}|${sqft}`;
-        if (ensured.has(key)) continue;
-        ensured.add(key);
-        await enqueueRateResearch({ service, city, state, sqft, source });
-      }
-    }
-    for (const service of UNBANDED_SERVICES) {
-      const key = `${service}|${city.toLowerCase()}|${state.toLowerCase()}|`;
-      if (ensured.has(key)) continue;
-      ensured.add(key);
-      await enqueueRateResearch({ service, city, state, source });
-    }
-  }
-  return ensured.size;
-}
-
 // ------------------------------------------------------- work selection
 
 /** The live (serving) MarketRate row per rate key. `manifest` is the active
@@ -398,12 +226,17 @@ function researchable(c: CoverageRow, now: number): boolean {
   return true;
 }
 
+function hasResearchRequest(c: CoverageRow): boolean {
+  return Boolean(c.researchRequestedAt) ||
+    (c.source === "DEMAND" && !c.lastSuccessAt);
+}
+
 /**
  * What this run researches, in priority order:
- *   (a) DEMAND combos with no sheet — a lead is waiting; self-heal ≤5min.
- *   (b) other combos with no sheet (seed/served gaps), never-attempted
- *       first so a failing combo cannot starve fresh ones.
- *   (c) sheets past the weekly refresh, oldest first — skipping pinned.
+ *   (a) Persisted DEMAND requests with no sheet — a real lead is waiting.
+ *   (b) Persisted MANUAL requests — one rate explicitly selected by staff.
+ *
+ * Legacy SEED/SERVED gaps and age alone are deliberately inert.
  */
 function selectWork(
   coverage: CoverageRow[],
@@ -411,24 +244,18 @@ function selectWork(
   now: number
 ): CoverageRow[] {
   const eligible = coverage.filter((c) => researchable(c, now));
-  const noSheet = eligible.filter((c) => !live.has(c.id));
   const byAttempt = (a: CoverageRow, b: CoverageRow) =>
     (a.lastAttemptAt ?? "").localeCompare(b.lastAttemptAt ?? "");
-  const demand = noSheet.filter((c) => c.source === "DEMAND").sort(byAttempt);
-  const gaps = noSheet.filter((c) => c.source !== "DEMAND").sort(byAttempt);
-  const cutoff = now - REFRESH_AFTER_MS;
-  const due = eligible
-    .filter((c) => {
-      const row = live.get(c.id);
-      if (!row || row.pinned) return false;
-      return (row.researchedAt ? Date.parse(row.researchedAt) : 0) < cutoff;
-    })
-    .sort((a, b) =>
-      (live.get(a.id)?.researchedAt ?? "").localeCompare(
-        live.get(b.id)?.researchedAt ?? ""
-      )
-    );
-  return [...demand, ...gaps, ...due];
+  // Deployment compatibility: a pre-change, never-successful DEMAND row
+  // still represents a real waiting quote without the new request stamp.
+  const requested = eligible.filter(hasResearchRequest);
+  const demand = requested
+    .filter((c) => c.source === "DEMAND" && !live.has(c.id))
+    .sort(byAttempt);
+  const manual = requested
+    .filter((c) => c.source === "MANUAL" && !live.get(c.id)?.pinned)
+    .sort(byAttempt);
+  return [...demand, ...manual];
 }
 
 // ------------------------------------------------------ self-heal email
@@ -629,7 +456,7 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
       ownerTeam: "OPS",
     });
   }
-  const activeCov = coverage.filter((c) => c.active);
+  const activeCov = coverage.filter((c) => c.active && hasResearchRequest(c));
   // Rollback-aware: the digest's queue depth and live view describe what is
   // actually serving, not sheets a rollback has taken out of service.
   const live = liveRowsByKey(rates, rollback?.manifest ?? null);
@@ -679,7 +506,7 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
       "Nothing is waiting out a failure backoff."
     )}
     <h2 style="font-size:15px;margin:20px 0 6px;">Today's budget & queue</h2>
-    <p style="margin:0;">${counters.attempts} research attempts (${counters.succeeded} succeeded, ${counters.failed} failed, ${counters.demandAttempts} for waiting leads) · estimated spend ~$${spendEstimate} · daily cap ${RESEARCH_PER_DAY} · queue depth ${queueDepth} · ${activeCov.length} combos covered.</p>`;
+    <p style="margin:0;">${counters.attempts} research attempts (${counters.succeeded} succeeded, ${counters.failed} failed, ${counters.demandAttempts} for waiting leads) · estimated spend ~$${spendEstimate} · daily cap ${RESEARCH_PER_DAY} · ${queueDepth} requested combo${queueDepth === 1 ? "" : "s"} still queued.</p>`;
 
   return notifyOffice({
     subject: `AI pricing daily digest — ${cachedToday.length} sheet${cachedToday.length === 1 ? "" : "s"} cached, ~$${spendEstimate} spent`,
@@ -690,11 +517,11 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
 }
 
 /**
- * The Monday email: everything the refresh did and everything it cannot
- * do. Visibility, not a gate — every sheet listed is already live and
+ * The Monday email: everything requested research did and could not do.
+ * Visibility, not a gate — every sheet listed is already live and
  * quoting; nothing here waits for approval (Jake's standing rule: no
  * review gates, no clamps). The office overrides any line it dislikes on
- * the Market Rates screen, which pins the row out of future refreshes.
+ * the Market Rates screen, which pins the row against AI replacement.
  */
 async function sendWeeklyReport(): Promise<boolean> {
   const client = await dataClient();
@@ -702,9 +529,8 @@ async function sendWeeklyReport(): Promise<boolean> {
   const rates = await listAll<RateRow>(client.models.MarketRate);
   const now = Date.now();
   const weekAgo = now - 7 * DAY_MS;
-  const staleCutoff = now - STALE_AFTER_DAYS * DAY_MS;
-
   const activeCov = coverage.filter((c) => c.active);
+  const requested = activeCov.filter(hasResearchRequest);
   const fresh = rates.filter(
     (r) => r.active && r.researchedAt && Date.parse(r.researchedAt) > weekAgo
   );
@@ -724,21 +550,18 @@ async function sendWeeklyReport(): Promise<boolean> {
   const floored = fresh.filter((r) =>
     (r.basis ?? "").includes("floored at Zone-A variable cost")
   );
-  const failing = activeCov.filter(
+  const failing = requested.filter(
     (c) => !c.exhaustedAt && (c.failCount ?? 0) >= FAILING_THRESHOLD
   );
-  const exhausted = activeCov.filter((c) => c.exhaustedAt);
-  const stale = activeCov.filter(
-    (c) => c.lastSuccessAt && Date.parse(c.lastSuccessAt) < staleCutoff
-  );
-  const gaps = activeCov.filter((c) => !c.lastSuccessAt);
+  const exhausted = requested.filter((c) => c.exhaustedAt);
+  const gaps = requested.filter((c) => !c.lastSuccessAt);
   // Counts are per-combo latest stamps, so a combo attempted twice in the
   // week counts once — close enough for a trend line. (Exact daily counts
   // live on the PricingControl day rows and the daily digest.)
-  const attempts7d = activeCov.filter(
+  const attempts7d = requested.filter(
     (c) => c.lastAttemptAt && Date.parse(c.lastAttemptAt) > weekAgo
   ).length;
-  const successes7d = activeCov.filter(
+  const successes7d = requested.filter(
     (c) => c.lastSuccessAt && Date.parse(c.lastSuccessAt) > weekAgo
   ).length;
 
@@ -751,14 +574,14 @@ async function sendWeeklyReport(): Promise<boolean> {
     rollback
       ? `<p style="background:#fef3c7;border-radius:8px;padding:10px;"><strong>Catalog rolled back</strong> to version ${esc(rollback.versionId)} — only that version's rows are serving, and research is paused until the rollback clears.</p>`
       : ""
-  }<p>The weekly look at what the AI pricer did. Every sheet below is <strong>already live and quoting</strong> — this is visibility, not an approval queue. To overrule any number, edit it on <a href="${process.env.CRM_APP_URL ?? ""}/market-rates">Market Rates</a>; an edit pins the row and the refresh never touches it again.</p>
+  }<p>The weekly look at demand-triggered and staff-requested AI research. Every sheet below is <strong>already live and quoting</strong> — this is visibility, not an approval queue. The system does not seed towns or refresh rates merely because they age. To overrule any number, edit it on <a href="${process.env.CRM_APP_URL ?? ""}/market-rates">Market Rates</a>; an edit pins the row.</p>
     ${section(
       `Price moves this week (${moves.length})`,
       moves.map(
         ({ r, pct }) =>
           `${esc(rateLabel(r))}: ${money(r.prevPriceCents!)} → <strong>${money(r.priceCents)}</strong> (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%)`
       ),
-      "No refreshed sheet changed price."
+      "No requested research changed a price."
     )}
     ${section(
       `Floors that bound (${floored.length})`,
@@ -785,25 +608,18 @@ async function sendWeeklyReport(): Promise<boolean> {
       `Nothing has failed ${FAILING_THRESHOLD}+ times.`
     )}
     ${section(
-      `Stale sheets — no successful refresh in ${STALE_AFTER_DAYS}+ days (${stale.length})`,
-      stale.map(
-        (c) => `${esc(covLabel(c))}: last success ${ageDays(c.lastSuccessAt!)}d ago`
-      ),
-      "Every covered combo refreshed recently."
-    )}
-    ${section(
-      `Coverage gaps — never successfully priced (${gaps.length})`,
+      `Requested prices still missing (${gaps.length})`,
       gaps.map(
         (c) =>
           `${esc(covLabel(c))} (${c.source.toLowerCase()}${(c.failCount ?? 0) > 0 ? `, ${c.failCount} failed tries` : ""})`
       ),
-      "Every covered combo has a sheet."
+      "Every requested combo has a sheet."
     )}
     <h2 style="font-size:15px;margin:20px 0 6px;">This week's research</h2>
-    <p style="margin:0;">${successes7d} combos refreshed successfully of ${attempts7d} attempted · ${activeCov.length} combos covered · daily cap ${RESEARCH_PER_DAY}.</p>`;
+    <p style="margin:0;">${successes7d} requested combos succeeded of ${attempts7d} attempted · ${requested.length} still requested or in recovery · daily cap ${RESEARCH_PER_DAY}.</p>`;
 
   return notifyOffice({
-    subject: `AI pricing weekly report — ${moves.length} price move${moves.length === 1 ? "" : "s"}, ${gaps.length} gap${gaps.length === 1 ? "" : "s"}`,
+    subject: `AI pricing weekly report — ${moves.length} price move${moves.length === 1 ? "" : "s"}, ${gaps.length} request${gaps.length === 1 ? "" : "s"} missing`,
     heading: "AI pricing — weekly report",
     template: "ops-pricing-weekly-report",
     bodyHtml,
@@ -852,22 +668,22 @@ async function settleResearchFailure(
 // --------------------------------------------------------------- handler
 
 type PricingRefreshEvent = {
-  /** Internal on-demand wake-up from booking-public. */
+  /** Internal on-demand wake-up from a quote miss or explicit staff review. */
   rateKey?: string;
-  source?: "quote";
+  source?: "quote" | "manual";
 };
 
 export const handler = async (event: PricingRefreshEvent = {}) => {
   const startedAt = Date.now();
   const now = new Date();
-  const targetedRateKey =
-    event.source === "quote" && typeof event.rateKey === "string"
-      ? event.rateKey
+  const targetedSource =
+    (event.source === "quote" || event.source === "manual") &&
+    typeof event.rateKey === "string"
+      ? event.source
       : null;
-  // The cron fires every 5 minutes for fast demand self-heal, but seeding
-  // (a full re-scan of rates/customers/bookings) and the weekly report only
-  // belong once an hour: the first run of the hour owns them. Off the hour,
-  // the run is a pure drain over the already-seeded work-list.
+  const targetedRateKey = targetedSource ? event.rateKey! : null;
+  // The cron is only a recovery drain for persisted demand/manual requests.
+  // The top-of-hour check exists solely to send the once-weekly report.
   const topOfHour = !targetedRateKey && now.getUTCMinutes() < 5;
 
   // GL-16: ONE drain at a time. The loser exits before selecting or spending
@@ -895,16 +711,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
     return summary;
   }
   try {
-    let seeded = 0;
-    if (topOfHour) {
-      try {
-        seeded = await seedCoverage();
-      } catch (err) {
-        // Seeding trouble must not stop the drain — demand rows still self-heal.
-        console.error("pricing-refresh: seeding failed", err);
-      }
-    }
-
+    const seeded = 0; // retained in the operational summary for compatibility
     const client = await dataClient();
     const coverage = await listAll<CoverageRow>(client.models.RateCoverage);
     // GL-16 rollback: read the rollback state FIRST — the live map must
@@ -962,9 +769,9 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
     // the restored sheet. The work-list, leases, and notify retries keep
     // running; research resumes the moment the rollback is cleared.
 
-    // A targeted wake-up researches ONLY its miss — and only when the combo
-    // genuinely has no live sheet (fresh, pinned, exhausted, leased, and
-    // backing-off rows are never re-researched by a wake-up either).
+    // A quote wake-up researches only a persisted cold-cache miss. A manual
+    // wake-up may replace a live unpinned sheet, but only when staff stamped
+    // that exact coverage row. Nothing else can become targeted work.
     const targetedRow = targetedRateKey
       ? (coverage.find((row) => row.id === targetedRateKey) ?? null)
       : null;
@@ -972,8 +779,14 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
       ? []
       : targetedRateKey
         ? targetedRow &&
-          !live.has(targetedRateKey) &&
-          researchable(targetedRow, startedAt)
+          researchable(targetedRow, startedAt) &&
+          Boolean(targetedRow.researchRequestedAt) &&
+          ((targetedSource === "quote" &&
+            targetedRow.source === "DEMAND" &&
+            !live.has(targetedRateKey)) ||
+            (targetedSource === "manual" &&
+              targetedRow.source === "MANUAL" &&
+              !live.get(targetedRateKey)?.pinned))
           ? [targetedRow]
           : []
         : selectWork(coverage, live, startedAt);
@@ -1003,7 +816,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
         // overlapping invocations can never jointly exceed the caps.
         const reserved = await reserveBudget(
           leaseNow,
-          targetedRateKey ? "DEMAND" : "GENERAL",
+          targetedSource === "quote" ? "DEMAND" : "GENERAL",
           { perDay: RESEARCH_PER_DAY, demandPerDay: DEMAND_RESEARCH_PER_DAY }
         );
         if (!reserved) {
@@ -1041,6 +854,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
               failCount: 0,
               nextEligibleAt: null,
               exhaustedAt: null,
+              researchRequestedAt: null,
               leaseUntil: null,
             });
           } else {

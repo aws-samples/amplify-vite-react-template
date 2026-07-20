@@ -7,8 +7,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * an expired sheet still serves, a pinned sheet serves forever, only a
  * combo with no sheet at all returns null — and reading NEVER researches.
  * Misses are recorded with enqueueRateResearch (idempotent RateCoverage
- * upsert, notify list capped) for the hourly cron. Research itself
- * (researchAndCacheRate) is the cron's machinery: one call per (service,
+ * upsert, notify list capped) for the demand worker. Research itself
+ * (researchAndCacheRate) is the worker's machinery: one call per (service,
  * area, size band) yields a full sheet cached on one MarketRate row, with
  * prev-values recorded on refresh for the weekly diff. Guardrails: the
  * variable-cost floor (one-time components only) and every-component-or-
@@ -131,7 +131,6 @@ const {
   getCachedRate,
   hoaBandFor,
   NOTIFY_CAP,
-  pickLiveRow,
   pickServingRow,
   pricingPromptHash,
   PRICING_MODEL,
@@ -322,7 +321,13 @@ describe("demand-enqueue — an idempotent RateCoverage upsert per combo", () =>
     enqueueRateResearch({ ...gpArgs, ...extra });
 
   it("records a miss keyed by the combo, DEMAND, active, with the waiting lead", async () => {
-    await miss({ notifyEmail: "Lead@Example.com", bookingRequestId: "bk1" });
+    await expect(
+      miss({
+        notifyEmail: "Lead@Example.com",
+        bookingRequestId: "bk1",
+        requestedBy: "PUBLIC_QUOTE",
+      })
+    ).resolves.toBe(true);
 
     expect(covRows).toHaveLength(1);
     expect(covRows[0]).toMatchObject({
@@ -333,9 +338,12 @@ describe("demand-enqueue — an idempotent RateCoverage upsert per combo", () =>
       state: "MA",
       band: 2000,
       source: "DEMAND",
+      researchRequestedBy: "PUBLIC_QUOTE",
+      researchRequestReason: "MISSING_RATE_SHEET",
       failCount: 0,
       active: true,
     });
+    expect(covRows[0].researchRequestedAt).toBeTruthy();
     expect(JSON.parse(covRows[0].notify!)).toEqual([
       { email: "lead@example.com", bookingRequestId: "bk1" },
     ]);
@@ -368,14 +376,14 @@ describe("demand-enqueue — an idempotent RateCoverage upsert per combo", () =>
     expect(JSON.parse(covRows[0].notify!)).toHaveLength(NOTIFY_CAP);
   });
 
-  it("a real miss promotes a seeded row to DEMAND; seeding never demotes it back", async () => {
+  it("a real miss promotes a legacy seeded row to DEMAND; legacy writes cannot demote it", async () => {
     await miss({ source: "SEED" });
     expect(covRows[0].source).toBe("SEED");
 
     await miss(); // a customer actually needed this combo
     expect(covRows[0].source).toBe("DEMAND");
 
-    await miss({ source: "SEED" }); // next hour's idempotent seeding pass
+    await miss({ source: "SEED" }); // deployment-compatibility write
     expect(covRows[0].source).toBe("DEMAND");
   });
 
@@ -390,10 +398,10 @@ describe("demand-enqueue — an idempotent RateCoverage upsert per combo", () =>
     expect(covRows[0].notify).toBe(before.notify); // not even a notify append
   });
 
-  it("never throws — losing a miss record must never fail a quote", async () => {
+  it("never throws, but refuses to acknowledge a miss it could not persist", async () => {
     covGetThrows = true;
 
-    await expect(miss({ notifyEmail: "a@x.com" })).resolves.toBeUndefined();
+    await expect(miss({ notifyEmail: "a@x.com" })).resolves.toBe(false);
     expect(covRows).toHaveLength(0);
   });
 });

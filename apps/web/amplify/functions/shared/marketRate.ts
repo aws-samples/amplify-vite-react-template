@@ -15,17 +15,18 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  * sheet: the Market Rates screen edits ratesJson components and mirrors
  * `priceCents` to the sheet's one-time price on save. An office edit sets
  * `pinned`, and a pinned row is NEVER re-researched — the office's number
- * stands until the office un-pins or retires it.
+ * stands until the office un-pins it and explicitly requests new research.
  *
  * The live path is PURE READS. getCachedRate serves last-known-good and
  * never researches: an expired sheet still serves (a week-old price beats
- * a callback), so `expiresAt` means "due for refresh", never "refuse";
+ * a callback), so `expiresAt` is historical metadata, never "refuse";
  * pinned rows serve forever until un-pinned; only a combo with NO sheet at
- * all returns null. On null the caller records the miss with
+ * all returns null. On null the caller records the real quote demand with
  * enqueueRateResearch (an idempotent RateCoverage upsert, optionally
- * carrying the waiting lead's email) and takes its honest fallback — the
- * hourly pricing-refresh cron researches the combo and emails the lead
- * when their exact prices are ready.
+ * carrying the waiting lead's email) and takes its honest fallback. The
+ * pricing worker researches only that requested combo and emails the lead
+ * when their exact prices are ready. There is no speculative town seeding
+ * and age alone never triggers research.
  *
  * Research (researchAndCacheRate) is exported ONLY as the cron's
  * machinery: no quote request ever waits 10–60s on an Anthropic call
@@ -56,9 +57,9 @@ import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
  */
 
 /**
- * Refresh cadence: a sheet older than this is due for re-research by the
- * cron. Also what a fresh row's `expiresAt` is set to — the "due" date the
- * office sees, not a serve deadline.
+ * Historical review marker retained on stored rows. It is not an automatic
+ * refresh trigger: a sheet keeps serving until a real quote needs a missing
+ * sheet, staff explicitly requests research, edits/pins it, or retires it.
  */
 export const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -450,8 +451,8 @@ export function _resetRollbackMemoForTests(): void {
 
 /**
  * The live path: return the freshest usable cached sheet, or null. NEVER
- * researches, never waits — an expired sheet still serves (it is merely
- * due for refresh), a pinned sheet serves forever, and only a combo with
+ * researches, never waits — an expired sheet still serves (age is historical
+ * metadata only), a pinned sheet serves forever, and only a combo with
  * no sheet at all returns null. Callers pair a null with
  * enqueueRateResearch + their honest fallback.
  */
@@ -528,13 +529,14 @@ export function parseNotify(raw: unknown): RateNotifyEntry[] {
 }
 
 /**
- * Record that somebody needed a combo we have no sheet for (or that
- * seeding wants one researched). Idempotent per combo: one RateCoverage
+ * Record that somebody needed an exact combo we have no sheet for.
+ * Idempotent per combo: one RateCoverage
  * row keyed by the combo, upserted; a waiting lead's email is appended to
- * its notify list (deduped, capped at NOTIFY_CAP) so the cron can send
+ * its notify list (deduped, capped at NOTIFY_CAP) so the recovery worker can send
  * "your exact prices are ready" when the sheet lands. A live-path miss is
- * DEMAND and jumps the refresh queue — including promoting an existing
- * seeded row. Never throws: losing a miss record must never fail a quote.
+ * DEMAND and jumps the research queue. The boolean return is the durable
+ * enqueue acknowledgement: callers must not claim that research is queued
+ * unless it is true.
  */
 export async function enqueueRateResearch(opts: {
   service: MarketRateService;
@@ -545,13 +547,16 @@ export async function enqueueRateResearch(opts: {
   bookingRequestId?: string;
   /** Coverage provenance; live-path misses are DEMAND (the default). */
   source?: "SEED" | "SERVED" | "DEMAND";
-}): Promise<void> {
+  /** Human-readable origin for the durable demand audit. */
+  requestedBy?: "PUBLIC_QUOTE" | "CRM_LEAD";
+}): Promise<boolean> {
   try {
     const { service, city, state, sqft } = opts;
     const source = opts.source ?? "DEMAND";
     const areaKey = areaKeyFor(city, state);
     const band = sqft != null ? sqftBucket(sqft) : null;
     const id = rateKeyFor(service, areaKey, band);
+    const requestedAt = new Date().toISOString();
     const entry: RateNotifyEntry | null = opts.notifyEmail
       ? {
           email: opts.notifyEmail.trim().toLowerCase(),
@@ -573,27 +578,36 @@ export async function enqueueRateResearch(opts: {
           state: state.trim().toUpperCase(),
           band,
           source,
+          ...(source === "DEMAND"
+            ? {
+                researchRequestedAt: requestedAt,
+                researchRequestedBy: opts.requestedBy ?? "QUOTE_DEMAND",
+                researchRequestReason: "MISSING_RATE_SHEET",
+              }
+            : {}),
           failCount: 0,
           active: true,
           notify: JSON.stringify(entry ? [entry] : []),
         });
-      if (createdRow && !errors?.length) return;
+      if (createdRow && !errors?.length) return true;
       // Lost a create race — re-read and merge into the winner's row.
       existing = (await client.models.RateCoverage.get({ id })).data;
-      if (!existing) return;
+      if (!existing) return false;
     }
 
     // GL-16: a retired coverage row is the office's decision and STAYS
-    // retired — seeding and quote misses must not regenerate work the
-    // office removed. (The office reactivates from the Market Rates
-    // screen.) The lead already received the honest callback fallback.
-    if (!existing.active) return;
+    // retired. The caller receives false and must use its honest human
+    // fallback instead of telling the customer research was queued.
+    if (!existing.active) return false;
 
     const patch: Record<string, unknown> = {};
-    // A real customer miss promotes a seeded row so it jumps the refresh
-    // queue (self-heal within the hour). Never demote the other way.
-    if (source === "DEMAND" && existing.source !== "DEMAND") {
+    // A real customer miss promotes any legacy row to DEMAND. Never demote
+    // a demand request the other way.
+    if (source === "DEMAND") {
       patch.source = "DEMAND";
+      patch.researchRequestedAt = requestedAt;
+      patch.researchRequestedBy = opts.requestedBy ?? "QUOTE_DEMAND";
+      patch.researchRequestReason = "MISSING_RATE_SHEET";
     }
     if (entry) {
       const list = parseNotify(existing.notify);
@@ -607,10 +621,16 @@ export async function enqueueRateResearch(opts: {
       }
     }
     if (Object.keys(patch).length) {
-      await client.models.RateCoverage.update({ id, ...patch });
+      const { data, errors } = await client.models.RateCoverage.update({
+        id,
+        ...patch,
+      });
+      return Boolean(data) && !errors?.length;
     }
+    return true;
   } catch (err) {
     console.error("enqueueRateResearch failed", opts.service, opts.city, err);
+    return false;
   }
 }
 
@@ -979,4 +999,3 @@ async function research(
     return null;
   }
 }
-

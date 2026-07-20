@@ -359,7 +359,14 @@ backend.dailyReminders.resources.lambda.addToRolePolicy(
 backend.pricingRefresh.resources.lambda.grantInvoke(
   backend.bookingPublic.resources.lambda
 );
+backend.pricingRefresh.resources.lambda.grantInvoke(
+  backend.crmPricing.resources.lambda
+);
 backend.bookingPublic.addEnvironment(
+  "PRICING_REFRESH_FUNCTION_NAME",
+  backend.pricingRefresh.resources.lambda.functionName
+);
+backend.crmPricing.addEnvironment(
   "PRICING_REFRESH_FUNCTION_NAME",
   backend.pricingRefresh.resources.lambda.functionName
 );
@@ -704,7 +711,7 @@ backend.pricingRefresh.resources.lambda
     {
       alarmName: `buzzkill-${branch}-pricing-refresh-did-not-run`,
       alarmDescription:
-        "The pricing-refresh schedule (every 5 minutes) produced zero invocations in an hour — waiting leads are not being priced and rate sheets are not refreshing.",
+        "The pricing-research recovery schedule (every 5 minutes) produced zero invocations in an hour — persisted website, CRM, or manual research requests are not being recovered.",
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,

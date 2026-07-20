@@ -1160,9 +1160,10 @@ export const schema = a.schema({
   // (one-time, plan cadences with monthly + initial fees, wasp extra-nest,
   // HOA per-unit monthly rates by unit band) stored in ratesJson; priceCents
   // mirrors the sheet's one-time price. Research happens ONLY in the hourly
-  // pricing-refresh cron; the live quoting paths are pure reads with
-  // serve-last-known-good semantics — expiresAt means "due for refresh",
-  // never "refuse". The office override surface is the FULL sheet: the
+  // pricing-refresh worker, and ONLY after a real website/CRM quote misses
+  // its sheet or staff explicitly requests a market review. The live quoting
+  // paths are pure reads with serve-last-known-good semantics; rates do not
+  // expire merely because they age. The office override surface is the FULL sheet: the
   // Market Rates screen edits ratesJson components, keeps priceCents
   // mirrored, and sets pinned — a pinned row is never re-researched and
   // serves until the office un-pins or retires it. Cached so identical
@@ -1179,7 +1180,8 @@ export const schema = a.schema({
       researchedAt: a.datetime(),
       expiresAt: a.datetime(),
       active: a.boolean().required(),
-      // Office-edited. Pinned rows are the office's word and never refresh.
+      // Office-edited. Pinned rows are the office's word and cannot be
+      // manually re-researched until staff unpins them.
       pinned: a.boolean(),
       // The superseded sheet's mirror price + research time, stamped by the
       // refresh cron when it replaces a sheet — the weekly report diffs
@@ -1208,15 +1210,11 @@ export const schema = a.schema({
       allow.groups(["OWNER", "OFFICE"]).to(["create", "read", "update", "delete"]),
     ]),
 
-  // The research work-list for the pricing-refresh cron: one row per
-  // (service, area, sqft band) combo the AI pricer should keep a fresh
-  // sheet for, with the row id doubling as the combo key (identical to the
-  // MarketRate rateKey format). Rows are born from idempotent seeding
-  // (SEED: the curated core-town list; SERVED: combos derived from existing
-  // rates, customer towns and booking requests) or from a live-path cache
-  // miss (DEMAND — those jump the refresh queue so a waiting lead is priced
-  // within the hour). The live quoting paths only ever READ MarketRate;
-  // this model belongs to enqueueRateResearch and the cron.
+  // The demand/manual work-list for pricing research: one row per
+  // (service, area, sqft band) combo. Merely discovering a town, customer,
+  // booking request, or old sheet creates NO research work. A row is eligible
+  // to spend only while researchRequestedAt is present, stamped by an actual
+  // website/CRM quote miss or an explicit staff market-review command.
   RateCoverage: a
     .model({
       service: a.string().required(),
@@ -1227,7 +1225,10 @@ export const schema = a.schema({
       // sqft band (bucket ceiling) for sqft-priced services; null for
       // WASP_NEST / HOA, whose sheets are not sized.
       band: a.integer(),
-      source: a.string().required(), // SEED | SERVED | DEMAND
+      source: a.string().required(), // DEMAND | MANUAL (legacy values stay inert)
+      researchRequestedAt: a.datetime(),
+      researchRequestedBy: a.string(),
+      researchRequestReason: a.string(),
       lastAttemptAt: a.datetime(),
       lastSuccessAt: a.datetime(),
       failCount: a.integer(),
@@ -3611,6 +3612,22 @@ export const schema = a.schema({
       screenshotKey: a.string(),
       customerId: a.string(),
       leadFeeCents: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])
+    .handler(a.handler.function(crmPricing)),
+
+  /**
+   * Explicit staff market review. This is the only non-quote path that may
+   * request AI price research; it is reasoned, attributable, and targeted to
+   * one existing rate key. It never expands to neighboring services/towns.
+   */
+  requestPricingResearch: a
+    .mutation()
+    .arguments({
+      rateKey: a.string().required(),
+      reasonCode: a.string().required(),
+      note: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "OFFICE"])])

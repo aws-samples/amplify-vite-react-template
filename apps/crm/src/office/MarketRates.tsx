@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   listAll,
+  opResult,
   unwrap,
   updateMarketRate,
   type MarketRate,
@@ -50,22 +51,19 @@ import {
  * market-rate sheet cached on one of these rows — this screen is the ONLY
  * human pricing control: the office edits any component of a sheet (one-time,
  * extra nest, each cadence's monthly + initial fee), and saving pins the row
- * so it never expires or re-researches until the office un-pins it.
+ * so AI cannot replace it until the office un-pins it and deliberately
+ * requests fresh market research.
  */
 
 const STATUS_TONE: Record<RateStatus, BadgeTone> = {
   active: "ok",
   pinned: "info",
-  stale: "warn",
   retired: "muted",
 };
 
 const STATUS_LABEL: Record<RateStatus, string> = {
   active: "active",
-  pinned: "pinned — never re-researches",
-  // Serve-last-known-good: a row past its refresh date keeps quoting until
-  // the pricing cron replaces the sheet — amber, not an outage.
-  stale: "stale — serving last known, refresh due",
+  pinned: "pinned — office controlled",
   retired: "retired",
 };
 
@@ -86,8 +84,6 @@ function scopeOf(rate: MarketRate): string {
 const COST_PER_RESEARCH_USD = 0.35;
 /** Mirrors the engine's daily cap (pricing-refresh's RESEARCH_PER_DAY). */
 const RESEARCH_PER_DAY = 150;
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-
 function covScope(c: RateCoverage): string {
   return `${SERVICE_LABEL[c.service] ?? c.service} · ${c.areaKey}${c.band ? ` · up to ${c.band.toLocaleString()} sqft` : ""}`;
 }
@@ -126,12 +122,20 @@ function EnginePanel({
     byKey.set(r.rateKey, list);
   }
   const liveKeys = new Set<string>();
+  const pinnedLiveKeys = new Set<string>();
   for (const [key, keyRows] of byKey) {
-    if (pickServingRow(keyRows, key, rollbackManifest)) liveKeys.add(key);
+    const serving = pickServingRow(keyRows, key, rollbackManifest);
+    if (serving) liveKeys.add(key);
+    if (serving?.pinned) pinnedLiveKeys.add(key);
   }
   const active = coverage.filter((c) => c.active);
-  const exhausted = active.filter((c) => c.exhaustedAt);
-  const backingOff = active
+  const requested = active.filter(
+    (c) =>
+      Boolean(c.researchRequestedAt) ||
+      (c.source === "DEMAND" && !c.lastSuccessAt)
+  );
+  const exhausted = requested.filter((c) => c.exhaustedAt);
+  const backingOff = requested
     .filter(
       (c) =>
         !c.exhaustedAt &&
@@ -139,20 +143,13 @@ function EnginePanel({
         Date.parse(c.nextEligibleAt) > now
     )
     .sort((a, b) => (a.nextEligibleAt ?? "").localeCompare(b.nextEligibleAt ?? ""));
-  const waiting = active.filter(
+  const waiting = requested.filter(
     (c) =>
       !c.exhaustedAt &&
-      !liveKeys.has(c.id) &&
+      ((c.source === "DEMAND" && !liveKeys.has(c.id)) ||
+        (c.source === "MANUAL" && !pinnedLiveKeys.has(c.id))) &&
       !(c.nextEligibleAt && Date.parse(c.nextEligibleAt) > now)
   );
-  const dueRefresh = rates.filter(
-    (r) =>
-      r.active &&
-      !r.pinned &&
-      r.researchedAt &&
-      now - Date.parse(r.researchedAt) > WEEK_MS
-  );
-
   const attempts = control?.attempts ?? 0;
   const succeeded = control?.succeeded ?? 0;
   const failed = control?.failed ?? 0;
@@ -172,6 +169,7 @@ function EnginePanel({
           exhaustedAt: null,
           nextEligibleAt: null,
           failCount: 0,
+          researchRequestedAt: new Date().toISOString(),
         })
       );
       await onChanged();
@@ -200,9 +198,8 @@ function EnginePanel({
         {RESEARCH_PER_DAY}
       </p>
       <p className="muted small" style={{ margin: "4px 0 0" }}>
-        Queue: {waiting.length} waiting for research · {dueRefresh.length} due
-        a weekly refresh · {backingOff.length} backing off after a failure ·{" "}
-        {active.length} combos covered
+        Queue: {waiting.length} requested · {backingOff.length} backing off
+        after a failure. Towns and aging rates do not create research work.
       </p>
       <ErrorNote error={error} />
       {exhausted.map((c) => (
@@ -344,7 +341,7 @@ export default function MarketRates() {
       ) : rates.length === 0 ? (
         <EmptyState
           title="No market rates yet"
-          body="Every base price is AI-researched: the hourly pricing refresh researches each service + area (+ size band) and caches the full rate sheet here, re-checking it weekly. Review, edit (which pins the rate), or retire any row."
+          body="Rates are researched only when a real website/CRM quote needs a missing sheet or staff explicitly requests a market review. No towns are pre-generated and rates do not refresh merely because they age."
         />
       ) : (
         <Card>
@@ -445,6 +442,14 @@ const EDIT_REASONS = [
   { code: "OTHER", label: "Other (explain in the note)" },
 ] as const;
 
+const RESEARCH_REASONS = [
+  { code: "COMPETITOR_CHANGE", label: "Competitor pricing appears to have changed" },
+  { code: "MARGIN_REVIEW", label: "Reviewing service margin" },
+  { code: "CONVERSION_REVIEW", label: "Quote conversion suggests the rate is wrong" },
+  { code: "PROMPT_CHANGE", label: "Re-run after an approved pricing-prompt change" },
+  { code: "OTHER", label: "Other business reason" },
+] as const;
+
 function RateForm({
   rate,
   onDone,
@@ -485,7 +490,9 @@ function RateForm({
   const [active, setActive] = useState(rate.active);
   const [editReason, setEditReason] = useState("");
   const [editNote, setEditNote] = useState("");
-  const [busy, setBusy] = useState<null | "save" | "unpin">(null);
+  const [researchReason, setResearchReason] = useState("");
+  const [researchNote, setResearchNote] = useState("");
+  const [busy, setBusy] = useState<null | "save" | "unpin" | "research">(null);
   const [error, setError] = useState<string | null>(null);
 
   // HOA sheets have no one-time card; everything else always has one.
@@ -613,6 +620,32 @@ function RateForm({
     }
   };
 
+  const requestResearch = async () => {
+    if (!researchReason) {
+      setError("Pick the business reason for new market research");
+      return;
+    }
+    if (researchReason === "OTHER" && !researchNote.trim()) {
+      setError("Explain why this rate needs new research");
+      return;
+    }
+    setBusy("research");
+    setError(null);
+    try {
+      opResult(
+        await api().mutations.requestPricingResearch({
+          rateKey: rate.rateKey,
+          reasonCode: researchReason,
+          note: researchNote.trim() || undefined,
+        })
+      );
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not request research");
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="form-grid">
       <div className="row-split">
@@ -626,15 +659,11 @@ function RateForm({
             <dd>{fmtDate(rate.researchedAt, true)}</dd>
           </>
         ) : null}
-        <dt>Refresh due</dt>
+        <dt>AI research</dt>
         <dd>
           {rate.pinned
-            ? "never — pinned until you un-pin it"
-            : rate.expiresAt
-              ? // Past-due rows keep serving the last known sheet until the
-                // pricing cron refreshes them — due, never dark.
-                fmtDate(rate.expiresAt, true)
-              : "—"}
+            ? "Blocked by office pin"
+            : "Only on real quote demand or a staff-requested review"}
         </dd>
       </dl>
       {rate.basis ? (
@@ -769,7 +798,10 @@ function RateForm({
             : ""}
         </p>
       ) : null}
-      <Field label="Active" hint="Retire to stop serving this rate — the refresh cron researches a replacement">
+      <Field
+        label="Active"
+        hint="Retire to stop serving this rate. AI researches a replacement only if a later quote requests this exact combination."
+      >
         <SegControl
           options={[
             { value: "yes" as const, label: "Active" },
@@ -785,8 +817,8 @@ function RateForm({
       </Button>
       <p className="muted small">
         {active
-          ? "Saving pins the sheet: it becomes the quoted price for this service + area and never expires or re-researches until you un-pin it."
-          : "A retired rate is never served — the next quote for this service + area researches the market fresh."}
+          ? "Saving pins the sheet: it becomes the quoted price for this service + area until the office changes it."
+          : "A retired rate is never served. A later quote for this exact combination can request replacement research."}
       </p>
       {rate.pinned ? (
         <Button
@@ -795,8 +827,46 @@ function RateForm({
           loading={busy === "unpin"}
           onClick={() => void unpin()}
         >
-          Resume AI research for this rate
+          Unpin this office rate
         </Button>
+      ) : null}
+      {rate.active && !rate.pinned ? (
+        <div className="form-grid" style={{ borderTop: "1px solid var(--line)", paddingTop: 12 }}>
+          <strong>Request new AI market research</strong>
+          <p className="muted small">
+            This spends one targeted research attempt for this rate only. It
+            does not generate neighboring towns, services, or size bands.
+          </p>
+          <Field label="Business reason">
+            <select
+              value={researchReason}
+              onChange={(event) => setResearchReason(event.target.value)}
+            >
+              <option value="">Pick a reason…</option>
+              {RESEARCH_REASONS.map((reason) => (
+                <option key={reason.code} value={reason.code}>
+                  {reason.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Supporting note" hint="Required when Other is selected">
+            <input
+              value={researchNote}
+              onChange={(event) => setResearchNote(event.target.value)}
+              placeholder="What changed or what should be checked?"
+            />
+          </Field>
+          <Button
+            block
+            variant="subtle"
+            loading={busy === "research"}
+            disabled={!researchReason || (researchReason === "OTHER" && !researchNote.trim())}
+            onClick={() => void requestResearch()}
+          >
+            Research this rate only
+          </Button>
+        </div>
       ) : null}
     </div>
   );

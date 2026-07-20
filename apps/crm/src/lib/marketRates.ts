@@ -19,15 +19,13 @@ import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCa
  * are replicated here and must move with the engine's.
  *
  * Pinned semantics (this wave): an office-edited row is saved with
- * pinned=true and is served forever — it never expires and never
- * re-researches — until the office un-pins it, which puts it back on the
- * cron's normal refresh cycle.
+ * pinned=true and is served until the office changes it. Unpinning permits
+ * a deliberate staff research request; it does not start background work.
  *
  * Serve-last-known-good (this wave): the live path is a pure read and the
- * engine serves the freshest usable row even past expiresAt — a stale sheet
- * beats a callback. expiresAt now means "due for refresh" (the hourly
- * pricing-refresh cron re-researches on schedule), never "refuse". Only a
- * retired row — or a combo with no sheet at all — is not served.
+ * engine serves the freshest usable row regardless of the historical
+ * expiresAt marker. Age alone does not trigger AI research. Only a retired
+ * row — or a combo with no sheet at all — is not served.
  */
 
 export type { HoaBand, HoaPerUnitRates, PlanCadence, PlanRate, RateSheet };
@@ -103,27 +101,22 @@ export function bandOfKey(rateKey: string | null | undefined): number | null {
 
 // ------------------------------------------------------------------ status
 
-export type RateStatus = "retired" | "pinned" | "stale" | "active";
+export type RateStatus = "retired" | "pinned" | "active";
 
 /**
- * The row's honest state. Pinned wins over staleness — a pinned row never
- * refreshes, which is exactly why the badge must say so. A row past
- * expiresAt is "stale": the engine still serves it (serve-last-known-good —
- * staleness beats a callback) while the refresh cron owes it new research.
+ * The row's honest state. Age is deliberately absent: an old sheet remains
+ * active until a real quote needs a missing sheet or staff requests review.
  */
 export function rateStatus(
   rate: Pick<MarketRate, "active" | "pinned" | "expiresAt">,
-  now = Date.now()
+  _now = Date.now()
 ): RateStatus {
   if (!rate.active) return "retired";
   if (rate.pinned) return "pinned";
-  if (rate.expiresAt && new Date(rate.expiresAt).getTime() < now)
-    return "stale";
   return "active";
 }
 
-/** Would the engine serve this row? Only retired refuses — a stale row is
- *  served as the last known good sheet until the cron refreshes it. */
+/** Would the engine serve this row? Only retired refuses. */
 export function isServable(
   rate: Pick<MarketRate, "active" | "pinned" | "expiresAt">,
   now = Date.now()

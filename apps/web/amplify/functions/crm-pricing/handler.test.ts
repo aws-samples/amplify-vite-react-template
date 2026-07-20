@@ -16,8 +16,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * market-rate sheet via the PURE-READ getCachedRate API (deterministic
  * Zone B adders on top, like the funnel). The live path never researches:
  * a stale sheet still serves, and a combo with no sheet at all enqueues
- * the research for the hourly pricing-refresh cron and ESCALATES to a
- * human with the re-price-in-an-hour reason — never a silent skip, never
+ * the exact research for the demand worker and ESCALATES to a human while
+ * it runs — never a silent skip, never
  * an invented price; HOA leads auto-quote per-unit like everything else.
  */
 
@@ -25,6 +25,8 @@ const pricingRuns: Record<string, unknown>[] = [];
 // GL-16: the rollback mutations read/write the PricingControl control row.
 const controlRows = new Map<string, Record<string, unknown>>();
 const versionRows = new Map<string, Record<string, unknown>>();
+const marketRows: Record<string, unknown>[] = [];
+const coverageRows = new Map<string, Record<string, unknown>>();
 const fakeDataClient = {
   models: {
     LeadPricingRun: {
@@ -59,9 +61,48 @@ const fakeDataClient = {
         return { data: { ...row } };
       },
     },
+    MarketRate: {
+      listMarketRateByRateKey: async ({ rateKey }: { rateKey: string }) => ({
+        data: marketRows.filter((row) => row.rateKey === rateKey),
+      }),
+    },
+    RateCoverage: {
+      get: async ({ id }: { id: string }) => ({
+        data: coverageRows.get(id) ?? null,
+      }),
+      create: async (input: Record<string, unknown> & { id: string }) => {
+        coverageRows.set(input.id, { ...input });
+        return { data: coverageRows.get(input.id) };
+      },
+      update: async (input: Record<string, unknown> & { id: string }) => {
+        const row = coverageRows.get(input.id);
+        if (!row) return { data: null, errors: [{ message: "not found" }] };
+        for (const [key, value] of Object.entries(input)) {
+          if (value === null) delete row[key];
+          else row[key] = value;
+        }
+        return { data: { ...row } };
+      },
+    },
   },
 };
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
+
+const lambdaInvokes: Record<string, unknown>[] = [];
+vi.mock("@aws-sdk/client-lambda", () => ({
+  InvokeCommand: class {
+    input: Record<string, unknown>;
+    constructor(input: Record<string, unknown>) {
+      this.input = input;
+    }
+  },
+  LambdaClient: class {
+    send = async (command: { input: Record<string, unknown> }) => {
+      lambdaInvokes.push(command.input);
+      return {};
+    };
+  },
+}));
 
 // R80: a pricing escalation is a lead needing a call — it routes to sales@ via
 // notifyLeads now (was a hand-rolled sendEmail to the ops inbox).
@@ -110,7 +151,7 @@ vi.stubGlobal("fetch", fetchMock);
 
 /** The AI market-rate cache: tests set the cached sheet per service. The
  *  handler only ever READS it (getCachedRate) — a miss enqueues research
- *  for the cron instead of researching inline. */
+ *  for the demand worker instead of researching inline. */
 type FakeSheet = Record<string, unknown> | null;
 let sheets: Record<string, FakeSheet>;
 type FakeRate = {
@@ -137,7 +178,7 @@ const marketRateMock = vi.fn(
     };
   }
 );
-const enqueueMock = vi.fn(async (_opts: Record<string, unknown>) => undefined);
+const enqueueMock = vi.fn(async (opts: Record<string, unknown>) => opts != null);
 vi.mock("../shared/marketRate", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../shared/marketRate")>()),
   getCachedRate: (opts: never) => marketRateMock(opts),
@@ -182,12 +223,16 @@ const baseExtraction = {
 
 beforeEach(() => {
   controlRows.clear();
+  marketRows.length = 0;
+  coverageRows.clear();
+  lambdaInvokes.length = 0;
   pricingRuns.length = 0;
   leadEscalations.length = 0;
   messagesCreate.mockClear();
   fetchMock.mockClear();
   marketRateMock.mockClear();
   enqueueMock.mockClear();
+  enqueueMock.mockImplementation(async () => true);
   extraction = { ...baseExtraction };
   composedReply = "Sounds good!"; // no dollar amounts — always passes the guard
   // The cached AI sheets every price comes from. The quarterly plan is
@@ -407,14 +452,16 @@ describe("every base price comes from the AI market-rate sheet", () => {
   });
 });
 
-describe("a cache miss enqueues and escalates — the human holds it for an hour", () => {
-  it("no GP sheet → enqueue for the cron + ESCALATE with the re-price reason and the holding script", async () => {
+describe("a cache miss enqueues and escalates — a human owns it while research runs", () => {
+  it("no GP sheet → request the exact rate + ESCALATE with the holding script", async () => {
     sheets.GENERAL_PEST = null;
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
+    expect(run.reason).toBe(
+      "AI rate research requested — exact sheet is not ready; follow up with this lead now"
+    );
     expect(String(run.replyText)).toContain("custom quote from our owner");
     expect(run.monthlyPriceCents).toBeUndefined();
     expect(run.oneTimePriceCents).toBeUndefined();
@@ -423,6 +470,7 @@ describe("a cache miss enqueues and escalates — the human holds it for an hour
       city: "Ware",
       state: "MA",
       sqft: 3200,
+      requestedBy: "CRM_LEAD",
     });
     // R80: the escalation email is a lead alert — it routes to sales@ via
     // notifyLeads with the pricing-escalation template, not the ops inbox.
@@ -444,11 +492,14 @@ describe("a cache miss enqueues and escalates — the human holds it for an hour
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
+    expect(run.reason).toBe(
+      "AI rate research requested — exact sheet is not ready; follow up with this lead now"
+    );
     expect(enqueueMock).toHaveBeenCalledWith({
       service: "WASP_NEST",
       city: "Ware",
       state: "MA",
+      requestedBy: "CRM_LEAD",
     });
   });
 
@@ -470,6 +521,18 @@ describe("a cache miss enqueues and escalates — the human holds it for an hour
     expect(run.monthlyPriceCents).toBe(7500);
     expect(run.initialFeeCents).toBe(9900);
     expect(enqueueMock).not.toHaveBeenCalled();
+  });
+
+  it("labels a failed durable enqueue for immediate manual pricing", async () => {
+    sheets.GENERAL_PEST = null;
+    enqueueMock.mockResolvedValueOnce(false);
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("ESCALATE");
+    expect(String(run.reason)).toMatch(/could not be persisted/i);
+    expect(String(run.reason)).toMatch(/price this lead manually/i);
+    expect(leadEscalations[0].bodyHtml).toMatch(/could not be persisted/i);
   });
 });
 
@@ -561,7 +624,9 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
       const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
       expect(run.decision).toBe("ESCALATE");
-      expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
+      expect(run.reason).toBe(
+        "AI rate research requested — exact sheet is not ready; follow up with this lead now"
+      );
       expect(String(run.replyText)).toContain("custom quote from our owner");
       expect(enqueueMock).toHaveBeenCalledTimes(1);
     }
@@ -617,12 +682,88 @@ describe("HOA auto-quotes per unit — the always-escalate policy is retired", (
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("ESCALATE");
-    expect(run.reason).toBe("AI rate queued — re-price this lead in an hour");
+    expect(run.reason).toBe(
+      "AI rate research requested — exact sheet is not ready; follow up with this lead now"
+    );
     expect(enqueueMock).toHaveBeenCalledWith({
       service: "HOA",
       city: "Ware",
       state: "MA",
+      requestedBy: "CRM_LEAD",
     });
+  });
+});
+
+describe("explicit staff market research — exactly one existing rate", () => {
+  const rateKey = "GENERAL_PEST#ware-ma#2000";
+  const request = async (args: Record<string, unknown>) =>
+    (await handler({
+      arguments: args,
+      identity: {
+        sub: "u1",
+        groups: ["OFFICE"],
+        claims: { email: "office@example.com" },
+      },
+      fieldName: "requestPricingResearch",
+    } as never)) as Record<string, unknown>;
+
+  beforeEach(() => {
+    process.env.PRICING_REFRESH_FUNCTION_NAME = "pricing-refresh-test";
+    marketRows.push({
+      id: "mr-live",
+      rateKey,
+      service: "GENERAL_PEST",
+      areaKey: "ware-ma",
+      priceCents: 31900,
+      active: true,
+      pinned: false,
+      researchedAt: "2026-06-01T00:00:00.000Z",
+    });
+  });
+
+  it("stamps and wakes only the selected rate with an attributable reason", async () => {
+    const result = await request({
+      rateKey,
+      reasonCode: "COMPETITOR_CHANGE",
+      note: "Two local competitors changed plans",
+    });
+
+    expect(result).toEqual({ ok: true, rateKey });
+    expect([...coverageRows.keys()]).toEqual([rateKey]);
+    expect(coverageRows.get(rateKey)).toMatchObject({
+      source: "MANUAL",
+      active: true,
+      researchRequestedBy: "office@example.com",
+      researchRequestReason:
+        "COMPETITOR_CHANGE — Two local competitors changed plans",
+    });
+    expect(coverageRows.get(rateKey)?.researchRequestedAt).toBeTruthy();
+    expect(lambdaInvokes).toHaveLength(1);
+    expect(
+      JSON.parse(
+        Buffer.from(lambdaInvokes[0].Payload as Uint8Array).toString("utf8")
+      )
+    ).toEqual({ rateKey, source: "manual" });
+  });
+
+  it("refuses to research over an office-pinned rate", async () => {
+    marketRows[0].pinned = true;
+
+    await expect(
+      request({ rateKey, reasonCode: "MARGIN_REVIEW" })
+    ).rejects.toThrow(/Unpin the office rate/i);
+    expect(coverageRows.size).toBe(0);
+    expect(lambdaInvokes).toHaveLength(0);
+  });
+
+  it("requires a controlled business reason and an explanation for OTHER", async () => {
+    await expect(
+      request({ rateKey, reasonCode: "FELT_LIKE_IT" })
+    ).rejects.toThrow(/business reason/i);
+    await expect(
+      request({ rateKey, reasonCode: "OTHER" })
+    ).rejects.toThrow(/Explain/i);
+    expect(coverageRows.size).toBe(0);
   });
 });
 

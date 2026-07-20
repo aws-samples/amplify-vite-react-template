@@ -215,12 +215,7 @@ const {
   MAX_RESEARCH_ATTEMPTS,
   RESEARCH_PER_DAY,
   RESEARCH_PER_RUN,
-  SEED_TOWNS,
-  SEED_SQFT_BUCKETS,
 } = await import("./handler");
-
-/** 6 sqft-banded services × the seed buckets + WASP_NEST + HOA, per town. */
-const COMBOS_PER_TOWN = 6 * SEED_SQFT_BUCKETS.length + 2;
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 const DAY = 24 * 3600_000;
@@ -240,8 +235,40 @@ function spendBudget(attempts: number, demandAttempts = 0) {
   });
 }
 
-/** Run the handler with no API key: seeding happens, research cannot. */
+/** A compact set of legacy coverage rows/rates used by bookkeeping tests.
+ * They deliberately have no request stamp, so the demand-only worker must
+ * never spend money on them. */
+function legacyFixture() {
+  const combos = [
+    ["GENERAL_PEST", 2000],
+    ["RODENT", 2000],
+    ["ROACH", 1500],
+    ["ROACH", 2000],
+    ["TERMITE", 1500],
+    ["WILDLIFE", 1500],
+    ["WASP_NEST", null],
+  ] as const;
+  for (const [service, band] of combos) {
+    const id = `${service}#ware-ma${band == null ? "" : `#${band}`}`;
+    if (covTable.has(id)) continue;
+    addCov({
+      id,
+      service,
+      areaKey: "ware-ma",
+      city: "Ware",
+      state: "MA",
+      band,
+      source: "SERVED",
+      active: true,
+      failCount: 0,
+      notify: "[]",
+    });
+  }
+}
+
+/** Run the recovery worker with a quiet legacy fixture and no API key. */
 async function seedOnly() {
+  legacyFixture();
   delete process.env.ANTHROPIC_API_KEY;
   const summary = await handler();
   process.env.ANTHROPIC_API_KEY = "test-key";
@@ -273,11 +300,26 @@ const demandRow = (over: Partial<CovRow> = {}): CovRow => ({
   state: "MA",
   band: 3000,
   source: "DEMAND",
+  researchRequestedAt: new Date().toISOString(),
+  researchRequestedBy: "PUBLIC_QUOTE",
+  researchRequestReason: "MISSING_RATE_SHEET",
   active: true,
   failCount: 0,
   notify: "[]",
   ...over,
 });
+
+function addRequestedQueue(count: number) {
+  for (let i = 0; i < count; i += 1) {
+    addCov(
+      demandRow({
+        id: `TERMITE#town-${i}-ma#3000`,
+        areaKey: `town-${i}-ma`,
+        city: `Town ${i}`,
+      })
+    );
+  }
+}
 
 beforeEach(() => {
   covTable.clear();
@@ -395,133 +437,59 @@ describe("the drain lease — exactly one invocation researches at a time", () =
   });
 });
 
-describe("coverage seeding — top of the hour only, demand drains every run", () => {
-  it("skips seeding off the top of the hour, but still drains a waiting DEMAND miss", async () => {
-    await seedOnly();
-    quietAll(); // every seeded combo has a fresh sheet — nothing due
-    const seededCount = covTable.size;
-    addCov(demandRow());
-    vi.setSystemTime(new Date("2026-07-15T14:05:00Z")); // 5 past — off the hour
-
-    const summary = await handler();
-
-    expect(summary.seeded).toBe(0); // no re-scan mid-hour
-    expect(covTable.size).toBe(seededCount + 1); // only the demand row we added
-    expect(summary.attempted).toBe(1); // the demand miss still drained
-    expect(createdRates[0].rateKey).toBe("TERMITE#springfield-ma#3000");
-  });
-
-  it("seeds the curated town list across every service kind and common band", async () => {
-    await seedOnly();
-
-    expect(covTable.size).toBe(SEED_TOWNS.length * COMBOS_PER_TOWN);
-    expect(cov("GENERAL_PEST#ware-ma#2000")).toMatchObject({
-      source: "SEED",
-      city: "Ware",
-      state: "MA",
-      band: 2000,
-      active: true,
-    });
-    expect(cov("HOA#ware-ma")).toMatchObject({
-      band: null,
-      source: "SEED",
-    });
-  });
-
-  it("is idempotent — a second run creates nothing new", async () => {
-    await seedOnly();
-    const count = covTable.size;
-
-    await seedOnly();
-
-    expect(covTable.size).toBe(count);
-  });
-
-  it("cannot resurrect a combo the office retired", async () => {
-    await seedOnly();
-    const retired = cov("GENERAL_PEST#ware-ma#2000")!;
-    retired.active = false;
-
-    await seedOnly();
-
-    expect(cov("GENERAL_PEST#ware-ma#2000")!.active).toBe(false);
-  });
-
-  it("cannot re-arm an exhausted combo — only the office's explicit retry does", async () => {
-    await seedOnly();
-    const parked = cov("GENERAL_PEST#ware-ma#2000")!;
-    parked.exhaustedAt = iso(DAY);
-    parked.failCount = MAX_RESEARCH_ATTEMPTS;
-
-    await seedOnly();
-    const summary = await handler();
-
-    expect(cov("GENERAL_PEST#ware-ma#2000")).toMatchObject({
-      exhaustedAt: parked.exhaustedAt,
-      failCount: MAX_RESEARCH_ATTEMPTS,
-    });
-    // ...and the drain never touched it either.
-    expect(
-      messagesCreate.mock.calls.length === 0 ||
-        createdRates.every((r) => r.rateKey !== "GENERAL_PEST#ware-ma#2000")
-    ).toBe(true);
-    expect(summary.attempted).toBeLessThanOrEqual(RESEARCH_PER_RUN);
-  });
-
-  it("derives SERVED combos from existing rates, customer towns, and booking requests", async () => {
+describe("demand-only discovery — no speculative town, service, band, or age work", () => {
+  it("does not create research from customers, booking towns, or existing rates", async () => {
+    customers.push({ serviceCity: "Amherst", serviceState: "MA" });
+    bookings.push({ city: "Granby", state: "MA", service: "GENERAL_PEST" });
     rateRows.push({
-      id: "pre1",
+      id: "old-live",
       rateKey: "RODENT#springfield-ma#2000",
       service: "RODENT",
       areaKey: "springfield-ma",
       priceCents: 19900,
       active: true,
-      researchedAt: iso(DAY),
+      researchedAt: iso(90 * DAY),
     });
-    customers.push({ serviceCity: "Amherst", serviceState: "MA" });
-    bookings.push({
-      propertyKind: "COMMUNITY",
-      service: "GENERAL_PEST",
-      city: "Granby",
-      state: "MA",
-      units: 30,
-    });
-
-    await seedOnly();
-
-    // The pre-existing sheet's exact combo joins the refresh cycle.
-    expect(cov("RODENT#springfield-ma#2000")).toMatchObject({
-      source: "SERVED",
-      city: "springfield",
-      band: 2000,
-    });
-    // Customer and booking towns get the full service × band cross.
-    expect(cov("GENERAL_PEST#amherst-ma#1500")).toMatchObject({
-      source: "SERVED",
-    });
-    // A community booking maps to the HOA kind (no band).
-    expect(cov("HOA#granby-ma")).toMatchObject({ source: "SERVED" });
-  });
-});
-
-describe("work selection — demand first, then gaps, then weekly-due; pinned never", () => {
-  it("a DEMAND miss is researched before a sheet due for weekly refresh", async () => {
-    await seedOnly();
-    quietAll();
-    const due = rateRows.find((r) => r.rateKey === "RODENT#ware-ma#2000")!;
-    due.researchedAt = iso(8 * DAY);
-    addCov(demandRow());
 
     const summary = await handler();
 
-    expect(summary.attempted).toBe(2);
-    expect(createdRates[0].rateKey).toBe("TERMITE#springfield-ma#3000");
-    expect(createdRates[1].rateKey).toBe("RODENT#ware-ma#2000");
+    expect(summary).toMatchObject({ seeded: 0, attempted: 0 });
+    expect(covTable.size).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
   });
 
-  it("a sheet fresher than a week is not touched", async () => {
-    await seedOnly();
-    quietAll();
+  it("ignores legacy SEED/SERVED gaps and an old live sheet", async () => {
+    addCov({
+      ...demandRow(),
+      id: "GENERAL_PEST#ware-ma#2000",
+      service: "GENERAL_PEST",
+      areaKey: "ware-ma",
+      city: "Ware",
+      band: 2000,
+      source: "SEED",
+      researchRequestedAt: undefined,
+      lastSuccessAt: undefined,
+    });
+    addCov({
+      ...demandRow(),
+      id: "RODENT#ware-ma#2000",
+      service: "RODENT",
+      areaKey: "ware-ma",
+      city: "Ware",
+      band: 2000,
+      source: "SERVED",
+      researchRequestedAt: undefined,
+      lastSuccessAt: iso(90 * DAY),
+    });
+    rateRows.push({
+      id: "old-live",
+      rateKey: "RODENT#ware-ma#2000",
+      service: "RODENT",
+      areaKey: "ware-ma",
+      priceCents: 19900,
+      active: true,
+      researchedAt: iso(90 * DAY),
+    });
 
     const summary = await handler();
 
@@ -529,23 +497,75 @@ describe("work selection — demand first, then gaps, then weekly-due; pinned ne
     expect(messagesCreate).not.toHaveBeenCalled();
   });
 
-  it("a pinned sheet is never refreshed, however old", async () => {
-    await seedOnly();
-    quietAll();
-    const pinned = rateRows.find((r) => r.rateKey === "GENERAL_PEST#ware-ma#2000")!;
-    pinned.pinned = true;
-    pinned.researchedAt = iso(60 * DAY);
-
+  it("drains one persisted website/CRM miss and no neighboring combination", async () => {
+    addCov(demandRow());
     const summary = await handler();
 
-    expect(summary.attempted).toBe(0);
+    expect(summary.attempted).toBe(1);
+    expect(createdRates.map((r) => r.rateKey)).toEqual([
+      "TERMITE#springfield-ma#3000",
+    ]);
+  });
+
+  it("refreshes one explicitly requested unpinned rate, then becomes inert", async () => {
+    const requested = demandRow({
+      id: "RODENT#ware-ma#2000",
+      service: "RODENT",
+      areaKey: "ware-ma",
+      city: "Ware",
+      band: 2000,
+      source: "MANUAL",
+      researchRequestedBy: "owner@example.com",
+      researchRequestReason: "MARGIN_REVIEW",
+      lastSuccessAt: iso(90 * DAY),
+    });
+    addCov(requested);
+    rateRows.push({
+      id: "old-live",
+      rateKey: requested.id,
+      service: requested.service,
+      areaKey: requested.areaKey,
+      priceCents: 19900,
+      active: true,
+      researchedAt: iso(90 * DAY),
+    });
+
+    expect((await handler()).attempted).toBe(1);
+    expect(cov(requested.id)?.researchRequestedAt).toBeFalsy();
+    messagesCreate.mockClear();
+    expect((await handler()).attempted).toBe(0);
+    expect(messagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("never replaces a pinned rate even if a stale manual request exists", async () => {
+    const requested = demandRow({
+      id: "GENERAL_PEST#ware-ma#2000",
+      service: "GENERAL_PEST",
+      areaKey: "ware-ma",
+      city: "Ware",
+      band: 2000,
+      source: "MANUAL",
+    });
+    addCov(requested);
+    rateRows.push({
+      id: "office-pin",
+      rateKey: requested.id,
+      service: requested.service,
+      areaKey: requested.areaKey,
+      priceCents: 29900,
+      active: true,
+      pinned: true,
+      researchedAt: iso(90 * DAY),
+    });
+
+    expect((await handler()).attempted).toBe(0);
     expect(messagesCreate).not.toHaveBeenCalled();
   });
 });
 
 describe("the atomic budget — reserved before every provider call", () => {
   it(`a deep queue drains at most RESEARCH_PER_RUN (${RESEARCH_PER_RUN}) per run`, async () => {
-    await seedOnly(); // hundreds of never-researched gap rows
+    addRequestedQueue(RESEARCH_PER_RUN + 5);
 
     const summary = await handler();
 
@@ -555,7 +575,7 @@ describe("the atomic budget — reserved before every provider call", () => {
   });
 
   it(`stops at RESEARCH_PER_DAY (${RESEARCH_PER_DAY}) across a day's runs — the counter, not a guess`, async () => {
-    await seedOnly();
+    addRequestedQueue(RESEARCH_PER_RUN + 5);
     spendBudget(RESEARCH_PER_DAY - 10);
 
     const summary = await handler();
@@ -566,7 +586,7 @@ describe("the atomic budget — reserved before every provider call", () => {
   });
 
   it("a spent daily budget researches nothing — the queue holds for tomorrow", async () => {
-    await seedOnly();
+    addRequestedQueue(2);
     spendBudget(RESEARCH_PER_DAY);
 
     const summary = await handler();
@@ -700,6 +720,12 @@ describe("refresh bookkeeping", () => {
     due.priceCents = 24900;
     due.researchedAt = iso(9 * DAY);
     const dueResearchedAt = due.researchedAt;
+    Object.assign(cov("WASP_NEST#ware-ma")!, {
+      source: "MANUAL",
+      researchRequestedAt: new Date().toISOString(),
+      researchRequestedBy: "owner@example.com",
+      researchRequestReason: "COMPETITOR_CHANGE",
+    });
 
     await handler();
 
@@ -928,7 +954,7 @@ describe("the self-heal email — a waiting lead hears exactly once", () => {
 });
 
 describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => {
-  /** Fixtures the report should surface, built on a quiet seeded base. */
+  /** Fixtures the report should surface, built on quiet legacy rates. */
   async function reportFixtures() {
     delete process.env.ANTHROPIC_API_KEY; // report only — no research noise
     await seedOnly();
@@ -947,15 +973,25 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
     const floored = rateRows.find((r) => r.rateKey === "ROACH#ware-ma#2000")!;
     floored.basis = "junk ads · one-time floored at Zone-A variable cost $155.00";
     floored.researchedAt = iso(DAY);
-    // A combo failing research, a stale one, and an exhausted one.
+    // Only explicitly requested failures/exhaustion belong in this report.
     const failing = cov("TERMITE#ware-ma#1500")!;
-    failing.failCount = 3;
+    Object.assign(failing, {
+      source: "MANUAL",
+      researchRequestedAt: new Date().toISOString(),
+      researchRequestReason: "MARGIN_REVIEW",
+      failCount: 3,
+    });
     const stale = cov("WILDLIFE#ware-ma#1500")!;
     stale.lastSuccessAt = iso(25 * DAY);
     const parked = cov("ROACH#ware-ma#1500")!;
-    parked.exhaustedAt = iso(2 * DAY);
-    parked.failCount = MAX_RESEARCH_ATTEMPTS;
-    // A coverage gap: never succeeded.
+    Object.assign(parked, {
+      source: "MANUAL",
+      researchRequestedAt: new Date().toISOString(),
+      researchRequestReason: "CONVERSION_REVIEW",
+      exhaustedAt: iso(2 * DAY),
+      failCount: MAX_RESEARCH_ATTEMPTS,
+    });
+    // A real quote requested a missing sheet.
     addCov({
       id: "HOA#springfield-ma",
       service: "HOA",
@@ -963,18 +999,21 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
       city: "Springfield",
       state: "MA",
       band: null,
-      source: "SERVED",
+      source: "DEMAND",
       active: true,
       failCount: 0,
+      researchRequestedAt: new Date().toISOString(),
+      researchRequestedBy: "PUBLIC_QUOTE",
+      researchRequestReason: "MISSING_RATE_SHEET",
       lastSuccessAt: undefined,
       notify: "[]",
     });
-    // The seeding run above may itself have hit the report slot — only the
+    // Fixture setup may itself have hit the report slot — only the
     // report from the run under test counts.
     officeEmails.length = 0;
   }
 
-  it("emails one report with ranked moves, floors, failures, exhausted, stale rows, gaps and counts", async () => {
+  it("emails one report with moves, floors, requested failures, exhaustion, missing requests, and counts", async () => {
     vi.setSystemTime(new Date("2026-07-20T10:00:00Z")); // Monday 10:00 UTC
     await reportFixtures();
 
@@ -992,19 +1031,19 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
     // Floors that bound.
     expect(body).toContain("shipped at the Zone-A floor");
     expect(body).toContain("ROACH · ware-ma");
-    // Failing, exhausted, stale, gaps.
+    // Requested failures, exhausted requests, and real missing quotes.
     expect(body).toContain("TERMITE · ware-ma · up to 1,500 sqft");
     expect(body).toContain("3 straight failures");
     expect(body).toContain("ROACH · ware-ma · up to 1,500 sqft");
     expect(body).toContain("retry, pin a price, or retire it");
-    expect(body).toContain("WILDLIFE · ware-ma · up to 1,500 sqft");
-    expect(body).toContain("last success 25d ago");
+    // An old rate with no request is deliberately absent.
+    expect(body).not.toContain("WILDLIFE · ware-ma · up to 1,500 sqft");
     expect(body).toContain("HOA · springfield-ma");
     // Visibility, not a gate — and the override surface is named.
     expect(body).toContain("already live and quoting");
     expect(body).toContain("https://crm.example.test/market-rates");
     // Weekly research counts.
-    expect(body).toMatch(/\d+ combos refreshed successfully of \d+ attempted/);
+    expect(body).toMatch(/\d+ requested combos succeeded of \d+ attempted/);
   });
 
   it("fires ONLY on the weekly slot — same data, Monday 11:00, no report", async () => {

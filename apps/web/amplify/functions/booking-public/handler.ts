@@ -695,7 +695,7 @@ async function quoteStatus(
  * Layered abuse control for the unauthenticated endpoint: an optional bot
  * token (enforced as soon as TURNSTILE_SECRET is configured) and a
  * best-effort per-IP hourly cap. The live path is pure reads now — AI
- * research runs only inside the hourly pricing-refresh cron, behind its own
+ * research runs only inside the demand worker, behind its own
  * per-run/per-day caps — but the endpoint still spends real money per call
  * (Google Routes), so nothing billed runs until these pass.
  */
@@ -967,7 +967,8 @@ async function quote(
     situation: string,
     goal = "",
     extra: Record<string, unknown> = {},
-    opsNote = ""
+    opsNote = "",
+    existingBookingId?: string
   ) => {
     const now = new Date();
     const timing = nextContactPhrase(now);
@@ -978,7 +979,7 @@ async function quote(
     const message = `${situation}, so ${promise}.`;
     const channelWord = canCall ? "call" : "email";
 
-    const booking = await makeBooking({
+    const contactFields = {
       status: "CONTACT",
       callConsent: input.callConsent === true,
       callConsentTextVersion:
@@ -988,7 +989,21 @@ async function quote(
           : undefined,
       quoteJson: JSON.stringify({ contactMessage: message }),
       ...extra,
-    });
+    } as const;
+    const booking = existingBookingId
+      ? (
+          await client.models.BookingRequest.update({
+            id: existingBookingId,
+            ...contactFields,
+          })
+        ).data
+      : await makeBooking(contactFields);
+    if (!booking) {
+      throw new HttpError(503, {
+        error:
+          "We saved your request, but couldn't confirm its follow-up status. Please try again in a moment or call the office.",
+      });
+    }
     const opened = await openOwnedWork({
       kind: "CALLBACK_PROMISE",
       dedupeKey: booking.id,
@@ -1095,17 +1110,24 @@ async function quote(
       areaKeyFor(addr.city!, addr.state!),
       sqft != null ? sqftBucket(sqft) : null
     );
-    // Never throws (its own contract) — a lost miss record must never fail
-    // the lead, and the cron's seeding pass rediscovers this combo from the
-    // BookingRequest row anyway.
-    await enqueueRateResearch({
+    const queued = await enqueueRateResearch({
       service: engineService,
       city: addr.city!,
       state: addr.state!,
       sqft,
       notifyEmail: email,
       bookingRequestId: booking.id,
+      requestedBy: "PUBLIC_QUOTE",
     });
+    if (!queued) {
+      return contact(
+        "We couldn't start the automated price research safely",
+        "with your exact price",
+        {},
+        "The exact AI rate request did not persist. Do not wait for the pricing worker; price this lead manually.",
+        booking.id
+      );
+    }
     // Only the original submission wakes the worker and pages sales. Polling
     // must be a pure status check until the cached sheet appears.
     if (!resume) {

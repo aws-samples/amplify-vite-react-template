@@ -72,13 +72,11 @@ describe("keys and bands (must mirror the engine)", () => {
   });
 });
 
-describe("pinned and serve-stale semantics", () => {
-  it("a row past expiresAt is stale — still served as the last known good sheet", () => {
-    const stale = rate({ expiresAt: new Date(NOW - DAY).toISOString() });
-    expect(rateStatus(stale, NOW)).toBe("stale");
-    // Serve-last-known-good: staleness beats a callback; the refresh cron
-    // owes the row new research, but the engine keeps quoting from it.
-    expect(isServable(stale, NOW)).toBe(true);
+describe("pinned and serve-last-known-good semantics", () => {
+  it("age never changes an active rate's status or triggers replacement", () => {
+    const old = rate({ expiresAt: new Date(NOW - DAY).toISOString() });
+    expect(rateStatus(old, NOW)).toBe("active");
+    expect(isServable(old, NOW)).toBe(true);
 
     const pinned = rate({
       expiresAt: new Date(NOW - DAY).toISOString(),
