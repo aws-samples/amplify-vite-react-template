@@ -28,11 +28,14 @@ type Job = {
   customerId?: string;
   status: string;
   scheduledDate?: string | null;
+  timeWindow?: string | null;
   paidAt?: string | null;
   priceCents?: number | null;
   routeId?: string | null;
   routeOrder?: number | null;
   notes?: string | null;
+  cancelDisposition?: string | null;
+  cancelDispositionCents?: number | null;
 };
 
 type TestInvoice = {
@@ -625,5 +628,70 @@ describe("cancelQueuedPlanVisits", () => {
     );
 
     expect(jobs.get(job.id)!.notes).toContain("canceled at Stripe");
+  });
+
+  // GL-08: the money disposition is HOUR-EXACT against the visit's Eastern
+  // scheduled start, judged from the accepted-cancellation instant. Visit is
+  // Monday 2026-07-20, morning window → 8:00 AM ET start, so the 72-hour line
+  // is Friday 8:00 AM ET. A whole-calendar-day rule (Mon − Fri = 3 days) would
+  // have refused every Friday cancel; hour-exact refunds at 73h, retains at 71h.
+  const seedPaidMondayVisit = () => {
+    seedPlan();
+    return seedJob({
+      status: "SCHEDULED",
+      scheduledDate: "2026-07-20",
+      timeWindow: "morning (8am–12pm)",
+      paidAt: "2026-07-01",
+      priceCents: 15000,
+    });
+  };
+
+  it("refunds in full at 73 hours out (Friday 7am) — where the day-based rule refused", async () => {
+    const job = seedPaidMondayVisit();
+    const nowMs = Date.parse("2026-07-17T07:00:00-04:00"); // 73h before Mon 8am
+
+    const res = await cancelQueuedPlanVisits(
+      "p1",
+      "the service plan was canceled",
+      nowMs
+    );
+
+    expect(jobs.get(job.id)!.status).toBe("CANCELED");
+    expect(jobs.get(job.id)!.cancelDisposition).toBe("REFUND_OWED");
+    expect(res.refundsOwed).toEqual([
+      expect.objectContaining({ jobId: job.id, amountCents: 15000 }),
+    ]);
+    expect(res.retained ?? []).toHaveLength(0);
+  });
+
+  it("retains the fee at 71 hours out (Friday 9am) — the same weekend, boundary crossed", async () => {
+    const job = seedPaidMondayVisit();
+    const nowMs = Date.parse("2026-07-17T09:00:00-04:00"); // 71h before Mon 8am
+
+    const res = await cancelQueuedPlanVisits(
+      "p1",
+      "the service plan was canceled",
+      nowMs
+    );
+
+    expect(jobs.get(job.id)!.cancelDisposition).toBe("FEE_RETAINED");
+    expect(res.retained).toEqual([
+      expect.objectContaining({ jobId: job.id, amountCents: 15000 }),
+    ]);
+    expect(res.refundsOwed ?? []).toHaveLength(0);
+  });
+
+  it("defaults to now when no instant is supplied (still hour-exact, not day-based)", async () => {
+    const job = seedPaidMondayVisit();
+    // Freeze "now" at 73h out; with no explicit instant the function uses it.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T07:00:00-04:00"));
+    try {
+      const res = await cancelQueuedPlanVisits("p1", "the service plan was canceled");
+      expect(jobs.get(job.id)!.cancelDisposition).toBe("REFUND_OWED");
+      expect(res.refundsOwed).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

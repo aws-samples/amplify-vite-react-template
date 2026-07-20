@@ -146,18 +146,18 @@ export default function MosquitoTick() {
   return (
     <>
       <SEO
-        title="Ant Control & Removal Services — MA & RI"
-        description="Professional ant and spider control for homes across Massachusetts and Rhode Island. Pet-safe, licensed technicians, lasting results. Get an instant quote."
+        title="Mosquito & Tick Control Services — MA & RI"
+        description="Professional mosquito and tick control for Massachusetts and Rhode Island yards. Our seasonal program reduces activity so you can enjoy your outdoor spaces. Get an instant quote."
         jsonLd={[
           buildServiceSchema(
-            "Ant Control & Removal Services",
-            "Professional ant and spider pest control for Massachusetts and Rhode Island homes. Pet-safe treatments, licensed technicians.",
-            "/services/general-pest",
+            "Mosquito & Tick Control Services",
+            "Professional seasonal mosquito and tick control for Massachusetts and Rhode Island properties, reducing activity to protect families, pets, and outdoor spaces.",
+            "/services/mosquito-tick",
           ),
           buildBreadcrumbSchema([
             { name: "Home", url: "/" },
-            { name: "Services", url: "/services/general-pest" },
-            { name: "Ant Control", url: "/services/general-pest" },
+            { name: "Services", url: "/services/mosquito-tick" },
+            { name: "Mosquito & Tick Control", url: "/services/mosquito-tick" },
           ]),
         ]}
       />
@@ -231,7 +231,7 @@ export default function MosquitoTick() {
         <div className="bk-container bk-narrow">
           <p className="bk-eyebrow" style={{ color: "var(--bk-green)" }}>The Real Issue</p>
           <h2 className="bk-h2 bk-on-dark">Here's What's Really Happening</h2>
-          <p className="bk-issue-intro">Most ant and spider problems don't start where you can see them. Understanding what's attracting pests to your home is the first step toward long-term ant control and spider control, not just temporary relief.</p>
+          <p className="bk-issue-intro">Most mosquito and tick problems come from where they breed and wait. Understanding what draws them to your yard is the first step toward reducing their activity all season, not just temporary relief.</p>
 
           <div className="bk-issue-selector">
             {HAPPENING_CARDS.map((card, i) => (
@@ -256,7 +256,7 @@ export default function MosquitoTick() {
         </div>
       </section>
 
-      {/* 4. Why Your Property Attracts Ants */}
+      {/* 4. Why Mosquitoes Love Your Yard */}
       <section id="attracts" className="bk-section bk-section-cream">
         <div className="bk-container">
           <div className="bk-attract-layout">
@@ -396,8 +396,8 @@ export default function MosquitoTick() {
       <section id="related" className="bk-section bk-section-cream">
         <div className="bk-container">
           <p className="bk-eyebrow bk-center">More Protection</p>
-          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop With Ants</h2>
-          <p className="bk-body-lead bk-center">Ants and spiders are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
+          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop at Mosquitoes &amp; Ticks</h2>
+          <p className="bk-body-lead bk-center">Mosquitoes and ticks are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
           <div className="bk-related-grid">
             {RELATED_SERVICES.map((svc, i) => (
               <Link key={i} to={svc.to} className="bk-related-card">

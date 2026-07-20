@@ -161,11 +161,15 @@ async function listQueuedVisits(
         paidByJob.get(job.id) ?? (job.paidAt ? Math.max(0, job.priceCents ?? 0) : 0);
       if (paidCents > 0) {
         // GL-08 R6: the preview states the SERVER-calculated 72-hour outcome —
-        // never a keep-or-refund choice, never credit.
+        // never a keep-or-refund choice, never credit. Hour-exact against the
+        // visit's Eastern start (judged NOW, the moment the customer is looking)
+        // so the preview matches what the dispositive cancel will actually do.
         const policy = computeVisitCancellationPolicy({
           scheduledDate: job.scheduledDate ?? null,
           amountPaidCents: paidCents,
           today,
+          nowMs: Date.now(),
+          timeWindow: job.timeWindow ?? null,
         });
         visits.push({
           jobId: job.id,
@@ -990,7 +994,11 @@ async function repairCanceledPlan(
   const client = await dataClient();
   const resolution = await cancelQueuedPlanVisits(
     plan.id,
-    "Plan cancellation repair — clearing residual visits"
+    "Plan cancellation repair — clearing residual visits",
+    // GL-08: judge the hour-exact refund line from the durable command's
+    // original requestedAt, so a repair run never re-dates the customer across
+    // the 72-hour boundary.
+    Date.parse(ctx.requestedAt)
   );
   await client.models.ServicePlan.update({
     id: plan.id,

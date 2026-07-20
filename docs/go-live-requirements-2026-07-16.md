@@ -2,12 +2,12 @@
 
 **Business review date:** 19 July 2026
 
-**Latest commit review:** every commit after `f70e621` through `f39de9e`; newest
-implementation commit `f39de9e`
+**Latest commit review:** every commit after `f70e621` through `67df267`; newest
+implementation commit `9057015`
 
 **Decision:** **NO-GO until every gate in this document is closed**
 
-**Remaining:** **23 gates / 57 remaining requirements**, ordered by launch priority and
+**Remaining:** **23 gates / 55 remaining requirements**, ordered by launch priority and
 expected impact. The count is the number of top-level bullets under the "Remaining requirements"
 headings below — sub-clauses inside one bullet are not counted separately.
 
@@ -217,7 +217,7 @@ action, and physical operating setup as dependencies the agent cannot complete a
 | P0 | GL-12 | Copy/vocabulary approvals — engineering closed (`5c8c6ef`) | Head of Operations | An unsafe or unperformable visit is dispatched | **18% — Very low (approvals + backfill)** |
 | P0 | GL-05 | Copy sign-off + policy definitions — engineering closed (`cc76773`) | CEO + Engineering lead | A confirmation duplicates, or a paid booking silently disagrees with the money | **15% — Very low (sign-offs)** |
 | P0 | GL-09 | Lifecycle policy sign-off + history export — engineering closed (`dc39f74`) | Head of Operations | An interrupted transition leaves billing, access, service, or status wrong while the screen reports success | **10% — Very low (sign-off; export rides GL-19)** |
-| P0 | GL-08 | 72-hour copy + refund-workflow sign-off — engineering closed (`dc39f74`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
+| P0 | GL-08 | Finance/Operations workflow sign-off — hour-exact engineering closed (`73174e8`) | CEO | Concurrent recovery or a false settlement leaves billing, a refund, visit, or promised notice unfinished | **12% — Very low (sign-offs)** |
 | P0 | GL-07 | Copy sign-off; atomic capacity rides GL-04 — engineering closed (`5b2fb76`) | Head of Operations | A visit reports complete while a charge, refund, staffing, notice, or concurrent change remains wrong | **12% — Very low (sign-offs + GL-04 tie)** |
 | P0 | GL-18 | Override-authority + queue-ops sign-off — engineering closed (`f6a34a8`) | Head of Operations + Finance lead | A case closes while money or customer work remains, or routine work waits for an OWNER | **15% — Very low (sign-offs; GL-04/GL-23 ties)** |
 | P0 | GL-04 | Travel-model calibration + data entry — engineering closed (`dc39f74`) | Head of Operations | Two customers buy the last slot; a day is sold with no one to work it | **15% — Very low (ops data + calibration)** |
@@ -380,18 +380,23 @@ recovery policy.
 **Business outcome:** A customer's online cancellation is a durable instruction, and every customer
 message matches the actual billing, plan, schedule, and delivery state.
 
-**Engineering:** closed (`dc39f74`). Only the items below remain; they are business decisions, sign-offs, production wiring, or operating data — not software this repository can finish alone.
+**Engineering:** closed (`dc39f74`, hour-exact correction `73174e8`). The refund line is
+enforced HOUR-EXACT in `America/New_York` on all three money-dispositive cancel paths, matching the
+approved copy ("more than 72 hours away = full refund; within 72 hours = no refund"). The office path
+(`driveHeldVisitCancel`) was already hour-exact; the follow-up corrected the two paths that still
+decided on whole calendar days — plan cancellation (`cancelQueuedPlanVisits`, and the matching preview
+`listQueuedVisits`) and the public self-cancel link (`booking-public` `cancel`) — to judge refundability
+from the accepted-cancellation instant against the visit's DST-correct Eastern start. The public path
+now persists that instant (`BookingRequest.cancelRequestedAt`) so a retry after an outage judges the
+moment the customer was entitled to. Only the business sign-off below remains.
 
 **Remaining requirements:**
 
-- CEO/Finance/Operations sign off the changed customer-facing copy and workflow now live: the per-visit
-  72-hour outcomes in the preview, confirmation email, and success message (this replaces the previous
-  "keep it or refund it, your choice" promise for paid visits), and the prescribed-full-refund Finance
+- Finance and Operations sign off the changed customer-facing copy and workflow now live (CEO approved
+  19 July 2026): the per-visit 72-hour outcomes in the preview, confirmation email, and success message
+  (this replaces the previous "keep it or refund it, your choice" promise for paid visits), and the
+  prescribed-full-refund Finance
   case flow (Finance issues the exact refund; no discretionary disposition).
-- Leadership's cancellation history/reconciliation view rides GL-19; the persisted command rows,
-  owned cases, and per-plan email log are the durable inputs it reads.
-- The `PAID_VISIT_CANCELLATION` manual close reason "Account credit applied" must be removed with
-  GL-18's close-reason pass (no credit ledger exists; the disposition contradicts the locked rule).
 
 **Pass owner:** CEO, with Finance and Operations sign-off.
 

@@ -146,18 +146,18 @@ export default function WaspHornetBee() {
   return (
     <>
       <SEO
-        title="Ant Control & Removal Services — MA & RI"
-        description="Professional ant and spider control for homes across Massachusetts and Rhode Island. Pet-safe, licensed technicians, lasting results. Get an instant quote."
+        title="Wasp, Hornet & Bee Removal Services — MA & RI"
+        description="Professional wasp, hornet, and bee nest removal for Massachusetts and Rhode Island homes. Safe removal by licensed technicians so you can enjoy your yard again. Get an instant quote."
         jsonLd={[
           buildServiceSchema(
-            "Ant Control & Removal Services",
-            "Professional ant and spider pest control for Massachusetts and Rhode Island homes. Pet-safe treatments, licensed technicians.",
-            "/services/general-pest",
+            "Wasp, Hornet & Bee Removal Services",
+            "Professional wasp, hornet, and bee nest removal for Massachusetts and Rhode Island homes by licensed technicians.",
+            "/services/wasp-hornet-bee",
           ),
           buildBreadcrumbSchema([
             { name: "Home", url: "/" },
-            { name: "Services", url: "/services/general-pest" },
-            { name: "Ant Control", url: "/services/general-pest" },
+            { name: "Services", url: "/services/wasp-hornet-bee" },
+            { name: "Wasp & Hornet Removal", url: "/services/wasp-hornet-bee" },
           ]),
         ]}
       />
@@ -233,7 +233,7 @@ export default function WaspHornetBee() {
         <div className="bk-container bk-narrow">
           <p className="bk-eyebrow" style={{ color: "var(--bk-green)" }}>The Real Issue</p>
           <h2 className="bk-h2 bk-on-dark">Here's What's Really Happening</h2>
-          <p className="bk-issue-intro">Most ant and spider problems don't start where you can see them. Understanding what's attracting pests to your home is the first step toward long-term ant control and spider control, not just temporary relief.</p>
+          <p className="bk-issue-intro">Most stinging insect problems trace back to a nest you can't see. Understanding what draws wasps and hornets to your property is the first step toward lasting relief, not just knocking down what's visible.</p>
 
           <div className="bk-issue-selector">
             {HAPPENING_CARDS.map((card, i) => (
@@ -258,7 +258,7 @@ export default function WaspHornetBee() {
         </div>
       </section>
 
-      {/* 4. Why Your Property Attracts Ants */}
+      {/* 4. Why Stinging Insects Choose Your Property */}
       <section id="attracts" className="bk-section bk-section-cream">
         <div className="bk-container">
           <div className="bk-attract-layout">
@@ -398,8 +398,8 @@ export default function WaspHornetBee() {
       <section id="related" className="bk-section bk-section-cream">
         <div className="bk-container">
           <p className="bk-eyebrow bk-center">More Protection</p>
-          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop With Ants</h2>
-          <p className="bk-body-lead bk-center">Ants and spiders are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
+          <h2 className="bk-h2 bk-center">Your Pest Problem Might Not Stop at Wasps &amp; Hornets</h2>
+          <p className="bk-body-lead bk-center">Stinging insects are often just the beginning. Explore the other pest control services BuzzKill provides across Massachusetts &amp; Rhode Island.</p>
           <div className="bk-related-grid">
             {RELATED_SERVICES.map((svc, i) => (
               <Link key={i} to={svc.to} className="bk-related-card">

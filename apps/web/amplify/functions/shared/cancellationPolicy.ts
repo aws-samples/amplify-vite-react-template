@@ -70,8 +70,11 @@ export function windowStartHour(timeWindow: string | null | undefined): number {
   return hour;
 }
 
-/** The epoch (ms) of an Eastern wall-clock time on a calendar date, DST-aware. */
-function easternEpochMs(dateIso: string, hour: number): number {
+/** The epoch (ms) of an Eastern wall-clock time on a calendar date, DST-aware.
+ *  Exported so callers that must reconstruct a judging instant from a stored
+ *  Eastern calendar date (e.g. the public self-cancel's legacy resume path)
+ *  share this one DST-correct boundary maths instead of re-deriving an offset. */
+export function easternEpochMs(dateIso: string, hour: number): number {
   const guess = Date.parse(`${dateIso}T${String(hour).padStart(2, "0")}:00:00Z`);
   const tz = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",

@@ -101,7 +101,7 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
     label: "Paid cancellation",
     severity: "CRITICAL",
     customerImpact:
-      "A paid, canceled visit still owes the customer a refund, credit, or invoice void.",
+      "A paid, canceled visit still has an unresolved refund or invoice disposition.",
     verified: [{ id: "MONEY_SETTLED", label: "Confirm the refund / void is settled" }],
     manualReasons: [
       { code: "REFUNDED_IN_STRIPE", label: "Refunded directly in Stripe" },
