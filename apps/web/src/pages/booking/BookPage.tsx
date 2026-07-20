@@ -12,6 +12,7 @@ import SEO from "../../components/SEO";
 import {
   bookVisit,
   checkBookingStatus,
+  isBookedResponse,
   type BookingStatusResponse,
   type BookingTerms,
   type PricedQuote,
@@ -53,6 +54,12 @@ export default function BookPage() {
   const [accepted, setAccepted] = useState(false);
   const [terms, setTerms] = useState<BookingTerms | null>(null);
   const [termsChanged, setTermsChanged] = useState<string | null>(null);
+  // Invoice-me (HOA/commercial only): "CARD" pays now; "INVOICE" books
+  // card-less on net terms. Offered only when the quote is invoiceEligible.
+  const [payMode, setPayMode] = useState<"CARD" | "INVOICE">("CARD");
+  // Set once an invoice-me booking is placed so the finalizing/booked screens
+  // say "invoice on its way" instead of "payment received / paid today".
+  const [invoiced, setInvoiced] = useState(false);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -285,6 +292,7 @@ export default function BookPage() {
     setError(null);
     setTermsChanged(null);
 
+    const invoiceMe = payMode === "INVOICE" && Boolean(quote.invoiceEligible);
     const result = await bookVisit({
       bookingId: quote.bookingId,
       date: selection.date,
@@ -292,10 +300,27 @@ export default function BookPage() {
       recurring: selection.recurring,
       tcAccepted: true,
       tcVersion: terms.version,
+      ...(invoiceMe ? { invoice: true } : {}),
     });
     setBusy(false);
 
     if (result.ok) {
+      // Invoice-me finalizes server-side: the visit is already booked and an
+      // OPEN invoice created — there's nothing to pay, so poll straight to the
+      // confirmed state instead of mounting Stripe's PaymentElement.
+      if (isBookedResponse(result.body)) {
+        setChargedAmountCents(result.body.amountCents);
+        setInvoiced(true);
+        const token = result.body.statusToken ?? quote.statusToken;
+        if (token) {
+          enterFinalizing(quote.bookingId, token);
+        } else {
+          setRecoveryMsg(
+            `Your visit is booked and an invoice is on its way. Questions? Call ${OFFICE_PHONE}.`
+          );
+        }
+        return;
+      }
       setClientSecret(result.body.clientSecret);
       setChargedAmountCents(result.body.amountCents);
       if (result.body.statusToken) setStatusToken(result.body.statusToken);
@@ -364,13 +389,17 @@ export default function BookPage() {
             </div>
             {booked.amountCents != null ? (
               <div className="bk-booking-price-card__meta">
-                {money(booked.amountCents)} paid today
+                {invoiced
+                  ? `${money(booked.amountCents)} invoiced — due per your terms`
+                  : `${money(booked.amountCents)} paid today`}
               </div>
             ) : null}
           </div>
           <p className="bk-body-lead">
-            A confirmation email with your receipt and cancellation link is on
-            its way{booked.email ? ` to ${booked.email}` : ""}.
+            {invoiced
+              ? "A confirmation email with your invoice and cancellation link is on its way"
+              : "A confirmation email with your receipt and cancellation link is on its way"}
+            {booked.email ? ` to ${booked.email}` : ""}.
           </p>
         </div>
       </Shell>
@@ -383,12 +412,14 @@ export default function BookPage() {
     return (
       <Shell>
         <div className="bk-confirm">
-          <div className="bk-eyebrow">Payment received</div>
-          <h1 className="bk-h2">Finalizing your booking&hellip;</h1>
+          <div className="bk-eyebrow">{invoiced ? "Almost done" : "Payment received"}</div>
+          <h1 className="bk-h2">
+            {invoiced ? "Booking your visit…" : "Finalizing your booking…"}
+          </h1>
           <p className="bk-body-lead">
-            Your payment went through and we&rsquo;re completing your booking —
-            this usually takes a few seconds. Don&rsquo;t pay again; this page
-            will update on its own.
+            {invoiced
+              ? "We're scheduling your visit and preparing your invoice — this usually takes a few seconds. This page will update on its own."
+              : "Your payment went through and we're completing your booking — this usually takes a few seconds. Don't pay again; this page will update on its own."}
           </p>
         </div>
       </Shell>
@@ -576,8 +607,13 @@ export default function BookPage() {
   // ── Checkout ──────────────────────────────────────────────────────
 
   const offer = quote.recurringOffer;
-  const payLabel =
-    amountCents != null ? `Pay ${money(amountCents)} and book` : "Pay and book";
+  const canInvoice = Boolean(quote.invoiceEligible);
+  const invoiceMe = payMode === "INVOICE" && canInvoice;
+  const payLabel = invoiceMe
+    ? "Book & send my invoice"
+    : amountCents != null
+      ? `Pay ${money(amountCents)} and book`
+      : "Pay and book";
 
   return (
     <Shell>
@@ -638,6 +674,36 @@ export default function BookPage() {
             </li>
           )}
         </ul>
+
+        {canInvoice && !clientSecret && (
+          <>
+            <h3 className="bk-form-step__title">How would you like to pay?</h3>
+            <div className="bk-choice-row">
+              <button
+                type="button"
+                className={`bk-choice-card ${payMode === "CARD" ? "is-active" : ""}`}
+                aria-pressed={payMode === "CARD"}
+                onClick={() => setPayMode("CARD")}
+              >
+                <div className="bk-choice-card__title">Pay by card now</div>
+                <div className="bk-choice-card__meta">
+                  Secure checkout, booked instantly
+                </div>
+              </button>
+              <button
+                type="button"
+                className={`bk-choice-card ${payMode === "INVOICE" ? "is-active" : ""}`}
+                aria-pressed={payMode === "INVOICE"}
+                onClick={() => setPayMode("INVOICE")}
+              >
+                <div className="bk-choice-card__title">Invoice me</div>
+                <div className="bk-choice-card__meta">
+                  Book now, pay by invoice (net 30) — HOA &amp; commercial only
+                </div>
+              </button>
+            </div>
+          </>
+        )}
 
         <h3 className="bk-form-step__title">Booking &amp; cancellation terms</h3>
         {terms ? (

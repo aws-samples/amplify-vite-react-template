@@ -202,14 +202,34 @@ export type BookRequest = {
   tcAccepted: true;
   /** R17 — the exact terms version rendered above the pay button. */
   tcVersion: string;
+  /** Invoice-me (HOA/commercial only): book card-less on net terms. The
+   *  server re-checks eligibility from the property kind and refuses it for
+   *  residential; the response is a booked confirmation, not a clientSecret. */
+  invoice?: boolean;
 };
 
+/** Card checkout: a Stripe client secret to confirm. */
 export type BookResponse = {
   clientSecret: string;
   amountCents: number;
   summary: string;
   statusToken?: string;
 };
+
+/** Invoice-me: the visit is already booked and an OPEN net-terms invoice
+ *  was created — there is nothing to pay now, so no clientSecret. */
+export type BookedResponse = {
+  booked: true;
+  amountCents: number;
+  summary: string;
+  statusToken?: string;
+};
+
+export function isBookedResponse(
+  body: BookResponse | BookedResponse
+): body is BookedResponse {
+  return (body as BookedResponse).booked === true;
+}
 
 export type CancelPreview = {
   booking: {
@@ -376,8 +396,10 @@ export function checkQuoteStatus(input: {
   return post<QuoteResponse>("/quote-status", input);
 }
 
-export function bookVisit(input: BookRequest): Promise<ApiResult<BookResponse>> {
-  return post<BookResponse>("/book", input);
+export function bookVisit(
+  input: BookRequest
+): Promise<ApiResult<BookResponse | BookedResponse>> {
+  return post<BookResponse | BookedResponse>("/book", input);
 }
 
 /** Preview what canceling would do — no side effects. */

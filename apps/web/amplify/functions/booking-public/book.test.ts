@@ -135,6 +135,21 @@ vi.mock("@aws-sdk/client-ssm", () => ({
   GetParameterCommand: class {},
 }));
 
+// The card-less invoice path finalizes synchronously; the finalize behavior
+// itself is covered in bookingFinalize.test.ts, so here we only assert the
+// /book branch routes to it with the right args (eligibility, capacity, terms).
+const finalizeBookingMock = vi.fn(
+  async (_opts: {
+    bookingRequestId: string;
+    paymentIntentId: string;
+    amountReceived: number;
+    invoice?: { terms: string; dueDate: string };
+  }) => {}
+);
+vi.mock("../shared/bookingFinalize", () => ({
+  finalizeBooking: finalizeBookingMock,
+}));
+
 const { handler } = await import("./handler");
 
 const postBook = async (body: unknown) => {
@@ -227,6 +242,8 @@ beforeEach(() => {
   intentCancel.mockClear();
   intentCancel.mockImplementation(defaultIntentCancelImpl);
   customerCreate.mockClear();
+  finalizeBookingMock.mockClear();
+  finalizeBookingMock.mockImplementation(async () => {});
   jobRow = null;
   process.env.SES_NOTIFY_EMAIL = "office@pestbuzzkill.com";
   process.env.STRIPE_SECRET_KEY = "sk_test_x";
@@ -269,6 +286,46 @@ const bookIt = (overrides: Record<string, unknown> = {}) =>
     tcVersion: BOOKING_TERMS_VERSION,
     ...overrides,
   });
+
+describe("invoice-me — HOA/commercial book card-less on net terms", () => {
+  it("refuses a residential invoice request server-side, even if the client asks", async () => {
+    // Default fixture has no propertyKind → residential.
+    const res = await bookIt({ invoice: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invoicing isn't available/i);
+    expect(finalizeBookingMock).not.toHaveBeenCalled();
+    expect(intentCreate).not.toHaveBeenCalled();
+  });
+
+  it("books a commercial invoice request card-less — claims capacity, finalizes on net terms, returns no client secret", async () => {
+    booking.propertyKind = "COMMERCIAL";
+
+    const res = await bookIt({ invoice: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ booked: true, amountCents: 31300 });
+    expect(res.body.clientSecret).toBeUndefined();
+    // No Stripe object is ever created for an invoiced booking.
+    expect(intentCreate).not.toHaveBeenCalled();
+    // The card-less finalize ran once, with the synthetic anchor + net terms.
+    expect(finalizeBookingMock).toHaveBeenCalledTimes(1);
+    const arg = finalizeBookingMock.mock.calls[0][0];
+    expect(arg).toMatchObject({
+      bookingRequestId: "b1",
+      paymentIntentId: "invoice-b1",
+      amountReceived: 31300,
+      invoice: { terms: "NET_30" },
+    });
+    expect(arg.invoice?.dueDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // The selection + amount were persisted through the fenced write.
+    expect(booking.selectedDate).toBe("2026-07-22");
+    expect(booking.selectedWindow).toBe("MORNING");
+    expect(booking.amountCents).toBe(31300);
+    // No card intent reference was written.
+    expect(booking.stripePaymentIntentId ?? null).toBeNull();
+  });
+});
 
 describe("booking re-checks live availability (R29)", () => {
   it("books when the day is still live — at the quoted price, not a reprice", async () => {
