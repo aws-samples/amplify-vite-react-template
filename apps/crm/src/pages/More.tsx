@@ -21,6 +21,7 @@ export default function More() {
   const navigate = useNavigate();
   const [emailLogSheet, setEmailLogSheet] = useState(false);
   const [passwordSheet, setPasswordSheet] = useState(false);
+  const [pricingOpen, setPricingOpen] = useState(false);
 
   return (
     <Page title="More">
@@ -50,20 +51,33 @@ export default function More() {
           {roles.tech ? (
             <ListRow title="My day (technician view)" onClick={() => navigate("/tech")} />
           ) : null}
+          {/* Pricing log + Market rates are the AI-pricing back office — kept
+              fully functional, but tucked behind a closed-by-default disclosure
+              so the day-to-day Office tools list stays short. */}
           <ListRow
-            title="Pricing log"
-            subtitle="Every AI-priced lead — the weekly review sheet"
-            onClick={() => navigate("/pricing")}
+            title="Pricing tools"
+            subtitle="AI pricing log and market rates"
+            meta={<Badge tone="muted">{pricingOpen ? "Hide" : "Show"}</Badge>}
+            onClick={() => setPricingOpen((v) => !v)}
           />
+          {pricingOpen ? (
+            <>
+              <ListRow
+                title="Pricing log"
+                subtitle="Every AI-priced lead — the weekly review sheet"
+                onClick={() => navigate("/pricing")}
+              />
+              <ListRow
+                title="Market rates"
+                subtitle="Every AI-researched base price — review, override, pin"
+                onClick={() => navigate("/market-rates")}
+              />
+            </>
+          ) : null}
           <ListRow
             title="Product log"
             subtitle="Products techs record on service reports"
             onClick={() => navigate("/products")}
-          />
-          <ListRow
-            title="Market rates"
-            subtitle="Every AI-researched base price — review, override, pin"
-            onClick={() => navigate("/market-rates")}
           />
           <ListRow
             title="Service catalog"
