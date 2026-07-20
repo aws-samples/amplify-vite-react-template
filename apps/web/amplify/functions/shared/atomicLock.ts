@@ -4,7 +4,7 @@ import {
   DeleteItemCommand,
 } from "@aws-sdk/client-dynamodb";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
-import { getAmplifyDataClientConfig } from "@aws-amplify/backend/function/runtime";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 /**
  * Atomic compare-and-swap primitives for the operational locks and durable
@@ -33,13 +33,22 @@ import { getAmplifyDataClientConfig } from "@aws-amplify/backend/function/runtim
  *    cannot release a newer worker's lock.
  *
  * Table names are derived at runtime (`<Model>-<apiId>-NONE`, the Amplify Gen2
- * naming rule) from the same data-client config the functions already load, so
- * backend.ts only has to grant the IAM actions by name pattern — no CDK
- * cross-stack table references (which would cycle with the schema's handler
- * references). When the wiring is unavailable (unit-test fakes, a container
- * straddling a deploy) every call reports UNSUPPORTED and the caller falls
+ * naming rule). The apiId comes from an SSM parameter backend.ts publishes
+ * from INSIDE the data stack (env var AMPLIFY_DATA_API_ID_PARAM names it) —
+ * the same runtime-resolution pattern Amplify itself uses for the GraphQL
+ * endpoint, so backend.ts only has to grant IAM by name pattern and no CDK
+ * cross-stack table references exist (those would cycle with the schema's
+ * handler references). The apiId is NOT derivable from the GraphQL endpoint
+ * hostname — that prefix is a separate DNS id, and deriving from it made
+ * every deployed CAS write target a nonexistent table (the July staging
+ * defect: ResourceNotFoundException read as "lease held"). When the wiring
+ * is unavailable (unit-test fakes, a container straddling a deploy, the
+ * parameter unreadable) every call reports UNSUPPORTED and the caller falls
  * back to its create-only behavior: fresh claims stay serialized and stale
- * takeover is REFUSED — blocked is safe, two winners is not.
+ * takeover is REFUSED — blocked is safe, two winners is not. Infrastructure
+ * failures on the write itself (table missing, access denied) are ALSO
+ * UNSUPPORTED, never LOST: "somebody else holds it" must mean somebody
+ * else actually holds it.
  */
 
 export type LockCondition =
@@ -98,29 +107,42 @@ export type LockStore = {
 
 let tableSuffixPromise: Promise<string | null> | null = null;
 
-/** `-<apiId>-NONE`, parsed from the GraphQL endpoint host the data client
- *  already loads. Null when the config is unavailable (tests, straddling). */
+/** Reads the apiId from the SSM parameter the data stack publishes. Exposed
+ *  (with an injectable reader) so the resolution rule itself is unit-tested. */
+export async function _resolveTableSuffix(
+  env: Record<string, string | undefined> = process.env,
+  readParameter: (name: string) => Promise<string | undefined> = async (
+    name
+  ) => {
+    const out = await new SSMClient({}).send(
+      new GetParameterCommand({ Name: name })
+    );
+    return out.Parameter?.Value;
+  }
+): Promise<string | null> {
+  const paramName = env.AMPLIFY_DATA_API_ID_PARAM;
+  if (!paramName) return null;
+  const apiId = (await readParameter(paramName))?.trim();
+  if (!apiId || !/^[a-z0-9]+$/.test(apiId)) return null;
+  return `-${apiId}-NONE`;
+}
+
+/** `-<apiId>-NONE`. Successful resolution is cached for the container's
+ *  lifetime; a failed attempt is NOT cached, so a transient SSM error does
+ *  not permanently disable the CAS layer. Null = UNSUPPORTED. */
 function tableSuffix(): Promise<string | null> {
   if (!tableSuffixPromise) {
     tableSuffixPromise = (async () => {
       try {
-        const { resourceConfig } = await getAmplifyDataClientConfig(
-          process.env as unknown as Parameters<
-            typeof getAmplifyDataClientConfig
-          >[0]
-        );
-        const endpoint = (
-          resourceConfig as {
-            API?: { GraphQL?: { endpoint?: string } };
-          }
-        ).API?.GraphQL?.endpoint;
-        if (!endpoint) return null;
-        const apiId = new URL(endpoint).hostname.split(".")[0];
-        return apiId ? `-${apiId}-NONE` : null;
-      } catch {
+        return await _resolveTableSuffix();
+      } catch (err) {
+        console.error("atomicLock: table-suffix resolution failed", err);
         return null;
       }
-    })();
+    })().then((suffix) => {
+      if (!suffix) tableSuffixPromise = null;
+      return suffix;
+    });
   }
   return tableSuffixPromise;
 }
@@ -259,9 +281,11 @@ function dynamoStore(): LockStore {
         if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
           console.error(`atomicLock: conditionalUpdate(${model}, ${id}) failed`, err);
         }
-        // Any failure means the guarded write did NOT happen — the caller must
-        // treat it as lost, never as "probably fine".
-        return { ok: false, reason: "LOST" };
+        // Any failure means the guarded write did NOT happen. LOST is
+        // reserved for a real condition race; a broken CAS layer (missing
+        // table, denied access) is UNSUPPORTED so callers refuse-and-alarm
+        // instead of concluding another worker holds the resource.
+        return { ok: false, reason: _classifyLockError(err) };
       }
     },
     async conditionalDelete(model, id, conditions) {
@@ -295,10 +319,25 @@ function dynamoStore(): LockStore {
         if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
           console.error(`atomicLock: conditionalDelete(${model}, ${id}) failed`, err);
         }
-        return "LOST";
+        return _classifyLockError(err) === "UNSUPPORTED" ? "UNSUPPORTED" : "LOST";
       }
     },
   };
+}
+
+/** ConditionalCheckFailed = a genuine race (LOST). Misconfiguration that
+ *  means the write could not even be ATTEMPTED against the real table —
+ *  table missing, access denied — is UNSUPPORTED: the caller must treat the
+ *  CAS layer as down, not conclude a competitor holds the resource. Unknown
+ *  errors (network, throttle) stay LOST: the write may have been rejected
+ *  for real, and "blocked" is the safe reading. */
+export function _classifyLockError(err: unknown): "LOST" | "UNSUPPORTED" {
+  const name = (err as { name?: string })?.name ?? "";
+  return name === "ResourceNotFoundException" ||
+    name === "AccessDeniedException" ||
+    name === "UnrecognizedClientException"
+    ? "UNSUPPORTED"
+    : "LOST";
 }
 
 let activeStore: LockStore | null = null;

@@ -80,8 +80,11 @@ async function ensureControlRow(
 
 /**
  * Take the single drain lease. Exactly one concurrent invocation wins; a
- * loser must exit without draining. UNSUPPORTED refuses — without the CAS
- * store there is no single-winner guarantee and no research may run.
+ * loser must exit without draining. UNSUPPORTED (no CAS wiring / the lock
+ * layer misconfigured) THROWS: without it there is no single-winner
+ * guarantee and no research may run — and the July staging defect proved
+ * that reading an infrastructure failure as "lease held" silences the
+ * worker forever. A loud run failure trips the Errors alarm instead.
  */
 export async function acquireDrain(nonce: string): Promise<boolean> {
   await ensureControlRow(DRAIN_ID, "DRAIN");
@@ -91,6 +94,11 @@ export async function acquireDrain(nonce: string): Promise<boolean> {
     leaseField: "leaseUntil",
     leaseMs: DRAIN_LEASE_MS,
   });
+  if (!res.ok && res.reason === "UNSUPPORTED") {
+    throw new Error(
+      "pricing drain: CAS lock layer unavailable — refusing to run (this is an infrastructure failure, not a held lease)"
+    );
+  }
   return res.ok;
 }
 
@@ -142,6 +150,11 @@ export async function reserveBudget(
             value: caps.perDay - 1,
           },
         ]);
+  if (!res.ok && res.reason === "UNSUPPORTED") {
+    throw new Error(
+      "pricing budget: CAS lock layer unavailable — refusing all research spend (infrastructure failure, not budget exhaustion)"
+    );
+  }
   return res.ok;
 }
 

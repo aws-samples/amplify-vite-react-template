@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  _classifyLockError,
+  _resolveTableSuffix,
   _setLockStoreForTests,
   casFencedDelete,
   casFencedUpdate,
@@ -363,5 +365,60 @@ describe("customer lifecycle claim under contention", () => {
     expect(rows.CustomerLifecycleClaim.get("cust-2")!.holder).toBe(
       "live-holder"
     );
+  });
+});
+
+describe("lock-layer infrastructure failures (the July staging defect)", () => {
+  // Staging demonstrated the failure: the table suffix was derived from the
+  // GraphQL endpoint HOSTNAME (a separate DNS id, not the apiId), so every
+  // deployed CAS write threw ResourceNotFoundException — and the error was
+  // reported as LOST, which callers read as "somebody else holds the lease".
+  // The pricing worker skipped every run as "drain-lease-held" forever.
+
+  it("classifies missing-table and denied-access as UNSUPPORTED, never LOST", () => {
+    expect(_classifyLockError({ name: "ResourceNotFoundException" })).toBe(
+      "UNSUPPORTED"
+    );
+    expect(_classifyLockError({ name: "AccessDeniedException" })).toBe(
+      "UNSUPPORTED"
+    );
+    expect(_classifyLockError({ name: "UnrecognizedClientException" })).toBe(
+      "UNSUPPORTED"
+    );
+    // A genuine condition race stays LOST…
+    expect(_classifyLockError({ name: "ConditionalCheckFailedException" })).toBe(
+      "LOST"
+    );
+    // …and so does anything ambiguous (the write may have been refused for
+    // real; "blocked" is the safe reading).
+    expect(_classifyLockError({ name: "TimeoutError" })).toBe("LOST");
+    expect(_classifyLockError(new Error("socket hang up"))).toBe("LOST");
+  });
+
+  it("resolves the table suffix from the published SSM parameter, not the endpoint host", async () => {
+    const suffix = await _resolveTableSuffix(
+      { AMPLIFY_DATA_API_ID_PARAM: "/buzzkill/app/staging/data-api-id" },
+      async (name) => {
+        expect(name).toBe("/buzzkill/app/staging/data-api-id");
+        return "ksa6jq5wnfcrniqugdl7rzdgvy";
+      }
+    );
+    expect(suffix).toBe("-ksa6jq5wnfcrniqugdl7rzdgvy-NONE");
+  });
+
+  it("refuses a suffix when the parameter is absent, empty, or malformed", async () => {
+    expect(await _resolveTableSuffix({}, async () => "whatever")).toBeNull();
+    expect(
+      await _resolveTableSuffix(
+        { AMPLIFY_DATA_API_ID_PARAM: "/p" },
+        async () => undefined
+      )
+    ).toBeNull();
+    expect(
+      await _resolveTableSuffix(
+        { AMPLIFY_DATA_API_ID_PARAM: "/p" },
+        async () => "not a valid id!"
+      )
+    ).toBeNull();
   });
 });

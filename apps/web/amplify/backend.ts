@@ -1,5 +1,6 @@
 import { defineBackend } from "@aws-amplify/backend";
-import { Duration } from "aws-cdk-lib";
+import { Duration, Stack } from "aws-cdk-lib";
+import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import {
   FunctionUrlAuthType,
   HttpMethod,
@@ -138,6 +139,29 @@ const lockTablePolicy = new PolicyStatement({
     (m) => `arn:aws:dynamodb:us-east-1:*:table/${m}-*`
   ),
 });
+// The table names end `-<apiId>-NONE`, and the apiId is NOT derivable at
+// runtime (the GraphQL endpoint hostname is a separate DNS id — deriving
+// from it made every deployed CAS write miss its table). The data stack
+// publishes the apiId as an SSM parameter (created INSIDE the data stack,
+// so no function↔data CFN edge and no cycle); the lock functions get the
+// parameter's name as a literal env var and a literal-path IAM grant, and
+// atomicLock resolves it at runtime — the same resource_reference pattern
+// Amplify itself uses for the GraphQL endpoint.
+const lockAppId = process.env.AWS_APP_ID ?? "d26qpsjewk0bee";
+const lockBranch = process.env.AWS_BRANCH ?? "staging";
+const dataApiIdParamName = `/buzzkill/${lockAppId}/${lockBranch}/data-api-id`;
+new StringParameter(
+  Stack.of(backend.data.resources.graphqlApi),
+  "LockTableApiIdParam",
+  {
+    parameterName: dataApiIdParamName,
+    stringValue: backend.data.resources.graphqlApi.apiId,
+  }
+);
+const dataApiIdParamPolicy = new PolicyStatement({
+  actions: ["ssm:GetParameter"],
+  resources: [`arn:aws:ssm:us-east-1:*:parameter${dataApiIdParamName}`],
+});
 for (const fn of [
   backend.crmAdmin,
   backend.crmBilling,
@@ -150,6 +174,8 @@ for (const fn of [
   backend.pricingRefresh,
 ]) {
   fn.resources.lambda.addToRolePolicy(lockTablePolicy);
+  fn.resources.lambda.addToRolePolicy(dataApiIdParamPolicy);
+  fn.addEnvironment("AMPLIFY_DATA_API_ID_PARAM", dataApiIdParamName);
 }
 
 // Public Function URL for the contact-form proxy. CORS is locked to the

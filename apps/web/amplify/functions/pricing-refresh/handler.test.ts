@@ -1087,3 +1087,35 @@ describe("GL-16 — rollback pause and the daily change review", () => {
     ).toBe(false);
   });
 });
+
+describe("lock-layer infrastructure failure fails the run LOUDLY (July staging defect)", () => {
+  // Staging demonstrated it: every deployed CAS write missed its table
+  // (ResourceNotFoundException), the drain takeover reported LOST, and the
+  // worker logged "drain-lease-held" and did nothing — forever, silently.
+  // An unavailable lock layer must be a thrown run failure (Errors alarm),
+  // never a quiet skip that impersonates a held lease.
+
+  it("the handler run REJECTS when the CAS store has no PricingControl wiring", async () => {
+    _setLockStoreForTests(memoryLockStore({})); // no PricingControl table
+    await expect(handler()).rejects.toThrow(/CAS lock layer unavailable/);
+  });
+
+  it("acquireDrain throws on UNSUPPORTED instead of reporting a held lease", async () => {
+    const { acquireDrain } = await import("../shared/pricingControl");
+    _setLockStoreForTests(memoryLockStore({}));
+    await expect(acquireDrain("nonce-1")).rejects.toThrow(
+      /infrastructure failure, not a held lease/
+    );
+  });
+
+  it("reserveBudget throws on UNSUPPORTED instead of reporting exhaustion", async () => {
+    const { reserveBudget } = await import("../shared/pricingControl");
+    _setLockStoreForTests(memoryLockStore({}));
+    await expect(
+      reserveBudget(new Date("2026-07-15T14:00:00Z"), "GENERAL", {
+        perDay: 150,
+        demandPerDay: 40,
+      })
+    ).rejects.toThrow(/infrastructure failure, not budget exhaustion/);
+  });
+});
