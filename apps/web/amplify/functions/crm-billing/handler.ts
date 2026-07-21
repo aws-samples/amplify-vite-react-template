@@ -520,6 +520,12 @@ async function chargeOneTimeJob(actor: Actor, jobId: string) {
     status: intent.status === "succeeded" ? "PAID" : "OPEN",
     method: pm.type === "us_bank_account" ? "BANK" : "CARD",
     stripePaymentIntentId: intent.id,
+    // GL-06: a still-processing bank debit marks the invoice un-payable so the
+    // portal/office can't charge it again while it clears; the webhook clears
+    // this on succeeded/failed.
+    ...(intent.status === "processing"
+      ? { pendingDebitIntentId: intent.id }
+      : {}),
     issuedAt: new Date().toISOString(),
     ...(intent.status === "succeeded"
       ? { paidAt: new Date().toISOString() }
@@ -607,6 +613,12 @@ async function chargeManualAmount(
     status: intent.status === "succeeded" ? "PAID" : "OPEN",
     method: pm.type === "us_bank_account" ? "BANK" : "CARD",
     stripePaymentIntentId: intent.id,
+    // GL-06: a still-processing bank debit marks the invoice un-payable so it
+    // can't be charged again while it clears; the webhook clears this on
+    // succeeded/failed.
+    ...(intent.status === "processing"
+      ? { pendingDebitIntentId: intent.id }
+      : {}),
     issuedAt: new Date().toISOString(),
     ...(intent.status === "succeeded"
       ? { paidAt: new Date().toISOString() }

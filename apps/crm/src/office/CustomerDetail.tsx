@@ -949,14 +949,22 @@ export default function CustomerDetail() {
                             ) {
                               return;
                             }
-                            void run(
-                              `charge-${j.id}`,
-                              async () =>
-                                unwrap(
-                                  await api().mutations.chargeOneTimeJob({ jobId: j.id })
-                                ),
-                              `Charged ${money(j.priceCents ?? 0)} for ${j.serviceType}`
-                            );
+                            void run(`charge-${j.id}`, async () => {
+                              // chargeOneTimeJob returns a.json() → read the
+                              // real status. A bank (ACH) debit comes back
+                              // "processing": the money is NOT collected yet, so
+                              // don't claim it was charged.
+                              const res = opResult<{ status?: string }>(
+                                await api().mutations.chargeOneTimeJob({ jobId: j.id })
+                              );
+                              const collected =
+                                res?.status === "succeeded" || res?.status === "PAID";
+                              setNotice(
+                                collected
+                                  ? `Charged ${money(j.priceCents ?? 0)} for ${j.serviceType}.`
+                                  : `Bank payment for ${money(j.priceCents ?? 0)} is processing — it'll show as paid once it settles (a few business days), or we'll flag it if it fails.`
+                              );
+                            });
                           }}
                         >
                           Charge {money(j.priceCents)}

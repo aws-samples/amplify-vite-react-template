@@ -359,6 +359,44 @@ describe("payment_intent.succeeded settles and sends the receipt", () => {
     expect(invoices[0].status).toBe("FAILED");
     expect(sendEmail).not.toHaveBeenCalled();
   });
+
+  it("clears the in-flight debit mark on success, so the paid bill is not re-charged", async () => {
+    invoices.push({
+      id: "inv1",
+      customerId: "c1",
+      amountCents: 29900,
+      description: "Wasp nest removal",
+      status: "OPEN",
+      stripePaymentIntentId: "pi_1",
+      pendingDebitIntentId: "pi_1", // marked un-payable while clearing
+    });
+
+    await invoke("payment_intent.succeeded", { id: "pi_1", metadata: {} });
+
+    expect(invoices[0].status).toBe("PAID");
+    expect(invoices[0].pendingDebitIntentId).toBeNull();
+  });
+
+  it("clears the in-flight debit mark on failure, so the failed bill is payable again", async () => {
+    invoices.push({
+      id: "inv1",
+      customerId: "c1",
+      amountCents: 29900,
+      description: "Wasp nest removal",
+      status: "OPEN",
+      stripePaymentIntentId: "pi_1",
+      pendingDebitIntentId: "pi_1",
+    });
+
+    await invoke("payment_intent.payment_failed", {
+      id: "pi_1",
+      metadata: {},
+      last_payment_error: { message: "insufficient funds" },
+    });
+
+    expect(invoices[0].status).toBe("FAILED");
+    expect(invoices[0].pendingDebitIntentId).toBeNull();
+  });
 });
 
 describe("invoice.paid mirrors the monthly settlement and sends the receipt", () => {

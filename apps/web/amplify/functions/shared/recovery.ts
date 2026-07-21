@@ -200,6 +200,22 @@ export async function settleInvoiceOnCard(
     throw new Error("This invoice has no amount to charge");
   }
 
+  // GL-06: a bank (ACH) debit already clearing on this invoice must NOT be
+  // charged again. Such a debit sits OPEN for days; the "Pay now" button hides
+  // while pendingDebitIntentId is set, but this is the authoritative backstop
+  // for a stale button, a second browser tab, or the dunning retry racing a
+  // manual pay. The webhook clears pendingDebitIntentId when the debit settles
+  // or fails; until then we report the in-flight state and create no new charge.
+  const pendingDebit = (invoice as { pendingDebitIntentId?: string | null })
+    .pendingDebitIntentId;
+  if (pendingDebit) {
+    return {
+      invoiceId: invoice.id,
+      status: "processing",
+      paymentIntentId: pendingDebit,
+    };
+  }
+
   const { customer, stripeCustomerId } = await ensureStripeCustomer(
     stripe,
     invoice.customerId
@@ -290,12 +306,15 @@ export async function settleInvoiceOnCard(
 
   // A bank debit that is still processing: keep the invoice OPEN with the new
   // intent id and let the webhook settle it to PAID (and send the receipt) when
-  // payment_intent.succeeded lands.
+  // payment_intent.succeeded lands. pendingDebitIntentId marks it un-payable in
+  // the meantime so no one is charged twice for the same bill; the webhook
+  // clears it on succeeded/failed.
   await client.models.Invoice.update({
     id: invoice.id,
     status: "OPEN",
     method,
     stripePaymentIntentId: intent.id,
+    pendingDebitIntentId: intent.id,
     failureReason: null,
   });
   return {

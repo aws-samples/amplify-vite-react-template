@@ -282,6 +282,10 @@ async function settlePaymentIntent(
   await client.models.Invoice.update({
     id: invoice.id,
     status,
+    // GL-06: the pending bank debit has now resolved (settled or failed), so the
+    // "un-payable while clearing" mark is lifted — a FAILED invoice becomes
+    // payable again, a PAID one is done.
+    pendingDebitIntentId: null,
     ...(status === "PAID"
       ? { paidAt: new Date().toISOString(), failureReason: null }
       : {

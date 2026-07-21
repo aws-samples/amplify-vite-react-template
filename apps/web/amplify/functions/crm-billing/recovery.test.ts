@@ -322,6 +322,73 @@ describe("payInvoice — the customer pay button", () => {
   });
 });
 
+describe("in-flight bank debit — the double-charge guard (GL-06)", () => {
+  it("marks the invoice pendingDebitIntentId when a debit is still processing", async () => {
+    invoices.push({
+      id: "inv_1",
+      customerId: "cA",
+      amountCents: 14900,
+      status: "OPEN",
+    });
+    paymentIntentsCreate.mockImplementation(async () => ({
+      id: "pi_proc",
+      status: "processing",
+    }));
+
+    const res = (await call("payInvoice", { invoiceId: "inv_1" })) as {
+      status: string;
+      paymentIntentId: string;
+    };
+
+    expect(res.status).toBe("processing");
+    expect(invoices[0]).toMatchObject({
+      status: "OPEN", // NOT paid yet — the debit is still clearing
+      pendingDebitIntentId: "pi_proc",
+      stripePaymentIntentId: "pi_proc",
+    });
+  });
+
+  it("REFUSES a second charge while a debit is already clearing — no new intent", async () => {
+    invoices.push({
+      id: "inv_1",
+      customerId: "cA",
+      amountCents: 14900,
+      status: "OPEN",
+      pendingDebitIntentId: "pi_existing",
+    });
+
+    const res = (await call("payInvoice", { invoiceId: "inv_1" })) as {
+      status: string;
+      paymentIntentId: string;
+    };
+
+    // Reports the in-flight state and creates NO second charge.
+    expect(res.status).toBe("processing");
+    expect(res.paymentIntentId).toBe("pi_existing");
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+
+  it("a customer clicking Pay twice on a clearing debit is not charged twice", async () => {
+    invoices.push({
+      id: "inv_1",
+      customerId: "cA",
+      amountCents: 14900,
+      status: "OPEN",
+      pendingDebitIntentId: "pi_existing",
+    });
+    const cust = {
+      groups: ["CUSTOMER", "cus-cA"],
+      sub: "sub-cust-a",
+      email: "a@example.com",
+    };
+
+    await call("payInvoice", { invoiceId: "inv_1" }, cust);
+    await call("payInvoice", { invoiceId: "inv_1" }, cust);
+
+    expect(paymentIntentsCreate).not.toHaveBeenCalled();
+  });
+});
+
 describe("assignRecoveryOwner", () => {
   it("stamps the owner on an invoice from the caller's token", async () => {
     invoices.push({ id: "inv_1", customerId: "cA", amountCents: 100, status: "OPEN" });
