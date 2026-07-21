@@ -334,6 +334,12 @@ type ReadyBooking = {
 const lambdaClient = new LambdaClient({});
 let bookingPublicNameCache: string | null | undefined;
 
+/** Test-only: clear the memoized booking-public function name so a test can
+ *  control whether the reverse invoke is wired without cross-test bleed. */
+export function _resetBookingPublicNameCacheForTests(): void {
+  bookingPublicNameCache = undefined;
+}
+
 /**
  * booking-public's deployed function name. A direct CDK reference (grantInvoke
  * + functionName env) would cycle the stacks — booking-public already invokes
@@ -419,8 +425,18 @@ async function buildRateReadyQuotePdf(
 ): Promise<EmailAttachment | null> {
   try {
     let priced = booking;
-    if (priced.status !== "QUOTED") {
-      if (!priced.cancelToken) return null;
+    // Drive PENDING → QUOTED through /quote-status, retrying on a still-PENDING
+    // result. The sheet was CREATEd microseconds ago by this same run, but
+    // /quote-status reprices by reading it back through the
+    // listMarketRateByRateKey GSI, which is eventually consistent — a first
+    // invoke can miss the fresh row and leave the booking PENDING. Without the
+    // retry the "your exact prices are ready" email raced the index and shipped
+    // link-only (no PDF) for the very leads the feature is for. We only re-poll
+    // while it is PENDING (research landed, index lagging); a terminal
+    // CONTACT/EXPIRED means there is genuinely no exact price to print.
+    for (let attempt = 0; priced.status !== "QUOTED" && attempt < 4; attempt++) {
+      if (priced.status !== "PENDING" || !priced.cancelToken) break;
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
       const ran = await computeQuoteViaBookingPublic(
         priced.id,
         priced.cancelToken

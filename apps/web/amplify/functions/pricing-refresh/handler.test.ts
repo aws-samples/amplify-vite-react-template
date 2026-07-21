@@ -181,6 +181,28 @@ vi.mock("@aws-sdk/client-ssm", () => ({
   GetParameterCommand: class {},
 }));
 
+// The reverse invoke into booking-public /quote-status. Default: a no-op that
+// leaves the booking untouched (existing link-only tests never reach it — they
+// leave BOOKING_PUBLIC_FUNCTION_NAME unset). A test that exercises the priced
+// PDF path replaces lambdaInvokeImpl to model the invoke driving PENDING →
+// QUOTED, including the eventually-consistent index miss on the first poll.
+let lambdaInvokeImpl: (payload: Record<string, unknown>) => Promise<unknown> =
+  async () => ({});
+vi.mock("@aws-sdk/client-lambda", () => ({
+  LambdaClient: class {
+    send = async (cmd: { input: { Payload: Uint8Array } }) => {
+      const payload = JSON.parse(Buffer.from(cmd.input.Payload).toString());
+      return lambdaInvokeImpl(payload);
+    };
+  },
+  InvokeCommand: class {
+    input: unknown;
+    constructor(input: unknown) {
+      this.input = input;
+    }
+  },
+}));
+
 /** One response satisfying EVERY service's label set — each spec parses
  *  only its own lines, so one text prices any combo the run picks. */
 const MEGA_TEXT = `Local pricing research for the area.
@@ -221,6 +243,7 @@ vi.mock("@anthropic-ai/sdk", () => ({
 
 const {
   handler,
+  _resetBookingPublicNameCacheForTests,
   BACKOFF_BASE_MS,
   DEMAND_BACKOFF_BASE_MS,
   DEMAND_RESEARCH_PER_DAY,
@@ -349,6 +372,9 @@ beforeEach(() => {
   sentEmails.length = 0;
   emailsThatFail.clear();
   officeEmails.length = 0;
+  lambdaInvokeImpl = async () => ({});
+  delete process.env.BOOKING_PUBLIC_FUNCTION_NAME;
+  _resetBookingPublicNameCacheForTests();
   messagesCreate.mockClear();
   messagesCreate.mockImplementation(async () => ({
     content: [{ type: "text", text: researchText }],
@@ -1089,6 +1115,62 @@ describe("the self-heal email — a waiting lead hears exactly once", () => {
     // The unpriceable lead (no booking row) still hears — just without a PDF.
     const toLead2 = ready.find((e) => e.to === "lead2@x.com")!;
     expect(toLead2.attachments).toBeUndefined();
+  });
+
+  it("retries the reprice past an eventually-consistent index miss so the PDF still attaches", async () => {
+    await seedOnly();
+    quietAll();
+    // The sheet was just cached by this same run, but /quote-status reprices by
+    // reading it back through a GSI. The FIRST poll misses the fresh row and
+    // leaves the booking PENDING; the retry finds it and the booking goes
+    // QUOTED. Without the retry the ready email shipped link-only.
+    process.env.BOOKING_PUBLIC_FUNCTION_NAME = "booking-public-fn";
+    bookings.push({
+      id: "bk1",
+      status: "PENDING",
+      cancelToken: "resume-token-1",
+      name: "Dana Rivera",
+      email: "lead1@x.com",
+      street: "12 Maple St",
+      city: "Springfield",
+      state: "MA",
+      zip: "01103",
+    });
+    let invokes = 0;
+    lambdaInvokeImpl = async (payload) => {
+      invokes++;
+      // Only the second invoke "sees" the freshly-cached sheet and prices it.
+      if (invokes >= 2) {
+        const bk1 = bookings.find((b) => b.id === "bk1")!;
+        bk1.status = "QUOTED";
+        bk1.expiresAt = "2026-07-21T15:00:00.000Z";
+        bk1.quoteJson = JSON.stringify({
+          days: [{ date: "2026-07-25", priceCents: 18900 }],
+          baseCents: 18900,
+          serviceLabel: "General pest control",
+          recurringOffer: {
+            frequency: "QUARTERLY",
+            monthlyCents: 4900,
+            initialFeeCents: 4900,
+          },
+        });
+      }
+      void payload;
+      return { Payload: Buffer.from(JSON.stringify({ statusCode: 200 })) };
+    };
+    addCov(waitingRow());
+
+    const run = handler();
+    // Drive the bounded backoff between reprice attempts (fake timers).
+    await vi.advanceTimersByTimeAsync(2000);
+    await run;
+
+    expect(invokes).toBeGreaterThanOrEqual(2);
+    const toLead1 = sentEmails.find(
+      (e) => e.template === "booking-rate-ready" && e.to === "lead1@x.com"
+    )!;
+    expect(toLead1.attachments).toHaveLength(1);
+    expect(toLead1.attachments![0].filename).toBe("BuzzKill-Quote.pdf");
   });
 
   it("sends link-only when the quote can't be priced (no invoke configured)", async () => {
