@@ -389,8 +389,8 @@ export default function BookPage() {
           </div>
           <p className="bk-body-lead">
             {invoiced
-              ? "A confirmation email with your invoice and cancellation link is on its way"
-              : "A confirmation email with your receipt and cancellation link is on its way"}
+              ? "A confirmation email with your invoice is on its way"
+              : "A confirmation email with your receipt is on its way"}
             {booked.email ? ` to ${booked.email}` : ""}.
           </p>
         </div>
