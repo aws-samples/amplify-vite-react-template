@@ -56,12 +56,14 @@ applications:
             # single backend) instead of deploying its own — no pipeline-deploy
             # here. Both apps build in parallel on push, so the web app's
             # backend deploy may still be running: retry until the outputs
-            # contain the newest model (else this bundle bakes stale
-            # introspection and new models are undefined at runtime).
+            # match the newest schema — newest models/fields PRESENT and
+            # removed fields GONE. A model.list() bakes the full field set from
+            # this introspection, so stale outputs make new models undefined OR
+            # keep querying a removed field (AppSync then rejects the query).
             - |
               for i in $(seq 1 16); do
                 npx ampx generate outputs --app-id d26qpsjewk0bee --branch $AWS_BRANCH || true
-                if node -e "const i=(require('./amplify_outputs.json').data||{}).model_introspection||{};const m=i.models||{};const p=(i.mutations||{}).prepareLeadQuote;process.exit(m.Product&&m.ServiceReport&&m.LeadPricingRun&&m.LeadPricingRun.fields.researchRateKey&&p&&p.arguments.customerId?0:1)" 2>/dev/null; then
+                if node -e "const i=(require('./amplify_outputs.json').data||{}).model_introspection||{};const m=i.models||{};const p=(i.mutations||{}).prepareLeadQuote;process.exit(m.Product&&m.ServiceReport&&m.LeadPricingRun&&m.LeadPricingRun.fields.researchRateKey&&p&&p.arguments.customerId&&m.Job&&!m.Job.fields.timeWindow&&!m.Job.fields.capacityWindow?0:1)" 2>/dev/null; then
                   echo "backend outputs are current (attempt $i)"; break
                 fi
                 if [ "$i" = "16" ]; then echo "ERROR backend outputs still stale after 8 minutes" && exit 1; fi
