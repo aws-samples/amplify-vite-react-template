@@ -34,6 +34,7 @@ import {
   daysUntilEvidenceDue,
   type RecoveryItem,
 } from "../lib/recovery";
+import { isLeadOpen } from "../lib/leadStage";
 import { useRoles } from "../lib/auth";
 import {
   Badge,
@@ -226,7 +227,13 @@ export default function Dashboard() {
   // with no visit on the calendar. NO_ACCESS deliberately parks a plan here.
   const noNextVisit = plansWithoutNextVisit(plans, jobs, today);
 
-  const openLeads = customers.filter((c) => c.status === "LEAD");
+  // Match the Leads inbox exactly: a LEAD-status customer is only "open" while
+  // its derived stage is still workable. Counting raw status === "LEAD" here
+  // over-counts by including WON/LOST/DNC leads the inbox already hides, so the
+  // tile read 5 while the inbox showed none.
+  const openLeads = customers.filter(
+    (c) => c.status === "LEAD" && isLeadOpen(c)
+  );
   const customerById = new Map(customers.map((c) => [c.id, c]));
   const openOwnedWork = ownedWork
     .filter((item) => item.status === "OPEN")
@@ -392,10 +399,15 @@ export default function Dashboard() {
       ) : null}
 
       <div className="stat-grid">
-        <Stat label="Open leads" value={openLeads.length} />
+        <Stat
+          label="Open leads"
+          value={openLeads.length}
+          onClick={() => navigate("/leads")}
+        />
         <Stat
           label="Active customers"
           value={customers.filter((c) => c.status === "ACTIVE").length}
+          onClick={() => navigate("/customers")}
         />
       </div>
 
