@@ -137,6 +137,33 @@ describe("durable owned work", () => {
   });
 });
 
+describe("suppressed routine kinds — trim the flood, keep money safety", () => {
+  it("a suppressed OPS nag opens no case and persists nothing", async () => {
+    for (const kind of [
+      "DISPATCH_NOT_READY",
+      "LICENSE_LAPSE",
+      "UNSTAFFED_VISIT",
+      "PAYMENT_PROCESSING_OVERDUE",
+    ] as const) {
+      const id = await openOwnedWork({ ...input, kind });
+      expect(id).toBeNull();
+    }
+    expect(rows).toHaveLength(0);
+    expect(events).toHaveLength(0);
+  });
+
+  it("a money/legal safety net still opens exactly as before", async () => {
+    const id = await openOwnedWork({
+      ...input,
+      kind: "PAID_NOT_FINALIZED",
+      ownerTeam: "FINANCE",
+    });
+    expect(id).toBeTruthy();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "PAID_NOT_FINALIZED", status: "OPEN" });
+  });
+});
+
 describe("releasing owned work on offboarding (GL-18)", () => {
   beforeEach(() => {
     process.env.SES_NOTIFY_EMAIL = "info@example.com";

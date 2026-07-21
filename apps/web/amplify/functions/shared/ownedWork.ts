@@ -149,6 +149,26 @@ type OpenOwnedWorkInput = {
 };
 
 /**
+ * Routine OPS nags that were flooding the exception queue with day-to-day work
+ * rather than genuine exceptions — the office reads these off the normal screens
+ * (schedule board, licence records) without a case per row. Owner decision
+ * (2026-07-21): stop opening them and keep the queue for the rare
+ * money/legal/security nets (paid-not-finalized, disputes, payment/plan/visit-
+ * change recovery, staff security, infra alerts). Drop a kind from the set to
+ * bring its case back.
+ *
+ * Only fire-and-forget kinds belong here: some owned-work is load-bearing (the
+ * lead pipeline's LEAD_FOLLOWUP obligation, report-delivery MISSING_CONTACT)
+ * whose callers require the WorkItem to exist, so those are NOT suppressed here.
+ */
+const SUPPRESSED_KINDS: ReadonlySet<WorkKind> = new Set<WorkKind>([
+  "DISPATCH_NOT_READY",
+  "LICENSE_LAPSE",
+  "UNSTAFFED_VISIT",
+  "PAYMENT_PROCESSING_OVERDUE",
+]);
+
+/**
  * Open (or re-open) an owned exception without ever breaking the operation that
  * discovered it. A deterministic id collapses retries into one queue row;
  * every occurrence still gets its own WorkEvent.
@@ -156,6 +176,10 @@ type OpenOwnedWorkInput = {
 export async function openOwnedWork(
   input: OpenOwnedWorkInput
 ): Promise<string | null> {
+  // A suppressed routine kind never becomes a case (see SUPPRESSED_KINDS) —
+  // return the same null a no-op create would, so every best-effort caller is
+  // unaffected.
+  if (SUPPRESSED_KINDS.has(input.kind)) return null;
   const id = workItemId(input.kind, input.dedupeKey);
   const now = new Date();
   const nowIso = now.toISOString();
