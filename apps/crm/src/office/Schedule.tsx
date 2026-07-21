@@ -296,6 +296,51 @@ export default function Schedule() {
   );
   const customerCity = (j: Job) => customers.get(j.customerId)?.serviceCity;
 
+  // A stop's full mappable address, or null when the customer record has none.
+  const stopAddress = (j: Job): string | null => {
+    const c = customers.get(j.customerId);
+    if (!c) return null;
+    const parts = [c.serviceStreet, c.serviceCity, c.serviceState, c.serviceZip]
+      .map((p) => p?.trim())
+      .filter(Boolean);
+    return parts.length ? parts.join(", ") : null;
+  };
+
+  // A technician's home base — where the optimized day starts and ends. Falls
+  // back to HQ when a tech has no private base, mirroring the routing engine's
+  // baseAddressOf (a tech needs ≥2 address parts to override HQ).
+  const techBase = (tech: Technician): string => {
+    const t = tech as {
+      baseStreet?: string | null;
+      baseCity?: string | null;
+      baseState?: string | null;
+      baseZip?: string | null;
+    };
+    const parts = [t.baseStreet, t.baseCity, t.baseState, t.baseZip]
+      .map((p) => p?.trim())
+      .filter(Boolean);
+    return parts.length >= 2 ? parts.join(", ") : "81 Greenwich Rd, Ware, MA 01082";
+  };
+
+  // A Google Maps directions link for the day's route exactly as the optimizer
+  // sequenced it: base → each stop in routeOrder → base. Maps preserves the
+  // waypoint order we pass, so the office sees the real planned tour, not a
+  // Maps re-optimization. Null when no stop has a mappable address.
+  const mapsRouteUrl = (tech: Technician, jobs: Job[]): string | null => {
+    const stops = jobs
+      .map(stopAddress)
+      .filter((a): a is string => a !== null);
+    if (stops.length === 0) return null;
+    const base = encodeURIComponent(techBase(tech));
+    return (
+      "https://www.google.com/maps/dir/?api=1" +
+      `&origin=${base}` +
+      `&destination=${base}` +
+      "&travelmode=driving" +
+      `&waypoints=${stops.map(encodeURIComponent).join("%7C")}`
+    );
+  };
+
   return (
     <Page title="Schedule">
       <Card>
@@ -407,6 +452,7 @@ export default function Schedule() {
               const dayJobs = techJobs
                 .filter((j) => j.scheduledDate === selDate)
                 .sort((a, b) => (a.routeOrder ?? 0) - (b.routeOrder ?? 0));
+              const mapUrl = dayJobs.length ? mapsRouteUrl(tech, dayJobs) : null;
               const complianceIssue = technicianComplianceIssue(tech, selDate);
               const route = routes.find(
                 (r) => r.technicianId === tech.id && r.date === selDate
@@ -495,6 +541,17 @@ export default function Schedule() {
                         );
                       })
                     )}
+                    {mapUrl ? (
+                      <a
+                        className="muted small route-map-link"
+                        href={mapUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ display: "inline-block", marginTop: 8 }}
+                      >
+                        View route in Google Maps ↗
+                      </a>
+                    ) : null}
                   </div>
                 </Card>
               );
