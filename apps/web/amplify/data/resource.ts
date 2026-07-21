@@ -617,6 +617,12 @@ export const schema = a.schema({
       recurring: a.boolean(),
       amountCents: a.integer(),
       monthlyCents: a.integer(),
+      // A staff discount code applied at checkout, snapshotted here so the
+      // booking's price is explainable and stable even if the PromoCode is
+      // later edited or retired. promoDiscountCents is the ACTUAL cents taken
+      // off today's charge (already capped to the amount due).
+      promoCode: a.string(),
+      promoDiscountCents: a.integer(),
       stripeCustomerId: a.string(),
       stripePaymentIntentId: a.string(),
       cancelToken: a.string(),
@@ -1220,6 +1226,36 @@ export const schema = a.schema({
       editReason: a.string(),
     })
     .secondaryIndexes((index) => [index("rateKey")])
+    .authorization((allow) => [
+      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
+    ]),
+
+  // A staff-managed discount code the office hands out and the customer types
+  // on the funnel checkout. Owner-only CRUD in the CRM; the public booking
+  // Lambda reads it (validate + apply) and writes back the redemption count.
+  // The applied discount is snapshotted onto the BookingRequest, so editing or
+  // retiring a code never re-prices a booking that already used it.
+  PromoCode: a
+    .model({
+      // The customer-typed code, stored UPPERCASE and looked up case-folded.
+      code: a.string().required(),
+      // Optional office-facing label shown next to the code in the CRM list.
+      description: a.string(),
+      // PERCENT takes percentOff (1–100); FIXED takes amountOffCents.
+      kind: a.enum(["PERCENT", "FIXED"]),
+      percentOff: a.integer(),
+      amountOffCents: a.integer(),
+      // A retired code stops working immediately without losing its history.
+      active: a.boolean().required(),
+      // Optional validity window (ISO). Absent bound = open on that side.
+      startsAt: a.datetime(),
+      endsAt: a.datetime(),
+      // Optional redemption cap. Absent = unlimited. Enforced (best-effort,
+      // not a money guarantee) against timesRedeemed at validation time.
+      maxRedemptions: a.integer(),
+      timesRedeemed: a.integer(),
+    })
+    .secondaryIndexes((index) => [index("code")])
     .authorization((allow) => [
       allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
     ]),

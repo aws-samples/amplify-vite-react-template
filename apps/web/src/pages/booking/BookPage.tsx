@@ -10,6 +10,7 @@ import {
 } from "@stripe/react-stripe-js";
 import SEO from "../../components/SEO";
 import {
+  applyPromo,
   bookVisit,
   checkBookingStatus,
   isBookedResponse,
@@ -59,6 +60,19 @@ export default function BookPage() {
   // Set once an invoice-me booking is placed so the finalizing/booked screens
   // say "invoice on its way" instead of "payment received / paid today".
   const [invoiced, setInvoiced] = useState(false);
+
+  // A staff discount code the customer/CSR types at checkout. `promo` holds
+  // the server-validated discount once applied; the total and the /book call
+  // both use it, and /book re-validates it authoritatively.
+  const [promoInput, setPromoInput] = useState("");
+  const [promo, setPromo] = useState<{
+    code: string;
+    label: string;
+    discountCents: number;
+    amountCents: number;
+  } | null>(null);
+  const [promoBusy, setPromoBusy] = useState(false);
+  const [promoError, setPromoError] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -281,9 +295,52 @@ export default function BookPage() {
     };
   }, [returnSecret, stripePromise]);
 
+  const baseAmountCents =
+    quote && selection ? amountDueCents(quote, selection) : null;
+  // Post-charge the server-confirmed amount wins; pre-charge an applied code
+  // discounts the base. /book re-applies the code, so the two always agree.
   const amountCents =
-    chargedAmountCents ??
-    (quote && selection ? amountDueCents(quote, selection) : null);
+    chargedAmountCents ?? (promo ? promo.amountCents : baseAmountCents);
+
+  async function applyPromoCode() {
+    if (!quote || !selection || promoBusy) return;
+    const code = promoInput.trim();
+    if (!code) return;
+    setPromoBusy(true);
+    setPromoError(null);
+    const result = await applyPromo({
+      bookingId: quote.bookingId,
+      code,
+      date: selection.date,
+      recurring: selection.recurring,
+    });
+    setPromoBusy(false);
+    if (!result.ok) {
+      setPromoError(
+        result.body.error ?? "We couldn't check that code — please try again."
+      );
+      return;
+    }
+    if (!result.body.valid) {
+      setPromo(null);
+      setPromoError(result.body.message);
+      return;
+    }
+    setPromo({
+      code: result.body.code,
+      label: result.body.label,
+      discountCents: result.body.discountCents,
+      amountCents: result.body.amountCents,
+    });
+    setPromoInput(result.body.code);
+    setPromoError(null);
+  }
+
+  function removePromo() {
+    setPromo(null);
+    setPromoInput("");
+    setPromoError(null);
+  }
 
   async function startPayment() {
     if (!quote || !selection || !terms || !accepted || busy) return;
@@ -299,6 +356,7 @@ export default function BookPage() {
       tcAccepted: true,
       tcVersion: terms.version,
       ...(invoiceMe ? { invoice: true } : {}),
+      ...(promo ? { promoCode: promo.code } : {}),
     });
     setBusy(false);
 
@@ -626,6 +684,20 @@ export default function BookPage() {
               </span>
             </li>
           )}
+          {promo && baseAmountCents != null && (
+            <>
+              <li>
+                <span className="bk-summary-key">Subtotal</span>
+                <span className="bk-summary-val">{money(baseAmountCents)}</span>
+              </li>
+              <li>
+                <span className="bk-summary-key">Discount</span>
+                <span className="bk-summary-val">
+                  {promo.label} &mdash; &minus;{money(promo.discountCents)}
+                </span>
+              </li>
+            </>
+          )}
           <li>
             <span className="bk-summary-key">Due today</span>
             <span className="bk-summary-val">
@@ -650,6 +722,64 @@ export default function BookPage() {
             </li>
           )}
         </ul>
+
+        {/* Staff discount code. Hidden once payment has started (a client
+            secret exists) — the amount is locked to the created intent. */}
+        {!clientSecret && (
+          <div className="bk-promo">
+            {promo ? (
+              <div className="bk-promo-applied">
+                <span>
+                  Code <strong>{promo.code}</strong> applied.
+                </span>
+                <button
+                  type="button"
+                  className="bk-btn bk-btn-outline bk-btn-sm"
+                  onClick={removePromo}
+                >
+                  Remove
+                </button>
+              </div>
+            ) : (
+              <div className="bk-field bk-full">
+                <label htmlFor="bk-promo-code">Have a discount code?</label>
+                <div className="bk-promo-row">
+                  <input
+                    id="bk-promo-code"
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={promoInput}
+                    onChange={(e) =>
+                      setPromoInput(e.target.value.toUpperCase())
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void applyPromoCode();
+                      }
+                    }}
+                    placeholder="Enter code"
+                    disabled={promoBusy}
+                  />
+                  <button
+                    type="button"
+                    className="bk-btn bk-btn-outline"
+                    onClick={() => void applyPromoCode()}
+                    disabled={promoBusy || !promoInput.trim()}
+                  >
+                    {promoBusy ? "Checking…" : "Apply"}
+                  </button>
+                </div>
+                {promoError && (
+                  <div className="bk-field-error" role="alert">
+                    {promoError}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {canInvoice && !clientSecret && (
           <>

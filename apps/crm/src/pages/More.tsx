@@ -97,6 +97,20 @@ export default function More() {
               subtitle="Ask the owner — staff management is owner-only"
             />
           )}
+          {/* Discount codes are OWNER-only server-side (the public funnel
+              reads them to discount checkout). Non-owners get the honest line. */}
+          {roles.owner ? (
+            <ListRow
+              title="Discount codes"
+              subtitle="Codes customers enter at online checkout"
+              onClick={() => navigate("/promo-codes")}
+            />
+          ) : (
+            <ListRow
+              title="Discount codes"
+              subtitle="Ask the owner — discount codes are owner-only"
+            />
+          )}
           <ListRow
             title="Email log"
             subtitle="Recent emails sent to customers"

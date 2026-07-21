@@ -206,7 +206,27 @@ export type BookRequest = {
    *  server re-checks eligibility from the property kind and refuses it for
    *  residential; the response is a booked confirmation, not a clientSecret. */
   invoice?: boolean;
+  /** A staff discount code typed at checkout. The server re-validates and
+   *  re-applies it (the /promo preview is advisory); a bad code is rejected
+   *  before any charge. Omitted when no code was entered. */
+  promoCode?: string;
 };
+
+/** A resolved discount-code preview for the current selection (see /promo).
+ *  `valid:false` carries a customer-facing message the CSR reads verbatim. */
+export type PromoPreview =
+  | {
+      valid: true;
+      /** Normalized (uppercase) code to send back on /book. */
+      code: string;
+      /** Short human label, e.g. "SAVE20 (20% off)". */
+      label: string;
+      /** Cents this code takes off today's charge. */
+      discountCents: number;
+      /** Today's charge after the discount. */
+      amountCents: number;
+    }
+  | { valid: false; message: string };
 
 /** Card checkout: a Stripe client secret to confirm. */
 export type BookResponse = {
@@ -399,6 +419,19 @@ export function bookVisit(
   input: BookRequest
 ): Promise<ApiResult<BookResponse | BookedResponse>> {
   return post<BookResponse | BookedResponse>("/book", input);
+}
+
+/** Preview a staff discount code against the current selection — no side
+ *  effects. The server validates the code and returns the discounted total;
+ *  /book re-validates and applies it authoritatively. */
+export function applyPromo(input: {
+  bookingId: string;
+  code: string;
+  /** null on an off-season enrollment — no first-visit day exists. */
+  date: string | null;
+  recurring: boolean;
+}): Promise<ApiResult<PromoPreview>> {
+  return post<PromoPreview>("/promo", input);
 }
 
 /** Preview what canceling would do — no side effects. */

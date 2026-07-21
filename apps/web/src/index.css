@@ -1927,6 +1927,39 @@ h6 {
   border-color: var(--bk-green);
   box-shadow: 0 0 0 3px rgba(126, 211, 33, 0.18);
 }
+/* Checkout discount code */
+.bk-promo {
+  margin-top: 18px;
+}
+.bk-promo-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+.bk-promo-row input {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.bk-promo-row .bk-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.bk-promo-applied {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--bk-green);
+  border-radius: 6px;
+  background: rgba(126, 211, 33, 0.08);
+  font-size: 14px;
+  color: var(--fg1);
+}
+.bk-btn-sm {
+  padding: 8px 14px;
+  font-size: 12px;
+}
 .bk-segmented {
   display: inline-flex;
   border: 1px solid var(--border-strong);

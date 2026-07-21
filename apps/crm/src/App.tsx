@@ -27,6 +27,7 @@ import MarketRates from "./office/MarketRates";
 import Catalog from "./office/Catalog";
 import Schedule from "./office/Schedule";
 import Staff from "./office/Staff";
+import PromoCodes from "./office/PromoCodes";
 import VisitChangeHistory from "./pages/VisitChangeHistory";
 import More from "./pages/More";
 import TechToday from "./tech/Today";
@@ -219,6 +220,7 @@ function Shell() {
         <Route path="/market-rates" element={<Require when={staff}><MarketRates /></Require>} />
         <Route path="/catalog" element={<Require when={staff}><Catalog /></Require>} />
         <Route path="/staff" element={<Require when={roles.owner}><Staff /></Require>} />
+        <Route path="/promo-codes" element={<Require when={roles.owner}><PromoCodes /></Require>} />
 
         {/* Technician */}
         <Route path="/tech" element={<Require when={roles.tech || staff}><TechToday /></Require>} />

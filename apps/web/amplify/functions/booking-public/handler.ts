@@ -34,6 +34,13 @@ import {
 import { casGuardedUpdate } from "../shared/atomicLock";
 import { finalizeBooking } from "../shared/bookingFinalize";
 import {
+  discountFor,
+  normalizeCode,
+  promoLabel,
+  resolvePromo,
+  STRIPE_MIN_CHARGE_CENTS,
+} from "./promo";
+import {
   acquirePaymentAttempt,
   PAYABLE_REUSE_STATUSES,
   persistCheckoutAttempt,
@@ -312,6 +319,9 @@ export const handler = async (
         headers,
         await quoteStatus(body, event.requestContext.http.sourceIp)
       );
+    }
+    if (path.endsWith("/promo")) {
+      return json(headers, await promoPreview(body));
     }
     if (path.endsWith("/book")) {
       return json(
@@ -1896,9 +1906,13 @@ async function offSeasonEnrollmentAttempt(opts: {
   client: { models: Record<string, unknown> };
   /** The exact attempt-lease value book() acquired — the persistence fence. */
   holderUntil: string;
+  /** First-month charge with any staff discount code already applied. */
+  amountCents: number;
+  /** The applied-code snapshot to persist on the BookingRequest. */
+  promoSets: { promoCode: string | null; promoDiscountCents: number | null };
 }) {
-  const { booking, stored, req, tcVersion, client, holderUntil } = opts;
-  const amountCents = stored.recurringOffer.initialFeeCents;
+  const { booking, stored, req, tcVersion, client, holderUntil, amountCents, promoSets } =
+    opts;
   const s = await stripeClient();
   const summary = `${stored.serviceLabel ?? "Seasonal plan"} — billing starts today; first treatment scheduled for April (we'll confirm the exact day).`;
 
@@ -1922,6 +1936,7 @@ async function offSeasonEnrollmentAttempt(opts: {
           capacityMinutes: null,
           recurring: true,
           amountCents,
+          ...promoSets,
           ...(customerId ? { stripeCustomerId: customerId } : {}),
           stripePaymentIntentId: intentId,
           paymentFailedReason: null,
@@ -2042,6 +2057,61 @@ async function offSeasonEnrollmentAttempt(opts: {
   };
 }
 
+/**
+ * Preview a staff discount code against a quote WITHOUT booking — the client
+ * shows the discounted total before the customer pays. /book re-validates and
+ * applies the SAME decision authoritatively; this endpoint mutates nothing.
+ */
+async function promoPreview(body: Record<string, unknown>) {
+  const client = await dataClient();
+  const bookingId = String(body.bookingId ?? "");
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: bookingId,
+  });
+  if (!booking) {
+    throw new HttpError(404, { error: "Quote not found — request a new one." });
+  }
+  const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
+    days?: DayQuote[];
+    recurringOffer?: { initialFeeCents: number } | null;
+    planOnly?: boolean;
+    offSeason?: boolean;
+  };
+  // Mirror /book's base-amount rule: recurring/plan/off-season discount off the
+  // first-month fee, a one-time booking off the chosen day's price.
+  const recurring = body.recurring === true || stored.planOnly === true;
+  const offSeason = stored.offSeason === true;
+  const date = String(body.date ?? "");
+  const day = offSeason ? null : stored.days?.find((d) => d.date === date);
+  const baseCents =
+    recurring || offSeason
+      ? stored.recurringOffer?.initialFeeCents ?? 0
+      : day?.priceCents ?? 0;
+  if (baseCents <= 0) {
+    throw new HttpError(409, {
+      error: "That day is no longer available — request a fresh quote.",
+    });
+  }
+  const resolved = await resolvePromo(client, body.code, Date.now());
+  if (!resolved.ok) {
+    return { valid: false as const, message: resolved.message };
+  }
+  const discountCents = discountFor(resolved.promo, baseCents);
+  if (discountCents <= 0) {
+    return {
+      valid: false as const,
+      message: "That code doesn't apply to this booking.",
+    };
+  }
+  return {
+    valid: true as const,
+    code: normalizeCode(resolved.promo.code),
+    label: promoLabel(resolved.promo),
+    discountCents,
+    amountCents: baseCents - discountCents,
+  };
+}
+
 async function book(
   body: Record<string, unknown>,
   req: { sourceIp?: string; userAgent?: string }
@@ -2153,6 +2223,58 @@ async function book(
     });
   }
 
+  // A staff-entered discount code (optional). Resolve it ONCE here so every
+  // /book branch — dated card, invoice, off-season — discounts from the same
+  // decision, and a bad code is refused before any provider object exists. The
+  // code was validated identically at /promo; /book is the authority.
+  const resolved = normalizeCode(body.promoCode)
+    ? await resolvePromo(client, body.promoCode, Date.now())
+    : null;
+  if (resolved && !resolved.ok) {
+    throw new HttpError(400, { error: resolved.message });
+  }
+  const promo = resolved?.ok ? resolved.promo : null;
+  if (promo && booking.promoCode !== normalizeCode(promo.code)) {
+    // Best-effort "first N" tally: counted when the code is first applied at
+    // checkout, not when payment clears — so an abandoned checkout still
+    // consumes one. That undercounts issuance rather than overselling a capped
+    // code (the safe direction). Not money-atomic; maxRedemptions is a
+    // marketing guardrail, not a financial guarantee. A tally failure never
+    // blocks the booking.
+    await client.models.PromoCode.update({
+      id: promo.id,
+      timesRedeemed: (promo.timesRedeemed ?? 0) + 1,
+    }).catch(() => undefined);
+  }
+  // Apply the resolved code (if any) to a branch's base charge. A card charge
+  // a code would push below Stripe's floor is refused honestly here, so "the
+  // code wins" never yields an unchargeable intent. Returns the fields to
+  // snapshot on the BookingRequest alongside the amount.
+  function pricedWithPromo(
+    baseCents: number,
+    opts?: { card?: boolean }
+  ): {
+    amountCents: number;
+    promoSets: { promoCode: string | null; promoDiscountCents: number | null };
+  } {
+    const discount = promo ? discountFor(promo, baseCents) : 0;
+    const amountCents = baseCents - discount;
+    if (opts?.card && discount > 0 && amountCents < STRIPE_MIN_CHARGE_CENTS) {
+      throw new HttpError(400, {
+        error:
+          amountCents <= 0
+            ? "That code makes this booking free — bill it by invoice instead of charging a card."
+            : `That code drops the total below the ${money(STRIPE_MIN_CHARGE_CENTS)} card minimum — use a smaller code or bill by invoice.`,
+      });
+    }
+    return {
+      amountCents,
+      promoSets: promo
+        ? { promoCode: normalizeCode(promo.code), promoDiscountCents: discount }
+        : { promoCode: null, promoDiscountCents: null },
+    };
+  }
+
   // GL-17: EVERY /book branch — dated, plan-only, and off-season — runs
   // behind ONE durable single-winner attempt boundary. Parallel requests
   // (double-clicks, two tabs, different selections) get exactly one live
@@ -2173,6 +2295,10 @@ async function book(
       return await bookInvoiceAttempt();
     }
     if (offSeason) {
+      // The off-season enrollment charges the first month by card — apply the
+      // code to that charge here (same card floor as every other checkout).
+      const { amountCents: offSeasonAmountCents, promoSets: offSeasonPromoSets } =
+        pricedWithPromo(stored.recurringOffer!.initialFeeCents, { card: true });
       return await offSeasonEnrollmentAttempt({
         booking,
         stored: stored as {
@@ -2183,6 +2309,8 @@ async function book(
         tcVersion,
         client,
         holderUntil,
+        amountCents: offSeasonAmountCents,
+        promoSets: offSeasonPromoSets,
       });
     }
     return await bookDatedAttempt();
@@ -2197,10 +2325,13 @@ async function book(
   // webhook), so the response is a booked confirmation, not a client secret.
   async function bookInvoiceAttempt() {
     const booking = bookingRow;
-    const amountCents =
+    // A staff discount code comes off the invoiced amount too (no Stripe
+    // minimum applies — nothing is charged to a card).
+    const { amountCents, promoSets } = pricedWithPromo(
       recurring || offSeason
         ? stored.recurringOffer!.initialFeeCents
-        : day!.priceCents;
+        : day!.priceCents
+    );
     // Default net-30 terms; the due date is stamped on the OPEN invoice and
     // drives AR aging / dunning exactly like any other net-terms bill.
     const due = new Date();
@@ -2265,6 +2396,7 @@ async function book(
         capacityMinutes: claimedSlot?.claimMinutes ?? null,
         recurring,
         amountCents,
+        ...promoSets,
         paymentFailedReason: null,
         paymentFailedNoticeSentAt: null,
         tcVersion,
@@ -2310,10 +2442,12 @@ async function book(
   // already threw. Shadow with the proven-non-null row.
   const booking = bookingRow;
   // Server-side price: one-time pays the day price; recurring pays the
-  // initial fee now and the subscription starts after the first visit.
-  const amountCents = recurring
-    ? stored.recurringOffer!.initialFeeCents
-    : day!.priceCents;
+  // initial fee now and the subscription starts after the first visit. A
+  // staff discount code (if any) comes off this card charge.
+  const { amountCents, promoSets } = pricedWithPromo(
+    recurring ? stored.recurringOffer!.initialFeeCents : day!.priceCents,
+    { card: true }
+  );
 
   const s = await stripeClient();
 
@@ -2436,6 +2570,7 @@ async function book(
           selectedDate: date,
           recurring,
           amountCents,
+          ...promoSets,
           // GL-06: a retried attempt (after a pre-service failure) re-arms
           // the state machine — the reused intent's webhooks only apply to
           // QUOTED/PROCESSING, and a fresh failure must notice again.
@@ -2579,6 +2714,7 @@ async function book(
       capacityMinutes: slot.claimMinutes,
       recurring,
       amountCents,
+      ...promoSets,
       stripeCustomerId: customerId,
       stripePaymentIntentId: intent.id,
       // A new attempt clears the prior failure's reason and notice marker.

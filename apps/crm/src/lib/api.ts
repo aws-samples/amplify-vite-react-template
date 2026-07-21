@@ -32,6 +32,9 @@ export type LeadActivity = Schema["LeadActivity"]["type"];
 // Market Rates screen's engine panel.
 export type RateCoverage = Schema["RateCoverage"]["type"];
 export type PricingControl = Schema["PricingControl"]["type"];
+/** Staff-managed funnel discount codes (owner-only CRUD; the public booking
+ *  Lambda reads them to discount checkout). */
+export type PromoCode = Schema["PromoCode"]["type"];
 
 /** GL-02 — controlled lead vocabularies (mirror the server validators). */
 export const LEAD_LOST_REASONS = [
