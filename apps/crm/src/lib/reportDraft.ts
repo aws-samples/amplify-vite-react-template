@@ -94,6 +94,26 @@ export function loadDraft<F>(
   }
 }
 
+/**
+ * Is a cached draft stale — the office copy was updated at or after the draft's
+ * last local save? A stale draft must NOT be restored: its older words would
+ * silently overwrite the newer server record (a second device, or an office
+ * amendment, advanced it after this phone last saved). A draft with no office
+ * copy yet (serverUpdatedAt absent) is never stale, and unparseable timestamps
+ * fail open to "not stale" so a normal offline draft is never dropped by a bad
+ * clock. Equal timestamps favor the server — it is the record of authority.
+ */
+export function isDraftStale(
+  draft: { savedAt: string },
+  serverUpdatedAt: string | null | undefined
+): boolean {
+  if (!serverUpdatedAt) return false;
+  const saved = new Date(draft.savedAt).getTime();
+  const server = new Date(serverUpdatedAt).getTime();
+  if (Number.isNaN(saved) || Number.isNaN(server)) return false;
+  return saved <= server;
+}
+
 export function clearDraft(
   jobId: string,
   store: DraftStore = localStorage,

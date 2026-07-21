@@ -3,6 +3,7 @@ import {
   clearDraft,
   draftKey,
   isConnectivityError,
+  isDraftStale,
   loadDraft,
   saveDraft,
   syncBadge,
@@ -128,6 +129,35 @@ describe("clearDraft", () => {
 
   it("tolerates a store that throws", () => {
     expect(() => clearDraft("job-1", brokenStore)).not.toThrow();
+  });
+});
+
+describe("isDraftStale — never restore over a newer office copy", () => {
+  const draft = { savedAt: "2026-07-21T12:00:00.000Z" };
+
+  it("is stale when the office copy is newer than the draft", () => {
+    // Another device / an office amendment advanced the record after this
+    // phone's last local save — the draft must not be restored.
+    expect(isDraftStale(draft, "2026-07-21T13:00:00.000Z")).toBe(true);
+  });
+
+  it("is NOT stale when the draft is newer (the normal offline case)", () => {
+    // The phone has unsent edits later than the last successful send.
+    expect(isDraftStale(draft, "2026-07-21T11:00:00.000Z")).toBe(false);
+  });
+
+  it("treats an equal timestamp as stale — the server is the record of authority", () => {
+    expect(isDraftStale(draft, "2026-07-21T12:00:00.000Z")).toBe(true);
+  });
+
+  it("is never stale with no office copy yet (local-only draft still restores)", () => {
+    expect(isDraftStale(draft, null)).toBe(false);
+    expect(isDraftStale(draft, undefined)).toBe(false);
+  });
+
+  it("fails open to not-stale on an unparseable timestamp — a bad clock never drops a draft", () => {
+    expect(isDraftStale({ savedAt: "nonsense" }, "2026-07-21T13:00:00.000Z")).toBe(false);
+    expect(isDraftStale(draft, "nonsense")).toBe(false);
   });
 });
 

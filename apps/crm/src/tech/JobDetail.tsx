@@ -16,7 +16,9 @@ import { fmtDate } from "../lib/format";
 import {
   clearDraft,
   isConnectivityError,
+  isDraftStale,
   loadDraft,
+  type ReportDraft,
   saveDraft,
   syncBadge,
 } from "../lib/reportDraft";
@@ -1105,15 +1107,27 @@ function ReportForm({
   // GL-13: drafts are bound to the signed-in identity (the caller's own
   // technician record), so another login on this device can never restore them.
   const ownerSub = technician?.userSub ?? null;
-  const [restored] = useState(() => {
+  const [restoreState] = useState(() => {
+    const none = { draft: null as ReportDraft<DraftFields> | null, stale: false };
     const d = loadDraft<DraftFields>(job.id, localStorage, ownerSub);
-    if (!d) return null;
+    if (!d) return none;
+    // Identical to the office copy → nothing to restore.
     if (JSON.stringify(d.fields) === JSON.stringify(serverCopyFields())) {
       clearDraft(job.id, localStorage, ownerSub);
-      return null;
+      return none;
     }
-    return d;
+    // The office copy was updated AFTER this phone last saved its draft (a
+    // second device, or an office amendment). Restoring the older local words
+    // and auto-resending them would silently revert the newer pesticide
+    // record, so set the stale draft aside and keep the office copy. (No office
+    // copy yet → nothing newer to lose, so a local-only draft still restores.)
+    if (isDraftStale(d, existing?.updatedAt)) {
+      clearDraft(job.id, localStorage, ownerSub);
+      return { draft: null as ReportDraft<DraftFields> | null, stale: true };
+    }
+    return { draft: d, stale: false };
   });
+  const restored = restoreState.draft;
   const [servicesPerformed, setServicesPerformed] = useState(
     restored?.fields.servicesPerformed ?? existing?.servicesPerformed ?? ""
   );
@@ -1174,6 +1188,9 @@ function ReportForm({
   const [persisted, setPersisted] = useState(true);
   const [sendFailed, setSendFailed] = useState(false);
   const [restoredNote, setRestoredNote] = useState(restored?.savedAt ?? null);
+  // A local draft was set aside because the office copy was newer (edited on
+  // another device / amended). The tech is told rather than silently losing it.
+  const [staleNote, setStaleNote] = useState(restoreState.stale);
   const editGen = useRef(0);
   const lastMirrored = useRef<string | null>(null);
   const retryRef = useRef<(() => void) | null>(null);
@@ -1339,6 +1356,7 @@ function ReportForm({
   const markDelivered = (gen: number) => {
     setSendFailed(false);
     setRestoredNote(null);
+    setStaleNote(false);
     if (editGen.current === gen) {
       clearDraft(job.id, localStorage, ownerSub);
       setDirty(false);
@@ -1489,6 +1507,13 @@ function ReportForm({
             Restored the report you typed at{" "}
             {new Date(restoredNote).toLocaleString()} — it was saved on this
             phone.
+          </p>
+        ) : null}
+        {staleNote ? (
+          <p className="small" style={{ margin: 0, color: "var(--warn, #a15c00)" }}>
+            This report was updated somewhere else since this phone last saved a
+            draft, so that older draft was set aside to avoid overwriting the
+            newer version. Please review the details below before saving.
           </p>
         ) : null}
         <Field label="Services performed">
