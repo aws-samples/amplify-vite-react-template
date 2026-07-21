@@ -19,12 +19,11 @@ import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
  * (Mon–Fri, stop capacity, rough route-minutes feasibility), and its price
  * is the deterministic rate-card base times transparent modifiers:
  *
- *   route density   −10%  a stop already within 25 drive-min that day
+ *   route density   −10/20/35%  a stop already within 25/15/5 drive-min that day
  *   quiet day       −5%   day under half capacity
  *   nearly full     +10%  day at ≥85% capacity
- *   rush            +15%  inside 48 hours
  *   planner         −5%   three or more weeks out
- *   floor           never below 85% of base, and never below variable cost
+ *   floor           never below 60% of base, and never below variable cost
  *
  * Identical inputs (same schedule state) → identical prices, always.
  */
@@ -187,8 +186,14 @@ export async function buildDayMatrix(opts: {
     let factor = 1;
     const factors: string[] = [];
     if (nearest != null && nearest <= 25) {
-      factor -= 0.1;
-      factors.push(`route-density −10% (stop ${nearest} min away)`);
+      // Graduated by real proximity: a stop on the adjacent parcel is nearly
+      // free travel and earns far more than one 25 minutes away. If we're
+      // already going to be right there, we want to fill the slot, not tax it.
+      const pct = nearest <= 5 ? 0.35 : nearest <= 15 ? 0.2 : 0.1;
+      factor -= pct;
+      factors.push(
+        `route-density −${Math.round(pct * 100)}% (stop ${nearest} min away)`
+      );
     }
     const load = capacity > 0 ? committed / capacity : 1;
     void stopCount;
@@ -204,15 +209,15 @@ export async function buildDayMatrix(opts: {
         new Date(`${today}T12:00:00Z`).getTime()) /
         86_400_000
     );
-    if (daysOut <= 2) {
-      factor += 0.15;
-      factors.push("rush +15%");
-    } else if (daysOut >= 21) {
+    if (daysOut >= 21) {
       factor -= 0.05;
       factors.push("planner −5%");
     }
 
-    let floored = Math.max(baseCents * 0.85, baseCents * factor);
+    // Policy floor lets the deepest configured discount land (−35% next-door,
+    // plus a −5% quiet/planner stack); real margin is protected by the R62
+    // variable-cost floor below.
+    let floored = Math.max(baseCents * 0.6, baseCents * factor);
     if (costCents != null && costCents > floored) {
       floored = costCents;
       factors.push("floored at variable cost");

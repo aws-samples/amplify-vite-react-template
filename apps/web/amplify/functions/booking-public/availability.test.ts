@@ -72,9 +72,9 @@ const { buildDayMatrix } = await import("./availability");
 const freezeEastern = (isoDate: string) =>
   vi.setSystemTime(new Date(`${isoDate}T12:00:00-04:00`));
 
-// Tuesday 2026-07-28 is 12 days out from the frozen today: no rush, no
-// planner modifier. One nearby stop → route-density −10% and quiet-day −5%,
-// the deepest discount the modifiers can produce (factor 0.85).
+// Tuesday 2026-07-28 is 12 days out from the frozen today: no planner
+// modifier. One stop 20 drive-min away (the ≤25 tier) → route-density −10%,
+// plus quiet-day −5%, for factor 0.85.
 const QUIET_NEARBY_DAY = "2026-07-28";
 
 beforeEach(() => {
@@ -123,7 +123,7 @@ describe("discount floor at variable cost (R62)", () => {
     expect(day.factors).toContain("floored at variable cost");
   });
 
-  it("without a zone there is no cost model, and the 85% floor stands", async () => {
+  it("without a zone there is no cost model, so the discounted price stands", async () => {
     const days = await buildDayMatrix({
       routesKey: "test-routes-key",
       candidateAddress: "12 Beacon St, Ware, MA",
@@ -132,6 +132,7 @@ describe("discount floor at variable cost (R62)", () => {
     });
 
     const day = days.find((d) => d.date === QUIET_NEARBY_DAY)!;
+    // factor 0.85 (route −10% + quiet −5%), clear of the 60% policy floor.
     expect(day.priceCents).toBe(16900); // tidy(0.85 × $199)
   });
 
