@@ -59,13 +59,18 @@ const fakeDataClient = {
         filter?: {
           routeId?: { eq: string };
           customerId?: { eq: string };
+          or?: { routeId?: { eq: string } }[];
         };
       }) => ({
-        data: [...jobs.values()].filter(
-          (j) =>
-            (!filter?.routeId || j.routeId === filter.routeId.eq) &&
+        data: [...jobs.values()].filter((j) => {
+          const routeOk = filter?.or
+            ? filter.or.some((c) => j.routeId === c.routeId?.eq)
+            : !filter?.routeId || j.routeId === filter.routeId.eq;
+          return (
+            routeOk &&
             (!filter?.customerId || j.customerId === filter.customerId.eq)
-        ),
+          );
+        }),
         nextToken: null,
       }),
     },
@@ -250,6 +255,35 @@ describe("buildTechnicianDay", () => {
     expect(d.technicians.map((t) => t.id).sort()).toEqual(["t_a", "t_b"]);
     expect(d.technicianId).toBe("t_b");
     expect(d.jobs.map((j) => j.id)).toEqual(["job_b"]);
+  });
+
+  it("unions stops split across DUPLICATE routes for the same technician+date", async () => {
+    // Non-atomic route creation left two PLANNED routes for Ana on the same
+    // day, with her stops split across them. Trusting a single route[0] would
+    // hide whichever stops live on the other route (the bug that made a real
+    // day read "No stops on this route"). The day must show every stop, in
+    // routeOrder, regardless of which duplicate route each one landed on.
+    routes.set("r_a2", {
+      id: "r_a2",
+      technicianId: "t_a",
+      date: "2026-07-20",
+      status: "PLANNED",
+      notes: null,
+    });
+    jobs.set("job_a2", {
+      id: "job_a2",
+      customerId: "c_a",
+      technicianId: "t_a",
+      routeId: "r_a2",
+      routeOrder: 2,
+      serviceType: "Wasp",
+      status: "SCHEDULED",
+    });
+    const d = await buildTechnicianDay(TECH_A, { date: "2026-07-20" });
+    // job_a (order 1, route r_a) + job_a2 (order 2, route r_a2), both shown.
+    expect(d.jobs.map((j) => j.id)).toEqual(["job_a", "job_a2"]);
+    // Display route is a deterministic pick across the duplicates.
+    expect(d.route?.id).toBe("r_a");
   });
 });
 

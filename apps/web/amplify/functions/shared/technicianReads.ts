@@ -150,22 +150,43 @@ export async function buildTechnicianDay(
     return emptyDay({ technicianId, technicianName, canPick: office, technicians });
   }
 
-  const routes = await listAll((nextToken) =>
+  const routeList = (await listAll((nextToken) =>
     client.models.Route.listRouteByTechnicianIdAndDate(
       { technicianId: technicianId!, date: { eq: args.date! } },
       { nextToken }
     )
-  );
-  const route = (routes as AnyRecord[])[0] ?? null;
-  if (!route) {
+  )) as AnyRecord[];
+  if (routeList.length === 0) {
     return emptyDay({ technicianId, technicianName, canPick: office, technicians });
   }
 
+  // A technician has one route per day by design, but route creation is a
+  // non-atomic query-then-create on (technicianId, date) with no uniqueness
+  // constraint, so a burst of assignments can leave DUPLICATE routes with the
+  // day's stops split across them. Trusting a single routes[0] silently hides
+  // the stops that live on the others (the office board masks this — it groups
+  // jobs by technicianId+date, not by which route). So the day unions every
+  // route for the tech+date. Display metadata comes from a deterministic pick
+  // so the same route wins across reads. (Root fix: atomic route creation keyed
+  // on technicianId#date — tracked separately.)
+  const routeIds = routeList.map((r) => String(r.id));
+  const displayRoute = routeList
+    .slice()
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))[0];
+  if (routeList.length > 1) {
+    console.warn(
+      `technicianDay: ${routeList.length} duplicate routes for technician ${technicianId} on ${args.date} (${routeIds.join(", ")}); unioning their stops.`
+    );
+  }
+
   // routeId has no index, so the filter runs post-scan; page to exhaustion or
-  // stops silently fall off the day.
+  // stops silently fall off the day. Union across every route id for the day.
   const jobRows = await listAll((nextToken) =>
     client.models.Job.list({
-      filter: { routeId: { eq: String(route.id) } },
+      filter:
+        routeIds.length === 1
+          ? { routeId: { eq: routeIds[0] } }
+          : { or: routeIds.map((id) => ({ routeId: { eq: id } })) },
       limit: 200,
       nextToken,
     })
@@ -188,7 +209,7 @@ export async function buildTechnicianDay(
       kind: "ROUTE_MISMATCH",
       dedupeKey: `route-mismatch:${String(j.id)}`,
       title: "A visit's route and assigned technician disagree",
-      detail: `Job ${String(j.id)}${j.scheduledDate ? ` (${String(j.scheduledDate)})` : ""} sits on route ${String(route.id)} (${technicianName ?? technicianId}), but its assigned technician is ${j.technicianId ? String(j.technicianId) : "nobody"}. The stop was withheld from the technician's day until the route and assignment agree.`,
+      detail: `Job ${String(j.id)}${j.scheduledDate ? ` (${String(j.scheduledDate)})` : ""} sits on route ${String(j.routeId ?? displayRoute.id)} (${technicianName ?? technicianId}), but its assigned technician is ${j.technicianId ? String(j.technicianId) : "nobody"}. The stop was withheld from the technician's day until the route and assignment agree.`,
       relatedId: String(j.id),
       sourceUrl: "/schedule",
       resolutionAction:
@@ -223,10 +244,10 @@ export async function buildTechnicianDay(
     canPickTechnician: office,
     technicians,
     route: {
-      id: String(route.id),
-      date: (route.date as string) ?? null,
-      status: (route.status as string) ?? null,
-      notes: (route.notes as string) ?? null,
+      id: String(displayRoute.id),
+      date: (displayRoute.date as string) ?? null,
+      status: (displayRoute.status as string) ?? null,
+      notes: (displayRoute.notes as string) ?? null,
     },
     jobs,
     customers,
