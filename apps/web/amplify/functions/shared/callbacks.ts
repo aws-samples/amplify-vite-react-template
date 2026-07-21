@@ -11,6 +11,7 @@ import {
   reserveSlot,
   techBaseFor,
 } from "./capacity";
+import { optimizeTechDay } from "./routeOptimizer";
 import {
   assertDispatchFacts,
   proveRoutable,
@@ -347,6 +348,11 @@ export async function scheduleCallback(opts: {
     });
     if (!existing) throw new Error("The callback visit could not be created");
   }
+  // Scheduled onto the technician's day — re-sequence their route.
+  await optimizeTechDay({
+    technicianId: opts.technicianId,
+    date: opts.scheduledDate,
+  }).catch(() => undefined);
   await client.models.CallbackRequest.update({
     id: cb.id,
     status: "SCHEDULED",

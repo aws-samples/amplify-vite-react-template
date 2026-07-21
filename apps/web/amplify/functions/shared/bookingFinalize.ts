@@ -13,6 +13,7 @@ import {
   reserveSlot,
 } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
+import { optimizeTechDay } from "./routeOptimizer";
 
 /** Give back minutes a finalize attempt reserved but could not stamp. */
 async function reserveSlotRelease(
@@ -560,6 +561,15 @@ export async function finalizeBooking(opts: {
             consumedSlot.minutes
           );
         }
+      }
+      // Scheduled onto a real technician's day — re-sequence their route into
+      // the shortest base → stops → base tour. Best-effort; a Routes hiccup
+      // leaves the appended order untouched.
+      if (stamped.ok && assign && assignTech && booking.selectedDate) {
+        await optimizeTechDay({
+          technicianId: assignTech,
+          date: booking.selectedDate,
+        }).catch(() => undefined);
       }
     }
     // The booking is whole. If a prior attempt had opened the paid-not-finalized

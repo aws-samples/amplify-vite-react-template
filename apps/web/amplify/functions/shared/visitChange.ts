@@ -28,6 +28,7 @@ import {
   reserveSlot,
   techBaseFor,
 } from "./capacity";
+import { optimizeTechDay } from "./routeOptimizer";
 import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
@@ -1731,6 +1732,21 @@ export async function rescheduleVisit(args: {
       // releases the stop when the prior row carried a real technicianId).
       await releaseJobSlot(job);
     }
+    // Re-sequence the destination technician's day now this stop joined it —
+    // and the source day it left, on a cross-tech/day move.
+    await optimizeTechDay({ technicianId: technician.id, date: newDate! }).catch(
+      () => undefined
+    );
+    if (
+      priorScheduledDate &&
+      job.technicianId &&
+      (job.technicianId !== technician.id || priorScheduledDate !== newDate)
+    ) {
+      await optimizeTechDay({
+        technicianId: job.technicianId,
+        date: priorScheduledDate,
+      }).catch(() => undefined);
+    }
   } else {
     // GL-07 R4: a dated move with no technician is NEVER published as a clean
     // SCHEDULED — the owned staffing case is CONFIRMED FIRST (a case that
@@ -1817,6 +1833,14 @@ export async function rescheduleVisit(args: {
     }
     // The prior slot's minutes come back after the move landed.
     await releaseJobSlot(job);
+    // The stop left its old technician's day (moved to the pool) — re-sequence
+    // whatever remains there.
+    if (priorScheduledDate && job.technicianId) {
+      await optimizeTechDay({
+        technicianId: job.technicianId,
+        date: priorScheduledDate,
+      }).catch(() => undefined);
+    }
   }
 
   const { data: customer } = await client.models.Customer.get({
