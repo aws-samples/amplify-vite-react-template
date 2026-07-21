@@ -592,6 +592,41 @@ textarea {
   background: var(--danger);
 }
 
+.stat-clickable {
+  cursor: pointer;
+  transition: box-shadow 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+}
+
+.stat-clickable::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  opacity: 0.5;
+}
+
+.stat-clickable:hover,
+.stat-clickable:focus-visible {
+  border-color: var(--brand);
+  box-shadow: var(--shadow-md, var(--shadow-sm));
+  outline: none;
+}
+
+.stat-clickable.stat-active {
+  border-color: var(--brand);
+}
+
+.stat-clickable.stat-active::after {
+  transform: rotate(45deg);
+  opacity: 0.9;
+  border-color: var(--brand);
+}
+
 .stat-value {
   font-size: 23px;
   font-weight: 800;

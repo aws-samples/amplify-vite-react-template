@@ -29,7 +29,7 @@ export type RevenueTotals = {
   refundedCents: number;
 };
 
-const isSettled = (i: RevenueInvoice) =>
+export const isSettled = (i: RevenueInvoice) =>
   i.status === "PAID" || i.status === "REFUNDED";
 
 export function refundedOf(i: RevenueInvoice): number {

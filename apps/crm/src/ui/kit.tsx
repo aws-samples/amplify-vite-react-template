@@ -331,13 +331,38 @@ export function Stat({
   label,
   value,
   tone,
+  onClick,
+  active,
 }: {
   label: string;
   value: ReactNode;
   tone?: BadgeTone;
+  /** When set, the tile becomes a button that drills into its breakdown. */
+  onClick?: () => void;
+  /** Whether this tile's drill-down is currently open. */
+  active?: boolean;
 }) {
+  const interactive = !!onClick;
   return (
-    <div className={`stat ${tone ? `stat-${tone}` : ""}`}>
+    <div
+      className={`stat ${tone ? `stat-${tone}` : ""}${
+        interactive ? " stat-clickable" : ""
+      }${active ? " stat-active" : ""}`}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-pressed={interactive ? active : undefined}
+      onClick={onClick}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
+    >
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
     </div>

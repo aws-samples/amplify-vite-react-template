@@ -14,12 +14,19 @@ import {
   type WorkItem,
 } from "../lib/api";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
-import { revenueTotals } from "../lib/revenue";
+import {
+  isSettled,
+  netCollectedCents,
+  refundedOf,
+  revenueTotals,
+} from "../lib/revenue";
 import { plansWithoutNextVisit, unchargedOneTimeJobs } from "../lib/workQueues";
 import {
   AGING_BUCKET_LABEL,
   AGING_BUCKETS,
+  agingBucket,
   agingSummary,
+  isReceivable,
   type AgingBucket,
 } from "../lib/aging";
 import {
@@ -44,6 +51,23 @@ import {
 
 type Period = "MONTH" | "LAST_MONTH" | "ALL";
 
+/**
+ * Which financial tile is drilled open. The revenue keys break down the top
+ * grid (and Refunded); `aging:<bucket>` breaks down one AR aging tile. Each
+ * drill lists the exact invoices that sum to its tile, so a total is always
+ * explainable down to the customer.
+ */
+type DrillKey =
+  | "billed"
+  | "paid"
+  | "open"
+  | "failed"
+  | "refunded"
+  | `aging:${AgingBucket}`;
+
+/** One line of a tile's breakdown: an invoice and the amount it contributes. */
+type DrillRow = { invoice: Invoice; amountCents: number };
+
 function inPeriod(iso: string | null | undefined, period: Period): boolean {
   if (period === "ALL") return true;
   if (!iso) return false;
@@ -58,6 +82,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const roles = useRoles();
   const [period, setPeriod] = useState<Period>("MONTH");
+  const [drill, setDrill] = useState<DrillKey | null>(null);
   const [invoices, setInvoices] = useState<Invoice[] | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [plans, setPlans] = useState<ServicePlan[]>([]);
@@ -207,6 +232,66 @@ export default function Dashboard() {
     .filter((item) => item.status === "OPEN")
     .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
 
+  // The invoices behind whichever financial tile is drilled open. Each subset
+  // is the same filter its total uses (lib/revenue.ts, lib/aging.ts) and each
+  // row carries that invoice's contribution, so the rows always sum back to the
+  // tile — largest contribution first.
+  const drillRowsFor = (key: DrillKey): DrillRow[] => {
+    let rows: DrillRow[];
+    switch (key) {
+      case "billed":
+        // Every in-range invoice, net of any refund on it.
+        rows = inRange.map((i) => ({
+          invoice: i,
+          amountCents: i.amountCents - (isSettled(i) ? refundedOf(i) : 0),
+        }));
+        break;
+      case "paid":
+        rows = inRange
+          .map((i) => ({ invoice: i, amountCents: netCollectedCents(i) }))
+          .filter((r) => r.amountCents > 0);
+        break;
+      case "open":
+        rows = inRange
+          .filter((i) => i.status === "OPEN")
+          .map((i) => ({ invoice: i, amountCents: i.amountCents }));
+        break;
+      case "failed":
+        rows = inRange
+          .filter((i) => i.status === "FAILED")
+          .map((i) => ({ invoice: i, amountCents: i.amountCents }));
+        break;
+      case "refunded":
+        rows = inRange
+          .filter((i) => isSettled(i) && refundedOf(i) > 0)
+          .map((i) => ({ invoice: i, amountCents: refundedOf(i) }));
+        break;
+      default: {
+        // aging:<bucket> — receivable invoices (all time, like the AR card)
+        // that land in that bucket as of today.
+        const bucket = key.slice("aging:".length) as AgingBucket;
+        rows = invoices
+          .filter((i) => isReceivable(i) && agingBucket(i, today) === bucket)
+          .map((i) => ({ invoice: i, amountCents: i.amountCents }));
+      }
+    }
+    return rows.sort((a, b) => b.amountCents - a.amountCents);
+  };
+
+  // Toggle a tile's drill-down: clicking the open one closes it.
+  const toggleDrill = (key: DrillKey) =>
+    setDrill((cur) => (cur === key ? null : key));
+
+  const drillPanel = (key: DrillKey) =>
+    drill === key ? (
+      <DrillPanel
+        title={drillTitle(key)}
+        rows={drillRowsFor(key)}
+        customerById={customerById}
+        onOpen={(id) => navigate(`/customers/${id}`)}
+      />
+    ) : null;
+
   return (
     <Page title="Dashboard">
       <SegControl
@@ -216,16 +301,46 @@ export default function Dashboard() {
           { value: "ALL" as Period, label: "All time" },
         ]}
         value={period}
-        onChange={setPeriod}
+        onChange={(p) => {
+          setPeriod(p);
+          setDrill(null);
+        }}
       />
       <ErrorNote error={error} />
 
       <div className="stat-grid">
-        <Stat label="Billed" value={money(billed)} />
-        <Stat label="Paid" value={money(paid)} tone="ok" />
-        <Stat label="Unpaid" value={money(open)} tone="warn" />
-        <Stat label="Failed" value={money(failed)} tone={failed ? "danger" : undefined} />
+        <Stat
+          label="Billed"
+          value={money(billed)}
+          onClick={inRange.length ? () => toggleDrill("billed") : undefined}
+          active={drill === "billed"}
+        />
+        <Stat
+          label="Paid"
+          value={money(paid)}
+          tone="ok"
+          onClick={paid ? () => toggleDrill("paid") : undefined}
+          active={drill === "paid"}
+        />
+        <Stat
+          label="Unpaid"
+          value={money(open)}
+          tone="warn"
+          onClick={open ? () => toggleDrill("open") : undefined}
+          active={drill === "open"}
+        />
+        <Stat
+          label="Failed"
+          value={money(failed)}
+          tone={failed ? "danger" : undefined}
+          onClick={failed ? () => toggleDrill("failed") : undefined}
+          active={drill === "failed"}
+        />
       </div>
+      {drillPanel("billed")}
+      {drillPanel("paid")}
+      {drillPanel("open")}
+      {drillPanel("failed")}
 
       <Card
         title={`Exception work queue (${openOwnedWork.length})`}
@@ -262,9 +377,18 @@ export default function Dashboard() {
       {refunded > 0 ? (
         // Netted out of Billed and Paid above, but shown rather than silently
         // subtracted — the numbers should be explainable, not just correct.
-        <div className="stat-grid">
-          <Stat label="Refunded" value={money(refunded)} tone="warn" />
-        </div>
+        <>
+          <div className="stat-grid">
+            <Stat
+              label="Refunded"
+              value={money(refunded)}
+              tone="warn"
+              onClick={() => toggleDrill("refunded")}
+              active={drill === "refunded"}
+            />
+          </div>
+          {drillPanel("refunded")}
+        </>
       ) : null}
 
       <div className="stat-grid">
@@ -295,9 +419,18 @@ export default function Dashboard() {
                     ? bucketTone(b)
                     : undefined
                 }
+                onClick={
+                  aging.buckets[b].count
+                    ? () => toggleDrill(`aging:${b}`)
+                    : undefined
+                }
+                active={drill === `aging:${b}`}
               />
             ))}
           </div>
+          {AGING_BUCKETS.filter((b) => drill === `aging:${b}`).map((b) => (
+            <div key={b}>{drillPanel(`aging:${b}`)}</div>
+          ))}
         </Card>
       ) : null}
 
@@ -497,6 +630,62 @@ export default function Dashboard() {
         />
       ) : null}
     </Page>
+  );
+}
+
+/** The heading for a drilled-open financial tile's breakdown. */
+function drillTitle(key: DrillKey): string {
+  switch (key) {
+    case "billed":
+      return "Billed — invoices";
+    case "paid":
+      return "Paid — invoices";
+    case "open":
+      return "Unpaid — invoices";
+    case "failed":
+      return "Failed — invoices";
+    case "refunded":
+      return "Refunded — invoices";
+    default: {
+      const bucket = key.slice("aging:".length) as AgingBucket;
+      return `${AGING_BUCKET_LABEL[bucket]} past due — invoices`;
+    }
+  }
+}
+
+/**
+ * The invoices behind a financial tile, each linking to its customer. The rows
+ * are pre-summed to the tile total (shown in the heading) so the number is
+ * explainable down to the individual bill.
+ */
+function DrillPanel({
+  title,
+  rows,
+  customerById,
+  onOpen,
+}: {
+  title: string;
+  rows: DrillRow[];
+  customerById: Map<string, Customer>;
+  onOpen: (customerId: string) => void;
+}) {
+  const total = rows.reduce((s, r) => s + r.amountCents, 0);
+  return (
+    <Card title={`${title} · ${money(total)}`}>
+      {rows.length === 0 ? (
+        <p className="muted small">Nothing in this total.</p>
+      ) : (
+        rows.map((r) => (
+          <ListRow
+            key={r.invoice.id}
+            title={customerById.get(r.invoice.customerId)?.displayName ?? "Unknown"}
+            subtitle={`${r.invoice.description} · ${fmtDate(r.invoice.issuedAt, true)}`}
+            meta={<strong>{money(r.amountCents)}</strong>}
+            onClick={() => onOpen(r.invoice.customerId)}
+          />
+        ))
+      )}
+    </Card>
   );
 }
 
