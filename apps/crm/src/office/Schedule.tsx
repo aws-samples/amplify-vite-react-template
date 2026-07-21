@@ -127,6 +127,16 @@ export default function Schedule() {
       setRoutes(routesByDay.flat());
       const inWeek = jobsByDay.flat().filter((j) => j.status !== "CANCELED");
       setWeekJobs(inWeek);
+      // A no-access visit that has already been rebooked has handed its
+      // scheduling need to the new linked stop, so it must stop offering
+      // Rebook. The original is never mutated, so the only signal is a job
+      // pointing back at it via rebookedFromJobId — collect those originals
+      // and drop them from the pool (otherwise the same customer shows a
+      // Rebook row for the original AND an Assign row for its rebooking).
+      const rebookedOriginals = new Set<string>();
+      for (const j of [...inWeek, ...unscheduled]) {
+        if (j.rebookedFromJobId) rebookedOriginals.add(j.rebookedFromJobId);
+      }
       // COMPLETED / IN_PROGRESS / CANCELED never belong in the pool. A
       // NO_ACCESS visit does, but only to be rebooked — the render offers
       // Rebook, not Assign — so it is let through the assign-blocked filter.
@@ -134,7 +144,11 @@ export default function Schedule() {
       // UNSCHEDULED jobs; dedupe by id so a row can't appear twice.
       const pool = new Map<string, Job>();
       for (const j of inWeek) {
-        if (!j.routeId && (!assignBlockedNote(j.status) || j.status === "NO_ACCESS")) {
+        if (
+          !j.routeId &&
+          !rebookedOriginals.has(j.id) &&
+          (!assignBlockedNote(j.status) || j.status === "NO_ACCESS")
+        ) {
           pool.set(j.id, j);
         }
       }
