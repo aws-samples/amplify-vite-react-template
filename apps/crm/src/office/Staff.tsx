@@ -15,6 +15,7 @@ import {
   type Technician,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
+import { TechnicianRoster } from "./technicians";
 import { fmtDate, fmtDateTime } from "../lib/format";
 import {
   Badge,
@@ -173,6 +174,8 @@ export default function Staff() {
           ))}
         </Card>
       )}
+
+      <TechnicianRoster />
 
       <Sheet open={inviting} onClose={() => setInviting(false)} title="Invite a staff member">
         {inviting ? (
