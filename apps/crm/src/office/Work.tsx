@@ -737,7 +737,7 @@ export default function WorkQueue() {
 /**
  * GL-06 — the plain-language view of every payment still in flight or
  * recently failed. A week-one office employee reads WHO, HOW MUCH, by WHAT
- * method, WHICH slot, HOW LONG it has waited, what the provider last said,
+ * method, WHICH day, HOW LONG it has waited, what the provider last said,
  * whether the customer was told, and the one safe next action — with no
  * mental math and no way to bypass policy (collection and recovery happen
  * only through the owned cases below).
@@ -749,7 +749,6 @@ type InFlightBooking = {
   email?: string | null;
   amountCents?: number | null;
   selectedDate?: string | null;
-  selectedWindow?: string | null;
   jobId?: string | null;
   customerId?: string | null;
   processingStartedAt?: string | null;
@@ -835,9 +834,7 @@ export function PaymentsInFlight() {
         const overdue =
           processing && b.processingExpectedBy && b.processingExpectedBy < today;
         const age = ageDays(b.processingStartedAt ?? b.updatedAt);
-        const slot = b.selectedDate
-          ? `${b.selectedDate}${b.selectedWindow ? ` ${b.selectedWindow.toLowerCase()}` : ""}`
-          : "no slot";
+        const slot = b.selectedDate ?? "no date";
         const noticed = processing
           ? b.pendingConfirmationSentAt
             ? "customer confirmed (payment pending)"

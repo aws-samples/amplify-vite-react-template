@@ -178,14 +178,15 @@ export function StatusBadge({ status }: { status?: string | null }) {
  * A finalized report's delivery state — separate from completion. A report can
  * be complete and still not have reached the customer, so this never says
  * "sent" unless it was. `emailedAt` covers reports finalized before
- * deliveryStatus existed: a stamped time means it was delivered.
+ * deliveryStatus existed: a stamped time proves only provider acceptance, not
+ * delivery.
  */
 /**
  * GL-15 — one truthful sentence about where a legal document actually is.
  * Provider ACCEPTANCE is never called delivered: only the mailbox-provider
  * event (DELIVERED) earns the green "delivered", and a later bounce/complaint
- * reopens the obligation visibly. No emailedAt fallback — an old timestamp is
- * not proof of receipt.
+ * reopens the obligation visibly. emailedAt only ever falls back to provider
+ * acceptance, never delivered — an old timestamp is not proof of receipt.
  */
 export function DeliveryBadge({
   status,

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 
 /**
- * Slick date/time entry for office staff: native pickers (great on mobile,
+ * Slick date entry for office staff: a native date picker (great on mobile,
  * fine on desktop) fronted by one-tap quick choices for the common cases.
  */
 

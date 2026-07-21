@@ -699,7 +699,7 @@ function addDaysUTC(ymd: string, days: number): string {
  * portal /billing page — which now carries a per-invoice "Pay now" button, so
  * the customer lands exactly where they can settle the bill.
  *
- * The invoiceId is accepted (and forwarded as an email note reference) so this
+ * The invoiceId is accepted (but not passed onward — it is voided here) so this
  * reads as invoice-scoped at the call site, but the email itself is not yet a
  * single-invoice deep link: the backend's sendCustomerEmail only knows the
  * kinds payment-request / portal-reminder / booking-link, and rejects an
