@@ -3,6 +3,7 @@ import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "../../../amplify/f
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
+import BugZapper from "../../components/BugZapper";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
 import { WILDLIFE_REMOVAL_KINDS } from "../../../amplify/functions/shared/serviceCatalog";
 import {
@@ -1183,6 +1184,8 @@ function QuoteLoadingScreen({
               {pendingError}
             </div>
           )}
+
+          {step > 1 && <BugZapper />}
 
           {step > 1 &&
             (longWait ? (
