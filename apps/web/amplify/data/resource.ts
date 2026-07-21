@@ -3407,7 +3407,11 @@ export const schema = a.schema({
     .mutation()
     .arguments({
       reportId: a.string().required(),
-      photoKeys: a.string().required().array().required(),
+      // A DELTA, not a full array: the server re-reads the report's current
+      // photoKeys and applies these. A full replace was last-writer-wins — two
+      // techs/devices adding photos at once dropped one of the captured photos.
+      addKeys: a.string().array(),
+      removeKeys: a.string().array(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "TECH"])])

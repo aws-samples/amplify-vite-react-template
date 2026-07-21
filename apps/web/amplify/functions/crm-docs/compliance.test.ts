@@ -1346,8 +1346,30 @@ describe("a finalized report is immutable", () => {
     reports.push(validReport({ status: "FINALIZED" }));
 
     await expect(
-      call("setReportPhotos", { reportId: "rep_1", photoKeys: [] })
+      call("setReportPhotos", { reportId: "rep_1", addKeys: ["p_new"] })
     ).rejects.toThrow(/cannot be changed/i);
+  });
+
+  it("MERGES a photo add against the report's current keys — no last-writer-wins loss", async () => {
+    // Another device already added p_b since this client loaded [p_a].
+    reports.push(validReport({ photoKeys: ["p_a", "p_b"] }));
+
+    await call("setReportPhotos", { reportId: "rep_1", addKeys: ["p_c"] });
+
+    // p_b (the concurrent add) survives; p_c is appended; no duplicates.
+    expect(reports[0].photoKeys).toEqual(["p_a", "p_b", "p_c"]);
+  });
+
+  it("removes only the named key and dedupes, leaving the rest intact", async () => {
+    reports.push(validReport({ photoKeys: ["p_a", "p_b", "p_c"] }));
+
+    await call("setReportPhotos", {
+      reportId: "rep_1",
+      removeKeys: ["p_b"],
+      addKeys: ["p_a"], // already present → must not duplicate
+    });
+
+    expect(reports[0].photoKeys).toEqual(["p_a", "p_c"]);
   });
 
   it("still lets a draft be edited", async () => {

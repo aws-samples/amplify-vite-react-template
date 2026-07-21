@@ -70,10 +70,12 @@ export default function ReportPhotos({
         added.push(target.key);
       }
       if (added.length) {
+        // Send only the delta — the server merges against the report's current
+        // keys, so a photo another device just added is never overwritten.
         unwrap(
           await api().mutations.setReportPhotos({
             reportId: report.id,
-            photoKeys: [...keys, ...added],
+            addKeys: added,
           })
         );
         await onChanged();
@@ -92,7 +94,7 @@ export default function ReportPhotos({
       unwrap(
         await api().mutations.setReportPhotos({
           reportId: report.id,
-          photoKeys: keys.filter((k) => k !== key),
+          removeKeys: [key],
         })
       );
       await onChanged();

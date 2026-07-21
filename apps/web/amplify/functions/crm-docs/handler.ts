@@ -204,6 +204,8 @@ type Args = {
   geoAccuracyM?: number;
   geoCapturedAt?: string;
   photoKeys?: (string | null)[];
+  addKeys?: (string | null)[];
+  removeKeys?: (string | null)[];
   productId?: string;
   name?: string;
   epaNumber?: string;
@@ -269,12 +271,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "setReportPhotos": {
       await assertCanActOnReportId(event.identity, event.arguments.reportId!);
-      return setReportPhotos(
-        event.arguments.reportId!,
-        (event.arguments.photoKeys ?? []).filter(
-          (k): k is string => typeof k === "string"
-        )
-      );
+      const clean = (arr: (string | null)[] | undefined) =>
+        (arr ?? []).filter((k): k is string => typeof k === "string" && k.length > 0);
+      return setReportPhotos(event.arguments.reportId!, {
+        addKeys: clean(event.arguments.addKeys),
+        removeKeys: clean(event.arguments.removeKeys),
+      });
     }
     case "reportScopeMismatch": {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
@@ -5084,7 +5086,10 @@ async function saveServiceReportDraft(
 }
 
 /** Attach or remove report photos. Refuses once the report is FINALIZED. */
-async function setReportPhotos(reportId: string, photoKeys: string[]) {
+async function setReportPhotos(
+  reportId: string,
+  delta: { addKeys: string[]; removeKeys: string[] }
+) {
   const client = await dataClient();
   const { data: report } = await client.models.ServiceReport.get({ id: reportId });
   if (!report) throw new Error(`Report ${reportId} not found`);
@@ -5093,9 +5098,22 @@ async function setReportPhotos(reportId: string, photoKeys: string[]) {
       "This report has been finalized — its photos are part of the record and cannot be changed"
     );
   }
+  // Merge server-side against the CURRENT keys so concurrent edits don't clobber
+  // each other: (current ∪ addKeys) \ removeKeys, order-preserving and deduped.
+  // A photo another device just added survives an add here, and a remove only
+  // drops the named key.
+  const current = (report.photoKeys ?? []).filter(
+    (k): k is string => typeof k === "string" && k.length > 0
+  );
+  const removed = new Set(delta.removeKeys);
+  const merged: string[] = [];
+  for (const k of [...current, ...delta.addKeys]) {
+    if (removed.has(k) || merged.includes(k)) continue;
+    merged.push(k);
+  }
   const { data: updated, errors } = await client.models.ServiceReport.update({
     id: reportId,
-    photoKeys,
+    photoKeys: merged,
   });
   if (!updated) {
     throw new Error(

@@ -1704,10 +1704,23 @@ function ReportForm({
         ) : null}
         <ErrorNote error={error} />
         <div className="form-row-2">
-          <Button variant="ghost" loading={busy === "save"} onClick={runSave}>
+          {/* Cross-disabled: while either a save or a finalize is in flight, the
+              other is blocked too — a "Save draft" then instant "Complete & send"
+              on a report with no id yet used to fire two concurrent draft writes
+              and race the record. */}
+          <Button
+            variant="ghost"
+            loading={busy === "save"}
+            disabled={busy !== null}
+            onClick={runSave}
+          >
             Save draft
           </Button>
-          <Button loading={busy === "finalize"} onClick={runFinalize}>
+          <Button
+            loading={busy === "finalize"}
+            disabled={busy !== null}
+            onClick={runFinalize}
+          >
             Complete &amp; send
           </Button>
         </div>
