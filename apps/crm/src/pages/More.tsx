@@ -77,6 +77,21 @@ export default function More() {
             subtitle="Products techs record on service reports"
             onClick={() => navigate("/products")}
           />
+          {/* Inventory + usage read the same catalog and are owner-only. */}
+          {roles.owner ? (
+            <>
+              <ListRow
+                title="Inventory"
+                subtitle="On-hand stock, restock, and reorder points"
+                onClick={() => navigate("/inventory")}
+              />
+              <ListRow
+                title="Product usage"
+                subtitle="What was used, and cost of goods, over a date range"
+                onClick={() => navigate("/product-usage")}
+              />
+            </>
+          ) : null}
           <ListRow
             title="Service catalog"
             subtitle="What BuzzKill sells, and public-site conflicts awaiting the CEO"

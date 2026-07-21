@@ -193,6 +193,19 @@ function ProductForm({
   );
   const [notes, setNotes] = useState(existing?.notes ?? "");
   const [active, setActive] = useState(existing?.active ?? true);
+  // Light inventory settings.
+  const [trackInventory, setTrackInventory] = useState(
+    existing?.trackInventory ?? false
+  );
+  const [stockUnit, setStockUnit] = useState(existing?.stockUnit ?? "");
+  const [reorderPoint, setReorderPoint] = useState(
+    existing?.reorderPoint != null ? String(existing.reorderPoint) : ""
+  );
+  const [unitCost, setUnitCost] = useState(
+    existing?.unitCostCents != null
+      ? (existing.unitCostCents / 100).toFixed(2)
+      : ""
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -248,6 +261,22 @@ function ProductForm({
       rules.quantity = { min, max, unit: ruleQtyUnit.trim() };
     }
     if (Object.keys(rules).length) labelRulesJson = JSON.stringify(rules);
+    // Inventory validation — only meaningful when tracking is on.
+    if (trackInventory && !stockUnit.trim()) {
+      setError("A tracked product needs a stock unit (what on-hand is counted in).");
+      return;
+    }
+    const parsedReorder =
+      trackInventory && reorderPoint.trim() !== "" ? Number(reorderPoint) : null;
+    if (parsedReorder != null && (!Number.isFinite(parsedReorder) || parsedReorder < 0)) {
+      setError("The reorder point must be zero or greater.");
+      return;
+    }
+    const parsedCost = unitCost.trim() !== "" ? Number(unitCost) : null;
+    if (parsedCost != null && (!Number.isFinite(parsedCost) || parsedCost < 0)) {
+      setError("The unit cost must be zero or greater.");
+      return;
+    }
     setBusy(true);
     setError(null);
     const fields = {
@@ -262,6 +291,11 @@ function ProductForm({
       labelRulesJson,
       notes: notes.trim() || null,
       active,
+      trackInventory,
+      stockUnit: trackInventory ? stockUnit.trim() || null : null,
+      reorderPoint: parsedReorder,
+      unitCostCents:
+        trackInventory && parsedCost != null ? Math.round(parsedCost * 100) : null,
     };
     try {
       opResult(
@@ -407,6 +441,65 @@ function ProductForm({
           onChange={(e) => setRuleQtyUnit(e.target.value)}
           placeholder="Qty unit (oz, gal…)"
         />
+      </Field>
+      <Field
+        group
+        label="Inventory"
+        hint="Turn on to track on-hand stock. It depletes when a report using this product is finalized, and low stock raises a reorder nudge."
+      >
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={trackInventory}
+            onChange={(e) => setTrackInventory(e.target.checked)}
+          />
+          Track stock on-hand for this product
+        </label>
+        {trackInventory ? (
+          <>
+            <div className="form-row-2">
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span className="field-label">Stock unit</span>
+                <select
+                  value={stockUnit}
+                  onChange={(e) => setStockUnit(e.target.value)}
+                >
+                  <option value="">Choose a unit…</option>
+                  {["fl oz", "gal", "qt", "oz", "lb", "g", "mL", "L", "each"].map(
+                    (u) => (
+                      <option key={u} value={u}>
+                        {u}
+                      </option>
+                    )
+                  )}
+                </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span className="field-label">Reorder at (optional)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={reorderPoint}
+                  onChange={(e) => setReorderPoint(e.target.value)}
+                  placeholder="e.g. 8"
+                />
+              </label>
+            </div>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span className="field-label">Cost per {stockUnit || "unit"} (USD, optional)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={unitCost}
+                onChange={(e) => setUnitCost(e.target.value)}
+                placeholder="4.00"
+              />
+            </label>
+          </>
+        ) : null}
       </Field>
       <Field label="Notes" hint="Mixing/application notes for techs">
         <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />

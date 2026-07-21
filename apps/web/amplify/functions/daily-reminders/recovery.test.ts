@@ -35,6 +35,13 @@ const fakeDataClient = {
         return { data: plans.get(patch.id) };
       },
     },
+    // Light inventory low-stock digest: no tracked products in these tests.
+    Product: {
+      list: async () => ({ data: [], nextToken: null }),
+    },
+    ProductStockEntry: {
+      listProductStockEntryByProductId: async () => ({ data: [], nextToken: null }),
+    },
     Job: {
       listJobByScheduledDate: async () => ({ data: [], nextToken: null }),
       listJobByServicePlanId: async () => ({ data: [], nextToken: null }),

@@ -8,6 +8,7 @@ import {
   sendEmail,
 } from "../shared/email";
 import { licenseFactsFor } from "../shared/licenses";
+import { isLowStock, onHandFromEntries } from "../shared/inventory";
 import { ensureObligation, markObligation } from "../shared/obligations";
 import { isWeekday, reconcileCapacityDay } from "../shared/capacity";
 import { isServiceMonth, monthKeyOf } from "../shared/season";
@@ -166,6 +167,10 @@ export const handler = async () => {
   }
   const notBilling = await run("reportPlansNotBilling", reportPlansNotBilling);
   const uncharged = await run("reportUnchargedOneTimeJobs", reportUnchargedOneTimeJobs);
+  // Light inventory: nudge the office to reorder any tracked product at or
+  // below its reorder point. Informational digest (not owned work), repeats
+  // daily until a restock lifts it back above the line.
+  const lowStock = await run("reportLowStock", reportLowStock);
   const noNextVisit = await run("reportPlansWithoutNextVisit", reportPlansWithoutNextVisit);
   // Money-out recovery lifecycle.
   const dunning = await run("runDunningRetries", runDunningRetries);
@@ -240,6 +245,7 @@ export const handler = async () => {
     ...totals,
     notBilling,
     uncharged,
+    lowStock,
     noNextVisit,
     dunning,
     invoiceReminders,
@@ -850,6 +856,74 @@ async function reportStaleLeads() {
  * backstop that keeps announcing a plan being serviced for free until somebody
  * actually fixes it — each row is roughly $1,188/yr.
  */
+/**
+ * Low-stock reorder digest. Sums the append-only ProductStockEntry ledger per
+ * tracked product and emails the office the ones at or below their reorder
+ * point. Repeats daily until restocked — the office adds a PURCHASE entry on
+ * More → Inventory, which lifts on-hand back above the line and clears it.
+ */
+async function reportLowStock() {
+  const client = await dataClient();
+  const { data: products } = await client.models.Product.list({ limit: 1000 });
+  // Only an active, tracked product with a reorder point can be "low".
+  const tracked = (products ?? []).filter(
+    (p) => p.active && p.trackInventory && typeof p.reorderPoint === "number"
+  );
+  if (tracked.length === 0) return { lowStock: 0, notified: false };
+
+  const fmtQty = (n: number) =>
+    (Math.round(n * 100) / 100).toString();
+  const low: {
+    name: string;
+    onHand: number;
+    reorderPoint: number;
+    unit: string;
+  }[] = [];
+  for (const p of tracked) {
+    const entries: { deltaBaseUnits?: number | null }[] = [];
+    let nextToken: string | null | undefined;
+    do {
+      const page =
+        await client.models.ProductStockEntry.listProductStockEntryByProductId(
+          { productId: p.id },
+          { nextToken, limit: 500 }
+        );
+      entries.push(...page.data);
+      nextToken = page.nextToken;
+    } while (nextToken);
+    const onHand = onHandFromEntries(entries);
+    if (isLowStock(p, onHand)) {
+      low.push({
+        name: p.name,
+        onHand,
+        reorderPoint: p.reorderPoint as number,
+        unit: p.stockUnit ?? "",
+      });
+    }
+  }
+  if (low.length === 0) {
+    console.log("Low-stock digest: none");
+    return { lowStock: 0, notified: false };
+  }
+
+  const rows = low
+    .sort((a, b) => a.onHand - b.onHand)
+    .map(
+      (l) =>
+        `<li><strong>${l.name}</strong> — ${fmtQty(l.onHand)} ${l.unit} on hand (reorder at ${fmtQty(l.reorderPoint)} ${l.unit})</li>`
+    );
+  const notified = await notifyOffice({
+    subject: `${low.length} product${low.length === 1 ? " is" : "s are"} low on stock`,
+    heading: "Low on stock — time to reorder",
+    template: "ops-low-stock-digest",
+    bodyHtml: `<p>These products are at or below their reorder point:</p>
+       <ul>${rows.join("")}</ul>
+       <p>Once the order arrives, record it on <strong>More &rsaquo; Inventory</strong> to clear this.</p>`,
+  });
+  console.log(`Low-stock digest: ${low.length} low, notified=${notified}`);
+  return { lowStock: low.length, notified };
+}
+
 async function reportPlansNotBilling() {
   const client = await dataClient();
 

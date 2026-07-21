@@ -985,6 +985,15 @@ export type ReportProduct = {
   /** Label rate or dilution as applied, e.g. "0.05% dilution". */
   rate?: string;
   targetPest?: string;
+  /** Structured amount, preferred over parsing the `quantity` string: the
+   *  numeric value and its unit, e.g. { amountValue: 2, amountUnit: "fl oz" }.
+   *  `quantity` is still written ("2 fl oz") for the PDF and legacy readers, so
+   *  older reports without these fields keep rendering and validating. */
+  amountValue?: number;
+  amountUnit?: string;
+  /** The catalog Product this row was picked from, when known — the exact link
+   *  for reconciliation and inventory depletion (falls back to name+EPA). */
+  productId?: string;
 };
 
 export async function renderServiceReportPdf(opts: {

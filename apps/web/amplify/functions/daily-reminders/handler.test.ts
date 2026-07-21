@@ -61,6 +61,13 @@ const fakeDataClient = {
         nextToken: null,
       }),
     },
+    // Light inventory low-stock digest: no tracked products in these tests.
+    Product: {
+      list: async () => ({ data: [], nextToken: null }),
+    },
+    ProductStockEntry: {
+      listProductStockEntryByProductId: async () => ({ data: [], nextToken: null }),
+    },
     Job: {
       listJobByScheduledDate: async ({
         scheduledDate,

@@ -1738,6 +1738,18 @@ export const schema = a.schema({
       notes: a.string(),
       active: a.boolean().required(),
       sortOrder: a.integer(),
+      // Light inventory. A tracked product depletes when a report that used it
+      // is finalized (a USAGE ledger entry) and raises a low-stock nag; an
+      // untracked one (tools, inspection aids) is skipped. stockUnit is the
+      // base unit on-hand and reorderPoint are counted in — a recorded usage
+      // amount is converted to it (see shared/units.ts). unitCostCents is the
+      // cost per stockUnit, used for cost-of-goods and inventory valuation.
+      // On-hand is NOT stored here — it is the running sum of the append-only
+      // ProductStockEntry ledger, so concurrent writes never race a counter.
+      trackInventory: a.boolean(),
+      stockUnit: a.string(),
+      reorderPoint: a.float(),
+      unitCostCents: a.integer(),
     })
     // The catalog is the control that makes pesticide records correct by
     // construction. TECH create is gone: a technician in manual-product mode
@@ -1751,6 +1763,40 @@ export const schema = a.schema({
       // of deleting products referenced by pesticide records.
       allow.groups(["OWNER"]).to(["read"]),
       allow.groups(["TECH"]).to(["read"]),
+    ]),
+
+  // Append-only stock ledger for light inventory. On-hand for a product is the
+  // sum of its deltaBaseUnits — never a stored counter, so parallel restocks
+  // and usage depletions can't race. A PURCHASE/ADJUST is entered by the office
+  // (Inventory screen); a USAGE is written by report finalization, once per
+  // finalized report (guarded by serviceReportId), so a replayed finalize never
+  // double-depletes. Deletes stay open for correcting an office fat-finger, but
+  // the honest pattern is an offsetting ADJUST entry.
+  ProductStockEntry: a
+    .model({
+      productId: a.id().required(),
+      // Signed change in the product's stockUnit: + for a purchase/restock,
+      // - for a job's usage or a downward correction.
+      deltaBaseUnits: a.float().required(),
+      reason: a.enum(["PURCHASE", "USAGE", "ADJUST"]),
+      // Provenance + idempotency for a USAGE entry: the finalized report that
+      // consumed the product. Finalize writes usage only when no USAGE entry
+      // already names the report.
+      serviceReportId: a.id(),
+      jobId: a.id(),
+      // Cost per stockUnit at the time (PURCHASE), for valuation / cost-of-goods.
+      unitCostCents: a.integer(),
+      note: a.string(),
+      // Who recorded it — office email for PURCHASE/ADJUST, "system" for USAGE.
+      enteredByEmail: a.string(),
+      at: a.datetime(),
+    })
+    .secondaryIndexes((index) => [
+      index("productId"),
+      index("serviceReportId"),
+    ])
+    .authorization((allow) => [
+      allow.groups(["OWNER"]).to(["create", "read", "update", "delete"]),
     ]),
 
   ServiceReport: a
@@ -2775,6 +2821,11 @@ export const schema = a.schema({
       notes: a.string(),
       active: a.boolean().required(),
       sortOrder: a.integer(),
+      // Light inventory settings (see the Product model).
+      trackInventory: a.boolean(),
+      stockUnit: a.string(),
+      reorderPoint: a.float(),
+      unitCostCents: a.integer(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])

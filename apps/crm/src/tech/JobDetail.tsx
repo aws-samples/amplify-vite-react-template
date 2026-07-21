@@ -37,9 +37,18 @@ import ReportPhotos from "../components/ReportPhotos";
 type ProductRow = {
   name: string;
   epaNumber: string;
+  /** The composed amount ("2 fl oz") — kept for the PDF and legacy readers and
+   *  always derived from amountValue + amountUnit below. */
   quantity: string;
   rate?: string;
   targetPest: string;
+  /** The catalog product this row was picked from — the exact link the report
+   *  carries for reconciliation and inventory depletion. */
+  productId?: string;
+  /** Structured amount: a numeric string (kept as a string for the input) and
+   *  a unit from the dropdown. Together they compose `quantity`. */
+  amountValue?: string;
+  amountUnit?: string;
   /** UI-only: row is being typed manually instead of picked from the log. */
   custom?: boolean;
   /** UI-only: the tech typed this field, so a re-pick must not overwrite it. */
@@ -89,6 +98,95 @@ function parseProducts(raw: unknown): ProductRow[] {
     return Array.isArray(v) ? (v as ProductRow[]) : [];
   } catch {
     return [];
+  }
+}
+
+/** The units the amount dropdown offers — the set the inventory converter
+ *  understands (kept in step with shared/units.ts COMMON_UNITS by hand). */
+const AMOUNT_UNITS = ["fl oz", "gal", "qt", "oz", "lb", "g", "mL", "L", "each"];
+
+/** Split a composed amount ("2 fl oz") into its value + unit for the inputs. */
+function splitAmount(raw: string | undefined): { value: string; unit: string } {
+  const m = (raw ?? "").trim().match(/^([0-9]*\.?[0-9]+)\s*(.*)$/);
+  if (!m) return { value: "", unit: "" };
+  return { value: m[1], unit: m[2].trim() };
+}
+
+/** Compose the amount string the PDF and legacy readers use. */
+function composeAmount(value: string | undefined, unit: string | undefined): string {
+  const v = (value ?? "").trim();
+  if (!v) return "";
+  return unit ? `${v} ${unit}` : v;
+}
+
+/** Give a parsed/restored row its structured fields (productId, amountValue,
+ *  amountUnit) from the catalog + composed quantity, so the editor renders them
+ *  and older reports upgrade seamlessly. Idempotent. */
+function normalizeRow(row: ProductRow, catalog: CatalogProduct[]): ProductRow {
+  const match = row.productId
+    ? catalog.find((c) => c.id === row.productId)
+    : catalog.find((c) => c.name === row.name);
+  const split = splitAmount(row.quantity);
+  return {
+    ...row,
+    productId: row.productId ?? match?.id,
+    amountValue: row.amountValue ?? split.value,
+    amountUnit: row.amountUnit ?? split.unit,
+  };
+}
+
+/** A fresh product row seeded from a catalog pick (quick-add / picker) — the
+ *  same prefill onPick applies: last-used amount, else the catalog default. */
+function buildPickedRow(picked: CatalogProduct): ProductRow {
+  const seed =
+    readLastAmounts()[picked.id] ?? splitAmount(picked.defaultQuantity ?? "");
+  return {
+    name: picked.name,
+    epaNumber: picked.epaNumber ?? "",
+    productId: picked.id,
+    rate: picked.defaultRate ?? "",
+    amountValue: seed.value,
+    amountUnit: seed.unit,
+    quantity: composeAmount(seed.value, seed.unit),
+    targetPest: picked.targetPests ?? "",
+    custom: false,
+  };
+}
+
+/** The service-type labels a product's label rules allow it on (empty = any). */
+function allowedServiceTypesOf(c: CatalogProduct): string[] {
+  try {
+    const raw = (c as { labelRulesJson?: unknown }).labelRulesJson;
+    const r = raw ? (typeof raw === "string" ? JSON.parse(raw) : raw) : null;
+    const list = (r as { allowedServiceTypes?: unknown } | null)?.allowedServiceTypes;
+    return Array.isArray(list) ? (list as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Per-tech memory of the last amount used for a product, so the next report
+ *  prefills what they typically apply. Keyed by product id; best-effort. */
+const LAST_AMOUNT_KEY = "buzzkill.tech.lastAmount.v1";
+function readLastAmounts(): Record<string, { value: string; unit: string }> {
+  try {
+    const raw = localStorage.getItem(LAST_AMOUNT_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, { value: string; unit: string }>) : {};
+  } catch {
+    return {};
+  }
+}
+function rememberAmounts(rows: ProductRow[]): void {
+  try {
+    const store = readLastAmounts();
+    for (const r of rows) {
+      if (r.productId && r.amountValue?.trim()) {
+        store[r.productId] = { value: r.amountValue.trim(), unit: r.amountUnit ?? "" };
+      }
+    }
+    localStorage.setItem(LAST_AMOUNT_KEY, JSON.stringify(store));
+  } catch {
+    /* storage disabled — prefill just won't persist */
   }
 }
 
@@ -988,10 +1086,12 @@ function ReportForm({
       existing?.reEntryIntervalHours != null
         ? String(existing.reEntryIntervalHours)
         : "",
-    products: parseProducts(existing?.productsUsed).map((p) => ({
-      ...p,
-      custom: !!p.name && !catalog.some((c) => c.name === p.name),
-    })),
+    products: parseProducts(existing?.productsUsed).map((p) =>
+      normalizeRow(
+        { ...p, custom: !!p.name && !catalog.some((c) => c.name === p.name) },
+        catalog
+      )
+    ),
     geo:
       existing?.geoLat != null && existing?.geoLng != null
         ? {
@@ -1041,13 +1141,14 @@ function ReportForm({
   // Reloaded rows lost their UI-only flags — a named row that isn't in the
   // catalog must come back in manual mode or its inputs vanish mid-edit.
   // (A restored draft kept its flags: it is the exact UI state as typed.)
-  const [products, setProducts] = useState<ProductRow[]>(
-    () =>
+  const [products, setProducts] = useState<ProductRow[]>(() =>
+    (
       restored?.fields.products ??
       parseProducts(existing?.productsUsed).map((p) => ({
         ...p,
         custom: !!p.name && !catalog.some((c) => c.name === p.name),
       }))
+    ).map((p) => normalizeRow(p, catalog))
   );
   const [geo, setGeo] = useState<Geo | null>(
     () =>
@@ -1164,17 +1265,33 @@ function ReportForm({
       productsUsed: JSON.stringify(
         products
           .filter((p) => p.name.trim())
-          .map(({ custom, quantityTouched: _q, pestTouched: _p, ...keep }) => {
-            // Picker-mode rows display the catalog's EPA # — save that same
-            // value so the PDF matches what the tech saw on screen.
-            const m = !custom ? catalog.find((c) => c.name === keep.name) : null;
-            return m
-              ? {
-                  ...keep,
-                  epaNumber: m.epaNumber ?? "",
-                  rate: keep.rate?.trim() || m.defaultRate || "",
-                }
-              : keep;
+          .map((p) => {
+            // Picker-mode rows carry the catalog's exact id + EPA #, so the PDF
+            // matches what the tech saw and inventory/reconciliation link back
+            // precisely instead of by fragile name matching.
+            const m = p.custom
+              ? null
+              : p.productId
+                ? catalog.find((c) => c.id === p.productId)
+                : catalog.find((c) => c.name === p.name);
+            const amountNum = p.amountValue?.trim() ? Number(p.amountValue) : undefined;
+            return {
+              name: p.name,
+              epaNumber: m ? (m.epaNumber ?? "") : p.epaNumber,
+              rate: p.rate?.trim() || m?.defaultRate || "",
+              targetPest: p.targetPest,
+              // The composed amount string the PDF + label validation read.
+              quantity: composeAmount(p.amountValue, p.amountUnit) || p.quantity,
+              ...(m?.id
+                ? { productId: m.id }
+                : p.productId
+                  ? { productId: p.productId }
+                  : {}),
+              // Structured amount for inventory depletion + usage rollups.
+              ...(amountNum != null && Number.isFinite(amountNum)
+                ? { amountValue: amountNum, amountUnit: p.amountUnit ?? "" }
+                : {}),
+            };
           })
       ),
       targetPests: targetPests.trim() || undefined,
@@ -1208,6 +1325,8 @@ function ReportForm({
       })
     );
     if (!saved?.reportId) throw new Error("Could not save the report");
+    // Remember what this tech applied, to prefill the next report.
+    rememberAmounts(products);
     setReportId(saved.reportId);
     return saved.reportId;
   };
@@ -1305,21 +1424,53 @@ function ReportForm({
 
   const setProduct = (
     i: number,
-    k: "name" | "epaNumber" | "quantity" | "rate" | "targetPest",
+    k: "name" | "epaNumber" | "amountValue" | "amountUnit" | "rate" | "targetPest",
     v: string
   ) =>
     setProducts((list) =>
-      list.map((p, idx) =>
-        idx === i
-          ? {
-              ...p,
-              [k]: v,
-              ...(k === "quantity" ? { quantityTouched: true } : {}),
-              ...(k === "targetPest" ? { pestTouched: true } : {}),
-            }
-          : p
-      )
+      list.map((p, idx) => {
+        if (idx !== i) return p;
+        const next = { ...p, [k]: v };
+        // The amount inputs are the source of truth; recompose the `quantity`
+        // string the PDF and validation still read, and mark it hand-touched so
+        // a re-pick won't clobber it.
+        if (k === "amountValue" || k === "amountUnit") {
+          next.quantity = composeAmount(
+            k === "amountValue" ? v : p.amountValue,
+            k === "amountUnit" ? v : p.amountUnit
+          );
+          next.quantityTouched = true;
+        }
+        if (k === "targetPest") next.pestTouched = true;
+        return next;
+      })
     );
+
+  // Quick-add chips: the products commonly used for THIS job's service (by the
+  // catalog's label rules), or a short list of active products when none are
+  // service-scoped — minus ones already on the report. Tap adds a pre-picked
+  // row so the tech rarely opens the dropdown.
+  const jobServiceLabel = (job.serviceType ?? "").trim().toLowerCase();
+  const usedProductIds = new Set(
+    products.map((p) => p.productId).filter(Boolean)
+  );
+  const activeCatalog = catalog.filter((c) => c.active);
+  const forService = activeCatalog.filter((c) =>
+    allowedServiceTypesOf(c).some((s) => s.trim().toLowerCase() === jobServiceLabel)
+  );
+  const quickPicks = (forService.length ? forService : activeCatalog)
+    .filter((c) => !usedProductIds.has(c.id))
+    .slice(0, 6);
+  const quickAdd = (picked: CatalogProduct) => {
+    setProducts((l) => [...l, buildPickedRow(picked)]);
+    if (picked.reEntryHours != null) {
+      setReEntry((cur) =>
+        cur === ""
+          ? String(picked.reEntryHours)
+          : String(Math.max(Number(cur), picked.reEntryHours!))
+      );
+    }
+  };
 
   const syncState = syncBadge({
     online,
@@ -1366,6 +1517,20 @@ function ReportForm({
         {inspectionOnly ? null : (
         <Field group label="Products applied" hint="Pick from the product log — ask the office to add anything missing">
           <div className="form-grid">
+            {quickPicks.length > 0 ? (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {quickPicks.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className="btn btn-ghost btn-small"
+                    onClick={() => quickAdd(c)}
+                  >
+                    + {c.name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             {products.map((p, i) => (
               <ProductRowEditor
                 key={i}
@@ -1374,25 +1539,33 @@ function ReportForm({
                 onChange={(k, v) => setProduct(i, k, v)}
                 onPick={(picked) => {
                   setProducts((list) =>
-                    list.map((row, idx) =>
-                      idx === i
-                        ? {
-                            ...row,
-                            name: picked.name,
-                            epaNumber: picked.epaNumber ?? "",
-                            rate: picked.defaultRate ?? "",
-                            quantity:
-                              row.quantityTouched && row.quantity
-                                ? row.quantity
-                                : (picked.defaultQuantity ?? ""),
-                            targetPest:
-                              row.pestTouched && row.targetPest
-                                ? row.targetPest
-                                : (picked.targetPests ?? ""),
-                            custom: false,
-                          }
-                        : row
-                      )
+                    list.map((row, idx) => {
+                      if (idx !== i) return row;
+                      // Keep a hand-typed amount; otherwise prefill what this
+                      // tech last used for the product, falling back to the
+                      // catalog's default amount.
+                      const keepAmount =
+                        row.quantityTouched && (row.amountValue ?? "").trim() !== "";
+                      const seed = keepAmount
+                        ? { value: row.amountValue ?? "", unit: row.amountUnit ?? "" }
+                        : readLastAmounts()[picked.id] ??
+                          splitAmount(picked.defaultQuantity ?? "");
+                      return {
+                        ...row,
+                        name: picked.name,
+                        epaNumber: picked.epaNumber ?? "",
+                        productId: picked.id,
+                        rate: picked.defaultRate ?? "",
+                        amountValue: seed.value,
+                        amountUnit: seed.unit,
+                        quantity: composeAmount(seed.value, seed.unit),
+                        targetPest:
+                          row.pestTouched && row.targetPest
+                            ? row.targetPest
+                            : (picked.targetPests ?? ""),
+                        custom: false,
+                      };
+                    })
                   );
                   if (picked.reEntryHours != null) {
                     setReEntry((current) =>
@@ -1537,13 +1710,18 @@ function ProductRowEditor({
   row: ProductRow;
   catalog: CatalogProduct[];
   onChange: (
-    k: "name" | "epaNumber" | "quantity" | "rate" | "targetPest",
+    k: "name" | "epaNumber" | "amountValue" | "amountUnit" | "rate" | "targetPest",
     v: string
   ) => void;
   onPick: (p: CatalogProduct) => void;
   onCustom: () => void;
   onRemove: () => void;
 }) {
+  // Keep a legacy/unusual unit selectable even if it isn't in the common set.
+  const unitOptions =
+    row.amountUnit && !AMOUNT_UNITS.includes(row.amountUnit)
+      ? [row.amountUnit, ...AMOUNT_UNITS]
+      : AMOUNT_UNITS;
   const matched = !row.custom
     ? catalog.find((c) => c.name === row.name) ?? null
     : null;
@@ -1622,16 +1800,31 @@ function ProductRowEditor({
         ) : null}
         <div className="form-row-2">
           <input
-            placeholder="Amount (e.g. 2 oz)"
-            value={row.quantity}
-            onChange={(e) => onChange("quantity", e.target.value)}
+            type="text"
+            inputMode="decimal"
+            placeholder="Amount"
+            value={row.amountValue ?? ""}
+            onChange={(e) =>
+              onChange("amountValue", e.target.value.replace(/[^\d.]/g, ""))
+            }
           />
-          <input
-            placeholder="Target pest"
-            value={row.targetPest}
-            onChange={(e) => onChange("targetPest", e.target.value)}
-          />
+          <select
+            value={row.amountUnit ?? ""}
+            onChange={(e) => onChange("amountUnit", e.target.value)}
+          >
+            <option value="">unit…</option>
+            {unitOptions.map((u) => (
+              <option key={u} value={u}>
+                {u}
+              </option>
+            ))}
+          </select>
         </div>
+        <input
+          placeholder="Target pest"
+          value={row.targetPest}
+          onChange={(e) => onChange("targetPest", e.target.value)}
+        />
         <Button small variant="ghost" onClick={onRemove}>
           ✕ Remove product
         </Button>

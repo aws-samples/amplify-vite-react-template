@@ -23,6 +23,8 @@ import CustomerDetail from "./office/CustomerDetail";
 import GroupDetail from "./office/GroupDetail";
 import PricingLog from "./office/PricingLog";
 import ProductLog from "./office/ProductLog";
+import Inventory from "./office/Inventory";
+import ProductUsage from "./office/ProductUsage";
 import MarketRates from "./office/MarketRates";
 import Catalog from "./office/Catalog";
 import Schedule from "./office/Schedule";
@@ -217,6 +219,8 @@ function Shell() {
         <Route path="/schedule" element={<Require when={staff}><Schedule /></Require>} />
         <Route path="/pricing" element={<Require when={staff}><PricingLog /></Require>} />
         <Route path="/products" element={<Require when={staff}><ProductLog /></Require>} />
+        <Route path="/inventory" element={<Require when={roles.owner}><Inventory /></Require>} />
+        <Route path="/product-usage" element={<Require when={roles.owner}><ProductUsage /></Require>} />
         <Route path="/market-rates" element={<Require when={staff}><MarketRates /></Require>} />
         <Route path="/catalog" element={<Require when={staff}><Catalog /></Require>} />
         <Route path="/staff" element={<Require when={roles.owner}><Staff /></Require>} />

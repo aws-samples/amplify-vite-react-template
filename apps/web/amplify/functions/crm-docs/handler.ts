@@ -18,6 +18,7 @@ import {
   parseLabelRules,
 } from "../shared/compliance";
 import { retryBookingFinalization } from "../shared/bookingFinalize";
+import { depletionsForReport } from "../shared/inventory";
 import { opFieldName } from "../shared/opEvent";
 import {
   callerEmail,
@@ -214,6 +215,10 @@ type Args = {
   labelRulesJson?: unknown;
   active?: boolean;
   sortOrder?: number;
+  trackInventory?: boolean;
+  stockUnit?: string;
+  reorderPoint?: number;
+  unitCostCents?: number;
   servicePlanId?: string;
   serviceType?: string;
   priceCents?: number;
@@ -2020,10 +2025,19 @@ async function saveProduct(args: Args) {
   };
   assertProductCanBeSaved(fields);
 
+  // Light inventory settings ride alongside the compliance fields (the assert
+  // above governs only the label record; stock config is free of it).
+  const inventory = {
+    trackInventory: args.trackInventory ?? false,
+    stockUnit: args.stockUnit?.trim() || null,
+    reorderPoint: args.reorderPoint ?? null,
+    unitCostCents: args.unitCostCents ?? null,
+  };
+
   const client = await dataClient();
   const result = args.productId
-    ? await client.models.Product.update({ id: args.productId, ...fields })
-    : await client.models.Product.create(fields);
+    ? await client.models.Product.update({ id: args.productId, ...fields, ...inventory })
+    : await client.models.Product.create({ ...fields, ...inventory });
   if (!result.data) {
     throw new Error(
       `Could not save the product: ${result.errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
@@ -4011,6 +4025,59 @@ async function releaseFinalizeClaim(
   );
 }
 
+/**
+ * Write the stock-ledger USAGE entries for a finalized report's tracked
+ * products. Idempotent per (report, product): re-running writes only products
+ * not already recorded, so a partial prior pass completes instead of double-
+ * depleting. Untracked products and unreadable/inconvertible amounts are
+ * skipped (logged), never guessed onto the ledger.
+ */
+async function depleteInventoryForReport(report: {
+  id: string;
+  jobId: string;
+  inspectionOnly?: boolean | null;
+  productsUsed?: unknown;
+}): Promise<void> {
+  if (report.inspectionOnly) return;
+  const products = parseProducts(report.productsUsed);
+  if (!products.length) return;
+  const client = await dataClient();
+  const { data: catalog } = await client.models.Product.list({ limit: 1000 });
+  const { deplete, skips } = depletionsForReport(products, catalog ?? []);
+  if (skips.length) {
+    console.warn("inventory: skipped report rows", report.id, skips);
+  }
+  if (!deplete.length) return;
+  // Aggregate multiple rows of the same product into ONE entry per product, so
+  // the per-product idempotency guard below is exact.
+  const byProduct = new Map<string, { delta: number; notes: string[] }>();
+  for (const d of deplete) {
+    const cur = byProduct.get(d.productId) ?? { delta: 0, notes: [] };
+    cur.delta += d.deltaBaseUnits;
+    cur.notes.push(d.note);
+    byProduct.set(d.productId, cur);
+  }
+  const { data: existing } =
+    await client.models.ProductStockEntry.listProductStockEntryByServiceReportId(
+      { serviceReportId: report.id }
+    );
+  const already = new Set((existing ?? []).map((e) => e.productId));
+  const at = new Date().toISOString();
+  for (const [productId, agg] of byProduct) {
+    if (already.has(productId)) continue;
+    await client.models.ProductStockEntry.create({
+      productId,
+      deltaBaseUnits: agg.delta,
+      reason: "USAGE",
+      serviceReportId: report.id,
+      jobId: report.jobId,
+      note: agg.notes.join(", ").slice(0, 240),
+      enteredByEmail: "system",
+      at,
+    });
+  }
+}
+
 async function finalizeServiceReport(reportId: string) {
   const client = await dataClient();
   const { data: report } = await client.models.ServiceReport.get({
@@ -4200,6 +4267,20 @@ async function finalizeServiceReport(reportId: string) {
     report.applicationStartAt = applicationStartIso;
     report.applicationEndAt = applicationEndIso;
   }
+
+  // --- Checkpoint 1b: deplete inventory for tracked products. ---
+  // Independent and idempotent (one USAGE ledger entry per product per report,
+  // guarded by serviceReportId), so a resumed finalize completes it and a
+  // fully-done one no-ops. Never throws: light inventory is secondary to the
+  // pesticide record and its billing, and a stock hiccup must not block or
+  // reverse a finalized report. An office ADJUST corrects any under-count.
+  await depleteInventoryForReport(report).catch((err) => {
+    console.error(
+      "finalizeServiceReport: inventory depletion failed",
+      reportId,
+      err
+    );
+  });
 
   // --- Checkpoint 2: complete the job and its downstream billing effects. ---
   // The job flip is idempotent on job.status; startBillingForPlan and
