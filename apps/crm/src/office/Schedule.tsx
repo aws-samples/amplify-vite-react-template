@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   api,
   listAll,
@@ -59,6 +60,7 @@ const DOW_LABEL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
  * below the list.
  */
 export default function Schedule() {
+  const navigate = useNavigate();
   const [weekStart, setWeekStart] = useState(() => startOfWeek(todayEastern()));
   const [selDate, setSelDate] = useState(todayEastern());
   const [techs, setTechs] = useState<Technician[] | null>(null);
@@ -284,6 +286,18 @@ export default function Schedule() {
 
   const customerName = (j: Job) =>
     customers.get(j.customerId)?.displayName ?? "…";
+  // The stop's customer name opens the office customer detail. It's a button,
+  // not a row-level onClick, so it never fights the assign/reorder/unassign
+  // controls sharing the row.
+  const customerLink = (j: Job) => (
+    <button
+      type="button"
+      className="name-link"
+      onClick={() => navigate(`/customers/${j.customerId}`)}
+    >
+      {customerName(j)}
+    </button>
+  );
   const customerCity = (j: Job) => customers.get(j.customerId)?.serviceCity;
 
   return (
@@ -354,7 +368,7 @@ export default function Schedule() {
               {poolJobs.map((j) => (
                 <ListRow
                   key={j.id}
-                  title={customerName(j)}
+                  title={customerLink(j)}
                   subtitle={`${j.serviceType}${j.scheduledDate && j.scheduledDate !== selDate ? ` · wants ${fmtDate(j.scheduledDate)}` : ""}${customerCity(j) ? ` · ${customerCity(j)}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
                   meta={
                     j.status === "NO_ACCESS" ? (
@@ -466,7 +480,7 @@ export default function Schedule() {
                         return (
                           <ListRow
                             key={j.id}
-                            title={`${i + 1}. ${customerName(j)}`}
+                            title={<span>{i + 1}. {customerLink(j)}</span>}
                             subtitle={`${j.serviceType}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
                             meta={
                               <>

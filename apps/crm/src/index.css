@@ -283,6 +283,23 @@ button {
   flex-wrap: wrap;
 }
 
+.name-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--brand-strong);
+  cursor: pointer;
+  text-align: left;
+}
+
+@media (hover: hover) {
+  .name-link:hover {
+    text-decoration: underline;
+  }
+}
+
 .list-row-sub {
   color: var(--muted);
   font-size: 13px;
