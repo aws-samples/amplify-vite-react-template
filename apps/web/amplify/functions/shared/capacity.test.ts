@@ -643,6 +643,58 @@ describe("feasibility — REAL Routes legs, fail closed", () => {
     });
     expect(best).toBeNull();
   });
+
+  it("a technician already at the day's stop ceiling is never offered", async () => {
+    // GL-07: t1 already holds STOPS_PER_TECH stops that day, so the only
+    // eligible tech drops out and the day sells nothing — a booking can never
+    // auto-assign onto a full route.
+    const full = Array.from(
+      { length: STOPS_PER_TECH },
+      (_, i) => `${i} Stop St, Ware, MA`
+    );
+    const best = await bestSlotFor({
+      date: WED,
+      onsite: 30,
+      eligibility: await dayEligibility(WED),
+      slots: await slotStates(WED),
+      stopsBySlot: new Map([[slotId(WED, "t1"), full]]),
+      legMinutes: makeLegResolver("routes-key"),
+      candidateAddress: "12 Beacon St, Ware, MA",
+    });
+    expect(best).toBeNull();
+  });
+
+  it("reports the nearest existing stop on the chosen tech (drives the discount)", async () => {
+    // One stop 15 min away → nearest-stop insertion 2×15; the discount keys
+    // off nearestStopMinutes, so it always names the tech we book.
+    const best = await bestSlotFor({
+      date: WED,
+      onsite: 30,
+      eligibility: await dayEligibility(WED),
+      slots: await slotStates(WED),
+      stopsBySlot: new Map([[slotId(WED, "t1"), ["9 Near St, Ware, MA"]]]),
+      legMinutes: makeLegResolver("routes-key"),
+      candidateAddress: "12 Beacon St, Ware, MA",
+    });
+    expect(best).toMatchObject({
+      technicianId: "t1",
+      claimMinutes: 60,
+      nearestStopMinutes: 15,
+    });
+  });
+
+  it("an empty tech has no nearest stop (no route-density discount)", async () => {
+    const best = await bestSlotFor({
+      date: WED,
+      onsite: 30,
+      eligibility: await dayEligibility(WED),
+      slots: await slotStates(WED),
+      stopsBySlot: new Map(),
+      legMinutes: makeLegResolver("routes-key"),
+      candidateAddress: "12 Beacon St, Ware, MA",
+    });
+    expect(best?.nearestStopMinutes).toBeNull();
+  });
 });
 
 describe("nightly rebuild — base → stops → base with real legs", () => {

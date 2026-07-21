@@ -858,6 +858,10 @@ export type SlotFeasibility = {
   technicianId: string;
   /** on-site + the marginal Routes legs this stop adds to the slot's route. */
   claimMinutes: number;
+  /** Routes minutes to the nearest existing stop in THIS tech's route that
+   *  day, or null when the tech's day is empty (no route to be near). Drives
+   *  the route-density discount, so the credit reflects the tech we book. */
+  nearestStopMinutes: number | null;
 };
 
 /**
@@ -890,24 +894,28 @@ export async function bestSlotFor(opts: {
     if (state && !state.verified) continue; // fail closed until Routes verifies
     const committed = state?.committedMinutes ?? 0;
     const stops = opts.stopsBySlot.get(id) ?? [];
+    // GL-07: a tech already at the day's stop ceiling is not sellable — the
+    // booking would auto-assign onto a full route. Never offer a full tech.
+    if (stops.length >= STOPS_PER_TECH) continue;
     let marginalTravel: number | null = null;
+    let nearestStop: number | null = null;
     if (stops.length === 0) {
       const out = await opts.legMinutes(tech.baseAddress, opts.candidateAddress);
       const back = await opts.legMinutes(opts.candidateAddress, tech.baseAddress);
       if (out != null && back != null) marginalTravel = out + back;
     } else {
-      let nearest: number | null = null;
       for (const stop of stops) {
         const leg = await opts.legMinutes(opts.candidateAddress, stop);
-        if (leg != null && (nearest === null || leg < nearest)) nearest = leg;
+        if (leg != null && (nearestStop === null || leg < nearestStop))
+          nearestStop = leg;
       }
-      if (nearest != null) marginalTravel = nearest * 2;
+      if (nearestStop != null) marginalTravel = nearestStop * 2;
     }
     if (marginalTravel == null) continue; // no Routes answer → not sellable here
     const claimMinutes = onsite + marginalTravel;
     if (committed + claimMinutes > DAY_MINUTES) continue;
     if (!best || claimMinutes < best.claimMinutes) {
-      best = { technicianId: tech.id, claimMinutes };
+      best = { technicianId: tech.id, claimMinutes, nearestStopMinutes: nearestStop };
     }
   }
   return best;

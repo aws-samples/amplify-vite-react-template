@@ -164,13 +164,10 @@ export async function buildDayMatrix(opts: {
       committed += state?.committedMinutes ?? 0;
       stopCount += (stops.get(slotId(date, t.id)) ?? []).length;
     }
-    let nearest: number | null = null;
-    for (const list of stops.values()) {
-      for (const stop of list) {
-        const leg = await legMinutes(candidateAddress, stop);
-        if (leg != null && (nearest === null || leg < nearest)) nearest = leg;
-      }
-    }
+    // Route density reflects the tech we will actually book (bestSlotFor's
+    // choice): the nearest existing stop in THAT tech's route, so the discount
+    // and the auto-assignment always name the same technician.
+    const nearest = slot.nearestStopMinutes;
 
     let factor = 1;
     const factors: string[] = [];

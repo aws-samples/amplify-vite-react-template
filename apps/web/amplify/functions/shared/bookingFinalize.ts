@@ -22,6 +22,69 @@ async function reserveSlotRelease(
 ): Promise<void> {
   await releaseSlot(date, technicianId, minutes).catch(() => undefined);
 }
+
+/** Find-or-create the technician's route for a date and the next append order
+ *  on it, so a funnel booking can auto-assign onto a real route. Returns null
+ *  when the route can neither be read nor created — the caller then keeps the
+ *  visit as an unassigned hold rather than assigning it blind. */
+async function ensureRouteAndOrder(
+  technicianId: string,
+  date: string
+): Promise<{ routeId: string; routeOrder: number } | null> {
+  const client = await dataClient();
+  // No Route model (or a degraded client) → fail closed to an unassigned
+  // hold; the office assigns, exactly as before auto-assign existed.
+  if (!("Route" in client.models)) return null;
+  const routeModel = (
+    client.models as unknown as {
+      Route: {
+        listRouteByTechnicianIdAndDate: (
+          input: { technicianId: string; date: string },
+          opts?: { limit?: number }
+        ) => Promise<{ data: { id: string }[] }>;
+        create: (input: {
+          technicianId: string;
+          date: string;
+          status: string;
+        }) => Promise<{ data: { id: string } | null }>;
+      };
+    }
+  ).Route;
+  let routeId: string | null = null;
+  try {
+    const { data: routes } = await routeModel.listRouteByTechnicianIdAndDate(
+      { technicianId, date },
+      { limit: 1 }
+    );
+    routeId = routes?.[0]?.id ?? null;
+  } catch {
+    /* fall through to create */
+  }
+  if (!routeId) {
+    const { data: created } = await routeModel
+      .create({ technicianId, date, status: "PLANNED" })
+      .catch(() => ({ data: null }));
+    routeId = created?.id ?? null;
+  }
+  if (!routeId) return null;
+  // Append after the route's last stop. There is no by-route Job index, so
+  // scan the date and take the max order already on this route.
+  let maxOrder = 0;
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.Job.listJobByScheduledDate(
+      { scheduledDate: date },
+      { limit: 200, nextToken: token }
+    );
+    for (const j of page.data ?? []) {
+      if (j.routeId === routeId && typeof j.routeOrder === "number") {
+        maxOrder = Math.max(maxOrder, j.routeOrder);
+      }
+    }
+    token = page.nextToken;
+  } while (token);
+  return { routeId, routeOrder: maxOrder + 1 };
+}
 import {
   firstWeekdayOf,
   isSeasonalPlanName,
@@ -429,31 +492,63 @@ export async function finalizeBooking(opts: {
       }
     }
     if (consumedSlot && booking.jobId) {
+      const assignTech =
+        consumedSlot.technicianId !== POOL_TECH
+          ? consumedSlot.technicianId
+          : null;
+      // Auto-assign (funnel bookings): the visit goes straight onto the held
+      // technician's route instead of waiting in the office pool. The quote
+      // only offered a tech with a stop free (bestSlotFor excludes a full
+      // day), so the stop claim succeeds; if a route or stop can't be taken,
+      // the visit falls back to an unassigned hold exactly as before.
+      let assign: { routeId: string; routeOrder: number } | null = null;
+      if (assignTech && booking.selectedDate) {
+        const route = await ensureRouteAndOrder(assignTech, booking.selectedDate);
+        if (route) {
+          const stop = await reserveSlot(booking.selectedDate, assignTech, 0, {
+            stops: 1,
+          });
+          if (stop.ok) assign = route;
+        }
+      }
       // GUARDED: the stamp lands only while the job is still the untouched
       // funnel visit (no technician, no stamps). A retried finalization that
       // runs AFTER the office already assigned must not overwrite the
-      // assignment's published stamps — on a loss, the minutes this attempt
-      // just took are given straight back so the office's accounting stands.
+      // assignment's published stamps — on a loss, the minutes (and any stop)
+      // this attempt just took are given straight back so accounting stands.
       const stamped = await casGuardedUpdate(
         "Job",
         booking.jobId,
-        {
-          capacityMinutes: consumedSlot.minutes,
-          // The slot's technician holds these minutes until the office
-          // assigns for real — the rebuild keys on this, so the hold
-          // survives nightly.
-          capacityTechnicianId:
-            consumedSlot.technicianId === POOL_TECH
-              ? null
-              : consumedSlot.technicianId,
-        },
+        assign && assignTech
+          ? {
+              capacityMinutes: consumedSlot.minutes,
+              technicianId: assignTech,
+              routeId: assign.routeId,
+              routeOrder: assign.routeOrder,
+              // Assigned for real now — the hold rides on technicianId.
+              capacityTechnicianId: null,
+            }
+          : {
+              capacityMinutes: consumedSlot.minutes,
+              // The slot's technician holds these minutes until the office
+              // assigns for real — the rebuild keys on this, so the hold
+              // survives nightly.
+              capacityTechnicianId:
+                consumedSlot.technicianId === POOL_TECH
+                  ? null
+                  : consumedSlot.technicianId,
+            },
         [
           { kind: "fieldMissingOrNull", field: "technicianId" },
           { kind: "fieldMissingOrNull", field: "capacityMinutes" },
         ]
       ).catch(() => ({ ok: false as const, reason: "UNSUPPORTED" as const }));
       if (!stamped.ok && booking.selectedDate) {
-        if (consumedSlot.technicianId === POOL_TECH) {
+        if (assign && assignTech) {
+          await releaseSlot(booking.selectedDate, assignTech, consumedSlot.minutes, {
+            stops: 1,
+          }).catch(() => undefined);
+        } else if (consumedSlot.technicianId === POOL_TECH) {
           await releasePoolMinutes(
             booking.selectedDate,
             consumedSlot.minutes

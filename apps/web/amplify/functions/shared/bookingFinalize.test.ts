@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
 import { capacityFixtureModels } from "./capacityTestFixture";
+import { STOPS_PER_TECH } from "./capacity";
 
 /**
  * Lead conversion at booking finalization.
@@ -45,6 +46,7 @@ const store = {
   BookingFinalization: new Map<string, Row>(),
   LeadActivity: new Map<string, Row>(),
   TreatmentObligation: new Map<string, Row>(),
+  Route: new Map<string, Row>(),
 };
 // Per-model injected failures — set true to make the next create(s) fail, the
 // way a throttled/validation-refused write would, so a retry can then succeed.
@@ -194,6 +196,21 @@ Object.assign(fakeDataClient.models, capacityFixture.models, {
     ),
     nextToken: null,
   });
+// GL-04 auto-assign: the tech's route, find-or-create by (tech, date).
+const routeModel = statefulModel("Route") as Record<string, unknown>;
+routeModel.listRouteByTechnicianIdAndDate = async ({
+  technicianId,
+  date,
+}: {
+  technicianId: string;
+  date: string;
+}) => ({
+  data: [...store.Route.values()].filter(
+    (r) => r.technicianId === technicianId && r.date === date
+  ),
+  nextToken: null,
+});
+(fakeDataClient.models as Record<string, unknown>).Route = routeModel;
 
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 vi.mock("./email", () => ({
@@ -359,6 +376,7 @@ beforeEach(() => {
   store.BookingFinalization.clear();
   store.LeadActivity.clear();
   store.TreatmentObligation.clear();
+  store.Route.clear();
   obligationsCreated.length = 0;
   failCreate.ServicePlan = false;
   failCreate.Job = false;
@@ -1336,7 +1354,7 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
     // released it before the payment was reported.
   });
 
-  it("re-reserves the booking's stamped slot when it still fits, and stamps the job with the hold", async () => {
+  it("re-reserves the booking's stamped slot when it still fits, and AUTO-ASSIGNS it to that tech", async () => {
     capacityFixture.maps.capacityDays.set(slotKey, {
       id: slotKey,
       date: "2026-07-22",
@@ -1349,10 +1367,39 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
       capacityFixture.maps.capacityDays.get(slotKey)!.committedMinutes
     ).toBe(60);
     const job = [...store.Job.values()][0];
-    expect(job).toMatchObject({
-      capacityMinutes: 60,
-      capacityTechnicianId: "t1",
+    // Auto-assigned: the visit rides on technicianId (not a pool hold), on the
+    // tech's route, and holds one stop on their day ledger.
+    expect(job).toMatchObject({ capacityMinutes: 60, technicianId: "t1" });
+    expect(job.capacityTechnicianId ?? null).toBeNull();
+    expect(job.routeId).toBeTruthy();
+    const route = [...store.Route.values()][0];
+    expect(route).toMatchObject({ technicianId: "t1", date: "2026-07-22" });
+    expect(
+      capacityFixture.maps.techDayStops.get("2026-07-22#t1")!.committedStops
+    ).toBe(1);
+  });
+
+  it("falls back to an unassigned pool hold when the tech's day is at the stop ceiling", async () => {
+    capacityFixture.maps.capacityDays.set(slotKey, {
+      id: slotKey,
+      date: "2026-07-22",
+      technicianId: "t1",
+      committedMinutes: 0,
     });
+    // t1 already at the 8-stop ceiling → the stop claim refuses, so the visit
+    // stays a pool hold for the office rather than overfilling the route.
+    capacityFixture.maps.techDayStops.set("2026-07-22#t1", {
+      id: "2026-07-22#t1",
+      date: "2026-07-22",
+      technicianId: "t1",
+      committedStops: STOPS_PER_TECH,
+    });
+    await finalize();
+    expect(booking.status).toBe("BOOKED");
+    const job = [...store.Job.values()][0];
+    expect(job.technicianId ?? null).toBeNull();
+    expect(job.routeId ?? null).toBeNull();
+    expect(job.capacityTechnicianId).toBe("t1");
   });
 
   it("a slot that meanwhile SOLD OUT books onto the pool ledger and opens an owned re-place case", async () => {
