@@ -11,18 +11,16 @@ import {
   releasePoolMinutes,
   releaseSlot,
   reserveSlot,
-  type CapacityWindow,
 } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
 
 /** Give back minutes a finalize attempt reserved but could not stamp. */
 async function reserveSlotRelease(
   date: string,
-  window: CapacityWindow,
   technicianId: string,
   minutes: number
 ): Promise<void> {
-  await releaseSlot(date, window, technicianId, minutes).catch(() => undefined);
+  await releaseSlot(date, technicianId, minutes).catch(() => undefined);
 }
 import {
   firstWeekdayOf,
@@ -48,10 +46,6 @@ import {
   planNameFor,
   SERVICE_CATALOG_VERSION,
 } from "./serviceCatalog";
-// The single shared window→label map (GL-08): the label stamped on job.timeWindow
-// here is the same string the public cancel path judges its 72-hour line from.
-import { WINDOW_LABEL } from "./bookingWindows";
-
 const s3 = new S3Client();
 
 // Derived from the single shared constant (R17) — the policy in the signed
@@ -382,18 +376,17 @@ export async function finalizeBooking(opts: {
       opts.invoice ?? null
     );
     // GL-04: the checkout's capacity claim is CONSUMED into the booked job —
-    // the scheduled visit carries the claim's slot facts (window, technician,
-    // minutes) from here on, so the claim row goes away without giving them
-    // back. If the hold expired and was swept before the payment landed, the
-    // booking's stamped facts re-reserve the slot NOW; a slot that meanwhile
-    // sold out books onto the pool ledger and opens an owned case — the money
-    // is real either way, but the schedule never silently oversells.
+    // the scheduled visit carries the claim's slot facts (technician, minutes)
+    // from here on, so the claim row goes away without giving them back. If the
+    // hold expired and was swept before the payment landed, the booking's
+    // stamped facts re-reserve the slot NOW; a slot that meanwhile sold out
+    // books onto the pool ledger and opens an owned case — the money is real
+    // either way, but the schedule never silently oversells.
     let consumedSlot = await consumeCapacityClaim(opts.bookingRequestId);
     const stampedTech = (booking as { capacityTechnicianId?: string | null })
       .capacityTechnicianId;
     const stampedMinutes = (booking as { capacityMinutes?: number | null })
       .capacityMinutes;
-    const slotWindow = (booking.selectedWindow ?? "MORNING") as CapacityWindow;
     if (
       !consumedSlot &&
       booking.selectedDate &&
@@ -402,13 +395,11 @@ export async function finalizeBooking(opts: {
     ) {
       const rereserved = await reserveSlot(
         booking.selectedDate,
-        slotWindow,
         stampedTech,
         stampedMinutes
       );
       if (rereserved.ok) {
         consumedSlot = {
-          window: slotWindow,
           technicianId: stampedTech,
           minutes: stampedMinutes,
         };
@@ -416,13 +407,10 @@ export async function finalizeBooking(opts: {
         const poolMinutes = onsiteMinutes(
           (booking as { propertyKind?: string | null }).propertyKind
         );
-        await notePoolMinutes(
-          booking.selectedDate,
-          slotWindow,
-          poolMinutes
-        ).catch(() => undefined);
+        await notePoolMinutes(booking.selectedDate, poolMinutes).catch(
+          () => undefined
+        );
         consumedSlot = {
-          window: slotWindow,
           technicianId: POOL_TECH,
           minutes: poolMinutes,
         };
@@ -430,7 +418,7 @@ export async function finalizeBooking(opts: {
           kind: "UNSTAFFED_VISIT",
           dedupeKey: `booking-slot-lost:${booking.id}`,
           title: `Re-place a paid booking whose held slot expired: ${booking.name ?? booking.email ?? booking.id}`,
-          detail: `The payment for booking ${booking.id} landed after its 45-minute slot hold expired, and the ${booking.selectedDate} ${slotWindow.toLowerCase()} window no longer has room. The visit is booked and counted on the pool ledger — assign a technician (any day/window that fits) or agree a new time with the customer. Do not leave it unassigned.`,
+          detail: `The payment for booking ${booking.id} landed after its 45-minute slot hold expired, and ${booking.selectedDate} no longer has room. The visit is booked and counted on the pool ledger — assign a technician (any day that fits) or agree a new day with the customer. Do not leave it unassigned.`,
           customerId: booking.customerId ?? undefined,
           relatedId: booking.jobId ?? booking.id,
           sourceUrl: `/schedule`,
@@ -450,7 +438,6 @@ export async function finalizeBooking(opts: {
         "Job",
         booking.jobId,
         {
-          capacityWindow: consumedSlot.window,
           capacityMinutes: consumedSlot.minutes,
           // The slot's technician holds these minutes until the office
           // assigns for real — the rebuild keys on this, so the hold
@@ -462,7 +449,6 @@ export async function finalizeBooking(opts: {
         },
         [
           { kind: "fieldMissingOrNull", field: "technicianId" },
-          { kind: "fieldMissingOrNull", field: "capacityWindow" },
           { kind: "fieldMissingOrNull", field: "capacityMinutes" },
         ]
       ).catch(() => ({ ok: false as const, reason: "UNSUPPORTED" as const }));
@@ -470,13 +456,11 @@ export async function finalizeBooking(opts: {
         if (consumedSlot.technicianId === POOL_TECH) {
           await releasePoolMinutes(
             booking.selectedDate,
-            consumedSlot.window,
             consumedSlot.minutes
           ).catch(() => undefined);
         } else {
           await reserveSlotRelease(
             booking.selectedDate,
-            consumedSlot.window,
             consumedSlot.technicianId,
             consumedSlot.minutes
           );
@@ -699,7 +683,6 @@ type BookingRecord = {
   quoteJson?: unknown;
   attribution?: unknown;
   selectedDate?: string | null;
-  selectedWindow?: string | null;
   recurring?: boolean | null;
   amountCents?: number | null;
   cancelToken?: string | null;
@@ -1157,10 +1140,6 @@ async function finalizeClaimed(
   // catalog version) on the plan and job so later catalog edits never
   // re-define old work. The label resolver covers every historical string.
   const catalogService = entryForLabel(serviceLabel);
-  const windowLabel =
-    WINDOW_LABEL[booking.selectedWindow ?? ""] ??
-    booking.selectedWindow?.toLowerCase() ??
-    "";
 
   // 1. Customer (ACTIVE — they've paid). A lead already in the CRM with this
   // email (Thumbtack paste, funnel CONTACT) CONVERTS instead of duplicating:
@@ -1528,7 +1507,6 @@ async function finalizeClaimed(
         serviceCode: catalogService?.id ?? undefined,
         catalogVersion: catalogService ? SERVICE_CATALOG_VERSION : undefined,
         scheduledDate: firstVisitDate,
-        timeWindow: windowLabel,
         // GL-04: the visit's locked on-site class rides on the job — the
         // nightly rebuild and office assignment count commercial/community
         // stops at 60 minutes only if the class is recorded here.
@@ -1583,14 +1561,12 @@ async function finalizeClaimed(
       {
         status: offSeasonFirstVisit ? "UNSCHEDULED" : "SCHEDULED",
         scheduledDate: firstVisitDate ?? null,
-        timeWindow: windowLabel,
         paymentPendingIntentId: pending ? paymentIntentId : null,
         paidAt: !deferred && booking.amountCents ? paidAtIso : null,
         paidPaymentIntentId:
           !deferred && booking.amountCents ? paymentIntentId : null,
         // The old attempt's capacity facts were released with the cancel —
         // finalizeBooking's consume/stamp pass records the new claim's.
-        capacityWindow: null,
         capacityMinutes: null,
         capacityTechnicianId: null,
       },
@@ -1720,7 +1696,7 @@ async function finalizeClaimed(
   // 4. T&C acceptance becomes the signed agreement + PDF on file.
   const signedAtIso = new Date().toISOString();
   const bodyText = [
-    `SERVICE AGREEMENT. BuzzKill Pest Control will provide: ${serviceLabel} at ${[booking.street, booking.city, booking.state, booking.zip].filter(Boolean).join(", ")} ${booking.selectedDate ? `on ${booking.selectedDate} (${windowLabel})` : `with the first treatment in ${firstTreatmentMonthLabel()}; BuzzKill will contact the customer to agree the exact day`}.`,
+    `SERVICE AGREEMENT. BuzzKill Pest Control will provide: ${serviceLabel} at ${[booking.street, booking.city, booking.state, booking.zip].filter(Boolean).join(", ")} ${booking.selectedDate ? `on ${booking.selectedDate}` : `with the first treatment in ${firstTreatmentMonthLabel()}; BuzzKill will contact the customer to agree the exact day`}.`,
     booking.recurring && stored.recurringOffer
       ? booking.selectedDate
         ? `RECURRING PLAN. After the initial visit, service continues ${stored.recurringOffer.frequency.toLowerCase()} at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed automatically. Cancel anytime.`
@@ -1914,7 +1890,6 @@ async function finalizeClaimed(
 
     await deliverPendingComms(booking, {
       serviceLabel,
-      windowLabel,
       recurringOffer: stored.recurringOffer ?? null,
       methodLabel: pending.methodLabel,
       matchFallbackReason,
@@ -1950,7 +1925,6 @@ async function finalizeClaimed(
   // in the owned-work queue as a resend path.
   await deliverBookingComms(booking, {
     serviceLabel,
-    windowLabel,
     recurringOffer: stored.recurringOffer ?? null,
     portalInvited,
     matchFallbackReason,
@@ -2087,7 +2061,6 @@ async function deliverBookingComms(
   booking: BookingRecord,
   ctx: {
     serviceLabel: string;
-    windowLabel: string;
     recurringOffer: { frequency: string; monthlyCents: number } | null;
     portalInvited: boolean;
     matchFallbackReason: string | null;
@@ -2106,7 +2079,6 @@ async function deliverBookingComms(
   const customerId = booking.customerId ?? undefined;
 
   let serviceLabel: string;
-  let windowLabel: string;
   let recurringOffer: { frequency: string; monthlyCents: number } | null;
   let portalInvited: boolean;
   let matchFallbackReason: string | null;
@@ -2114,7 +2086,7 @@ async function deliverBookingComms(
   let pdfKey: string | undefined;
   let invoiced: { terms: string; dueDate: string } | null;
   if (ctx) {
-    ({ serviceLabel, windowLabel, recurringOffer, portalInvited, matchFallbackReason, pdf, pdfKey } = ctx);
+    ({ serviceLabel, recurringOffer, portalInvited, matchFallbackReason, pdf, pdfKey } = ctx);
     invoiced = ctx.invoiced ?? null;
   } else {
     // Resume path: rebuild from the persisted booking. A redelivery cannot know
@@ -2126,10 +2098,6 @@ async function deliverBookingComms(
       recurringOffer?: { frequency: string; monthlyCents: number } | null;
     };
     serviceLabel = stored.serviceLabel ?? "Pest control service";
-    windowLabel =
-      WINDOW_LABEL[booking.selectedWindow ?? ""] ??
-      booking.selectedWindow?.toLowerCase() ??
-      "";
     recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
     portalInvited = false;
     matchFallbackReason = null;
@@ -2183,7 +2151,7 @@ async function deliverBookingComms(
           booking.selectedDate ? "Your visit is booked" : "Your plan is active",
           `<p>Hi ${booking.name},</p>
        <p><strong>${serviceLabel}</strong><br/>
-       ${booking.selectedDate ? `${booking.selectedDate} · ${windowLabel}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
+       ${booking.selectedDate ? `${booking.selectedDate}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
        <p>${
          invoiced
@@ -2247,7 +2215,7 @@ async function deliverBookingComms(
         heading: invoiced ? "New invoiced website booking" : "New paid website booking",
         customerId,
         relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate} (${windowLabel})` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} ${invoiced ? `<strong>invoiced</strong> (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate}) — an OPEN invoice is on the customer's account to collect` : "paid"}.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing started at checkout; agree the first treatment date with the customer.") : ""}</p>
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate}` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} ${invoiced ? `<strong>invoiced</strong> (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate}) — an OPEN invoice is on the customer's account to collect` : "paid"}.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing started at checkout; agree the first treatment date with the customer.") : ""}</p>
          <p>${booking.selectedDate ? "The job is on the Needs-scheduling board for route assignment." : "The first visit is UNSCHEDULED with an owned action to confirm the date — do not leave it unassigned."}</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
@@ -2350,7 +2318,6 @@ async function deliverPendingComms(
   booking: BookingRecord,
   ctx: {
     serviceLabel: string;
-    windowLabel: string;
     recurringOffer: { frequency: string; monthlyCents: number } | null;
     methodLabel: string | null;
     matchFallbackReason: string | null;
@@ -2364,24 +2331,19 @@ async function deliverPendingComms(
   const customerId = booking.customerId ?? undefined;
 
   let serviceLabel: string;
-  let windowLabel: string;
   let methodLabel: string | null;
   let matchFallbackReason: string | null;
   let pdf: Uint8Array | null;
   let pdfKey: string | undefined;
   let recurringOffer: { frequency: string; monthlyCents: number } | null;
   if (ctx) {
-    ({ serviceLabel, windowLabel, recurringOffer, methodLabel, matchFallbackReason, pdf, pdfKey } = ctx);
+    ({ serviceLabel, recurringOffer, methodLabel, matchFallbackReason, pdf, pdfKey } = ctx);
   } else {
     const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
       serviceLabel?: string;
       recurringOffer?: { frequency: string; monthlyCents: number } | null;
     };
     serviceLabel = stored.serviceLabel ?? "Pest control service";
-    windowLabel =
-      WINDOW_LABEL[booking.selectedWindow ?? ""] ??
-      booking.selectedWindow?.toLowerCase() ??
-      "";
     recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
     methodLabel = booking.processingMethodLabel ?? null;
     matchFallbackReason = null;
@@ -2427,7 +2389,7 @@ async function deliverPendingComms(
             "Your visit is scheduled — payment processing",
             `<p>Hi ${booking.name},</p>
        <p><strong>${serviceLabel}</strong><br/>
-       ${booking.selectedDate ? `${booking.selectedDate} · ${windowLabel}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
+       ${booking.selectedDate ? `${booking.selectedDate}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
        <p>Your payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> by ${methodLabel ?? "bank transfer"} is <strong>still processing</strong> — a bank debit can take a few business days${booking.processingExpectedBy ? ` (expected by ${booking.processingExpectedBy})` : ""}. ${booking.selectedDate ? "Your visit is scheduled" : "Your enrollment is locked in"} and <strong>you don't need to do anything</strong>. Please don't pay again.</p>
        <p>We'll email you the moment the payment clears${
@@ -2472,7 +2434,7 @@ async function deliverPendingComms(
         heading: "New website booking — payment pending",
         customerId,
         relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate} (${windowLabel})` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} by bank debit, <strong>payment pending</strong> (not settled yet). ${booking.selectedDate ? "The visit is real and dispatchable; every" : "Every"} screen shows "Payment pending" until the debit clears.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing starts when the debit settles; agree the first treatment date with the customer.") : ""}</p>
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate}` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} by bank debit, <strong>payment pending</strong> (not settled yet). ${booking.selectedDate ? "The visit is real and dispatchable; every" : "Every"} screen shows "Payment pending" until the debit clears.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing starts when the debit settles; agree the first treatment date with the customer.") : ""}</p>
          <p>${booking.selectedDate ? "The job is on the Needs-scheduling board for route assignment." : "The first visit is UNSCHEDULED with an owned action to confirm the date — do not leave it unassigned."}</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
@@ -2598,24 +2560,19 @@ export async function settlePendingFailure(opts: {
     if (canceled.ok) {
       const prior = canceled.prior as {
         scheduledDate?: string | null;
-        capacityWindow?: string | null;
         capacityMinutes?: number | null;
         capacityTechnicianId?: string | null;
       };
       const date = prior.scheduledDate ?? booking.selectedDate ?? null;
-      const window = (prior.capacityWindow ?? booking.selectedWindow) as
-        | CapacityWindow
-        | null;
-      if (date && window && prior.capacityMinutes != null) {
+      if (date && prior.capacityMinutes != null) {
         if (prior.capacityTechnicianId) {
           await releaseSlot(
             date,
-            window,
             prior.capacityTechnicianId,
             prior.capacityMinutes
           ).catch(() => undefined);
         } else {
-          await releasePoolMinutes(date, window, prior.capacityMinutes).catch(
+          await releasePoolMinutes(date, prior.capacityMinutes).catch(
             () => undefined
           );
         }

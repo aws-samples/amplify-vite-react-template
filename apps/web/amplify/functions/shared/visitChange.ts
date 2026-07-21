@@ -27,8 +27,6 @@ import {
   releaseSlot,
   reserveSlot,
   techBaseFor,
-  windowOfTimeWindow,
-  type CapacityWindow,
 } from "./capacity";
 import {
   computeVisitCancellationPolicy,
@@ -108,7 +106,6 @@ type JobRow = {
   serviceType: string;
   status: string;
   scheduledDate?: string | null;
-  timeWindow?: string | null;
   priceCents?: number | null;
   routeId?: string | null;
   technicianId?: string | null;
@@ -184,7 +181,6 @@ export type VisitChangePreview = {
   customerEmail: string | null;
   serviceType: string;
   scheduledDate: string | null;
-  timeWindow: string | null;
   status: string;
   /** False when the visit is IN_PROGRESS/COMPLETED/terminal — nothing to change. */
   changeable: boolean;
@@ -226,7 +222,6 @@ export async function buildVisitChangePreview(
     amountPaidCents,
     today: todayEastern(),
     nowMs: Date.now(),
-    timeWindow: job.timeWindow ?? null,
   });
 
   let planConsequence =
@@ -261,7 +256,6 @@ export async function buildVisitChangePreview(
     customerEmail: customer?.email ?? null,
     serviceType: job.serviceType,
     scheduledDate: job.scheduledDate ?? null,
-    timeWindow: job.timeWindow ?? null,
     status: job.status,
     changeable,
     alreadyCanceled,
@@ -592,7 +586,6 @@ async function driveHeldVisitCancel(
     amountPaidCents,
     today: todayEastern(),
     nowMs: Number.isFinite(requestedMs) ? requestedMs : Date.now(),
-    timeWindow: job.timeWindow ?? null,
   });
 
   // GL-07 R6: the SERVER-calculated 72-hour amount is the only refund — no
@@ -856,7 +849,6 @@ async function driveHeldVisitCancel(
       // The stamps end WITH the hold: the release below uses the pre-update
       // row, and a resumed drive re-reads a job with no stamps — so the slot
       // (or pool) minutes can never be given back twice.
-      capacityWindow: null,
       capacityMinutes: null,
       capacityTechnicianId: null,
       cancelDisposition: moneyPending
@@ -1360,7 +1352,6 @@ export async function resumeVisitChange(
     return rescheduleVisit({
       jobId,
       scheduledDate: existing.newScheduledDate ?? null,
-      timeWindow: existing.proposedTimeWindow ?? null,
       technicianId: existing.proposedTechnicianId ?? null,
       routeId: existing.proposedRouteId ?? null,
       reason: existing.reason ?? "Resumed reschedule",
@@ -1429,7 +1420,6 @@ export type VisitRescheduleOutcome = {
 export async function rescheduleVisit(args: {
   jobId: string;
   scheduledDate?: string | null;
-  timeWindow?: string | null;
   technicianId?: string | null;
   routeId?: string | null;
   routeOrder?: number | null;
@@ -1468,7 +1458,6 @@ export async function rescheduleVisit(args: {
     newScheduledDate: newDate ?? undefined,
     proposedTechnicianId: args.technicianId ?? undefined,
     proposedRouteId: args.routeId ?? undefined,
-    proposedTimeWindow: args.timeWindow?.trim() || undefined,
     actorSub: args.actor.sub ?? undefined,
     actorEmail: args.actor.email ?? undefined,
     leaseNonce: rescheduleNonce,
@@ -1489,7 +1478,6 @@ export async function rescheduleVisit(args: {
       newScheduledDate: newDate,
       proposedTechnicianId: args.technicianId ?? null,
       proposedRouteId: args.routeId ?? null,
-      proposedTimeWindow: args.timeWindow?.trim() || null,
       actorSub: args.actor.sub ?? null,
       actorEmail: args.actor.email ?? null,
     });
@@ -1600,14 +1588,11 @@ export async function rescheduleVisit(args: {
     // below — one guarded conditional add on the technician-day stop ledger
     // per claim, so two simultaneous moves can never both take the last
     // stop, no lease and no read→act count involved.
-    // GL-04: the ATOMIC technician-window slot claim. The minutes are the
+    // GL-04: the ATOMIC technician-day slot claim. The minutes are the
     // locked on-site duration + REAL Routes legs measured from the assigned
     // technician's private base (or that day's override); a base or Routes
     // answer that can't be produced refuses the move (fail closed). Two
     // simultaneous office moves cannot both take a slot's last minutes.
-    const targetWindow = windowOfTimeWindow(
-      args.timeWindow ?? job.timeWindow ?? null
-    );
     const techBase = await techBaseFor(technician.id, newDate!);
     if (!techBase) {
       throw new Error(
@@ -1648,13 +1633,9 @@ export async function rescheduleVisit(args: {
     // on the ledgers depends on where the visit already is:
     //  - same technician + same DAY: the visit already holds its stop —
     //    stop delta 0, so a fully-booked eight-stop day can still be
-    //    moved/reordered without being told a ninth stop was requested.
-    //  - same technician + same day + same WINDOW: reserve only the
-    //    POSITIVE minutes delta; a smaller requirement releases the
+    //    reordered without being told a ninth stop was requested. Reserve
+    //    only the POSITIVE minutes delta; a smaller requirement releases the
     //    difference after publication. A pure reorder touches nothing.
-    //  - same technician + same day, OTHER window: claim the destination
-    //    window's minutes, publish, then release the source window's —
-    //    no stop churn.
     //  - different technician or day: claim +1 stop and full minutes on
     //    the destination; the source's stop and minutes come back only
     //    after the publish lands.
@@ -1671,8 +1652,7 @@ export async function rescheduleVisit(args: {
     const sameSlotExact = Boolean(
       sameTechDay &&
         priorAssignedFacts &&
-        priorAssignedFacts.technicianId === technician.id &&
-        priorAssignedFacts.window === targetWindow
+        priorAssignedFacts.technicianId === technician.id
     );
     const stopDelta = sameTechDay ? 0 : 1;
     const claimMinutes = sameSlotExact
@@ -1681,7 +1661,6 @@ export async function rescheduleVisit(args: {
     if (claimMinutes > 0 || stopDelta > 0) {
       const reserved = await reserveSlot(
         newDate!,
-        targetWindow,
         technician.id,
         claimMinutes,
         { stops: stopDelta }
@@ -1700,12 +1679,10 @@ export async function rescheduleVisit(args: {
       job.id,
       {
         scheduledDate: newDate!,
-        timeWindow: args.timeWindow?.trim() || null,
         technicianId: technician.id,
         routeId: route.id,
         routeOrder: args.routeOrder ?? 999,
         status: "SCHEDULED",
-        capacityWindow: targetWindow,
         capacityMinutes: slotMinutes,
         capacityTechnicianId: null,
       },
@@ -1716,7 +1693,7 @@ export async function rescheduleVisit(args: {
       // minutes delta and (only on a cross-tech/day move) the stop — must
       // not stay held for a publish that never landed.
       if (claimMinutes > 0 || stopDelta > 0) {
-        await releaseSlot(newDate!, targetWindow, technician.id, claimMinutes, {
+        await releaseSlot(newDate!, technician.id, claimMinutes, {
           stops: stopDelta,
         }).catch(() => undefined);
       }
@@ -1744,20 +1721,8 @@ export async function rescheduleVisit(args: {
       if (shrink > 0) {
         await releaseSlot(
           newDate!,
-          targetWindow,
           technician.id,
           shrink
-        ).catch(() => undefined);
-      }
-    } else if (sameTechDay) {
-      // Cross-window on the same technician-day: give the source window's
-      // minutes back; the day's stop never moved.
-      if (priorAssignedFacts && priorAssignedFacts.minutes > 0) {
-        await releaseSlot(
-          priorAssignedFacts.date,
-          priorAssignedFacts.window,
-          priorAssignedFacts.technicianId!,
-          priorAssignedFacts.minutes
         ).catch(() => undefined);
       }
     } else {
@@ -1795,16 +1760,12 @@ export async function rescheduleVisit(args: {
       }
       staffingOwned = true;
     }
-    const poolWindow = windowOfTimeWindow(
-      args.timeWindow ?? job.timeWindow ?? null
-    );
     const poolMinutes = slotOnsiteMinutes(job.propertyClass);
     const published = await casGuardedUpdate(
       "Job",
       job.id,
       {
         scheduledDate: newDate,
-        timeWindow: args.timeWindow?.trim() || null,
         routeId: null,
         technicianId: null,
         routeOrder: null,
@@ -1814,7 +1775,6 @@ export async function rescheduleVisit(args: {
         // Pool facts replace whatever hold the visit had — INCLUDING a funnel
         // checkout's capacityTechnicianId; leaving that stale would key the
         // next release to a technician slot the pool note never touched.
-        capacityWindow: newDate ? poolWindow : null,
         capacityMinutes: newDate ? poolMinutes : null,
         capacityTechnicianId: null,
       },
@@ -1848,10 +1808,10 @@ export async function rescheduleVisit(args: {
     }
     // A pending-assignment move shows on the POOL accounting slot (visible on
     // the Operations readout, never blocking a real slot) — the real
-    // technician-window claim happens at assignment, which is also where the
-    // customer's window becomes a confirmed commitment.
+    // technician-day claim happens at assignment, which is also where the
+    // visit becomes a confirmed commitment.
     if (newDate) {
-      await notePoolMinutes(newDate, poolWindow, poolMinutes).catch(
+      await notePoolMinutes(newDate, poolMinutes).catch(
         () => undefined
       );
     }
@@ -1865,16 +1825,14 @@ export async function rescheduleVisit(args: {
   // The customer is promised a CONFIRMED time only when a technician is truly
   // assigned; a pending-assignment move promises confirmation, not a date.
   const nowLine = assignedToRoute
-    ? `${newDate}${args.timeWindow ? ` (${args.timeWindow})` : ""}`
+    ? `${newDate}`
     : newDate
-      ? `${newDate}${args.timeWindow ? ` (${args.timeWindow})` : ""} — requested; we'll confirm your appointment once your technician is assigned`
+      ? `${newDate} — requested; we'll confirm your appointment once your technician is assigned`
       : "to be scheduled — we'll confirm the date";
   const html = emailShell(
     "Your visit has been rescheduled",
     `<p>Your <strong>${job.serviceType}</strong> visit has been moved.</p>
-     <p><strong>Was:</strong> ${priorScheduledDate ?? "not yet scheduled"}${
-       job.timeWindow ? ` (${job.timeWindow})` : ""
-     }<br/>
+     <p><strong>Was:</strong> ${priorScheduledDate ?? "not yet scheduled"}<br/>
         <strong>Now:</strong> ${nowLine}</p>
      <p>If this new time doesn't work, just reply to this email or call us and we'll find another.</p>`
   );

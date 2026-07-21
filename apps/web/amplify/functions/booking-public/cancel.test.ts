@@ -17,7 +17,6 @@ type Booking = {
   email: string;
   service: string;
   selectedDate: string;
-  selectedWindow: string;
   amountCents: number;
   cancelToken: string;
   customerId?: string | null;
@@ -174,7 +173,6 @@ beforeEach(() => {
     email: "dana@example.com",
     service: "GENERAL_PEST",
     selectedDate: "2026-07-20",
-    selectedWindow: "MORNING",
     amountCents: 29900,
     cancelToken: "tok",
     customerId: "c1",
@@ -276,10 +274,11 @@ describe("cancellation refund window", () => {
 });
 
 describe("GL-08 — hour-exact 72-hour enforcement (matches the customer copy)", () => {
-  // Visit Monday 2026-07-20, MORNING window → 8:00 AM ET start. The 72-hour
-  // line therefore falls on Friday 8:00 AM ET — a boundary the whole-calendar-
-  // day rule could NEVER see: Monday − Friday is 3 calendar days, so the old
-  // `daysOut > 3` check refused every Friday cancel regardless of the hour.
+  // Visit Monday 2026-07-20 → 8:00 AM ET workday start (we schedule by day, so
+  // every visit's start is the 8am open). The 72-hour line therefore falls on
+  // Friday 8:00 AM ET — a boundary the whole-calendar-day rule could NEVER see:
+  // Monday − Friday is 3 calendar days, so the old `daysOut > 3` check refused
+  // every Friday cancel regardless of the hour.
 
   it("refunds a cancel 73 hours out (Friday 7am) — which the day-based rule wrongly refused", async () => {
     vi.setSystemTime(new Date("2026-07-17T07:00:00-04:00")); // 73h before Mon 8am
@@ -309,20 +308,6 @@ describe("GL-08 — hour-exact 72-hour enforcement (matches the customer copy)",
     expect(Date.parse(stamp as string)).toBe(
       Date.parse("2026-07-17T07:00:00-04:00")
     );
-  });
-
-  it("judges an afternoon visit from its 12pm start, matching the job's stored label", async () => {
-    // AFTERNOON maps to "afternoon (12pm–5pm)" — a noon start. The 72-hour line
-    // is Friday 12pm; at Friday 11am we are 73h out. Judged from the raw
-    // "AFTERNOON" enum (no parseable hour) it would default to an 8am start and
-    // wrongly refuse — this proves the public path shares the office start hour.
-    booking.selectedWindow = "AFTERNOON";
-    vi.setSystemTime(new Date("2026-07-17T11:00:00-04:00")); // 73h before Mon 12pm
-
-    const res = await call({ token: "tok", confirm: true });
-
-    expect(res.body).toMatchObject({ canceled: true, refunded: true });
-    expect(refundsCreate).toHaveBeenCalledOnce();
   });
 });
 

@@ -315,7 +315,6 @@ export async function cancelQueuedPlanVisits(
         amountPaidCents: paidCents,
         today,
         nowMs,
-        timeWindow: job.timeWindow ?? null,
       });
 
       const note = `Auto-canceled ${new Date().toISOString().slice(0, 10)}: ${cause}.${
@@ -353,7 +352,6 @@ export async function cancelQueuedPlanVisits(
             // Stamps end WITH the hold — the release below reads the
             // pre-update row, and a re-driven sweep finds nothing left to
             // give back.
-            capacityWindow: null,
             capacityMinutes: null,
             capacityTechnicianId: null,
             cancelDisposition: disposition,
@@ -377,7 +375,7 @@ export async function cancelQueuedPlanVisits(
         continue;
       }
       resolution.canceled.push(visit);
-      // GL-04: the canceled visit's minutes go back to its technician-window
+      // GL-04: the canceled visit's minutes go back to its technician-day
       // slot (or the pool accounting slot) — strictly from its stamps, via
       // the one canonical release path.
       await releaseJobCapacity(job);

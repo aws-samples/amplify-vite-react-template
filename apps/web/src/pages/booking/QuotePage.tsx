@@ -17,7 +17,6 @@ import {
   type QuoteRequest,
   type RecurringFrequency,
   type ServiceCode,
-  type WindowCode,
 } from "../../lib/bookingApi";
 import {
   FREQUENCY_LABELS,
@@ -34,7 +33,6 @@ import {
   quoteFieldNeeds,
   saveFunnelState,
   validateQuoteForm,
-  windowLabel,
 } from "../../lib/bookingFunnel";
 
 const OFFICE_PHONE = "508-258-9294";
@@ -149,7 +147,6 @@ export default function QuotePage() {
 
   // Day-picker selection
   const [selDate, setSelDate] = useState<string | null>(null);
-  const [selWindow, setSelWindow] = useState<WindowCode | null>(null);
   const [plan, setPlan] = useState<"ONE_TIME" | "PLAN">("ONE_TIME");
 
   // A refresh, an emailed resume link, or a round trip to /book must not lose
@@ -238,7 +235,6 @@ export default function QuotePage() {
     setPriced(stored.quote);
     if (stored.selection) {
       setSelDate(stored.selection.date);
-      setSelWindow(stored.selection.window);
       setPlan(stored.selection.recurring ? "PLAN" : "ONE_TIME");
     } else {
       setPlan(defaultQuoteChoice(stored.quote));
@@ -362,7 +358,6 @@ export default function QuotePage() {
     setPriced(quote);
     setContact(null);
     setSelDate(null);
-    setSelWindow(null);
     setPlan(
       defaultQuoteChoice(quote) === "PLAN" || fields.recurringPreference
         ? "PLAN"
@@ -473,7 +468,6 @@ export default function QuotePage() {
     setPendingError(null);
     setWaitedMs(0);
     setSelDate(null);
-    setSelWindow(null);
     setBanner(null);
     setNotice(null);
     setFieldErrors({});
@@ -484,7 +478,7 @@ export default function QuotePage() {
     // GL-17: an off-season enrollment has no day board — checkout is the
     // plan itself, date-less, billing starting today.
     const offSeasonCheckout = Boolean(priced.offSeason && priced.recurringOffer);
-    if (!offSeasonCheckout && (!selDate || !selWindow)) return;
+    if (!offSeasonCheckout && !selDate) return;
     if (isQuoteExpired(priced.expiresAt)) {
       startOver();
       setNotice(
@@ -495,10 +489,9 @@ export default function QuotePage() {
     saveFunnelState(window.sessionStorage, {
       quote: priced,
       selection: offSeasonCheckout
-        ? { date: null, window: null, recurring: true }
+        ? { date: null, recurring: true }
         : {
             date: selDate,
-            window: selWindow,
             // A plan-only (community) quote always checks out as the plan.
             recurring:
               (plan === "PLAN" || Boolean(priced.planOnly)) &&
@@ -599,8 +592,8 @@ export default function QuotePage() {
               {offSeason
                 ? "Enroll now — no date to pick today. This quote is held until "
                 : planOnly
-                  ? "Pick your first visit day and arrival window. This quote is held until "
-                  : "Pick a day and arrival window. This quote is held until "}
+                  ? "Pick your first visit day. This quote is held until "
+                  : "Pick a day. This quote is held until "}
               {expiresText}.
             </p>
 
@@ -655,12 +648,7 @@ export default function QuotePage() {
                     type="button"
                     className={`bk-day-card ${selDate === d.date ? "is-active" : ""}`}
                     aria-pressed={selDate === d.date}
-                    onClick={() => {
-                      setSelDate(d.date);
-                      setSelWindow(
-                        d.windows.length === 1 ? (d.windows[0] as WindowCode) : null
-                      );
-                    }}
+                    onClick={() => setSelDate(d.date)}
                   >
                     <div className="bk-day-card__date">{formatDay(d.date)}</div>
                     {!requestedPlan && (!planOnly || d.priceCents > 0) && (
@@ -670,28 +658,9 @@ export default function QuotePage() {
                 ))}
               </div>
 
-              {selectedDay && (
+              {selectedDay && offer && planOnly && (
                 <>
-                  <h3 className="bk-form-step__title">2. Morning or afternoon?</h3>
-                  <div className="bk-choice-row">
-                    {selectedDay.windows.map((w) => (
-                      <button
-                        key={w}
-                        type="button"
-                        className={`bk-choice-card ${selWindow === w ? "is-active" : ""}`}
-                        aria-pressed={selWindow === w}
-                        onClick={() => setSelWindow(w as WindowCode)}
-                      >
-                        <div className="bk-choice-card__title">{windowLabel(w)}</div>
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {selectedDay && selWindow && offer && planOnly && (
-                <>
-                  <h3 className="bk-form-step__title">3. Your plan</h3>
+                  <h3 className="bk-form-step__title">2. Your plan</h3>
                   <div className="bk-booking-price-card">
                     <div className="bk-booking-price-card__label">
                       {FREQUENCY_LABELS[offer.frequency]} plan
@@ -708,12 +677,12 @@ export default function QuotePage() {
                 </>
               )}
 
-              {selectedDay && selWindow && offer && !planOnly && (
+              {selectedDay && offer && !planOnly && (
                 <>
                   <h3 className="bk-form-step__title">
                     {requestedPlan
-                      ? `3. Confirm your ${FREQUENCY_LABELS[offer.frequency].toLowerCase()} plan`
-                      : "3. One-time or a plan?"}
+                      ? `2. Confirm your ${FREQUENCY_LABELS[offer.frequency].toLowerCase()} plan`
+                      : "2. One-time or a plan?"}
                   </h3>
                   <div className="bk-choice-row">
                     {serviceChoices.map((choice) =>
@@ -764,7 +733,7 @@ export default function QuotePage() {
                 <button
                   type="button"
                   className="bk-btn bk-btn-primary"
-                  disabled={offSeason ? false : !selDate || !selWindow}
+                  disabled={offSeason ? false : !selDate}
                   onClick={continueToCheckout}
                 >
                   Continue to booking &rarr;
@@ -1205,7 +1174,7 @@ function QuoteLoadingScreen({
             </li>
             <li className={step === 3 ? "is-active" : ""}>
               <span aria-hidden="true">3</span>
-              Available days and times
+              Available days
             </li>
           </ol>
 

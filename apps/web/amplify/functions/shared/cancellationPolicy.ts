@@ -54,21 +54,10 @@ const usd = (cents: number): string =>
     maximumFractionDigits: 2,
   })}`;
 
-/** Parse the visit's start hour (0–23) out of a free-form time window like
- *  "8-10am", "1:30 PM", "10am-12pm". Defaults to the 8:00 AM workday start —
- *  the conservative earliest a visit can begin. */
-export function windowStartHour(timeWindow: string | null | undefined): number {
-  const m = (timeWindow ?? "").match(/(\d{1,2})(?::(\d{2}))?\s*(a|p)?/i);
-  if (!m) return 8;
-  let hour = Number(m[1]);
-  if (!Number.isFinite(hour) || hour < 1 || hour > 12) return 8;
-  const meridiem = (m[3] ?? "").toLowerCase();
-  if (meridiem === "p" && hour !== 12) hour += 12;
-  if (meridiem === "a" && hour === 12) hour = 0;
-  // No meridiem: business hours run 8–5, so 1–7 mean afternoon.
-  if (!meridiem && hour >= 1 && hour <= 7) hour += 12;
-  return hour;
-}
+/** We schedule for the DAY, not a time-of-day window, so the 72-hour refund
+ *  line is judged from the 8:00 AM Eastern workday open — the earliest a
+ *  visit can begin. */
+const WORKDAY_START_HOUR = 8;
 
 /** The epoch (ms) of an Eastern wall-clock time on a calendar date, DST-aware.
  *  Exported so callers that must reconstruct a judging instant from a stored
@@ -94,7 +83,7 @@ export function easternEpochMs(dateIso: string, hour: number): number {
  *
  * GL-07 R6 — when the caller supplies `nowMs` the rule is HOUR-EXACT: strictly
  * more than 72 hours before the visit's scheduled start in America/New_York
- * (the time-window's start, defaulting to the 8:00 AM workday open) refunds in
+ * (the 8:00 AM workday open, since visits are scheduled by day) refunds in
  * full; exactly 72 hours or less refunds nothing. Without `nowMs` the legacy
  * whole-calendar-day comparison applies (the public funnel's promised wording
  * is day-based and changes only with CEO approval).
@@ -109,8 +98,6 @@ export function computeVisitCancellationPolicy(opts: {
   /** The judging instant for the hour-exact rule (Date.now() at the accepted
    *  request, or the durable command's requestedAt on a resume). */
   nowMs?: number;
-  /** The visit's time window, for its start hour ("8-10am" → 8). */
-  timeWindow?: string | null;
 }): VisitCancellationPolicy {
   const amountPaidCents = Math.max(0, Math.trunc(opts.amountPaidCents || 0));
   const scheduledDate = opts.scheduledDate?.trim() || null;
@@ -141,8 +128,7 @@ export function computeVisitCancellationPolicy(opts: {
   // whole-day comparison remains for callers without a judging instant.
   const withinFreeWindow =
     opts.nowMs != null
-      ? easternEpochMs(scheduledDate, windowStartHour(opts.timeWindow)) -
-          opts.nowMs >
+      ? easternEpochMs(scheduledDate, WORKDAY_START_HOUR) - opts.nowMs >
         CANCEL_FULL_REFUND_DAYS * MS_PER_DAY
       : daysUntilVisit > CANCEL_FULL_REFUND_DAYS;
 

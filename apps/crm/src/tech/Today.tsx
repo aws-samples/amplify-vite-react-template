@@ -138,7 +138,6 @@ export default function TechToday() {
                 subtitle={
                   <>
                     {j.serviceType}
-                    {j.timeWindow ? ` · ${j.timeWindow}` : ""}
                     {addr ? (
                       <>
                         {" · "}

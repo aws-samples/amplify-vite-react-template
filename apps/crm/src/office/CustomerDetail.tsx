@@ -59,7 +59,7 @@ import LeadPanel from "../components/LeadPanel";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import VisitCancelSheet from "../components/VisitCancelSheet";
 import DocButton from "../components/DocButton";
-import { DateField, TimeWindowField } from "../components/DateTimeFields";
+import { DateField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
 import { Icon } from "../ui/icons";
 import {
@@ -840,7 +840,7 @@ export default function CustomerDetail() {
                   title={j.serviceType}
                   subtitle={
                     <>
-                      {`${j.scheduledDate ? fmtDate(j.scheduledDate, true) : "unscheduled"}${j.timeWindow ? ` · ${j.timeWindow}` : ""}${j.priceCents ? ` · ${money(j.priceCents)}` : ""}`}
+                      {`${j.scheduledDate ? fmtDate(j.scheduledDate, true) : "unscheduled"}${j.priceCents ? ` · ${money(j.priceCents)}` : ""}`}
                       {j.status === "COMPLETED" ? (
                         <span className="nested-line">
                           {report?.pdfKey ? (
@@ -1820,7 +1820,6 @@ export default function CustomerDetail() {
                 serviceCode: v.serviceCode,
                 priceCents: v.priceCents ?? undefined,
                 scheduledDate: v.scheduledDate || undefined,
-                timeWindow: v.timeWindow || undefined,
                 accessInstructions: v.packet.accessInstructions.trim() || undefined,
                 hazardNotes: v.packet.hazardNotes.trim() || undefined,
                 prepInstructions: v.packet.prepInstructions.trim() || undefined,
@@ -2478,7 +2477,6 @@ function RescheduleForm({
   onDone: () => Promise<void>;
 }) {
   const [date, setDate] = useState(job.scheduledDate ?? "");
-  const [timeWindow, setTimeWindow] = useState(job.timeWindow ?? "");
   const [reasonCode, setReasonCode] = useState<string>(
     VISIT_RESCHEDULE_REASONS[0]
   );
@@ -2507,9 +2505,6 @@ function RescheduleForm({
       </ul>
       <Field label="Date">
         <DateField value={date} onChange={setDate} allowClear />
-      </Field>
-      <Field label="Time window">
-        <TimeWindowField value={timeWindow} onChange={setTimeWindow} />
       </Field>
       {dateChanged && job.routeId ? (
         <p className="muted small">
@@ -2543,7 +2538,6 @@ function RescheduleForm({
           rescheduleVisit({
             jobId: job.id,
             scheduledDate: date || undefined,
-            timeWindow: timeWindow.trim() || undefined,
             reasonCode,
             note: note.trim() || undefined,
           })
@@ -2848,7 +2842,6 @@ function JobForm({
     serviceCode: string;
     priceCents: number | null;
     scheduledDate: string;
-    timeWindow: string;
     servicePlanId: string;
     packet: PacketValues;
   }) => Promise<void>;
@@ -2860,7 +2853,6 @@ function JobForm({
   const [otherText, setOtherText] = useState("");
   const [price, setPrice] = useState("");
   const [scheduledDate, setScheduledDate] = useState("");
-  const [timeWindow, setTimeWindow] = useState("");
   const [planId, setPlanId] = useState("");
   const [packet, setPacket] = useState<PacketValues>(emptyPacket);
   const [busy, setBusy] = useState(false);
@@ -2920,9 +2912,6 @@ function JobForm({
       <Field label="Date" hint="Leave empty to schedule later">
         <DateField value={scheduledDate} onChange={setScheduledDate} allowClear />
       </Field>
-      <Field label="Time window">
-        <TimeWindowField value={timeWindow} onChange={setTimeWindow} />
-      </Field>
       <PacketFields value={packet} onChange={setPacket} />
       <ErrorNote error={error} />
       <Button
@@ -2948,7 +2937,6 @@ function JobForm({
             serviceCode,
             priceCents: planId ? null : cents,
             scheduledDate,
-            timeWindow: timeWindow.trim(),
             servicePlanId: planId,
             packet,
           }).catch((err) => {
@@ -3272,7 +3260,6 @@ function CallbacksSection({
   const [rows, setRows] = useState<CallbackRow[] | null>(null);
   const [scheduling, setScheduling] = useState<CallbackRow | null>(null);
   const [date, setDate] = useState("");
-  const [window, setWindow] = useState("8-12");
   const [technicianId, setTechnicianId] = useState("");
   const [techs, setTechs] = useState<{ id: string; displayName?: string | null }[]>([]);
   const [laterOk, setLaterOk] = useState(false);
@@ -3337,7 +3324,6 @@ function CallbacksSection({
             scheduleCallback: (a: {
               callbackRequestId: string;
               scheduledDate: string;
-              timeWindow?: string;
               technicianId: string;
               customerRequestedLater?: boolean;
             }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
@@ -3345,7 +3331,6 @@ function CallbacksSection({
         ).scheduleCallback({
           callbackRequestId: scheduling.id,
           scheduledDate: date,
-          timeWindow: window,
           technicianId,
           customerRequestedLater: laterOk || undefined,
         })
@@ -3419,16 +3404,6 @@ function CallbacksSection({
             </p>
             <Field label="Date">
               <DateField value={date} onChange={setDate} />
-            </Field>
-            <Field label="Arrival window">
-              <SegControl
-                value={window}
-                onChange={setWindow}
-                options={[
-                  { value: "8-12", label: "Morning (8–12)" },
-                  { value: "12-5", label: "Afternoon (12–5)" },
-                ]}
-              />
             </Field>
             <Field
               label="Technician"

@@ -18,7 +18,6 @@ import {
   clearFunnelState,
   serviceOption,
   validateQuoteForm,
-  windowLabel,
   FUNNEL_STORAGE_KEY,
   type QuoteFormFields,
   type StorageLike,
@@ -61,8 +60,8 @@ const pricedQuote: PricedQuote = {
     initialFeeCents: 9900,
   },
   days: [
-    { date: "2026-07-21", windows: ["MORNING", "AFTERNOON"], priceCents: 24900 },
-    { date: "2026-07-22", windows: ["AFTERNOON"], priceCents: 22900 },
+    { date: "2026-07-21", priceCents: 24900 },
+    { date: "2026-07-22", priceCents: 22900 },
   ],
   expiresAt: "2026-07-17T12:00:00.000Z",
   terms: { version: "2026-07-16", text: "The terms." },
@@ -269,10 +268,6 @@ describe("formatDay", () => {
 });
 
 describe("labels", () => {
-  it("windowLabel humanizes the two windows", () => {
-    expect(windowLabel("MORNING")).toBe("Morning");
-    expect(windowLabel("AFTERNOON")).toBe("Afternoon");
-  });
   it("humanizeServiceEnum prefers catalog labels, falls back to lowercased words", () => {
     expect(humanizeServiceEnum("WASP_NEST")).toBe("Wasp / hornet nest removal");
     expect(humanizeServiceEnum("SOMETHING_NEW")).toBe("something new");
@@ -322,7 +317,7 @@ describe("funnel state codec", () => {
   it("round-trips a quote with a selection", () => {
     const state = {
       quote: pricedQuote,
-      selection: { date: "2026-07-21", window: "MORNING" as const, recurring: true },
+      selection: { date: "2026-07-21", recurring: true },
     };
     expect(decodeFunnelState(encodeFunnelState(state))).toEqual(state);
   });
@@ -330,7 +325,7 @@ describe("funnel state codec", () => {
   it("keeps the planOnly flag through a round trip (community quotes)", () => {
     const state = {
       quote: { ...pricedQuote, planOnly: true },
-      selection: { date: "2026-07-21", window: "MORNING" as const, recurring: true },
+      selection: { date: "2026-07-21", recurring: true },
     };
     expect(decodeFunnelState(encodeFunnelState(state))).toEqual(state);
   });
@@ -345,7 +340,7 @@ describe("funnel state codec", () => {
   it("drops an invalid selection but keeps the valid quote", () => {
     const raw = JSON.stringify({
       quote: pricedQuote,
-      selection: { date: "2026-07-21", window: "EVENING", recurring: true },
+      selection: { date: "2026-07-21", recurring: "yes" },
     });
     expect(decodeFunnelState(raw)).toEqual({ quote: pricedQuote });
   });
@@ -383,22 +378,22 @@ describe("funnel state codec", () => {
 describe("amountDueCents", () => {
   it("one-time pays the selected day's price", () => {
     expect(
-      amountDueCents(pricedQuote, { date: "2026-07-22", window: "AFTERNOON", recurring: false })
+      amountDueCents(pricedQuote, { date: "2026-07-22", recurring: false })
     ).toBe(22900);
   });
   it("recurring pays the plan's initial fee", () => {
     expect(
-      amountDueCents(pricedQuote, { date: "2026-07-21", window: "MORNING", recurring: true })
+      amountDueCents(pricedQuote, { date: "2026-07-21", recurring: true })
     ).toBe(9900);
   });
   it("null when the day is gone or no plan was offered", () => {
     expect(
-      amountDueCents(pricedQuote, { date: "2026-08-01", window: "MORNING", recurring: false })
+      amountDueCents(pricedQuote, { date: "2026-08-01", recurring: false })
     ).toBeNull();
     expect(
       amountDueCents(
         { ...pricedQuote, recurringOffer: null },
-        { date: "2026-07-21", window: "MORNING", recurring: true }
+        { date: "2026-07-21", recurring: true }
       )
     ).toBeNull();
   });
@@ -445,16 +440,15 @@ describe("off-season (date-less) funnel selections", () => {
     },
   };
 
-  it("round-trips a null date/window selection for an off-season quote", () => {
+  it("round-trips a null date selection for an off-season quote", () => {
     const storage = fakeStorage();
     saveFunnelState(storage, {
       quote: offSeasonQuote,
-      selection: { date: null, window: null, recurring: true },
+      selection: { date: null, recurring: true },
     });
     const loaded = loadFunnelState(storage);
     expect(loaded?.selection).toEqual({
       date: null,
-      window: null,
       recurring: true,
     });
   });
@@ -463,7 +457,7 @@ describe("off-season (date-less) funnel selections", () => {
     const storage = fakeStorage();
     saveFunnelState(storage, {
       quote: pricedQuote,
-      selection: { date: null, window: null, recurring: true },
+      selection: { date: null, recurring: true },
     });
     // The quote survives; the impossible selection is treated as absent.
     const loaded = loadFunnelState(storage);
@@ -475,7 +469,6 @@ describe("off-season (date-less) funnel selections", () => {
     expect(
       amountDueCents(offSeasonQuote, {
         date: null,
-        window: null,
         recurring: true,
       })
     ).toBe(11900);

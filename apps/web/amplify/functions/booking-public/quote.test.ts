@@ -1149,22 +1149,19 @@ describe("the only surviving CONTACT outcomes", () => {
   });
 
   it("a fully-booked month falls to the callback path", async () => {
-    // GL-04: "fully booked" means every technician-window LEDGER holds its
-    // minutes — fill t1's slots for every weekday in the sellable window.
+    // GL-04: "fully booked" means every technician-DAY LEDGER holds its 540
+    // minutes — fill t1's slot for every day in the sellable window.
     // From i = 0 (not 1): after ~8pm Eastern the UTC day is already
     // tomorrow's date, so starting at 1 left the first sellable Eastern day
     // uncovered and the test flaked PRICED between 00:00 and 04:00 UTC.
     for (let i = 0; i <= 41; i++) {
       const d = new Date(Date.now() + i * 86_400_000).toISOString().slice(0, 10);
-      for (const w of ["MORNING", "AFTERNOON"] as const) {
-        capacityFixture.maps.capacityDays.set(`${d}#${w}#t1`, {
-          id: `${d}#${w}#t1`,
-          date: d,
-          window: w,
-          technicianId: "t1",
-          committedMinutes: w === "MORNING" ? 240 : 300,
-        });
-      }
+      capacityFixture.maps.capacityDays.set(`${d}#t1`, {
+        id: `${d}#t1`,
+        date: d,
+        technicianId: "t1",
+        committedMinutes: 540,
+      });
     }
 
     const res = await postQuote(rodentInput);
@@ -1630,15 +1627,12 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
     // off-season while the season is running.
     for (let i = 0; i <= 41; i++) {
       const d = new Date(Date.now() + i * 86_400_000).toISOString().slice(0, 10);
-      for (const w of ["MORNING", "AFTERNOON"] as const) {
-        capacityFixture.maps.capacityDays.set(`${d}#${w}#t1`, {
-          id: `${d}#${w}#t1`,
-          date: d,
-          window: w,
-          technicianId: "t1",
-          committedMinutes: w === "MORNING" ? 240 : 300,
-        });
-      }
+      capacityFixture.maps.capacityDays.set(`${d}#t1`, {
+        id: `${d}#t1`,
+        date: d,
+        technicianId: "t1",
+        committedMinutes: 540,
+      });
     }
 
     const res = await postQuote({

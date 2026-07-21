@@ -171,7 +171,6 @@ const freezeEastern = (isoDate: string) =>
 // Quoted 2026-07-15; booking attempted 2026-07-16 for Wednesday 2026-07-22.
 const QUOTED_DAY = {
   date: "2026-07-22",
-  windows: ["MORNING", "AFTERNOON"],
   priceCents: 31300, // deliberately NOT what a live repricing would produce
   factors: [],
 };
@@ -182,19 +181,16 @@ const gpcStop = (n: number): Stop => ({
   status: "SCHEDULED",
 });
 
-/** GL-04: "full" now means the technician-window LEDGERS hold the minutes —
- *  slot rows, not a stop count. `headroom` leaves that many minutes free. */
+/** GL-04: "full" now means the technician-DAY LEDGER holds the minutes —
+ *  one slot row per tech-day (540 min), not a stop count. `headroom` leaves
+ *  that many minutes free. */
 const fillSlots = (date: string, headroom = 0) => {
-  for (const w of ["MORNING", "AFTERNOON"] as const) {
-    const max = w === "MORNING" ? 240 : 300;
-    capacityFixture.maps.capacityDays.set(`${date}#${w}#t1`, {
-      id: `${date}#${w}#t1`,
-      date,
-      window: w,
-      technicianId: "t1",
-      committedMinutes: max - headroom,
-    });
-  }
+  capacityFixture.maps.capacityDays.set(`${date}#t1`, {
+    id: `${date}#t1`,
+    date,
+    technicianId: "t1",
+    committedMinutes: 540 - headroom,
+  });
 };
 
 beforeEach(() => {
@@ -270,7 +266,6 @@ beforeEach(() => {
     stripeCustomerId: null,
     stripePaymentIntentId: null,
     selectedDate: null,
-    selectedWindow: null,
   };
   bookingRows.set("b1", booking);
 });
@@ -281,7 +276,6 @@ const bookIt = (overrides: Record<string, unknown> = {}) =>
   postBook({
     bookingId: "b1",
     date: "2026-07-22",
-    window: "MORNING",
     tcAccepted: true,
     tcVersion: BOOKING_TERMS_VERSION,
     ...overrides,
@@ -320,7 +314,6 @@ describe("invoice-me — HOA/commercial book card-less on net terms", () => {
     expect(arg.invoice?.dueDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     // The selection + amount were persisted through the fenced write.
     expect(booking.selectedDate).toBe("2026-07-22");
-    expect(booking.selectedWindow).toBe("MORNING");
     expect(booking.amountCents).toBe(31300);
     // No card intent reference was written.
     expect(booking.stripePaymentIntentId ?? null).toBeNull();
@@ -340,7 +333,6 @@ describe("booking re-checks live availability (R29)", () => {
     // The fenced write landed the facts on the durable row.
     expect(booking).toMatchObject({
       selectedDate: "2026-07-22",
-      selectedWindow: "MORNING",
       stripePaymentIntentId: "pi_new",
     });
   });
@@ -603,7 +595,6 @@ describe("GL-17 — off-season enrollment checks out date-less, paid TODAY", () 
     // The fenced write landed the enrollment facts on the durable row
     // (nulls REMOVE the attribute, exactly like the deployed CAS write).
     expect(booking.selectedDate ?? null).toBeNull();
-    expect(booking.selectedWindow ?? null).toBeNull();
     expect(booking).toMatchObject({
       recurring: true,
       amountCents: 11900,
@@ -877,7 +868,6 @@ describe("GL-17 corrective — the STANDARD path shares the payable-reuse allowl
   it("a canceled same-slot same-amount intent is not handed back — a fresh one replaces it", async () => {
     booking.stripePaymentIntentId = "pi_dead";
     booking.selectedDate = "2026-07-22";
-    booking.selectedWindow = "MORNING";
     existingIntent = {
       id: "pi_dead",
       amount: 31300,
@@ -959,7 +949,6 @@ describe("GL-17 corrective 3 — lifecycle-fenced checkout on EVERY /book branch
   it("STANDARD reuse persistence failure: no secret leaves", async () => {
     booking.stripePaymentIntentId = "pi_live";
     booking.selectedDate = "2026-07-22";
-    booking.selectedWindow = "MORNING";
     existingIntent = {
       id: "pi_live",
       amount: 31300,
@@ -979,7 +968,6 @@ describe("GL-17 corrective 3 — lifecycle-fenced checkout on EVERY /book branch
     // Mismatched selection forces replacement; the provider won't confirm
     // the cancel and the re-read still shows it live.
     booking.selectedDate = "2026-07-20";
-    booking.selectedWindow = "AFTERNOON";
     existingIntent = {
       id: "pi_stuck",
       amount: 31300,
@@ -1010,11 +998,11 @@ describe("GL-17 corrective 3 — lifecycle-fenced checkout on EVERY /book branch
       };
     });
 
-    const first = bookIt(); // MORNING
+    const first = bookIt(); // the winning attempt
     await flush(); // parked inside the provider create, lease held
     expect(intentCreate).toHaveBeenCalledTimes(1);
 
-    const second = await bookIt({ window: "AFTERNOON" }); // racing selection
+    const second = await bookIt(); // racing duplicate attempt
     expect(second.status).toBe(409);
     expect(String(second.body.error)).toContain("already being prepared");
 
@@ -1023,7 +1011,7 @@ describe("GL-17 corrective 3 — lifecycle-fenced checkout on EVERY /book branch
 
     expect(winner.status).toBe(200);
     // Exactly ONE selection mutation, ONE claim, ONE chargeable intent.
-    expect(booking.selectedWindow).toBe("MORNING");
+    expect(booking.selectedDate).toBe("2026-07-22");
     expect(booking.stripePaymentIntentId).toBe("pi_new");
     expect(intentCreate).toHaveBeenCalledTimes(1);
     expect(capacityFixture.maps.capacityClaims.size).toBe(1);

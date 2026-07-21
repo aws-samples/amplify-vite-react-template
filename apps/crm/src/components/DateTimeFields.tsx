@@ -64,36 +64,3 @@ export function DateField({
     </div>
   );
 }
-
-const TIME_WINDOWS = ["8–10 AM", "10–12 PM", "12–2 PM", "2–4 PM", "4–6 PM"];
-
-export function TimeWindowField({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (window: string) => void;
-}) {
-  const isPreset = TIME_WINDOWS.includes(value);
-  return (
-    <div className="datefield">
-      <div className="chip-row">
-        {TIME_WINDOWS.map((w) => (
-          <button
-            key={w}
-            type="button"
-            className={`chip ${value === w ? "chip-on" : ""}`}
-            onClick={() => onChange(value === w ? "" : w)}
-          >
-            {w}
-          </button>
-        ))}
-      </div>
-      <input
-        placeholder="Custom window (e.g. 9–11 AM)"
-        value={isPreset ? "" : value}
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </div>
-  );
-}

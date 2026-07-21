@@ -140,7 +140,7 @@ export default function PortalHome() {
                 <ListRow
                   key={j.id}
                   title={j.serviceType}
-                  subtitle={[nameFor(j), j.timeWindow].filter(Boolean).join(" · ") || undefined}
+                  subtitle={nameFor(j) || undefined}
                   meta={<strong>{fmtDate(j.scheduledDate)}</strong>}
                 />
               ))

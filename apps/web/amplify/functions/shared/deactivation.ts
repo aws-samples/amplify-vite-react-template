@@ -776,7 +776,6 @@ async function sweepRemainingFutureJobs(
               technicianId: null,
               // Stamps end WITH the hold: the release below reads the
               // pre-update row, so a resumed sweep cannot release twice.
-              capacityWindow: null,
               capacityMinutes: null,
               capacityTechnicianId: null,
               notes: job.notes ? `${job.notes}\n${note}` : note,
@@ -785,7 +784,7 @@ async function sweepRemainingFutureJobs(
           );
           if (published.ok) {
             out.canceled++;
-            // GL-04: a swept visit's technician-window (or pool) minutes go
+            // GL-04: a swept visit's technician-day (or pool) minutes go
             // back — a deactivation must not strand sold capacity.
             await releaseJobCapacity(job);
             // GL-17: a swept seasonal visit gives its month back too.

@@ -120,7 +120,6 @@ beforeEach(() => {
       recurringOffer: null,
     }),
     selectedDate: "2026-07-22",
-    selectedWindow: "MORNING",
     recurring: false,
     amountCents: 31300,
     cancelToken: "tok-1",

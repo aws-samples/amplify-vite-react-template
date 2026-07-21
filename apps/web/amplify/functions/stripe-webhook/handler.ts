@@ -11,12 +11,11 @@ import { recordFunnelPaymentFailure } from "../shared/bookingPaymentFailure";
 import { applyRefundToInvoice } from "../shared/refund";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
-  claimWindowSlot,
+  claimDaySlot,
   extendCapacityClaim,
   releaseCapacityClaim,
   consumeCapacityClaim,
   PROCESSING_CLAIM_MS,
-  type CapacityWindow,
 } from "../shared/capacity";
 import {
   escapeHtml,
@@ -108,11 +107,10 @@ export const handler = async (
               ?.capacityTechnicianId;
             const minutes = (bk as { capacityMinutes?: number | null } | null)
               ?.capacityMinutes;
-            if (bk?.selectedDate && bk.selectedWindow && tech && minutes != null) {
-              await claimWindowSlot({
+            if (bk?.selectedDate && tech && minutes != null) {
+              await claimDaySlot({
                 claimKey: bk.id,
                 date: bk.selectedDate,
-                window: bk.selectedWindow as CapacityWindow,
                 technicianId: tech,
                 minutes,
                 holdMs: PROCESSING_CLAIM_MS,

@@ -3,18 +3,15 @@ import { casGuardedAdd, casGuardedUpdate , type LockCondition } from "./atomicLo
 import { onsiteMinutesFor } from "./dispatchReadiness";
 import { driveMinutesBetween, HQ_ADDRESS } from "./driveTime";
 import { licenseFactsFromRecords, licenseRecordsFor } from "./licenses";
-import { windowStartHour } from "./cancellationPolicy";
 
 /**
- * GL-04 — the ONE capacity rule: PER-TECHNICIAN, PER-WINDOW minute
- * feasibility, shared by the funnel calendar, checkout, dispatch, and office
- * reschedules.
+ * GL-04 — the ONE capacity rule: PER-TECHNICIAN, PER-DAY minute feasibility,
+ * shared by the funnel calendar, checkout, dispatch, and office reschedules.
  *
- *  - The working day is Monday–Friday, 8:00–5:00 Eastern, split into the two
- *    sold windows: MORNING 8:00–12:00 (240 min) and AFTERNOON 12:00–5:00
- *    (300 min). Each technician-window is its own ledger slot — mornings can
- *    never borrow afternoon minutes, and one technician's free time never
- *    hides another's overload.
+ *  - The working day is Monday–Friday, 8:00–5:00 Eastern (540 min). We
+ *    schedule for the DAY, not a time-of-day window: each technician-day is
+ *    its own ledger slot, and one technician's free time never hides
+ *    another's overload.
  *  - A visit consumes its locked on-site minutes (residential 30;
  *    commercial/community 60) plus REAL Google Routes travel legs measured
  *    from the technician's private base (or that day's reasoned
@@ -23,14 +20,14 @@ import { windowStartHour } from "./cancellationPolicy";
  *    Routes cannot produce makes the slot infeasible (fail closed).
  *  - Weekends, company closures, per-day PTO, inactive status, and licence
  *    problems (including unreadable records — fail closed) remove the
- *    technician's slots entirely; zero eligible technicians sells zero.
- *  - Committed minutes live on ONE CapacityDay row per slot, maintained by
- *    ATOMIC guarded adds: taking minutes succeeds only while the fit
- *    condition (≤ the window's minutes) holds in the same write, so two
+ *    technician's slot entirely; zero eligible technicians sells zero.
+ *  - Committed minutes live on ONE CapacityDay row per technician-day,
+ *    maintained by ATOMIC guarded adds: taking minutes succeeds only while
+ *    the fit condition (≤ the day's minutes) holds in the same write, so two
  *    concurrent purchases or office moves can never both take a slot's last
  *    minutes. Missing models or CAS wiring REFUSE (fail closed) — never
  *    permissive success.
- *  - A checkout attempt claims a SPECIFIC technician-window slot BEFORE the
+ *  - A checkout attempt claims a SPECIFIC technician-day slot BEFORE the
  *    payment attempt (CapacityClaim carries the slot and the address so
  *    later routing sees the stop); success consumes it into the booked job
  *    (the job carries the stamped minutes), an accepted pending bank debit
@@ -39,14 +36,9 @@ import { windowStartHour } from "./cancellationPolicy";
  *    can't be verified sells nothing until they can.
  */
 
-export type CapacityWindow = "MORNING" | "AFTERNOON";
-export const WINDOWS: readonly CapacityWindow[] = ["MORNING", "AFTERNOON"];
-
-/** MORNING 8:00–12:00; AFTERNOON 12:00–17:00 (Eastern). */
-export const WINDOW_MINUTES: Record<CapacityWindow, number> = {
-  MORNING: 240,
-  AFTERNOON: 300,
-};
+/** The working day is 8:00–5:00 Eastern — 540 sellable minutes per
+ *  technician (travel + on-site). */
+export const DAY_MINUTES = 540;
 
 /** How long a card checkout may hold a claim before the sweep releases it. */
 export const CHECKOUT_CLAIM_MS = 45 * 60_000;
@@ -60,7 +52,7 @@ export const PROCESSING_CLAIM_MS = 7 * 24 * 60 * 60_000;
 export const POOL_TECH = "POOL";
 
 /** GL-07: one route is one technician-day of at most this many ASSIGNED
- *  stops — the coarse day ceiling alongside the per-window minutes ledger. */
+ *  stops — the coarse day ceiling alongside the per-day minutes ledger. */
 export const STOPS_PER_TECH = 8;
 
 /** GL-07: the id of a technician-day row on the DEDICATED TechDayStops
@@ -75,22 +67,8 @@ export function isWeekday(date: string): boolean {
   return dow >= 1 && dow <= 5;
 }
 
-/** Which sold window a visit's time-window string belongs to. */
-export function windowOfTimeWindow(
-  timeWindow: string | null | undefined
-): CapacityWindow {
-  const normalized = (timeWindow ?? "").trim().toUpperCase();
-  if (normalized.startsWith("MORNING")) return "MORNING";
-  if (normalized.startsWith("AFTERNOON")) return "AFTERNOON";
-  return windowStartHour(timeWindow) < 12 ? "MORNING" : "AFTERNOON";
-}
-
-export function slotId(
-  date: string,
-  window: CapacityWindow,
-  technicianId: string
-): string {
-  return `${date}#${window}#${technicianId}`;
+export function slotId(date: string, technicianId: string): string {
+  return `${date}#${technicianId}`;
 }
 
 /** The locked on-site duration for a visit (residential 30; commercial and
@@ -338,7 +316,6 @@ export async function techBaseFor(
 
 export type SlotState = {
   technicianId: string;
-  window: CapacityWindow;
   committedMinutes: number;
   verified: boolean;
 };
@@ -357,10 +334,9 @@ export async function slotStates(
       { limit: 200, nextToken: token }
     );
     for (const row of page.data ?? []) {
-      if (!row.window || !row.technicianId) continue;
+      if (!row.technicianId) continue;
       out.set(row.id, {
         technicianId: row.technicianId,
-        window: row.window as CapacityWindow,
         committedMinutes: row.committedMinutes ?? 0,
         verified: row.verified !== false,
       });
@@ -374,7 +350,6 @@ export async function slotStates(
 export async function liveClaimsOn(date: string): Promise<
   {
     id: string;
-    window: CapacityWindow;
     technicianId: string;
     minutes: number;
     address: string | null;
@@ -385,7 +360,6 @@ export async function liveClaimsOn(date: string): Promise<
   const nowIso = new Date().toISOString();
   const out: {
     id: string;
-    window: CapacityWindow;
     technicianId: string;
     minutes: number;
     address: string | null;
@@ -400,7 +374,6 @@ export async function liveClaimsOn(date: string): Promise<
       if (String(claim.expiresAt) <= nowIso) continue;
       out.push({
         id: claim.id,
-        window: (claim.window as CapacityWindow) ?? "MORNING",
         technicianId: claim.technicianId ?? POOL_TECH,
         minutes: claim.minutes ?? 0,
         address: claim.address ?? null,
@@ -413,15 +386,13 @@ export async function liveClaimsOn(date: string): Promise<
 
 async function ensureSlot(
   date: string,
-  window: CapacityWindow,
   technicianId: string
 ): Promise<void> {
   const client = await dataClient();
   if (!("CapacityDay" in client.models)) return;
   await client.models.CapacityDay.create({
-    id: slotId(date, window, technicianId),
+    id: slotId(date, technicianId),
     date,
-    window,
     technicianId,
     committedMinutes: 0,
     verified: true,
@@ -433,21 +404,20 @@ async function ensureSlot(
 // ---------------------------------------------------------------------------
 
 /**
- * Atomically take `minutes` on one technician-window slot: ONE guarded add
- * conditioned on the result fitting the window. Exactly one of two
- * concurrent takers of the last minutes wins. Missing models or CAS wiring
- * REFUSE — an unverifiable ledger schedules nothing.
+ * Atomically take `minutes` on one technician-day slot: ONE guarded add
+ * conditioned on the result fitting the day. Exactly one of two concurrent
+ * takers of the last minutes wins. Missing models or CAS wiring REFUSE — an
+ * unverifiable ledger schedules nothing.
  */
 export async function reserveSlot(
   date: string,
-  window: CapacityWindow,
   technicianId: string,
   minutes: number,
   opts?: {
     /** GL-07: reserve this many ASSIGNED stops on the technician's DAY in
-     *  the same claim (0 for checkout holds and window shifts). Each
-     *  ceiling is one guarded conditional write; a minutes refusal after a
-     *  won stop compensates the stop, so a failed claim never leaks. */
+     *  the same claim (0 for checkout holds). Each ceiling is one guarded
+     *  conditional write; a minutes refusal after a won stop compensates the
+     *  stop, so a failed claim never leaks. */
     stops?: number;
   }
 ): Promise<ClaimOutcome> {
@@ -480,8 +450,8 @@ export async function reserveSlot(
       };
     }
   }
-  await ensureSlot(date, window, technicianId);
-  const id = slotId(date, window, technicianId);
+  await ensureSlot(date, technicianId);
+  const id = slotId(date, technicianId);
   const res = await casGuardedAdd(
     "CapacityDay",
     id,
@@ -490,7 +460,7 @@ export async function reserveSlot(
       {
         kind: "fieldAtMostOrMissing",
         field: "committedMinutes",
-        value: WINDOW_MINUTES[window] - minutes,
+        value: DAY_MINUTES - minutes,
       },
     ]
   );
@@ -509,7 +479,7 @@ export async function reserveSlot(
   return {
     ok: false,
     soldOut: true,
-    message: `That ${window.toLowerCase()} is now fully booked — pick another window or day.`,
+    message: `That day is now fully booked — pick another day.`,
   };
 }
 
@@ -566,7 +536,6 @@ async function ensureDayStopRow(
  *  safe direction — the nightly rebuild reclaims them from ground truth). */
 export async function releaseSlot(
   date: string,
-  window: CapacityWindow,
   technicianId: string,
   minutes: number,
   opts?: { stops?: number }
@@ -575,7 +544,7 @@ export async function releaseSlot(
   if (!("CapacityDay" in client.models)) return;
   await casGuardedAdd(
     "CapacityDay",
-    slotId(date, window, technicianId),
+    slotId(date, technicianId),
     { committedMinutes: -minutes },
     [{ kind: "fieldAtLeast", field: "committedMinutes", value: minutes }]
   );
@@ -597,14 +566,13 @@ export async function releaseSlot(
  *  through the real assign claim. */
 export async function notePoolMinutes(
   date: string,
-  window: CapacityWindow,
   minutes: number
 ): Promise<void> {
   if (!(await capacityModelsReady())) return;
-  await ensureSlot(date, window, POOL_TECH);
+  await ensureSlot(date, POOL_TECH);
   await casGuardedAdd(
     "CapacityDay",
-    slotId(date, window, POOL_TECH),
+    slotId(date, POOL_TECH),
     { committedMinutes: minutes },
     []
   );
@@ -612,20 +580,18 @@ export async function notePoolMinutes(
 
 export async function releasePoolMinutes(
   date: string,
-  window: CapacityWindow,
   minutes: number
 ): Promise<void> {
-  await releaseSlot(date, window, POOL_TECH, minutes);
+  await releaseSlot(date, POOL_TECH, minutes);
 }
 
 // ---------------------------------------------------------------------------
 // Checkout claims — atomic, slot-bound, durable
 // ---------------------------------------------------------------------------
 
-export async function claimWindowSlot(input: {
+export async function claimDaySlot(input: {
   claimKey: string;
   date: string;
-  window: CapacityWindow;
   technicianId: string;
   minutes: number;
   address?: string | null;
@@ -640,7 +606,6 @@ export async function claimWindowSlot(input: {
   const { data: created } = await client.models.CapacityClaim.create({
     id: input.claimKey,
     date: input.date,
-    window: input.window,
     technicianId: input.technicianId,
     address: input.address ?? undefined,
     minutes: input.minutes,
@@ -654,7 +619,6 @@ export async function claimWindowSlot(input: {
     if (existing && String(existing.expiresAt) > new Date().toISOString()) {
       const sameSlot =
         existing.date === input.date &&
-        existing.window === input.window &&
         existing.technicianId === input.technicianId &&
         (existing.minutes ?? 0) === input.minutes;
       if (sameSlot) {
@@ -672,7 +636,6 @@ export async function claimWindowSlot(input: {
       // nightly rebuild release.
       const takenNew = await reserveSlot(
         input.date,
-        input.window,
         input.technicianId,
         input.minutes
       );
@@ -680,7 +643,6 @@ export async function claimWindowSlot(input: {
       const { data: moved } = await client.models.CapacityClaim.update({
         id: input.claimKey,
         date: input.date,
-        window: input.window,
         technicianId: input.technicianId,
         minutes: input.minutes,
         address: input.address ?? undefined,
@@ -690,7 +652,6 @@ export async function claimWindowSlot(input: {
       if (!moved) {
         await releaseSlot(
           input.date,
-          input.window,
           input.technicianId,
           input.minutes
         ).catch(() => undefined);
@@ -702,7 +663,6 @@ export async function claimWindowSlot(input: {
       }
       await releaseSlot(
         String(existing.date),
-        (existing.window as CapacityWindow) ?? "MORNING",
         existing.technicianId ?? POOL_TECH,
         existing.minutes ?? 0
       ).catch(() => undefined);
@@ -712,7 +672,6 @@ export async function claimWindowSlot(input: {
     const { data: retried } = await client.models.CapacityClaim.create({
       id: input.claimKey,
       date: input.date,
-      window: input.window,
       technicianId: input.technicianId,
       address: input.address ?? undefined,
       minutes: input.minutes,
@@ -731,7 +690,6 @@ export async function claimWindowSlot(input: {
   // fit deletes the row — the claim never lies about holding capacity.
   const taken = await reserveSlot(
     input.date,
-    input.window,
     input.technicianId,
     input.minutes
   );
@@ -775,7 +733,6 @@ export async function releaseCapacityClaim(claimKey: string): Promise<void> {
   if (!deleted) return; // someone else released/consumed it first
   await releaseSlot(
     String(claim.date),
-    (claim.window as CapacityWindow) ?? "MORNING",
     claim.technicianId ?? POOL_TECH,
     claim.minutes ?? 0
   );
@@ -796,7 +753,6 @@ export function jobScheduleGuards(job: {
   scheduledDate?: string | null;
   status?: string | null;
   technicianId?: string | null;
-  capacityWindow?: string | null;
   capacityMinutes?: number | null;
   capacityTechnicianId?: string | null;
 }): LockCondition[] {
@@ -811,7 +767,6 @@ export function jobScheduleGuards(job: {
     pin("scheduledDate", job.scheduledDate ?? null),
     pin("status", job.status ?? null),
     pin("technicianId", job.technicianId ?? null),
-    pin("capacityWindow", job.capacityWindow ?? null),
     pin("capacityMinutes", job.capacityMinutes ?? null),
     pin(
       "capacityTechnicianId",
@@ -828,21 +783,18 @@ export function jobScheduleGuards(job: {
  *  re-drive finds nothing left to give back. */
 export function jobCapacityFacts(job: {
   scheduledDate?: string | null;
-  capacityWindow?: string | null;
   capacityMinutes?: number | null;
   technicianId?: string | null;
   capacityTechnicianId?: string | null;
 }): {
   date: string;
-  window: CapacityWindow;
   minutes: number;
   technicianId: string | null;
 } | null {
   if (!job.scheduledDate) return null;
-  if (job.capacityMinutes == null || !job.capacityWindow) return null;
+  if (job.capacityMinutes == null) return null;
   return {
     date: job.scheduledDate,
-    window: job.capacityWindow as CapacityWindow,
     minutes: job.capacityMinutes,
     technicianId: job.technicianId ?? job.capacityTechnicianId ?? null,
   };
@@ -854,7 +806,6 @@ export function jobCapacityFacts(job: {
  *  twice. */
 export async function releaseJobCapacity(job: {
   scheduledDate?: string | null;
-  capacityWindow?: string | null;
   capacityMinutes?: number | null;
   technicianId?: string | null;
   capacityTechnicianId?: string | null;
@@ -864,7 +815,6 @@ export async function releaseJobCapacity(job: {
   if (facts.technicianId && facts.technicianId !== POOL_TECH) {
     await releaseSlot(
       facts.date,
-      facts.window,
       facts.technicianId,
       facts.minutes,
       // GL-07: an ASSIGNED visit (technicianId, not a checkout hold) held
@@ -872,7 +822,7 @@ export async function releaseJobCapacity(job: {
       { stops: job.technicianId && job.technicianId !== POOL_TECH ? 1 : 0 }
     ).catch(() => undefined);
   } else {
-    await releasePoolMinutes(facts.date, facts.window, facts.minutes).catch(
+    await releasePoolMinutes(facts.date, facts.minutes).catch(
       () => undefined
     );
   }
@@ -882,7 +832,6 @@ export async function releaseJobCapacity(job: {
  *  minutes back — the scheduled job carries them from now on. Returns the
  *  claim's slot facts so the job can be stamped with them. */
 export async function consumeCapacityClaim(claimKey: string): Promise<{
-  window: CapacityWindow;
   technicianId: string;
   minutes: number;
 } | null> {
@@ -896,7 +845,6 @@ export async function consumeCapacityClaim(claimKey: string): Promise<{
     () => undefined
   );
   return {
-    window: (claim.window as CapacityWindow) ?? "MORNING",
     technicianId: claim.technicianId ?? POOL_TECH,
     minutes: claim.minutes ?? 0,
   };
@@ -913,32 +861,31 @@ export type SlotFeasibility = {
 };
 
 /**
- * Which technician-window slot (if any) can absorb the candidate stop.
+ * Which technician-day slot (if any) can absorb the candidate stop.
  *
  * Marginal travel is measured with REAL Routes legs, no defaults:
  *  - an EMPTY slot pays base → candidate + candidate → base;
  *  - a slot with stops pays a nearest-stop insertion (2 × the Routes leg
- *    between the candidate and its nearest existing stop in that slot).
+ *    between the candidate and its nearest existing stop that day).
  * A leg Routes cannot produce makes that slot infeasible — fail closed. The
  * caller supplies the leg resolver (a memoized wrapper over Routes) so a
  * calendar of days shares its Routes calls.
  */
 export async function bestSlotFor(opts: {
   date: string;
-  window: CapacityWindow;
   onsite: number;
   eligibility: DayEligibility;
   slots: Map<string, SlotState>;
-  /** slotId → the stop addresses already occupying that tech-window. */
+  /** slotId → the stop addresses already occupying that tech-day. */
   stopsBySlot: Map<string, string[]>;
   /** Routes minutes between two addresses; null = unroutable (fail closed). */
   legMinutes: (from: string, to: string) => Promise<number | null>;
   candidateAddress: string;
 }): Promise<SlotFeasibility | null> {
-  const { date, window, onsite } = opts;
+  const { date, onsite } = opts;
   let best: SlotFeasibility | null = null;
   for (const tech of opts.eligibility.techs) {
-    const id = slotId(date, window, tech.id);
+    const id = slotId(date, tech.id);
     const state = opts.slots.get(id);
     if (state && !state.verified) continue; // fail closed until Routes verifies
     const committed = state?.committedMinutes ?? 0;
@@ -958,7 +905,7 @@ export async function bestSlotFor(opts: {
     }
     if (marginalTravel == null) continue; // no Routes answer → not sellable here
     const claimMinutes = onsite + marginalTravel;
-    if (committed + claimMinutes > WINDOW_MINUTES[window]) continue;
+    if (committed + claimMinutes > DAY_MINUTES) continue;
     if (!best || claimMinutes < best.claimMinutes) {
       best = { technicianId: tech.id, claimMinutes };
     }
@@ -982,8 +929,8 @@ export function makeLegResolver(
   };
 }
 
-/** The stops currently occupying each technician-window slot on a date —
- *  scheduled jobs (by their stamped or parsed window) plus live claims. */
+/** The stops currently occupying each technician-day slot on a date —
+ *  scheduled jobs plus live claims. */
 export async function stopsBySlotOn(
   date: string
 ): Promise<Map<string, string[]>> {
@@ -1009,9 +956,6 @@ export async function stopsBySlotOn(
           .capacityTechnicianId ??
         null;
       if (!stopTechId) continue;
-      const window =
-        (job.capacityWindow as CapacityWindow | null) ??
-        windowOfTimeWindow(job.timeWindow);
       const { data: customer } = await client.models.Customer.get({
         id: job.customerId,
       });
@@ -1025,13 +969,13 @@ export async function stopsBySlotOn(
             .filter(Boolean)
             .join(", ")
         : null;
-      push(slotId(date, window, stopTechId), address);
+      push(slotId(date, stopTechId), address);
     }
     token = page.nextToken;
   } while (token);
   for (const claim of await liveClaimsOn(date)) {
     if (claim.technicianId === POOL_TECH) continue;
-    push(slotId(date, claim.window, claim.technicianId), claim.address);
+    push(slotId(date, claim.technicianId), claim.address);
   }
   return out;
 }
@@ -1105,10 +1049,7 @@ export async function reconcileCapacityDay(
         !pendingAssignment
       )
         continue;
-      const window =
-        (job.capacityWindow as CapacityWindow | null) ??
-        windowOfTimeWindow(job.timeWindow);
-      // A paid funnel booking holds a SPECIFIC technician's window before any
+      // A paid funnel booking holds a SPECIFIC technician's day before any
       // office assignment exists — the rebuild must keep that hold, not
       // reclassify it to the non-blocking pool.
       const techId = pendingAssignment
@@ -1117,7 +1058,7 @@ export async function reconcileCapacityDay(
           (job as { capacityTechnicianId?: string | null })
             .capacityTechnicianId ??
           POOL_TECH);
-      const key = slotId(date, window, techId);
+      const key = slotId(date, techId);
       const { data: customer } = await client.models.Customer.get({
         id: job.customerId,
       });
@@ -1156,7 +1097,7 @@ export async function reconcileCapacityDay(
   const liveClaims = await liveClaimsOn(date);
   const claimMinutesBySlot = new Map<string, number>();
   for (const claim of liveClaims) {
-    const key = slotId(date, claim.window, claim.technicianId);
+    const key = slotId(date, claim.technicianId);
     claimMinutesBySlot.set(
       key,
       (claimMinutesBySlot.get(key) ?? 0) + claim.minutes
@@ -1172,7 +1113,7 @@ export async function reconcileCapacityDay(
   let slots = 0;
   let unverified = 0;
   for (const id of allSlotIds) {
-    const [, window, techId] = id.split("#") as [string, CapacityWindow, string];
+    const [, techId] = id.split("#") as [string, string];
     const stops = (jobsBySlot.get(id) ?? []).sort(
       (a, b) => a.routeOrder - b.routeOrder
     );
@@ -1212,9 +1153,9 @@ export async function reconcileCapacityDay(
       }
     }
     minutes += claimMinutesBySlot.get(id) ?? 0;
-    await ensureSlot(date, window, techId);
+    await ensureSlot(date, techId);
     const sets = {
-      committedMinutes: verified ? minutes : WINDOW_MINUTES[window] ?? 300,
+      committedMinutes: verified ? minutes : DAY_MINUTES,
       verified,
       reconciledAt: new Date().toISOString(),
     };

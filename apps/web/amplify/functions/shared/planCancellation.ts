@@ -169,7 +169,6 @@ async function listQueuedVisits(
           amountPaidCents: paidCents,
           today,
           nowMs: Date.now(),
-          timeWindow: job.timeWindow ?? null,
         });
         visits.push({
           jobId: job.id,

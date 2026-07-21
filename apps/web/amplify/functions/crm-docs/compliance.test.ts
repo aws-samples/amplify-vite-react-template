@@ -427,8 +427,8 @@ describe("regulated assignment", () => {
     });
   });
 
-  it("assigns a funnel-booked visit whose own checkout hold nearly fills the window (GL-07 delta, not a double claim)", async () => {
-    // The staging failure: a funnel booking holds 220 of the morning's 240
+  it("assigns a funnel-booked visit whose own checkout hold nearly fills the day (GL-07 delta, not a double claim)", async () => {
+    // The staging failure: a funnel booking holds 220 of the day's 540
     // minutes on t1 via capacityTechnicianId. Assigning that same visit to
     // t1 used to claim ANOTHER full slot on top of its own hold and refuse
     // as "fully booked" on an empty schedule.
@@ -440,16 +440,13 @@ describe("regulated assignment", () => {
       status: "SCHEDULED",
       propertyClass: "RESIDENTIAL",
       scheduledDate: "2026-07-20",
-      timeWindow: "morning (8am–12pm)",
       capacityTechnicianId: "t1",
-      capacityWindow: "MORNING",
       capacityMinutes: 220,
     };
     routes.push({ id: "r1", technicianId: "t1", date: "2026-07-20" });
-    capacityFixture.maps.capacityDays.set("2026-07-20#MORNING#t1", {
-      id: "2026-07-20#MORNING#t1",
+    capacityFixture.maps.capacityDays.set("2026-07-20#t1", {
+      id: "2026-07-20#t1",
       date: "2026-07-20",
-      window: "MORNING",
       technicianId: "t1",
       committedMinutes: 220,
     });
@@ -478,7 +475,7 @@ describe("regulated assignment", () => {
     // minutes, no drive under the local-dev escape): the hold's surplus is
     // released, nothing double-held.
     expect(
-      capacityFixture.maps.capacityDays.get("2026-07-20#MORNING#t1")
+      capacityFixture.maps.capacityDays.get("2026-07-20#t1")
         ?.committedMinutes
     ).toBe(30);
     // A checkout hold never held a stop — the first assignment claims it.

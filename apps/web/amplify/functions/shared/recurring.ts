@@ -196,7 +196,6 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       scheduledDate: dueDate, // target date — office confirms the slot
       // GL-04: pool facts stamped at birth — the canonical release path
       // gives exactly these minutes back exactly once on cancel/sweep.
-      capacityWindow: "MORNING",
       capacityMinutes: onsiteMinutes(null),
       notes: `Auto-queued ${plan.serviceFrequency.toLowerCase()} visit after job ${job.id}.`,
       accessGroups: customerAccessGroups(
@@ -230,7 +229,7 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     // target day (system-created — never refused, never blocking a real
     // slot; it becomes a commitment only through the assign claim, and the
     // nightly rebuild keeps this honest).
-    await notePoolMinutes(dueDate, "MORNING", onsiteMinutes(null)).catch(
+    await notePoolMinutes(dueDate, onsiteMinutes(null)).catch(
       () => undefined
     );
     console.log(

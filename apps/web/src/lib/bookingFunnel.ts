@@ -11,7 +11,6 @@ import type {
   RecurringFrequency,
   RecurringOffer,
   ServiceCode,
-  WindowCode,
 } from "./bookingApi";
 import { funnelCatalog } from "../../amplify/functions/shared/serviceCatalog";
 
@@ -118,12 +117,6 @@ export const FREQUENCY_LABELS: Record<RecurringFrequency, string> = {
 export function money(cents: number): string {
   const d = cents / 100;
   return Number.isInteger(d) ? `$${d}` : `$${d.toFixed(2)}`;
-}
-
-export function windowLabel(window: string): string {
-  if (window === "MORNING") return "Morning";
-  if (window === "AFTERNOON") return "Afternoon";
-  return window;
 }
 
 /**
@@ -263,15 +256,14 @@ export function isQuoteExpired(expiresAt: string, now: number = Date.now()): boo
 
 // ── sessionStorage codec ────────────────────────────────────────────
 //
-// The PRICED quote plus the visitor's day/window/plan selection survive a
-// refresh (and the Stripe redirect round-trip) via sessionStorage. The codec
-// is defensive: anything that doesn't decode back to the expected shape is
+// The PRICED quote plus the visitor's day/plan selection survive a refresh
+// (and the Stripe redirect round-trip) via sessionStorage. The codec is
+// defensive: anything that doesn't decode back to the expected shape is
 // treated as absent, never thrown.
 
 export type FunnelSelection = {
-  /** Both null on a GL-17 off-season enrollment (no day board existed). */
+  /** null on a GL-17 off-season enrollment (no day board existed). */
   date: string | null;
-  window: WindowCode | null;
   recurring: boolean;
 };
 
@@ -314,11 +306,7 @@ export function decodeFunnelState(raw: string | null): FunnelState | null {
       const dateOk =
         typeof sel.date === "string" ||
         (sel.date === null && q.offSeason === true);
-      const windowOk =
-        sel.window === "MORNING" ||
-        sel.window === "AFTERNOON" ||
-        (sel.window === null && q.offSeason === true);
-      if (!dateOk || !windowOk || typeof sel.recurring !== "boolean") {
+      if (!dateOk || typeof sel.recurring !== "boolean") {
         return { quote: q };
       }
     }

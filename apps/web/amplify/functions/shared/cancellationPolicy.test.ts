@@ -3,7 +3,6 @@ import {
   addDays,
   computeVisitCancellationPolicy,
   easternEpochMs,
-  windowStartHour,
 } from "./cancellationPolicy";
 
 /**
@@ -98,7 +97,6 @@ describe("GL-07 R6 — the hour-exact 72-hour rule", () => {
       amountPaidCents: 15000,
       today: "2026-08-07",
       nowMs: eightAmEt - 30 * 60_000, // 7:30 AM on the 7th — 72.5h out
-      timeWindow: "8-10am",
     });
     expect(p.withinFreeWindow).toBe(true);
     expect(p.refundableCents).toBe(15000);
@@ -110,33 +108,11 @@ describe("GL-07 R6 — the hour-exact 72-hour rule", () => {
       amountPaidCents: 15000,
       today: "2026-08-07",
       nowMs: eightAmEt + 5 * 60_000, // 8:05 AM on the 7th — inside 72h
-      timeWindow: "8-10am",
     });
     expect(p.withinFreeWindow).toBe(false);
     expect(p.refundableCents).toBe(0);
     expect(p.explanation).toMatch(/72 hours/);
     expect(p.explanation).toMatch(/no override and no account credit/i);
-  });
-
-  it("uses the time window's start hour — an afternoon visit extends the free window", () => {
-    const onePmEt = Date.parse("2026-08-07T13:00:00-04:00");
-    const p = computeVisitCancellationPolicy({
-      scheduledDate: visit,
-      amountPaidCents: 15000,
-      today: "2026-08-07",
-      nowMs: onePmEt - 10 * 60_000, // 12:50 PM on the 7th — >72h before a 1 PM start
-      timeWindow: "1-3pm",
-    });
-    expect(p.withinFreeWindow).toBe(true);
-  });
-
-  it("windowStartHour parses common window formats and defaults to the 8 AM open", () => {
-    expect(windowStartHour("8-10am")).toBe(8);
-    expect(windowStartHour("10am-12pm")).toBe(10);
-    expect(windowStartHour("1-3pm")).toBe(13);
-    expect(windowStartHour("1:30 PM")).toBe(13);
-    expect(windowStartHour(null)).toBe(8);
-    expect(windowStartHour("afternoon")).toBe(8);
   });
 
   it("without a judging instant the legacy whole-day comparison still applies", () => {
@@ -158,7 +134,6 @@ describe("GL-07 R6 — the hour-exact 72-hour rule", () => {
       amountPaidCents: 15000,
       today: "2026-07-17",
       nowMs: Date.parse(iso),
-      timeWindow: "8-10am",
     });
     expect(
       computeVisitCancellationPolicy(at("2026-07-17T07:00:00-04:00")).withinFreeWindow

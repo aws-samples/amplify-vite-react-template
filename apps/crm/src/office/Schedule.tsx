@@ -467,7 +467,7 @@ export default function Schedule() {
                           <ListRow
                             key={j.id}
                             title={`${i + 1}. ${customerName(j)}`}
-                            subtitle={`${j.serviceType}${j.timeWindow ? ` · ${j.timeWindow}` : ""}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
+                            subtitle={`${j.serviceType}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
                             meta={
                               <>
                                 <StatusBadge status={j.status} />
@@ -595,21 +595,17 @@ function AvailabilityPanel({
   date: string;
   techs: Technician[];
 }) {
-  type WindowFacts = {
-    window: string;
+  // We schedule for the DAY: one 540-minute bucket per technician.
+  type DayFacts = {
+    eligibleTechs: number;
     technicians: {
       technicianId: string;
       technicianName: string;
       committedMinutes: number;
-      windowMinutes: number;
+      dayMinutes: number;
       verified: boolean;
     }[];
     poolMinutes: number;
-    sellable: boolean;
-  };
-  type DayFacts = {
-    eligibleTechs: number;
-    windows: WindowFacts[];
     liveCheckoutClaims: number;
     sellable: boolean;
     reasons: string[];
@@ -707,6 +703,10 @@ function AvailabilityPanel({
   const pto = exceptions.filter((e) => e.kind === "PTO");
   const readableDate = prettyWeekday(date);
 
+  // Scheduling is day-level: one 540-minute working day per technician.
+  const dayTechs = facts?.technicians ?? [];
+  const dayPoolMinutes = facts?.poolMinutes ?? 0;
+
   return (
     <>
       <Card
@@ -738,49 +738,32 @@ function AvailabilityPanel({
               </div>
             </div>
 
-            <div className="availability-window-grid">
-              {facts.windows.map((w) => {
-                const morning = w.window === "MORNING";
-                return (
-                  <section className="availability-window" key={w.window}>
-                    <header>
+            <div className="availability-day-capacity">
+              {dayTechs.length === 0 ? (
+                <p className="availability-empty">No eligible technician.</p>
+              ) : (
+                <div className="availability-tech-list">
+                  {dayTechs.map((t) => (
+                    <div className="availability-tech" key={t.technicianId}>
                       <div>
-                        <strong>{morning ? "Morning" : "Afternoon"}</strong>
-                        <span>{morning ? "8 AM–12 PM" : "12–5 PM"}</span>
+                        <strong>{t.technicianName}</strong>
+                        <span>
+                          {t.committedMinutes} of {t.dayMinutes} minutes scheduled
+                        </span>
                       </div>
-                      <Badge tone={w.sellable ? "ok" : "warn"}>
-                        {w.sellable ? "Available" : "Unavailable"}
-                      </Badge>
-                    </header>
+                      {!t.verified ? (
+                        <Badge tone="warn">Not verified</Badge>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
 
-                    {w.technicians.length === 0 ? (
-                      <p className="availability-empty">No eligible technician.</p>
-                    ) : (
-                      <div className="availability-tech-list">
-                        {w.technicians.map((t) => (
-                          <div className="availability-tech" key={t.technicianId}>
-                            <div>
-                              <strong>{t.technicianName}</strong>
-                              <span>
-                                {t.committedMinutes} of {t.windowMinutes} minutes scheduled
-                              </span>
-                            </div>
-                            {!t.verified ? (
-                              <Badge tone="warn">Not verified</Badge>
-                            ) : null}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {w.poolMinutes ? (
-                      <p className="availability-pool">
-                        {w.poolMinutes} minutes still awaiting technician assignment
-                      </p>
-                    ) : null}
-                  </section>
-                );
-              })}
+              {dayPoolMinutes ? (
+                <p className="availability-pool">
+                  {dayPoolMinutes} minutes still awaiting technician assignment
+                </p>
+              ) : null}
             </div>
 
             {facts.reasons.length ? (

@@ -381,7 +381,6 @@ beforeEach(() => {
       recurringOffer: null,
     }),
     selectedDate: "2026-07-22",
-    selectedWindow: "MORNING",
     recurring: false,
     amountCents: 31300,
     cancelToken: "tok-1",
@@ -1315,7 +1314,7 @@ describe("GL-05 — finalization is idempotent and resumable under failure", () 
 });
 
 describe("GL-04: a payment landing after the slot hold expired never books a visit that holds nothing", () => {
-  const slotKey = "2026-07-22#MORNING#t1";
+  const slotKey = "2026-07-22#t1";
   beforeEach(() => {
     _setLockStoreForTests(
       memoryLockStore({
@@ -1341,7 +1340,6 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
     capacityFixture.maps.capacityDays.set(slotKey, {
       id: slotKey,
       date: "2026-07-22",
-      window: "MORNING",
       technicianId: "t1",
       committedMinutes: 0,
     });
@@ -1352,7 +1350,6 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
     ).toBe(60);
     const job = [...store.Job.values()][0];
     expect(job).toMatchObject({
-      capacityWindow: "MORNING",
       capacityMinutes: 60,
       capacityTechnicianId: "t1",
     });
@@ -1362,18 +1359,16 @@ describe("GL-04: a payment landing after the slot hold expired never books a vis
     capacityFixture.maps.capacityDays.set(slotKey, {
       id: slotKey,
       date: "2026-07-22",
-      window: "MORNING",
       technicianId: "t1",
-      committedMinutes: 240, // full — someone else bought the window
+      committedMinutes: 540, // full — someone else bought the day
     });
     await finalize();
     expect(booking.status).toBe("BOOKED"); // the money is real either way
     // The sold-out slot was NOT force-oversold.
     expect(
       capacityFixture.maps.capacityDays.get(slotKey)!.committedMinutes
-    ).toBe(240);
+    ).toBe(540);
     const job = [...store.Job.values()][0];
-    expect(job).toMatchObject({ capacityWindow: "MORNING" });
     expect(job.capacityTechnicianId ?? null).toBeNull(); // pool, not a lie
     expect(
       workOpened.some(
@@ -1605,7 +1600,6 @@ describe("GL-17 — a date-less off-season enrollment finalizes with an April ob
       offSeason: true,
     });
     booking.selectedDate = null;
-    booking.selectedWindow = null;
     booking.recurring = true;
     booking.amountCents = 11900;
   };

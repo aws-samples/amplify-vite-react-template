@@ -26,12 +26,10 @@ import {
   computeVisitCancellationPolicy,
   easternEpochMs,
 } from "../shared/cancellationPolicy";
-import { windowLabelFor } from "../shared/bookingWindows";
 import {
-  claimWindowSlot,
+  claimDaySlot,
   jobScheduleGuards,
   releaseJobCapacity,
-  type CapacityWindow,
 } from "../shared/capacity";
 import { casGuardedUpdate } from "../shared/atomicLock";
 import { finalizeBooking } from "../shared/bookingFinalize";
@@ -495,9 +493,8 @@ function pricedResponse(booking: StoredQuoteBooking) {
     // never invented here.
     offSeason: stored.offSeason || undefined,
     offSeasonMessage: stored.offSeason ? OFF_SEASON_MESSAGE : undefined,
-    days: (stored.days ?? []).map(({ date, windows, priceCents }) => ({
+    days: (stored.days ?? []).map(({ date, priceCents }) => ({
       date,
-      windows,
       priceCents,
     })),
     expiresAt: booking.expiresAt,
@@ -518,7 +515,7 @@ function pricedResponse(booking: StoredQuoteBooking) {
  * GL-05 — the truthful post-payment state, read (never assumed) by the funnel.
  * Authenticated like quoteStatus: bookingId + the cancel token. Pure read.
  * States:
- *   BOOKED     — the complete commitment exists (date/window/amount returned
+ *   BOOKED     — the complete commitment exists (date/amount returned
  *                for the durable confirmation card).
  *   FINALIZING — payment reported succeeded/processing; the server has not yet
  *                confirmed the complete commitment.
@@ -545,7 +542,6 @@ async function bookingStatus(body: Record<string, unknown>) {
       bookingId,
       state: "BOOKED" as const,
       selectedDate: booking.selectedDate ?? null,
-      selectedWindow: booking.selectedWindow ?? null,
       amountCents: booking.amountCents ?? null,
       email: booking.email ?? null,
       recurring: Boolean(booking.recurring),
@@ -564,7 +560,6 @@ async function bookingStatus(body: Record<string, unknown>) {
         ? ("PROCESSING_SCHEDULED" as const)
         : ("PROCESSING" as const),
       selectedDate: booking.selectedDate ?? null,
-      selectedWindow: booking.selectedWindow ?? null,
       amountCents: booking.amountCents ?? null,
       methodLabel:
         (booking as { processingMethodLabel?: string | null })
@@ -643,7 +638,6 @@ async function quoteStatus(
       bookingId: booking.id,
       decision: "PROCESSING" as const,
       selectedDate: booking.selectedDate ?? null,
-      selectedWindow: booking.selectedWindow ?? null,
       amountCents: booking.amountCents ?? null,
       message: booking.jobId
         ? `Your payment is still processing and your visit${booking.selectedDate ? ` on ${booking.selectedDate}` : ""} is scheduled — please don't pay again. We'll email you the moment it clears.`
@@ -655,7 +649,6 @@ async function quoteStatus(
       bookingId: booking.id,
       decision: "BOOKED" as const,
       selectedDate: booking.selectedDate ?? null,
-      selectedWindow: booking.selectedWindow ?? null,
       message:
         "This booking is paid and confirmed — the details are in your confirmation email.",
     };
@@ -1656,9 +1649,8 @@ async function quote(
     // truthful explanation — checkout is the plan itself, date-less.
     offSeason: offSeason || undefined,
     offSeasonMessage: offSeason ? OFF_SEASON_MESSAGE : undefined,
-    days: days.map(({ date, windows, priceCents }) => ({
+    days: days.map(({ date, priceCents }) => ({
       date,
-      windows,
       priceCents,
     })),
     expiresAt,
@@ -1926,7 +1918,6 @@ async function offSeasonEnrollmentAttempt(opts: {
         sets: {
           status: "QUOTED",
           selectedDate: null,
-          selectedWindow: null,
           capacityTechnicianId: null,
           capacityMinutes: null,
           recurring: true,
@@ -2057,7 +2048,6 @@ async function book(
 ) {
   const bookingId = String(body.bookingId ?? "");
   const date = String(body.date ?? "");
-  const window = String(body.window ?? "");
   if (!body.tcAccepted) {
     throw new HttpError(400, {
       error: "Please accept the terms & cancellation policy to book.",
@@ -2143,11 +2133,11 @@ async function book(
   // booking is always the plan, whatever the client sent.
   const recurring = body.recurring === true || stored.planOnly === true;
   // GL-17: an off-season seasonal enrollment books the PLAN with no first-
-  // visit day — no date, no window, no capacity claim; the first treatment
-  // is scheduled by the office next April (finalize owns that action).
+  // visit day — no date, no capacity claim; the first treatment is scheduled
+  // by the office next April (finalize owns that action).
   const offSeason = stored.offSeason === true;
   const day = offSeason ? null : stored.days?.find((d) => d.date === date);
-  if (!offSeason && (!day || !day.windows.includes(window))) {
+  if (!offSeason && !day) {
     throw new HttpError(409, {
       error: "That day is no longer available — request a fresh quote.",
     });
@@ -2237,18 +2227,15 @@ async function book(
             ? 60
             : 30,
       });
-      const slot = liveDay.find((d) => d.date === date)?.slots?.[
-        window as CapacityWindow
-      ];
+      const slot = liveDay.find((d) => d.date === date)?.slot;
       if (!slot) {
         throw new HttpError(409, {
-          error: "That window just sold out — pick another from a fresh quote.",
+          error: "That day just sold out — pick another from a fresh quote.",
         });
       }
-      const claim = await claimWindowSlot({
+      const claim = await claimDaySlot({
         claimKey: booking.id,
         date,
-        window: window as CapacityWindow,
         technicianId: slot.technicianId,
         minutes: slot.claimMinutes,
         address: addr,
@@ -2257,7 +2244,7 @@ async function book(
       if (!claim.ok) {
         throw new HttpError(409, {
           error: claim.soldOut
-            ? "That window just sold out — pick another from a fresh quote."
+            ? "That day just sold out — pick another from a fresh quote."
             : claim.message,
         });
       }
@@ -2274,7 +2261,6 @@ async function book(
       sets: {
         status: "QUOTED",
         selectedDate: offSeason ? null : date,
-        selectedWindow: offSeason ? null : window,
         capacityTechnicianId: claimedSlot?.technicianId ?? null,
         capacityMinutes: claimedSlot?.claimMinutes ?? null,
         recurring,
@@ -2313,12 +2299,7 @@ async function book(
       booked: true as const,
       amountCents,
       statusToken: booking.cancelToken ?? undefined,
-      summary: summaryFor(
-        stored,
-        offSeason ? "" : date,
-        offSeason ? "" : window,
-        recurring
-      ),
+      summary: summaryFor(stored, offSeason ? "" : date, recurring),
     };
   }
 
@@ -2378,7 +2359,7 @@ async function book(
         ? 60
         : 30,
   });
-  if (!liveDay.some((d) => d.date === date && d.windows.includes(window))) {
+  if (!liveDay.some((d) => d.date === date)) {
     // A stale open intent must not stay chargeable for a day we just said no to.
     if (existing) {
       try {
@@ -2400,15 +2381,14 @@ async function book(
       PAYABLE_REUSE_STATUSES.has(existing.status) &&
       existing.amount === amountCents &&
       booking.selectedDate === date &&
-      booking.selectedWindow === window &&
       existing.client_secret
     ) {
       // GL-04: the cached intent is returned ONLY with a live hold behind
-      // it. claimWindowSlot extends a live same-slot claim and re-reserves
+      // it. claimDaySlot extends a live same-slot claim and re-reserves
       // after an expiry sweep; a slot that meanwhile sold out refuses the
       // retry instead of handing back a chargeable secret that holds nothing.
       const liveDayQuote0 = liveDay.find((d) => d.date === date);
-      const slot0 = liveDayQuote0?.slots?.[window as CapacityWindow];
+      const slot0 = liveDayQuote0?.slot;
       if (!slot0) {
         try {
           await s.paymentIntents.cancel(existing.id);
@@ -2416,13 +2396,12 @@ async function book(
           /* already canceled/expired — fine */
         }
         throw new HttpError(409, {
-          error: "That window just sold out — pick another from a fresh quote.",
+          error: "That day just sold out — pick another from a fresh quote.",
         });
       }
-      const reclaimed = await claimWindowSlot({
+      const reclaimed = await claimDaySlot({
         claimKey: booking.id,
         date,
-        window: window as CapacityWindow,
         technicianId: slot0.technicianId,
         minutes: slot0.claimMinutes,
         holdReason: `checkout for ${booking.email}`,
@@ -2435,7 +2414,7 @@ async function book(
         }
         throw new HttpError(409, {
           error: reclaimed.soldOut
-            ? "That window just sold out — pick another from a fresh quote."
+            ? "That day just sold out — pick another from a fresh quote."
             : reclaimed.message,
         });
       }
@@ -2455,7 +2434,6 @@ async function book(
           capacityTechnicianId: slot0.technicianId,
           capacityMinutes: slot0.claimMinutes,
           selectedDate: date,
-          selectedWindow: window,
           recurring,
           amountCents,
           // GL-06: a retried attempt (after a pre-service failure) re-arms
@@ -2483,7 +2461,7 @@ async function book(
         clientSecret: existing.client_secret,
         amountCents,
         statusToken: booking.cancelToken ?? undefined,
-        summary: summaryFor(stored, date, window, recurring),
+        summary: summaryFor(stored, date, recurring),
       };
     }
     // GL-17: PROVE the prior intent terminal before any replacement can
@@ -2509,7 +2487,7 @@ async function book(
   // it, and failure/abandonment releases it (the sweep owns crashed
   // checkouts).
   const liveDayQuote = liveDay.find((d) => d.date === date);
-  const slot = liveDayQuote?.slots?.[window as CapacityWindow];
+  const slot = liveDayQuote?.slot;
   if (!slot) {
     if (existing) {
       try {
@@ -2519,7 +2497,7 @@ async function book(
       }
     }
     throw new HttpError(409, {
-      error: "That window just sold out — pick another from a fresh quote.",
+      error: "That day just sold out — pick another from a fresh quote.",
     });
   }
   const candidateAddress = [
@@ -2530,10 +2508,9 @@ async function book(
   ]
     .filter(Boolean)
     .join(", ");
-  const capacityClaim = await claimWindowSlot({
+  const capacityClaim = await claimDaySlot({
     claimKey: booking.id,
     date,
-    window: window as CapacityWindow,
     technicianId: slot.technicianId,
     minutes: slot.claimMinutes,
     address: candidateAddress,
@@ -2549,7 +2526,7 @@ async function book(
     }
     throw new HttpError(409, {
       error: capacityClaim.soldOut
-        ? "That window just sold out — pick another from a fresh quote."
+        ? "That day just sold out — pick another from a fresh quote."
         : capacityClaim.message,
     });
   }
@@ -2576,7 +2553,7 @@ async function book(
     bookingId: booking.id,
     customerId,
     amountCents,
-    description: `${stored.serviceLabel ?? "BuzzKill service"} — ${date} (${window.toLowerCase()})`,
+    description: `${stored.serviceLabel ?? "BuzzKill service"} — ${date}`,
     generation: booking.stripePaymentIntentId ?? "first",
   });
 
@@ -2595,7 +2572,6 @@ async function book(
       // any prior PAYMENT_FAILED so a retried attempt finalizes cleanly.
       status: "QUOTED",
       selectedDate: date,
-      selectedWindow: window,
       // GL-04: the checkout claim's slot facts survive the claim row — if
       // the hold expires before the payment lands, finalize re-reserves
       // from THESE instead of booking a visit that holds nothing.
@@ -2642,7 +2618,7 @@ async function book(
     clientSecret: intent.client_secret,
     amountCents,
     statusToken: booking.cancelToken ?? undefined,
-    summary: summaryFor(stored, date, window, recurring),
+    summary: summaryFor(stored, date, recurring),
   };
   }
 }
@@ -2653,10 +2629,9 @@ function summaryFor(
     recurringOffer?: { frequency: string; monthlyCents: number } | null;
   },
   date: string,
-  window: string,
   recurring: boolean
 ): string {
-  return `${stored.serviceLabel ?? "Service visit"} — ${date}, ${window.toLowerCase()}${
+  return `${stored.serviceLabel ?? "Service visit"} — ${date}${
     recurring && stored.recurringOffer
       ? ` · then ${money(stored.recurringOffer.monthlyCents)}/mo ${stored.recurringOffer.frequency.toLowerCase()} plan`
       : ""
@@ -2712,9 +2687,6 @@ async function cancel(body: Record<string, unknown>) {
     amountPaidCents: booking.amountCents ?? 0,
     today: todayEt,
     nowMs: safeJudgedMs,
-    // Map the raw window enum to the SAME label the job carries, so the start
-    // hour (and thus the 72-hour boundary) matches the office and plan paths.
-    timeWindow: windowLabelFor(booking.selectedWindow),
   });
   const refundable = policy.withinFreeWindow;
 
@@ -2723,7 +2695,6 @@ async function cancel(body: Record<string, unknown>) {
       booking: {
         service: booking.service,
         date: booking.selectedDate,
-        window: booking.selectedWindow,
         amountCents: booking.amountCents,
       },
       refund: refundable
@@ -2972,7 +2943,6 @@ async function cancel(body: Record<string, unknown>) {
           routeId: null,
           routeOrder: null,
           technicianId: null,
-          capacityWindow: null,
           capacityMinutes: null,
           capacityTechnicianId: null,
         },

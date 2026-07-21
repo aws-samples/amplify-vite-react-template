@@ -506,7 +506,6 @@ export type VisitChangePreview = {
   customerEmail: string | null;
   serviceType: string;
   scheduledDate: string | null;
-  timeWindow: string | null;
   status: string;
   changeable: boolean;
   alreadyCanceled: boolean;
@@ -628,7 +627,6 @@ export function cancelVisit(input: {
 export function rescheduleVisit(input: {
   jobId: string;
   scheduledDate?: string;
-  timeWindow?: string;
   technicianId?: string;
   routeId?: string;
   routeOrder?: number;

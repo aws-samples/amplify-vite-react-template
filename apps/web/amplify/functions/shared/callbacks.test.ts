@@ -89,27 +89,25 @@ vi.mock("./capacity", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   onsiteMinutes: (pc: string | null | undefined) =>
     pc === "RESIDENTIAL" ? 30 : 60,
-  windowOfTimeWindow: (tw: string | null) =>
-    tw === "12-5" ? "AFTERNOON" : "MORNING",
   techBaseFor: async () => techBase,
   reserveSlot: async (
     date: string,
-    window: string,
     technicianId: string,
-    minutes: number
+    minutes: number,
+    opts?: { stops?: number }
   ) => {
     if (slotSoldOut)
-      return { ok: false, soldOut: true, message: "That morning is now fully booked — pick another window or day." };
-    reserved.push({ date, window, technicianId, minutes });
+      return { ok: false, soldOut: true, message: "That day is now fully booked — pick another day." };
+    reserved.push({ date, technicianId, minutes, stops: opts?.stops ?? 0 });
     return { ok: true };
   },
   releaseSlot: async (
     date: string,
-    window: string,
     technicianId: string,
-    minutes: number
+    minutes: number,
+    opts?: { stops?: number }
   ) => {
-    released.push({ date, window, technicianId, minutes });
+    released.push({ date, technicianId, minutes, stops: opts?.stops ?? 0 });
   },
 }));
 
@@ -341,22 +339,21 @@ describe("scheduling — $0 by construction, inside the promise", () => {
     expect(ok.callbackJobId).toBe("cbjob-cb-j1");
   });
 
-  it("the visit consumes REAL capacity: onsite + round-trip drive reserved on the technician's window", async () => {
+  it("the visit consumes REAL capacity: onsite + round-trip drive reserved on the technician's day", async () => {
     await request();
     await scheduleCallback({
       callbackRequestId: "cb-j1",
       scheduledDate: "2026-07-22",
-      timeWindow: "12-5",
       technicianId: "t1",
     });
 
-    // RESIDENTIAL 30 onsite + 15 drive * 2 = 60 minutes on the AFTERNOON slot.
+    // RESIDENTIAL 30 onsite + 15 drive * 2 = 60 minutes on the technician-day
+    // slot, as an assigned stop (stops: 1).
     expect(reserved).toEqual([
-      { date: "2026-07-22", window: "AFTERNOON", technicianId: "t1", minutes: 60 },
+      { date: "2026-07-22", technicianId: "t1", minutes: 60, stops: 1 },
     ]);
     const job = jobs.get("cbjob-cb-j1")!;
     expect(job.technicianId).toBe("t1");
-    expect(job.capacityWindow).toBe("AFTERNOON");
     expect(job.capacityMinutes).toBe(60);
   });
 

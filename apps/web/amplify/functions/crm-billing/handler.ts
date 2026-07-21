@@ -62,7 +62,6 @@ type Args = {
   // GL-07 visit cancel/reschedule.
   decision?: string;
   scheduledDate?: string;
-  timeWindow?: string;
   technicianId?: string;
   routeId?: string;
   routeOrder?: number;
@@ -265,7 +264,6 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return rescheduleVisit({
         jobId: event.arguments.jobId!,
         scheduledDate: event.arguments.scheduledDate ?? null,
-        timeWindow: event.arguments.timeWindow ?? null,
         technicianId: event.arguments.technicianId ?? null,
         routeId: event.arguments.routeId ?? null,
         routeOrder: event.arguments.routeOrder ?? null,

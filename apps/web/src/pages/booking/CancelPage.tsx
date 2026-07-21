@@ -11,7 +11,6 @@ import {
   formatDay,
   humanizeServiceEnum,
   money,
-  windowLabel,
 } from "../../lib/bookingFunnel";
 
 /** The number customers should call when self-service can't help. */
@@ -194,12 +193,6 @@ export default function CancelPage() {
                     <span className="bk-summary-key">Day</span>
                     <span className="bk-summary-val">
                       {formatDay(phase.preview.booking.date)}
-                    </span>
-                  </li>
-                  <li>
-                    <span className="bk-summary-key">Arrival window</span>
-                    <span className="bk-summary-val">
-                      {windowLabel(phase.preview.booking.window)}
                     </span>
                   </li>
                   <li>

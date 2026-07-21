@@ -1101,7 +1101,6 @@ async function reportPlansWithoutNextVisit() {
 type DatedJob = {
   customerId: string;
   serviceType: string;
-  timeWindow?: string | null;
   status: string | null;
   id: string;
   routeId?: string | null;
@@ -1214,13 +1213,13 @@ async function reportUnstaffedJobs(
       names.set(job.customerId, customer?.displayName ?? job.customerId);
     }
     rows.push(
-      `<li><strong>${names.get(job.customerId)}</strong> — ${job.serviceType}${job.timeWindow ? `, ${job.timeWindow}` : ""}: ${why}</li>`
+      `<li><strong>${names.get(job.customerId)}</strong> — ${job.serviceType}: ${why}</li>`
     );
     await openOwnedWork({
       kind: "UNSTAFFED_VISIT",
       dedupeKey: job.id,
       title: `Staff tomorrow's visit: ${names.get(job.customerId)}`,
-      detail: `${job.serviceType}${job.timeWindow ? ` (${job.timeWindow})` : ""} is scheduled for ${date}, but ${why}. The customer reminder was suppressed.`,
+      detail: `${job.serviceType} is scheduled for ${date}, but ${why}. The customer reminder was suppressed.`,
       customerId: job.customerId,
       relatedId: job.id,
       sourceUrl: "/schedule",
@@ -1302,10 +1301,7 @@ async function remind(date: string, phrasing: string, staffingGate: boolean) {
     }
 
     const visitLines = customerJobs
-      .map(
-        (j) =>
-          `<li><strong>${j.serviceType}</strong>${j.timeWindow ? ` — ${j.timeWindow}` : ""}</li>`
-      )
+      .map((j) => `<li><strong>${j.serviceType}</strong></li>`)
       .join("");
     const ok = await sendEmail({
       to: customer.email,

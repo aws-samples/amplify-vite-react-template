@@ -250,7 +250,7 @@ export default function TechJob() {
           <dt>Contact</dt>
           <dd>{customer.contactName?.trim() || customer.displayName}</dd>
           <dt>Date</dt>
-          <dd>{fmtDate(job.scheduledDate, true)}{job.timeWindow ? ` · ${job.timeWindow}` : ""}</dd>
+          <dd>{fmtDate(job.scheduledDate, true)}</dd>
           <dt>Address</dt>
           <dd>
             {address ? (

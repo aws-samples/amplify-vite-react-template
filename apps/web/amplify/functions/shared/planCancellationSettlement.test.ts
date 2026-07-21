@@ -124,7 +124,6 @@ vi.mock("./capacity", () => ({
   // capacity/visitChange suites; this harness tests settlement truth.
   jobScheduleGuards: () => [],
   onsiteMinutes: () => 30,
-  windowOfTimeWindow: () => "MORNING",
 }));
 
 const { cancelPlanBilling } = await import("./subscription");

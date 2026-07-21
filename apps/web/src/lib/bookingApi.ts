@@ -61,7 +61,6 @@ export type ServiceCode =
 
 export type PropertyKind = "RESIDENTIAL" | "COMMUNITY" | "COMMERCIAL";
 export type RecurringFrequency = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
-export type WindowCode = "MORNING" | "AFTERNOON";
 
 export type QuoteRequest = {
   name: string;
@@ -105,7 +104,6 @@ export type QuoteRequest = {
 
 export type QuoteDay = {
   date: string; // YYYY-MM-DD
-  windows: WindowCode[];
   priceCents: number;
 };
 
@@ -185,7 +183,6 @@ export type PaymentStateQuote = {
   decision: "PROCESSING" | "BOOKED" | "PAYMENT_FAILED";
   message: string;
   selectedDate?: string | null;
-  selectedWindow?: string | null;
   amountCents?: number | null;
   reason?: string | null;
 };
@@ -201,7 +198,6 @@ export type BookRequest = {
   bookingId: string;
   /** null on a GL-17 off-season enrollment — no first-visit day exists. */
   date: string | null;
-  window: WindowCode | null;
   recurring: boolean;
   tcAccepted: true;
   /** R17 — the exact terms version rendered above the pay button. */
@@ -239,7 +235,6 @@ export type CancelPreview = {
   booking: {
     service: string; // enum, e.g. "WASP_NEST"
     date: string;
-    window: string;
     amountCents: number;
   };
   refund: { kind: "FULL" | "NONE"; amountCents: number };
@@ -431,7 +426,6 @@ export type BookingStatusResponse = {
     | "PROCESSING"
     | "PROCESSING_SCHEDULED";
   selectedDate?: string | null;
-  selectedWindow?: string | null;
   amountCents?: number | null;
   email?: string | null;
   recurring?: boolean;

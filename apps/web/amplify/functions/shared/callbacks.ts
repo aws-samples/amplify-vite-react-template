@@ -10,7 +10,6 @@ import {
   releaseSlot,
   reserveSlot,
   techBaseFor,
-  windowOfTimeWindow,
 } from "./capacity";
 import {
   assertDispatchFacts,
@@ -220,7 +219,6 @@ export async function requestCallback(
 export async function scheduleCallback(opts: {
   callbackRequestId: string;
   scheduledDate: string;
-  timeWindow?: string | null;
   /** The technician whose real capacity the visit consumes — a callback is
    *  a real slot on a real route, never free-floating schedule text. */
   technicianId: string;
@@ -265,7 +263,7 @@ export async function scheduleCallback(opts: {
   if (!customer) throw new Error("Customer not found");
 
   // GL-10 + GL-04: a callback visit is CAPACITY-SAFE — the same dispatch
-  // facts, routability proof, and ONE atomic technician-window slot claim
+  // facts, routability proof, and ONE atomic technician-day slot claim
   // as every other assignment. $0 changes the price, not the minutes.
   assertDispatchFacts(customer as DispatchCustomer, {
     propertyClass: (original as { propertyClass?: string | null } | null)
@@ -283,14 +281,12 @@ export async function scheduleCallback(opts: {
     base,
     customer as DispatchCustomer
   );
-  const targetWindow = windowOfTimeWindow(opts.timeWindow ?? null);
   const slotMinutes =
     onsiteMinutes(
       (original as { propertyClass?: string | null } | null)?.propertyClass
     ) + (routeProof ? routeProof.driveMinutes * 2 : 0);
   const reserved = await reserveSlot(
     opts.scheduledDate,
-    targetWindow,
     opts.technicianId,
     slotMinutes,
     // GL-07: the $0 callback visit is an assigned stop like any other.
@@ -300,7 +296,6 @@ export async function scheduleCallback(opts: {
   const giveBack = () =>
     releaseSlot(
       opts.scheduledDate,
-      targetWindow,
       opts.technicianId,
       slotMinutes,
       { stops: 1 }
@@ -324,9 +319,7 @@ export async function scheduleCallback(opts: {
         priceCents: null,
         status: "SCHEDULED",
         scheduledDate: opts.scheduledDate,
-        timeWindow: opts.timeWindow ?? undefined,
         technicianId: opts.technicianId,
-        capacityWindow: targetWindow,
         capacityMinutes: slotMinutes,
         ...(routeProof
           ? {
@@ -376,7 +369,7 @@ export async function scheduleCallback(opts: {
       html: emailShell(
         "Your callback is scheduled",
         `<p>Hi ${customer.displayName ?? "there"},</p>
-         <p>Your guarantee callback (reference <strong>${cb.id}</strong>) is scheduled for <strong>${opts.scheduledDate}</strong>${opts.timeWindow ? ` (${opts.timeWindow})` : ""} at no charge.</p>
+         <p>Your guarantee callback (reference <strong>${cb.id}</strong>) is scheduled for <strong>${opts.scheduledDate}</strong> at no charge.</p>
          <p style="color:#666;font-size:13px;">On site, the technician will confirm whether the activity is treatable, unexpected activity covered by your plan's guarantee.</p>`
       ),
     }).catch(() => undefined);

@@ -4,10 +4,9 @@ import {
   dayEligibilityMap,
   makeLegResolver,
   slotStates,
+  slotId,
   stopsBySlotOn,
-  WINDOWS,
-  WINDOW_MINUTES,
-  type CapacityWindow,
+  DAY_MINUTES,
   type SlotFeasibility,
 } from "../shared/capacity";
 import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
@@ -30,11 +29,10 @@ import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
 
 export type DayQuote = {
   date: string;
-  windows: string[];
-  /** GL-04: the feasibility behind each offered window — which technician's
-   *  slot absorbs the stop and for how many minutes (on-site + real Routes
-   *  legs). Checkout claims exactly this. */
-  slots?: Partial<Record<CapacityWindow, SlotFeasibility>>;
+  /** GL-04: the feasibility behind the offered day — which technician's slot
+   *  absorbs the stop and for how many minutes (on-site + real Routes legs).
+   *  Checkout claims exactly this. */
+  slot?: SlotFeasibility;
   priceCents: number;
   factors: string[]; // audit trail persisted with the quote
 };
@@ -143,37 +141,28 @@ export async function buildDayMatrix(opts: {
     const slots = await slotStates(date);
     const stops = await stopsBySlotOn(date);
 
-    // Per-window feasibility: MORNING and AFTERNOON are protected
-    // independently — each window offers only if some technician's slot can
+    // Day feasibility: the day offers only if some technician's slot can
     // absorb this stop's on-site + real marginal Routes legs.
-    const windowSlots: Partial<Record<CapacityWindow, SlotFeasibility>> = {};
-    for (const window of WINDOWS) {
-      const best = await bestSlotFor({
-        date,
-        window,
-        onsite,
-        eligibility,
-        slots,
-        stopsBySlot: stops,
-        legMinutes,
-        candidateAddress,
-      });
-      if (best) windowSlots[window] = best;
-    }
-    const windows = Object.keys(windowSlots);
-    if (windows.length === 0) continue;
+    const slot = await bestSlotFor({
+      date,
+      onsite,
+      eligibility,
+      slots,
+      stopsBySlot: stops,
+      legMinutes,
+      candidateAddress,
+    });
+    if (!slot) continue;
 
     // Pricing modifiers, from the day's real load and proximity.
     let stopCount = 0;
     let committed = 0;
     let capacity = 0;
     for (const t of eligibility.techs) {
-      for (const window of WINDOWS) {
-        capacity += WINDOW_MINUTES[window];
-        const state = slots.get(`${date}#${window}#${t.id}`);
-        committed += state?.committedMinutes ?? 0;
-        stopCount += (stops.get(`${date}#${window}#${t.id}`) ?? []).length;
-      }
+      capacity += DAY_MINUTES;
+      const state = slots.get(slotId(date, t.id));
+      committed += state?.committedMinutes ?? 0;
+      stopCount += (stops.get(slotId(date, t.id)) ?? []).length;
     }
     let nearest: number | null = null;
     for (const list of stops.values()) {
@@ -225,8 +214,7 @@ export async function buildDayMatrix(opts: {
     const priceCents = tidyDollars(floored);
     out.push({
       date,
-      windows,
-      slots: windowSlots,
+      slot,
       priceCents,
       factors,
     });

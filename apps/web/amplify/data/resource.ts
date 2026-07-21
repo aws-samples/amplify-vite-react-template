@@ -595,7 +595,6 @@ export const schema = a.schema({
       driveMinutes: a.integer(),
       quoteJson: a.json(),
       selectedDate: a.date(),
-      selectedWindow: a.string(),
       // GL-17: the single-winner checkout-attempt lease (CAS, backend-only
       // writes). Serializes concurrent /book attempts for one booking; the
       // deterministic provider idempotency keys make even an expiry overlap
@@ -784,7 +783,6 @@ export const schema = a.schema({
        *  and actor — never a system guess. */
       proposedTechnicianId: a.string(),
       proposedRouteId: a.string(),
-      proposedTimeWindow: a.string(),
       actorSub: a.string(),
       actorEmail: a.string(),
       leaseNonce: a.string(),
@@ -1047,10 +1045,8 @@ export const schema = a.schema({
   CapacityDay: a
     .model({
       date: a.date().required(),
-      /** GL-04: one ledger row per technician-WINDOW (id =
-       *  `date#WINDOW#technicianId`) — morning and afternoon are protected
-       *  independently, per technician, never as one day-wide pool. */
-      window: a.string(),
+      /** GL-04: one ledger row per technician-DAY (id = `date#technicianId`).
+       *  We schedule for the day, not a time-of-day window. */
       technicianId: a.string(),
       committedMinutes: a.integer(),
       /** False ⇒ the nightly Routes rebuild could not verify this slot's
@@ -1095,9 +1091,8 @@ export const schema = a.schema({
   CapacityClaim: a
     .model({
       date: a.date().required(),
-      /** GL-04: the claim binds a SPECIFIC technician-window slot, and keeps
-       *  the stop's address so later feasibility routes around it. */
-      window: a.string().required(),
+      /** GL-04: the claim binds a SPECIFIC technician-day slot, and keeps the
+       *  stop's address so later feasibility routes around it. */
       technicianId: a.string().required(),
       address: a.string(),
       minutes: a.integer().required(),
@@ -1509,7 +1504,6 @@ export const schema = a.schema({
       priceCents: a.integer(),
       status: a.ref("JobStatus").required(),
       scheduledDate: a.date(),
-      timeWindow: a.string(),
       routeId: a.id(),
       route: a.belongsTo("Route", "routeId"),
       routeOrder: a.integer(),
@@ -1552,19 +1546,18 @@ export const schema = a.schema({
        *  instead of inferring it from vanished schedule rows. */
       cancelDisposition: a.string(),
       cancelDispositionCents: a.integer(),
-      /** GL-04: the minutes this visit holds on its technician-window slot
+      /** GL-04: the minutes this visit holds on its technician-day slot
        *  (on-site + real Routes legs), stamped when the slot was taken so a
        *  cancel/move releases exactly what was reserved. */
       capacityMinutes: a.integer(),
-      capacityWindow: a.string(),
       // GL-06: set while a bank debit for this visit is still clearing — the
       // visit is REAL and dispatchable, and every surface says "Payment
       // pending" instead of paid or unpaid. Cleared when the debit settles
       // or fails.
       paymentPendingIntentId: a.string(),
-      // GL-04: the technician-window slot the visit's minutes are HELD on,
-      // even before an office assignment exists (a funnel booking reserves a
-      // specific technician's window at checkout). The nightly rebuild and
+      // GL-04: the technician-day slot the visit's minutes are HELD on, even
+      // before an office assignment exists (a funnel booking reserves a
+      // specific technician's day at checkout). The nightly rebuild and
       // every release path key on technicianId ?? capacityTechnicianId, so a
       // paid unassigned visit's hold survives reconciliation.
       capacityTechnicianId: a.string(),
@@ -2782,7 +2775,6 @@ export const schema = a.schema({
       serviceCode: a.string(),
       priceCents: a.integer(),
       scheduledDate: a.date(),
-      timeWindow: a.string(),
       // GL-12 dispatch packet, captured at scheduling time.
       accessInstructions: a.string(),
       hazardNotes: a.string(),
@@ -2831,7 +2823,6 @@ export const schema = a.schema({
       jobId: a.string().required(),
       operation: a.string().required(),
       scheduledDate: a.date(),
-      timeWindow: a.string(),
       technicianId: a.string(),
       routeId: a.string(),
       routeOrder: a.integer(),
@@ -3191,7 +3182,6 @@ export const schema = a.schema({
     .arguments({
       jobId: a.string().required(),
       scheduledDate: a.date(),
-      timeWindow: a.string(),
       technicianId: a.string(),
       routeId: a.string(),
       routeOrder: a.integer(),
@@ -3563,7 +3553,6 @@ export const schema = a.schema({
     .arguments({
       callbackRequestId: a.string().required(),
       scheduledDate: a.date().required(),
-      timeWindow: a.string(),
       technicianId: a.string().required(),
       customerRequestedLater: a.boolean(),
     })

@@ -75,11 +75,9 @@ import {
   releaseSlot,
   reserveSlot,
   slotStates,
+  slotId,
   techBaseFor,
-  windowOfTimeWindow,
-  WINDOWS,
-  WINDOW_MINUTES,
-  type CapacityWindow,
+  DAY_MINUTES,
 } from "../shared/capacity";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
@@ -219,7 +217,6 @@ type Args = {
   serviceType?: string;
   priceCents?: number;
   scheduledDate?: string;
-  timeWindow?: string;
   operation?: string;
   officeReason?: string;
   technicianId?: string;
@@ -457,14 +454,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       const scArgs = event.arguments as unknown as {
         callbackRequestId?: string;
         scheduledDate?: string;
-        timeWindow?: string | null;
         technicianId?: string;
         customerRequestedLater?: boolean | null;
       };
       return scheduleCallback({
         callbackRequestId: String(scArgs.callbackRequestId ?? ""),
         scheduledDate: String(scArgs.scheduledDate ?? ""),
-        timeWindow: scArgs.timeWindow,
         technicianId: String(scArgs.technicianId ?? ""),
         customerRequestedLater: scArgs.customerRequestedLater,
       });
@@ -605,33 +600,28 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         slotStates(date),
         liveClaimsOn(date),
       ]);
-      const windowFacts = WINDOWS.map((window) => {
-        const perTech = eligibility.techs.map((t) => {
-          const state = slots.get(`${date}#${window}#${t.id}`);
-          return {
-            technicianId: t.id,
-            technicianName: t.name,
-            committedMinutes: state?.committedMinutes ?? 0,
-            windowMinutes: WINDOW_MINUTES[window],
-            verified: state?.verified !== false,
-          };
-        });
-        const pool = slots.get(`${date}#${window}#POOL`);
+      // We schedule for the DAY: one 540-minute bucket per technician, no
+      // morning/afternoon split.
+      const technicians = eligibility.techs.map((t) => {
+        const state = slots.get(slotId(date, t.id));
         return {
-          window,
-          technicians: perTech,
-          poolMinutes: pool?.committedMinutes ?? 0,
-          sellable: perTech.some(
-            (t) => t.verified && t.committedMinutes < t.windowMinutes
-          ),
+          technicianId: t.id,
+          technicianName: t.name,
+          committedMinutes: state?.committedMinutes ?? 0,
+          dayMinutes: DAY_MINUTES,
+          verified: state?.verified !== false,
         };
       });
+      const pool = slots.get(slotId(date, POOL_TECH));
       return {
         date,
         eligibleTechs: eligibility.techs.length,
-        windows: windowFacts,
+        technicians,
+        poolMinutes: pool?.committedMinutes ?? 0,
         liveCheckoutClaims: claims.length,
-        sellable: windowFacts.some((w) => w.sellable),
+        sellable: technicians.some(
+          (t) => t.verified && t.committedMinutes < t.dayMinutes
+        ),
         reasons: eligibility.reasons,
       };
     }
@@ -2187,12 +2177,10 @@ async function createOfficeJob(args: Args) {
     priceCents: args.priceCents ?? undefined,
     status: args.scheduledDate ? "SCHEDULED" : "UNSCHEDULED",
     scheduledDate: args.scheduledDate || undefined,
-    timeWindow: args.timeWindow?.trim() || undefined,
     // GL-04: pool facts are STAMPED at birth so the one canonical release
     // path can give exactly these minutes back exactly once.
     ...(args.scheduledDate
       ? {
-          capacityWindow: windowOfTimeWindow(args.timeWindow ?? null),
           capacityMinutes: slotOnsiteMinutes(
             normalizePropertyClass(
               (args as { propertyClass?: string | null }).propertyClass
@@ -2216,11 +2204,10 @@ async function createOfficeJob(args: Args) {
     );
   }
   // GL-04: a dated office-created visit shows on the POOL accounting slot
-  // until its real technician-window claim happens at assignment.
+  // until its real technician-day claim happens at assignment.
   if (args.scheduledDate) {
     await notePoolMinutes(
       args.scheduledDate,
-      windowOfTimeWindow(args.timeWindow ?? null),
       slotOnsiteMinutes(
         normalizePropertyClass(
           (args as { propertyClass?: string | null }).propertyClass
@@ -2573,14 +2560,11 @@ async function updateJobSchedule(
         }).catch(() => undefined);
       }
     };
-    // GL-04: ONE atomic technician-WINDOW slot claim. The minutes are the
+    // GL-04: ONE atomic technician-DAY slot claim. The minutes are the
     // locked on-site duration + the REAL Routes leg from the assigned
     // technician's private base (routeProof is measured from that base) —
     // round trip. No proof ⇒ no claim ⇒ no assignment (fail closed). Two
     // simultaneous assigns cannot both take a slot's last minutes.
-    const targetWindow = windowOfTimeWindow(
-      args.timeWindow ?? job.timeWindow ?? null
-    );
     // proveRoutable THROWS when the key exists but the address won't route,
     // and when no key exists without the explicit dev escape — so a null
     // proof here can only be the ALLOW_UNVERIFIED_ROUTES local-dev path,
@@ -2592,7 +2576,7 @@ async function updateJobSchedule(
     // existing hold on a REAL technician's ledger counts — whether it is a
     // prior ASSIGNMENT (technicianId) or a funnel checkout hold that already
     // sits on this technician's slot (capacityTechnicianId). A funnel-booked
-    // visit whose hold consumed most of the window used to double-claim
+    // visit whose hold consumed most of the day used to double-claim
     // against its own minutes here and refuse as "fully booked" on an empty
     // schedule. Same tech-day claims reserve only the positive minutes
     // delta; only a prior ASSIGNMENT also held a stop, so a first
@@ -2612,11 +2596,7 @@ async function updateJobSchedule(
           priorHeldFacts.technicianId === technician.id &&
           priorHeldFacts.date === args.scheduledDate)
     );
-    const sameSlotExact = Boolean(
-      sameTechDay &&
-        priorHeldFacts &&
-        priorHeldFacts.window === targetWindow
-    );
+    const sameSlotExact = Boolean(sameTechDay && priorHeldFacts);
     const stopDelta = sameTechDay && priorWasAssigned ? 0 : 1;
     const claimMinutes = sameSlotExact
       ? Math.max(0, slotMinutes - priorHeldFacts!.minutes)
@@ -2624,7 +2604,6 @@ async function updateJobSchedule(
     if (claimMinutes > 0 || stopDelta > 0) {
       const reserved = await reserveSlot(
         args.scheduledDate,
-        targetWindow,
         technician.id,
         claimMinutes,
         { stops: stopDelta }
@@ -2647,7 +2626,6 @@ async function updateJobSchedule(
         routeOrder: args.routeOrder ?? 1,
         scheduledDate: args.scheduledDate,
         status: "SCHEDULED",
-        capacityWindow: targetWindow,
         capacityMinutes: slotMinutes,
         // A real assignment supersedes the checkout-time hold — the release
         // below gives that hold back from the pre-update row.
@@ -2667,7 +2645,6 @@ async function updateJobSchedule(
       if (claimMinutes > 0 || stopDelta > 0) {
         await releaseSlot(
           args.scheduledDate,
-          targetWindow,
           technician.id,
           claimMinutes,
           { stops: stopDelta }
@@ -2690,25 +2667,15 @@ async function updateJobSchedule(
     }
     // The prior hold — technician slot, checkout-time funnel hold, or pool
     // note — comes back strictly from the pre-update stamps. A same-slot
-    // reassignment settles only its shrink; a cross-window same-day one
-    // returns the source window's minutes (its stop never moved).
+    // reassignment settles only its shrink; a cross-tech/day one returns the
+    // full prior hold (its stop moved with it).
     if (sameSlotExact) {
       const shrink = priorHeldFacts!.minutes - slotMinutes;
       if (shrink > 0) {
         await releaseSlot(
           args.scheduledDate,
-          targetWindow,
           technician.id,
           shrink
-        ).catch(() => undefined);
-      }
-    } else if (sameTechDay) {
-      if (priorHeldFacts && priorHeldFacts.minutes > 0) {
-        await releaseSlot(
-          priorHeldFacts.date,
-          priorHeldFacts.window,
-          priorHeldFacts.technicianId!,
-          priorHeldFacts.minutes
         ).catch(() => undefined);
       }
     } else {
@@ -2727,12 +2694,11 @@ async function updateJobSchedule(
 
   if (operation === "UNASSIGN") {
     assertJobCanBeScheduled(job);
-    // GL-04: unassigning ENDS the technician-window hold ASSIGN reserved.
+    // GL-04: unassigning ENDS the technician-day hold ASSIGN reserved.
     // The write clears the assignment and restamps pending-assignment pool
     // facts in the SAME update; the old hold is released from the pre-update
     // row, so a repeated unassign cannot double-release, and a later
     // re-assign releases pool facts — never the stale technician stamp.
-    const poolWindow = windowOfTimeWindow(job.timeWindow);
     const poolMinutes = slotOnsiteMinutes(job.propertyClass);
     const published = await casGuardedUpdate(
       "Job",
@@ -2742,7 +2708,6 @@ async function updateJobSchedule(
         technicianId: null,
         routeOrder: null,
         status: "UNSCHEDULED",
-        capacityWindow: job.scheduledDate ? poolWindow : null,
         capacityMinutes: job.scheduledDate ? poolMinutes : null,
         capacityTechnicianId: null,
       },
@@ -2757,7 +2722,7 @@ async function updateJobSchedule(
     }
     await releaseJobCapacity(job);
     if (job.scheduledDate) {
-      await notePoolMinutes(job.scheduledDate, poolWindow, poolMinutes).catch(
+      await notePoolMinutes(job.scheduledDate, poolMinutes).catch(
         () => undefined
       );
     }
@@ -2813,7 +2778,6 @@ async function updateJobSchedule(
         routeId: null,
         technicianId: null,
         routeOrder: null,
-        capacityWindow: null,
         capacityMinutes: null,
         capacityTechnicianId: null,
       },
@@ -2854,9 +2818,6 @@ async function updateJobSchedule(
     assertJobCanBeScheduled(job);
     const date = args.scheduledDate || null;
     const dateChanged = date !== (job.scheduledDate ?? null);
-    const newWindow = date
-      ? windowOfTimeWindow(args.timeWindow?.trim() || null)
-      : null;
 
     // GL-17: a date move on a seasonal plan is a MONTH move — the ledger is
     // consulted BEFORE publishing, in-season enforced, and a claim taken for
@@ -2911,47 +2872,22 @@ async function updateJobSchedule(
 
     // GL-04: capacity moves WITH the visit. A date change drops the
     // assignment, so accounting moves to the pool for the new date. A
-    // window-only change must fit the held slot's OTHER window first —
-    // refused when it doesn't. The hold may ride on the assigned technician
-    // OR a funnel checkout's capacityTechnicianId; window moves move THAT
-    // slot, and the attribution survives so the eventual release hits the
-    // same ledger row.
+    // same-date change keeps the held slot untouched (we schedule by day, so
+    // there is no time-of-day move within a day). The hold may ride on the
+    // assigned technician OR a funnel checkout's capacityTechnicianId, and
+    // the attribution survives so the eventual release hits the same ledger
+    // row.
     const heldTech = !dateChanged
       ? (job.technicianId ?? job.capacityTechnicianId ?? null)
       : null;
-    const windowChanged =
-      !dateChanged &&
-      date != null &&
-      newWindow != null &&
-      (job.capacityWindow ?? windowOfTimeWindow(job.timeWindow)) !== newWindow;
-    let stamped: { window: CapacityWindow; minutes: number } | null = null;
+    let stamped: { minutes: number } | null = null;
     if (date) {
-      if (heldTech && windowChanged && job.capacityMinutes != null) {
-        const movedRes = await reserveSlot(
-          date,
-          newWindow!,
-          heldTech,
-          job.capacityMinutes
-        );
-        if (!movedRes.ok) {
-          await rollbackMonth();
-          throw new Error(movedRes.message);
-        }
-        stamped = { window: newWindow!, minutes: job.capacityMinutes };
-      } else if (heldTech) {
-        // Same slot (or an unstamped legacy hold): stamps carry over.
+      if (heldTech) {
+        // Same day, still held: stamps carry over unchanged.
         stamped =
-          job.capacityWindow && job.capacityMinutes != null
-            ? {
-                window: job.capacityWindow as CapacityWindow,
-                minutes: job.capacityMinutes,
-              }
-            : null;
+          job.capacityMinutes != null ? { minutes: job.capacityMinutes } : null;
       } else {
-        stamped = {
-          window: newWindow!,
-          minutes: slotOnsiteMinutes(job.propertyClass),
-        };
+        stamped = { minutes: slotOnsiteMinutes(job.propertyClass) };
       }
     }
     // Guarded on the schedule this move validated — a concurrent mover wins
@@ -2961,9 +2897,7 @@ async function updateJobSchedule(
       job.id,
       {
         scheduledDate: date,
-        timeWindow: args.timeWindow?.trim() || null,
         status: date ? "SCHEDULED" : "UNSCHEDULED",
-        capacityWindow: stamped?.window ?? null,
         capacityMinutes: stamped?.minutes ?? null,
         capacityTechnicianId: dateChanged
           ? null
@@ -2976,11 +2910,6 @@ async function updateJobSchedule(
     );
     if (!published.ok) {
       await rollbackMonth();
-      if (heldTech && windowChanged && job.capacityMinutes != null && date) {
-        await releaseSlot(date, newWindow!, heldTech, job.capacityMinutes).catch(
-          () => undefined
-        );
-      }
       throw new Error(
         published.reason === "UNSUPPORTED"
           ? "The scheduling lock store is unavailable — nothing was changed. Try again in a moment."
@@ -2989,15 +2918,13 @@ async function updateJobSchedule(
     }
     // Publish landed: the PRIOR hold and month come back, from the
     // pre-update row — a retry re-reads fresh stamps and cannot double-release.
-    const capacityMoved =
-      dateChanged || windowChanged || (!heldTech && date != null) || !date;
+    const capacityMoved = dateChanged || (!heldTech && date != null) || !date;
     if (capacityMoved) {
       await releaseJobCapacity(job);
     }
     if (date && !heldTech) {
       await notePoolMinutes(
         date,
-        newWindow!,
         slotOnsiteMinutes(job.propertyClass)
       ).catch(() => undefined);
     }
@@ -3020,7 +2947,7 @@ async function updateJobSchedule(
         scheduledDate: date,
         effects: dateChanged
           ? `Rescheduled to ${date ?? "no date"}; assignment cleared for re-routing.`
-          : `Time window updated for ${date ?? "no date"}.`,
+          : `Visit updated for ${date ?? "no date"}.`,
       }
     );
   }
@@ -3269,7 +3196,6 @@ async function rebookJob(
     // up-front payment marker so no later screen can charge this visit again.
     paidAt: job.paidAt ?? undefined,
     paidPaymentIntentId: job.paidPaymentIntentId ?? undefined,
-    timeWindow: job.timeWindow ?? undefined,
     notes: job.notes ?? undefined,
     status: "UNSCHEDULED",
     rebookedFromJobId: job.id,

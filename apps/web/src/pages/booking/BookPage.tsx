@@ -26,7 +26,6 @@ import {
   loadFunnelState,
   money,
   saveFunnelState,
-  windowLabel,
   type FunnelSelection,
 } from "../../lib/bookingFunnel";
 
@@ -296,7 +295,6 @@ export default function BookPage() {
     const result = await bookVisit({
       bookingId: quote.bookingId,
       date: selection.date,
-      window: selection.window,
       recurring: selection.recurring,
       tcAccepted: true,
       tcVersion: terms.version,
@@ -380,12 +378,6 @@ export default function BookPage() {
             <div className="bk-booking-price-card__label">Your visit</div>
             <div className="bk-booking-price-card__price">
               {booked.selectedDate ? formatDay(booked.selectedDate) : "Scheduled"}
-              {booked.selectedWindow ? (
-                <span className="bk-booking-price-card__per">
-                  {" "}
-                  &bull; {windowLabel(booked.selectedWindow)}
-                </span>
-              ) : null}
             </div>
             {booked.amountCents != null ? (
               <div className="bk-booking-price-card__meta">
@@ -445,8 +437,6 @@ export default function BookPage() {
   if (processing) {
     const scheduled = processingInfo?.state === "PROCESSING_SCHEDULED";
     const dateShown = processingInfo?.selectedDate ?? selection?.date ?? null;
-    const windowShown =
-      processingInfo?.selectedWindow ?? selection?.window ?? null;
     return (
       <Shell>
         <div className="bk-confirm">
@@ -467,12 +457,6 @@ export default function BookPage() {
               <div className="bk-booking-price-card__label">Your visit</div>
               <div className="bk-booking-price-card__price">
                 {dateShown ? formatDay(dateShown) : "Scheduling"}
-                {windowShown ? (
-                  <span className="bk-booking-price-card__per">
-                    {" "}
-                    &bull; {windowLabel(windowShown)}
-                  </span>
-                ) : null}
               </div>
               <div className="bk-booking-price-card__meta">
                 {quote?.service ?? "Pest control service"}
@@ -544,8 +528,8 @@ export default function BookPage() {
         <div className="bk-eyebrow">Booking</div>
         <h1 className="bk-h2">Nothing to check out yet.</h1>
         <p className="bk-body-lead">
-          Start with an instant quote — pick your day and time there, then come
-          back here to pay.
+          Start with an instant quote — pick your day there, then come back here
+          to pay.
         </p>
         <Link to="/quote" className="bk-btn bk-btn-primary">
           Get an instant quote
@@ -627,19 +611,11 @@ export default function BookPage() {
             <span className="bk-summary-key">Service</span>
             <span className="bk-summary-val">{quote.service}</span>
           </li>
-          {selection.date && selection.window ? (
-            <>
-              <li>
-                <span className="bk-summary-key">Day</span>
-                <span className="bk-summary-val">{formatDay(selection.date)}</span>
-              </li>
-              <li>
-                <span className="bk-summary-key">Arrival window</span>
-                <span className="bk-summary-val">
-                  {windowLabel(selection.window)}
-                </span>
-              </li>
-            </>
+          {selection.date ? (
+            <li>
+              <span className="bk-summary-key">Day</span>
+              <span className="bk-summary-val">{formatDay(selection.date)}</span>
+            </li>
           ) : (
             // GL-17 off-season enrollment: no first-visit day exists yet —
             // never invent one; the office confirms the real April date.
@@ -746,7 +722,7 @@ export default function BookPage() {
               className="bk-btn bk-btn-outline"
               onClick={() => navigate("/quote")}
             >
-              &larr; Change day or time
+              &larr; Change day
             </button>
             <button
               type="button"
