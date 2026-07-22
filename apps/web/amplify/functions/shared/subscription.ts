@@ -81,6 +81,71 @@ export async function ensureProduct(stripe: Stripe): Promise<string> {
   return created.id;
 }
 
+/**
+ * A migrated plan bills its PRE-tax price plus sales tax, so its total matches
+ * what FieldRoutes charged (BuzzKill bills 0% tax on funnel plans, unchanged).
+ * Reuse one EXCLUSIVE (added-on-top) Stripe tax rate per distinct percentage,
+ * marked so we find it again instead of minting duplicates.
+ */
+export async function ensureTaxRate(
+  stripe: Stripe,
+  percent: number
+): Promise<string> {
+  const { data } = await stripe.taxRates.list({ active: true, limit: 100 });
+  const existing = data.find(
+    (t) =>
+      t.metadata?.crmTaxRate === "true" &&
+      t.inclusive === false &&
+      t.percentage === percent
+  );
+  if (existing) return existing.id;
+  const created = await stripe.taxRates.create({
+    display_name: "Sales tax",
+    percentage: percent,
+    inclusive: false,
+    metadata: { crmTaxRate: "true" },
+  });
+  return created.id;
+}
+
+/**
+ * The Unix-seconds anchor for a migrated plan's billing cycle: the NEXT future
+ * date matching the Sold Date's day-of-month, clamped to the last day of short
+ * months (a 31st Sold Date bills on Feb 28/29). Anchoring here — with proration
+ * 'none' — means the customer is NOT charged now and their BuzzKill bill day
+ * matches FieldRoutes. Returns undefined for a missing/invalid date, in which
+ * case billing starts immediately, exactly as a funnel plan does today.
+ *
+ * Pure and nowMs-injected so it is deterministically testable.
+ */
+export function computeBillingCycleAnchor(
+  anchorDate: string | null | undefined,
+  nowMs: number
+): number | undefined {
+  if (!anchorDate) return undefined;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(anchorDate.trim());
+  if (!m) return undefined;
+  const day = parseInt(m[3], 10);
+  if (day < 1 || day > 31) return undefined;
+  let year = new Date(nowMs).getUTCFullYear();
+  let month = new Date(nowMs).getUTCMonth(); // 0-based
+  // Advance month by month until the clamped candidate is strictly in the
+  // future. Bounded so a bad input can never loop forever.
+  for (let i = 0; i < 24; i++) {
+    const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    const d = Math.min(day, daysInMonth);
+    // Noon UTC keeps the calendar day stable regardless of timezone/DST.
+    const candidate = Date.UTC(year, month, d, 12, 0, 0);
+    if (candidate > nowMs) return Math.floor(candidate / 1000);
+    month += 1;
+    if (month > 11) {
+      month = 0;
+      year += 1;
+    }
+  }
+  return undefined;
+}
+
 export type StartBillingOutcome =
   | { started: true; stripeSubscriptionId: string; alreadyRunning: boolean }
   | {
@@ -157,6 +222,15 @@ export async function startPlanBilling(
       };
     }
     const productId = await ensureProduct(stripe);
+    // Migrated plans carry a tax rate and a bill day; funnel plans carry
+    // neither, so tax stays 0% and billing starts immediately, exactly as before.
+    const taxPercent = plan.salesTaxPercent ?? 0;
+    const taxRateIds =
+      taxPercent > 0 ? [await ensureTaxRate(stripe, taxPercent)] : undefined;
+    const billingCycleAnchor = computeBillingCycleAnchor(
+      plan.billingAnchorDate,
+      Date.now()
+    );
     const created = await stripe.subscriptions.create(
       {
         customer: stripeCustomerId,
@@ -171,6 +245,18 @@ export async function startPlanBilling(
           },
         ],
         default_payment_method: pm.id,
+        // Sales tax added on top of the pre-tax price so the total matches
+        // FieldRoutes. Absent on funnel plans (0% tax).
+        ...(taxRateIds ? { default_tax_rates: taxRateIds } : {}),
+        // Anchor a migrated plan's cycle to its Sold-Date bill day with NO
+        // proration — no charge now, first full charge on the bill day. Absent
+        // on funnel plans, which bill immediately.
+        ...(billingCycleAnchor
+          ? {
+              billing_cycle_anchor: billingCycleAnchor,
+              proration_behavior: "none" as const,
+            }
+          : {}),
         metadata: {
           crmServicePlanId: servicePlanId,
           crmCustomerId: plan.customerId,

@@ -20,6 +20,8 @@ type Plan = {
   status: string;
   stripeSubscriptionId?: string | null;
   canceledAt?: string | null;
+  salesTaxPercent?: number | null;
+  billingAnchorDate?: string | null;
 };
 
 type Job = {
@@ -113,8 +115,12 @@ vi.mock("./ownedWork", () => ({
     (openOwnedWork as unknown as (...a: unknown[]) => Promise<string | null>)(...args),
 }));
 
-const { startPlanBilling, cancelPlanBilling, cancelQueuedPlanVisits } =
-  await import("./subscription");
+const {
+  startPlanBilling,
+  cancelPlanBilling,
+  cancelQueuedPlanVisits,
+  computeBillingCycleAnchor,
+} = await import("./subscription");
 
 type FakeStripe = Stripe & {
   __subsCreated: Stripe.SubscriptionCreateParams[];
@@ -143,6 +149,15 @@ function makeStripe(opts: { hasPaymentMethod: boolean }): FakeStripe {
         data: [{ id: "prod_1", metadata: { crmProduct: "true" } }],
       }),
       create: async () => ({ id: "prod_1" }),
+    },
+    taxRates: {
+      list: async () => ({ data: [] as unknown[] }),
+      create: async (params: Stripe.TaxRateCreateParams) => ({
+        id: `txr_${params.percentage}`,
+        percentage: params.percentage,
+        inclusive: params.inclusive,
+        metadata: params.metadata,
+      }),
     },
     subscriptions: {
       create: async (params: Stripe.SubscriptionCreateParams) => {
@@ -693,5 +708,74 @@ describe("cancelQueuedPlanVisits", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("FieldRoutes migration billing (tax + Sold-Date anchor)", () => {
+  it("adds sales tax and anchors the cycle to the Sold Date, with no charge now", async () => {
+    // A migrated plan: pre-tax price + a tax rate + a Sold-Date bill day.
+    seedPlan({ salesTaxPercent: 6.25, billingAnchorDate: "2026-05-01" });
+    const stripe = makeStripe({ hasPaymentMethod: true });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-25T12:00:00Z"));
+    try {
+      const outcome = await startPlanBilling(stripe, "p1");
+      expect(outcome.started).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const params = stripe.__subsCreated[0];
+    // Tax is added on top of the pre-tax price so the total matches FieldRoutes.
+    expect(params.default_tax_rates).toEqual(["txr_6.25"]);
+    // Anchored to the NEXT 1st of the month (Aug 1), not "now", and no proration.
+    expect(params.billing_cycle_anchor).toBe(
+      Math.floor(Date.UTC(2026, 7, 1, 12, 0, 0) / 1000)
+    );
+    expect(params.proration_behavior).toBe("none");
+  });
+
+  it("leaves a funnel plan unchanged: no tax, no anchor, bills immediately", async () => {
+    seedPlan(); // no salesTaxPercent, no billingAnchorDate
+    const stripe = makeStripe({ hasPaymentMethod: true });
+    await startPlanBilling(stripe, "p1");
+
+    const params = stripe.__subsCreated[0];
+    expect(params.default_tax_rates).toBeUndefined();
+    expect(params.billing_cycle_anchor).toBeUndefined();
+    expect(params.proration_behavior).toBeUndefined();
+  });
+});
+
+describe("computeBillingCycleAnchor", () => {
+  const at = (iso: string) => new Date(iso).getTime();
+  const unix = (y: number, m: number, d: number) =>
+    Math.floor(Date.UTC(y, m, d, 12, 0, 0) / 1000);
+
+  it("returns the next future occurrence of the Sold Date's day-of-month", () => {
+    // Sold on the 1st; now is mid-July → next bill day is Aug 1.
+    expect(computeBillingCycleAnchor("2026-05-01", at("2026-07-25T00:00:00Z"))).toBe(
+      unix(2026, 7, 1)
+    );
+  });
+
+  it("rolls to the same day this month when it is still ahead", () => {
+    // Sold on the 15th; now is the 10th → the 15th of THIS month.
+    expect(computeBillingCycleAnchor("2026-05-15", at("2026-07-10T00:00:00Z"))).toBe(
+      unix(2026, 6, 15)
+    );
+  });
+
+  it("clamps a 31st Sold Date to the last day of a short month", () => {
+    // Sold on the 31st; now is early Feb 2027 → Feb 28, 2027.
+    expect(computeBillingCycleAnchor("2026-01-31", at("2027-02-05T00:00:00Z"))).toBe(
+      unix(2027, 1, 28)
+    );
+  });
+
+  it("returns undefined for a missing or invalid date (bills immediately)", () => {
+    expect(computeBillingCycleAnchor(null, at("2026-07-25T00:00:00Z"))).toBeUndefined();
+    expect(computeBillingCycleAnchor("not-a-date", at("2026-07-25T00:00:00Z"))).toBeUndefined();
   });
 });

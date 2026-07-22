@@ -472,6 +472,17 @@ export const schema = a.schema({
       catalogVersion: a.string(),
       priceCents: a.integer().required(),
       serviceFrequency: a.ref("ServiceFrequency").required(),
+      // FieldRoutes migration. priceCents is PRE-tax; when a plan carries a tax
+      // rate, startPlanBilling attaches a Stripe tax rate so the customer's
+      // total (price + tax) matches what they paid before. Null on funnel plans
+      // — BuzzKill bills 0% tax there, unchanged.
+      salesTaxPercent: a.float(),
+      // FieldRoutes migration. The bill day to anchor the Stripe subscription to
+      // (the original FieldRoutes Sold Date). When set, startPlanBilling anchors
+      // the cycle to the next occurrence of this day-of-month with no proration
+      // — so a migrated customer is NOT charged immediately and their cycle
+      // aligns. Null on funnel plans — billing starts now, unchanged.
+      billingAnchorDate: a.date(),
       status: a.ref("ServicePlanStatus").required(),
       stripeSubscriptionId: a.string(),
       /** GL-08 R3: the durable provider reference AFTER cancellation clears

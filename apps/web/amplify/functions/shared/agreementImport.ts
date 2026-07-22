@@ -175,6 +175,11 @@ export async function importAgreement(
         serviceFrequency: input.serviceFrequency,
         status: "ACTIVE",
         startDate: input.startDate,
+        // The tax rate and bill day billing needs: startPlanBilling reads these
+        // to attach a Stripe tax rate and anchor the cycle to the Sold Date, so
+        // the customer's total and bill day match FieldRoutes.
+        salesTaxPercent: input.salesTaxPercent ?? undefined,
+        billingAnchorDate: input.startDate,
         // No stripeSubscriptionId yet — billing is a later, opt-in stage. The
         // plan reads ACTIVE-not-billing until a card is on file.
         ...(input.seasonal
