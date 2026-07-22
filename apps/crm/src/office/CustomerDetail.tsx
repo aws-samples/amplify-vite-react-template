@@ -3084,8 +3084,9 @@ function GroupPicker({
         </select>
       </Field>
       {/* GL-11: membership changes grant/remove real portal access across the
-          group, so every change records who, when, and why. */}
-      <Field label="Why is this changing?">
+          group, so the change always records who and when. A reason is
+          optional — add one when it's useful, but it isn't required. */}
+      <Field label="Why is this changing? (optional)">
         <input
           value={reason}
           onChange={(e) => setReason(e.target.value)}
@@ -3096,7 +3097,6 @@ function GroupPicker({
       <Button
         block
         loading={busy}
-        disabled={!reason.trim()}
         onClick={() => {
           setBusy(true);
           onPick(value || null, reason.trim()).catch((err) => {

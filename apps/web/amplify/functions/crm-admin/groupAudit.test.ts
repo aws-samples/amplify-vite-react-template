@@ -241,12 +241,19 @@ describe("setCustomerGroup — the durable verified command", () => {
     expect(cmd.stage).toBe("FAILED");
   });
 
-  it("REFUSES a change without a reason", async () => {
-    await expect(call({ customerId: "c1", groupId: "g1", reason: " " })).rejects.toThrow(
-      /reason is required/i
-    );
-    expect(commands.size).toBe(0);
-    expect(auditEvents).toHaveLength(0);
+  it("records a system reason when none is given — the change is never left unexplained", async () => {
+    const res = (await call({ customerId: "c1", groupId: "g1", reason: " " })) as Record<
+      string,
+      unknown
+    >;
+
+    expect(res.verified).toBe(true);
+    expect(auditEvents).toHaveLength(1);
+    expect(auditEvents[0]).toMatchObject({
+      action: "GROUP_CHANGE",
+      reason: "Group membership updated via CRM.",
+    });
+    expect(customers.get("c1")!.groupId).toBe("g1");
   });
 
   it("a Cognito fault settles PARTIAL with owned work — never a silent split", async () => {

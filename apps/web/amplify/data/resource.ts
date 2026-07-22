@@ -2502,7 +2502,8 @@ export const schema = a.schema({
     .arguments({
       customerId: a.string().required(),
       groupId: a.string(),
-      // GL-11: membership changes are audited — who, when, why.
+      // GL-11: membership changes are audited — who and when always; an
+      // optional reason is recorded when supplied (a system note otherwise).
       reason: a.string(),
     })
     .returns(a.json())

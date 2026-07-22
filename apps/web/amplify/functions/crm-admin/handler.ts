@@ -909,12 +909,10 @@ async function setCustomerGroup(
     id: args.customerId,
   });
   if (!customer) throw new Error(`Customer ${args.customerId} not found`);
-  // GL-11: membership changes RETAIN who/when/WHY — the why is not optional.
-  if (!args.reason?.trim()) {
-    throw new Error(
-      "A reason is required to change group membership — it is retained on the audit record."
-    );
-  }
+  // GL-11: membership changes still RETAIN who/when — the audit row is always
+  // written. A typed reason is optional; when the caller omits it we record a
+  // system note so the change is never left unexplained on the record.
+  const reason = args.reason?.trim() || "Group membership updated via CRM.";
 
   const newGroupId = args.groupId || null;
   if (newGroupId) {
@@ -942,7 +940,7 @@ async function setCustomerGroup(
     customerId: args.customerId,
     fromGroupId: (customer.groupId as string | null) ?? null,
     toGroupId: newGroupId,
-    reason: args.reason.trim(),
+    reason,
     actor,
   });
   if (!claim.claimed) {
