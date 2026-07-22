@@ -2511,6 +2511,22 @@ export const schema = a.schema({
     .handler(a.handler.function(crmAdmin)),
 
   /**
+   * One-time FieldRoutes migration: create customers, groups, and plans at
+   * their locked (pre-tax) agreement prices. `agreements` is a normalized
+   * AgreementInput[] (shared/agreementImport) produced by the office from the
+   * FieldRoutes export via shared/fieldRoutesImport. Idempotent — deterministic
+   * ids mean a re-run resumes onto the same records instead of duplicating, so
+   * a partial batch is safe to re-send. Imported plans land ACTIVE-not-billing;
+   * billing starts later once a card is on file. OWNER only.
+   */
+  importAgreements: a
+    .mutation()
+    .arguments({ agreements: a.json().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmAdmin)),
+
+  /**
    * End a deactivated customer's portal login: drop its portal + dynamic group
    * memberships, disable the Cognito account, and globally sign it out. The
    * access half of deactivation (deactivateCustomer is the money/work half) —

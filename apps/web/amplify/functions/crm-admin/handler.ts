@@ -12,6 +12,10 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "../shared/dataClient";
 import {
+  importAgreement,
+  type AgreementInput,
+} from "../shared/agreementImport";
+import {
   claimGroupChange,
   executeGroupChange,
 } from "../shared/groupChange";
@@ -221,6 +225,10 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         sub: callerSub(event.identity),
         email: callerEmail(event.identity),
       });
+    case "importAgreements":
+      return importAgreements(
+        event.arguments as unknown as { agreements: unknown }
+      );
     case "resumeGroupChange": {
       // Internal: the daily run re-drives stuck group changes through this
       // handler (which holds the Cognito perms). IAM restricts who can
@@ -898,6 +906,52 @@ function groupCognitoSync(): {
       return wanted ? state.current.includes(wanted) : true;
     },
   };
+}
+
+/**
+ * Run a FieldRoutes migration batch. Each row is imported independently and
+ * idempotently (deterministic ids), so one bad row never aborts the rest and a
+ * re-send resumes cleanly. Returns a per-row outcome the office can reconcile
+ * against the dry-run preview.
+ */
+async function importAgreements(args: { agreements: unknown }): Promise<{
+  imported: number;
+  failed: number;
+  results: Array<
+    | { ok: true; externalSubscriptionId: string; customerId: string; servicePlanId: string }
+    | { ok: false; externalSubscriptionId: string; error: string }
+  >;
+}> {
+  // a.json() args arrive already parsed; accept an array or a {agreements:[...]}
+  // envelope defensively.
+  const raw = args.agreements;
+  const rows = (Array.isArray(raw) ? raw : []) as AgreementInput[];
+  if (!rows.length) {
+    throw new Error("importAgreements: no agreements provided");
+  }
+  const results: Awaited<ReturnType<typeof importAgreements>>["results"] = [];
+  let imported = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      const r = await importAgreement(row);
+      imported++;
+      results.push({
+        ok: true,
+        externalSubscriptionId: row.externalSubscriptionId,
+        customerId: r.customerId,
+        servicePlanId: r.servicePlanId,
+      });
+    } catch (err) {
+      failed++;
+      results.push({
+        ok: false,
+        externalSubscriptionId: row?.externalSubscriptionId ?? "(unknown)",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { imported, failed, results };
 }
 
 async function setCustomerGroup(
