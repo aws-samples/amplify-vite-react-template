@@ -1117,23 +1117,9 @@ export async function renderQuotePdf(opts: {
   return d.doc.save();
 }
 
-export type ReportProduct = {
-  name?: string;
-  epaNumber?: string;
-  quantity?: string;
-  /** Label rate or dilution as applied, e.g. "0.05% dilution". */
-  rate?: string;
-  targetPest?: string;
-  /** Structured amount, preferred over parsing the `quantity` string: the
-   *  numeric value and its unit, e.g. { amountValue: 2, amountUnit: "fl oz" }.
-   *  `quantity` is still written ("2 fl oz") for the PDF and legacy readers, so
-   *  older reports without these fields keep rendering and validating. */
-  amountValue?: number;
-  amountUnit?: string;
-  /** The catalog Product this row was picked from, when known — the exact link
-   *  for reconciliation and inventory depletion (falls back to name+EPA). */
-  productId?: string;
-};
+// ReportProduct is owned by inventory.ts (so usage-reporting consumers don't
+// pull this PDF module); re-exported here for pdf.ts's existing callers.
+export type { ReportProduct } from "./inventory";
 
 export async function renderServiceReportPdf(opts: {
   reportId: string;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  aggregateProductUsage,
   depletionsForReport,
   isLowStock,
   matchCatalogProduct,
@@ -100,6 +101,72 @@ describe("depletionsForReport", () => {
       CATALOG
     );
     expect(skips[0]).toMatchObject({ reason: "no-amount" });
+  });
+});
+
+describe("aggregateProductUsage", () => {
+  it("sums a tracked product across reports, folding units into its stock unit", () => {
+    const rows = aggregateProductUsage(
+      [
+        [{ productId: "prod-termidor", amountValue: 1, amountUnit: "gal" }], // 128 fl oz
+        [{ name: "Termidor SC", epaNumber: "7969-210", quantity: "2 fl oz" }],
+      ],
+      CATALOG
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      productId: "prod-termidor",
+      tracked: true,
+      applications: 2,
+      byUnit: [{ unit: "fl oz", value: 130 }],
+      costCents: 130 * 400,
+      hasUnmeasuredUse: false,
+    });
+  });
+
+  it("includes UNtracked products the ledger never sees, keyed by name+EPA", () => {
+    const rows = aggregateProductUsage(
+      [[{ name: "Wasp Freeze", epaNumber: "1234-5", quantity: "3 oz" }]],
+      CATALOG
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      productId: null,
+      name: "Wasp Freeze",
+      tracked: false,
+      byUnit: [{ unit: "oz", value: 3 }],
+      costCents: 0,
+    });
+  });
+
+  it("keeps inconvertible units separate rather than summing across dimensions", () => {
+    // A tracked product (stockUnit fl oz) recorded once in fl oz and once in oz
+    // (weight) — the weight reading can't fold into fl oz.
+    const rows = aggregateProductUsage(
+      [
+        [{ productId: "prod-termidor", amountValue: 2, amountUnit: "fl oz" }],
+        [{ productId: "prod-termidor", amountValue: 3, amountUnit: "oz" }],
+      ],
+      CATALOG
+    );
+    expect(rows[0].byUnit).toEqual([
+      { unit: "oz", value: 3 },
+      { unit: "fl oz", value: 2 },
+    ]);
+    // Only the convertible fl-oz portion is costed.
+    expect(rows[0].costCents).toBe(2 * 400);
+  });
+
+  it("flags an application whose amount was not readable", () => {
+    const rows = aggregateProductUsage(
+      [[{ name: "Termidor SC", epaNumber: "7969-210", quantity: "as needed" }]],
+      CATALOG
+    );
+    expect(rows[0]).toMatchObject({
+      applications: 1,
+      byUnit: [],
+      hasUnmeasuredUse: true,
+    });
   });
 });
 

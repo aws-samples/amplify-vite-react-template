@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  api,
-  listAll,
-  type Product,
-  type ProductStockEntry,
-} from "../lib/api";
+import { api, listAll, type Product } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import {
+  aggregateProductUsage,
+  type ReportProduct,
+  type UsageAggregateRow,
+} from "../../../web/amplify/functions/shared/inventory";
+import {
   Badge,
+  Button,
   Card,
   EmptyState,
   ErrorNote,
@@ -18,11 +19,12 @@ import {
 } from "../ui/kit";
 
 /**
- * Product usage + cost-of-goods, derived from the stock ledger's USAGE entries
- * (the depletions report finalization writes). This reuses the exact amounts
- * that came off inventory — already in each product's stock unit — so there's
- * no unit-parsing here. It therefore covers TRACKED products only; untracked
- * products don't hit the ledger. Owner-only, under More.
+ * Product usage across a custom date range: the total amount of every chemical
+ * USED (not bought) on finalized service reports. Sourced from each report's
+ * productsUsed rather than the stock ledger, so it covers EVERY product a tech
+ * recorded — inventory-tracked or not. Amounts fold into a product's stock unit
+ * where convertible and stay per-unit where not (see aggregateProductUsage).
+ * Cost of goods is computed for tracked products with a unit cost. Owner-only.
  */
 
 function fmtQty(n: number): string {
@@ -37,6 +39,26 @@ function isoDate(d: Date): string {
     d.getDate()
   ).padStart(2, "0")}`;
 }
+/** The joined per-unit total, e.g. "128 fl oz · 6 each", or a dash when the
+ *  amount was never recorded. */
+function usedLabel(row: UsageAggregateRow): string {
+  if (!row.byUnit.length) return "amount not recorded";
+  return row.byUnit.map((u) => `${fmtQty(u.value)} ${u.unit}`).join(" · ");
+}
+/** Coerce a report's productsUsed json into typed rows, tolerating null and a
+ *  legacy stringified value. */
+function toReportRows(v: unknown): ReportProduct[] {
+  if (Array.isArray(v)) return v as ReportProduct[];
+  if (typeof v === "string") {
+    try {
+      const parsed = JSON.parse(v);
+      return Array.isArray(parsed) ? (parsed as ReportProduct[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
 
 export default function ProductUsage() {
   const roles = useRoles();
@@ -49,65 +71,95 @@ export default function ProductUsage() {
   const [from, setFrom] = useState(isoDate(ninetyAgo));
   const [to, setTo] = useState(isoDate(today));
   const [products, setProducts] = useState<Product[] | null>(null);
-  const [usage, setUsage] = useState<ProductStockEntry[] | null>(null);
+  const [reportRows, setReportRows] = useState<ReportProduct[][] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
+    setProducts(null);
+    setReportRows(null);
     try {
-      const [prods, entries] = await Promise.all([
+      // Bound the scan to FINALIZED reports in the range. serviceDate is a
+      // UTC-Z ISO string, so a lexical `between` on the day bounds is correct;
+      // an exact client-side prefix filter belts-and-suspenders the edges.
+      const toEnd = `${to}T23:59:59.999Z`;
+      const [prods, reports] = await Promise.all([
         listAll((t) => api().models.Product.list({ limit: 500, nextToken: t })),
         listAll((t) =>
-          api().models.ProductStockEntry.list({ limit: 1000, nextToken: t })
+          api().models.ServiceReport.list({
+            limit: 500,
+            nextToken: t,
+            filter: {
+              status: { eq: "FINALIZED" },
+              serviceDate: { between: [from, toEnd] },
+            },
+          })
         ),
       ]);
       setProducts(prods);
-      setUsage(entries.filter((e) => e.reason === "USAGE"));
+      setReportRows(
+        reports
+          .filter((r) => {
+            const day = (r.serviceDate ?? "").slice(0, 10);
+            return day && day >= from && day <= to;
+          })
+          .map((r) => toReportRows(r.productsUsed))
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load usage");
       setProducts([]);
-      setUsage([]);
+      setReportRows([]);
     }
-  }, []);
+  }, [from, to]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   const rows = useMemo(() => {
-    if (!products || !usage) return null;
-    const byId = new Map(products.map((p) => [p.id, p]));
-    // Inclusive date window (compare on the YYYY-MM-DD prefix of `at`).
-    const inRange = usage.filter((e) => {
-      const day = (e.at ?? "").slice(0, 10);
-      return day && day >= from && day <= to;
-    });
-    const agg = new Map<
-      string,
-      { used: number; applications: number; costCents: number }
-    >();
-    for (const e of inRange) {
-      const p = byId.get(e.productId);
-      const used = Math.abs(e.deltaBaseUnits ?? 0); // USAGE deltas are negative
-      const cur = agg.get(e.productId) ?? { used: 0, applications: 0, costCents: 0 };
-      cur.used += used;
-      cur.applications += 1;
-      if (p?.unitCostCents != null) cur.costCents += used * p.unitCostCents;
-      agg.set(e.productId, cur);
-    }
-    return [...agg.entries()]
-      .map(([productId, v]) => ({
-        product: byId.get(productId),
-        productId,
-        ...v,
-      }))
-      .sort((a, b) => b.costCents - a.costCents || b.used - a.used);
-  }, [products, usage, from, to]);
+    if (!products || !reportRows) return null;
+    return aggregateProductUsage(reportRows, products);
+  }, [products, reportRows]);
 
   const totalCost = useMemo(
     () => (rows ?? []).reduce((s, r) => s + r.costCents, 0),
     [rows]
   );
+
+  const exportCsv = useCallback(() => {
+    if (!rows) return;
+    const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const header = [
+      "Product",
+      "EPA number",
+      "Used",
+      "Applications",
+      "Inventory tracked",
+      "Cost of goods",
+    ];
+    const lines = [
+      header.join(","),
+      ...rows.map((r) =>
+        [
+          r.name,
+          r.epaNumber ?? "",
+          usedLabel(r),
+          r.applications,
+          r.tracked ? "yes" : "no",
+          r.costCents > 0 ? money(r.costCents) : "",
+        ]
+          .map(esc)
+          .join(",")
+      ),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `product-usage-${from}-to-${to}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [rows, from, to]);
 
   if (!roles.owner) {
     return (
@@ -119,11 +171,11 @@ export default function ProductUsage() {
 
   return (
     <Page title="Product usage" back="/more">
-      <Card title="Usage & cost of goods">
+      <Card title="Chemical usage">
         <p className="muted small" style={{ marginBottom: 6 }}>
-          Product consumed on finalized service reports, from the stock ledger.
-          Covers products with inventory tracking on; cost uses each product's
-          unit cost.
+          Total amount of each product applied on finalized service reports in
+          the range — every chemical a tech recorded, not just inventory-tracked
+          ones. Cost of goods is shown for tracked products with a unit cost.
         </p>
         <div className="form-row-2" style={{ marginBottom: 10 }}>
           <Field label="From">
@@ -133,40 +185,52 @@ export default function ProductUsage() {
             <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
           </Field>
         </div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            marginBottom: 8,
+          }}
+        >
+          <Button
+            small
+            variant="ghost"
+            disabled={!rows || rows.length === 0}
+            onClick={exportCsv}
+          >
+            Export CSV
+          </Button>
+        </div>
         <ErrorNote error={error} />
         {rows === null ? (
           <Spinner label="Loading usage…" />
         ) : rows.length === 0 ? (
           <EmptyState
             title="No usage in this range"
-            body="Finalized reports that use a tracked product will show here."
+            body="Finalized reports that applied a product will show here."
           />
         ) : (
           <>
-            {rows.map((r) => {
-              const unit = r.product?.stockUnit ?? "";
-              return (
-                <ListRow
-                  key={r.productId}
-                  title={r.product?.name ?? r.productId}
-                  subtitle={`${fmtQty(r.used)} ${unit} · ${r.applications} application${
-                    r.applications === 1 ? "" : "s"
-                  }`}
-                  meta={
-                    r.product?.unitCostCents != null ? (
-                      <Badge tone="muted">{money(r.costCents)}</Badge>
-                    ) : (
-                      <Badge tone="info">no cost set</Badge>
-                    )
-                  }
-                />
-              );
-            })}
-            <div
-              className="row-split"
-              style={{ marginTop: 10, fontWeight: 600 }}
-            >
-              <span>Total cost of goods</span>
+            {rows.map((r) => (
+              <ListRow
+                key={r.productId ?? `${r.name}·${r.epaNumber ?? ""}`}
+                title={r.name}
+                subtitle={`${usedLabel(r)} · ${r.applications} application${
+                  r.applications === 1 ? "" : "s"
+                }${r.hasUnmeasuredUse ? " · some amounts not recorded" : ""}`}
+                meta={
+                  r.costCents > 0 ? (
+                    <Badge tone="muted">{money(r.costCents)}</Badge>
+                  ) : r.tracked ? (
+                    <Badge tone="info">no cost set</Badge>
+                  ) : (
+                    <Badge tone="info">untracked</Badge>
+                  )
+                }
+              />
+            ))}
+            <div className="row-split" style={{ marginTop: 10, fontWeight: 600 }}>
+              <span>Total cost of goods (tracked)</span>
               <span>{money(totalCost)}</span>
             </div>
           </>
