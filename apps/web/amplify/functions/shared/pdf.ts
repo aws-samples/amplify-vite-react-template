@@ -1435,6 +1435,7 @@ export type AmendmentChange = { label: string; from: string; to: string };
 export async function renderAmendmentPdf(opts: {
   amendmentId: string;
   originalReportId: string;
+  company?: AgreementCompany;
   customerName: string;
   serviceAddress?: string;
   serviceType: string;
@@ -1445,37 +1446,165 @@ export async function renderAmendmentPdf(opts: {
   authorEmail?: string | null;
   issuedAtIso: string;
 }): Promise<Uint8Array> {
-  const w = await PdfWriter.create();
-  w.header("Amended Service Report");
+  const d = await AgreementDoc.create();
+  const co = opts.company ?? DEFAULT_COMPANY;
+  const rightX = A_M + A_COLW + A_GUTTER;
 
-  w.labelValue("Customer", opts.customerName);
-  if (opts.serviceAddress) w.labelValue("Service address", opts.serviceAddress);
-  w.labelValue("Service", opts.serviceType);
-  w.labelValue("Original report", fmtDateTime(opts.originalServiceDateIso));
-  w.labelValue("Amendment issued", fmtDateTime(opts.issuedAtIso));
-  w.labelValue(
-    "Issued by",
-    opts.authorEmail ? `${opts.authorName}  ·  ${opts.authorEmail}` : opts.authorName
-  );
-  w.rule();
-
-  w.heading("Reason for the correction");
-  w.text(opts.reason, { gapAfter: 12 });
-
-  w.heading("What was corrected");
-  for (const c of opts.changes) {
-    w.text(c.label, { font: w.bold, size: 10.5 });
-    w.text(`Was:  ${c.from || "—"}`, { size: 10, color: MUTED });
-    w.text(`Now:  ${c.to}`, { size: 10 });
-    w.y -= 8;
+  // ---- Masthead: logo (left) · SERVICE REPORT AMENDMENT (center) · contact
+  const topY = d.y;
+  const logoH = await drawLogo(d, A_M, topY, 150);
+  if (logoH == null) {
+    d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
+    d.write("PEST CONTROL", A_M + 2, topY - 24, { font: d.bold, size: 7.5, color: MUTED });
   }
+  // Centered across the full width but kept small enough that this longer title
+  // clears the logo on the left and the contact block on the right.
+  d.write("SERVICE REPORT AMENDMENT", A_M, topY - 8, {
+    font: d.bold,
+    size: 13,
+    color: BK_GREEN_DK,
+    maxWidth: A_CW,
+    align: "center",
+  });
+  const contact = [
+    co.name,
+    ...(co.addressLines ?? []),
+    co.phone,
+    co.email,
+    co.website,
+    co.license ? `License #: ${co.license}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const contactBottom = d.write(contact, A_M, topY, {
+    font: d.font,
+    size: 8,
+    color: INK,
+    maxWidth: A_CW,
+    align: "right",
+    lineGap: 1.5,
+  });
+  d.y = Math.min(topY - (logoH ?? 44), contactBottom) - 6;
+  d.hline(A_M, PAGE.width - A_M, d.y, BK_GREEN, 1.5);
+  d.y -= 14;
 
-  w.rule();
-  w.text(
-    `This amendment corrects the service report issued ${fmtDateTime(
-      opts.originalServiceDateIso
-    )} and forms part of that record. The original report is preserved unchanged. Amendment reference: ${opts.amendmentId}.`,
-    { size: 8.5, color: MUTED }
+  // ---- Correction notice banner: this is a correction, stated up front
+  const noticeH = 22;
+  d.fill(A_M, d.y, A_CW, noticeH, CELL_TINT);
+  d.fill(A_M, d.y, 4, noticeH, BK_GREEN);
+  d.write(
+    "This document corrects a previously issued service report. The original report is preserved unchanged.",
+    A_M + 18,
+    d.y - 7,
+    { font: d.bold, size: 9, color: BK_GREEN_DK, maxWidth: A_CW - 34 }
   );
-  return w.save();
+  d.y -= noticeH + 14;
+
+  // Shared label/value column (bold label left, value flush right, wrapping).
+  const colRows = (
+    x: number,
+    top: number,
+    wid: number,
+    rows: Array<[string, string | null | undefined]>
+  ): number => {
+    let yy = top;
+    for (const [label, value] of rows) {
+      if (!value) continue;
+      const rowTop = yy;
+      d.write(label, x + 6, rowTop, { font: d.bold, size: 8.5, color: INK, maxWidth: wid * 0.42 });
+      const valBottom = d.write(value, x + 6, rowTop, {
+        font: d.font,
+        size: 8.5,
+        color: INK,
+        maxWidth: wid - 12,
+        align: "right",
+      });
+      yy = Math.min(rowTop - 8.5 * 1.32, valBottom) - 3;
+    }
+    return yy;
+  };
+
+  // ---- Two-column: Customer Information | Amendment Details
+  const infoTop = d.y;
+  const infoBlock = (
+    x: number,
+    title: string,
+    rows: Array<[string, string | null | undefined]>
+  ): number => {
+    d.fill(x, infoTop, A_COLW, BAR_H);
+    d.write(title.toUpperCase(), x, infoTop - 2.5, {
+      font: d.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: A_COLW,
+      align: "center",
+    });
+    return colRows(x, infoTop - BAR_H - 8, A_COLW, rows);
+  };
+  const address = opts.serviceAddress?.split(", ").join("\n");
+  const leftBottom = infoBlock(A_M, "Customer Information", [
+    ["Customer", opts.customerName],
+    ["Address", address],
+    ["Service", opts.serviceType],
+  ]);
+  const rightBottom = infoBlock(rightX, "Amendment Details", [
+    ["Original report", fmtDateTime(opts.originalServiceDateIso)],
+    ["Amendment issued", fmtDateTime(opts.issuedAtIso)],
+    ["Issued by", opts.authorName],
+    ["Contact", opts.authorEmail],
+  ]);
+  d.y = Math.min(leftBottom, rightBottom) - 12;
+
+  // ---- Reason for the Correction
+  d.band("Reason for the Correction");
+  d.y -= 5;
+  d.flow(opts.reason.trim(), { size: 9.5, color: INK, gapAfter: 12 });
+
+  // ---- What Was Corrected — each change as a before/after pair
+  d.band("What Was Corrected");
+  d.y -= 8;
+  opts.changes.forEach((c, i) => {
+    d.need(46);
+    const top = d.y;
+    d.write(c.label, A_M + 2, top, { font: d.bold, size: 10, color: INK, maxWidth: A_CW - 4 });
+    const cellTop = top - 15;
+    // Left cell: previously (muted). Right cell: corrected to (green).
+    const cell = (x: number, tag: string, value: string, tagColor: ReturnType<typeof rgb>, valColor: ReturnType<typeof rgb>) => {
+      d.write(tag, x + 6, cellTop, { font: d.bold, size: 7, color: tagColor, maxWidth: A_COLW - 12 });
+      return d.write(value || "—", x + 6, cellTop - 9, {
+        size: 9.5,
+        color: valColor,
+        maxWidth: A_COLW - 12,
+        lineGap: 0.5,
+      });
+    };
+    const lB = cell(A_M, "PREVIOUSLY", c.from, MUTED, MUTED);
+    const rB = cell(rightX, "CORRECTED TO", c.to, BK_GREEN_DK, INK);
+    d.y = Math.min(lB, rB) - 8;
+    if (i < opts.changes.length - 1) {
+      d.hline(A_M, PAGE.width - A_M, d.y + 3, RULE, 0.5);
+      d.y -= 4;
+    }
+  });
+  d.y -= 6;
+
+  // ---- Footer
+  d.need(44);
+  d.hline(A_M, PAGE.width - A_M, d.y, RULE, 0.5);
+  d.y -= 10;
+  d.y = d.write(
+    `This amendment corrects the service report issued ${fmtDateTime(opts.originalServiceDateIso)} and forms part of that record. ` +
+      "The original report is preserved unchanged.",
+    A_M,
+    d.y,
+    { size: 7.5, color: MUTED, maxWidth: A_CW, align: "center", lineGap: 0.5 }
+  );
+  d.y -= 6;
+  d.write(`Amendment reference: ${opts.amendmentId}`, A_M, d.y, {
+    size: 7.5,
+    color: MUTED,
+    maxWidth: A_CW,
+    align: "center",
+  });
+  return d.doc.save();
 }
