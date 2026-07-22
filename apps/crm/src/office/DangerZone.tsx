@@ -244,7 +244,10 @@ function WipeForm({ onDone }: { onDone: (summary: ResetSummary) => void }) {
           setBusy(true);
           setError(null);
           api()
-            .mutations.wipeDatabase({ label: label.trim() || undefined })
+            .mutations.databaseReset({
+              action: "WIPE",
+              label: label.trim() || undefined,
+            })
             .then((res) => {
               const summary = opResult<ResetSummary>(res);
               if (!summary) throw new Error("The wipe did not return a result");
@@ -303,7 +306,10 @@ function RestoreForm({
           setBusy(true);
           setError(null);
           api()
-            .mutations.rollbackDatabase({ archiveId: archive.id })
+            .mutations.databaseReset({
+              action: "ROLLBACK",
+              archiveId: archive.id,
+            })
             .then((res) => {
               const summary = opResult<ResetSummary>(res);
               if (!summary) throw new Error("The restore did not return a result");

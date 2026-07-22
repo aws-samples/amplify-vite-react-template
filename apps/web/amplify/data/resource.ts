@@ -3875,25 +3875,27 @@ export const schema = a.schema({
     .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
 
   /**
-   * Snapshot every model to S3, record a DatabaseArchive, then delete every
-   * record — a staging "clean start". The handler HARD-REFUSES on the main
-   * branch (AMPLIFY_BRANCH), so this can only ever wipe staging. OWNER only.
+   * Danger Zone — the staging-only database reset, ONE field for both actions.
+   * (Deliberately not two mutations: every Lambda-backed custom op costs 6
+   * CloudFormation resources in FunctionDirectiveStack, which sits at the
+   * hard 500-resource ceiling — see the 505/500 deploy failure of 2026-07-22.)
+   *
+   * action "WIPE": snapshot every model to S3, record a DatabaseArchive, then
+   * delete every record — a staging "clean start". Optional label names the
+   * restore point. action "ROLLBACK": restore the whole database from a
+   * DatabaseArchive's snapshot (kept 30 days) — archiveId required.
+   *
+   * The handler HARD-REFUSES unless deployed on a known non-production branch
+   * (AMPLIFY_BRANCH, fail-closed), so this can only ever touch staging. OWNER
+   * only.
    */
-  wipeDatabase: a
+  databaseReset: a
     .mutation()
-    .arguments({ label: a.string() })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER"])])
-    .handler(a.handler.function(crmReset)),
-
-  /**
-   * Restore the whole database from a DatabaseArchive's snapshot (kept 30
-   * days): clears current data, then re-creates every archived record. Also
-   * refuses on the main branch. OWNER only.
-   */
-  rollbackDatabase: a
-    .mutation()
-    .arguments({ archiveId: a.string().required() })
+    .arguments({
+      action: a.string().required(), // "WIPE" | "ROLLBACK"
+      label: a.string(),
+      archiveId: a.string(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmReset)),
