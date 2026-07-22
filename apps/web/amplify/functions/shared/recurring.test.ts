@@ -106,6 +106,28 @@ describe("scheduleNextRecurringVisit — INACTIVE customer guard", () => {
   });
 });
 
+describe("scheduleNextRecurringVisit — one-time type guard", () => {
+  it("does not queue a next visit for a ONE_TIME job, even with a plan id", async () => {
+    customers.set("c1", { id: "c1", status: "ACTIVE" });
+
+    // A contradictory record: a one-time job that somehow carries a plan id.
+    // Billing already refuses this (startBillingForPlan gates on RECURRING);
+    // scheduling must refuse in lockstep so a one-time treatment can never
+    // spawn a recurring successor.
+    await scheduleNextRecurringVisit({ ...completedJob, type: "ONE_TIME" });
+
+    expect(created).toHaveLength(0);
+  });
+
+  it("queues a next visit for a RECURRING job", async () => {
+    customers.set("c1", { id: "c1", status: "ACTIVE" });
+
+    await scheduleNextRecurringVisit({ ...completedJob, type: "RECURRING" });
+
+    expect(created).toHaveLength(1);
+  });
+});
+
 describe("scheduleNextRecurringVisit — delinquency gate", () => {
   it("does not queue the next visit when the plan is delinquent (billing suspended)", async () => {
     customers.set("c1", { id: "c1", status: "ACTIVE" });

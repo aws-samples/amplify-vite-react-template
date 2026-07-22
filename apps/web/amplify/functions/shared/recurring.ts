@@ -6,7 +6,8 @@ import {
   markObligation,
   releaseMonthForJob,
 } from "./obligations";
-import { notePoolMinutes, onsiteMinutes } from "./capacity";
+import { notePoolMinutes, onsiteMinutes, POOL_TECH } from "./capacity";
+import { assignVisitToTech, pickTechDayNear } from "./assignVisit";
 import {
   firstWeekdayOf,
   monthKeyAfter,
@@ -47,6 +48,9 @@ type JobLike = {
   serviceType: string;
   priceCents?: number | null;
   type?: string | null;
+  /** The technician who ran the completed visit — the next visit is auto-
+   *  assigned back onto their schedule. */
+  technicianId?: string | null;
   completedAt?: string | null;
 };
 
@@ -63,6 +67,12 @@ type JobLike = {
 export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
   try {
     if (!job.servicePlanId) return;
+    // A one-time visit never spawns a successor, even if it somehow carries a
+    // plan id: billing (startBillingForPlan) already gates on RECURRING, so
+    // keep scheduling in lockstep and the two can never disagree. A true
+    // one-time booking has no plan at all and already returned above; this
+    // guards the contradictory case.
+    if (job.type && job.type !== "RECURRING") return;
     const client = await dataClient();
 
     const { data: plan } = await client.models.ServicePlan.get({
@@ -225,16 +235,69 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
         return;
       }
     }
-    // GL-04: the auto-queued visit shows on the POOL accounting slot for its
-    // target day (system-created — never refused, never blocking a real
-    // slot; it becomes a commitment only through the assign claim, and the
-    // nightly rebuild keeps this honest).
-    await notePoolMinutes(dueDate, onsiteMinutes(null)).catch(
-      () => undefined
-    );
-    console.log(
-      `Queued next ${plan.serviceFrequency} visit for plan ${job.servicePlanId} on ${dueDate}`
-    );
+    // Auto-assign the queued visit onto the SAME technician who ran the
+    // completed visit — picking the best-fitting day around the due date (least
+    // added route travel, day not at the eight-stop ceiling), exactly the way a
+    // website lead lands straight on a tech's schedule. Best-effort: if the tech
+    // is full / off / unroutable across the window, or facts are missing, the
+    // visit stays in the office pool (the notePoolMinutes fallback below).
+    // Seasonal plans keep their pool behaviour — their month-obligation ledger,
+    // not a rolling window, owns which day the next treatment lands on.
+    let autoAssigned = false;
+    const priorTech =
+      !seasonal && job.technicianId && job.technicianId !== POOL_TECH
+        ? job.technicianId
+        : null;
+    if (priorTech) {
+      const candidateAddress = [
+        customer?.serviceStreet,
+        customer?.serviceCity,
+        customer?.serviceState,
+        customer?.serviceZip,
+      ]
+        .map((p) => p?.trim())
+        .filter(Boolean)
+        .join(", ");
+      const pick = candidateAddress
+        ? await pickTechDayNear({
+            technicianId: priorTech,
+            candidateAddress,
+            fromDate: dueDate,
+            // ~two working weeks of candidate days: close enough to hold the
+            // cadence, wide enough to find a day the tech is already nearby.
+            windowDays: 14,
+            // Residential on-site default, matching this path's pool sizing.
+            onsite: onsiteMinutes(null),
+            routesKey: process.env.GOOGLE_ROUTES_API_KEY ?? null,
+          })
+        : null;
+      if (pick) {
+        autoAssigned = await assignVisitToTech({
+          jobId: `next-${job.id}`,
+          date: pick.date,
+          technicianId: priorTech,
+          minutes: pick.minutes,
+        });
+        if (autoAssigned) {
+          console.log(
+            `Auto-assigned next ${plan.serviceFrequency} visit for plan ${job.servicePlanId} to tech ${priorTech} on ${pick.date}`
+          );
+        }
+      }
+    }
+
+    if (!autoAssigned) {
+      // GL-04: the auto-queued visit shows on the POOL accounting slot for its
+      // target day (system-created — never refused, never blocking a real
+      // slot; it becomes a commitment only through the assign claim, and the
+      // nightly rebuild keeps this honest).
+      await notePoolMinutes(dueDate, onsiteMinutes(null)).catch(
+        () => undefined
+      );
+      console.log(
+        `Queued next ${plan.serviceFrequency} visit for plan ${job.servicePlanId} on ${dueDate}`
+      );
+    }
   } catch (err) {
     console.error("scheduleNextRecurringVisit failed (non-fatal)", err);
   }

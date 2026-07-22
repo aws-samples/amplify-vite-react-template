@@ -3751,7 +3751,7 @@ async function deliverServiceReport(
     deliveryStatus?: string | null;
     pdfKey?: string | null;
   },
-  job: { serviceType: string; servicePlanId?: string | null },
+  job: { serviceType: string; servicePlanId?: string | null; type?: string | null },
   customer: {
     id: string;
     email?: string | null;
@@ -3872,8 +3872,12 @@ async function deliverServiceReport(
   const { data: plan } = job.servicePlanId
     ? await client.models.ServicePlan.get({ id: job.servicePlanId })
     : { data: null };
+  // Only a recurring visit promises a next one. Gate on the job type too (not
+  // just the presence of a plan) so a job that isn't RECURRING never tells the
+  // customer "your next visit is planned" — the same rule billing and the
+  // auto-scheduler apply.
   const nextIso =
-    plan && plan.status === "ACTIVE"
+    plan && plan.status === "ACTIVE" && job.type === "RECURRING"
       ? nextVisitDate(plan.serviceFrequency, new Date().toISOString(), plan)
       : null;
   const reviewUrl = process.env.GOOGLE_REVIEW_URL;

@@ -1516,6 +1516,16 @@ async function finalizeClaimed(
   // R73: the booking is the outcome of this customer's pricing runs.
   await markPricingRunsWon(matchClient, customer.id);
 
+  // A recurring enrollment's visits carry the PLAN name, never the funnel's
+  // one-time label ("General pest control — one-time treatment"). The funnel
+  // label always reads "one-time treatment" for GPC even when the customer
+  // picks the recurring plan, so without this a plan customer's first service
+  // report — and the next visit auto-queued off it — would read as a one-time
+  // job. One-time bookings keep the funnel label unchanged.
+  const recurringPlanName = catalogService
+    ? planNameFor(catalogService.id)
+    : `${serviceLabel.replace(/ — .*$/, "")} plan`;
+
   // 2. Plan (recurring) — billing starts after the first visit completes. A
   // deterministic id makes the create idempotent: a retry resumes onto the same
   // plan instead of standing up a second subscription for one booking.
@@ -1529,9 +1539,7 @@ async function finalizeClaimed(
         client.models.ServicePlan.create({
           id: planId,
           customerId: customer.id,
-          planName: catalogService
-            ? planNameFor(catalogService.id)
-            : serviceLabel.replace(/ — .*$/, "") + " plan",
+          planName: recurringPlanName,
           serviceCode: catalogService?.id ?? undefined,
           catalogVersion: catalogService ? SERVICE_CATALOG_VERSION : undefined,
           priceCents: offer.monthlyCents,
@@ -1608,7 +1616,9 @@ async function finalizeClaimed(
         customerId: customer.id,
         servicePlanId,
         type: booking.recurring ? "RECURRING" : "ONE_TIME",
-        serviceType: serviceLabel,
+        // Recurring visits are labelled by their plan; only a one-time booking
+        // keeps the funnel's one-time label.
+        serviceType: booking.recurring ? recurringPlanName : serviceLabel,
         serviceCode: catalogService?.id ?? undefined,
         catalogVersion: catalogService ? SERVICE_CATALOG_VERSION : undefined,
         scheduledDate: firstVisitDate,

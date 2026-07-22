@@ -583,7 +583,9 @@ describe("new booking shapes finalize into the right records", () => {
     });
     expect(jobsCreated[0]).toMatchObject({
       type: "RECURRING",
-      serviceType: "Community common-area pest control — 24 units",
+      // A recurring plan's visits carry the PLAN name, not the funnel's
+      // one-time label — so the service report doesn't read as a one-time job.
+      serviceType: "Community common-area pest control plan",
       priceCents: 28800,
       status: "SCHEDULED",
     });
@@ -613,7 +615,8 @@ describe("new booking shapes finalize into the right records", () => {
       serviceFrequency: "MONTHLY",
     });
     expect(jobsCreated[0]).toMatchObject({
-      serviceType: "Commercial pest control — up to 5,000 sqft",
+      // Recurring plan → plan-name label, not the funnel's one-time label.
+      serviceType: "Commercial pest control plan",
       priceCents: 19900,
     });
   });
