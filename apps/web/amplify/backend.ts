@@ -550,7 +550,11 @@ const sesEventDestination = new CfnConfigurationSetEventDestination(
     configurationSetName: sesConfigurationSetName,
     eventDestination: {
       enabled: true,
-      name: "sns-delivery-events",
+      // Branch-suffixed: SES scopes destination names per config set, but
+      // CloudFormation treats the name as an account-wide physical ID — a
+      // hard-coded name here made the main stack collide with staging's
+      // destination and roll back the whole function stack.
+      name: `sns-delivery-events-${branch}`,
       matchingEventTypes: ["bounce", "complaint", "delivery"],
       snsDestination: { topicArn: sesEventsTopic.topicArn },
     },
