@@ -2839,6 +2839,16 @@ a:focus-visible {
 /* Async quote preparation */
 .bk-quote-loading {
   max-width: 620px;
+  /* The shared .bk-confirm gives 64px top padding on top of the section's
+     72px — far too tall a gap above the spinner. Pull the whole waiting
+     state up so it reads as one balanced, compact card. */
+  padding-top: 12px;
+}
+.bk-quote-loading .bk-quote-spinner {
+  margin-top: 4px;
+}
+.bk-quote-loading .bk-h2 {
+  margin-top: 6px;
 }
 .bk-quote-spinner {
   width: 62px;
