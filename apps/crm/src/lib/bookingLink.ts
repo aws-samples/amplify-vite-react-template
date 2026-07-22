@@ -18,10 +18,22 @@ const PRODUCTION_CRM_HOSTS = new Set([
   "main.d5ln2hbbp9s2j.amplifyapp.com",
 ]);
 
+/**
+ * True when this CRM is the production (main) deployment. The Danger Zone
+ * (staging-only database wipe) hides itself when this is true — a second layer
+ * over the backend's authoritative branch guard. Anything that isn't a known
+ * production host counts as staging/dev.
+ */
+export function isProductionCrm(
+  hostname: string = window.location.hostname
+): boolean {
+  return PRODUCTION_CRM_HOSTS.has(hostname.toLowerCase());
+}
+
 export function marketingSiteUrl(
   hostname: string = window.location.hostname
 ): string {
-  return PRODUCTION_CRM_HOSTS.has(hostname.toLowerCase())
+  return isProductionCrm(hostname)
     ? "https://www.pestbuzzkill.com"
     : "https://staging.d26qpsjewk0bee.amplifyapp.com";
 }

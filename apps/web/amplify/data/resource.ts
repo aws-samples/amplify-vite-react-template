@@ -13,6 +13,7 @@ import { sesEvents } from "../functions/ses-events/resource";
 import { opsAlerts } from "../functions/ops-alerts/resource";
 import { verifyChallenge } from "../functions/auth-challenge/resource";
 import { leadSweep } from "../functions/lead-sweep/resource";
+import { crmReset } from "../functions/crm-reset/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -413,6 +414,17 @@ export const schema = a.schema({
       bookingLinkToken: a.string().authorization(fieldNoTech),
       bookingLinkTokenExpiresAt: a.datetime().authorization(fieldNoTech),
       accessGroups: a.string().array().authorization(fieldNoTech),
+      // Office-uploaded documents — most often an agreement signed OUTSIDE the
+      // software, plus letters, inspections, insurance. A JSON array of
+      // { id, title, kind, fileKey, contentType, sizeBytes, uploadedByEmail,
+      //   uploadedAt }; the bytes live at documents/<customerId>/<id> in the
+      // crmDocuments bucket. Written only by crm-docs (recordCustomerDocument)
+      // after a presigned PUT — no browser write. A field on Customer rather
+      // than its own model deliberately: a new model tips amplify's tsc over
+      // its depth ceiling. fieldNoTech — office writes, the portal customer
+      // reads their own; a technician never sees office documents (like
+      // agreements, which are never technician documents).
+      documents: a.json().authorization(fieldNoTech),
       servicePlans: a.hasMany("ServicePlan", "customerId"),
       jobs: a.hasMany("Job", "customerId"),
       agreements: a.hasMany("Agreement", "customerId"),
@@ -3741,6 +3753,37 @@ export const schema = a.schema({
     .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
 
+  /**
+   * Presigned PUT for an office-uploaded customer document (a PDF or image —
+   * e.g. an agreement signed outside the software). Keys land under
+   * `documents/<customerId>/…` so getDocumentUrl entitlement covers viewing.
+   * The client PUTs the file, then calls recordCustomerDocument with the key.
+   */
+  getCustomerDocumentUploadUrl: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      contentType: a.string().required(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /** Write the CustomerDocument row after its file is PUT to `key`. */
+  recordCustomerDocument: a
+    .mutation()
+    .arguments({
+      customerId: a.string().required(),
+      key: a.string().required(),
+      title: a.string().required(),
+      kind: a.string(),
+      contentType: a.string(),
+      sizeBytes: a.integer(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmDocs)),
+
   /** Entitlement-checked, short-lived presigned URL for a stored PDF. */
   getDocumentUrl: a
     .query()
@@ -3797,6 +3840,52 @@ export const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
+
+  /**
+   * STAGING-ONLY Danger Zone bookkeeping. Each row is one "clean start": a
+   * pointer to the pre-wipe snapshot in S3 (db-archives/<id>.json, auto-expired
+   * after 30 days) plus the per-model counts it captured. Written by crm-reset
+   * via IAM; OWNER-readable so the Danger Zone can list what can be rolled back.
+   * Deliberately excluded from the wipe itself so a wipe never erases its own
+   * undo trail. `id` is the archive id and the S3 object stem.
+   */
+  DatabaseArchive: a
+    .model({
+      label: a.string(),
+      s3Key: a.string().required(),
+      branch: a.string(),
+      takenAt: a.datetime().required(),
+      expiresAt: a.datetime().required(),
+      totalRecords: a.integer().required(),
+      counts: a.json(),
+      status: a.enum(["ACTIVE", "RESTORED", "EXPIRED"]),
+      restoredAt: a.datetime(),
+    })
+    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
+
+  /**
+   * Snapshot every model to S3, record a DatabaseArchive, then delete every
+   * record — a staging "clean start". The handler HARD-REFUSES on the main
+   * branch (AMPLIFY_BRANCH), so this can only ever wipe staging. OWNER only.
+   */
+  wipeDatabase: a
+    .mutation()
+    .arguments({ label: a.string() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmReset)),
+
+  /**
+   * Restore the whole database from a DatabaseArchive's snapshot (kept 30
+   * days): clears current data, then re-creates every archived record. Also
+   * refuses on the main branch. OWNER only.
+   */
+  rollbackDatabase: a
+    .mutation()
+    .arguments({ archiveId: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER"])])
+    .handler(a.handler.function(crmReset)),
 }).authorization((allow) => [
   allow.resource(crmAdmin),
   allow.resource(crmBilling),
@@ -3814,6 +3903,10 @@ export const schema = a.schema({
   // the shared email contract.
   allow.resource(verifyChallenge),
   allow.resource(leadSweep),
+  // Staging-only Danger Zone: crm-reset snapshots + wipes + restores every
+  // model, so it needs full data access. The handler refuses on the main
+  // branch (see shared/databaseReset).
+  allow.resource(crmReset),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { confirmResetPassword, resetPassword, signOut } from "aws-amplify/auth";
 import { clearAllDrafts } from "../lib/reportDraft";
 import { api, unwrap } from "../lib/api";
+import { isProductionCrm } from "../lib/bookingLink";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
 import {
@@ -130,6 +131,19 @@ export default function More() {
             title="Email log"
             subtitle="Recent emails sent to customers"
             onClick={() => setEmailLogSheet(true)}
+          />
+        </Card>
+      ) : null}
+
+      {/* Staging-only "clean start" + 30-day restore. Owner-only, and hidden on
+          the production CRM so the wipe is never one tap away in prod. */}
+      {roles.owner && !isProductionCrm() ? (
+        <Card title="Staging tools">
+          <ListRow
+            title="Danger Zone"
+            subtitle="Wipe the database for a clean start, or restore an archive"
+            meta={<Badge tone="danger">staging</Badge>}
+            onClick={() => navigate("/danger-zone")}
           />
         </Card>
       ) : null}
