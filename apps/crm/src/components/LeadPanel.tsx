@@ -11,7 +11,13 @@ import {
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
-import { isLeadOverdue, leadNextActionAt } from "../lib/leadStage";
+import {
+  deriveLeadStage,
+  isLeadOverdue,
+  leadNextActionAt,
+  LEAD_STAGE_LABEL,
+  LEAD_STAGE_TONE,
+} from "../lib/leadStage";
 import { Badge, Button, Card, ErrorNote, Field } from "../ui/kit";
 
 /**
@@ -106,13 +112,20 @@ export default function LeadPanel({
     <Card
       title="Handle this inquiry"
       actions={
-        terminal ? (
-          <Badge tone="muted">closed</Badge>
-        ) : isLeadOverdue(customer) ? (
-          <Badge tone="danger">overdue</Badge>
-        ) : (
-          <Badge tone="info">open</Badge>
-        )
+        <span className="inline-actions">
+          {/* The derived pipeline stage — computed from facts, never stored,
+              so it always matches the Lead inbox badge. */}
+          <Badge tone={LEAD_STAGE_TONE[deriveLeadStage(customer)]}>
+            {LEAD_STAGE_LABEL[deriveLeadStage(customer)]}
+          </Badge>
+          {terminal ? (
+            <Badge tone="muted">closed</Badge>
+          ) : isLeadOverdue(customer) ? (
+            <Badge tone="danger">overdue</Badge>
+          ) : (
+            <Badge tone="info">open</Badge>
+          )}
+        </span>
       }
     >
       <ErrorNote error={error} />
