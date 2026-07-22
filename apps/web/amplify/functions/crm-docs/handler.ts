@@ -4204,6 +4204,9 @@ async function finalizeServiceReport(reportId: string) {
     pdf = await renderServiceReportPdf({
       reportId,
       customerName: customer.displayName,
+      contactName: customer.contactName,
+      customerPhone: customer.phone,
+      customerEmail: customer.email,
       serviceAddress: serviceAddress || undefined,
       serviceType: job.serviceType,
       serviceDateIso: report.serviceDate,

@@ -212,6 +212,18 @@ export type AgreementCompany = {
   license?: string;
 };
 
+/** The BuzzKill masthead identity, used when a caller supplies no company. It
+ *  mirrors AGREEMENT_COMPANY so the report, quote, and agreement print the same
+ *  address, contact, and applicator licence. */
+const DEFAULT_COMPANY: AgreementCompany = {
+  name: "BuzzKill Pest Control",
+  addressLines: ["420 Lakeside Ave, Suite 104", "Marlborough, MA 01752"],
+  phone: "(508) 258-9294",
+  email: "info@pestbuzzkill.com",
+  website: "pestbuzzkill.com",
+  license: "CC-0060592",
+};
+
 /** One line in a money summary box (label left, amount right). */
 export type AgreementMoneyRow = {
   label: string;
@@ -998,7 +1010,12 @@ export type ReportProduct = {
 
 export async function renderServiceReportPdf(opts: {
   reportId: string;
+  company?: AgreementCompany;
   customerName: string;
+  /** The on-site contact, when different from the account/display name. */
+  contactName?: string | null;
+  customerPhone?: string | null;
+  customerEmail?: string | null;
   serviceAddress?: string;
   serviceType: string;
   serviceDateIso: string;
@@ -1021,105 +1038,263 @@ export async function renderServiceReportPdf(opts: {
     capturedAtIso?: string | null;
   } | null;
 }): Promise<Uint8Array> {
-  const w = await PdfWriter.create();
-  w.header("Service Report");
+  const d = await AgreementDoc.create();
+  const co = opts.company ?? DEFAULT_COMPANY;
+  const rightX = A_M + A_COLW + A_GUTTER;
 
-  w.labelValue("Customer", opts.customerName);
-  if (opts.serviceAddress) w.labelValue("Service address", opts.serviceAddress);
-  w.labelValue("Service", opts.serviceType);
-  w.labelValue("Service date", fmtDateTime(opts.serviceDateIso));
-  if (opts.applicationStartIso) {
-    w.labelValue(
-      "Application time",
-      opts.applicationEndIso
-        ? `${fmtTime(opts.applicationStartIso)} – ${fmtTime(opts.applicationEndIso)}`
-        : fmtTime(opts.applicationStartIso)
-    );
+  // ---- Masthead: logo (left) · SERVICE REPORT (center) · contact (right)
+  const topY = d.y;
+  const logoH = await drawLogo(d, A_M, topY, 150);
+  if (logoH == null) {
+    // Asset failed to embed — fall back to the text wordmark so the report still
+    // renders a branded masthead.
+    d.write("BuzzKill", A_M, topY, { font: d.bold, size: 22, color: BK_GREEN_DK });
+    d.write("PEST CONTROL", A_M + 2, topY - 24, {
+      font: d.bold,
+      size: 7.5,
+      color: MUTED,
+    });
   }
-  w.labelValue(
-    "Technician",
-    opts.technicianLicenseNumber
-      ? `${opts.technicianName}  ·  Licence ${opts.technicianLicenseNumber}`
-      : opts.technicianName
-  );
-  w.rule();
+  d.write("SERVICE REPORT", A_M, topY - 6, {
+    font: d.bold,
+    size: 17,
+    color: BK_GREEN_DK,
+    maxWidth: A_CW,
+    align: "center",
+  });
+  const contact = [
+    co.name,
+    ...(co.addressLines ?? []),
+    co.phone,
+    co.email,
+    co.website,
+    co.license ? `License #: ${co.license}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const contactBottom = d.write(contact, A_M, topY, {
+    font: d.font,
+    size: 8,
+    color: INK,
+    maxWidth: A_CW,
+    align: "right",
+    lineGap: 1.5,
+  });
+  d.y = Math.min(topY - (logoH ?? 44), contactBottom) - 6;
+  d.hline(A_M, PAGE.width - A_M, d.y, BK_GREEN, 1.5);
+  d.y -= 14;
 
-  const section = (title: string, body?: string | null) => {
-    if (!body?.trim()) return;
-    w.heading(title);
-    w.text(body, { gapAfter: 10 });
+  // A column of label/value rows — bold label at the left, value flush right,
+  // wrapping when long (an address, a licence). Returns the new bottom edge.
+  const colRows = (
+    x: number,
+    top: number,
+    w: number,
+    rows: Array<[string, string | null | undefined]>
+  ): number => {
+    let yy = top;
+    for (const [label, value] of rows) {
+      if (!value) continue;
+      const rowTop = yy;
+      d.write(label, x + 6, rowTop, {
+        font: d.bold,
+        size: 8.5,
+        color: INK,
+        maxWidth: w * 0.42,
+      });
+      const valBottom = d.write(value, x + 6, rowTop, {
+        font: d.font,
+        size: 8.5,
+        color: INK,
+        maxWidth: w - 12,
+        align: "right",
+      });
+      yy = Math.min(rowTop - 8.5 * 1.32, valBottom) - 3;
+    }
+    return yy;
   };
 
-  section("Services performed", opts.servicesPerformed);
+  // ---- Two-column: Customer Information | Service Information
+  const infoTop = d.y;
+  const infoBlock = (
+    x: number,
+    title: string,
+    rows: Array<[string, string | null | undefined]>
+  ): number => {
+    d.fill(x, infoTop, A_COLW, BAR_H);
+    d.write(title.toUpperCase(), x, infoTop - 2.5, {
+      font: d.bold,
+      size: 8.5,
+      color: WHITE,
+      maxWidth: A_COLW,
+      align: "center",
+    });
+    return colRows(x, infoTop - BAR_H - 8, A_COLW, rows);
+  };
+  const address = opts.serviceAddress?.split(", ").join("\n");
+  const contactName =
+    opts.contactName && opts.contactName !== opts.customerName
+      ? opts.contactName
+      : null;
+  const custRows: Array<[string, string | null | undefined]> = [
+    ["Customer", opts.customerName],
+    ["Contact", contactName],
+    ["Address", address],
+    ["Phone", opts.customerPhone],
+    ["Email", opts.customerEmail],
+  ];
+  const svcRows: Array<[string, string | null | undefined]> = [
+    ["Service", opts.serviceType],
+    ["Date", fmtQuoteDate(opts.serviceDateIso)],
+    ["Time In", opts.applicationStartIso ? fmtTime(opts.applicationStartIso) : null],
+    ["Time Out", opts.applicationEndIso ? fmtTime(opts.applicationEndIso) : null],
+    ["Technician", opts.technicianName],
+    ["License #", opts.technicianLicenseNumber],
+  ];
+  const leftBottom = infoBlock(A_M, "Customer Information", custRows);
+  const rightBottom = infoBlock(rightX, "Service Information", svcRows);
+  d.y = Math.min(leftBottom, rightBottom) - 10;
 
+  // A banded free-text section (Services Performed, Recommendations, …). Renders
+  // nothing when its body is empty, so a sparse report skips it cleanly.
+  const section = (title: string, body?: string | null) => {
+    if (!body?.trim()) return;
+    d.band(title);
+    d.y -= 5;
+    d.flow(body.trim(), { size: 9.5, color: INK, gapAfter: 9 });
+  };
+
+  section("Services Performed", opts.servicesPerformed);
+
+  // ---- Products Applied
+  d.band("Products Applied");
+  d.y -= 5;
   if (opts.inspectionOnly) {
-    w.heading("Products applied");
-    w.text("Inspection only — no pesticide was applied on this visit.", {
-      gapAfter: 10,
+    d.flow("Inspection only — no pesticide was applied on this visit.", {
+      size: 9.5,
+      color: INK,
+      gapAfter: 9,
     });
   } else if (opts.productsUsed?.length) {
-    w.heading("Products applied");
-    for (const p of opts.productsUsed) {
-      const parts = [
-        p.name ?? "Product",
-        p.epaNumber ? `EPA #${p.epaNumber}` : null,
-        p.rate ? `Rate: ${p.rate}` : null,
-        p.quantity ? `Qty: ${p.quantity}` : null,
-        p.targetPest ? `Target: ${p.targetPest}` : null,
-      ].filter(Boolean);
-      w.text(`•  ${parts.join("   —   ")}`, { size: 10 });
-    }
-    w.y -= 10;
+    opts.productsUsed.forEach((p, i) => {
+      d.need(38);
+      const pTop = d.y;
+      let lB = d.write(p.name ?? "Product", A_M + 4, pTop, {
+        font: d.bold,
+        size: 10,
+        color: INK,
+        maxWidth: A_COLW - 8,
+      });
+      if (p.epaNumber) {
+        lB = d.write(`EPA Reg. # ${p.epaNumber}`, A_M + 4, lB - 2, {
+          size: 8.5,
+          color: MUTED,
+          maxWidth: A_COLW - 8,
+        });
+      }
+      const amount =
+        p.quantity ||
+        (p.amountValue != null
+          ? `${p.amountValue}${p.amountUnit ? ` ${p.amountUnit}` : ""}`
+          : null);
+      const rB = colRows(rightX, pTop, A_COLW, [
+        ["Rate", p.rate],
+        ["Amount", amount],
+        ["Target", p.targetPest],
+      ]);
+      d.y = Math.min(lB, rB) - 8;
+      // A hairline between products, as on the reference document — skipped after
+      // the last row so the section doesn't close on a dangling rule.
+      if (i < opts.productsUsed!.length - 1) {
+        d.hline(A_M, PAGE.width - A_M, d.y + 3, RULE, 0.5);
+        d.y -= 4;
+      }
+    });
+    d.y -= 5;
+  } else {
+    d.flow("No products were recorded for this visit.", {
+      size: 9.5,
+      color: MUTED,
+      gapAfter: 9,
+    });
   }
 
   // The applicator's duty to warn. An occupant who is not told when it is safe
   // to go back in has not been told the one thing this document is for.
   if (!opts.inspectionOnly && opts.reEntryIntervalHours != null) {
-    w.heading("When it is safe to re-enter");
-    w.text(
+    section(
+      "When It Is Safe to Re-Enter",
       opts.reEntryIntervalHours <= 0
         ? "Treated areas may be re-entered immediately once any applied product is dry or contained."
-        : `Keep people and pets out of the treated areas for ${opts.reEntryIntervalHours} ${opts.reEntryIntervalHours === 1 ? "hour" : "hours"} from the application time above.`,
-      { gapAfter: 10 }
+        : `Keep people and pets out of the treated areas for ${opts.reEntryIntervalHours} ${opts.reEntryIntervalHours === 1 ? "hour" : "hours"} from the application time above.`
     );
   }
 
-  section("Target pests", opts.targetPests);
-  section("Areas treated", opts.areasTreated);
-  section("Recommendations", opts.recommendations);
+  section("Target Pests", opts.targetPests);
+  section("Areas Treated", opts.areasTreated);
+  // Recommendations always open with the BuzzKill thank-you, then the
+  // technician's own notes. Any thank-you the tech already typed (in whatever
+  // casing) is stripped first so the canonical line is never doubled, and the
+  // section always renders even when there are no further notes.
+  const THANKS = "Thank you for choosing BuzzKill!";
+  const recRest = (opts.recommendations ?? "")
+    .trim()
+    .replace(/^thank you for choosing buzzkill[!.…\s]*/i, "")
+    .trim();
+  section("Recommendations", recRest ? `${THANKS}\n\n${recRest}` : THANKS);
   // ServiceReport.techNotes is internal-only ("not shown to customer" in the tech
   // app) and must never be passed into this customer-facing document.
 
   if (opts.geo) {
-    w.rule();
-    w.heading("On-site verification");
-    w.labelValue(
-      "GPS location",
-      `${opts.geo.lat.toFixed(5)}, ${opts.geo.lng.toFixed(5)}` +
-        (opts.geo.accuracyM ? `  (±${Math.round(opts.geo.accuracyM)} m)` : "")
-    );
-    if (opts.geo.capturedAtIso) {
-      w.labelValue("Captured", fmtDateTime(opts.geo.capturedAtIso));
-    }
-    w.labelValue(
-      "Map",
-      `https://maps.google.com/?q=${opts.geo.lat.toFixed(5)},${opts.geo.lng.toFixed(5)}`
-    );
-    // This used to read "…confirming on-site presence." Nothing compares these
-    // coordinates to the service address — there is no geofence and no accuracy
-    // floor — so the sentence asserted a proof the system does not have, on a
-    // document that would be handed to a lawyer in a misapplication claim. It
-    // now says only what is true. Restore a claim here when the distance is
-    // measured and printed, not before.
-    w.text(
+    d.band("On-Site Verification");
+    d.y -= 5;
+    const bottom = colRows(A_M, d.y, A_CW, [
+      [
+        "GPS location",
+        `${opts.geo.lat.toFixed(5)}, ${opts.geo.lng.toFixed(5)}` +
+          (opts.geo.accuracyM ? `  (±${Math.round(opts.geo.accuracyM)} m)` : ""),
+      ],
+      ["Captured", opts.geo.capturedAtIso ? fmtDateTime(opts.geo.capturedAtIso) : null],
+      [
+        "Map",
+        `https://maps.google.com/?q=${opts.geo.lat.toFixed(5)},${opts.geo.lng.toFixed(5)}`,
+      ],
+    ]);
+    d.y = bottom - 4;
+    // This states only what is true — the coordinates are device-reported and
+    // are not compared to the service address (there is no geofence), so the
+    // document must not imply a proof of on-site presence it does not have.
+    d.y = d.write(
       "Location reported by the technician's device when the report was filed. Accuracy depends on the device and is not independently verified.",
-      { size: 8.5, color: MUTED }
+      A_M,
+      d.y,
+      { size: 8, color: MUTED, maxWidth: A_CW, lineGap: 0.5 }
     );
+    d.y -= 10;
   }
 
-  w.rule();
-  w.text(`Report reference: ${opts.reportId}`, { size: 8.5, color: MUTED });
-  return w.save();
+  // ---- Safety footer + reference
+  d.need(48);
+  d.hline(A_M, PAGE.width - A_M, d.y, RULE, 0.5);
+  d.y -= 10;
+  d.y = d.write(
+    `${co.name} is committed to the safety of our customers and our environment. ` +
+      "All materials used have been registered by the Environmental Protection Agency. " +
+      "Please avoid unnecessary contact with materials and comply with all instructions and " +
+      "recommendations from our technicians. Thank you for your patronage! " +
+      "National Emergency Poison Control: (800) 222-1222",
+    A_M,
+    d.y,
+    { size: 7.5, color: MUTED, maxWidth: A_CW, align: "center", lineGap: 0.5 }
+  );
+  d.y -= 6;
+  d.write(`Report reference: ${opts.reportId}`, A_M, d.y, {
+    size: 7.5,
+    color: MUTED,
+    maxWidth: A_CW,
+    align: "center",
+  });
+  return d.doc.save();
 }
 
 export type AmendmentChange = { label: string; from: string; to: string };
