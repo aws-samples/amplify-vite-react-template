@@ -4,6 +4,7 @@ import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
 import SEO, { buildBreadcrumbSchema, buildServiceSchema } from "../../components/SEO";
 import QuoteCard from "../../components/QuoteCard";
+import { useTalkToExpert } from "../../components/TalkToExpertModal";
 
 const FAMILIAR_ITEMS = [
   { emoji: "🔍", icon: "/images/sf-entry-points.png", text: "I can't figure out where they're getting in." },
@@ -146,6 +147,7 @@ const FAQS = [
 ];
 
 export default function AntsSpiders() {
+  const { open: openTalkToExpert } = useTalkToExpert();
   const [showBackToTop, setShowBackToTop]     = useState(false);
   const [activeAccordion, setActiveAccordion] = useState<string | null>("01");
   const [activeHappening, setActiveHappening] = useState(0);
@@ -205,7 +207,7 @@ export default function AntsSpiders() {
         headline="Seeing ants in the kitchen or spiders around your home?"
         sub="BuzzKill helps homeowners across Massachusetts and Rhode Island understand the problem, solve it at the source, and help keep it from coming back. Safe for Families. Tough on Pests."
         primaryCta={{ label: "Get Instant Quote", href: "/quote" }}
-        secondaryCta={{ label: "Talk to a Local Expert", href: "tel:+15082589294" }}
+        secondaryCta={{ label: "Talk to a Local Expert", onClick: openTalkToExpert }}
         className="bk-hero--community"
       />
 

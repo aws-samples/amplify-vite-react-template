@@ -10,9 +10,14 @@ import {
 import { fmtDateTime } from "../lib/format";
 import { useRoles } from "../lib/auth";
 import {
+  deriveLeadStage,
   isLeadOpen,
   isLeadOverdue,
   leadNextActionAt,
+  LEAD_STAGE_LABEL,
+  LEAD_STAGE_TONE,
+  OPEN_LEAD_STAGES,
+  type LeadStage,
 } from "../lib/leadStage";
 import {
   Badge,
@@ -44,6 +49,9 @@ export default function Leads() {
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [mineOnly, setMineOnly] = useState(false);
+  // Narrow the inbox to one derived stage. The stage is computed from facts
+  // (deriveLeadStage), never stored — so this filter can't go stale.
+  const [stageFilter, setStageFilter] = useState<LeadStage | "ALL">("ALL");
   // The duplicate decision: candidates + the exact form values to re-submit.
   const [dupe, setDupe] = useState<{
     candidates: DupeCandidate[];
@@ -71,7 +79,7 @@ export default function Leads() {
 
   // The inbox is not a sales pipeline. It contains only inquiries that still
   // need a human outcome, ordered by business risk: overdue first, then due.
-  const shown = useMemo(() => {
+  const openRows = useMemo(() => {
     const rows = (leads ?? []).filter(
       (lead) =>
         isLeadOpen(lead) &&
@@ -86,6 +94,25 @@ export default function Leads() {
       );
     });
   }, [leads, mineOnly, roles.sub]);
+
+  // How many open leads sit at each derived stage — the counts stay on the
+  // full inbox so a filter never hides how much work exists.
+  const stageCounts = useMemo(() => {
+    const counts = new Map<LeadStage, number>();
+    for (const lead of openRows) {
+      const stage = deriveLeadStage(lead);
+      counts.set(stage, (counts.get(stage) ?? 0) + 1);
+    }
+    return counts;
+  }, [openRows]);
+
+  const shown = useMemo(
+    () =>
+      stageFilter === "ALL"
+        ? openRows
+        : openRows.filter((lead) => deriveLeadStage(lead) === stageFilter),
+    [openRows, stageFilter]
+  );
 
   const submitLead = async (
     values: Parameters<typeof createLead>[0]
@@ -105,9 +132,38 @@ export default function Leads() {
     navigate(`/customers/${res.id}`);
   };
 
+  // One chip per stage that actually has leads, plus All. Stage names match
+  // the badge on each row, so the pipeline is countable at a glance without
+  // anyone maintaining a status field.
+  const stageChips = (
+    <div
+      className="inline-actions"
+      style={{ flexWrap: "wrap", margin: "0 0 12px" }}
+    >
+      <Button
+        small
+        variant={stageFilter === "ALL" ? undefined : "subtle"}
+        onClick={() => setStageFilter("ALL")}
+      >
+        All ({openRows.length})
+      </Button>
+      {OPEN_LEAD_STAGES.filter((s) => stageCounts.get(s)).map((s) => (
+        <Button
+          key={s}
+          small
+          variant={stageFilter === s ? undefined : "subtle"}
+          onClick={() => setStageFilter((cur) => (cur === s ? "ALL" : s))}
+        >
+          {LEAD_STAGE_LABEL[s]} ({stageCounts.get(s)})
+        </Button>
+      ))}
+    </div>
+  );
+
   const inbox = (
     <Card title={`Needs action (${shown.length})`}>
       {shown.map((lead) => {
+          const stage = deriveLeadStage(lead);
           const overdue = isLeadOverdue(lead);
           const due = leadNextActionAt(lead);
           const missingContact = !lead.email || !lead.phone;
@@ -136,6 +192,9 @@ export default function Leads() {
                 .join(" · ")}
               meta={
                 <span className="inline-actions">
+                  <Badge tone={LEAD_STAGE_TONE[stage]}>
+                    {LEAD_STAGE_LABEL[stage]}
+                  </Badge>
                   {overdue ? <Badge tone="danger">overdue</Badge> : null}
                   {missingContact || missingAddress ? (
                     <Badge tone="warn">details needed</Badge>
@@ -173,14 +232,17 @@ export default function Leads() {
 
       {!leads ? (
         <Spinner />
-      ) : shown.length === 0 ? (
+      ) : openRows.length === 0 ? (
         <EmptyState
           title="No open leads"
           body="Every inquiry is handled. New website and staff-added inquiries will appear here automatically."
           action={<Button onClick={() => setAdding(true)}>Add a lead</Button>}
         />
       ) : (
-        inbox
+        <>
+          {stageChips}
+          {inbox}
+        </>
       )}
 
       <Sheet open={adding} onClose={() => setAdding(false)} title="New lead">

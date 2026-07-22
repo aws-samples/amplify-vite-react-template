@@ -4,6 +4,7 @@ import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
 import SEO, { buildBreadcrumbSchema, buildServiceSchema } from "../../components/SEO";
 import QuoteCard from "../../components/QuoteCard";
+import { useTalkToExpert } from "../../components/TalkToExpertModal";
 
 const FAMILIAR_ITEMS = [
   { emoji: "🪵", icon: "/images/icon-termite-wood-damage.png",          text: "I noticed wood damage and hope it's nothing serious." },
@@ -121,6 +122,7 @@ const FAQS = [
 ];
 
 export default function Termite() {
+  const { open: openTalkToExpert } = useTalkToExpert();
   const [showBackToTop, setShowBackToTop]     = useState(false);
   const [activeAccordion, setActiveAccordion] = useState<string | null>("01");
   const [activeHappening, setActiveHappening] = useState(0);
@@ -180,7 +182,7 @@ export default function Termite() {
         headline="Concerned About Hidden Termite Damage?"
         sub="Early termite inspections help catch problems before costly repairs begin. BuzzKill provides professional termite inspections across Massachusetts &amp; Rhode Island."
         primaryCta={{ label: "Get Instant Quote", href: "/quote" }}
-        secondaryCta={{ label: "Talk to a Local Expert", href: "tel:+15082589294" }}
+        secondaryCta={{ label: "Talk to a Local Expert", onClick: openTalkToExpert }}
         className="bk-hero--community"
       />
 

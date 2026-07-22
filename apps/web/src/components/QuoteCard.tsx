@@ -21,10 +21,10 @@ export default function QuoteCard() {
       </div>
 
       <div className="bk-quote-card-cta" style={{ paddingTop: 12, paddingBottom: 12 }}>
-        <Link to="/quote" className="bk-btn bk-btn-primary bk-btn-full">
+        <Link to="/quote" className="bk-btn bk-btn-primary bk-btn-full" data-track-id="quote_card_cta">
           Get Free Instant Quote
         </Link>
-        <a href="tel:+15082589294" className="bk-quote-card-phone bk-quote-card-phone--flash" style={{ fontSize: 17 }}>
+        <a href="tel:+15082589294" className="bk-quote-card-phone bk-quote-card-phone--flash" style={{ fontSize: 17 }} data-track-id="quote_card_phone">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.01-.24c1.12.37 2.33.57 3.58.57a1 1 0 011 1V20a1 1 0 01-1 1C10.74 21 3 13.26 3 4a1 1 0 011-1h3.5a1 1 0 011 1c0 1.25.2 2.45.57 3.57a1 1 0 01-.24 1.01l-2.21 2.21z"/>
           </svg>

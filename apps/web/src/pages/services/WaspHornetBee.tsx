@@ -4,6 +4,7 @@ import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
 import SEO, { buildBreadcrumbSchema, buildServiceSchema } from "../../components/SEO";
 import QuoteCard from "../../components/QuoteCard";
+import { useTalkToExpert } from "../../components/TalkToExpertModal";
 
 const FAMILIAR_ITEMS = [
   { emoji: "🐝", icon: "/images/wasp-sf-1.png", text: "We're avoiding the backyard because of a nest." },
@@ -121,6 +122,7 @@ const FAQS = [
 ];
 
 export default function WaspHornetBee() {
+  const { open: openTalkToExpert } = useTalkToExpert();
   const [showBackToTop, setShowBackToTop]     = useState(false);
   const [activeAccordion, setActiveAccordion] = useState<string | null>("01");
   const [activeHappening, setActiveHappening] = useState(0);
@@ -180,7 +182,7 @@ export default function WaspHornetBee() {
         headline="Wasps or Hornets Taking Over Your Yard?"
         sub="BuzzKill safely removes active nests and helps reduce future activity so you can enjoy your outdoor spaces again. Professional stinging insect removal across Massachusetts &amp; Rhode Island."
         primaryCta={{ label: "Get Instant Quote", href: "/quote" }}
-        secondaryCta={{ label: "Talk to a Local Expert", href: "tel:+15082589294" }}
+        secondaryCta={{ label: "Talk to a Local Expert", onClick: openTalkToExpert }}
         className="bk-hero--community"
       />
 

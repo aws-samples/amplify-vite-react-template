@@ -51,6 +51,10 @@ type JobLike = {
   /** The technician who ran the completed visit — the next visit is auto-
    *  assigned back onto their schedule. */
   technicianId?: string | null;
+  /** Sizes the next visit's on-site minutes (commercial/community 60, else
+   *  30) and is carried onto the created job — the property class does not
+   *  change between visits. */
+  propertyClass?: string | null;
   completedAt?: string | null;
 };
 
@@ -204,9 +208,13 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       priceCents: null,
       status: "UNSCHEDULED",
       scheduledDate: dueDate, // target date — office confirms the slot
+      // The property did not change class between visits — carry it forward
+      // so capacity reserves the real on-site time (commercial/community is
+      // 60 min, not the residential 30) and dispatch doesn't re-ask.
+      propertyClass: job.propertyClass ?? undefined,
       // GL-04: pool facts stamped at birth — the canonical release path
       // gives exactly these minutes back exactly once on cancel/sweep.
-      capacityMinutes: onsiteMinutes(null),
+      capacityMinutes: onsiteMinutes(job.propertyClass),
       notes: `Auto-queued ${plan.serviceFrequency.toLowerCase()} visit after job ${job.id}.`,
       accessGroups: customerAccessGroups(
         job.customerId,
@@ -266,8 +274,10 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
             // ~two working weeks of candidate days: close enough to hold the
             // cadence, wide enough to find a day the tech is already nearby.
             windowDays: 14,
-            // Residential on-site default, matching this path's pool sizing.
-            onsite: onsiteMinutes(null),
+            // The completed visit's property class sizes the next one — a
+            // commercial stop reserves 60 on-site minutes, not the
+            // residential 30 this path used to assume.
+            onsite: onsiteMinutes(job.propertyClass),
             routesKey: process.env.GOOGLE_ROUTES_API_KEY ?? null,
           })
         : null;
@@ -291,7 +301,7 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       // target day (system-created — never refused, never blocking a real
       // slot; it becomes a commitment only through the assign claim, and the
       // nightly rebuild keeps this honest).
-      await notePoolMinutes(dueDate, onsiteMinutes(null)).catch(
+      await notePoolMinutes(dueDate, onsiteMinutes(job.propertyClass)).catch(
         () => undefined
       );
       console.log(

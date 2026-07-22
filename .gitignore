@@ -28,3 +28,7 @@ dist-ssr
 .amplify
 amplify_outputs*
 amplifyconfiguration*
+
+# Customer PII — migration payloads must never land in this public repo
+apps/web/migration/
+docs/migration-scrub-checklist-*.md
