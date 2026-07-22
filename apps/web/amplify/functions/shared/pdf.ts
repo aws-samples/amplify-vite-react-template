@@ -10,6 +10,7 @@ import {
   BUZZKILL_LOGO_PNG_BASE64,
   BUZZKILL_LOGO_W,
 } from "./logoAsset";
+import { PEST_ART } from "./pestArt";
 
 const PAGE = { width: 612, height: 792 }; // US Letter
 const MARGIN = 54;
@@ -433,7 +434,7 @@ export async function renderAgreementPdf(opts: {
   images?: AgreementImage[];
 }): Promise<Uint8Array> {
   const d = await AgreementDoc.create();
-  const co = opts.company ?? { name: "BuzzKill Pest Control" };
+  const co = opts.company ?? DEFAULT_COMPANY;
 
   // ---- Masthead: logo (left) · SERVICE AGREEMENT (center) · contact (right)
   const topY = d.y;
@@ -754,6 +755,91 @@ const fmtQuoteDate = (iso: string) =>
   });
 
 /**
+ * The pest photos to show on a quote's coverage strip, chosen from the service
+ * label so the lineup is honest: a mosquito plan shows the mosquito/tick/flea
+ * trio it actually treats, a wasp or rodent job shows only that pest, and every
+ * general home/community/commercial plan shows the full common-pest lineup.
+ * Keys must exist in PEST_ART.
+ */
+function pestsForService(label: string): string[] {
+  const l = label.toLowerCase();
+  if (/mosquito/.test(l)) return ["mosquitoes", "ticks", "fleas"];
+  if (/\btick|\bflea/.test(l)) return ["ticks", "fleas", "mosquitoes"];
+  if (/wasp|hornet|\bbee|sting/.test(l)) return ["wasps"];
+  if (/rodent|mice|mouse|\brat/.test(l)) return ["rodents"];
+  if (/roach|cockroach/.test(l)) return ["cockroaches"];
+  if (/spider/.test(l)) return ["spiders"];
+  if (/\bant\b|ants/.test(l)) return ["ants"];
+  // General home / community / commercial / "pest control" plans.
+  return ["ants", "spiders", "cockroaches", "mosquitoes", "ticks", "wasps", "rodents"];
+}
+
+/**
+ * Draw a green check mark whose top-left sits near (x, top), about `s` points
+ * tall — Helvetica has no ✓ glyph, so it's stroked from two line segments.
+ */
+function drawCheck(
+  d: AgreementDoc,
+  x: number,
+  top: number,
+  s = 9,
+  color = BK_GREEN_DK
+) {
+  const y = top - s;
+  d.page.drawLine({
+    start: { x, y: y + s * 0.45 },
+    end: { x: x + s * 0.35, y },
+    thickness: 1.6,
+    color,
+  });
+  d.page.drawLine({
+    start: { x: x + s * 0.35, y },
+    end: { x: x + s, y: y + s * 0.95 },
+    thickness: 1.6,
+    color,
+  });
+}
+
+/**
+ * Draw the "pests we protect against" coverage strip: each pest photo scaled to
+ * fit its column and bottom-aligned to a common baseline (so they read as a row
+ * standing on a line), with a centered label beneath. Advances `d.y`. Embeds
+ * are best-effort — a pest whose PNG fails to decode is skipped, never fatal.
+ */
+async function drawCoverageStrip(d: AgreementDoc, pests: string[]): Promise<void> {
+  const keys = pests.filter((k) => PEST_ART[k]);
+  if (!keys.length) return;
+  const n = keys.length;
+  const colW = A_CW / n;
+  const imgH = n <= 2 ? 78 : 60; // a lone pest gets a larger portrait
+  const labelH = 13;
+  d.need(imgH + labelH + 6);
+  const top = d.y;
+  const baseline = top - imgH; // every image rests its bottom edge here
+  for (let i = 0; i < n; i++) {
+    const art = PEST_ART[keys[i]];
+    const cx = A_M + i * colW + colW / 2;
+    try {
+      const png = await d.doc.embedPng(Buffer.from(art.b64, "base64"));
+      const scale = Math.min((colW - 14) / art.w, imgH / art.h);
+      const w = art.w * scale;
+      const h = art.h * scale;
+      d.page.drawImage(png, { x: cx - w / 2, y: baseline, width: w, height: h });
+    } catch {
+      // Skip an undecodable pest rather than break the quote.
+    }
+    d.write(art.label, A_M + i * colW, baseline - 3, {
+      font: d.bold,
+      size: 7.5,
+      color: MUTED,
+      maxWidth: colW,
+      align: "center",
+    });
+  }
+  d.y = baseline - labelH - 6;
+}
+
+/**
  * Draw the BuzzKill logo lockup with its top-left corner at (x, top), scaled to
  * `width` points, and return the drawn height so the caller can position the
  * masthead rule beneath it. Returns null if the embedded asset fails to decode,
@@ -816,7 +902,7 @@ export async function renderQuotePdf(opts: {
   offSeasonMessage?: string | null;
 }): Promise<Uint8Array> {
   const d = await AgreementDoc.create();
-  const co = opts.company ?? { name: "BuzzKill Pest Control" };
+  const co = opts.company ?? DEFAULT_COMPANY;
   const rightX = A_M + A_COLW + A_GUTTER;
 
   // ---- Masthead: logo (left) · PRICE QUOTE (center) · contact (right)
@@ -936,22 +1022,27 @@ export async function renderQuotePdf(opts: {
   let lB = moneyTop - BAR_H;
   let rB = moneyTop - BAR_H;
   // A one-time treatment box — unless this is a plan-only (mosquito / community)
-  // quote, which is sold only as a subscription.
-  if (!opts.planOnly && opts.oneTimeCents != null) {
-    lB = moneyBlock(A_M, "One-Time Treatment", [
-      { label: "Service total", amountCents: opts.oneTimeCents, total: true },
+  // quote, which is sold only as a subscription. When only one box shows (a
+  // plan-only or one-time-only quote), center it instead of leaving a lopsided
+  // empty column.
+  const showsOneTime = !opts.planOnly && opts.oneTimeCents != null;
+  const bothBoxes = showsOneTime && Boolean(opts.plan);
+  const soloX = A_M + (A_CW - A_COLW) / 2;
+  if (showsOneTime) {
+    lB = moneyBlock(bothBoxes ? A_M : soloX, "One-Time Treatment", [
+      { label: "Service total", amountCents: opts.oneTimeCents!, total: true },
     ]);
   }
   if (opts.plan) {
-    rB = moneyBlock(rightX, "Recurring Plan", [
+    rB = moneyBlock(bothBoxes ? rightX : soloX, "Recurring Plan", [
       { label: `Visits: ${cadenceLabel(opts.plan.frequency)}`, amountCents: opts.plan.monthlyCents, muted: true },
       { label: "Billed monthly", amountCents: opts.plan.monthlyCents },
       { label: "Due at booking", amountCents: opts.plan.initialFeeCents, total: true },
     ]);
   }
-  d.y = Math.min(lB, rB) - 12;
+  d.y = Math.min(lB, rB) - 16;
 
-  // ---- Off-season note (GL-17) or the standard how-to-book line
+  // ---- Off-season note (GL-17)
   if (opts.offSeason && opts.offSeasonMessage) {
     d.band("Seasonal Enrollment");
     d.y -= 6;
@@ -960,17 +1051,53 @@ export async function renderQuotePdf(opts: {
       maxWidth: A_CW,
       lineGap: 0.5,
     });
-    d.y -= 10;
+    d.y -= 12;
   }
 
-  d.need(30);
-  d.write(
-    "To lock in this price, open your quote from the email we just sent and pick the day that works — booking online takes about a minute.",
-    A_M,
-    d.y,
-    { size: 9.5, maxWidth: A_CW, lineGap: 0.5 }
-  );
-  d.y -= 24;
+  // ---- Pests We Protect Against — the coverage strip with real pest photos
+  d.band("Pests We Protect Against");
+  d.y -= 12;
+  await drawCoverageStrip(d, pestsForService(opts.serviceLabel));
+  d.y -= 6;
+
+  // ---- Why Homeowners Choose BuzzKill — green-checked value props, two columns
+  d.band("Why Homeowners Choose BuzzKill");
+  d.y -= 10;
+  const valueProps = [
+    "Licensed, insured local technicians",
+    "Complimentary re-treats between visits",
+    "Safe for families and pets",
+    "Products registered with the EPA",
+  ];
+  const propColW = A_CW / 2;
+  const propRows = Math.ceil(valueProps.length / 2);
+  d.need(propRows * 16 + 4);
+  const propTop = d.y;
+  valueProps.forEach((prop, i) => {
+    const px = A_M + (i % 2) * propColW;
+    const py = propTop - Math.floor(i / 2) * 16;
+    drawCheck(d, px + 2, py, 9);
+    d.write(prop, px + 16, py, { size: 9.5, color: INK, maxWidth: propColW - 20 });
+  });
+  d.y = propTop - propRows * 16 - 12;
+
+  // ---- Booking call-to-action, in a green-tinted callout with an accent bar
+  const ctaText = opts.offSeason
+    ? "To reserve this price, open your quote from the email we just sent and enroll — it takes about a minute."
+    : "To lock in this price, open your quote from the email we just sent and pick the day that works — booking online takes about a minute.";
+  const ctaH = d.measure(ctaText, d.font, 10, A_CW - 44, 0.5) + 20;
+  d.need(ctaH + 4);
+  const ctaTop = d.y;
+  d.fill(A_M, ctaTop, A_CW, ctaH, CELL_TINT);
+  d.fill(A_M, ctaTop, 4, ctaH, BK_GREEN); // left accent bar
+  d.write(ctaText, A_M + 18, ctaTop - 12, {
+    font: d.bold,
+    size: 10,
+    color: BK_GREEN_DK,
+    maxWidth: A_CW - 44,
+    lineGap: 0.5,
+  });
+  d.y = ctaTop - ctaH - 14;
 
   // ---- Footer
   d.need(30);
