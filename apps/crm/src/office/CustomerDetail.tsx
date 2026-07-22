@@ -59,6 +59,7 @@ import LeadPanel from "../components/LeadPanel";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import VisitCancelSheet from "../components/VisitCancelSheet";
 import DocButton from "../components/DocButton";
+import CustomerDocuments from "../components/CustomerDocuments";
 import { DateField } from "../components/DateTimeFields";
 import { useRoles } from "../lib/auth";
 import { Icon } from "../ui/icons";
@@ -321,6 +322,18 @@ export default function CustomerDetail() {
 
   const isLead = customer.status === "LEAD";
   const group = groups.find((g) => g.id === customer.groupId);
+  const documentCount = (() => {
+    const raw = (customer as { documents?: unknown }).documents;
+    let v: unknown = raw;
+    if (typeof raw === "string") {
+      try {
+        v = JSON.parse(raw || "[]");
+      } catch {
+        v = [];
+      }
+    }
+    return Array.isArray(v) ? v.length : 0;
+  })();
   const activePlan = plans.find((p) => p.status === "ACTIVE");
   const upcomingJob = jobs.find(
     (j) => j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= todayEastern()
@@ -1061,6 +1074,14 @@ export default function CustomerDetail() {
               />
             ))
           )}
+        </RecordSection>
+
+        <RecordSection
+          title="Documents"
+          count={documentCount}
+          defaultOpen={documentCount > 0}
+        >
+          <CustomerDocuments customer={customer} onChanged={() => load()} />
         </RecordSection>
 
         <RecordSection

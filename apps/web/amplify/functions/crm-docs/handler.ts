@@ -184,6 +184,8 @@ type Args = {
   key?: string;
   customerId?: string;
   kind?: string;
+  title?: string;
+  sizeBytes?: number;
   note?: string;
   idempotencyKey?: string;
   notes?: string;
@@ -673,6 +675,27 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return getReportPhotoUploadUrl(
         event.arguments.reportId!,
         event.arguments.contentType!
+      );
+    }
+    case "getCustomerDocumentUploadUrl": {
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      return getCustomerDocumentUploadUrl(
+        event.arguments.customerId!,
+        event.arguments.contentType!
+      );
+    }
+    case "recordCustomerDocument": {
+      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      return recordCustomerDocument(
+        {
+          customerId: event.arguments.customerId!,
+          key: event.arguments.key!,
+          title: event.arguments.title!,
+          kind: event.arguments.kind ?? undefined,
+          contentType: event.arguments.contentType ?? undefined,
+          sizeBytes: event.arguments.sizeBytes ?? undefined,
+        },
+        callerEmail(event.identity)
       );
     }
     case "sendCustomerEmail": {
@@ -5457,19 +5480,143 @@ async function getReportPhotoUploadUrl(reportId: string, contentType: string) {
   return { key, uploadUrl, expiresInSeconds: 900 };
 }
 
+/** Content types the office may attach as a customer document: PDFs and the
+ *  same image types photos allow (a phone photo of a signed page is common). */
+const DOCUMENT_TYPES: Record<string, string> = {
+  "application/pdf": "pdf",
+  ...PHOTO_TYPES,
+};
+
+/**
+ * Presigned PUT for an office-uploaded customer document. Keys land under
+ * `documents/<customerId>/…`, so getDocumentUrl's existing entitlement check
+ * covers viewing. The office PUTs the file, then calls recordCustomerDocument.
+ */
+async function getCustomerDocumentUploadUrl(
+  customerId: string,
+  contentType: string
+) {
+  const ext = DOCUMENT_TYPES[contentType.toLowerCase()];
+  if (!ext) {
+    throw new Error("Unsupported file type — upload a PDF or an image");
+  }
+  const client = await dataClient();
+  const { data: customer } = await client.models.Customer.get({ id: customerId });
+  if (!customer) throw new Error(`Customer ${customerId} not found`);
+
+  const key = `documents/${customerId}/${Date.now()}-${randomBytes(4).toString("hex")}.${ext}`;
+  const uploadUrl = await getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: BUCKET(), Key: key, ContentType: contentType }),
+    { expiresIn: 900 }
+  );
+  return { key, uploadUrl, expiresInSeconds: 900 };
+}
+
+/** One entry in Customer.documents. */
+type CustomerDocumentEntry = {
+  id: string;
+  title: string;
+  kind: string;
+  fileKey: string;
+  contentType?: string;
+  sizeBytes?: number;
+  uploadedByEmail?: string;
+  uploadedAt: string;
+};
+
+const DOCUMENT_KINDS = [
+  "AGREEMENT",
+  "INSPECTION",
+  "INSURANCE",
+  "INVOICE",
+  "OTHER",
+];
+
+/** Read the current documents array off a customer row (tolerant of a stored
+ *  JSON string, a parsed array, or an absent field). */
+function readDocuments(raw: unknown): CustomerDocumentEntry[] {
+  const parsed = typeof raw === "string" ? safeParse(raw) : raw;
+  return Array.isArray(parsed) ? (parsed as CustomerDocumentEntry[]) : [];
+}
+function safeParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Append a document to Customer.documents after its file has been PUT to `key`.
+ * Verifies the key really belongs to this customer's prefix (so a caller can't
+ * point an entry at another customer's object). Stored as a JSON array on the
+ * Customer, which the office and the customer's own portal already read.
+ */
+async function recordCustomerDocument(
+  args: {
+    customerId: string;
+    key: string;
+    title: string;
+    kind?: string;
+    contentType?: string;
+    sizeBytes?: number;
+  },
+  uploadedByEmail: string | null
+) {
+  if (!args.key.startsWith(`documents/${args.customerId}/`)) {
+    throw new Error("Document key does not belong to this customer");
+  }
+  if (!args.title.trim()) throw new Error("A document title is required");
+  const client = await dataClient();
+  const { data: customer } = await client.models.Customer.get({
+    id: args.customerId,
+  });
+  if (!customer) throw new Error(`Customer ${args.customerId} not found`);
+
+  const kind =
+    args.kind && DOCUMENT_KINDS.includes(args.kind) ? args.kind : "OTHER";
+  const entry: CustomerDocumentEntry = {
+    // The object key's random suffix is already unique — reuse it as the id.
+    id: args.key.split("/").pop() ?? `${Date.now()}`,
+    title: args.title.trim(),
+    kind,
+    fileKey: args.key,
+    contentType: args.contentType,
+    sizeBytes: args.sizeBytes,
+    uploadedByEmail: uploadedByEmail ?? undefined,
+    uploadedAt: new Date().toISOString(),
+  };
+  const documents = [
+    ...readDocuments((customer as { documents?: unknown }).documents),
+    entry,
+  ];
+  // a.json() fields are written as a JSON string (read back parsed).
+  const { data, errors } = await client.models.Customer.update({
+    id: args.customerId,
+    documents: JSON.stringify(documents),
+  });
+  if (!data) {
+    throw new Error(
+      `Could not record document: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return entry;
+}
+
 /**
  * Presign a document for viewing. Keys are always
- * `reports/<customerId>/...` or `agreements/<customerId>/...`; entitlement
- * is office/tech, the customer's own dynamic group, or their
- * customer-group.
+ * `reports/<customerId>/...`, `agreements/<customerId>/...`, or
+ * `documents/<customerId>/...`; entitlement is office/tech, the customer's own
+ * dynamic group, or their customer-group.
  */
 async function getDocumentUrl(
   identity: AppSyncIdentity | undefined | null,
   key: string
 ) {
-  // reports/<cid>/…, agreements/<cid>/…, and jobs/<cid>/no-access/… (the
-  // no-access door-photo evidence, GL-15 retrieval).
-  const match = /^(reports|agreements|jobs)\/([^/]+)\//.exec(key);
+  // reports/<cid>/…, agreements/<cid>/…, documents/<cid>/… (office uploads),
+  // and jobs/<cid>/no-access/… (the no-access door-photo evidence, GL-15).
+  const match = /^(reports|agreements|documents|jobs)\/([^/]+)\//.exec(key);
   if (!match) throw new Error("Invalid document key");
   if (match[1] === "jobs" && !/^jobs\/[^/]+\/no-access\//.test(key)) {
     throw new Error("Invalid document key");
