@@ -29,6 +29,7 @@ import {
   saveFunnelState,
   type FunnelSelection,
 } from "../../lib/bookingFunnel";
+import { trackFormSubmit, trackPurchase } from "../../lib/analytics";
 
 const publishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as
   | string
@@ -264,6 +265,7 @@ export default function BookPage() {
         const stored = loadFunnelState(window.sessionStorage);
         const bookingId = urlBookingRef?.bookingId ?? stored?.quote.bookingId;
         const token = urlBookingRef?.t ?? stored?.quote.statusToken;
+        trackPurchase(bookingId ?? paymentIntent.id, paymentIntent.amount);
         if (bookingId && token) {
           enterFinalizing(bookingId, token);
         } else {
@@ -380,6 +382,7 @@ export default function BookPage() {
       setClientSecret(result.body.clientSecret);
       setChargedAmountCents(result.body.amountCents);
       if (result.body.statusToken) setStatusToken(result.body.statusToken);
+      trackFormSubmit("book", "success", { booking_id: quote.bookingId });
       return;
     }
 
@@ -409,9 +412,11 @@ export default function BookPage() {
       // invitation to pay again.
       const settledOrInFlight = /already paid|still processing/i.test(message);
       setFatal({ message, offerFreshQuote: !settledOrInFlight });
+      trackFormSubmit("book", "error", { error: message, status: result.status });
       return;
     }
     setError(message);
+    trackFormSubmit("book", "error", { error: message, status: result.status });
   }
 
   function freshQuote() {
@@ -884,6 +889,7 @@ export default function BookPage() {
               }
               onSucceeded={() => {
                 const token = statusToken ?? quote?.statusToken;
+                if (quote) trackPurchase(quote.bookingId, amountCents ?? 0);
                 if (quote && token) {
                   enterFinalizing(quote.bookingId, token);
                 } else {
@@ -956,6 +962,7 @@ function PaymentForm({
       if (result.error) {
         // Stripe's message is customer-facing (declines, expired cards…).
         setError(result.error.message ?? "Your payment could not be completed.");
+        trackFormSubmit("book_payment", "error", { error: result.error.code ?? result.error.message });
         return;
       }
       if (result.paymentIntent?.status === "succeeded") {

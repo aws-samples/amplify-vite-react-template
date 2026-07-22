@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
 import SEO, { buildBreadcrumbSchema, buildServiceSchema } from "../../components/SEO";
+import { useTalkToExpert } from "../../components/TalkToExpertModal";
 
 const FAMILIAR_ITEMS = [
   { emoji: "🦝", icon: "/images/badge-attic-squirrel.png",  text: "Something is definitely living in the attic." },
@@ -124,6 +125,7 @@ const FAQS = [
 ];
 
 export default function Wildlife() {
+  const { open: openTalkToExpert } = useTalkToExpert();
   const [showBackToTop, setShowBackToTop]     = useState(false);
   const [activeAccordion, setActiveAccordion] = useState<string | null>("01");
   const [activeHappening, setActiveHappening] = useState(0);
@@ -184,7 +186,7 @@ export default function Wildlife() {
         headline="Wildlife Belongs Outside, Not in Your Home"
         sub="BuzzKill provides humane wildlife removal and helps prevent animals from returning, so your home stays protected throughout Massachusetts &amp; Rhode Island."
         primaryCta={{ label: "Get Instant Quote", href: "/quote" }}
-        secondaryCta={{ label: "Talk to a Local Expert", href: "tel:+15082589294" }}
+        secondaryCta={{ label: "Talk to a Local Expert", onClick: openTalkToExpert }}
         className="bk-hero--community bk-hero--wildlife"
       />
 

@@ -45,10 +45,10 @@ export default function QuoteCTA({
             marginTop: 28,
           }}
         >
-          <Link to="/quote" className="bk-btn bk-btn-primary">
+          <Link to="/quote" className="bk-btn bk-btn-primary" data-track-id="quote_cta_primary">
             Get My Instant Quote &rarr;
           </Link>
-          <a href={OFFICE_PHONE_HREF} className="bk-btn bk-btn-outline">
+          <a href={OFFICE_PHONE_HREF} className="bk-btn bk-btn-outline" data-track-id="quote_cta_phone">
             Or call {OFFICE_PHONE_DISPLAY}
           </a>
         </div>

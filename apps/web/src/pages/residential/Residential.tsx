@@ -5,22 +5,22 @@ import FAQ from "../../components/FAQ";
 
 const LIFESTYLE_CARDS = [
   {
-    icon: "👨‍👩‍👧",
+    icon: "/images/01-families.png",
     title: "Families",
     body: "Helping create a comfortable home where your family can focus on living instead of worrying about pests.",
   },
   {
-    icon: "🐾",
+    icon: "/images/02-pet-owners.png",
     title: "Pet Owners",
     body: "Thoughtfully applied treatments designed with the safety and comfort of your pets in mind.",
   },
   {
-    icon: "🌿",
+    icon: "/images/03-outdoor-living.png",
     title: "Outdoor Living",
     body: "Enjoy more time in your backyard with protection from mosquitoes, ticks, and stinging insects.",
   },
   {
-    icon: "🛡️",
+    icon: "/images/04-year-round-protection.png",
     title: "Year Round Protection",
     body: "Helping keep seasonal pests from becoming year round problems.",
   },
@@ -62,13 +62,13 @@ const SERVICE_CATEGORIES = [
   },
 ];
 
-const HOMEOWNER_QUOTES = [
-  { emoji: "😤", text: "I've tried store sprays and they keep coming back." },
-  { emoji: "🐾", text: "My dog keeps bringing fleas inside." },
-  { emoji: "🦟", text: "We can't enjoy our backyard because of mosquitoes." },
-  { emoji: "🐀", text: "I hear scratching in the attic every night." },
-  { emoji: "🏠", text: "I'm worried termites have damaged my home." },
-  { emoji: "😩", text: "I just want someone to take care of it." },
+const HOMEOWNER_QUOTES: { icon?: string; emoji?: string; text: string }[] = [
+  { icon: "/images/01-store-sprays.png", text: "I've tried store sprays and they keep coming back." },
+  { icon: "/images/02-dog-fleas.png", text: "My dog keeps bringing fleas inside." },
+  { icon: "/images/03-backyard-mosquitoes.png", text: "We can't enjoy our backyard because of mosquitoes." },
+  { icon: "/images/04-attic-scratching.png", text: "I hear scratching in the attic every night." },
+  { icon: "/images/05-termites.png", text: "I'm worried termites have damaged my home." },
+  { icon: "/images/06-take-care.png", text: "I just want someone to take care of it." },
 ];
 
 
@@ -251,7 +251,9 @@ export default function Residential() {
           <div className="bk-res-lifestyle-grid">
             {LIFESTYLE_CARDS.map((c, i) => (
               <div key={i} className="bk-res-lifestyle-card">
-                <span className="bk-res-lifestyle-icon" aria-hidden="true">{c.icon}</span>
+                <span className="bk-res-lifestyle-icon" aria-hidden="true">
+                  <img src={c.icon} alt="" />
+                </span>
                 <h3 className="bk-res-lifestyle-title">{c.title}</h3>
                 <p className="bk-res-lifestyle-body">{c.body}</p>
               </div>
@@ -311,7 +313,11 @@ export default function Residential() {
             <div className="bk-familiar-carousel" ref={carouselRef}>
               {HOMEOWNER_QUOTES.map((item, i) => (
                 <div key={i} className="bk-familiar-bubble">
-                  <span className="bk-familiar-emoji" aria-hidden="true">{item.emoji}</span>
+                  {item.icon ? (
+                    <img src={item.icon} alt="" className="bk-familiar-icon" />
+                  ) : (
+                    <span className="bk-familiar-emoji" aria-hidden="true">{item.emoji}</span>
+                  )}
                   <p className="bk-familiar-bubble-text">&ldquo;{item.text}&rdquo;</p>
                 </div>
               ))}

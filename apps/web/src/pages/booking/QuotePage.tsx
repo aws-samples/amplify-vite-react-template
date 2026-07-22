@@ -6,6 +6,7 @@ import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
 import BugZapper from "../../components/BugZapper";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
 import { WILDLIFE_REMOVAL_KINDS } from "../../../amplify/functions/shared/serviceCatalog";
+import { trackFormSubmit, trackGenerateLead } from "../../lib/analytics";
 import {
   checkQuoteStatus,
   getLeadPrefill,
@@ -437,12 +438,15 @@ export default function QuotePage() {
         clearPendingQuote(window.sessionStorage);
         clearFunnelState(window.sessionStorage);
         window.scrollTo({ top: 0, behavior: "smooth" });
+        trackFormSubmit("quote", "success", { decision: "PRICED", booking_id: result.body.bookingId });
       } else {
         // GL-06: a fresh submission can't reach a payment state, but a
         // replayed one can — show the durable truth.
         setBanner(result.body.message);
         clearPendingQuote(window.sessionStorage);
         window.scrollTo({ top: 0, behavior: "smooth" });
+        trackFormSubmit("quote", "success", { decision: "CONTACT", booking_id: result.body.bookingId });
+        trackGenerateLead("quote_contact", result.body.bookingId);
       }
       return;
     }
@@ -452,11 +456,13 @@ export default function QuotePage() {
     if (result.body.errors && Object.keys(result.body.errors).length > 0) {
       setFieldErrors(result.body.errors);
       setBanner("A few details need another look — see the fields below.");
+      trackFormSubmit("quote", "error", { errors: Object.keys(result.body.errors).join(",") });
     } else {
       setBanner(
         result.body.error ??
           `Something went wrong (status ${result.status}). Please try again or call ${OFFICE_PHONE}.`
       );
+      trackFormSubmit("quote", "error", { error: result.body.error ?? `status_${result.status}` });
     }
   }
 
