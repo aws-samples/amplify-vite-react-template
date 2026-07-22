@@ -30,7 +30,6 @@ import Catalog from "./office/Catalog";
 import Schedule from "./office/Schedule";
 import Staff from "./office/Staff";
 import PromoCodes from "./office/PromoCodes";
-import DangerZone from "./office/DangerZone";
 import VisitChangeHistory from "./pages/VisitChangeHistory";
 import More from "./pages/More";
 import TechToday from "./tech/Today";
@@ -229,7 +228,6 @@ function Shell() {
         {/* Staging-only database reset. OWNER-gated here; the screen itself
             hides on production hosts and the backend refuses on the main
             branch. */}
-        <Route path="/danger-zone" element={<Require when={roles.owner}><DangerZone /></Require>} />
 
         {/* Technician */}
         <Route path="/tech" element={<Require when={roles.tech || staff}><TechToday /></Require>} />

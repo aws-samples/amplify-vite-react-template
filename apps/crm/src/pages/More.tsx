@@ -3,7 +3,6 @@ import { useNavigate } from "react-router-dom";
 import { confirmResetPassword, resetPassword, signOut } from "aws-amplify/auth";
 import { clearAllDrafts } from "../lib/reportDraft";
 import { api, unwrap } from "../lib/api";
-import { isStagingCrm } from "../lib/bookingLink";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
 import {
@@ -135,19 +134,6 @@ export default function More() {
         </Card>
       ) : null}
 
-      {/* Staging-only "clean start" + 30-day restore. Owner-only, and shown
-          ONLY on a positively-identified staging/dev CRM (fails closed), so the
-          wipe is never one tap away in prod or on any unrecognized host. */}
-      {roles.owner && isStagingCrm() ? (
-        <Card title="Staging tools">
-          <ListRow
-            title="Danger Zone"
-            subtitle="Wipe the database for a clean start, or restore an archive"
-            meta={<Badge tone="danger">staging</Badge>}
-            onClick={() => navigate("/danger-zone")}
-          />
-        </Card>
-      ) : null}
 
       {/* GL-07 R6: reachable by finance too — a finance-only user must be able to
           audit the money side of every cancel/reschedule, not just office. */}

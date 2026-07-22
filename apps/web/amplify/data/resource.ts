@@ -13,7 +13,6 @@ import { sesEvents } from "../functions/ses-events/resource";
 import { opsAlerts } from "../functions/ops-alerts/resource";
 import { verifyChallenge } from "../functions/auth-challenge/resource";
 import { leadSweep } from "../functions/lead-sweep/resource";
-import { crmReset } from "../functions/crm-reset/resource";
 
 /**
  * CRM data model, shared by the CRM app (apps/crm) and any backend functions.
@@ -3852,53 +3851,6 @@ export const schema = a.schema({
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmDocs)),
 
-  /**
-   * STAGING-ONLY Danger Zone bookkeeping. Each row is one "clean start": a
-   * pointer to the pre-wipe snapshot in S3 (db-archives/<id>.json, auto-expired
-   * after 30 days) plus the per-model counts it captured. Written by crm-reset
-   * via IAM; OWNER-readable so the Danger Zone can list what can be rolled back.
-   * Deliberately excluded from the wipe itself so a wipe never erases its own
-   * undo trail. `id` is the archive id and the S3 object stem.
-   */
-  DatabaseArchive: a
-    .model({
-      label: a.string(),
-      s3Key: a.string().required(),
-      branch: a.string(),
-      takenAt: a.datetime().required(),
-      expiresAt: a.datetime().required(),
-      totalRecords: a.integer().required(),
-      counts: a.json(),
-      status: a.enum(["ACTIVE", "RESTORED", "EXPIRED"]),
-      restoredAt: a.datetime(),
-    })
-    .authorization((allow) => [allow.groups(["OWNER"]).to(["read"])]),
-
-  /**
-   * Danger Zone — the staging-only database reset, ONE field for both actions.
-   * (Deliberately not two mutations: every Lambda-backed custom op costs 6
-   * CloudFormation resources in FunctionDirectiveStack, which sits at the
-   * hard 500-resource ceiling — see the 505/500 deploy failure of 2026-07-22.)
-   *
-   * action "WIPE": snapshot every model to S3, record a DatabaseArchive, then
-   * delete every record — a staging "clean start". Optional label names the
-   * restore point. action "ROLLBACK": restore the whole database from a
-   * DatabaseArchive's snapshot (kept 30 days) — archiveId required.
-   *
-   * The handler HARD-REFUSES unless deployed on a known non-production branch
-   * (AMPLIFY_BRANCH, fail-closed), so this can only ever touch staging. OWNER
-   * only.
-   */
-  databaseReset: a
-    .mutation()
-    .arguments({
-      action: a.string().required(), // "WIPE" | "ROLLBACK"
-      label: a.string(),
-      archiveId: a.string(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER"])])
-    .handler(a.handler.function(crmReset)),
 }).authorization((allow) => [
   allow.resource(crmAdmin),
   allow.resource(crmBilling),
@@ -3916,10 +3868,6 @@ export const schema = a.schema({
   // the shared email contract.
   allow.resource(verifyChallenge),
   allow.resource(leadSweep),
-  // Staging-only Danger Zone: crm-reset snapshots + wipes + restores every
-  // model, so it needs full data access. The handler refuses on the main
-  // branch (see shared/databaseReset).
-  allow.resource(crmReset),
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

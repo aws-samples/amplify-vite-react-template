@@ -51,7 +51,6 @@ import { sesEvents } from "./functions/ses-events/resource";
 import { opsAlerts } from "./functions/ops-alerts/resource";
 import { leadSweep } from "./functions/lead-sweep/resource";
 import { preToken } from "./functions/pre-token/resource";
-import { crmReset } from "./functions/crm-reset/resource";
 
 const backend = defineBackend({
   auth,
@@ -72,7 +71,6 @@ const backend = defineBackend({
   opsAlerts,
   leadSweep,
   preToken,
-  crmReset,
 });
 
 // CRM logins are invite-only (office provisions staff and portal users via
@@ -312,31 +310,6 @@ docsBucket.grantReadWrite(backend.crmDocs.resources.lambda);
 docsBucket.grantReadWrite(backend.crmPricing.resources.lambda);
 backend.crmDocs.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 backend.crmPricing.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
-// Danger Zone: crm-reset stores pre-wipe snapshots under db-archives/ in the
-// same bucket and reads them back on rollback.
-docsBucket.grantReadWrite(backend.crmReset.resources.lambda);
-backend.crmReset.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
-// The load-bearing production guard: the wipe/rollback handler runs ONLY on a
-// known non-production branch and refuses everything else. Baked in at deploy
-// from the branch being built. The default is "main" (not "staging") on
-// purpose — if AWS_BRANCH is ever unset, the reset must fail CLOSED and treat
-// the environment as production rather than accidentally arm the wipe.
-backend.crmReset.addEnvironment(
-  "AMPLIFY_BRANCH",
-  process.env.AWS_BRANCH ?? "main"
-);
-// Archive snapshots self-destruct after 30 days. Prefix-scoped so it can never
-// touch the finalized report/agreement PDFs living under reports/ & agreements/.
-backend.storage.resources.cfnResources.cfnBucket.lifecycleConfiguration = {
-  rules: [
-    {
-      id: "expire-db-archives",
-      status: "Enabled",
-      prefix: "db-archives/",
-      expirationInDays: 30,
-    },
-  ],
-};
 docsBucket.grantWrite(backend.bookingPublic.resources.lambda);
 backend.bookingPublic.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 // The webhook writes the booking agreement PDF during finalization.
@@ -577,7 +550,11 @@ const sesEventDestination = new CfnConfigurationSetEventDestination(
     configurationSetName: sesConfigurationSetName,
     eventDestination: {
       enabled: true,
-      name: "sns-delivery-events",
+      // Branch-suffixed: SES scopes destination names per config set, but
+      // CloudFormation treats the name as an account-wide physical ID — a
+      // hard-coded name here made the main stack collide with staging's
+      // destination and roll back the whole function stack.
+      name: `sns-delivery-events-${branch}`,
       matchingEventTypes: ["bounce", "complaint", "delivery"],
       snsDestination: { topicArn: sesEventsTopic.topicArn },
     },

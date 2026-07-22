@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   bookingFunnelSpoken,
   bookingFunnelUrl,
-  isStagingCrm,
   marketingSiteUrl,
 } from "./bookingLink";
 
@@ -49,32 +48,6 @@ describe("bookingFunnelUrl", () => {
     expect(bookingFunnelUrl(STAGING_CRM)).toBe(
       "https://staging.d26qpsjewk0bee.amplifyapp.com/quote"
     );
-  });
-});
-
-describe("isStagingCrm — the wipe gate, which must fail CLOSED", () => {
-  it("is true on the known staging CRM host", () => {
-    expect(isStagingCrm(STAGING_CRM)).toBe(true);
-  });
-
-  it("is true for local dev so the wipe is testable locally", () => {
-    expect(isStagingCrm("localhost")).toBe(true);
-    expect(isStagingCrm("127.0.0.1")).toBe(true);
-  });
-
-  it("is true for any staging.* host so a future staging domain still counts", () => {
-    expect(isStagingCrm("staging.pestbuzzkill.com")).toBe(true);
-  });
-
-  it("is FALSE on production — the wipe must never be one tap away in prod", () => {
-    expect(isStagingCrm(PROD_CRM)).toBe(false);
-    expect(isStagingCrm(LEGACY_PROD_CRM)).toBe(false);
-  });
-
-  it("is FALSE for any unrecognized host — fails closed on drift", () => {
-    expect(isStagingCrm("app.some-new-domain.com")).toBe(false);
-    expect(isStagingCrm("")).toBe(false);
-    expect(isStagingCrm("192.0.2.10")).toBe(false);
   });
 });
 
