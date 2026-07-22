@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { confirmResetPassword, resetPassword, signOut } from "aws-amplify/auth";
 import { clearAllDrafts } from "../lib/reportDraft";
 import { api, unwrap } from "../lib/api";
-import { isProductionCrm } from "../lib/bookingLink";
+import { isStagingCrm } from "../lib/bookingLink";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
 import {
@@ -135,9 +135,10 @@ export default function More() {
         </Card>
       ) : null}
 
-      {/* Staging-only "clean start" + 30-day restore. Owner-only, and hidden on
-          the production CRM so the wipe is never one tap away in prod. */}
-      {roles.owner && !isProductionCrm() ? (
+      {/* Staging-only "clean start" + 30-day restore. Owner-only, and shown
+          ONLY on a positively-identified staging/dev CRM (fails closed), so the
+          wipe is never one tap away in prod or on any unrecognized host. */}
+      {roles.owner && isStagingCrm() ? (
         <Card title="Staging tools">
           <ListRow
             title="Danger Zone"

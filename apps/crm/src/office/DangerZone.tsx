@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, opResult, unwrap } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { isProductionCrm } from "../lib/bookingLink";
+import { isStagingCrm } from "../lib/bookingLink";
 import { fmtDateTime } from "../lib/format";
 import {
   Badge,
@@ -22,11 +22,12 @@ import {
  * clean start; every wipe first archives a full snapshot you can roll back to
  * for 30 days.
  *
- * This screen is defended in depth: it is OWNER-only, it hides itself entirely
- * on the production CRM hostname, and the wipe requires typing an exact
- * confirmation phrase. None of that is the real backstop, though — the backend
- * refuses to wipe when it is deployed on the main branch, so even a bug here
- * cannot touch production data. See amplify/functions/shared/databaseReset.ts.
+ * This screen is defended in depth: it is OWNER-only, it shows itself ONLY on a
+ * positively-identified staging/dev CRM (fails closed — hidden on production and
+ * on any unrecognized host), and the wipe requires typing an exact confirmation
+ * phrase. None of that is the real backstop, though — the backend refuses to
+ * wipe unless it is deployed on a known non-production branch, so even a bug
+ * here cannot touch production data. See amplify/functions/shared/databaseReset.ts.
  */
 
 const WIPE_PHRASE = "WIPE STAGING";
@@ -51,7 +52,10 @@ type Archive = {
 
 export default function DangerZone() {
   const roles = useRoles();
-  const production = isProductionCrm();
+  // Fails closed: the wipe UI only appears where we can positively identify a
+  // staging/dev CRM. Production and any unrecognized host render the guard
+  // screen below, never the controls.
+  const staging = isStagingCrm();
 
   const [archives, setArchives] = useState<Archive[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,8 +78,8 @@ export default function DangerZone() {
   }, []);
 
   useEffect(() => {
-    if (roles.owner && !production) void load();
-  }, [roles.owner, production, load]);
+    if (roles.owner && staging) void load();
+  }, [roles.owner, staging, load]);
 
   if (roles.loading) return <Spinner label="Loading…" />;
 
@@ -90,9 +94,9 @@ export default function DangerZone() {
     );
   }
 
-  // Belt-and-braces: never render the wipe controls on production, even though
-  // the backend would refuse anyway.
-  if (production) {
+  // Belt-and-braces: never render the wipe controls unless this is a known
+  // staging/dev CRM (fails closed), even though the backend would refuse anyway.
+  if (!staging) {
     return (
       <Page title="Danger Zone" back="/more">
         <EmptyState

@@ -16,9 +16,11 @@ import { dataClient } from "./dataClient";
  *   1. the button is hidden on the production CRM hostnames (frontend);
  *   2. the route + mutations are OWNER-only (Cognito group);
  *   3. the handler re-checks callerIsOwner (server-side);
- *   4. assertNotProduction() throws when AMPLIFY_BRANCH === "main". This one is
- *      authoritative — the branch is baked into the Lambda env at deploy time
- *      from AWS_BRANCH, so a main deploy can never run the wipe no matter what
+ *   4. assertNotProduction() allows the wipe ONLY on a known non-production
+ *      branch (fails closed — main, unset, or anything unrecognized refuses).
+ *      This one is authoritative — the branch is baked into the Lambda env at
+ *      deploy time from AWS_BRANCH, so a main deploy can never run the wipe no
+ *      matter what
  *      the caller sends.
  *
  * Every wipe writes its pre-wipe snapshot to s3://$DOCS_BUCKET/db-archives/
@@ -104,12 +106,22 @@ export type ResetSummary = {
   models: number;
 };
 
-/** The load-bearing production guard. Throws on the main branch. */
+/**
+ * The load-bearing production guard, written to fail CLOSED. It allows the wipe
+ * ONLY when the branch is a known non-production branch; main, an unset/empty
+ * branch, a typo, a renamed prod branch, or any host we don't recognize all
+ * refuse. An inverted "throw only when === 'main'" check would default to
+ * permissive — exactly the wrong default for irreversible data loss.
+ */
+const NON_PRODUCTION_BRANCHES = new Set(["staging"]);
+
 export function assertNotProduction(): void {
-  const branch = process.env.AMPLIFY_BRANCH ?? "";
-  if (branch === "main") {
+  const branch = (process.env.AMPLIFY_BRANCH ?? "").trim().toLowerCase();
+  if (!NON_PRODUCTION_BRANCHES.has(branch)) {
     throw new Error(
-      "Database reset is disabled on production. This tool runs on staging only."
+      `Database reset runs on the staging branch only (branch: "${
+        branch || "unset"
+      }"). It is disabled everywhere else, including production.`
     );
   }
 }

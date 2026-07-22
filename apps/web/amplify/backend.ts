@@ -316,12 +316,14 @@ backend.crmPricing.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 // same bucket and reads them back on rollback.
 docsBucket.grantReadWrite(backend.crmReset.resources.lambda);
 backend.crmReset.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
-// The load-bearing production guard: the wipe/rollback handler throws when
-// this equals "main". Baked in at deploy from the branch being built, so a
-// production deploy can never run the reset regardless of the caller.
+// The load-bearing production guard: the wipe/rollback handler runs ONLY on a
+// known non-production branch and refuses everything else. Baked in at deploy
+// from the branch being built. The default is "main" (not "staging") on
+// purpose — if AWS_BRANCH is ever unset, the reset must fail CLOSED and treat
+// the environment as production rather than accidentally arm the wipe.
 backend.crmReset.addEnvironment(
   "AMPLIFY_BRANCH",
-  process.env.AWS_BRANCH ?? "staging"
+  process.env.AWS_BRANCH ?? "main"
 );
 // Archive snapshots self-destruct after 30 days. Prefix-scoped so it can never
 // touch the finalized report/agreement PDFs living under reports/ & agreements/.
