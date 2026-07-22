@@ -16,6 +16,24 @@ import {
 } from "../ui/kit";
 
 /**
+ * A Google Maps turn-by-turn link for the whole day's stops IN ORDER. Origin is
+ * omitted so Google starts from the device's live location (right for a tech
+ * starting or resuming mid-route); the last stop is the destination and the
+ * rest are waypoints. Null when there are no addresses to route.
+ */
+export function googleRouteUrl(orderedAddresses: string[]): string | null {
+  const addrs = orderedAddresses.map((a) => a.trim()).filter(Boolean);
+  if (addrs.length === 0) return null;
+  const enc = encodeURIComponent;
+  const destination = enc(addrs[addrs.length - 1]);
+  const base = `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
+  if (addrs.length === 1) return base;
+  // waypoints are the stops before the last, pipe-separated (encoded as %7C).
+  const waypoints = addrs.slice(0, -1).map(enc).join("%7C");
+  return `${base}&waypoints=${waypoints}`;
+}
+
+/**
  * Technician day view: my route for the selected day, stop by stop.
  *
  * GL-13 row-scoping: this reads only through the server-scoped technicianDay
@@ -88,6 +106,8 @@ export default function TechToday() {
     const c = customers[j.customerId];
     return [c?.serviceStreet, c?.serviceCity].filter(Boolean).join(", ");
   };
+  // The whole day's route, in stop order, for one-tap Google Maps navigation.
+  const routeUrl = googleRouteUrl((jobs ?? []).map(addressFor));
 
   return (
     <Page title="My day">
@@ -128,7 +148,21 @@ export default function TechToday() {
           body="The office hasn't assigned any jobs to your route for this day."
         />
       ) : (
-        <Card title={`${jobs.length} stop${jobs.length === 1 ? "" : "s"}`}>
+        <Card
+          title={`${jobs.length} stop${jobs.length === 1 ? "" : "s"}`}
+          actions={
+            routeUrl ? (
+              <a
+                className="btn btn-ghost btn-small"
+                href={routeUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                🗺️ Route in Google Maps
+              </a>
+            ) : null
+          }
+        >
           {jobs.map((j, i) => {
             const addr = addressFor(j);
             return (
