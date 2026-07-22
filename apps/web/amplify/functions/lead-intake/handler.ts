@@ -38,6 +38,10 @@ type LeadInput = {
   company?: string;
   specialtyService?: string;
   specialtyPropertyType?: string;
+  /** Free-text reason picked on the contact form, e.g. "Get a quote". */
+  reason?: string;
+  /** Free-text message from the contact form. */
+  message?: string;
   /** Form the lead came from, e.g. "contact" | "lp-call" | "lp-quote". */
   formId?: string;
   /** Explicit opt-in to be contacted. Absent means not granted. */
@@ -119,6 +123,8 @@ function buildLeadNotes(input: LeadInput, dropped: string[]): string {
   add("Square footage", input.sqft);
   add("Specialty service", input.specialtyService);
   add("Specialty property type", input.specialtyPropertyType);
+  add("Reason for contact", input.reason);
+  if (input.message?.trim()) lines.push(`Message: ${input.message.trim()}`);
 
   const a = input.attribution;
   if (a) {

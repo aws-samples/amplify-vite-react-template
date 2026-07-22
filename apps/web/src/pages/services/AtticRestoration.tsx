@@ -4,6 +4,7 @@ import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
 import SEO, { buildBreadcrumbSchema, buildServiceSchema } from "../../components/SEO";
 import QuoteCard from "../../components/QuoteCard";
+import { useTalkToExpert } from "../../components/TalkToExpertModal";
 
 const FAMILIAR_ITEMS = [
   { emoji: "🪹", icon: "/images/icon-restore-smells.png",            text: "My attic still smells even after the rodents are gone." },
@@ -121,6 +122,7 @@ const FAQS = [
 ];
 
 export default function AtticRestoration() {
+  const { open: openTalkToExpert } = useTalkToExpert();
   const [showBackToTop, setShowBackToTop]     = useState(false);
   const [activeAccordion, setActiveAccordion] = useState<string | null>("01");
   const [activeHappening, setActiveHappening] = useState(0);
@@ -180,7 +182,7 @@ export default function AtticRestoration() {
         headline="Restore Your Attic. Restore Your Peace of Mind."
         sub="Rodents may be gone, but the mess they leave behind can continue affecting your home. BuzzKill restores attics across Massachusetts and Rhode Island by removing damaged materials, replacing insulation, and helping return your attic to a cleaner, healthier condition."
         primaryCta={{ label: "Get Instant Quote", href: "/quote" }}
-        secondaryCta={{ label: "Talk to a Local Expert", href: "tel:+15082589294" }}
+        secondaryCta={{ label: "Talk to a Local Expert", onClick: openTalkToExpert }}
         className="bk-hero--community"
       />
 

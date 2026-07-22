@@ -145,7 +145,7 @@ export default function Header() {
       <div className="bk-topbar">
         <div className="bk-topbar-inner bk-topbar-inner--slim">
 
-          <a href="tel:+15082589294" className="bk-topbar-phone">
+          <a href="tel:+15082589294" className="bk-topbar-phone" data-track-id="topbar_phone">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
               <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.01-.24c1.12.37 2.33.57 3.58.57a1 1 0 011 1V20a1 1 0 01-1 1C10.74 21 3 13.26 3 4a1 1 0 011-1h3.5a1 1 0 011 1c0 1.25.2 2.45.57 3.57a1 1 0 01-.24 1.01l-2.21 2.21z"/>
             </svg>
@@ -157,6 +157,7 @@ export default function Header() {
             className="bk-topbar-login"
             target="_blank"
             rel="noopener noreferrer"
+            data-track-id="topbar_customer_login"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
               <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
@@ -346,7 +347,7 @@ export default function Header() {
 
             <span className="bk-nav-spacer" aria-hidden="true" />
 
-            <Link to="/quote" className="bk-btn bk-btn-primary bk-nav-cta-btn" onClick={closeAll}>
+            <Link to="/quote" className="bk-btn bk-btn-primary bk-nav-cta-btn" onClick={closeAll} data-track-id="nav_get_instant_quote">
               Get Instant Quote
             </Link>
 

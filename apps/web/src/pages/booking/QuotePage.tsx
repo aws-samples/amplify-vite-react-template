@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
+import { trackFormSubmit, trackGenerateLead } from "../../lib/analytics";
 import {
   requestQuote,
   type ContactQuote,
@@ -151,10 +152,13 @@ export default function QuotePage() {
         setPlan(fields.recurringPreference ? "PLAN" : "ONE_TIME");
         saveFunnelState(window.sessionStorage, { quote: result.body });
         window.scrollTo({ top: 0, behavior: "smooth" });
+        trackFormSubmit("quote", "success", { decision: "PRICED", booking_id: result.body.bookingId });
       } else {
         setContact(result.body);
         clearFunnelState(window.sessionStorage);
         window.scrollTo({ top: 0, behavior: "smooth" });
+        trackFormSubmit("quote", "success", { decision: "CONTACT", booking_id: result.body.bookingId });
+        trackGenerateLead("quote_contact", result.body.bookingId);
       }
       return;
     }
@@ -164,11 +168,13 @@ export default function QuotePage() {
     if (result.body.errors && Object.keys(result.body.errors).length > 0) {
       setFieldErrors(result.body.errors);
       setBanner("A few details need another look — see the fields below.");
+      trackFormSubmit("quote", "error", { errors: Object.keys(result.body.errors).join(",") });
     } else {
       setBanner(
         result.body.error ??
           `Something went wrong (status ${result.status}). Please try again or call ${OFFICE_PHONE}.`
       );
+      trackFormSubmit("quote", "error", { error: result.body.error ?? `status_${result.status}` });
     }
   }
 

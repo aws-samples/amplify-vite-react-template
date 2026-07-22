@@ -26,6 +26,7 @@ import {
   windowLabel,
   type FunnelSelection,
 } from "../../lib/bookingFunnel";
+import { trackFormSubmit, trackPurchase } from "../../lib/analytics";
 
 const publishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as
   | string
@@ -110,6 +111,7 @@ export default function BookPage() {
         setChargedAmountCents(paymentIntent.amount);
         setSucceeded(true);
         clearFunnelState(window.sessionStorage);
+        trackPurchase(paymentIntent.id, paymentIntent.amount);
       } else if (paymentIntent.status === "processing") {
         setChargedAmountCents(paymentIntent.amount);
         setProcessing(true);
@@ -148,6 +150,7 @@ export default function BookPage() {
     if (result.ok) {
       setClientSecret(result.body.clientSecret);
       setChargedAmountCents(result.body.amountCents);
+      trackFormSubmit("book", "success", { booking_id: quote.bookingId });
       return;
     }
 
@@ -175,9 +178,11 @@ export default function BookPage() {
       // "Already paid" is the one 409 that ends well — no fresh quote needed.
       const alreadyPaid = /already paid/i.test(message);
       setFatal({ message, offerFreshQuote: !alreadyPaid });
+      trackFormSubmit("book", "error", { error: message, status: result.status });
       return;
     }
     setError(message);
+    trackFormSubmit("book", "error", { error: message, status: result.status });
   }
 
   function freshQuote() {
@@ -415,6 +420,7 @@ export default function BookPage() {
               onSucceeded={() => {
                 setSucceeded(true);
                 clearFunnelState(window.sessionStorage);
+                trackPurchase(quote.bookingId, amountCents ?? 0);
               }}
               onProcessing={() => {
                 setProcessing(true);
@@ -467,6 +473,7 @@ function PaymentForm({
       if (result.error) {
         // Stripe's message is customer-facing (declines, expired cards…).
         setError(result.error.message ?? "Your payment could not be completed.");
+        trackFormSubmit("book_payment", "error", { error: result.error.code ?? result.error.message });
         return;
       }
       if (result.paymentIntent?.status === "succeeded") {

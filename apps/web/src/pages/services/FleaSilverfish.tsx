@@ -4,6 +4,7 @@ import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
 import SEO, { buildBreadcrumbSchema, buildServiceSchema } from "../../components/SEO";
 import QuoteCard from "../../components/QuoteCard";
+import { useTalkToExpert } from "../../components/TalkToExpertModal";
 
 const FAMILIAR_ITEMS = [
   { emoji: "🐾", icon: "/images/flea-sf-1.png", text: "My pet keeps scratching even after flea treatments." },
@@ -121,6 +122,7 @@ const FAQS = [
 ];
 
 export default function FleaSilverfish() {
+  const { open: openTalkToExpert } = useTalkToExpert();
   const [showBackToTop, setShowBackToTop]     = useState(false);
   const [activeAccordion, setActiveAccordion] = useState<string | null>("01");
   const [activeHappening, setActiveHappening] = useState(0);
@@ -180,7 +182,7 @@ export default function FleaSilverfish() {
         headline="Unwanted Pests Making Themselves at Home?"
         sub="Whether it&apos;s fleas affecting your family or silverfish damaging your belongings, BuzzKill finds the source, builds the right treatment, and helps protect your home across Massachusetts &amp; Rhode Island."
         primaryCta={{ label: "Get Instant Quote", href: "/quote" }}
-        secondaryCta={{ label: "Talk to a Local Expert", href: "tel:+15082589294" }}
+        secondaryCta={{ label: "Talk to a Local Expert", onClick: openTalkToExpert }}
         className="bk-hero--community"
       />
 

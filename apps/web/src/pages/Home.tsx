@@ -65,7 +65,7 @@ export default function Home() {
         }
         subtitle={<>Residential, Commercial, HOA &amp; Condominium Pest Control Protecting Properties Across Massachusetts &amp; Rhode Island</>}
         primaryCta={{ label: "Get an Instant Quote", onClick: goToForm }}
-        secondaryCta={{ label: "Find Your Service", onClick: goToForm }}
+        secondaryCta={{ label: "Find Your Service", href: "#common-pests" }}
       />
 
       {/* Protection section */}
@@ -105,9 +105,16 @@ export default function Home() {
           </div>
 
           <div className="bk-protect-cta">
-            <button type="button" className="bk-btn bk-btn-primary" onClick={goToForm}>
+            <a
+              href="#who-we-protect"
+              className="bk-btn bk-btn-primary"
+              onClick={(e) => {
+                e.preventDefault();
+                document.getElementById("who-we-protect")?.scrollIntoView({ behavior: "smooth" });
+              }}
+            >
               See the BuzzKill Approach
-            </button>
+            </a>
           </div>
         </div>
       </section>
@@ -130,7 +137,7 @@ export default function Home() {
       </section>
 
       {/* Who We Protect section */}
-      <section className="bk-services-stagger">
+      <section id="who-we-protect" className="bk-services-stagger">
         <div className="bk-services-stagger-inner">
 
           <div className="bk-stagger-section-header">
@@ -177,7 +184,7 @@ export default function Home() {
       </section>
 
       {/* Common Pests section */}
-      <section className="bk-pests-section">
+      <section id="common-pests" className="bk-pests-section">
         <div className="bk-pests-inner">
           <h2 className="bk-pests-title">Here are some of the most common pests we protect against</h2>
           <div className="bk-pests-tabs" role="tablist" aria-label="Common pests">
@@ -261,7 +268,7 @@ export default function Home() {
           <div className="bk-locations-grid">
 
             {/* Massachusetts */}
-            <Link to="/locations/massachusetts" className="bk-location-card">
+            <Link to="/service-areas#massachusetts" className="bk-location-card">
               <div className="bk-location-shape-wrap">
                 <svg viewBox="0 0 540 280" className="bk-state-svg" aria-label="Massachusetts" role="img">
                   <defs>
@@ -304,7 +311,7 @@ export default function Home() {
             </Link>
 
             {/* Rhode Island */}
-            <Link to="/locations/rhode-island" className="bk-location-card">
+            <Link to="/service-areas#rhode-island" className="bk-location-card">
               <div className="bk-location-shape-wrap">
                 <svg viewBox="0 0 135 175" className="bk-state-svg" aria-label="Rhode Island" role="img">
                   <defs>

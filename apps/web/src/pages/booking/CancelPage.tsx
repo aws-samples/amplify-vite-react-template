@@ -13,6 +13,7 @@ import {
   money,
   windowLabel,
 } from "../../lib/bookingFunnel";
+import { trackFormSubmit } from "../../lib/analytics";
 
 /** The number customers should call when self-service can't help. */
 const SUPPORT_PHONE = "(401) 526-0323";
@@ -73,10 +74,12 @@ export default function CancelPage() {
     setConfirming(false);
     if (result.ok) {
       setPhase({ kind: "done", refunded: result.body.refunded });
+      trackFormSubmit("cancel", "success", { refunded: result.body.refunded });
       return;
     }
     if (result.status === 503) {
       setPhase({ kind: "recorded-failure", body: result.body });
+      trackFormSubmit("cancel", "error", { status: 503 });
       return;
     }
     if (result.status === 404) {
@@ -84,6 +87,7 @@ export default function CancelPage() {
         kind: "not-found",
         message: result.body.error ?? "Booking not found or already canceled.",
       });
+      trackFormSubmit("cancel", "error", { status: 404 });
       return;
     }
     setPhase({
@@ -91,6 +95,7 @@ export default function CancelPage() {
       message:
         result.body.error ?? `Something went wrong (status ${result.status}).`,
     });
+    trackFormSubmit("cancel", "error", { status: result.status });
   }
 
   return (

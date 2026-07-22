@@ -4,7 +4,11 @@ import { captureAttribution } from "./lib/leadIntake";
 import Header from "./components/Header";
 import Footer from "./components/Footer";
 import ScrollToTop from "./components/ScrollToTop";
+import AnalyticsTracker from "./components/AnalyticsTracker";
+import ClickTracker from "./components/ClickTracker";
+import ScrollDepthTracker from "./components/ScrollDepthTracker";
 import ScrollProgress from "./components/ScrollProgress";
+import { TalkToExpertProvider } from "./components/TalkToExpertModal";
 
 import Home             from "./pages/Home";
 import Residential      from "./pages/residential/Residential";
@@ -74,8 +78,12 @@ export default function App() {
   }, []);
 
   return (
+    <TalkToExpertProvider>
     <BrowserRouter>
       <ScrollToTop />
+      <AnalyticsTracker />
+      <ClickTracker />
+      <ScrollDepthTracker />
       <Routes>
         {/* Landing pages — standalone, no header/footer (no escape routes) */}
         <Route path="/lp/quote" element={<LPQuote />} />
@@ -164,5 +172,6 @@ export default function App() {
         </Route>
       </Routes>
     </BrowserRouter>
+    </TalkToExpertProvider>
   );
 }

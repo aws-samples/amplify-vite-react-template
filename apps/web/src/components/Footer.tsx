@@ -37,7 +37,7 @@ export default function Footer() {
             </p>
             <p className="bk-p bk-on-dark">
               <strong>Phone:</strong>{" "}
-              <a className="bk-footer-link" style={{ display: "inline" }} href="tel:508-258-9294">
+              <a className="bk-footer-link" style={{ display: "inline" }} href="tel:508-258-9294" data-track-id="footer_phone">
                 508-258-9294
               </a>
             </p>
@@ -93,7 +93,7 @@ export default function Footer() {
             <Link className="bk-footer-link" to="/licensed-insured">
               Licensed &amp; Insured
             </Link>
-            <Link className="bk-footer-link" to="/#form">
+            <Link className="bk-footer-link" to="/#form" data-track-id="footer_start_service">
               Start Service
             </Link>
           </div>

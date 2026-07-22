@@ -4,27 +4,48 @@ import Hero from "../components/Hero";
 import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 import { CITIES } from "../data/cities";
 
-const STATE_ORDER = ["Massachusetts", "Rhode Island"] as const;
-
-const STATE_META: Record<string, { anchor: string; svgLabel: string }> = {
-  Massachusetts: { anchor: "massachusetts", svgLabel: "Massachusetts" },
-  "Rhode Island": { anchor: "rhode-island", svgLabel: "Rhode Island" },
+const STATE_ANCHORS: Record<string, string> = {
+  Massachusetts: "massachusetts",
+  "Rhode Island": "rhode-island",
 };
+
+const ALPHABET = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i));
 
 export default function ServiceAreas() {
   const [query, setQuery] = useState("");
+  const [activeLetter, setActiveLetter] = useState<string | null>(null);
 
-  const groups = useMemo(() => {
+  const stateCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const c of CITIES) counts[c.state] = (counts[c.state] ?? 0) + 1;
+    return counts;
+  }, []);
+
+  const availableLetters = useMemo(
+    () => new Set(CITIES.map((c) => c.city[0]!.toUpperCase())),
+    [],
+  );
+
+  const directoryCities = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return STATE_ORDER.map((state) => {
-      const cities = CITIES.filter((c) => c.state === state).filter((c) =>
-        q ? c.city.toLowerCase().includes(q) : true,
-      );
-      return { state, cities };
-    });
-  }, [query]);
+    const list = q
+      ? CITIES.filter((c) => c.city.toLowerCase().includes(q))
+      : activeLetter
+        ? CITIES.filter((c) => c.city[0]!.toUpperCase() === activeLetter)
+        : [];
+    return [...list].sort((a, b) => a.city.localeCompare(b.city));
+  }, [query, activeLetter]);
 
-  const totalShown = groups.reduce((sum, g) => sum + g.cities.length, 0);
+  const handleLetterClick = (letter: string) => {
+    setActiveLetter((current) => (current === letter ? null : letter));
+    setQuery("");
+  };
+
+  const handleSearchChange = (value: string) => {
+    setQuery(value);
+    setActiveLetter(null);
+  };
+
   const totalTowns = CITIES.length;
 
   return (
@@ -47,6 +68,73 @@ export default function ServiceAreas() {
         secondaryCta={{ label: "Find Your Town", href: "#directory" }}
       />
 
+      {/* City directory */}
+      <section id="directory" className="bk-areas-directory">
+        <div className="bk-areas-directory-inner">
+          <div className="bk-areas-directory-header">
+            <p className="bk-locations-eyebrow">Full Coverage List</p>
+            <h2 className="bk-h2">Find Your Town</h2>
+            <p className="bk-body-lead">
+              BuzzKill serves {totalTowns}+ towns across Massachusetts and Rhode Island. Pick a letter or search, then tap your town to get an instant quote.
+            </p>
+            <div className="bk-areas-search-wrap">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="bk-areas-search-icon">
+                <circle cx="11" cy="11" r="7" />
+                <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
+              </svg>
+              <input
+                type="search"
+                className="bk-areas-search"
+                placeholder="Search your town (e.g. Newton, Providence)"
+                value={query}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                aria-label="Search service area towns"
+              />
+            </div>
+            <div className="bk-areas-letterbar" role="tablist" aria-label="Browse towns by letter">
+              {ALPHABET.map((letter) => {
+                const has = availableLetters.has(letter);
+                return (
+                  <button
+                    key={letter}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeLetter === letter}
+                    disabled={!has}
+                    className={`bk-areas-letter${activeLetter === letter ? " is-active" : ""}`}
+                    onClick={() => handleLetterClick(letter)}
+                  >
+                    {letter}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {query.trim() !== "" && directoryCities.length === 0 && (
+            <p className="bk-areas-empty">
+              We couldn't find a match for "{query}" — but we may still service your area.{" "}
+              <Link to="/quote">Request a quote</Link> and we'll confirm.
+            </p>
+          )}
+
+          {query.trim() === "" && !activeLetter && (
+            <p className="bk-areas-hint">Select a letter above, or search your town.</p>
+          )}
+
+          {directoryCities.length > 0 && (
+            <div className="bk-areas-city-grid">
+              {directoryCities.map((c) => (
+                <Link key={c.slug} to="/quote" className="bk-areas-city">
+                  {c.city}
+                  {c.hq && <span className="bk-areas-hq-badge">HQ</span>}
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
       {/* Map overview */}
       <section className="bk-locations-section">
         <div className="bk-locations-inner">
@@ -61,7 +149,7 @@ export default function ServiceAreas() {
           <div className="bk-locations-grid">
 
             {/* Massachusetts */}
-            <a href="#massachusetts" className="bk-location-card">
+            <div id={STATE_ANCHORS.Massachusetts} className="bk-location-card">
               <div className="bk-location-shape-wrap">
                 <svg viewBox="0 0 540 280" className="bk-state-svg" aria-label="Massachusetts" role="img">
                   <defs>
@@ -99,12 +187,12 @@ export default function ServiceAreas() {
               </div>
               <div className="bk-location-label">
                 <span className="bk-location-name">Massachusetts</span>
-                <span className="bk-location-cta">{groups[0].cities.length} Towns ↓</span>
+                <span className="bk-location-cta">{stateCounts.Massachusetts ?? 0} Towns</span>
               </div>
-            </a>
+            </div>
 
             {/* Rhode Island */}
-            <a href="#rhode-island" className="bk-location-card">
+            <div id={STATE_ANCHORS["Rhode Island"]} className="bk-location-card">
               <div className="bk-location-shape-wrap">
                 <svg viewBox="0 0 135 175" className="bk-state-svg" aria-label="Rhode Island" role="img">
                   <defs>
@@ -141,64 +229,11 @@ export default function ServiceAreas() {
               </div>
               <div className="bk-location-label">
                 <span className="bk-location-name">Rhode Island</span>
-                <span className="bk-location-cta">{groups[1].cities.length} Towns ↓</span>
+                <span className="bk-location-cta">{stateCounts["Rhode Island"] ?? 0} Towns</span>
               </div>
-            </a>
-
-          </div>
-        </div>
-      </section>
-
-      {/* City directory */}
-      <section id="directory" className="bk-areas-directory">
-        <div className="bk-areas-directory-inner">
-          <div className="bk-areas-directory-header">
-            <p className="bk-locations-eyebrow">Full Coverage List</p>
-            <h2 className="bk-h2">Find Your Town</h2>
-            <p className="bk-body-lead">
-              BuzzKill serves {totalTowns}+ towns across Massachusetts and Rhode Island. Search below or browse by state, then tap your town for local details.
-            </p>
-            <div className="bk-areas-search-wrap">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="bk-areas-search-icon">
-                <circle cx="11" cy="11" r="7" />
-                <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
-              </svg>
-              <input
-                type="search"
-                className="bk-areas-search"
-                placeholder="Search your town (e.g. Newton, Providence)"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                aria-label="Search service area towns"
-              />
             </div>
+
           </div>
-
-          {totalShown === 0 && (
-            <p className="bk-areas-empty">
-              We couldn't find a match for "{query}" — but we may still service your area.{" "}
-              <Link to="/quote">Request a quote</Link> and we'll confirm.
-            </p>
-          )}
-
-          {groups.map(({ state, cities }) =>
-            cities.length === 0 ? null : (
-              <div key={state} id={STATE_META[state].anchor} className="bk-areas-group">
-                <div className="bk-areas-group-header">
-                  <h3 className="bk-areas-group-title">{state}</h3>
-                  <span className="bk-areas-group-count">{cities.length} towns</span>
-                </div>
-                <div className="bk-areas-city-grid">
-                  {cities.map((c) => (
-                    <Link key={c.slug} to={`/pest-control/${c.slug}`} className="bk-areas-city">
-                      {c.city}
-                      {c.hq && <span className="bk-areas-hq-badge">HQ</span>}
-                    </Link>
-                  ))}
-                </div>
-              </div>
-            ),
-          )}
         </div>
       </section>
 
