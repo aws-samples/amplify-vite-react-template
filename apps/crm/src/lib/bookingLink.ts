@@ -20,47 +20,13 @@ const PRODUCTION_CRM_HOSTS = new Set([
 
 /**
  * True when this CRM is the production (main) deployment. Used to pick the
- * booking/marketing URL, where the fail-safe default is the opposite of the
- * wipe's: an unrecognized host stays NON-production so a test lead is never
- * pointed at real checkout (see marketingSiteUrl). Do NOT use this to gate the
- * database wipe — use isStagingCrm, which fails closed the other way.
+ * booking/marketing URL: an unrecognized host stays NON-production so a test
+ * lead is never pointed at real checkout (see marketingSiteUrl).
  */
 export function isProductionCrm(
   hostname: string = window.location.hostname
 ): boolean {
   return PRODUCTION_CRM_HOSTS.has(hostname.toLowerCase());
-}
-
-/** Hosts that positively identify a staging or local-dev CRM. */
-const STAGING_CRM_HOSTS = new Set(["staging.d5ln2hbbp9s2j.amplifyapp.com"]);
-
-function isDevHost(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "[::1]" ||
-    hostname.endsWith(".localhost") ||
-    hostname.endsWith(".local")
-  );
-}
-
-/**
- * True ONLY when we can positively identify a staging or dev CRM. This is the
- * gate for destructive, staging-only tools (the database wipe): it fails
- * CLOSED — main and any host we don't recognize return false, so the wipe is
- * never one tap away outside a known staging/dev environment. This is
- * deliberately NOT the inverse of isProductionCrm: the two dangers are
- * opposite (real checkout vs. real data loss), so each defaults to its own
- * safe side for an unknown host. The backend branch guard is authoritative;
- * this keeps the button out of sight everywhere it must not appear.
- */
-export function isStagingCrm(
-  hostname: string = window.location.hostname
-): boolean {
-  const host = hostname.toLowerCase();
-  return (
-    STAGING_CRM_HOSTS.has(host) || host.startsWith("staging.") || isDevHost(host)
-  );
 }
 
 export function marketingSiteUrl(
