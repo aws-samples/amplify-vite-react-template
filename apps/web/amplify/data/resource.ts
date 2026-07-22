@@ -1978,6 +1978,16 @@ export const schema = a.schema({
       settledBy: a.string(),
       settledByEmail: a.string(),
       settleNote: a.string(),
+      // Bank-deposit confirmation for MANUALLY collected money (cash, cheque,
+      // direct transfer — invoices with no Stripe id; Stripe money reaches the
+      // bank via payouts on its own). "Settled" means the money was received;
+      // "deposited" means it reached the bank account. Stamped server-side by
+      // settleInvoice's MARK_DEPOSITED action; depositNote carries the paying-in
+      // slip / statement reference.
+      depositedAt: a.datetime(),
+      depositedBy: a.string(),
+      depositedByEmail: a.string(),
+      depositNote: a.string(),
       // Refunds. Cumulative, because an invoice can be refunded more than once
       // in parts. status flips to REFUNDED only when the whole amount is back;
       // until then the invoice stays PAID with a non-zero refundedAmountCents,
@@ -3181,12 +3191,22 @@ export const schema = a.schema({
    * FAILED (a VOID/REFUNDED/DRAFT invoice is not a bill awaiting payment). This
    * is the "the money came in — close the invoice" action the old
    * recordOfflinePayment could not do: it only ever created a new row.
+   *
+   *   method MARK_DEPOSITED — confirms an already-settled MANUAL invoice's
+   *     money physically reached the bank (stamps depositedAt + actor; note
+   *     carries the paying-in reference). Refuses Stripe-settled invoices —
+   *     payouts bank those. Idempotent when already deposited.
+   *   method UNMARK_DEPOSITED — clears a mistaken confirmation.
+   *
+   * The deposit actions share this mutation rather than getting their own
+   * because each custom op costs ~6 CFN resources and the function stack is
+   * nearly at the 500 cap (see databaseReset precedent).
    */
   settleInvoice: a
     .mutation()
     .arguments({
       invoiceId: a.string().required(),
-      /** OFFLINE (cash/cheque/transfer, no Stripe) or CARD (charge saved card). */
+      /** OFFLINE | CARD | MARK_DEPOSITED | UNMARK_DEPOSITED. */
       method: a.string().required(),
       note: a.string(),
     })

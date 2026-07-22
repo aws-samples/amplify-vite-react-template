@@ -400,10 +400,15 @@ type OpResult = Promise<{ data: unknown; errors?: { message: string }[] }>;
  * Settle an existing OPEN/FAILED invoice when payment arrives (R31). OFFLINE
  * records it PAID with a note (cash/check/transfer, no Stripe); CARD charges
  * the customer's saved card off-session and settles on success. OWNER/FINANCE.
+ *
+ * MARK_DEPOSITED / UNMARK_DEPOSITED ride the same mutation (CFN 500-resource
+ * cap — no new custom ops): they stamp/clear Invoice.depositedAt on an
+ * already-settled MANUAL invoice, confirming the cash/cheque physically
+ * reached the bank. They refuse Stripe-settled invoices.
  */
 export function settleInvoice(input: {
   invoiceId: string;
-  method: "OFFLINE" | "CARD";
+  method: "OFFLINE" | "CARD" | "MARK_DEPOSITED" | "UNMARK_DEPOSITED";
   note?: string;
 }): OpResult {
   return (

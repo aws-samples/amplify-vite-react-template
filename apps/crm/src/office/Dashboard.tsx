@@ -5,6 +5,8 @@ import {
   assignRecoveryOwner,
   listAll,
   listDisputes,
+  settleInvoice,
+  unwrap,
   type Customer,
   type Dispute,
   type Invoice,
@@ -13,11 +15,15 @@ import {
 } from "../lib/api";
 import { fmtDate, money, todayEastern } from "../lib/format";
 import {
+  CLIENT_TYPE_LABEL,
+  CLIENT_TYPES,
   isSettled,
   netCollectedCents,
   refundedOf,
+  revenueByClientType,
   revenueTotals,
 } from "../lib/revenue";
+import { awaitingDeposit, depositableCents } from "../lib/deposits";
 import { plansWithoutNextVisit, unchargedOneTimeJobs } from "../lib/workQueues";
 import {
   AGING_BUCKET_LABEL,
@@ -67,6 +73,22 @@ type DrillKey =
 /** One line of a tile's breakdown: an invoice and the amount it contributes. */
 type DrillRow = { invoice: Invoice; amountCents: number };
 
+/**
+ * The slice of a BookingRequest the discount figure needs. Typed by hand the
+ * same way Work.tsx does, so the dashboard still builds while the generated
+ * Schema lags a backend wave.
+ */
+type DiscountBooking = {
+  id: string;
+  status?: string | null;
+  name?: string | null;
+  promoCode?: string | null;
+  promoDiscountCents?: number | null;
+  customerId?: string | null;
+  tcAcceptedAt?: string | null;
+  createdAt?: string | null;
+};
+
 function inPeriod(iso: string | null | undefined, period: Period): boolean {
   if (period === "ALL") return true;
   if (!iso) return false;
@@ -87,23 +109,40 @@ export default function Dashboard() {
   const [plans, setPlans] = useState<ServicePlan[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [disputes, setDisputes] = useState<Dispute[]>([]);
+  const [bookings, setBookings] = useState<DiscountBooking[]>([]);
   const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [depositingId, setDepositingId] = useState<string | null>(null);
+  const [showDiscounts, setShowDiscounts] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [inv, cus, pl, jb, dp] = await Promise.all([
+      const [inv, cus, pl, jb, dp, bk] = await Promise.all([
         listAll((t) => api().models.Invoice.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.Customer.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.ServicePlan.list({ limit: 1000, nextToken: t })),
         listAll((t) => api().models.Job.list({ limit: 1000, nextToken: t })),
         listAll((t) => listDisputes({ limit: 1000, nextToken: t })),
+        // Discounts live on BookingRequest (promoDiscountCents snapshot), not
+        // on invoices. Tolerate this list failing — a dashboard that can't say
+        // "discounts" should still say everything else.
+        listAll<DiscountBooking>((t) =>
+          api().models.BookingRequest.list({
+            limit: 1000,
+            nextToken: t,
+          } as Parameters<ReturnType<typeof api>["models"]["BookingRequest"]["list"]>[0]) as Promise<{
+            data: DiscountBooking[];
+            nextToken?: string | null;
+            errors?: { message: string }[];
+          }>
+        ).catch(() => [] as DiscountBooking[]),
       ]);
       setInvoices(inv);
       setCustomers(cus);
       setPlans(pl);
       setJobs(jb);
       setDisputes(dp);
+      setBookings(bk);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load dashboard");
     }
@@ -112,6 +151,29 @@ export default function Dashboard() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Confirm a cash/cheque payment reached the bank. The server stamps the
+  // actor and refuses Stripe-settled invoices; reload shows it gone from the
+  // queue.
+  const markDeposited = useCallback(
+    async (invoiceId: string) => {
+      setDepositingId(invoiceId);
+      setError(null);
+      try {
+        unwrap(
+          await settleInvoice({ invoiceId, method: "MARK_DEPOSITED" })
+        );
+        await load();
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Could not mark the deposit"
+        );
+      } finally {
+        setDepositingId(null);
+      }
+    },
+    [load]
+  );
 
   // Claim a recovery item ("Assign to me") — the server stamps the owner from
   // the caller's identity, so after it lands a reload shows this user's email.
@@ -165,6 +227,36 @@ export default function Dashboard() {
   } = revenueTotals(inRange);
 
   const today = todayEastern();
+
+  // Where the money comes from: the same in-range, refund-aware numbers as the
+  // tiles above, split residential / community / commercial by each invoice's
+  // job (or the customer's latest classified job).
+  const clientSplit = revenueByClientType(inRange, jobs);
+  const anyUnclassified = clientSplit.UNCLASSIFIED.invoiceCount > 0;
+
+  // Discounts given: the promo cents actually taken off checkout charges,
+  // snapshotted on the BookingRequest when the code was applied. BOOKED and
+  // PROCESSING both count — the discount is committed once the charge is in
+  // flight. Period uses the checkout acceptance time.
+  const discountedBookings = bookings
+    .filter(
+      (b) =>
+        (b.promoDiscountCents ?? 0) > 0 &&
+        (b.status === "BOOKED" || b.status === "PROCESSING") &&
+        inPeriod(b.tcAcceptedAt ?? b.createdAt, period)
+    )
+    .sort((a, b) => (b.promoDiscountCents ?? 0) - (a.promoDiscountCents ?? 0));
+  const discountCents = discountedBookings.reduce(
+    (s, b) => s + (b.promoDiscountCents ?? 0),
+    0
+  );
+
+  // Cash and cheques recorded as received but never confirmed at the bank.
+  // Deliberately not period-scoped: undeposited money is outstanding until
+  // someone confirms it, however old it is.
+  const depositQueue = awaitingDeposit(invoices).sort((a, b) =>
+    (a.paidAt ?? a.issuedAt ?? "").localeCompare(b.paidAt ?? b.issuedAt ?? "")
+  );
 
   // Money-out recovery. Aging buckets the outstanding receivable (OPEN/FAILED)
   // by how overdue it is; the recovery queue is every overdue/failed invoice
@@ -358,6 +450,38 @@ export default function Dashboard() {
         </>
       ) : null}
 
+      {inRange.length > 0 ? (
+        <Card title="Revenue by client type">
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            The tiles above, split by who the work was for. An invoice follows
+            its job's property class; one with no job follows the customer's
+            most recent classified job.
+          </p>
+          {CLIENT_TYPES.filter(
+            (t) => t !== "UNCLASSIFIED" || anyUnclassified
+          ).map((t) => (
+            <ListRow
+              key={t}
+              title={CLIENT_TYPE_LABEL[t]}
+              subtitle={`${clientSplit[t].invoiceCount} invoice${
+                clientSplit[t].invoiceCount === 1 ? "" : "s"
+              }`}
+              meta={
+                <>
+                  <strong>{money(clientSplit[t].billedCents)}</strong>
+                  <Badge tone={clientSplit[t].paidCents > 0 ? "ok" : "muted"}>
+                    paid {money(clientSplit[t].paidCents)}
+                  </Badge>
+                  {t === "UNCLASSIFIED" ? (
+                    <Badge tone="warn">set property class on the job</Badge>
+                  ) : null}
+                </>
+              }
+            />
+          ))}
+        </Card>
+      ) : null}
+
       <div className="stat-grid">
         <Stat
           label="Open leads"
@@ -369,7 +493,43 @@ export default function Dashboard() {
           value={customers.filter((c) => c.status === "ACTIVE").length}
           onClick={() => navigate("/customers")}
         />
+        <Stat
+          label="Discounts given"
+          value={money(discountCents)}
+          tone={discountCents ? "warn" : undefined}
+          onClick={
+            discountedBookings.length
+              ? () => setShowDiscounts((v) => !v)
+              : undefined
+          }
+          active={showDiscounts}
+        />
       </div>
+
+      {showDiscounts && discountedBookings.length > 0 ? (
+        <Card title={`Discounts given · ${money(discountCents)}`}>
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            Promo codes applied at checkout this period — the cents actually
+            taken off each charge, snapshotted when the booking was made.
+          </p>
+          {discountedBookings.map((b) => (
+            <ListRow
+              key={b.id}
+              title={b.name ?? "Unknown"}
+              subtitle={`${b.promoCode ?? "code"} · ${fmtDate(
+                b.tcAcceptedAt ?? b.createdAt,
+                true
+              )}${b.status === "PROCESSING" ? " · payment clearing" : ""}`}
+              meta={<strong>−{money(b.promoDiscountCents ?? 0)}</strong>}
+              onClick={
+                b.customerId
+                  ? () => navigate(`/customers/${b.customerId}`)
+                  : undefined
+              }
+            />
+          ))}
+        </Card>
+      ) : null}
 
       {aging.count > 0 ? (
         <Card title={`Accounts receivable — ${money(aging.totalCents)} outstanding`}>
@@ -402,6 +562,50 @@ export default function Dashboard() {
           </div>
           {AGING_BUCKETS.filter((b) => drill === `aging:${b}`).map((b) => (
             <div key={b}>{drillPanel(`aging:${b}`)}</div>
+          ))}
+        </Card>
+      ) : null}
+
+      {depositQueue.length > 0 ? (
+        <Card
+          title={`Awaiting bank deposit — ${money(
+            depositQueue.reduce((s, i) => s + depositableCents(i), 0)
+          )}`}
+        >
+          <p className="muted small" style={{ marginBottom: 6 }}>
+            Cash and cheques recorded as received but not yet confirmed at the
+            bank. Mark each once it shows on the bank statement — until then
+            this money exists only in a drawer. Oldest first.
+          </p>
+          {depositQueue.map((i) => (
+            <ListRow
+              key={i.id}
+              title={customerById.get(i.customerId)?.displayName ?? "Unknown"}
+              subtitle={[
+                i.description,
+                `received ${fmtDate(i.paidAt ?? i.issuedAt, true)}`,
+                i.settleNote,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+              meta={
+                <>
+                  <strong>{money(depositableCents(i))}</strong>
+                  <Button
+                    small
+                    variant="subtle"
+                    loading={depositingId === i.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void markDeposited(i.id);
+                    }}
+                  >
+                    Mark deposited
+                  </Button>
+                </>
+              }
+              onClick={() => navigate(`/customers/${i.customerId}`)}
+            />
           ))}
         </Card>
       ) : null}

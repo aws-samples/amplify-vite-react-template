@@ -809,6 +809,9 @@ async function settleInvoice(
       attemptTag: "settle",
     });
   }
+  if (kind === "MARK_DEPOSITED" || kind === "UNMARK_DEPOSITED") {
+    return setInvoiceDeposited(actor, invoiceId, kind === "MARK_DEPOSITED", note);
+  }
   if (kind !== "OFFLINE") {
     throw new Error(`Unsupported settlement method: ${method}`);
   }
@@ -861,6 +864,65 @@ async function settleInvoice(
   // A subscription invoice paid by hand un-suspends the plan.
   await clearPlanDelinquency(invoice.servicePlanId);
   return { invoiceId, status: "PAID", alreadyPaid: false };
+}
+
+/**
+ * Confirm (or un-confirm) that a manually collected payment physically reached
+ * the bank account. Settling recorded the money as received; this records it
+ * as banked, so the office can reconcile the cash drawer against the bank
+ * statement. Rides settleInvoice's method arg — see the schema comment on why
+ * it is not its own mutation (CFN 500-resource cap).
+ *
+ * Only MANUAL invoices qualify: anything with a Stripe id reaches the bank via
+ * Stripe payouts, and stamping it here would fake a reconciliation that never
+ * happened.
+ */
+async function setInvoiceDeposited(
+  actor: Actor,
+  invoiceId: string,
+  deposited: boolean,
+  note?: string | null
+) {
+  const client = await dataClient();
+  const { data: invoice } = await client.models.Invoice.get({ id: invoiceId });
+  if (!invoice) throw new Error(`Invoice ${invoiceId} not found`);
+  if (invoice.stripePaymentIntentId || invoice.stripeInvoiceId) {
+    throw new Error(
+      "This invoice was paid through Stripe — that money reaches the bank via Stripe payouts and needs no manual deposit confirmation."
+    );
+  }
+  if (deposited && invoice.status !== "PAID" && invoice.status !== "REFUNDED") {
+    throw new Error(
+      `This invoice is ${String(invoice.status).toLowerCase()} — only money already received can be marked deposited`
+    );
+  }
+  if (deposited && invoice.depositedAt) {
+    return {
+      invoiceId,
+      depositedAt: invoice.depositedAt,
+      alreadyDeposited: true,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const cleanNote = note?.trim().slice(0, 300) || undefined;
+  const { data: updated, errors } = await client.models.Invoice.update({
+    id: invoiceId,
+    depositedAt: deposited ? nowIso : null,
+    depositedBy: deposited ? (actor.sub ?? undefined) : null,
+    depositedByEmail: deposited ? (actor.email ?? undefined) : null,
+    depositNote: deposited && cleanNote ? cleanNote : null,
+  });
+  if (!updated) {
+    throw new Error(
+      `Could not update the deposit record: ${errors?.map((e) => e.message).join("; ") ?? "unknown error"}`
+    );
+  }
+  return {
+    invoiceId,
+    depositedAt: deposited ? nowIso : null,
+    alreadyDeposited: false,
+  };
 }
 
 /**

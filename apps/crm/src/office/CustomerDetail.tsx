@@ -31,6 +31,7 @@ import {
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
 import { daysPastDue } from "../lib/aging";
+import { isManualSettled } from "../lib/deposits";
 import { dunningStateLabel, isOverdue } from "../lib/recovery";
 import { amountInWords } from "../lib/amountWords";
 import { planCadence } from "../lib/planCadence";
@@ -1317,6 +1318,16 @@ export default function CustomerDetail() {
                     <>
                       {overdue ? <Badge tone="danger">overdue</Badge> : null}
                       <StatusBadge status={inv.status} />
+                      {/* Cash/cheque money: settled says it was received;
+                          deposited says it reached the bank. The dashboard's
+                          "Awaiting bank deposit" queue is where it's marked. */}
+                      {isManualSettled(inv) ? (
+                        inv.depositedAt ? (
+                          <Badge tone="ok">deposited</Badge>
+                        ) : (
+                          <Badge tone="warn">awaiting deposit</Badge>
+                        )
+                      ) : null}
                       {canSettle ? (
                         <Button
                           small
