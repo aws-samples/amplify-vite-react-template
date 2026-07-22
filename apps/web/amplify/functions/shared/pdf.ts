@@ -1118,8 +1118,11 @@ export async function renderQuotePdf(opts: {
 }
 
 // ReportProduct is owned by inventory.ts (so usage-reporting consumers don't
-// pull this PDF module); re-exported here for pdf.ts's existing callers.
-export type { ReportProduct } from "./inventory";
+// pull this PDF module); imported for use below and re-exported for pdf.ts's
+// existing callers. (A bare `export type ... from` does NOT bring the name
+// into this file's scope — that broke the staging build.)
+import type { ReportProduct } from "./inventory";
+export type { ReportProduct };
 
 export async function renderServiceReportPdf(opts: {
   reportId: string;

@@ -805,7 +805,12 @@ describe("rescheduleVisit", () => {
     fakeDataClient.models.Job.get = (async ({ id }: { id: string }) => {
       // Serve a STALE copy, then flip the live row before publish.
       const copy = { ...liveRow, scheduledDate: oldDay };
-      liveRow.scheduledDate = daysFromNow(5); // someone else moved it
+      // Someone else moved it. daysFromNow(6) is the one offset that can NEVER
+      // collide with oldDay or newDay after weekend rolling: +3 rolls to at
+      // most +5, +6 rolls to at most +8, +9 rolls to at least +9. (+5 collided
+      // with oldDay every Wednesday — +3 = Saturday rolls to Monday = +5 — and
+      // a no-op "concurrent move" let the guarded publish legitimately win.)
+      liveRow.scheduledDate = daysFromNow(6);
       return { data: id === "j1" ? copy : null };
     }) as typeof fakeDataClient.models.Job.get;
     try {
