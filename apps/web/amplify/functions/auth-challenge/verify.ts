@@ -4,7 +4,7 @@ import {
   AdminUpdateUserAttributesCommand,
   CognitoIdentityProviderClient,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { sendEmail } from "../shared/email";
+import { sendEmail, emailShell } from "../shared/email";
 
 const cognito = new CognitoIdentityProviderClient();
 
@@ -105,12 +105,12 @@ async function emailSignInLink(
     to: email,
     subject: "Your BuzzKill sign-in link",
     template: "auth-magic-link",
-    html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
-  <h2 style="color:#176b2c">Sign in to BuzzKill</h2>
-  <p>Tap the button below to sign in — no password needed. The link works once and expires in ${LINK_TTL_MINUTES} minutes.</p>
-  <p style="margin:24px 0"><a href="${link}" style="background:#176b2c;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600">Sign in</a></p>
-  <p style="color:#666;font-size:13px">If you didn't request this, you can ignore this email.</p>
-</div>`,
+    html: emailShell(
+      "Sign in to BuzzKill",
+      `<p style="margin:0 0 16px;">Tap the button below to sign in — no password needed. The link works once and expires in ${LINK_TTL_MINUTES} minutes.</p>
+  <p style="margin:0 0 20px;"><a href="${link}" style="display:inline-block;background:#7ac142;color:#0b0d0c;padding:13px 26px;border-radius:8px;text-decoration:none;font-weight:700;">Sign in</a></p>
+  <p style="margin:0;color:#6a6f66;font-size:13px;">If you didn't request this, you can ignore this email.</p>`
+    ),
   });
 
   // The one breadcrumb this flow leaves: today's defect was diagnosable only

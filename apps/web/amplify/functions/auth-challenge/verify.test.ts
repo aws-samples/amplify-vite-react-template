@@ -44,6 +44,7 @@ vi.mock("../shared/email", () => ({
     sentEmails.push(o);
     return true;
   },
+  emailShell: (_heading: string, body: string) => body,
 }));
 
 const { handler, REQUEST_LINK_ANSWER } = await import("./verify");

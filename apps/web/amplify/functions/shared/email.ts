@@ -20,17 +20,72 @@ export type EmailAttachment = {
   contentType: string;
 };
 
-/** Minimal branded HTML shell shared by all CRM emails. */
+/**
+ * The branded HTML shell shared by every CRM email — customer-facing mail and
+ * internal ops/sales alerts alike. A dark masthead with the BuzzKill logo, a
+ * green accent keyline, the heading + caller-supplied body, and a contact
+ * footer with the tagline.
+ *
+ * Built as nested tables with inline styles for Outlook/Gmail/Apple Mail
+ * compatibility. The logo is referenced by URL (not attached): an inline
+ * attachment would flip every send's `hasAttachments` flag and make throttled
+ * mail un-resendable. Image-blocking clients fall back to the alt text and the
+ * text footer, so the branding still lands.
+ *
+ * The signature is unchanged — callers pass a heading and a body fragment.
+ */
 export function emailShell(heading: string, bodyHtml: string): string {
-  return `<!doctype html><html><body style="margin:0;padding:0;background:#f6f7f9;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#1a1a1a;">
-  <div style="max-width:560px;margin:0 auto;padding:24px 16px;">
-    <div style="font-size:18px;font-weight:700;margin-bottom:16px;">BuzzKill Pest Control</div>
-    <div style="background:#ffffff;border:1px solid #e4e6ea;border-radius:12px;padding:24px;">
-      <h1 style="font-size:20px;margin:0 0 12px;">${heading}</h1>
-      ${bodyHtml}
-    </div>
-    <div style="font-size:12px;color:#888;margin-top:16px;">BuzzKill Pest Control &middot; pestbuzzkill.com</div>
-  </div>
+  const site = (process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com").replace(
+    /\/+$/,
+    ""
+  );
+  const logo = `${site}/images/logo.png`;
+  const linkGreen = "#5a8a2c"; // readable brand green for text links on white
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light">
+<title>${heading}</title>
+</head>
+<body style="margin:0;padding:0;background:#eceee9;-webkit-font-smoothing:antialiased;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">${heading}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#eceee9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <tr>
+      <td align="center" style="padding:28px 12px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 6px rgba(11,13,12,0.10);">
+          <tr>
+            <td align="center" style="background:#0b0d0c;padding:26px 24px;">
+              <img src="${logo}" width="230" alt="BuzzKill Pest Control" style="display:block;width:230px;max-width:72%;height:auto;border:0;outline:none;text-decoration:none;">
+            </td>
+          </tr>
+          <tr>
+            <td style="height:4px;line-height:4px;font-size:0;background:#7ac142;">&nbsp;</td>
+          </tr>
+          <tr>
+            <td style="padding:30px 34px 26px;color:#1f221e;font-size:15px;line-height:1.6;">
+              <h1 style="margin:0 0 16px;font-size:22px;line-height:1.25;color:#0b0d0c;font-weight:800;letter-spacing:-0.01em;">${heading}</h1>
+              ${bodyHtml}
+            </td>
+          </tr>
+          <tr>
+            <td style="border-top:1px solid #e6e8e3;background:#f6f7f4;padding:22px 34px;color:#6a6f66;font-size:12px;line-height:1.7;">
+              <div style="font-weight:700;color:#3a3d37;font-size:13px;">BuzzKill Pest Control</div>
+              420 Lakeside Ave, Suite 104, Marlborough, MA 01752<br>
+              <a href="tel:+15082589294" style="color:${linkGreen};text-decoration:none;font-weight:600;">(508) 258-9294</a>
+              &nbsp;&middot;&nbsp;
+              <a href="${site}" style="color:${linkGreen};text-decoration:none;font-weight:600;">pestbuzzkill.com</a>
+              &nbsp;&middot;&nbsp;
+              <a href="mailto:info@pestbuzzkill.com" style="color:${linkGreen};text-decoration:none;font-weight:600;">info@pestbuzzkill.com</a>
+            </td>
+          </tr>
+        </table>
+        <div style="color:#9aa093;font-size:11px;font-style:italic;margin-top:14px;letter-spacing:0.02em;">Safe for Families. Tough on Pests.</div>
+      </td>
+    </tr>
+  </table>
 </body></html>`;
 }
 
