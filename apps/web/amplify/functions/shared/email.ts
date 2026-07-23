@@ -467,6 +467,19 @@ async function openEmailFailureWork(
  * website booking, a pricing escalation) must use notifyLeads, not this — they
  * go to the sales inbox (SES_LEADS_EMAIL, sales@). Keep money/ops alarms here.
  */
+/**
+ * Owner decision (2026-07-23): staging must never page the real office/sales
+ * inboxes — its test data generates a constant stream of ops noise into the
+ * same info@ the production alerts land in. backend.ts sets OPS_EMAIL_MUTED on
+ * every mail-sending function for non-main branches. Returning true (not
+ * false) is deliberate: a muted alert is handled, not failed, so callers never
+ * open EMAIL_FAILURE work for it. Customer-facing sends are unaffected — this
+ * gate covers only the internal pager helpers.
+ */
+function opsEmailsMuted(): boolean {
+  return Boolean(process.env.OPS_EMAIL_MUTED);
+}
+
 export async function notifyOffice(opts: {
   subject: string;
   heading: string;
@@ -475,6 +488,10 @@ export async function notifyOffice(opts: {
   customerId?: string | null;
   relatedId?: string;
 }): Promise<boolean> {
+  if (opsEmailsMuted()) {
+    console.log("notifyOffice muted (non-production branch):", opts.subject);
+    return true;
+  }
   const office = process.env.SES_NOTIFY_EMAIL;
   if (!office) {
     console.error(
@@ -531,6 +548,10 @@ export async function notifyLeads(opts: {
   customerId?: string | null;
   relatedId?: string;
 }): Promise<boolean> {
+  if (opsEmailsMuted()) {
+    console.log("notifyLeads muted (non-production branch):", opts.subject);
+    return true;
+  }
   let leads = process.env.SES_LEADS_EMAIL;
   if (!leads) {
     leads = process.env.SES_NOTIFY_EMAIL;
