@@ -13,7 +13,11 @@ import { openOwnedWork, workItemId } from "../shared/ownedWork";
 import { nextContactPhrase } from "../shared/businessHours";
 import { oneBusinessDayDeadline } from "../shared/businessDays";
 import { CALL_CONSENT_TEXT_VERSION } from "../shared/consentText";
-import { driveMinutesBetween, HQ_ADDRESS } from "../shared/driveTime";
+import {
+  driveMinutesBetween,
+  driveMinutesFromPoint,
+  HQ_ADDRESS,
+} from "../shared/driveTime";
 import {
   zoneFromMinutes,
   money,
@@ -340,6 +344,9 @@ export const handler = async (
     if (path.endsWith("/cancel")) {
       return json(headers, await cancel(body));
     }
+    if (path.endsWith("/track")) {
+      return json(headers, await trackStatus(body));
+    }
     return { statusCode: 404, headers, body: JSON.stringify({ error: "Not found" }) };
   } catch (err) {
     if (err instanceof HttpError) {
@@ -533,6 +540,79 @@ function pricedResponse(booking: StoredQuoteBooking) {
  *                the safe next step and is never invited to pay again.
  *   PAYMENT_FAILED / CANCELED — their terminal truths.
  */
+/**
+ * "On My Way" public tracking. The opaque token from the customer's email
+ * resolves to exactly one job; the response carries only what the live map
+ * needs (the tech's current point, an ETA, their first name) and only while the
+ * visit is genuinely en route. Pure status decision split out for testing.
+ */
+type TrackJobFields = {
+  enRouteAt?: string | null;
+  status: string;
+  trackEndsAt?: string | null;
+};
+export function decideTrackStatus(
+  job: TrackJobFields | null,
+  nowIso: string
+): "UNKNOWN" | "ARRIVED" | "ENDED" | "EN_ROUTE" {
+  if (!job || !job.enRouteAt) return "UNKNOWN";
+  // Any status past SCHEDULED means the tech arrived (IN_PROGRESS) or the visit
+  // ended (completed / no-access / canceled) — either way, stop sharing.
+  if (job.status !== "SCHEDULED") return "ARRIVED";
+  if (job.trackEndsAt && job.trackEndsAt <= nowIso) return "ENDED";
+  return "EN_ROUTE";
+}
+
+async function trackStatus(body: Record<string, unknown>) {
+  const token =
+    typeof body.token === "string" ? body.token.trim() : "";
+  if (!token) return { status: "UNKNOWN" as const };
+  const client = await dataClient();
+  const { data } = await client.models.Job.listJobByTrackToken({
+    trackToken: token,
+  });
+  const job = data?.[0] ?? null;
+  const nowIso = new Date().toISOString();
+  const status = decideTrackStatus(job, nowIso);
+  if (!job || status !== "EN_ROUTE") return { status };
+
+  const { data: customer } = await client.models.Customer.get({
+    id: job.customerId,
+  });
+  const address = [
+    customer?.serviceStreet,
+    customer?.serviceCity,
+    customer?.serviceState,
+    customer?.serviceZip,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  let techFirstName: string | null = null;
+  if (job.technicianId) {
+    const t = await client.models.Technician.get({ id: job.technicianId });
+    techFirstName = t.data?.name?.trim().split(/\s+/)[0] ?? null;
+  }
+  let etaMinutes: number | null = null;
+  if (job.trackLat != null && job.trackLng != null && address) {
+    const key = await getSecret("GOOGLE_ROUTES_API_KEY");
+    if (key) {
+      etaMinutes = await driveMinutesFromPoint(
+        key,
+        { lat: job.trackLat, lng: job.trackLng },
+        address
+      );
+    }
+  }
+  return {
+    status: "EN_ROUTE" as const,
+    lat: job.trackLat ?? null,
+    lng: job.trackLng ?? null,
+    updatedAt: job.trackAt ?? null,
+    etaMinutes,
+    techFirstName,
+  };
+}
+
 async function bookingStatus(body: Record<string, unknown>) {
   const bookingId = String(body.bookingId ?? "");
   const statusToken = String(body.statusToken ?? "");

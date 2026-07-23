@@ -85,6 +85,44 @@ export async function drivingDistanceMetersFromPoint(
 }
 
 /**
+ * Drive minutes from a live GPS point to an address — the "On My Way" ETA the
+ * customer's tracking page shows. Same latLng-origin Routes call as the meters
+ * helper, asking for duration instead. Null when the key is missing, the address
+ * won't route, or the call fails — the page then shows the map without an ETA.
+ */
+export async function driveMinutesFromPoint(
+  apiKey: string,
+  origin: { lat: number; lng: number },
+  destinationAddress: string
+): Promise<number | null> {
+  try {
+    const res = await fetch(ROUTES_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": "routes.duration",
+      },
+      body: JSON.stringify({
+        origin: {
+          location: {
+            latLng: { latitude: origin.lat, longitude: origin.lng },
+          },
+        },
+        destination: { address: destinationAddress },
+        travelMode: "DRIVE",
+      }),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { routes?: { duration?: string }[] };
+    const seconds = parseInt(json.routes?.[0]?.duration ?? "", 10);
+    return Number.isFinite(seconds) ? Math.round(seconds / 60) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Drive minutes from one origin address to many destinations in a single
  * computeRouteMatrix call. Returns minutes per destination index; null for
  * unroutable entries. Destinations are capped at 50 per Routes API limits.

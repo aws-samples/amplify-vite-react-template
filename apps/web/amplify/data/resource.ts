@@ -1641,6 +1641,20 @@ export const schema = a.schema({
       // The same source capacity uses, persisted so the decision is auditable.
       dispatchDriveMinutes: a.integer(),
       dispatchRouteCheckedAt: a.datetime(),
+      // "On My Way" live tracking. When the tech taps On My Way, enRouteAt is
+      // stamped and a random trackToken is minted; the customer is emailed a
+      // public /track/<token> link. The tech's phone streams its position into
+      // trackLat/trackLng/trackAt, which the unauthenticated tracking endpoint
+      // reads by trackToken (indexed below) to draw the live map + ETA. Tracking
+      // is live only while enRouteAt is set, the job has not reached IN_PROGRESS
+      // (arrival), and now < trackEndsAt (a safety TTL so a forgotten session
+      // never broadcasts location indefinitely).
+      enRouteAt: a.datetime(),
+      trackToken: a.string(),
+      trackLat: a.float(),
+      trackLng: a.float(),
+      trackAt: a.datetime(),
+      trackEndsAt: a.datetime(),
       // GL-12 — packet versioning: every safety/access/scope/prep change after
       // assignment bumps the version; the technician's app shows the change and
       // records their acknowledgement watermark. A post-start material change
@@ -1683,6 +1697,8 @@ export const schema = a.schema({
       index("scheduledDate"),
       index("status").sortKeys(["scheduledDate"]),
       index("servicePlanId"),
+      // Public "On My Way" tracking resolves the opaque token to its one job.
+      index("trackToken"),
     ])
     // TECH lost update: startedAt and applicationEndAt are the application
     // window on the pesticide record, and a TECH token with model update
@@ -3595,6 +3611,41 @@ export const schema = a.schema({
   endApplication: a
     .mutation()
     .arguments({ jobId: a.string().required(), officeReason: a.string() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * "On My Way": the technician tapped that they are driving to this visit.
+   * Stamps enRouteAt, mints a public tracking token (once), sets the safety TTL,
+   * seeds the first position if the phone sent one, and emails the customer a
+   * live-tracking link. Idempotent — tapping again re-sends the link against the
+   * same token. Assignment-gated to the tech on the job.
+   */
+  startOnMyWay: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      lat: a.float(),
+      lng: a.float(),
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * A live position sample from the en-route technician's phone. Best-effort:
+   * it only writes while the visit is still en route (enRouteAt set, not yet
+   * IN_PROGRESS, within the TTL), so a stale tab can never keep broadcasting.
+   * Assignment-gated to the tech on the job.
+   */
+  pingEnRoute: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      lat: a.float().required(),
+      lng: a.float().required(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),
