@@ -305,6 +305,12 @@ for (const fn of [
     "GOOGLE_REVIEW_URL",
     "https://g.page/r/CYyHi3DH59WEEAI/review"
   );
+  // Owner decision (2026-07-23): only production pages the office/sales
+  // inboxes. shared/email.ts notifyOffice/notifyLeads no-op when this is set;
+  // customer-facing sends are untouched.
+  if (process.env.AWS_BRANCH !== "main") {
+    fn.addEnvironment("OPS_EMAIL_MUTED", "1");
+  }
 }
 docsBucket.grantReadWrite(backend.crmDocs.resources.lambda);
 docsBucket.grantReadWrite(backend.crmPricing.resources.lambda);
@@ -318,6 +324,9 @@ backend.stripeWebhook.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 backend.stripeWebhook.resources.lambda.addToRolePolicy(sesPolicy);
 backend.stripeWebhook.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
 backend.stripeWebhook.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com");
+if (process.env.AWS_BRANCH !== "main") {
+  backend.stripeWebhook.addEnvironment("OPS_EMAIL_MUTED", "1");
+}
 // The dunning "your payment failed" email links the customer to the portal
 // billing page (CRM_APP_URL + /billing) to update their card and pay.
 backend.stripeWebhook.addEnvironment("CRM_APP_URL", crmUrlEnv);
@@ -632,9 +641,13 @@ backend.opsAlerts.resources.lambda.configureAsyncInvoke({
   onFailure: new SqsDestination(opsAlertsDlq),
 });
 const bridgeFailureTopic = new Topic(opsAlarmsStack, "OpsBridgeFailureTopic");
-bridgeFailureTopic.addSubscription(
-  new EmailSubscription("info@pestbuzzkill.com")
-);
+// Owner decision (2026-07-23): only production pages the real inbox — staging
+// alarm noise was flooding info@ alongside the real alerts.
+if (branch === "main") {
+  bridgeFailureTopic.addSubscription(
+    new EmailSubscription("info@pestbuzzkill.com")
+  );
+}
 const bridgeAction = new SnsAction(bridgeFailureTopic);
 wireAlarm(
 opsAlertsDlq

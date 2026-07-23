@@ -41,7 +41,7 @@ beforeEach(() => {
 });
 
 describe("owned-work overdue escalation", () => {
-  it("notifies management, stamps the row, and appends permanent history", async () => {
+  it("stamps the row and appends permanent history — and never emails (the /work queue is the tracker; per-item overdue emails were removed by owner decision 2026-07-23)", async () => {
     rows.push({
       id: "work-1",
       status: "OPEN",
@@ -57,13 +57,7 @@ describe("owned-work overdue escalation", () => {
     await expect(escalateOverdueOwnedWork()).resolves.toEqual({
       overdueWorkEscalated: 1,
     });
-    expect(sendEmail).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "manager@example.com",
-        template: "owned-work-overdue",
-        relatedId: "work-1",
-      })
-    );
+    expect(sendEmail).not.toHaveBeenCalled();
     expect(rows[0].escalatedAt).toEqual(expect.any(String));
     expect(history).toContainEqual(
       expect.objectContaining({

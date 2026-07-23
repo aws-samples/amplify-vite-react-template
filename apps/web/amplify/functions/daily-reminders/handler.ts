@@ -32,7 +32,6 @@ import {
   queuePresenceReview,
 } from "../shared/recovery";
 import {
-  defaultWorkOwner,
   openMissingContactWork,
   openOwnedWork,
   resolveOwnedWork,
@@ -2937,9 +2936,11 @@ function missingChildRecords(
 }
 
 /**
- * Escalate every overdue exception exactly once. The queue row is still the
- * authority; email is only the manager nudge, and a failed nudge creates its
- * own EMAIL_FAILURE work item through sendEmail.
+ * Mark every overdue exception exactly once. The queue row is the authority —
+ * the /work screen is where overdue items get noticed. The per-item escalation
+ * email that used to fire here was removed by owner decision (2026-07-23): one
+ * email per overdue row flooded the ops inbox the first morning production ran,
+ * and the nudge duplicated what the queue already shows.
  */
 export async function escalateOverdueOwnedWork() {
   const client = await dataClient();
@@ -2971,31 +2972,15 @@ export async function escalateOverdueOwnedWork() {
   let escalated = 0;
   for (const item of overdue) {
     try {
-      const escalationSent = await sendEmail({
-        to: defaultWorkOwner("OPS"),
-        subject: `OVERDUE owned work — ${item.title}`,
-        template: "owned-work-overdue",
-        customerId: item.customerId,
-        relatedId: item.id,
-        html: emailShell(
-          "Owned work is overdue",
-          `<p><strong>${escapeHtmlLite(item.title)}</strong> was due ${escapeHtmlLite(item.dueAt)}.</p>
-           <p>Owner: <strong>${escapeHtmlLite(item.ownerEmail)}</strong> (${escapeHtmlLite(item.ownerTeam)}).</p>
-           <p>${escapeHtmlLite(item.detail)}</p>
-           <p><a href="${process.env.CRM_APP_URL ?? ""}/work">Open the work queue</a></p>`
-        ),
-      });
       const escalatedAt = new Date().toISOString();
       // History lands first. If the row update fails, a later pass may append
-      // a second overdue event, but it can never claim escalation happened
-      // while leaving no permanent record of it.
+      // a second overdue event, but it can never claim the overdue mark
+      // happened while leaving no permanent record of it.
       const event = await client.models.WorkEvent.create({
         workItemId: item.id,
         eventType: "OVERDUE",
         actorEmail: "system@pestbuzzkill.com",
-        note: escalationSent
-          ? `Deadline passed; escalated to ${defaultWorkOwner("OPS")}.`
-          : `Deadline passed; escalation email failed and created separate email-failure work.`,
+        note: "Deadline passed.",
         occurredAt: escalatedAt,
       });
       if (!event.data) {
