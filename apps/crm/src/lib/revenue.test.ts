@@ -153,6 +153,30 @@ describe("revenueByClientType", () => {
     expect(split.UNCLASSIFIED.invoiceCount).toBe(2);
   });
 
+  it("falls back to the customer's property type when no job classifies it (migrated book, day one)", () => {
+    const split = revenueByClientType(
+      [cinv("c1", { amountCents: 7000 }), cinv("c2", { amountCents: 3000 })],
+      [], // no jobs yet — the just-migrated customers
+      [
+        { id: "c1", propertyClass: "COMMUNITY" },
+        { id: "c2", propertyClass: null }, // property type not set → still UNCLASSIFIED
+      ]
+    );
+    expect(split.COMMUNITY.billedCents).toBe(7000);
+    expect(split.COMMUNITY.invoiceCount).toBe(1);
+    expect(split.UNCLASSIFIED.billedCents).toBe(3000);
+  });
+
+  it("a job's own class still wins over the customer default", () => {
+    const split = revenueByClientType(
+      [cinv("c1", { jobId: "j1", amountCents: 5000 })],
+      [job("j1", "c1", "COMMERCIAL")],
+      [{ id: "c1", propertyClass: "RESIDENTIAL" }]
+    );
+    expect(split.COMMERCIAL.billedCents).toBe(5000);
+    expect(split.RESIDENTIAL.invoiceCount).toBe(0);
+  });
+
   it("keeps each slice refund-aware, matching the top tiles", () => {
     const split = revenueByClientType(
       [

@@ -92,7 +92,6 @@ export default function ProductLog() {
                   p.activeIngredient,
                   p.defaultRate ? `rate ${p.defaultRate}` : null,
                   p.reEntryHours != null ? `re-entry ${p.reEntryHours}h` : null,
-                  p.targetPests ? `targets ${p.targetPests}` : null,
                 ]
                   .filter(Boolean)
                   .join(" · ") || "No details yet"}
@@ -153,7 +152,6 @@ function ProductForm({
   const [labelApproved, setLabelApproved] = useState(
     existing?.labelApproved ?? false
   );
-  const [targetPests, setTargetPests] = useState(existing?.targetPests ?? "");
   // GL-15: the enforceable label rules finalization fails closed against.
   // Stored as structured JSON; edited here as plain fields so the office never
   // types JSON.
@@ -287,7 +285,6 @@ function ProductForm({
       defaultRate: defaultRate.trim() || null,
       reEntryHours: parsedReEntry,
       labelApproved,
-      targetPests: targetPests.trim() || null,
       labelRulesJson,
       notes: notes.trim() || null,
       active,
@@ -387,13 +384,6 @@ function ProductForm({
             against the approved product label.
           </span>
         </label>
-      </Field>
-      <Field label="Target pests">
-        <input
-          value={targetPests}
-          onChange={(e) => setTargetPests(e.target.value)}
-          placeholder="Ants, spiders, roaches"
-        />
       </Field>
       <Field
         group

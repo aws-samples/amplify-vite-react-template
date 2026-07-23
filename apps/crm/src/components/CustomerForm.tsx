@@ -12,6 +12,7 @@ export type CustomerFormValues = {
   serviceCity: string;
   serviceState: string;
   serviceZip: string;
+  propertyClass: string;
   leadSource: string;
   notes: string;
   emailPermission: boolean;
@@ -29,6 +30,7 @@ export function customerToForm(c?: Customer | null): CustomerFormValues {
     serviceCity: c?.serviceCity ?? "",
     serviceState: c?.serviceState ?? "MA",
     serviceZip: c?.serviceZip ?? "",
+    propertyClass: c?.propertyClass ?? "",
     leadSource: c?.leadSource ?? "",
     notes: c?.notes ?? "",
     emailPermission: (c?.contactConsentChannels ?? []).includes("EMAIL"),
@@ -135,6 +137,22 @@ export default function CustomerForm({
           <input inputMode="numeric" value={values.serviceZip} onChange={set("serviceZip")} />
         </Field>
       </div>
+      <Field
+        label="Property type"
+        hint="Sets on-site time, capacity, and pricing. New visits inherit this."
+      >
+        <select
+          value={values.propertyClass}
+          onChange={(e) =>
+            setValues((v) => ({ ...v, propertyClass: e.target.value }))
+          }
+        >
+          <option value="">Not set</option>
+          <option value="RESIDENTIAL">Residential</option>
+          <option value="COMMERCIAL">Commercial</option>
+          <option value="COMMUNITY">Community (HOA / multi-unit)</option>
+        </select>
+      </Field>
       {showLeadSource ? (
         <Field label="Lead source">
           <input value={values.leadSource} onChange={set("leadSource")} placeholder="Website, referral, Thumbtack…" />

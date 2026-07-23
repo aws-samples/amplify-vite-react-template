@@ -189,7 +189,15 @@ type UpdateCustomerContactArgs = {
   billingZip?: string | null;
   leadSource?: string | null;
   notes?: string | null;
+  propertyClass?: string | null;
 };
+
+/** The three property classes the rest of the system enforces on a Job. */
+const PROPERTY_CLASSES = ["RESIDENTIAL", "COMMERCIAL", "COMMUNITY"] as const;
+function normalizePropertyClass(v?: string | null): string | null {
+  const up = v?.trim().toUpperCase();
+  return up && (PROPERTY_CLASSES as readonly string[]).includes(up) ? up : null;
+}
 
 type AdminArgs =
   | AdminCreateUserArgs
@@ -1469,6 +1477,7 @@ async function updateCustomerContact(args: UpdateCustomerContactArgs) {
     billingZip: trim(args.billingZip),
     leadSource: trim(args.leadSource),
     notes: trim(args.notes),
+    propertyClass: normalizePropertyClass(args.propertyClass),
   });
   if (!updated) {
     throw new Error(

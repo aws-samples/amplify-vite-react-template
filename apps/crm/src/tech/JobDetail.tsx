@@ -150,7 +150,9 @@ function buildPickedRow(picked: CatalogProduct): ProductRow {
     amountValue: seed.value,
     amountUnit: seed.unit,
     quantity: composeAmount(seed.value, seed.unit),
-    targetPest: picked.targetPests ?? "",
+    // Target pests are recorded on the report itself now, not carried on the
+    // product (the product's free-text target-pests field was removed).
+    targetPest: "",
     custom: false,
   };
 }
@@ -1587,7 +1589,7 @@ function ReportForm({
                         targetPest:
                           row.pestTouched && row.targetPest
                             ? row.targetPest
-                            : (picked.targetPests ?? ""),
+                            : "",
                         custom: false,
                       };
                     })
@@ -1670,9 +1672,26 @@ function ReportForm({
           {existing ? (
             <ReportPhotos report={existing} onChanged={onChanged} />
           ) : (
-            <p className="muted small">
-              Save the draft once, then you can attach photos.
-            </p>
+            <>
+              {/* Photos are keyed to a saved report, so the very first one has
+                  to mint the draft. Rather than make the tech find and press
+                  "Save draft" first, this button does that save for them, then
+                  the picker appears — one tap, from a blank report to attaching
+                  photos. runSave is the same save path the footer button uses. */}
+              <Button
+                small
+                variant="subtle"
+                loading={busy === "save"}
+                disabled={busy !== null}
+                onClick={runSave}
+              >
+                Add job-site photos
+              </Button>
+              <p className="muted small" style={{ marginTop: 6 }}>
+                Starts the report so photos can attach — nothing is sent to the
+                customer until you complete it.
+              </p>
+            </>
           )}
         </Field>
 

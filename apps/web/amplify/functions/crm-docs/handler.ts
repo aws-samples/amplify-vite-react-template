@@ -2042,7 +2042,6 @@ async function saveProduct(args: Args) {
     defaultRate: args.defaultRate?.trim() || null,
     reEntryHours: args.reEntryHours ?? null,
     labelApproved: args.labelApproved ?? false,
-    targetPests: args.targetPests?.trim() || null,
     labelRulesJson,
     notes: args.notes?.trim() || null,
     active: args.active ?? false,
@@ -2105,6 +2104,16 @@ async function createOfficeJob(args: Args) {
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({ id: customerId });
   if (!customer) throw new Error(`Customer ${customerId} not found`);
+
+  // Property type is enforced per-Job, but the office sets it once on the
+  // customer. When this job doesn't carry its own, inherit the customer's
+  // default so dispatch sizing/capacity/pricing (all keyed on Job.propertyClass)
+  // are correct without re-picking it every visit. An explicit per-job value
+  // still wins. Coalesced here so every downstream read below sees it.
+  const jobArgs = args as { propertyClass?: string | null };
+  if (!jobArgs.propertyClass && customer.propertyClass) {
+    jobArgs.propertyClass = customer.propertyClass;
+  }
 
   // GL-01: every office visit is a CONTROLLED catalog selection — free text
   // cannot invent a service. "NOT_IN_CATALOG" routes the request to an owned

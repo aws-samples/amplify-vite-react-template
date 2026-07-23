@@ -334,6 +334,15 @@ export const schema = a.schema({
       serviceCity: a.string(),
       serviceState: a.string(),
       serviceZip: a.string(),
+      // The customer's default property type (RESIDENTIAL | COMMERCIAL |
+      // COMMUNITY). Property type is enforced per-Job (Job.propertyClass drives
+      // on-site duration, capacity, and pricing), but a customer rarely changes
+      // class between visits — so the office sets it once here and every new job
+      // seeds from it (createOfficeJob / recurring next-visit), instead of being
+      // re-picked per visit. Revenue's client-type split falls back to this when
+      // a customer has no completed jobs yet (the migrated book, day one).
+      // Not sensitive, so TECH may read it like the service address.
+      propertyClass: a.string(),
       // GL-13 field-level least-privilege. A technician receives only the
       // fields needed to perform the visit — name, contact, and the service
       // address above. Billing, provider identifiers, portal internals, lead
@@ -1747,7 +1756,6 @@ export const schema = a.schema({
       /** Office confirmation that the values above were checked against the
        *  approved product label. Active catalog rows require this true. */
       labelApproved: a.boolean(),
-      targetPests: a.string(),
       /**
        * GL-15 — the enforceable label rules finalization fails CLOSED against:
        * { allowedServiceTypes?: string[], allowedPests?: string[],
@@ -2634,6 +2642,7 @@ export const schema = a.schema({
       billingZip: a.string(),
       leadSource: a.string(),
       notes: a.string(),
+      propertyClass: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
@@ -2865,7 +2874,6 @@ export const schema = a.schema({
       defaultRate: a.string(),
       reEntryHours: a.float(),
       labelApproved: a.boolean().required(),
-      targetPests: a.string(),
       labelRulesJson: a.json(),
       notes: a.string(),
       active: a.boolean().required(),
