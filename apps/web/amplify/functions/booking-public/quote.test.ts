@@ -263,6 +263,11 @@ vi.mock("@aws-sdk/client-lambda", () => ({
 }));
 
 const quoteLifecycleCalls: { customerId: string; bookingRequestId: string }[] = [];
+const quoteContactReasons: {
+  customerId: string;
+  bookingRequestId: string;
+  reason: string;
+}[] = [];
 const quoteLeadCalls: { name: string; email: string; callConsent: boolean }[] = [];
 let quoteLeadResult: string | null = "web-lead-1";
 vi.mock("../shared/leadLifecycle", () => ({
@@ -284,6 +289,14 @@ vi.mock("../shared/leadLifecycle", () => ({
       callConsent: input.callConsent,
     });
     return quoteLeadResult;
+  },
+  recordFunnelContactOutcome: async (input: {
+    customerId: string;
+    bookingRequestId: string;
+    reason: string;
+  }) => {
+    quoteContactReasons.push(input);
+    return true;
   },
 }));
 

@@ -551,6 +551,43 @@ export async function recordWebsiteQuoteRequested(input: {
 }
 
 /**
+ * Record WHY a website quote fell to manual follow-up (outside the service
+ * area, a failed zone lookup, no availability, …) as a note on the lead itself.
+ * The callback work item and the sales email already carry the reason, but the
+ * lead record is what the office opens first — without this it shows a generic
+ * "complete the next follow-up" with no hint of why the funnel couldn't just
+ * quote and book. Best-effort: a lifecycle fault must never fail the funnel
+ * response, so this returns false rather than throwing (the quote was saved).
+ */
+export async function recordFunnelContactOutcome(input: {
+  customerId: string;
+  bookingRequestId: string;
+  reason: string;
+}): Promise<boolean> {
+  try {
+    await logLeadTouch(
+      {
+        customerId: input.customerId,
+        channel: "NOTE",
+        direction: "INBOUND",
+        outcome: "NOTE",
+        note: `Auto-quote unavailable — routed to manual follow-up. ${input.reason}`,
+        idempotencyKey: `website-contact:${input.bookingRequestId}`,
+      },
+      { sub: "booking-public", email: "system@pestbuzzkill.com" }
+    );
+    return true;
+  } catch (error) {
+    console.error(
+      "recordFunnelContactOutcome: lifecycle recovery owns the saved quote",
+      input.bookingRequestId,
+      error
+    );
+    return false;
+  }
+}
+
+/**
  * A public quote is a lead the moment it is requested. When a visitor reaches
  * the funnel without an office booking link (no pre-resolved leadCustomerId),
  * this durably captures them as a CRM lead — a priced quote they never book is

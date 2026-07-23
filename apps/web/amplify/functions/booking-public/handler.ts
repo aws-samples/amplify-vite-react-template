@@ -70,6 +70,7 @@ import {
 } from "../shared/marketRate";
 import { serviceLabelFor } from "../shared/serviceCatalog";
 import {
+  recordFunnelContactOutcome,
   recordWebsiteQuoteLead,
   recordWebsiteQuoteRequested,
 } from "../shared/leadLifecycle";
@@ -1207,8 +1208,14 @@ async function quote(
     goal = "",
     extra: Record<string, unknown> = {},
     opsNote = "",
-    existingBookingId?: string
+    existingBookingId?: string,
+    // A staff-facing, plain-English reason this couldn't auto-quote and book.
+    // Lands on the callback work item, the sales email, AND the lead's own
+    // audit — so whoever picks it up knows why without re-deriving it. Falls
+    // back to the customer-facing situation when a caller doesn't pass one.
+    staffReason = ""
   ) => {
+    const reason = staffReason || situation;
     const now = new Date();
     const timing = nextContactPhrase(now);
     const goalClause = goal ? ` ${goal}` : "";
@@ -1247,7 +1254,7 @@ async function quote(
       kind: "CALLBACK_PROMISE",
       dedupeKey: booking.id,
       title: `Website ${channelWord} promised: ${name}`,
-      detail: `${name} was promised a ${channelWord} ${timing} about ${service.toLowerCase().replace("_", " ")} at ${address}. ${opsNote.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`.trim(),
+      detail: `${name} was promised a ${channelWord} ${timing} about ${service.toLowerCase().replace("_", " ")} at ${address}. Why manual: ${reason} ${opsNote.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`.trim(),
       relatedId: booking.id,
       sourceUrl: "/work",
       // Closure-aware: a holiday between now and the deadline pushes it out.
@@ -1273,12 +1280,24 @@ async function quote(
       template: "ops-booking-contact",
       relatedId: booking.id,
       bodyHtml: `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}${input.phone ? `, ${escapeHtml(input.phone)}` : ""}) asked about <strong>${service.toLowerCase().replace("_", " ")}</strong> at ${escapeHtml(address)}.</p>
+       <p><strong>Why this couldn't auto-quote:</strong> ${escapeHtml(reason)}</p>
        <p>Promised to be reached by <strong>${escapeHtml(channelWord)}</strong> ${escapeHtml(timing)}.${canCall ? "" : " No phone/consent on file, so this is an email follow-up."}</p>
        ${input.comments ? `<p>Comments: ${escapeHtml(input.comments)}</p>` : ""}
        ${attribution?.source ? `<p>Lead source: utm:${escapeHtml(attribution.source)}${attribution.campaign ? ` · campaign:${escapeHtml(attribution.campaign)}` : ""}</p>` : ""}
        <p>Booking request ${booking.id}.</p>
        ${opsNote}`,
     });
+    // Stamp the reason on the lead record itself — the office opens the lead
+    // before the work queue, and a generic "complete the next follow-up" with
+    // no reason is exactly the gap this closes. Best-effort; the promise is
+    // already durably owned above.
+    if (leadCustomerId) {
+      await recordFunnelContactOutcome({
+        customerId: leadCustomerId,
+        bookingRequestId: booking.id,
+        reason,
+      });
+    }
     return { bookingId: booking.id, decision: "CONTACT", message };
   };
 
@@ -1302,7 +1321,12 @@ async function quote(
     return contact(
       "You're a bit outside our standard service area",
       "to see what we can do",
-      { zone, driveMinutes: minutes ?? undefined }
+      { zone, driveMinutes: minutes ?? undefined },
+      "",
+      undefined,
+      `Outside the standard service area: Google Routes put this address at ${
+        minutes != null ? `~${minutes} min` : "over 90 min"
+      } from base, past our 90-minute limit (Zone A ≤50 min, Zone B ≤90 min). Decide whether to service it at a travel-adjusted rate, refer it out, or decline — the funnel can't auto-price beyond Zone B.`
     );
   }
   if (zone === "UNKNOWN") {
@@ -1317,7 +1341,13 @@ async function quote(
         routesKey
           ? " (the Routes API returned no route — possible outage or a bad address)"
           : " (GOOGLE_ROUTES_API_KEY is not configured)"
-      }. Zone pricing is unavailable, so this quote fell back to a callback. If this keeps happening, check the Google Routes API key.</p>`
+      }. Zone pricing is unavailable, so this quote fell back to a callback. If this keeps happening, check the Google Routes API key.</p>`,
+      undefined,
+      `Drive-time zone lookup failed (${
+        routesKey
+          ? "Routes API returned no route — outage or an address that won't geocode"
+          : "the Routes API key isn't configured"
+      }), so the funnel couldn't determine a price. Verify the address, then quote by hand or on the office board.`
     );
   }
   const priceZone: Zone = zone;
@@ -1663,7 +1693,11 @@ async function quote(
   if (days.length === 0 && !offSeason) {
     return contact(
       "We're fully booked this month",
-      "to find you the first opening"
+      "to find you the first opening",
+      {},
+      "",
+      undefined,
+      `No bookable day this month for ${service.toLowerCase().replace("_", " ")} at this address (every day was full or infeasible on the board). Offer the first opening next month, or fit them in manually.`
     );
   }
   if (planOnly) {
