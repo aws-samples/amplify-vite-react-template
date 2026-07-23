@@ -293,6 +293,113 @@ export default function TechJob() {
     return () => window.removeEventListener("online", onOnline);
   }, [load]);
 
+  // "On My Way" live location sharing. While sharing, the phone streams its
+  // position to the enRoute PING mutation; the customer watches it on the
+  // public /track page. A ref (not state) holds the geolocation watch id so the
+  // cleanup effect can always cancel it, and lastPing throttles the writes.
+  const [omwSharing, setOmwSharing] = useState(false);
+  const [omwBusy, setOmwBusy] = useState(false);
+  const omwWatchId = useRef<number | null>(null);
+  const omwLastPing = useRef(0);
+
+  const stopOmwWatch = useCallback(() => {
+    if (omwWatchId.current != null && navigator.geolocation) {
+      navigator.geolocation.clearWatch(omwWatchId.current);
+    }
+    omwWatchId.current = null;
+  }, []);
+
+  // Always cancel the watch when leaving the screen.
+  useEffect(() => stopOmwWatch, [stopOmwWatch]);
+
+  // Arrival (Start job → the job is no longer SCHEDULED) ends sharing on its
+  // own — the backend also stops accepting pings, but this stops the phone.
+  useEffect(() => {
+    if (job && job.status !== "SCHEDULED" && omwSharing) {
+      stopOmwWatch();
+      setOmwSharing(false);
+    }
+  }, [job, omwSharing, stopOmwWatch]);
+
+  const beginOnMyWay = () => {
+    if (!job) return;
+    if (!navigator.geolocation) {
+      setError("This device can't share location.");
+      return;
+    }
+    setOmwBusy(true);
+    setError(null);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        try {
+          // Only START (which emails the customer) on the first tap; if this
+          // visit is already en route, resume streaming without a second email.
+          if (!job.enRouteAt) {
+            opResult(
+              await api().mutations.enRoute({
+                jobId: job.id,
+                action: "START",
+                lat,
+                lng,
+              })
+            );
+          } else {
+            opResult(
+              await api().mutations.enRoute({
+                jobId: job.id,
+                action: "PING",
+                lat,
+                lng,
+              })
+            );
+          }
+          omwLastPing.current = Date.now();
+          setOmwSharing(true);
+          setOmwBusy(false);
+          // Stream position; throttle writes to ~1 / 15s to spare battery/data.
+          omwWatchId.current = navigator.geolocation.watchPosition(
+            (p) => {
+              const now = Date.now();
+              if (now - omwLastPing.current < 15000) return;
+              omwLastPing.current = now;
+              void api().mutations.enRoute({
+                jobId: job.id,
+                action: "PING",
+                lat: p.coords.latitude,
+                lng: p.coords.longitude,
+              });
+            },
+            () => {
+              /* a dropped sample is fine — the next one updates the map */
+            },
+            { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
+          );
+        } catch (err) {
+          setOmwBusy(false);
+          setError(
+            err instanceof Error ? err.message : "Could not start On My Way"
+          );
+        }
+      },
+      (err) => {
+        setOmwBusy(false);
+        setError(
+          err.code === err.PERMISSION_DENIED
+            ? "Location permission denied — allow location to share your arrival."
+            : "Couldn't get your location — try again outdoors."
+        );
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+    );
+  };
+
+  const endOnMyWay = () => {
+    stopOmwWatch();
+    setOmwSharing(false);
+  };
+
   const online = useOnline();
   const offlineBanner = !online ? (
     <Card>
@@ -539,6 +646,30 @@ export default function TechJob() {
             I've read the change — acknowledge
           </Button>
         </Card>
+      ) : null}
+
+      {job.status === "SCHEDULED" ? (
+        omwSharing ? (
+          <Card>
+            <Badge tone="ok">sharing location</Badge>
+            <p className="small" style={{ marginTop: 8, marginBottom: 8 }}>
+              {customer.displayName} was emailed a live map of your drive. It
+              stops the moment you start the job.
+            </p>
+            <Button small variant="ghost" onClick={endOnMyWay}>
+              Stop sharing
+            </Button>
+          </Card>
+        ) : (
+          <Button
+            block
+            variant="subtle"
+            loading={omwBusy}
+            onClick={beginOnMyWay}
+          >
+            On My Way — share arrival with customer
+          </Button>
+        )
       ) : null}
 
       {job.status === "SCHEDULED" ? (
