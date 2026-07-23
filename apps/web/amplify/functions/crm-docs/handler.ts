@@ -366,15 +366,24 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
       return endApplication(event.arguments.jobId!);
     }
-    case "startOnMyWay": {
+    case "enRoute": {
       await assertCanActOnJobId(event.identity, event.arguments.jobId!);
-      const a = event.arguments as { jobId: string; lat?: number; lng?: number };
-      return startOnMyWay(a.jobId, a.lat ?? null, a.lng ?? null);
-    }
-    case "pingEnRoute": {
-      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
-      const a = event.arguments as { jobId: string; lat: number; lng: number };
-      return pingEnRoute(a.jobId, a.lat, a.lng);
+      const a = event.arguments as {
+        jobId: string;
+        action?: string;
+        lat?: number;
+        lng?: number;
+      };
+      if (a.action === "PING") {
+        if (typeof a.lat !== "number" || typeof a.lng !== "number") {
+          throw new Error("A position is required to update en-route location.");
+        }
+        return pingEnRoute(a.jobId, a.lat, a.lng);
+      }
+      if (a.action === "START") {
+        return startOnMyWay(a.jobId, a.lat ?? null, a.lng ?? null);
+      }
+      throw new Error(`Unknown en-route action "${a.action ?? ""}"`);
     }
     case "completeJob": {
       // Office-completable admin job types only (enforced in completeJob), but

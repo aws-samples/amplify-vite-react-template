@@ -3616,35 +3616,25 @@ export const schema = a.schema({
     .handler(a.handler.function(crmDocs)),
 
   /**
-   * "On My Way": the technician tapped that they are driving to this visit.
-   * Stamps enRouteAt, mints a public tracking token (once), sets the safety TTL,
-   * seeds the first position if the phone sent one, and emails the customer a
-   * live-tracking link. Idempotent — tapping again re-sends the link against the
-   * same token. Assignment-gated to the tech on the job.
-   */
-  startOnMyWay: a
-    .mutation()
-    .arguments({
-      jobId: a.string().required(),
-      lat: a.float(),
-      lng: a.float(),
-    })
-    .returns(a.json())
-    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
-    .handler(a.handler.function(crmDocs)),
-
-  /**
-   * A live position sample from the en-route technician's phone. Best-effort:
-   * it only writes while the visit is still en route (enRouteAt set, not yet
-   * IN_PROGRESS, within the TTL), so a stale tab can never keep broadcasting.
+   * "On My Way" — ONE mutation with an action discriminator, deliberately not
+   * two. Each Lambda-backed custom op costs 6 resources in the AppSync
+   * FunctionDirectiveStack, which is hard-capped at 500; the backend sits right
+   * under it, so a separate START and PING op (12) overflowed the stack (505).
+   * Folding both onto a single op (6) keeps On My Way under the cap.
+   *   action "START": the tech tapped On My Way — stamp enRouteAt, mint the
+   *     public tracking token (once), set the TTL, seed the first fix, and email
+   *     the customer the live link. Idempotent re-send against the same token.
+   *   action "PING": a live position sample, written only while genuinely en
+   *     route (enRouteAt set, not yet IN_PROGRESS, within the TTL).
    * Assignment-gated to the tech on the job.
    */
-  pingEnRoute: a
+  enRoute: a
     .mutation()
     .arguments({
       jobId: a.string().required(),
-      lat: a.float().required(),
-      lng: a.float().required(),
+      action: a.string().required(),
+      lat: a.float(),
+      lng: a.float(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
