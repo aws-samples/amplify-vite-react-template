@@ -1,4 +1,6 @@
-const GA_MEASUREMENT_ID = "G-PEL59Y653T";
+// The GA4 property is selected once in index.html (env-driven, see
+// VITE_GA_ID). gtag() events route to that configured property automatically,
+// so no measurement ID is needed here.
 
 declare global {
   interface Window {
@@ -29,8 +31,19 @@ function gtag(...args: unknown[]) {
   window.gtag(...args);
 }
 
+/**
+ * SPA page view. Sends an explicit `page_view` event (not a repeat `config`
+ * call) with the title and full URL captured at send time, so GA4's Page
+ * title dimension reflects the page the user is actually on rather than
+ * whatever `document.title` happened to be when the tag initialized.
+ * AnalyticsTracker defers this to the next frame so SEO.tsx has set the title.
+ */
 export function trackPageview(path: string) {
-  gtag("config", GA_MEASUREMENT_ID, { page_path: path });
+  trackEvent("page_view" as GAEventName, {
+    page_path: path,
+    page_location: typeof window === "undefined" ? "" : window.location.href,
+    page_title: typeof document === "undefined" ? "" : document.title,
+  });
 }
 
 export function trackEvent(name: GAEventName, params?: Record<string, unknown>) {

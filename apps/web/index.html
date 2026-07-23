@@ -35,13 +35,30 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
-    <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-PEL59Y653T"></script>
+    <!-- Google tag (gtag.js) — property is env-driven so staging can report
+         to a separate GA4 property. Vite replaces %VITE_GA_ID% at build time;
+         the fallback keeps tracking alive if the var is unset at build. -->
     <script>
+      window.GA_ID = '%VITE_GA_ID%';
+      if (!window.GA_ID || window.GA_ID.indexOf('%') === 0) window.GA_ID = 'G-PEL59Y653T';
+      var gaScript = document.createElement('script');
+      gaScript.async = true;
+      gaScript.src = 'https://www.googletagmanager.com/gtag/js?id=' + window.GA_ID;
+      document.head.appendChild(gaScript);
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
-      gtag('config', 'G-PEL59Y653T', { send_page_view: false });
+      gtag('config', window.GA_ID, { send_page_view: false });
+    </script>
+
+    <!-- Microsoft Clarity (session replay + heatmaps). Loaded here in the SPA
+         shell so it covers every route/page automatically. Project wan5977c41. -->
+    <script type="text/javascript">
+      (function(c,l,a,r,i,t,y){
+        c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
+        t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
+        y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
+      })(window, document, "clarity", "script", "wan5977c41");
     </script>
   </head>
   <body>
