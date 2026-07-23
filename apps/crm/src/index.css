@@ -1945,3 +1945,27 @@ body.has-install-banner .app-frame {
   font-weight: 500 !important;
   font-size: 13px !important;
 }
+
+/* Day-view technician card: call/text links beside the license badge. */
+.tech-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tech-contact {
+  display: inline-flex;
+  gap: 6px;
+}
+.tech-contact-link {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--brand-strong);
+  border: 1px solid var(--brand-soft);
+  border-radius: 6px;
+  padding: 2px 10px;
+  text-decoration: none;
+}
+.tech-contact-link:hover {
+  background: var(--brand-soft);
+}

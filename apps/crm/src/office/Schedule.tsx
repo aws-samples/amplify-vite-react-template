@@ -463,11 +463,31 @@ export default function Schedule() {
                   key={tech.id}
                   title={`${tech.name} — ${weekTotal} stop${weekTotal === 1 ? "" : "s"} this week`}
                   actions={
-                    complianceIssue ? (
-                      <Badge tone="warn">{complianceIssue}</Badge>
-                    ) : (
-                      <Badge tone="ok">license current</Badge>
-                    )
+                    <div className="tech-card-actions">
+                      {tech.phone ? (
+                        <span className="tech-contact">
+                          <a
+                            className="tech-contact-link"
+                            href={`tel:${tech.phone}`}
+                            aria-label={`Call ${tech.name}`}
+                          >
+                            Call
+                          </a>
+                          <a
+                            className="tech-contact-link"
+                            href={`sms:${tech.phone}`}
+                            aria-label={`Text ${tech.name}`}
+                          >
+                            Text
+                          </a>
+                        </span>
+                      ) : null}
+                      {complianceIssue ? (
+                        <Badge tone="warn">{complianceIssue}</Badge>
+                      ) : (
+                        <Badge tone="ok">license current</Badge>
+                      )}
+                    </div>
                   }
                 >
                   <div className="tech-week" role="group" aria-label={`${tech.name} week`}>

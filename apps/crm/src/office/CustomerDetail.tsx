@@ -1770,6 +1770,7 @@ export default function CustomerDetail() {
                 serviceCity: v.serviceCity.trim() || null,
                 serviceState: v.serviceState.trim() || null,
                 serviceZip: v.serviceZip.trim() || null,
+                propertyClass: v.propertyClass || null,
                 leadSource: v.leadSource.trim() || null,
                 notes: v.notes.trim() || null,
               })

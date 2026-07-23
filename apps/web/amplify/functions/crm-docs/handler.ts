@@ -366,6 +366,25 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
       return endApplication(event.arguments.jobId!);
     }
+    case "enRoute": {
+      await assertCanActOnJobId(event.identity, event.arguments.jobId!);
+      const a = event.arguments as {
+        jobId: string;
+        action?: string;
+        lat?: number;
+        lng?: number;
+      };
+      if (a.action === "PING") {
+        if (typeof a.lat !== "number" || typeof a.lng !== "number") {
+          throw new Error("A position is required to update en-route location.");
+        }
+        return pingEnRoute(a.jobId, a.lat, a.lng);
+      }
+      if (a.action === "START") {
+        return startOnMyWay(a.jobId, a.lat ?? null, a.lng ?? null);
+      }
+      throw new Error(`Unknown en-route action "${a.action ?? ""}"`);
+    }
     case "completeJob": {
       // Office-completable admin job types only (enforced in completeJob), but
       // it still ends a job and starts billing — prove assignment/office first
@@ -2042,7 +2061,6 @@ async function saveProduct(args: Args) {
     defaultRate: args.defaultRate?.trim() || null,
     reEntryHours: args.reEntryHours ?? null,
     labelApproved: args.labelApproved ?? false,
-    targetPests: args.targetPests?.trim() || null,
     labelRulesJson,
     notes: args.notes?.trim() || null,
     active: args.active ?? false,
@@ -2105,6 +2123,16 @@ async function createOfficeJob(args: Args) {
   const client = await dataClient();
   const { data: customer } = await client.models.Customer.get({ id: customerId });
   if (!customer) throw new Error(`Customer ${customerId} not found`);
+
+  // Property type is enforced per-Job, but the office sets it once on the
+  // customer. When this job doesn't carry its own, inherit the customer's
+  // default so dispatch sizing/capacity/pricing (all keyed on Job.propertyClass)
+  // are correct without re-picking it every visit. An explicit per-job value
+  // still wins. Coalesced here so every downstream read below sees it.
+  const jobArgs = args as { propertyClass?: string | null };
+  if (!jobArgs.propertyClass && customer.propertyClass) {
+    jobArgs.propertyClass = customer.propertyClass;
+  }
 
   // GL-01: every office visit is a CONTROLLED catalog selection — free text
   // cannot invent a service. "NOT_IN_CATALOG" routes the request to an owned
@@ -4935,6 +4963,108 @@ async function startJob(jobId: string) {
     );
   }
   return { jobId, startedAt, alreadyStarted: false };
+}
+
+/** The public site origin the customer's tracking link lives on. */
+const TRACK_SITE_URL = () =>
+  process.env.MARKETING_URL ?? "https://www.pestbuzzkill.com";
+/** How long an On-My-Way session may broadcast before it auto-expires. */
+const TRACK_TTL_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * "On My Way": stamp the visit en route, mint the public tracking token, and
+ * email the customer a live link. Re-tapping re-sends the same link. Only a
+ * scheduled, assigned visit qualifies — not one already started/terminal.
+ */
+async function startOnMyWay(
+  jobId: string,
+  lat: number | null,
+  lng: number | null
+) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+  if (job.status !== "SCHEDULED") {
+    throw new Error(
+      `On My Way is for a scheduled visit — this one is ${job.status.toLowerCase()}.`
+    );
+  }
+  if (!job.technicianId) {
+    throw new Error("This visit has no assigned technician yet.");
+  }
+  const token = job.trackToken || randomBytes(16).toString("hex");
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const trackEndsAt = new Date(now.getTime() + TRACK_TTL_MS).toISOString();
+  const hasFix = typeof lat === "number" && typeof lng === "number";
+  const { data: updated } = await client.models.Job.update({
+    id: jobId,
+    // Keep the original en-route stamp on a re-send; always refresh the TTL.
+    enRouteAt: job.enRouteAt ?? nowIso,
+    trackToken: token,
+    trackEndsAt,
+    ...(hasFix ? { trackLat: lat, trackLng: lng, trackAt: nowIso } : {}),
+  });
+  if (!updated) throw new Error("Could not start On My Way — try again.");
+
+  // Email the customer the live link (best-effort — a failed send never blocks
+  // the tech from driving; it lands in owned EMAIL_FAILURE work like any send).
+  const { data: customer } = await client.models.Customer.get({
+    id: job.customerId,
+  });
+  const techFirst =
+    (
+      await client.models.Technician.get({ id: job.technicianId })
+    ).data?.name?.trim().split(/\s+/)[0] ?? "Your technician";
+  const trackUrl = `${TRACK_SITE_URL()}/track/${token}`;
+  const techFirstSafe = techFirst.replace(
+    /[&<>"]/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c
+  );
+  let emailed = false;
+  if (customer?.email) {
+    emailed = await sendEmail({
+      to: customer.email,
+      subject: `${techFirst} is on the way`,
+      template: "on-my-way",
+      customerId: job.customerId,
+      relatedId: jobId,
+      html: emailShell(
+        `${techFirstSafe} is on the way`,
+        `<p>Your BuzzKill technician is heading to your service address now.</p>
+         <p><a href="${trackUrl}">Track their arrival on a live map</a> — it updates as they drive and shows an estimated arrival time.</p>
+         <p class="muted">The link stops working once your technician arrives.</p>`
+      ),
+    });
+  }
+  return { jobId, token, trackUrl, emailed };
+}
+
+/**
+ * A live position sample from the en-route tech's phone. Writes only while the
+ * visit is genuinely en route — enRouteAt set, not yet started, within the TTL —
+ * so a forgotten browser tab can never keep broadcasting a location.
+ */
+async function pingEnRoute(jobId: string, lat: number, lng: number) {
+  const client = await dataClient();
+  const { data: job } = await client.models.Job.get({ id: jobId });
+  if (!job) throw new Error(`Job ${jobId} not found`);
+  const live =
+    !!job.enRouteAt &&
+    job.status === "SCHEDULED" &&
+    (!job.trackEndsAt || job.trackEndsAt > new Date().toISOString());
+  if (!live) {
+    // Not an error — the tech's phone may fire one more sample after arrival.
+    return { jobId, accepted: false };
+  }
+  await client.models.Job.update({
+    id: jobId,
+    trackLat: lat,
+    trackLng: lng,
+    trackAt: new Date().toISOString(),
+  });
+  return { jobId, accepted: true };
 }
 
 /**

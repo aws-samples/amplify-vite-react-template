@@ -334,6 +334,15 @@ export const schema = a.schema({
       serviceCity: a.string(),
       serviceState: a.string(),
       serviceZip: a.string(),
+      // The customer's default property type (RESIDENTIAL | COMMERCIAL |
+      // COMMUNITY). Property type is enforced per-Job (Job.propertyClass drives
+      // on-site duration, capacity, and pricing), but a customer rarely changes
+      // class between visits — so the office sets it once here and every new job
+      // seeds from it (createOfficeJob / recurring next-visit), instead of being
+      // re-picked per visit. Revenue's client-type split falls back to this when
+      // a customer has no completed jobs yet (the migrated book, day one).
+      // Not sensitive, so TECH may read it like the service address.
+      propertyClass: a.string(),
       // GL-13 field-level least-privilege. A technician receives only the
       // fields needed to perform the visit — name, contact, and the service
       // address above. Billing, provider identifiers, portal internals, lead
@@ -1632,6 +1641,20 @@ export const schema = a.schema({
       // The same source capacity uses, persisted so the decision is auditable.
       dispatchDriveMinutes: a.integer(),
       dispatchRouteCheckedAt: a.datetime(),
+      // "On My Way" live tracking. When the tech taps On My Way, enRouteAt is
+      // stamped and a random trackToken is minted; the customer is emailed a
+      // public /track/<token> link. The tech's phone streams its position into
+      // trackLat/trackLng/trackAt, which the unauthenticated tracking endpoint
+      // reads by trackToken (indexed below) to draw the live map + ETA. Tracking
+      // is live only while enRouteAt is set, the job has not reached IN_PROGRESS
+      // (arrival), and now < trackEndsAt (a safety TTL so a forgotten session
+      // never broadcasts location indefinitely).
+      enRouteAt: a.datetime(),
+      trackToken: a.string(),
+      trackLat: a.float(),
+      trackLng: a.float(),
+      trackAt: a.datetime(),
+      trackEndsAt: a.datetime(),
       // GL-12 — packet versioning: every safety/access/scope/prep change after
       // assignment bumps the version; the technician's app shows the change and
       // records their acknowledgement watermark. A post-start material change
@@ -1674,6 +1697,8 @@ export const schema = a.schema({
       index("scheduledDate"),
       index("status").sortKeys(["scheduledDate"]),
       index("servicePlanId"),
+      // Public "On My Way" tracking resolves the opaque token to its one job.
+      index("trackToken"),
     ])
     // TECH lost update: startedAt and applicationEndAt are the application
     // window on the pesticide record, and a TECH token with model update
@@ -1747,7 +1772,6 @@ export const schema = a.schema({
       /** Office confirmation that the values above were checked against the
        *  approved product label. Active catalog rows require this true. */
       labelApproved: a.boolean(),
-      targetPests: a.string(),
       /**
        * GL-15 — the enforceable label rules finalization fails CLOSED against:
        * { allowedServiceTypes?: string[], allowedPests?: string[],
@@ -2634,6 +2658,7 @@ export const schema = a.schema({
       billingZip: a.string(),
       leadSource: a.string(),
       notes: a.string(),
+      propertyClass: a.string(),
     })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
@@ -2865,7 +2890,6 @@ export const schema = a.schema({
       defaultRate: a.string(),
       reEntryHours: a.float(),
       labelApproved: a.boolean().required(),
-      targetPests: a.string(),
       labelRulesJson: a.json(),
       notes: a.string(),
       active: a.boolean().required(),
@@ -3587,6 +3611,31 @@ export const schema = a.schema({
   endApplication: a
     .mutation()
     .arguments({ jobId: a.string().required(), officeReason: a.string() })
+    .returns(a.json())
+    .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
+    .handler(a.handler.function(crmDocs)),
+
+  /**
+   * "On My Way" — ONE mutation with an action discriminator, deliberately not
+   * two. Each Lambda-backed custom op costs 6 resources in the AppSync
+   * FunctionDirectiveStack, which is hard-capped at 500; the backend sits right
+   * under it, so a separate START and PING op (12) overflowed the stack (505).
+   * Folding both onto a single op (6) keeps On My Way under the cap.
+   *   action "START": the tech tapped On My Way — stamp enRouteAt, mint the
+   *     public tracking token (once), set the TTL, seed the first fix, and email
+   *     the customer the live link. Idempotent re-send against the same token.
+   *   action "PING": a live position sample, written only while genuinely en
+   *     route (enRouteAt set, not yet IN_PROGRESS, within the TTL).
+   * Assignment-gated to the tech on the job.
+   */
+  enRoute: a
+    .mutation()
+    .arguments({
+      jobId: a.string().required(),
+      action: a.string().required(),
+      lat: a.float(),
+      lng: a.float(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "TECH"])])
     .handler(a.handler.function(crmDocs)),

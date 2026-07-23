@@ -93,13 +93,34 @@ const jobWhen = (j: ClientTypeJob) =>
 export function classifyInvoice(
   invoice: ClientTypeInvoice,
   jobById: Map<string, ClientTypeJob>,
-  latestClassByCustomer: Map<string, ClientType>
+  latestClassByCustomer: Map<string, ClientType>,
+  // The customer's own default property type — the fallback when neither the
+  // invoice's job nor any prior classified job pins one. This is what keeps the
+  // migrated book (customers with plans but no completed jobs yet) out of
+  // UNCLASSIFIED once the office sets property type on the customer.
+  customerClassById?: Map<string, ClientType>
 ): ClientType {
   if (invoice.jobId) {
     const own = normalizeClientType(jobById.get(invoice.jobId)?.propertyClass);
     if (own) return own;
   }
-  return latestClassByCustomer.get(invoice.customerId) ?? "UNCLASSIFIED";
+  return (
+    latestClassByCustomer.get(invoice.customerId) ??
+    customerClassById?.get(invoice.customerId) ??
+    "UNCLASSIFIED"
+  );
+}
+
+/** The customer-default property type, for the classify fallback. */
+export function clientTypeByCustomerField(
+  customers: { id: string; propertyClass?: string | null }[]
+): Map<string, ClientType> {
+  const m = new Map<string, ClientType>();
+  for (const c of customers) {
+    const type = normalizeClientType(c.propertyClass);
+    if (type) m.set(c.id, type);
+  }
+  return m;
 }
 
 /** The customer's most recent job that carries a property class. */
@@ -122,10 +143,14 @@ export type ClientTypeSlice = RevenueTotals & { invoiceCount: number };
 /** The dashboard's revenue split: one refund-aware total set per client type. */
 export function revenueByClientType(
   invoices: ClientTypeInvoice[],
-  jobs: ClientTypeJob[]
+  jobs: ClientTypeJob[],
+  customers?: { id: string; propertyClass?: string | null }[]
 ): Record<ClientType, ClientTypeSlice> {
   const jobById = new Map(jobs.map((j) => [j.id, j]));
   const latest = latestClientTypeByCustomer(jobs);
+  const customerClass = customers
+    ? clientTypeByCustomerField(customers)
+    : undefined;
   const buckets: Record<ClientType, ClientTypeInvoice[]> = {
     RESIDENTIAL: [],
     COMMUNITY: [],
@@ -133,7 +158,7 @@ export function revenueByClientType(
     UNCLASSIFIED: [],
   };
   for (const inv of invoices) {
-    buckets[classifyInvoice(inv, jobById, latest)].push(inv);
+    buckets[classifyInvoice(inv, jobById, latest, customerClass)].push(inv);
   }
   return Object.fromEntries(
     CLIENT_TYPES.map((t) => [

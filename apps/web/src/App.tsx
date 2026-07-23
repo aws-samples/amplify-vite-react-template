@@ -55,6 +55,7 @@ import RIServiceArea    from "./pages/RIServiceArea";
 import QuotePage        from "./pages/booking/QuotePage";
 import BookPage         from "./pages/booking/BookPage";
 import CancelPage       from "./pages/booking/CancelPage";
+import TrackPage        from "./pages/booking/TrackPage";
 
 function SiteLayout() {
   return (
@@ -89,6 +90,9 @@ export default function App() {
         <Route path="/lp/quote" element={<LPQuote />} />
         <Route path="/lp/protect" element={<LPProtect />} />
         <Route path="/lp/call" element={<LPCall />} />
+        {/* "On My Way" live tracking — private token link from the email,
+            standalone (no nav) so the customer just watches the map. */}
+        <Route path="/track/:token" element={<TrackPage />} />
 
         {/* Main site */}
         <Route element={<SiteLayout />}>

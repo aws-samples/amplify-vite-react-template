@@ -231,7 +231,7 @@ export default function Dashboard() {
   // Where the money comes from: the same in-range, refund-aware numbers as the
   // tiles above, split residential / community / commercial by each invoice's
   // job (or the customer's latest classified job).
-  const clientSplit = revenueByClientType(inRange, jobs);
+  const clientSplit = revenueByClientType(inRange, jobs, customers);
   const anyUnclassified = clientSplit.UNCLASSIFIED.invoiceCount > 0;
 
   // Discounts given: the promo cents actually taken off checkout charges,
@@ -455,7 +455,7 @@ export default function Dashboard() {
           <p className="muted small" style={{ marginBottom: 6 }}>
             The tiles above, split by who the work was for. An invoice follows
             its job's property class; one with no job follows the customer's
-            most recent classified job.
+            most recent classified job, or the property type set on the customer.
           </p>
           {CLIENT_TYPES.filter(
             (t) => t !== "UNCLASSIFIED" || anyUnclassified

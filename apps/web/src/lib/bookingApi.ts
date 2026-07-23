@@ -474,3 +474,22 @@ export function checkBookingStatus(input: {
 }): Promise<ApiResult<BookingStatusResponse>> {
   return post<BookingStatusResponse>("/booking-status", input);
 }
+
+// ── "On My Way" live tracking ────────────────────────────────────────
+export type TrackResponse =
+  | { status: "UNKNOWN" }
+  | { status: "ARRIVED" }
+  | { status: "ENDED" }
+  | {
+      status: "EN_ROUTE";
+      lat: number | null;
+      lng: number | null;
+      updatedAt: string | null;
+      etaMinutes: number | null;
+      techFirstName: string | null;
+    };
+
+/** Resolve the customer's tracking token to the technician's live position. */
+export function checkTrack(token: string): Promise<ApiResult<TrackResponse>> {
+  return post<TrackResponse>("/track", { token });
+}
