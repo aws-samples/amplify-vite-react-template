@@ -214,7 +214,7 @@ export default function HumaneRemoval() {
   return (
     <>
       <SEO
-        title="Humane Wildlife Removal Services â€” MA & RI"
+        title="Humane Wildlife Removal Services — MA & RI"
         description="Licensed humane wildlife removal and exclusion for Massachusetts and Rhode Island homes. Safe for animals, effective for homeowners."
       />
 
@@ -251,7 +251,7 @@ export default function HumaneRemoval() {
               onClick={() => scrollCarousel("left")}
               aria-label="Scroll left"
             >
-              â€¹
+              ‹
             </button>
             <div className="bk-carousel" ref={carouselRef}>
               {FAMILIAR_ITEMS.map((item, i) => (
@@ -266,7 +266,7 @@ export default function HumaneRemoval() {
               onClick={() => scrollCarousel("right")}
               aria-label="Scroll right"
             >
-              â€º
+              ›
             </button>
           </div>
         </div>

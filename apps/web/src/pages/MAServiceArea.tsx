@@ -4,7 +4,10 @@ import SEO from "../components/SEO";
 export default function MAServiceArea() {
   return (
     <>
-      <SEO description="BuzzKill Pest Control services across Massachusetts — residential, commercial, and HOA pest control." />
+      <SEO
+        title="Massachusetts Pest Control Service Area"
+        description="BuzzKill Pest Control services across Massachusetts — residential, commercial, condo, and HOA pest control. Licensed, pet-safe technicians. Get an instant quote."
+      />
       <section style={{ padding: "80px 32px", maxWidth: 900, margin: "0 auto", textAlign: "center" }}>
         <p style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.2em", color: "var(--bk-green)", marginBottom: 12 }}>Service Area</p>
         <h1 style={{ fontSize: "clamp(2rem, 4vw, 3rem)", fontWeight: 700, marginBottom: 16 }}>Massachusetts Pest Control</h1>

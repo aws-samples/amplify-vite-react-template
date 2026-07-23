@@ -66,7 +66,7 @@ export default function Contact() {
   return (
     <>
       <SEO
-        title="Contact BuzzKill Pest Control"
+        title="Contact Us"
         description="Questions or ready to get started? Reach the BuzzKill team — local, licensed, and easy to reach across Massachusetts and Rhode Island."
         jsonLd={buildBreadcrumbSchema([
           { name: "Home", url: "/" },

@@ -198,7 +198,7 @@ export default function TermiteTreatment() {
   return (
     <>
       <SEO
-        title="Termite Treatment Plans â€” MA & RI"
+        title="Termite Treatment Plans — MA & RI"
         description="Professional termite treatment and colony elimination for Massachusetts and Rhode Island homes. Licensed, targeted, lasting structural protection."
       />
 
@@ -222,7 +222,7 @@ export default function TermiteTreatment() {
         className="bk-hero--community"
       />
 
-      {/* Sound Familiar â€” Carousel */}
+      {/* Sound Familiar — Carousel */}
       <section id="familiar" className="bk-familiar-section">
         <div className="bk-familiar-inner">
           <h2 className="bk-section-title">Sound Familiar?</h2>
@@ -235,7 +235,7 @@ export default function TermiteTreatment() {
               onClick={() => scrollCarousel("left")}
               aria-label="Scroll left"
             >
-              â€¹
+              ‹
             </button>
             <div className="bk-familiar-carousel" ref={carouselRef}>
               {FAMILIAR_ITEMS.map((item, i) => (
@@ -250,13 +250,13 @@ export default function TermiteTreatment() {
               onClick={() => scrollCarousel("right")}
               aria-label="Scroll right"
             >
-              â€º
+              ›
             </button>
           </div>
         </div>
       </section>
 
-      {/* What's Happening â€” Dark */}
+      {/* What's Happening — Dark */}
       <section id="happening" className="bk-happening-section bk-section--dark">
         <div className="bk-happening-inner">
           <h2 className="bk-section-title">What Is Actually Happening</h2>
@@ -283,7 +283,7 @@ export default function TermiteTreatment() {
         </div>
       </section>
 
-      {/* Root Causes Accordion + Quote Card â€” Cream */}
+      {/* Root Causes Accordion + Quote Card — Cream */}
       <section id="attracts" className="bk-attract-section bk-section--cream">
         <div className="bk-attract-inner">
           <div className="bk-attract-main">
@@ -325,7 +325,7 @@ export default function TermiteTreatment() {
         </div>
       </section>
 
-      {/* How We Help â€” Method Track â€” Cream */}
+      {/* How We Help — Method Track — Cream */}
       <section id="protects" className="bk-protects-section bk-section--cream">
         <div className="bk-protects-inner">
           <h2 className="bk-section-title">How We Treat Termite Problems</h2>
@@ -345,7 +345,7 @@ export default function TermiteTreatment() {
         </div>
       </section>
 
-      {/* Book Track â€” Dark */}
+      {/* Book Track — Dark */}
       <section id="book" className="bk-book-section bk-section--dark">
         <div className="bk-book-inner">
           <h2 className="bk-section-title">How Booking Works</h2>
@@ -372,7 +372,7 @@ export default function TermiteTreatment() {
         </div>
       </section>
 
-      {/* Why BuzzKill â€” Cream */}
+      {/* Why BuzzKill — Cream */}
       <section id="why-us" className="bk-why-section bk-section--cream">
         <div className="bk-why-inner">
           <h2 className="bk-section-title">Why BuzzKill Pest Control</h2>
@@ -391,7 +391,7 @@ export default function TermiteTreatment() {
         </div>
       </section>
 
-      {/* Prevention Tips â€” Cream */}
+      {/* Prevention Tips — Cream */}
       <section id="prevention" className="bk-prevention-section bk-section--cream">
         <div className="bk-prevention-inner">
           <h2 className="bk-section-title">Termite Prevention Tips</h2>
@@ -411,7 +411,7 @@ export default function TermiteTreatment() {
         </div>
       </section>
 
-      {/* Related Services â€” Cream */}
+      {/* Related Services — Cream */}
       <section id="related" className="bk-related-section bk-section--cream">
         <div className="bk-related-inner">
           <h2 className="bk-section-title">More Services</h2>
