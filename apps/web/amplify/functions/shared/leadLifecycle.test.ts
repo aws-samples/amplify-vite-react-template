@@ -123,6 +123,7 @@ const {
   logLeadTouch,
   setLeadDisposition,
   assignLeadOwner,
+  recordFunnelContactOutcome,
   recordWebsiteQuoteRequested,
   recordWebsiteQuoteLead,
   reassignLeadsForSub,
@@ -352,6 +353,37 @@ describe("recordWebsiteQuoteRequested", () => {
       status: "OPEN",
       dueAt: "2026-07-15T16:00:00.000Z",
     });
+  });
+});
+
+describe("recordFunnelContactOutcome", () => {
+  it("stamps the manual-follow-up reason on the lead as an audit note", async () => {
+    customers.set("l2", {
+      id: "l2",
+      status: "LEAD",
+      displayName: "Casey",
+      leadOwnerEmail: "sales@example.com",
+      nextAction: "Make first response",
+      nextActionAt: "2026-07-14T16:00:00Z",
+    });
+
+    await expect(
+      recordFunnelContactOutcome({
+        customerId: "l2",
+        bookingRequestId: "booking-2",
+        reason: "Outside the standard service area: ~95 min from base.",
+      })
+    ).resolves.toBe(true);
+
+    expect(activities).toContainEqual(
+      expect.objectContaining({
+        channel: "NOTE",
+        outcome: "NOTE",
+        note: expect.stringContaining("Outside the standard service area"),
+      })
+    );
+    // Never claims the customer was reached — it's a system note, not contact.
+    expect(customers.get("l2")?.lastReachedAt).toBeUndefined();
   });
 });
 

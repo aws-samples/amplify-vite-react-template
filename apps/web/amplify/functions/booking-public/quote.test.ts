@@ -263,6 +263,11 @@ vi.mock("@aws-sdk/client-lambda", () => ({
 }));
 
 const quoteLifecycleCalls: { customerId: string; bookingRequestId: string }[] = [];
+const quoteContactReasons: {
+  customerId: string;
+  bookingRequestId: string;
+  reason: string;
+}[] = [];
 const quoteLeadCalls: { name: string; email: string; callConsent: boolean }[] = [];
 let quoteLeadResult: string | null = "web-lead-1";
 vi.mock("../shared/leadLifecycle", () => ({
@@ -284,6 +289,14 @@ vi.mock("../shared/leadLifecycle", () => ({
       callConsent: input.callConsent,
     });
     return quoteLeadResult;
+  },
+  recordFunnelContactOutcome: async (input: {
+    customerId: string;
+    bookingRequestId: string;
+    reason: string;
+  }) => {
+    quoteContactReasons.push(input);
+    return true;
   },
 }));
 
@@ -1139,13 +1152,24 @@ describe("the live path is a pure read (serve-last-known-good)", () => {
 });
 
 describe("the only surviving CONTACT outcomes", () => {
-  it("zone OUT still falls to the callback path", async () => {
+  it("zone OUT still falls to the callback path for a PUBLIC visitor", async () => {
     hqMinutes = 120; // beyond the 90-minute zone
 
     const res = await postQuote(rodentInput);
 
     expect(res.body.decision).toBe("CONTACT");
     expect(bookings[0]).toMatchObject({ status: "CONTACT", zone: "OUT" });
+  });
+
+  it("an OFFICE-issued quote (lead link) prices a far address as Zone C instead of a callback", async () => {
+    hqMinutes = 120; // out of area
+
+    const res = await postQuote({ ...rodentInput, leadToken: "lead-tok-1" });
+
+    // Priced, not a callback — and at Zone C: base $199 + the $50 far-zone
+    // add-on = $249 (vs Zone B's $25 add-on → $224).
+    expect(res.body.decision).toBe("PRICED");
+    expect(pricingRuns[0]).toMatchObject({ zone: "C", oneTimePriceCents: 24900 });
   });
 
   it("a fully-booked month falls to the callback path", async () => {
