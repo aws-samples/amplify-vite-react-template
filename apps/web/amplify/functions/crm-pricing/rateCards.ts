@@ -14,7 +14,7 @@
  */
 
 export type Frequency = "MONTHLY" | "BIMONTHLY" | "QUARTERLY" | "ONE_TIME";
-export type Zone = "A" | "B" | "OUT" | "UNKNOWN";
+export type Zone = "A" | "B" | "C" | "OUT" | "UNKNOWN";
 
 export type PriceLine = { label: string; cents: number };
 
@@ -39,6 +39,36 @@ export const ZONE_B = {
   MOSQUITO_MONTHLY: $(25),
 };
 
+// ---------- Zone C adders (far zone, beyond 90 min) ----------
+// The public funnel never auto-sells Zone C — an out-of-area visitor still gets
+// a callback. This surcharge applies only when the OFFICE issues the quote (the
+// lead-specific "Open prefilled website quote" link), so a distant address the
+// office chose to service prices itself with a fixed far-zone travel add-on.
+//
+// PLACEHOLDER AMOUNTS — set to 2× Zone B. Confirm/tune these with the owner;
+// they are the only business number here and change nothing structurally.
+export const ZONE_C = {
+  MONTHLY: $(50),
+  BIMONTHLY: $(26),
+  QUARTERLY: $(16),
+  ONE_TIME_FLAT: $(50),
+  MOSQUITO_MONTHLY: $(50),
+};
+
+/**
+ * The travel add-on for a zone, by adder kind. A and OUT/UNKNOWN carry none;
+ * B and C read their table. Centralized so every pricing site applies the
+ * same rule and Zone C can never be half-wired into one service and not another.
+ */
+export function travelAdderCents(
+  zone: Zone,
+  kind: keyof typeof ZONE_B
+): number {
+  if (zone === "B") return ZONE_B[kind];
+  if (zone === "C") return ZONE_C[kind];
+  return 0;
+}
+
 // ---------- Mosquito & tick (seasonal, Apr–October) ----------
 
 export function priceMosquito(opts: {
@@ -58,9 +88,12 @@ export function priceMosquito(opts: {
       lines.push({ label: `${extra} × $40 (each additional ½ acre)`, cents: extra * $(40) });
       cents += extra * $(40);
     }
-    if (opts.zone === "B") {
-      lines.push({ label: "Zone B travel adder", cents: ZONE_B.ONE_TIME_FLAT });
-      cents += ZONE_B.ONE_TIME_FLAT;
+    {
+      const adder = travelAdderCents(opts.zone, "ONE_TIME_FLAT");
+      if (adder > 0) {
+        lines.push({ label: `Zone ${opts.zone} travel adder`, cents: adder });
+        cents += adder;
+      }
     }
     return {
       service: "Mosquito one-time event spray",
@@ -81,9 +114,12 @@ export function priceMosquito(opts: {
     lines.push({ label: `${extra} × $30 (each additional ½ acre)`, cents: extra * $(30) });
     monthly += extra * $(30);
   }
-  if (opts.zone === "B") {
-    lines.push({ label: "Zone B travel adder (monthly)", cents: ZONE_B.MOSQUITO_MONTHLY });
-    monthly += ZONE_B.MOSQUITO_MONTHLY;
+  {
+    const adder = travelAdderCents(opts.zone, "MOSQUITO_MONTHLY");
+    if (adder > 0) {
+      lines.push({ label: `Zone ${opts.zone} travel adder (monthly)`, cents: adder });
+      monthly += adder;
+    }
   }
   return {
     service: opts.tick ? "Mosquito + tick plan (Apr–Oct)" : "Mosquito plan (Apr–Oct)",
@@ -99,7 +135,13 @@ export function priceMosquito(opts: {
 
 const LABOR_PER_HR = 42;
 const VAN_PER_MI = 0.3;
-const DRIVE = { A: { min: 40, mi: 30 }, B: { min: 65, mi: 45 } };
+const DRIVE = {
+  A: { min: 40, mi: 30 },
+  B: { min: 65, mi: 45 },
+  // Zone C (far, office-issued only): representative round-trip cost so the
+  // variable-cost discount floor still protects a Zone C day quote.
+  C: { min: 110, mi: 75 },
+};
 
 const ONSITE_MIN: Record<string, number> = {
   one_time_gpc: 90,
@@ -122,7 +164,7 @@ export function oneTimeGrossProfitCents(
   priceCents: number,
   zone: Zone
 ): number | null {
-  if (zone !== "A" && zone !== "B") return null;
+  if (zone !== "A" && zone !== "B" && zone !== "C") return null;
   const onsite = ONSITE_MIN[kind] ?? 90;
   const materials = MATERIALS[kind] ?? 15;
   const drive = DRIVE[zone];

@@ -22,7 +22,8 @@ import {
   zoneFromMinutes,
   money,
   priceMosquito,
-  ZONE_B,
+  travelAdderCents,
+  ZONE_C,
   type Zone,
 } from "../crm-pricing/rateCards";
 import { cancelPlanForCustomer } from "../shared/planCancellation";
@@ -1304,9 +1305,14 @@ async function quote(
   // Zone from live drive time.
   const routesKey = await getSecret("GOOGLE_ROUTES_API_KEY");
   const storedZone = resumedBooking?.zone;
-  const hasStoredZone = ["A", "B", "OUT", "UNKNOWN"].includes(
+  const hasStoredZone = ["A", "B", "C", "OUT", "UNKNOWN"].includes(
     storedZone ?? ""
   );
+  // The office issued this quote (the lead-specific "Open prefilled website
+  // quote" link carries a lead token). Only then may a far, out-of-area address
+  // be priced — with the fixed Zone C travel add-on — instead of bouncing to a
+  // callback. A public visitor never gets here for OUT.
+  const officeQuote = Boolean(input.leadToken);
   const minutes = hasStoredZone
     ? (resumedBooking?.driveMinutes ?? null)
     : routesKey
@@ -1317,7 +1323,7 @@ async function quote(
     : minutes == null
       ? "UNKNOWN"
       : zoneFromMinutes(minutes);
-  if (zone === "OUT") {
+  if (zone === "OUT" && !officeQuote) {
     return contact(
       "You're a bit outside our standard service area",
       "to see what we can do",
@@ -1326,7 +1332,11 @@ async function quote(
       undefined,
       `Outside the standard service area: Google Routes put this address at ${
         minutes != null ? `~${minutes} min` : "over 90 min"
-      } from base, past our 90-minute limit (Zone A ≤50 min, Zone B ≤90 min). Decide whether to service it at a travel-adjusted rate, refer it out, or decline — the funnel can't auto-price beyond Zone B.`
+      } from base, past our 90-minute limit (Zone A ≤50 min, Zone B ≤90 min). If you want to service it, open "Quote this lead" — a prefilled quote applies the Zone C far-travel add-on (${money(
+        ZONE_C.ONE_TIME_FLAT
+      )} one-time / ${money(
+        ZONE_C.MONTHLY
+      )} per month) and sends them a bookable link. Otherwise refer it out or decline.`
     );
   }
   if (zone === "UNKNOWN") {
@@ -1350,7 +1360,10 @@ async function quote(
       }), so the funnel couldn't determine a price. Verify the address, then quote by hand or on the office board.`
     );
   }
-  const priceZone: Zone = zone;
+  // An office-issued OUT quote prices as Zone C (fixed far-travel add-on); the
+  // public OUT path already returned a callback above, so this only promotes
+  // office quotes.
+  const priceZone: Zone = zone === "OUT" ? "C" : zone;
 
   // AI base price. Every service prices from the cached market-rate sheet —
   // a PURE READ. The live path never researches: getCachedRate serves the
@@ -1374,7 +1387,7 @@ async function quote(
         ? resumedBooking
         : await makeBooking({
             status: "PENDING",
-            zone,
+            zone: priceZone,
             driveMinutes: minutes ?? undefined,
           });
     const rateKey = rateKeyFor(
@@ -1473,7 +1486,7 @@ async function quote(
     const card = priceMosquito({
       tick: service === "MOSQUITO_TICK",
       halfAcres,
-      zone: priceZone === "B" ? "B" : "A",
+      zone: priceZone,
     });
     const monthly = card.monthlyCents!;
     baseCents = monthly;
@@ -1511,7 +1524,7 @@ async function quote(
     }
     baseCents =
       rate.priceCents + extraNests * (rate.sheet.extraNestCents ?? 0);
-    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    baseCents += travelAdderCents(priceZone, "ONE_TIME_FLAT");
     serviceLabel = serviceLabelFor("WASP_NEST", {
       nestCount: input.nestCount ?? 1,
     });
@@ -1538,7 +1551,7 @@ async function quote(
     }
     baseCents =
       rate.priceCents + extraAnimals * (rate.sheet.extraAnimalCents ?? 0);
-    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    baseCents += travelAdderCents(priceZone, "ONE_TIME_FLAT");
     serviceLabel = serviceLabelFor("WILDLIFE", {
       removalKind: input.removalKind,
       removalCount: count,
@@ -1563,7 +1576,7 @@ async function quote(
     const perUnit = hoa[hoaBandFor(units)][freq];
     let monthly = perUnit * units;
     // R60: the same deterministic Zone B travel adder every plan carries.
-    if (priceZone === "B") monthly += ZONE_B[freq];
+    monthly += travelAdderCents(priceZone, freq);
     baseCents = monthly;
     planOnly = true;
     serviceLabel = serviceLabelFor("HOA_COMMON_AREA", { units });
@@ -1595,13 +1608,13 @@ async function quote(
     serviceLabel = serviceLabelFor("COMMERCIAL_PEST", {
       sqftBucket: sqftBucket(input.sqft!),
     });
-    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    baseCents += travelAdderCents(priceZone, "ONE_TIME_FLAT");
     recurringOffer = {
       frequency: freq,
       monthlyCents:
-        plan.monthlyCents + (priceZone === "B" ? ZONE_B[freq] : 0),
+        plan.monthlyCents + travelAdderCents(priceZone, freq),
       initialFeeCents:
-        plan.initialFeeCents + (priceZone === "B" ? ZONE_B.ONE_TIME_FLAT : 0),
+        plan.initialFeeCents + travelAdderCents(priceZone, "ONE_TIME_FLAT"),
     };
   } else if (service === "GENERAL_PEST") {
     const rate = await getCachedRate({
@@ -1622,13 +1635,13 @@ async function quote(
     serviceLabel = serviceLabelFor("GENERAL_PEST");
     // R60: the same deterministic Zone B travel adders the rate cards
     // carried — an 89-minute drive must not price like a 10-minute one.
-    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    baseCents += travelAdderCents(priceZone, "ONE_TIME_FLAT");
     recurringOffer = {
       frequency: freq,
       monthlyCents:
-        plan.monthlyCents + (priceZone === "B" ? ZONE_B[freq] : 0),
+        plan.monthlyCents + travelAdderCents(priceZone, freq),
       initialFeeCents:
-        plan.initialFeeCents + (priceZone === "B" ? ZONE_B.ONE_TIME_FLAT : 0),
+        plan.initialFeeCents + travelAdderCents(priceZone, "ONE_TIME_FLAT"),
     };
   } else {
     // RODENT / ROACH / TERMITE — one-time treatments priced from their
@@ -1642,7 +1655,7 @@ async function quote(
     });
     if (!rate) return contactForPrice(engineService, input.sqft!);
     baseCents = rate.priceCents;
-    if (priceZone === "B") baseCents += ZONE_B.ONE_TIME_FLAT;
+    baseCents += travelAdderCents(priceZone, "ONE_TIME_FLAT");
     // GL-01: the label is the catalog's, not a local map.
     serviceLabel = serviceLabelFor(engineService, {
       sqftBucket: sqftBucket(input.sqft!),
@@ -1717,7 +1730,9 @@ async function quote(
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const booking = await makeBooking({
     status: "QUOTED",
-    zone,
+    // Persist the zone it was PRICED at (an office OUT quote priced as Zone C),
+    // so the booking-status re-check reprices with the same travel add-on.
+    zone: priceZone,
     driveMinutes: minutes ?? undefined,
     quoteJson: JSON.stringify({
       days,
@@ -1742,7 +1757,7 @@ async function quote(
     decision: "QUOTE",
     outcome: "PENDING",
     inputText: `[website ${service}] ${name}, ${address}${input.sqft ? `, ${input.sqft} sqft` : ""}${input.nestCount ? `, ${input.nestCount} nests` : ""}${input.removalKind ? `, remove ${input.removalCount ?? 1} ${input.removalKind}` : ""}`,
-    zone,
+    zone: priceZone,
     driveMinutes: minutes ?? undefined,
     town: addr.city,
     state: addr.state?.toUpperCase(),
@@ -2464,7 +2479,11 @@ async function book(
         service: String(booking.service),
         baseCents: day!.priceCents,
         zone:
-          booking.zone === "A" || booking.zone === "B" ? booking.zone : undefined,
+          booking.zone === "A" ||
+          booking.zone === "B" ||
+          booking.zone === "C"
+            ? booking.zone
+            : undefined,
         onlyDate: date,
         onsiteMinutes:
           booking.propertyKind === "COMMERCIAL" ||
