@@ -318,8 +318,25 @@ async function getPaymentMethodSummary(customerId: string) {
   if (!customer.stripeCustomerId) {
     return { hasPaymentMethod: false, label: null, kind: null };
   }
-  const pm = await getDefaultPaymentMethod(customer.stripeCustomerId);
-  if (!pm) return { hasPaymentMethod: false, label: null, kind: null };
+  let pm = await getDefaultPaymentMethod(customer.stripeCustomerId);
+  if (!pm) {
+    // Self-heal: a saved method with no default happens when the
+    // setup_intent.succeeded webhook never arrived (unregistered endpoint,
+    // outage, missed delivery — Stripe does not replay events to endpoints
+    // added later). The method exists on the Stripe customer either way, so
+    // adopt the newest one as the default here rather than telling the office
+    // a collected card/bank is "missing".
+    const saved = await stripeClient().customers.listPaymentMethods(
+      customer.stripeCustomerId,
+      { limit: 10 }
+    );
+    const newest = saved.data.sort((a, b) => b.created - a.created)[0];
+    if (!newest) return { hasPaymentMethod: false, label: null, kind: null };
+    await stripeClient().customers.update(customer.stripeCustomerId, {
+      invoice_settings: { default_payment_method: newest.id },
+    });
+    pm = newest;
+  }
   const { label, kind } = paymentMethodLabel(pm);
   if (customer.paymentMethodLabel !== label) {
     await client.models.Customer.update({
