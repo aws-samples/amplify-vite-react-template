@@ -1129,15 +1129,19 @@ export async function recomputeSlotMinutes(
       .filter((c) => c.technicianId === technicianId)
       .reduce((sum, c) => sum + c.minutes, 0);
 
+    // Only OVERWRITE the ledger when the tour was actually measured. An
+    // unverifiable tour (a transient Routes failure, a missing leg) leaves the
+    // reservation's value in place rather than stomping a good day to a false
+    // "fully booked" on this one mutation — the nightly reconcile stays the
+    // fail-closed authority that holds an unverifiable day.
+    if (!tour.verified) return;
     const id = slotId(date, technicianId);
     await ensureSlot(date, technicianId);
     const sets = {
-      committedMinutes: tour.verified
-        ? tour.travel + tour.treatment + claimMinutes
-        : DAY_MINUTES,
-      travelMinutes: tour.verified ? tour.travel : null,
+      committedMinutes: tour.travel + tour.treatment + claimMinutes,
+      travelMinutes: tour.travel,
       treatmentMinutes: tour.treatment,
-      verified: tour.verified,
+      verified: true,
       reconciledAt: new Date().toISOString(),
     };
     const written = await casGuardedUpdate("CapacityDay", id, sets, []);
