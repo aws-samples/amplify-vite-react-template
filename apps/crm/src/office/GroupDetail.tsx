@@ -22,6 +22,10 @@ export default function GroupDetail() {
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [inviting, setInviting] = useState(false);
+  // When set, the group's email already signs in — hold the server's message
+  // and let the office choose to reuse that login or cancel.
+  const [reusePrompt, setReusePrompt] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -48,6 +52,37 @@ export default function GroupDetail() {
       </Page>
     );
   }
+
+  const invite = async (confirmReuse = false) => {
+    if (!group) return;
+    if (!group.contactEmail) {
+      setError("Add a contact email to the group before inviting a login.");
+      return;
+    }
+    setInviting(true);
+    setError(null);
+    try {
+      unwrap(
+        await api().mutations.adminCreateUser({
+          email: group.contactEmail,
+          name: group.contactName ?? group.name,
+          roles: ["CUSTOMER"],
+          groupId: group.id,
+          confirmReuse,
+        })
+      );
+      setReusePrompt(null);
+      await load();
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Could not invite group login";
+      // The collision guard is recoverable — offer reuse instead of failing.
+      if (msg.includes("already signs in as")) setReusePrompt(msg);
+      else setError(msg);
+    } finally {
+      setInviting(false);
+    }
+  };
 
   const move = async (customerId: string, groupId: string | null) => {
     setBusyId(customerId);
@@ -83,6 +118,27 @@ export default function GroupDetail() {
           Portal users belonging to members of this group can view every
           member's service details.
         </p>
+        <div className="inline-actions" style={{ marginTop: 12 }}>
+          <p className="muted small" style={{ flex: 1 }}>
+            {group.portalUserSub
+              ? `Group login active${group.portalInvitedAt ? ` — invited ${new Date(group.portalInvitedAt).toLocaleDateString()}` : ""}. It sees every property below.`
+              : "No group login yet. Invite one to give a management contact a single login across all properties."}
+          </p>
+          <span
+            className="permission-tooltip"
+            title={!group.contactEmail ? "Add a contact email first." : undefined}
+          >
+            <Button
+              small
+              variant="subtle"
+              disabled={!group.contactEmail}
+              loading={inviting}
+              onClick={() => void invite(false)}
+            >
+              {group.portalUserSub ? "Resend group login" : "Invite group login"}
+            </Button>
+          </span>
+        </div>
       </Card>
 
       <Card
@@ -141,6 +197,26 @@ export default function GroupDetail() {
             ))}
           </select>
         </Field>
+      </Sheet>
+
+      <Sheet
+        open={reusePrompt !== null}
+        onClose={() => setReusePrompt(null)}
+        title="Email already in use"
+      >
+        <p className="small">{reusePrompt}</p>
+        <div className="inline-actions" style={{ marginTop: 16 }}>
+          <Button
+            variant="subtle"
+            loading={inviting}
+            onClick={() => void invite(true)}
+          >
+            Reuse that login for this group
+          </Button>
+          <Button variant="ghost" onClick={() => setReusePrompt(null)}>
+            Cancel
+          </Button>
+        </div>
       </Sheet>
     </Page>
   );

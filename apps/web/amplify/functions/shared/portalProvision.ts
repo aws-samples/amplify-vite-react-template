@@ -20,7 +20,7 @@ import {
   CreateGroupCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { dataClient } from "./dataClient";
-import { customerAccessGroups } from "./dynamicGroups";
+import { customerAccessGroups, grpGroup } from "./dynamicGroups";
 import { emailShell, sendEmail } from "./email";
 
 const cognito = new CognitoIdentityProviderClient();
@@ -144,6 +144,44 @@ export async function grantCustomerPortal(opts: {
     portalUserSub: opts.sub,
     portalInvitedAt: new Date().toISOString(),
     accessGroups: dynamicGroups,
+  });
+  return groupsAdded;
+}
+
+/**
+ * Grant a login the CUSTOMER role plus a management group's dynamic (grp-)
+ * group — the "group-only" login. It sees every property in the group's
+ * portfolio (the portal Group view lists all customers with this groupId) but
+ * is bound to no single Customer, so a management company gets one login that
+ * is not entangled with any one property's cus- access. Stamps the group record
+ * with the portal linkage. Returns the groups granted.
+ */
+export async function grantGroupPortal(opts: {
+  username: string;
+  sub: string;
+  groupId: string;
+}): Promise<string[]> {
+  const client = await dataClient();
+  const { data: group } = await client.models.CustomerGroup.get({
+    id: opts.groupId,
+  });
+  if (!group) throw new Error(`CustomerGroup ${opts.groupId} not found`);
+
+  const grp = grpGroup(opts.groupId);
+  const groupsAdded: string[] = [];
+  for (const g of ["CUSTOMER", grp]) {
+    if (g !== "CUSTOMER") await ensureCognitoGroup(g);
+    await addToGroup(opts.username, g);
+    groupsAdded.push(g);
+  }
+
+  // The group's own record must carry grp-<id> so this login can read it (the
+  // portal loads the CustomerGroup before its members).
+  await client.models.CustomerGroup.update({
+    id: opts.groupId,
+    portalUserSub: opts.sub,
+    portalInvitedAt: new Date().toISOString(),
+    accessGroups: [grp],
   });
   return groupsAdded;
 }

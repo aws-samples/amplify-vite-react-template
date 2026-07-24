@@ -29,6 +29,7 @@ import {
   ensureCognitoGroup,
   ensureLogin,
   grantCustomerPortal,
+  grantGroupPortal,
   sendMagicLinkInvite,
 } from "../shared/portalProvision";
 import {
@@ -109,6 +110,8 @@ type AdminCreateUserArgs = {
   name: string;
   roles: string[];
   customerId?: string | null;
+  groupId?: string | null;
+  confirmReuse?: boolean | null;
   technicianId?: string | null;
   resend?: boolean | null;
 };
@@ -742,13 +745,66 @@ async function killLogin(
   }
 }
 
+/**
+ * If an email already has a Cognito login, return a short human label for who
+ * it is (a named customer or group when one can be found), else null. Turns a
+ * silent identity-merge into an explicit office decision when a group login is
+ * provisioned on an in-use email.
+ */
+async function describeExistingLoginForEmail(
+  email: string
+): Promise<string | null> {
+  let sub: string | undefined;
+  try {
+    const existing = await cognito.send(
+      new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: email })
+    );
+    sub = existing.UserAttributes?.find((a) => a.Name === "sub")?.Value;
+  } catch (err) {
+    if ((err as { name?: string }).name === "UserNotFoundException") return null;
+    throw err;
+  }
+  const client = await dataClient();
+  if (sub) {
+    const { data: bySub } = await client.models.Customer.list({
+      filter: { portalUserSub: { eq: sub } },
+      limit: 1,
+    });
+    if (bySub[0]) return `customer "${bySub[0].displayName}"`;
+    const { data: grpBySub } = await client.models.CustomerGroup.list({
+      filter: { portalUserSub: { eq: sub } },
+      limit: 1,
+    });
+    if (grpBySub[0]) return `group "${grpBySub[0].name}"`;
+  }
+  const { data: byEmail } = await client.models.Customer.list({
+    filter: { email: { eq: email } },
+    limit: 1,
+  });
+  if (byEmail[0]) return `customer "${byEmail[0].displayName}"`;
+  return "another BuzzKill login";
+}
+
 async function adminCreateUser(args: AdminCreateUserArgs) {
   const email = args.email.trim().toLowerCase();
   const roles = normalizeRoles(args.roles);
 
   assertValidRoleSet(roles);
-  if (roles.includes("CUSTOMER") && !args.customerId)
-    throw new Error("customerId is required when creating a CUSTOMER login");
+  // A CUSTOMER (portal) login is bound to exactly one of: a single Customer, or
+  // a whole CustomerGroup (the management-company "group login" — one login that
+  // sees every property in the portfolio but no one property's cus- data).
+  const isGroupLogin =
+    roles.includes("CUSTOMER") && !!args.groupId && !args.customerId;
+  if (roles.includes("CUSTOMER")) {
+    if (args.customerId && args.groupId)
+      throw new Error(
+        "A portal login is bound to either one customer or one group, not both."
+      );
+    if (!args.customerId && !args.groupId)
+      throw new Error(
+        "customerId (or groupId, for a management-company login) is required when creating a CUSTOMER login"
+      );
+  }
 
   // GL-14: a technician login is not a login that merely happens to be in the
   // TECH group — it is a login bound to exactly one Technician profile that
@@ -798,6 +854,29 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
     );
   }
 
+  // A group login is validated, and its email collision resolved, before any
+  // Cognito user is created — a refusal must leave nothing half-built.
+  if (isGroupLogin) {
+    const { data: grp } = await client.models.CustomerGroup.get({
+      id: args.groupId!,
+    });
+    if (!grp)
+      throw new Error(
+        `Group ${args.groupId} not found — pick an existing group.`
+      );
+    // Warn-and-choose collision guard. ensureLogin silently reuses an existing
+    // login on UsernameExistsException, which for a group would graft the whole
+    // portfolio onto whoever already signs in with that email. Refuse until the
+    // office explicitly confirms the reuse, and name who the email is today.
+    if (!args.confirmReuse) {
+      const existing = await describeExistingLoginForEmail(email);
+      if (existing)
+        throw new Error(
+          `${email} already signs in as ${existing}. Giving this group that login would also let it see this group's whole portfolio. Reuse that login for the group, or use a different email.`
+        );
+    }
+  }
+
   // The login/grant/invite core lives in shared/portalProvision — the same
   // implementation the booking webhook uses to provision portal access at
   // conversion (R41), so an invite from this button and an invite from a paid
@@ -825,11 +904,13 @@ async function adminCreateUser(args: AdminCreateUserArgs) {
 
   if (roles.includes("CUSTOMER")) {
     groupsAdded.push(
-      ...(await grantCustomerPortal({
-        username,
-        sub,
-        customerId: args.customerId!,
-      }))
+      ...(isGroupLogin
+        ? await grantGroupPortal({ username, sub, groupId: args.groupId! })
+        : await grantCustomerPortal({
+            username,
+            sub,
+            customerId: args.customerId!,
+          }))
     );
   }
 
