@@ -24,6 +24,7 @@ export type Agreement = Schema["Agreement"]["type"];
 export type ServiceReport = Schema["ServiceReport"]["type"];
 export type ServiceReportAmendment = Schema["ServiceReportAmendment"]["type"];
 export type LeadPricingRun = Schema["LeadPricingRun"]["type"];
+export type BookingRequest = Schema["BookingRequest"]["type"];
 export type Product = Schema["Product"]["type"];
 /** Append-only light-inventory stock ledger (on-hand = sum of deltas). */
 export type ProductStockEntry = Schema["ProductStockEntry"]["type"];

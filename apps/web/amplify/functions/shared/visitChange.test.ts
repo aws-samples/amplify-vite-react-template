@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _setLockStoreForTests, memoryLockStore } from "./atomicLock";
 import { capacityFixtureModels } from "./capacityTestFixture";
 
@@ -229,6 +229,13 @@ function seedPaidVisit(overrides: Partial<Row> = {}) {
 }
 
 beforeEach(() => {
+  // Freeze the clock to a fixed WEEKDAY (Tue 10 Mar 2026, noon UTC). The refund
+  // window is hour-exact (72h), and daysFromNow() rolls its date forward off
+  // weekends — so on a real Friday/Saturday daysFromNow(1) lands 3 days out,
+  // straddling the 72h line and flipping FEE_RETAINED↔REFUND by day of week.
+  // Faking only Date keeps setTimeout/async behavior real.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-03-10T12:00:00Z"));
   process.env.ALLOW_UNVERIFIED_ROUTES = "true";
   delete process.env.GOOGLE_ROUTES_API_KEY;
   capacityFixture.maps.capacityDays.clear();
@@ -264,6 +271,10 @@ beforeEach(() => {
   intentRetrieve.mockImplementation(async () => ({ status: "succeeded" }));
   intentCancel.mockClear();
   fakeDataClient.models.ServicePlan.update.mockClear();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("buildVisitChangePreview", () => {
