@@ -74,12 +74,14 @@ vi.mock("./driveTime", () => ({
 const {
   bestSlotFor,
   claimDaySlot,
+  closedTourMinutes,
   consumeCapacityClaim,
   dayEligibility,
   extendCapacityClaim,
   makeLegResolver,
   onsiteMinutes,
   reconcileCapacityDay,
+  recomputeSlotMinutes,
   dayStopId,
   STOPS_PER_TECH,
   releaseCapacityClaim,
@@ -665,8 +667,10 @@ describe("feasibility — REAL Routes legs, fail closed", () => {
   });
 
   it("reports the nearest existing stop on the chosen tech (drives the discount)", async () => {
-    // One stop 15 min away → nearest-stop insertion 2×15; the discount keys
-    // off nearestStopMinutes, so it always names the tech we book.
+    // One existing stop, every leg 15 min. Splicing the candidate into the
+    // tour replaces one 15-min leg with two → a TRUE marginal of 15 (not the
+    // old 2×15 round-trip double-count), so claim = 30 on-site + 15 = 45. The
+    // discount still keys off nearestStopMinutes, so it names the tech we book.
     const best = await bestSlotFor({
       date: WED,
       onsite: 30,
@@ -678,7 +682,7 @@ describe("feasibility — REAL Routes legs, fail closed", () => {
     });
     expect(best).toMatchObject({
       technicianId: "t1",
-      claimMinutes: 60,
+      claimMinutes: 45,
       nearestStopMinutes: 15,
     });
   });
@@ -782,5 +786,123 @@ describe("nightly rebuild — base → stops → base with real legs", () => {
       "9 Elm St, Ware, MA, 01082",
       "3 Oak St, Ware, MA",
     ]);
+  });
+});
+
+describe("closedTourMinutes — travel is ONE tour, not a round trip per stop", () => {
+  const BASE = "81 Greenwich Rd, Ware, MA";
+  // A far cluster: base ↔ cluster is 85 min each way; hops WITHIN the cluster
+  // are 5 min. This is the Ware-base / Ashland-work shape that read "full" at
+  // two stops under the old per-stop double-count.
+  const leg = async (from: string, to: string): Promise<number | null> => {
+    if (from === to) return 0;
+    const near = (a: string) => a.includes("Cluster");
+    return near(from) && near(to) ? 5 : 85;
+  };
+  const clusterStop = (n: number, onsite: number) => ({
+    address: `${n} Cluster Way`,
+    onsite,
+  });
+
+  it("charges the far base haul ONCE for the whole cluster day", async () => {
+    const stops = [clusterStop(1, 60), clusterStop(2, 60), clusterStop(3, 60)];
+    const { travel, treatment, verified } = await closedTourMinutes(
+      BASE,
+      stops,
+      leg
+    );
+    expect(verified).toBe(true);
+    // base→s1 85 + s1→s2 5 + s2→s3 5 + s3→base 85 = 180 travel, measured ONCE.
+    // The old model charged each stop its own ~170-min base round trip.
+    expect(travel).toBe(180);
+    expect(treatment).toBe(180); // 3 × 60 on-site
+    // 180 + 180 = 360 leaves real room under the 540 budget for more cluster
+    // stops — exactly what "full at two stops" was wrongly denying.
+    expect(travel + treatment).toBeLessThan(DAY_MINUTES);
+  });
+
+  it("fails closed (unverified) on an unroutable leg, but still knows treatment", async () => {
+    const res = await closedTourMinutes(
+      BASE,
+      [clusterStop(1, 30)],
+      async () => null
+    );
+    expect(res.verified).toBe(false);
+    expect(res.treatment).toBe(30);
+  });
+
+  it("an empty day is zero travel and verified", async () => {
+    expect(await closedTourMinutes(BASE, [], leg)).toEqual({
+      travel: 0,
+      treatment: 0,
+      verified: true,
+    });
+  });
+
+  it("a missing base fails closed", async () => {
+    const res = await closedTourMinutes(null, [clusterStop(1, 30)], leg);
+    expect(res.verified).toBe(false);
+  });
+});
+
+describe("recomputeSlotMinutes — a mutation rebuilds the day to its real tour", () => {
+  it("overwrites an INFLATED committed value with the true optimized tour + split", async () => {
+    customers.set("c1", {
+      id: "c1",
+      serviceStreet: "9 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
+    customers.set("c2", {
+      id: "c2",
+      serviceStreet: "11 Elm St",
+      serviceCity: "Ware",
+      serviceState: "MA",
+      serviceZip: "01082",
+    });
+    // Two SCHEDULED stops on t1 for WED (every mocked leg is 15 min).
+    jobs.set("j1", {
+      id: "j1",
+      customerId: "c1",
+      scheduledDate: WED,
+      status: "SCHEDULED",
+      technicianId: "t1",
+      routeOrder: 1,
+      propertyClass: "RESIDENTIAL",
+    });
+    jobs.set("j2", {
+      id: "j2",
+      customerId: "c2",
+      scheduledDate: WED,
+      status: "SCHEDULED",
+      technicianId: "t1",
+      routeOrder: 2,
+      propertyClass: "RESIDENTIAL",
+    });
+    // The ledger is inflated (as the per-stop double-count would leave it),
+    // which is what makes an almost-empty day read "fully booked".
+    capacityDays.set(slotId(WED, "t1"), {
+      id: slotId(WED, "t1"),
+      date: WED,
+      technicianId: "t1",
+      committedMinutes: 480,
+      verified: true,
+    });
+
+    await recomputeSlotMinutes(WED, "t1", "routes-key");
+
+    const slot = capacityDays.get(slotId(WED, "t1"));
+    // Real tour: base→s1 15 + s1→s2 15 + s2→base 15 = 45 travel; 2 × 30 = 60
+    // treatment; committed = 105 — the day is nowhere near full.
+    expect(slot!.travelMinutes).toBe(45);
+    expect(slot!.treatmentMinutes).toBe(60);
+    expect(slot!.committedMinutes).toBe(105);
+    expect(slot!.verified).toBe(true);
+  });
+
+  it("is a no-op for the POOL slot (no route to measure)", async () => {
+    await recomputeSlotMinutes(WED, "POOL", "routes-key");
+    expect(capacityDays.get(slotId(WED, "POOL"))).toBeUndefined();
   });
 });
