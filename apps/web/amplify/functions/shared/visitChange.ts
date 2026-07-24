@@ -28,7 +28,7 @@ import {
   reserveSlot,
   techBaseFor,
 } from "./capacity";
-import { optimizeTechDay } from "./routeOptimizer";
+import { resequenceAndRebuildDay } from "./routeOptimizer";
 import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
@@ -1734,18 +1734,19 @@ export async function rescheduleVisit(args: {
     }
     // Re-sequence the destination technician's day now this stop joined it —
     // and the source day it left, on a cross-tech/day move.
-    await optimizeTechDay({ technicianId: technician.id, date: newDate! }).catch(
-      () => undefined
-    );
+    await resequenceAndRebuildDay({
+      technicianId: technician.id,
+      date: newDate!,
+    });
     if (
       priorScheduledDate &&
       job.technicianId &&
       (job.technicianId !== technician.id || priorScheduledDate !== newDate)
     ) {
-      await optimizeTechDay({
+      await resequenceAndRebuildDay({
         technicianId: job.technicianId,
         date: priorScheduledDate,
-      }).catch(() => undefined);
+      });
     }
   } else {
     // GL-07 R4: a dated move with no technician is NEVER published as a clean
@@ -1836,10 +1837,10 @@ export async function rescheduleVisit(args: {
     // The stop left its old technician's day (moved to the pool) — re-sequence
     // whatever remains there.
     if (priorScheduledDate && job.technicianId) {
-      await optimizeTechDay({
+      await resequenceAndRebuildDay({
         technicianId: job.technicianId,
         date: priorScheduledDate,
-      }).catch(() => undefined);
+      });
     }
   }
 

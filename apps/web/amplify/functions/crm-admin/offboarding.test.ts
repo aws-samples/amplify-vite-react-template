@@ -131,6 +131,13 @@ vi.mock("@aws-sdk/client-cognito-identity-provider", () => {
         }
         if (c.__type === "CreateUser") {
           const email = username;
+          // Faithful to Cognito: a second create on an existing username throws,
+          // which is what ensureLogin catches to reuse the existing login.
+          if (pool.has(email)) {
+            const err = new Error("user exists") as Error & { name: string };
+            err.name = "UsernameExistsException";
+            throw err;
+          }
           return {
             User: {
               Username: email,
@@ -183,7 +190,18 @@ type Job = {
   notes?: string | null;
 };
 
+type Group = {
+  id: string;
+  name: string;
+  contactName?: string | null;
+  contactEmail?: string | null;
+  portalUserSub?: string | null;
+  portalInvitedAt?: string | null;
+  accessGroups?: string[] | null;
+};
+
 const customers = new Map<string, Customer>();
+const customerGroups = new Map<string, Group>();
 const technicians = new Map<string, Technician>();
 const jobs = new Map<string, Job>();
 /** Rows written to the append-only staff-access ledger (StaffAccessEvent). */
@@ -224,6 +242,22 @@ const fakeDataClient = {
         customers.set(patch.id, { ...customers.get(patch.id)!, ...patch });
         return { data: customers.get(patch.id) };
       },
+      // Used by describeExistingLoginForEmail's collision lookup.
+      list: async ({
+        filter,
+      }: {
+        filter?: {
+          portalUserSub?: { eq: string };
+          email?: { eq: string };
+        };
+      }) => {
+        const rows = [...customers.values()].filter((c) => {
+          if (filter?.portalUserSub) return c.portalUserSub === filter.portalUserSub.eq;
+          if (filter?.email) return c.email === filter.email.eq;
+          return true;
+        });
+        return { data: rows, nextToken: null };
+      },
       // GL-14 R6: the offboard reassigns the departing person's leads.
       listCustomerByStatusAndDisplayName: async ({
         status,
@@ -235,6 +269,25 @@ const fakeDataClient = {
         ),
         nextToken: null,
       }),
+    },
+    CustomerGroup: {
+      get: async ({ id }: { id: string }) => ({
+        data: customerGroups.get(id) ?? null,
+      }),
+      update: async (patch: Partial<Group> & { id: string }) => {
+        customerGroups.set(patch.id, { ...customerGroups.get(patch.id)!, ...patch });
+        return { data: customerGroups.get(patch.id) };
+      },
+      list: async ({
+        filter,
+      }: {
+        filter?: { portalUserSub?: { eq: string } };
+      }) => {
+        const rows = [...customerGroups.values()].filter((g) =>
+          filter?.portalUserSub ? g.portalUserSub === filter.portalUserSub.eq : true
+        );
+        return { data: rows, nextToken: null };
+      },
     },
     Technician: {
       get: async ({ id }: { id: string }) => ({ data: technicians.get(id) ?? null }),
@@ -449,6 +502,7 @@ beforeEach(() => {
   userGroups = [];
   pool.clear();
   customers.clear();
+  customerGroups.clear();
   technicians.clear();
   jobs.clear();
   staffAccessEvents.length = 0;
@@ -557,6 +611,109 @@ describe("adminCreateUser — atomic technician linking (GL-14)", () => {
     expect(technicians.get("t1")).toMatchObject({
       userSub: "sub-marcus@buzzkill.com",
       email: "marcus@buzzkill.com",
+    });
+  });
+});
+
+describe("adminCreateUser — management-company group login", () => {
+  it("provisions a group-only login: CUSTOMER + grp-<id>, no cus-, and stamps the group", async () => {
+    customerGroups.set("g1", {
+      id: "g1",
+      name: "Maple HOA",
+      contactEmail: "hoa@maple.com",
+    });
+    const res = (await call("adminCreateUser", {
+      email: "hoa@maple.com",
+      name: "Maple HOA",
+      roles: ["CUSTOMER"],
+      groupId: "g1",
+    })) as { groupsAdded: string[]; created: boolean };
+
+    expect(res.created).toBe(true);
+    expect(res.groupsAdded).toEqual(
+      expect.arrayContaining(["CUSTOMER", "grp-g1"])
+    );
+    // A group login is bound to no single property — never a cus- group.
+    expect(res.groupsAdded.some((g) => g.startsWith("cus-"))).toBe(false);
+    // The group record carries the portal linkage and can read itself (grp-g1).
+    expect(customerGroups.get("g1")).toMatchObject({
+      portalUserSub: "sub-hoa@maple.com",
+    });
+    expect(customerGroups.get("g1")?.accessGroups).toEqual(["grp-g1"]);
+    // The magic sign-in link was sent.
+    expect(sendEmail).toHaveBeenCalled();
+  });
+
+  it("refuses a login bound to both a customer and a group", async () => {
+    customerGroups.set("g1", { id: "g1", name: "Maple HOA" });
+    await expect(
+      call("adminCreateUser", {
+        email: "x@y.com",
+        name: "X",
+        roles: ["CUSTOMER"],
+        groupId: "g1",
+        customerId: "c1",
+      })
+    ).rejects.toThrow(/either one customer or one group/i);
+    expect(sentTypes()).not.toContain("CreateUser");
+  });
+
+  it("refuses a group login for a group that does not exist — nothing provisioned", async () => {
+    await expect(
+      call("adminCreateUser", {
+        email: "hoa@maple.com",
+        name: "Maple HOA",
+        roles: ["CUSTOMER"],
+        groupId: "ghost",
+      })
+    ).rejects.toThrow(/not found/i);
+    expect(sentTypes()).not.toContain("CreateUser");
+  });
+
+  it("warns instead of silently merging when the email already signs in, then reuses on confirm", async () => {
+    customerGroups.set("g1", {
+      id: "g1",
+      name: "Maple HOA",
+      contactEmail: "shared@x.com",
+    });
+    // An existing customer login on the same email.
+    pool.set("shared@x.com", {
+      username: "shared@x.com",
+      sub: "sub-existing",
+      email: "shared@x.com",
+      groups: ["CUSTOMER", "cus-c9"],
+    });
+    customers.set("c9", {
+      id: "c9",
+      displayName: "Unit 4B",
+      status: "ACTIVE",
+      email: "shared@x.com",
+      portalUserSub: "sub-existing",
+    });
+
+    // Without confirmation: refused, names who the email is, provisions nothing.
+    await expect(
+      call("adminCreateUser", {
+        email: "shared@x.com",
+        name: "Maple HOA",
+        roles: ["CUSTOMER"],
+        groupId: "g1",
+      })
+    ).rejects.toThrow(/already signs in as customer "Unit 4B"/i);
+    expect(sentTypes()).not.toContain("CreateUser");
+
+    // With confirmReuse: the existing login is reused and gains grp-g1.
+    const res = (await call("adminCreateUser", {
+      email: "shared@x.com",
+      name: "Maple HOA",
+      roles: ["CUSTOMER"],
+      groupId: "g1",
+      confirmReuse: true,
+    })) as { groupsAdded: string[]; created: boolean };
+    expect(res.created).toBe(false);
+    expect(res.groupsAdded).toContain("grp-g1");
+    expect(customerGroups.get("g1")).toMatchObject({
+      portalUserSub: "sub-existing",
     });
   });
 });

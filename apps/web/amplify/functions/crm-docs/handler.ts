@@ -80,7 +80,7 @@ import {
   techBaseFor,
   DAY_MINUTES,
 } from "../shared/capacity";
-import { optimizeTechDay } from "../shared/routeOptimizer";
+import { resequenceAndRebuildDay } from "../shared/routeOptimizer";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
 import { isServiceMonth } from "../shared/season";
@@ -2751,7 +2751,7 @@ async function updateJobSchedule(
     }
     // Re-sequence the technician's day into the shortest base → stops → base
     // route now that this stop joined it. Best-effort.
-    await optimizeTechDay({
+    await resequenceAndRebuildDay({
       technicianId: technician.id,
       date: args.scheduledDate,
     }).catch(() => undefined);
@@ -2802,7 +2802,7 @@ async function updateJobSchedule(
     }
     // The stop left this technician's day — re-sequence what remains.
     if (job.technicianId && job.scheduledDate) {
-      await optimizeTechDay({
+      await resequenceAndRebuildDay({
         technicianId: job.technicianId,
         date: job.scheduledDate,
       }).catch(() => undefined);
@@ -3023,7 +3023,7 @@ async function updateJobSchedule(
     // A dated move drops the stop off its old technician's day — re-sequence
     // whatever is left on that day.
     if (dateChanged && job.technicianId && job.scheduledDate) {
-      await optimizeTechDay({
+      await resequenceAndRebuildDay({
         technicianId: job.technicianId,
         date: job.scheduledDate,
       }).catch(() => undefined);

@@ -10,7 +10,7 @@ import {
   stopsBySlotOn,
   type DayEligibility,
 } from "./capacity";
-import { optimizeTechDay } from "./routeOptimizer";
+import { resequenceAndRebuildDay } from "./routeOptimizer";
 
 /** Add days to a YYYY-MM-DD date, returning YYYY-MM-DD (UTC-noon anchored). */
 function addDays(isoDate: string, days: number): string {
@@ -201,9 +201,10 @@ export async function assignVisitToTech(opts: {
       return false;
     }
     // Scheduled onto a real technician's day — re-sequence their route into the
-    // shortest base → stops → base tour. Best-effort; a Routes hiccup leaves
-    // the appended order untouched.
-    await optimizeTechDay({ technicianId, date }).catch(() => undefined);
+    // shortest base → stops → base tour and rebuild the day's capacity ledger
+    // from that tour. Best-effort; a Routes hiccup leaves the appended order and
+    // the prior ledger untouched.
+    await resequenceAndRebuildDay({ technicianId, date });
     return true;
   } catch (err) {
     console.error("assignVisitToTech failed (non-fatal)", err);

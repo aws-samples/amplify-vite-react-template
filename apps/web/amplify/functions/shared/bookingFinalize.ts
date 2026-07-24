@@ -13,7 +13,7 @@ import {
   reserveSlot,
 } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
-import { optimizeTechDay } from "./routeOptimizer";
+import { resequenceAndRebuildDay } from "./routeOptimizer";
 
 /** Give back minutes a finalize attempt reserved but could not stamp. */
 async function reserveSlotRelease(
@@ -566,7 +566,7 @@ export async function finalizeBooking(opts: {
       // the shortest base → stops → base tour. Best-effort; a Routes hiccup
       // leaves the appended order untouched.
       if (stamped.ok && assign && assignTech && booking.selectedDate) {
-        await optimizeTechDay({
+        await resequenceAndRebuildDay({
           technicianId: assignTech,
           date: booking.selectedDate,
         }).catch(() => undefined);
