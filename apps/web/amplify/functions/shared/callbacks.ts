@@ -11,7 +11,7 @@ import {
   reserveSlot,
   techBaseFor,
 } from "./capacity";
-import { optimizeTechDay } from "./routeOptimizer";
+import { resequenceAndRebuildDay } from "./routeOptimizer";
 import {
   assertDispatchFacts,
   proveRoutable,
@@ -349,7 +349,7 @@ export async function scheduleCallback(opts: {
     if (!existing) throw new Error("The callback visit could not be created");
   }
   // Scheduled onto the technician's day — re-sequence their route.
-  await optimizeTechDay({
+  await resequenceAndRebuildDay({
     technicianId: opts.technicianId,
     date: opts.scheduledDate,
   }).catch(() => undefined);

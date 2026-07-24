@@ -897,21 +897,33 @@ export async function bestSlotFor(opts: {
     // GL-07: a tech already at the day's stop ceiling is not sellable — the
     // booking would auto-assign onto a full route. Never offer a full tech.
     if (stops.length >= STOPS_PER_TECH) continue;
-    let marginalTravel: number | null = null;
+    // Nearest existing stop — the caller's route-density signal (informational).
     let nearestStop: number | null = null;
-    if (stops.length === 0) {
-      const out = await opts.legMinutes(tech.baseAddress, opts.candidateAddress);
-      const back = await opts.legMinutes(opts.candidateAddress, tech.baseAddress);
-      if (out != null && back != null) marginalTravel = out + back;
-    } else {
-      for (const stop of stops) {
-        const leg = await opts.legMinutes(opts.candidateAddress, stop);
-        if (leg != null && (nearestStop === null || leg < nearestStop))
-          nearestStop = leg;
-      }
-      if (nearestStop != null) marginalTravel = nearestStop * 2;
+    for (const stop of stops) {
+      const leg = await opts.legMinutes(opts.candidateAddress, stop);
+      if (leg != null && (nearestStop === null || leg < nearestStop))
+        nearestStop = leg;
     }
-    if (marginalTravel == null) continue; // no Routes answer → not sellable here
+    // TRUE marginal travel: the cheapest place to splice the candidate into the
+    // tech's closed tour base → stops → base. For each adjacent pair (a,b) in
+    // that tour, inserting costs leg(a,cand) + leg(cand,b) − leg(a,b); take the
+    // minimum. An empty day is the single pair (base, base) — a plain
+    // out-and-back. This is the delta the ledger will commit, so there is no
+    // per-stop round-trip double-count.
+    const route = [tech.baseAddress, ...stops, tech.baseAddress];
+    let marginalTravel: number | null = null;
+    for (let i = 0; i < route.length - 1; i++) {
+      const a = route[i];
+      const b = route[i + 1];
+      const toCand = await opts.legMinutes(a, opts.candidateAddress);
+      const fromCand = await opts.legMinutes(opts.candidateAddress, b);
+      if (toCand == null || fromCand == null) continue; // this seam unroutable
+      const baseLeg = a === b ? 0 : await opts.legMinutes(a, b);
+      if (baseLeg == null) continue;
+      const delta = Math.max(0, toCand + fromCand - baseLeg);
+      if (marginalTravel === null || delta < marginalTravel) marginalTravel = delta;
+    }
+    if (marginalTravel == null) continue; // no routable seam → not sellable here
     const claimMinutes = onsite + marginalTravel;
     if (committed + claimMinutes > DAY_MINUTES) continue;
     if (!best || claimMinutes < best.claimMinutes) {
@@ -943,12 +955,12 @@ export async function stopsBySlotOn(
   date: string
 ): Promise<Map<string, string[]>> {
   const client = await dataClient();
-  const out = new Map<string, string[]>();
-  const push = (key: string, address: string | null) => {
+  const ordered = new Map<string, { address: string; routeOrder: number }[]>();
+  const push = (key: string, address: string | null, routeOrder: number) => {
     if (!address) return;
-    const list = out.get(key) ?? [];
-    list.push(address);
-    out.set(key, list);
+    const list = ordered.get(key) ?? [];
+    list.push({ address, routeOrder });
+    ordered.set(key, list);
   };
   let token: string | null | undefined;
   do {
@@ -977,15 +989,166 @@ export async function stopsBySlotOn(
             .filter(Boolean)
             .join(", ")
         : null;
-      push(slotId(date, stopTechId), address);
+      push(slotId(date, stopTechId), address, job.routeOrder ?? 999);
     }
     token = page.nextToken;
   } while (token);
   for (const claim of await liveClaimsOn(date)) {
     if (claim.technicianId === POOL_TECH) continue;
-    push(slotId(date, claim.technicianId), claim.address);
+    push(slotId(date, claim.technicianId), claim.address, 1_000_000);
+  }
+  // Emit each slot's stops in route order so a marginal-insertion fit test
+  // (bestSlotFor) splices against the real tour, not an arbitrary read order.
+  const out = new Map<string, string[]>();
+  for (const [key, list] of ordered) {
+    list.sort((a, b) => a.routeOrder - b.routeOrder);
+    out.set(
+      key,
+      list.map((s) => s.address)
+    );
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Tour-based day accounting — travel measured ONCE per day, not per stop
+// ---------------------------------------------------------------------------
+
+export type TourStop = { address: string | null; onsite: number };
+
+/**
+ * The day's committed minutes split into its two real components:
+ *  - travel: the CLOSED tour base → stops (in the given order) → base, each
+ *    leg measured once. A far base is charged a SINGLE out-and-back for the
+ *    whole cluster, never a round trip per stop.
+ *  - treatment: the sum of on-site minutes across the stops.
+ *
+ * `stops` must already be in route order. A base that can't be resolved, a stop
+ * with no address, or any unroutable leg fails CLOSED (verified:false) — a day
+ * is never sold on travel we could not measure. Treatment is on-site time, so
+ * it is always known and returned even when the travel legs cannot be verified.
+ */
+export async function closedTourMinutes(
+  base: string | null,
+  stops: TourStop[],
+  legMinutes: (from: string, to: string) => Promise<number | null>
+): Promise<{ travel: number; treatment: number; verified: boolean }> {
+  const treatment = stops.reduce((sum, s) => sum + s.onsite, 0);
+  if (stops.length === 0) return { travel: 0, treatment, verified: true };
+  if (!base) return { travel: 0, treatment, verified: false };
+  let travel = 0;
+  let prev = base;
+  for (const stop of stops) {
+    if (!stop.address) return { travel: 0, treatment, verified: false };
+    const leg = await legMinutes(prev, stop.address);
+    if (leg == null) return { travel: 0, treatment, verified: false };
+    travel += leg;
+    prev = stop.address;
+  }
+  const home = await legMinutes(prev, base);
+  if (home == null) return { travel: 0, treatment, verified: false };
+  travel += home;
+  return { travel, treatment, verified: true };
+}
+
+/**
+ * Rebuild ONE technician-day's committed minutes from ground truth, right after
+ * a scheduling mutation — the SAME tour math the nightly reconcile uses, but on
+ * a single slot so the ledger reflects the real optimized tour immediately
+ * rather than drifting on per-stop marginal estimates until the nightly rebuild
+ * corrects it. Call it after `optimizeTechDay` (which sets the route order the
+ * tour is measured along).
+ *
+ * Reads the tech's SCHEDULED/IN_PROGRESS stops (in route order), their base, and
+ * any live checkout claims, then writes travelMinutes / treatmentMinutes /
+ * committedMinutes / verified. Best-effort and non-fatal: it never throws into
+ * the mutation that called it, and an unverifiable tour fails closed (holds the
+ * full window) exactly like the nightly rebuild.
+ */
+export async function recomputeSlotMinutes(
+  date: string,
+  technicianId: string,
+  routesKey?: string | null
+): Promise<void> {
+  try {
+    if (!technicianId || technicianId === POOL_TECH) return;
+    const client = await dataClient();
+    if (!("CapacityDay" in client.models)) return;
+    if (
+      typeof (client.models.Job as { listJobByScheduledDate?: unknown })
+        .listJobByScheduledDate !== "function"
+    )
+      return;
+    const key = routesKey ?? process.env.GOOGLE_ROUTES_API_KEY ?? null;
+    // No Routes key ⇒ a tour cannot be measured. Leave the ledger exactly as
+    // the reservation set it rather than stomping the day to a false "fully
+    // booked" on every mutation. Production always has a key; this is the
+    // local-dev / no-key path (mirrors ALLOW_UNVERIFIED_ROUTES elsewhere).
+    if (!key) return;
+    const legMinutes = makeLegResolver(key);
+
+    // This tech's counted stops for the date, in route order.
+    const stops: (TourStop & { routeOrder: number })[] = [];
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Job.listJobByScheduledDate(
+        { scheduledDate: date },
+        { limit: 200, nextToken: token }
+      );
+      for (const job of page.data ?? []) {
+        if (job.technicianId !== technicianId) continue;
+        if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
+        const { data: customer } = await client.models.Customer.get({
+          id: job.customerId,
+        });
+        const address = customer
+          ? [
+              customer.serviceStreet,
+              customer.serviceCity,
+              customer.serviceState,
+              customer.serviceZip,
+            ]
+              .filter(Boolean)
+              .join(", ")
+          : "";
+        stops.push({
+          address: address || null,
+          onsite: onsiteMinutes(job.propertyClass),
+          routeOrder: job.routeOrder ?? 999,
+        });
+      }
+      token = page.nextToken;
+    } while (token);
+    stops.sort((a, b) => a.routeOrder - b.routeOrder);
+
+    const base = await techBaseFor(technicianId, date);
+    const tour = await closedTourMinutes(base, stops, legMinutes);
+
+    // Live checkout holds on this exact slot ride on top of the tour.
+    const claimMinutes = (await liveClaimsOn(date))
+      .filter((c) => c.technicianId === technicianId)
+      .reduce((sum, c) => sum + c.minutes, 0);
+
+    const id = slotId(date, technicianId);
+    await ensureSlot(date, technicianId);
+    const sets = {
+      committedMinutes: tour.verified
+        ? tour.travel + tour.treatment + claimMinutes
+        : DAY_MINUTES,
+      travelMinutes: tour.verified ? tour.travel : null,
+      treatmentMinutes: tour.treatment,
+      verified: tour.verified,
+      reconciledAt: new Date().toISOString(),
+    };
+    const written = await casGuardedUpdate("CapacityDay", id, sets, []);
+    if (!written.ok && written.reason === "UNSUPPORTED") {
+      await client.models.CapacityDay.update({ id, ...sets }).catch(
+        () => undefined
+      );
+    }
+  } catch (err) {
+    console.error("recomputeSlotMinutes failed (non-fatal)", err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,45 +1288,30 @@ export async function reconcileCapacityDay(
     const stops = (jobsBySlot.get(id) ?? []).sort(
       (a, b) => a.routeOrder - b.routeOrder
     );
-    let minutes = 0;
+    const claimMinutes = claimMinutesBySlot.get(id) ?? 0;
+    let travelMinutes = 0;
+    let treatmentMinutes = 0;
     let verified = true;
     if (techId === POOL_TECH) {
-      // Pool accounting: on-site only (no route exists yet).
-      minutes = stops.reduce((sum, s) => sum + s.onsite, 0);
-    } else if (stops.length > 0) {
+      // Pool accounting: on-site only (no route exists yet, so no travel).
+      treatmentMinutes = stops.reduce((sum, s) => sum + s.onsite, 0);
+    } else {
+      // The one closed tour base → stops → base, measured ONCE. A missing base
+      // (tech not eligible that day) or any unroutable leg fails closed — the
+      // day-before dispatch sweep owns the human fix.
       const base =
         eligibility.techs.find((t) => t.id === techId)?.baseAddress ?? null;
-      if (!base) {
-        // The technician isn't eligible for this date (or the facts could not
-        // be read) yet holds stops — flagged unverified; the day-before
-        // dispatch sweep owns the human fix.
-        verified = false;
-      } else {
-        let prev = base;
-        for (const stop of stops) {
-          if (!stop.address) {
-            verified = false;
-            break;
-          }
-          const leg = await legMinutes(prev, stop.address);
-          if (leg == null) {
-            verified = false;
-            break;
-          }
-          minutes += leg + stop.onsite;
-          prev = stop.address;
-        }
-        if (verified) {
-          const home = await legMinutes(prev, base);
-          if (home == null) verified = false;
-          else minutes += home;
-        }
-      }
+      const tour = await closedTourMinutes(base, stops, legMinutes);
+      travelMinutes = tour.travel;
+      treatmentMinutes = tour.treatment;
+      verified = tour.verified;
     }
-    minutes += claimMinutesBySlot.get(id) ?? 0;
+    const minutes = travelMinutes + treatmentMinutes + claimMinutes;
     await ensureSlot(date, techId);
     const sets = {
       committedMinutes: verified ? minutes : DAY_MINUTES,
+      travelMinutes: verified ? travelMinutes : null,
+      treatmentMinutes,
       verified,
       reconciledAt: new Date().toISOString(),
     };

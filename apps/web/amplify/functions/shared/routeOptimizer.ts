@@ -1,5 +1,5 @@
 import { dataClient } from "./dataClient";
-import { POOL_TECH, techBaseFor } from "./capacity";
+import { POOL_TECH, recomputeSlotMinutes, techBaseFor } from "./capacity";
 import { driveMatrixFrom } from "./driveTime";
 
 /**
@@ -124,6 +124,32 @@ export async function optimizeTechDay(opts: {
   } catch {
     return { optimized: false };
   }
+}
+
+/**
+ * Re-sequence a technician's day into the shortest closed tour AND rebuild that
+ * day's capacity ledger from the new order — the two always belong together.
+ * Optimizing the route sets the sequence the ledger measures travel along, so
+ * after this returns the stored travelMinutes/treatmentMinutes reflect the real
+ * optimized tour (one base out-and-back for the whole cluster) instead of
+ * drifting on the per-stop marginal estimates the atomic reservation adds.
+ *
+ * Call this everywhere a scheduling mutation lands a stop on (or lifts one off)
+ * a technician's day. Both steps are best-effort and non-fatal — the ledger
+ * recompute runs even when optimizeTechDay early-returns (a day left with ≤1
+ * stop still needs its minutes dropped).
+ */
+export async function resequenceAndRebuildDay(opts: {
+  technicianId: string | null | undefined;
+  date: string | null | undefined;
+  routesKey?: string | null;
+}): Promise<void> {
+  await optimizeTechDay(opts).catch(() => undefined);
+  await recomputeSlotMinutes(
+    opts.date ?? "",
+    opts.technicianId ?? "",
+    opts.routesKey
+  ).catch(() => undefined);
 }
 
 /**

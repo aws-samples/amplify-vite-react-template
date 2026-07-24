@@ -1101,6 +1101,15 @@ export const schema = a.schema({
        *  We schedule for the day, not a time-of-day window. */
       technicianId: a.string(),
       committedMinutes: a.integer(),
+      /** The day's two committed components, stored separately so "full" is
+       *  read as (one closed-tour drive) + (all on-site treatment), not a
+       *  per-stop round-trip sum. committedMinutes = travelMinutes +
+       *  treatmentMinutes + live checkout-claim minutes. travelMinutes is the
+       *  optimized base → stops → base tour measured ONCE; treatmentMinutes is
+       *  the sum of on-site minutes. Null travelMinutes ⇒ unverified (the tour
+       *  legs could not all be measured); the slot then sells nothing. */
+      travelMinutes: a.integer(),
+      treatmentMinutes: a.integer(),
       /** False ⇒ the nightly Routes rebuild could not verify this slot's
        *  travel legs — it sells NOTHING until it verifies (fail closed). */
       verified: a.boolean(),
