@@ -6,11 +6,13 @@ import {
   opResult,
   setLeadDisposition,
   LEAD_LOST_REASONS,
+  type BookingRequest,
   type Customer,
   type LeadActivity,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { fmtDateTime } from "../lib/format";
+import { bookingFunnelUrl } from "../lib/bookingLink";
+import { fmtDateTime, money } from "../lib/format";
 import {
   deriveLeadStage,
   isLeadOverdue,
@@ -19,6 +21,60 @@ import {
   LEAD_STAGE_TONE,
 } from "../lib/leadStage";
 import { Badge, Button, Card, ErrorNote, Field } from "../ui/kit";
+
+/** The bits of a lead's last quote the panel shows: what, how much, and the
+ *  bookable link. Reads the stored quoteJson; falls back to the row fields. */
+function summarizeQuote(q: BookingRequest): {
+  service: string;
+  price: string | null;
+  statusLabel: string;
+  tone: "ok" | "info" | "warn" | "muted";
+  bookLink: string | null;
+} | null {
+  const priced = ["QUOTED", "PROCESSING", "BOOKED"].includes(q.status ?? "");
+  if (!priced) return null; // a CONTACT/callback carries no price to show
+  let parsed: {
+    serviceLabel?: string;
+    baseCents?: number;
+    recurringOffer?: { monthlyCents?: number } | null;
+    planOnly?: boolean;
+  } = {};
+  try {
+    parsed = q.quoteJson ? JSON.parse(String(q.quoteJson)) : {};
+  } catch {
+    /* fall back to the row fields below */
+  }
+  const monthly = parsed.recurringOffer?.monthlyCents ?? q.monthlyCents ?? null;
+  const price =
+    monthly != null
+      ? `${money(monthly)}/mo`
+      : parsed.baseCents != null
+        ? `${money(parsed.baseCents)}`
+        : null;
+  const statusLabel =
+    q.status === "BOOKED"
+      ? "booked & paid"
+      : q.status === "PROCESSING"
+        ? "payment processing"
+        : "quoted — not booked yet";
+  const tone =
+    q.status === "BOOKED" ? "ok" : q.status === "PROCESSING" ? "info" : "warn";
+  // Only a QUOTED request is still bookable via the resume link; the fragment
+  // (#request=…&token=…) is what the funnel reads to reopen the priced quote.
+  const bookLink =
+    q.status === "QUOTED" && q.cancelToken
+      ? `${bookingFunnelUrl()}#request=${encodeURIComponent(
+          q.id
+        )}&token=${encodeURIComponent(q.cancelToken)}`
+      : null;
+  return {
+    service: parsed.serviceLabel || String(q.service ?? "Service"),
+    price,
+    statusLabel,
+    tone,
+    bookLink,
+  };
+}
 
 /**
  * The lead record is an exception-safe inbox, not a second sales system.
@@ -45,6 +101,7 @@ export default function LeadPanel({
   const [activityPage, setActivityPage] = useState(0);
   const [clearReason, setClearReason] = useState("CUSTOMER_RECONSENTED");
   const [clearEvidence, setClearEvidence] = useState("");
+  const [quote, setQuote] = useState<BookingRequest | null>(null);
 
   const loadActivity = useCallback(async () => {
     try {
@@ -63,9 +120,28 @@ export default function LeadPanel({
     }
   }, [customer.id]);
 
+  // What this lead was last quoted — so the office sees the service + price on
+  // the record and can re-offer the bookable link, without re-running the form.
+  const loadQuote = useCallback(async () => {
+    try {
+      const res = await api().models.BookingRequest.listBookingRequestByLeadCustomerId(
+        { leadCustomerId: customer.id }
+      );
+      // The newest quote that actually produced (or became) a booking — skip a
+      // PENDING row whose price never finished computing.
+      const priced = (res.data ?? [])
+        .filter((b) => b.status && b.status !== "PENDING")
+        .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+      setQuote(priced[0] ?? null);
+    } catch {
+      setQuote(null); // best-effort: a missing quote never blocks the panel
+    }
+  }, [customer.id]);
+
   useEffect(() => {
     void loadActivity();
-  }, [loadActivity]);
+    void loadQuote();
+  }, [loadActivity, loadQuote]);
 
   const act = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -154,6 +230,50 @@ export default function LeadPanel({
               .
             </p>
           ) : null}
+
+          {(() => {
+            const q = quote && summarizeQuote(quote);
+            if (!q) return null;
+            return (
+              <div className="lead-quote" style={{ marginTop: 12 }}>
+                <div className="row-split">
+                  <strong className="small">Last quote</strong>
+                  <Badge tone={q.tone}>{q.statusLabel}</Badge>
+                </div>
+                <p className="small" style={{ margin: "4px 0 0" }}>
+                  {q.service}
+                  {q.price ? (
+                    <>
+                      {" — "}
+                      <strong>{q.price}</strong>
+                    </>
+                  ) : null}
+                </p>
+                {q.bookLink ? (
+                  <div style={{ marginTop: 8 }}>
+                    <Button
+                      small
+                      variant="subtle"
+                      onClick={() => {
+                        void navigator.clipboard
+                          ?.writeText(q.bookLink!)
+                          .then(() => {
+                            setBusy("copied");
+                            setTimeout(() => setBusy(null), 1500);
+                          });
+                      }}
+                    >
+                      {busy === "copied" ? "Copied!" : "Copy booking link"}
+                    </Button>
+                    <p className="muted small" style={{ marginTop: 6 }}>
+                      Reopens this exact quote for the customer to book and pay —
+                      no need to fill the form again.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })()}
 
           <div className="inline-actions" style={{ marginTop: 10 }}>
             <Button

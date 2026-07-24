@@ -706,7 +706,14 @@ export const schema = a.schema({
       // confirmation so the receipt still goes out when the debit settles.
       pendingConfirmationSentAt: a.datetime(),
     })
-    .secondaryIndexes((index) => [index("cancelToken"), index("status")])
+    .secondaryIndexes((index) => [
+      index("cancelToken"),
+      index("status"),
+      // The lead's own quotes, so the CRM lead panel can show what a lead was
+      // quoted (service + price) and re-offer the bookable link without the
+      // office re-running the funnel form.
+      index("leadCustomerId"),
+    ])
     .authorization((allow) => [
       allow.groups(["OWNER"]).to(["read", "update"]),
     ]),
