@@ -2209,8 +2209,25 @@ h6 {
   .bk-form-row {
     grid-template-columns: 1fr;
   }
+  /* City / State / Zip: City on its own row, State + Zip share the next,
+     so a city name isn't squeezed into a third of a phone screen. */
   .bk-form-row--3 {
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
+  }
+  .bk-form-row--3 > .bk-field:first-child {
+    grid-column: 1 / -1;
+  }
+  /* Property-type selector: stack full-width on phones so the long
+     "Condo / HOA Community" label isn't cramped, with big tap targets. */
+  .bk-segmented--full {
+    flex-direction: column;
+  }
+  .bk-segmented--full .bk-seg {
+    text-align: left;
+    padding: 14px 18px;
+  }
+  .bk-segmented--full .bk-seg + .bk-seg {
+    border-top: 1px solid var(--border-strong);
   }
 }
 
