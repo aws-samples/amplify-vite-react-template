@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Outlet, Navigate } from "react-router-dom";
 import { captureAttribution } from "./lib/leadIntake";
 import Header from "./components/Header";
@@ -10,52 +10,74 @@ import ScrollDepthTracker from "./components/ScrollDepthTracker";
 import ScrollProgress from "./components/ScrollProgress";
 import { TalkToExpertProvider } from "./components/TalkToExpertModal";
 
-import Home             from "./pages/Home";
-import Residential      from "./pages/residential/Residential";
-import Communities      from "./pages/Communities";
-import PropertyManagers from "./pages/PropertyManagers";
-import AboutPage        from "./pages/AboutPage";
-import ServiceAreas     from "./pages/ServiceAreas";
-import Reviews          from "./pages/Reviews";
-import Careers          from "./pages/Careers";
-import Contact          from "./pages/Contact";
+// Pages are code-split (lazy) so each route loads only its own JS chunk
+// instead of one big bundle — faster first paint, better Core Web Vitals.
+// Header/Footer and the trackers stay eager (they're on every page).
+const Home             = lazy(() => import("./pages/Home"));
+const Residential      = lazy(() => import("./pages/residential/Residential"));
+const Communities      = lazy(() => import("./pages/Communities"));
+const PropertyManagers = lazy(() => import("./pages/PropertyManagers"));
+const AboutPage        = lazy(() => import("./pages/AboutPage"));
+const ServiceAreas     = lazy(() => import("./pages/ServiceAreas"));
+const Reviews          = lazy(() => import("./pages/Reviews"));
+const Careers          = lazy(() => import("./pages/Careers"));
+const Contact          = lazy(() => import("./pages/Contact"));
 
-import CommonAreaProtection from "./pages/communities/CommonAreaProtection";
-import InUnitService        from "./pages/communities/InUnitService";
-import HOAResources         from "./pages/communities/HOAResources";
-import ForUnitOwners        from "./pages/communities/ForUnitOwners";
+const CommonAreaProtection = lazy(() => import("./pages/communities/CommonAreaProtection"));
+const InUnitService        = lazy(() => import("./pages/communities/InUnitService"));
+const HOAResources         = lazy(() => import("./pages/communities/HOAResources"));
+const ForUnitOwners        = lazy(() => import("./pages/communities/ForUnitOwners"));
 
-import AntsSpiders             from "./pages/services/AntsSpiders";
-import RodentControl           from "./pages/services/RodentControl";
-import MosquitoTick            from "./pages/services/MosquitoTick";
-import Termite                 from "./pages/services/Termite";
-import Wildlife                from "./pages/services/Wildlife";
-import Cockroach               from "./pages/services/Cockroach";
-import FleaSilverfish          from "./pages/services/FleaSilverfish";
-import WaspHornetBee           from "./pages/services/WaspHornetBee";
-import RodentEntrySealing      from "./pages/services/RodentEntrySealing";
-import RodentAttic             from "./pages/services/RodentAttic";
-import AtticRestoration        from "./pages/services/AtticRestoration";
-import TickProgram             from "./pages/services/TickProgram";
-import TermiteTreatment        from "./pages/services/TermiteTreatment";
-import WoodBoring              from "./pages/services/WoodBoring";
-import HumaneRemoval           from "./pages/services/HumaneRemoval";
+const AntsSpiders             = lazy(() => import("./pages/services/AntsSpiders"));
+const RodentControl           = lazy(() => import("./pages/services/RodentControl"));
+const MosquitoTick            = lazy(() => import("./pages/services/MosquitoTick"));
+const Termite                 = lazy(() => import("./pages/services/Termite"));
+const Wildlife                = lazy(() => import("./pages/services/Wildlife"));
+const Cockroach               = lazy(() => import("./pages/services/Cockroach"));
+const FleaSilverfish          = lazy(() => import("./pages/services/FleaSilverfish"));
+const WaspHornetBee           = lazy(() => import("./pages/services/WaspHornetBee"));
+const RodentEntrySealing      = lazy(() => import("./pages/services/RodentEntrySealing"));
+const RodentAttic             = lazy(() => import("./pages/services/RodentAttic"));
+const AtticRestoration        = lazy(() => import("./pages/services/AtticRestoration"));
+const TickProgram             = lazy(() => import("./pages/services/TickProgram"));
+const TermiteTreatment        = lazy(() => import("./pages/services/TermiteTreatment"));
+const WoodBoring              = lazy(() => import("./pages/services/WoodBoring"));
+const HumaneRemoval           = lazy(() => import("./pages/services/HumaneRemoval"));
 
-import CondoServices    from "./pages/CondoServices";
-import InUnitServices   from "./pages/InUnitServices";
-import PrivacyPolicy    from "./pages/PrivacyPolicy";
-import TermsOfService   from "./pages/TermsOfService";
-import CityPage         from "./pages/CityPage";
-import LicensedInsured  from "./pages/LicensedInsured";
-import LPQuote          from "./pages/lp/LPQuote";
-import LPProtect        from "./pages/lp/LPProtect";
-import LPCall           from "./pages/lp/LPCall";
-import MAServiceArea    from "./pages/MAServiceArea";
-import RIServiceArea    from "./pages/RIServiceArea";
-import QuotePage        from "./pages/booking/QuotePage";
-import BookPage         from "./pages/booking/BookPage";
-import CancelPage       from "./pages/booking/CancelPage";
-import TrackPage        from "./pages/booking/TrackPage";
+const CondoServices    = lazy(() => import("./pages/CondoServices"));
+const InUnitServices   = lazy(() => import("./pages/InUnitServices"));
+const PrivacyPolicy    = lazy(() => import("./pages/PrivacyPolicy"));
+const TermsOfService   = lazy(() => import("./pages/TermsOfService"));
+const CityPage         = lazy(() => import("./pages/CityPage"));
+const LicensedInsured  = lazy(() => import("./pages/LicensedInsured"));
+const LPQuote          = lazy(() => import("./pages/lp/LPQuote"));
+const LPProtect        = lazy(() => import("./pages/lp/LPProtect"));
+const LPCall           = lazy(() => import("./pages/lp/LPCall"));
+const MAServiceArea    = lazy(() => import("./pages/MAServiceArea"));
+const RIServiceArea    = lazy(() => import("./pages/RIServiceArea"));
+const QuotePage        = lazy(() => import("./pages/booking/QuotePage"));
+const BookPage         = lazy(() => import("./pages/booking/BookPage"));
+const CancelPage       = lazy(() => import("./pages/booking/CancelPage"));
+const TrackPage        = lazy(() => import("./pages/booking/TrackPage"));
+
+/** Brief, on-brand loader shown while a page's chunk loads (self-contained, no CSS needed). */
+function PageFallback() {
+  return (
+    <div style={{ minHeight: "60vh", display: "grid", placeItems: "center" }} aria-busy="true">
+      <svg width="42" height="42" viewBox="0 0 50 50" role="img" aria-label="Loading">
+        <circle
+          cx="25" cy="25" r="20" fill="none"
+          stroke="#7ac142" strokeWidth="5" strokeLinecap="round" strokeDasharray="80 42"
+        >
+          <animateTransform
+            attributeName="transform" type="rotate"
+            from="0 25 25" to="360 25 25" dur="0.8s" repeatCount="indefinite"
+          />
+        </circle>
+      </svg>
+    </div>
+  );
+}
 
 function SiteLayout() {
   return (
@@ -64,10 +86,22 @@ function SiteLayout() {
       <a href="#main-content" className="bk-skip-link">Skip to main content</a>
       <Header />
       <main id="main-content">
-        <Outlet />
+        {/* Suspense inside the layout so Header/Footer stay visible while a page chunk loads */}
+        <Suspense fallback={<PageFallback />}>
+          <Outlet />
+        </Suspense>
       </main>
       <Footer />
     </>
+  );
+}
+
+/** Standalone (no header/footer) wrapper that still provides a Suspense boundary for LP chunks. */
+function BareLayout() {
+  return (
+    <Suspense fallback={<PageFallback />}>
+      <Outlet />
+    </Suspense>
   );
 }
 
@@ -87,12 +121,14 @@ export default function App() {
       <ScrollDepthTracker />
       <Routes>
         {/* Landing pages — standalone, no header/footer (no escape routes) */}
-        <Route path="/lp/quote" element={<LPQuote />} />
-        <Route path="/lp/protect" element={<LPProtect />} />
-        <Route path="/lp/call" element={<LPCall />} />
-        {/* "On My Way" live tracking — private token link from the email,
-            standalone (no nav) so the customer just watches the map. */}
-        <Route path="/track/:token" element={<TrackPage />} />
+        <Route element={<BareLayout />}>
+          <Route path="/lp/quote" element={<LPQuote />} />
+          <Route path="/lp/protect" element={<LPProtect />} />
+          <Route path="/lp/call" element={<LPCall />} />
+          {/* "On My Way" live tracking — private token link from the email,
+              standalone (no nav) so the customer just watches the map. */}
+          <Route path="/track/:token" element={<TrackPage />} />
+        </Route>
 
         {/* Main site */}
         <Route element={<SiteLayout />}>

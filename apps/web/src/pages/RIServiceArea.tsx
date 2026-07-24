@@ -1,10 +1,17 @@
 import QuoteCTA from "../components/QuoteCTA";
-import SEO from "../components/SEO";
+import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 
 export default function RIServiceArea() {
   return (
     <>
-      <SEO description="BuzzKill Pest Control services across Rhode Island — residential, commercial, and HOA pest control." />
+      <SEO
+        title="Rhode Island Pest Control Service Area"
+        description="BuzzKill Pest Control services across Rhode Island — residential, commercial, condo, and HOA pest control. Licensed, pet-safe technicians. Get an instant quote."
+        jsonLd={buildBreadcrumbSchema([
+          { name: "Home", url: "/" },
+          { name: "Rhode Island", url: "/locations/rhode-island" },
+        ])}
+      />
       <section style={{ padding: "80px 32px", maxWidth: 900, margin: "0 auto", textAlign: "center" }}>
         <p style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.2em", color: "var(--bk-green)", marginBottom: 12 }}>Service Area</p>
         <h1 style={{ fontSize: "clamp(2rem, 4vw, 3rem)", fontWeight: 700, marginBottom: 16 }}>Rhode Island Pest Control</h1>
