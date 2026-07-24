@@ -75,7 +75,15 @@ export const schema = a.schema({
     "ERROR",
   ]),
   PricingOutcome: a.enum(["PENDING", "SENT", "WON", "LOST", "PASSED"]),
-  ServiceFrequency: a.enum(["MONTHLY", "BIMONTHLY", "QUARTERLY"]),
+  ServiceFrequency: a.enum([
+    "MONTHLY",
+    "BIMONTHLY",
+    "QUARTERLY",
+    // Twice a year (~6 months between visits). Office-added only for now — the
+    // public funnel doesn't sell it. Billing is monthly like every plan (the
+    // entered price is the monthly charge); this drives the visit cadence.
+    "SEMIANNUAL",
+  ]),
   JobType: a.enum(["ONE_TIME", "RECURRING"]),
   JobStatus: a.enum([
     "UNSCHEDULED",

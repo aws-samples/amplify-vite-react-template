@@ -160,7 +160,7 @@ export function setLeadDisposition(input: {
   // CONVERT only — the manually-entered plan that turns the lead into a client.
   planName?: string;
   priceCents?: number;
-  serviceFrequency?: "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
+  serviceFrequency?: "MONTHLY" | "BIMONTHLY" | "QUARTERLY" | "SEMIANNUAL";
   idempotencyKey: string;
 }): OpResult {
   return (

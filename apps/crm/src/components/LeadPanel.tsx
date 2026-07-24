@@ -104,9 +104,9 @@ export default function LeadPanel({
   const [quote, setQuote] = useState<BookingRequest | null>(null);
   const [convName, setConvName] = useState("");
   const [convPrice, setConvPrice] = useState("");
-  const [convFreq, setConvFreq] = useState<"MONTHLY" | "BIMONTHLY" | "QUARTERLY">(
-    "MONTHLY"
-  );
+  const [convFreq, setConvFreq] = useState<
+    "MONTHLY" | "BIMONTHLY" | "QUARTERLY" | "SEMIANNUAL"
+  >("MONTHLY");
 
   const loadActivity = useCallback(async () => {
     try {
@@ -339,13 +339,18 @@ export default function LeadPanel({
                     value={convFreq}
                     onChange={(e) =>
                       setConvFreq(
-                        e.target.value as "MONTHLY" | "BIMONTHLY" | "QUARTERLY"
+                        e.target.value as
+                          | "MONTHLY"
+                          | "BIMONTHLY"
+                          | "QUARTERLY"
+                          | "SEMIANNUAL"
                       )
                     }
                   >
                     <option value="MONTHLY">Monthly</option>
                     <option value="BIMONTHLY">Every 2 months</option>
                     <option value="QUARTERLY">Quarterly</option>
+                    <option value="SEMIANNUAL">Twice a year</option>
                   </select>
                 </Field>
               </div>

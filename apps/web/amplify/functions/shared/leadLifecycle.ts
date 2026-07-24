@@ -703,8 +703,8 @@ export async function setLeadDisposition(
       if (!Number.isInteger(priceCents) || priceCents <= 0) {
         throw new Error("Enter a valid plan price.");
       }
-      if (!["MONTHLY", "BIMONTHLY", "QUARTERLY"].includes(freq)) {
-        throw new Error("Choose a billing frequency (monthly, bi-monthly, or quarterly).");
+      if (!["MONTHLY", "BIMONTHLY", "QUARTERLY", "SEMIANNUAL"].includes(freq)) {
+        throw new Error("Choose a valid visit frequency.");
       }
       const today = nowIso.slice(0, 10);
       const accessGroups = customerAccessGroups(args.customerId);
@@ -718,7 +718,11 @@ export async function setLeadDisposition(
           customerId: args.customerId,
           planName,
           priceCents,
-          serviceFrequency: freq as "MONTHLY" | "BIMONTHLY" | "QUARTERLY",
+          serviceFrequency: freq as
+            | "MONTHLY"
+            | "BIMONTHLY"
+            | "QUARTERLY"
+            | "SEMIANNUAL",
           status: "ACTIVE",
           startDate: today,
           billingAnchorDate: today,

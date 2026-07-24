@@ -21,6 +21,7 @@ const FREQUENCY_DAYS: Record<string, number> = {
   MONTHLY: 30,
   BIMONTHLY: 60,
   QUARTERLY: 90,
+  SEMIANNUAL: 182, // ~6 months between visits
 };
 
 /** Add days to a YYYY-MM-DD date, returning YYYY-MM-DD (UTC-noon anchored). */
