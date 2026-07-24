@@ -3109,11 +3109,15 @@ function GroupPicker({
       >
         <select value={value} onChange={(e) => setValue(e.target.value)}>
           <option value="">No group</option>
-          {groups.map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.name}
-            </option>
-          ))}
+          {groups
+            // An inactive group can't take new members — hide it, but keep the
+            // current one selectable so the field still shows the truth.
+            .filter((g) => g.status !== "INACTIVE" || g.id === currentGroupId)
+            .map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
         </select>
       </Field>
       {/* GL-11: membership changes grant/remove real portal access across the

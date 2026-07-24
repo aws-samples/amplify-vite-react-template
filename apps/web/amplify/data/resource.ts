@@ -320,6 +320,12 @@ export const schema = a.schema({
       contactEmail: a.email(),
       contactPhone: a.phone(),
       notes: a.string(),
+      // ACTIVE (default; a null/absent value on migrated rows reads as ACTIVE)
+      // or INACTIVE. Inactivation is office-only and blocked while the group
+      // still has members — a retired management company that owns no property
+      // and, once inactivated, whose group login is disabled (revokePortalAccess
+      // with a groupId). Inactive groups drop out of the group pickers.
+      status: a.string(),
       accessGroups: a.string().array(),
       // The management-company portal login (grp-only), when one has been
       // provisioned. A group is granted a single login keyed to contactEmail
@@ -2630,7 +2636,10 @@ export const schema = a.schema({
    */
   revokePortalAccess: a
     .mutation()
-    .arguments({ customerId: a.string().required() })
+    // Exactly one of customerId / groupId. groupId disables a management-company
+    // GROUP login (the inactivate half); customerId disables a single customer's
+    // login (the customer-offboarding half). Validated in the handler.
+    .arguments({ customerId: a.string(), groupId: a.string() })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER"])])
     .handler(a.handler.function(crmAdmin)),
@@ -3087,7 +3096,16 @@ export const schema = a.schema({
    */
   createSetupIntent: a
     .mutation()
-    .arguments({ customerId: a.string().required() })
+    // `action` folds the portal add-service ops onto this op so no new AppSync
+    // resource is spent (the 499/500 cap has no room): default = a Stripe setup
+    // intent; "ADD_SERVICE_QUOTE" prices a new service for this customer;
+    // "ADD_SERVICE_BOOK" charges their saved card for the priced quote. `payload`
+    // carries the action's JSON (quote input, or bookingId/date/terms).
+    .arguments({
+      customerId: a.string().required(),
+      action: a.string(),
+      payload: a.json(),
+    })
     .returns(a.json())
     .authorization((allow) => [allow.groups(["OWNER", "CUSTOMER"])])
     .handler(a.handler.function(crmBilling)),

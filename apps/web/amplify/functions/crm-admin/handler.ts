@@ -248,7 +248,20 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
       return resumeGroupChange(String(rArgs.commandId ?? ""));
     }
     case "revokePortalAccess": {
-      const customerId = (event.arguments as CustomerIdArgs).customerId;
+      const { customerId, groupId } = event.arguments as CustomerIdArgs & {
+        groupId?: string | null;
+      };
+      // A group login (management company) is revoked by groupId; a single
+      // customer's login by customerId. Exactly one is required.
+      if (groupId && customerId)
+        throw new Error(
+          "Pass either customerId or groupId to revokePortalAccess, not both."
+        );
+      if (groupId) return await revokeGroupPortalAccess(groupId);
+      if (!customerId)
+        throw new Error(
+          "customerId (or groupId, for a group login) is required to revoke portal access."
+        );
       try {
         return await revokePortalAccess(customerId);
       } catch (err) {
@@ -1195,6 +1208,40 @@ async function revokePortalAccess(customerId: string) {
   }
   const groupsRemoved = await killLogin(username, ["CUSTOMER", "cus-", "grp-"]);
   return { customerId, revoked: true, groupsRemoved };
+}
+
+/**
+ * End a CustomerGroup's management-company portal login: disable the Cognito
+ * account, globally sign it out, strip its CUSTOMER + grp- memberships, and
+ * clear the login facts off the group so it reads "no login" and can be
+ * re-invited. The access half of group inactivation — a retired management
+ * company must not keep a working login into the whole portfolio. Idempotent; a
+ * no-op when the group has no login.
+ */
+async function revokeGroupPortalAccess(groupId: string) {
+  const client = await dataClient();
+  const { data: group } = await client.models.CustomerGroup.get({ id: groupId });
+  if (!group) throw new Error(`Group ${groupId} not found`);
+  if (!group.portalUserSub) {
+    return { groupId, revoked: false, groupsRemoved: [] as string[] };
+  }
+  // The group login was minted against the group's contact email (adminCreateUser
+  // with groupId), so that is the Cognito username to kill.
+  const username = group.contactEmail?.toLowerCase();
+  if (!username) {
+    throw new Error(
+      `Group ${groupId} has a portal login but no contact email to identify it — remove the Cognito user by hand`
+    );
+  }
+  const groupsRemoved = await killLogin(username, ["CUSTOMER", "grp-"]);
+  // Clear the login facts: reactivating a group re-invites, it does not silently
+  // resurrect a disabled login.
+  await client.models.CustomerGroup.update({
+    id: groupId,
+    portalUserSub: null,
+    portalInvitedAt: null,
+  }).catch(() => undefined);
+  return { groupId, revoked: true, groupsRemoved };
 }
 
 /**

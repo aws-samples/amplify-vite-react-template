@@ -1350,6 +1350,62 @@ describe("revokePortalAccess", () => {
     expect(res.revoked).toBe(false);
     expect(sends).toHaveLength(0);
   });
+
+  it("disables a GROUP login by groupId, drops CUSTOMER+grp- groups, and clears the login facts", async () => {
+    customerGroups.set("g1", {
+      id: "g1",
+      name: "GIM Property Management",
+      contactEmail: "Contact@GIM.com",
+      portalUserSub: "sub-grp",
+      portalInvitedAt: "2026-07-24T00:00:00Z",
+    });
+    // A group login is bound to CUSTOMER + its grp- group only — never a cus-.
+    userGroups = ["CUSTOMER", "grp-g1", "cus-should-not-touch"];
+
+    const res = (await call("revokePortalAccess", { groupId: "g1" })) as {
+      revoked: boolean;
+      groupsRemoved: string[];
+    };
+
+    expect(res.revoked).toBe(true);
+    expect(sentTypes()).toContain("Disable");
+    expect(sentTypes()).toContain("SignOut");
+    expect(res.groupsRemoved.sort()).toEqual(["CUSTOMER", "grp-g1"]);
+    const removed = sends
+      .filter((s) => s.type === "RemoveFromGroup")
+      .map((s) => s.input.GroupName);
+    expect(removed).not.toContain("cus-should-not-touch");
+    // Username is the group's (lower-cased) contact email.
+    expect(sends.find((s) => s.type === "Disable")!.input.Username).toBe(
+      "contact@gim.com"
+    );
+    // The login facts are cleared so the group reads "no login" and can be
+    // re-invited on reactivation.
+    expect(customerGroups.get("g1")!.portalUserSub).toBeNull();
+    expect(customerGroups.get("g1")!.portalInvitedAt).toBeNull();
+  });
+
+  it("is a no-op for a group with no login", async () => {
+    customerGroups.set("g1", {
+      id: "g1",
+      name: "Empty Group",
+      contactEmail: "x@x.com",
+      portalUserSub: null,
+    });
+
+    const res = (await call("revokePortalAccess", { groupId: "g1" })) as {
+      revoked: boolean;
+    };
+
+    expect(res.revoked).toBe(false);
+    expect(sends).toHaveLength(0);
+  });
+
+  it("refuses when both customerId and groupId are given", async () => {
+    await expect(
+      call("revokePortalAccess", { customerId: "c1", groupId: "g1" })
+    ).rejects.toThrow(/not both/i);
+  });
 });
 
 describe("restorePortalAccess", () => {

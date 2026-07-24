@@ -145,14 +145,22 @@ export default function Customers() {
         />
       ) : (
         <Card>
-          {groups.map((g) => (
-            <ListRow
-              key={g.id}
-              title={g.name}
-              subtitle={g.contactName ?? undefined}
-              onClick={() => navigate(`/groups/${g.id}`)}
-            />
-          ))}
+          {[...groups]
+            .sort((a, b) => {
+              // Active groups first; then alphabetical.
+              const ai = a.status === "INACTIVE" ? 1 : 0;
+              const bi = b.status === "INACTIVE" ? 1 : 0;
+              return ai - bi || a.name.localeCompare(b.name);
+            })
+            .map((g) => (
+              <ListRow
+                key={g.id}
+                title={g.name}
+                subtitle={g.contactName ?? undefined}
+                meta={<StatusBadge status={g.status ?? "ACTIVE"} />}
+                onClick={() => navigate(`/groups/${g.id}`)}
+              />
+            ))}
         </Card>
       )}
 
@@ -213,6 +221,7 @@ function GroupForm({ onDone }: { onDone: () => Promise<void> }) {
               name: name.trim(),
               contactName: contactName.trim() || undefined,
               contactEmail: contactEmail.trim() || undefined,
+              status: "ACTIVE",
             })
             .then((res) => {
               unwrap(res);

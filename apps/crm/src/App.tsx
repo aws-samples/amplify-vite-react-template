@@ -39,6 +39,7 @@ import PortalDocs from "./portal/Docs";
 import PortalBilling from "./portal/Billing";
 import PortalGroup from "./portal/Group";
 import PortalRequests from "./portal/Requests";
+import PortalAddService from "./portal/AddService";
 import Welcome from "./pages/Welcome";
 
 export default function App({ backendReady }: { backendReady: boolean }) {
@@ -238,6 +239,7 @@ function Shell() {
         <Route path="/portal/docs" element={<Require when={roles.customer}><PortalDocs /></Require>} />
         <Route path="/portal/billing" element={<Require when={roles.customer}><PortalBilling /></Require>} />
         <Route path="/portal/requests" element={<Require when={roles.customer}><PortalRequests /></Require>} />
+        <Route path="/portal/add-service" element={<Require when={roles.customer}><PortalAddService /></Require>} />
         <Route path="/portal/group" element={<Require when={roles.customer}><PortalGroup /></Require>} />
 
         <Route path="/more" element={<More />} />

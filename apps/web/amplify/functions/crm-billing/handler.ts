@@ -1,4 +1,5 @@
 import type { AppSyncResolverEvent } from "aws-lambda";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import {
@@ -59,6 +60,11 @@ type Args = {
   note?: string;
   kind?: string;
   id?: string;
+  // Portal add-service: folded onto createSetupIntent (the 499/500 AppSync cap
+  // has no room for a new op). `action` selects the sub-op; `payload` carries
+  // its parsed JSON (a.json() arrives already parsed — never re-stringify it).
+  action?: string;
+  payload?: unknown;
   // GL-07 visit cancel/reschedule.
   decision?: string;
   scheduledDate?: string;
@@ -146,6 +152,21 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
   switch (opFieldName(event)) {
     case "createSetupIntent": {
       assertCanActForCustomer(event.identity, event.arguments.customerId!);
+      // Portal add-service (folded here to spend no AppSync op): the ownership
+      // check above is the trust boundary — booking-public re-checks it, but a
+      // customer can never quote/charge for someone else's account from here.
+      if (event.arguments.action === "ADD_SERVICE_QUOTE") {
+        return portalAddServiceQuote(
+          event.arguments.customerId!,
+          event.arguments.payload
+        );
+      }
+      if (event.arguments.action === "ADD_SERVICE_BOOK") {
+        return portalAddServiceBook(
+          event.arguments.customerId!,
+          event.arguments.payload
+        );
+      }
       return createSetupIntent(event.arguments.customerId!);
     }
     case "getPaymentMethodSummary": {
@@ -307,6 +328,82 @@ async function createSetupIntent(customerId: string) {
     metadata: { crmCustomerId: customerId },
   });
   return { clientSecret: intent.client_secret, stripeCustomerId };
+}
+
+// ── Portal add-service ────────────────────────────────────────────────
+// A logged-in customer prices and books an ADDITIONAL service on their own
+// account. We reuse the public booking engine wholesale (pricing, capacity,
+// finalize) by invoking booking-public DIRECTLY (IAM), passing the customer id
+// this handler already verified. booking-public trusts the invoke only because
+// it arrives with no requestContext.http (a forged public POST can't), and it
+// re-checks the customer owns the quote. No new AppSync op, no JWT, no CORS.
+
+const lambda = new LambdaClient({});
+
+/** Resolve booking-public's function name (env for tests, else the token-free
+ *  SSM param the function stack publishes — a direct CDK ref cycled stacks). */
+async function bookingPublicFunctionName(): Promise<string> {
+  let fnName = process.env.BOOKING_PUBLIC_FUNCTION_NAME;
+  if (!fnName && process.env.BOOKING_PUBLIC_FUNCTION_PARAM) {
+    const { SSMClient, GetParameterCommand } = await import(
+      "@aws-sdk/client-ssm"
+    );
+    const out = await new SSMClient({}).send(
+      new GetParameterCommand({ Name: process.env.BOOKING_PUBLIC_FUNCTION_PARAM })
+    );
+    fnName = out.Parameter?.Value ?? undefined;
+  }
+  if (!fnName) {
+    throw new Error(
+      "Adding a service isn't available right now — please call the office."
+    );
+  }
+  return fnName;
+}
+
+/** Invoke booking-public's trusted internal op and unwrap its result. */
+async function invokeBookingPublic(op: Record<string, unknown>): Promise<unknown> {
+  const out = await lambda.send(
+    new InvokeCommand({
+      FunctionName: await bookingPublicFunctionName(),
+      InvocationType: "RequestResponse",
+      Payload: Buffer.from(JSON.stringify({ internalOp: op })),
+    })
+  );
+  if (out.FunctionError || !out.Payload) {
+    throw new Error("Adding a service didn't go through — nothing was charged.");
+  }
+  const parsed = JSON.parse(Buffer.from(out.Payload).toString("utf8")) as
+    | { ok: true; data: unknown }
+    | { ok: false; status: number; error: string };
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.data;
+}
+
+/** a.json() args arrive parsed, but a client that stringifies is tolerated. */
+function asObject(payload: unknown): Record<string, unknown> {
+  if (payload && typeof payload === "object") {
+    return payload as Record<string, unknown>;
+  }
+  if (typeof payload === "string" && payload.trim()) {
+    try {
+      const parsed = JSON.parse(payload);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      /* fall through to empty */
+    }
+  }
+  return {};
+}
+
+/** Price an additional service for this customer (binds the quote to them). */
+async function portalAddServiceQuote(customerId: string, payload: unknown) {
+  return invokeBookingPublic({ kind: "QUOTE", customerId, input: asObject(payload) });
+}
+
+/** Book the priced add-service quote onto this customer's saved card. */
+async function portalAddServiceBook(customerId: string, payload: unknown) {
+  return invokeBookingPublic({ kind: "BOOK", customerId, body: asObject(payload) });
 }
 
 async function getPaymentMethodSummary(customerId: string) {

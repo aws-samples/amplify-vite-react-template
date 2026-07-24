@@ -443,6 +443,31 @@ backend.pricingRefresh.resources.lambda.addToRolePolicy(
     ],
   })
 );
+
+// Portal add-service: crm-billing (data-backed, holds the verified Cognito
+// identity) invokes booking-public to run the add-service quote + saved-card
+// booking, reusing the whole booking engine. It reads the SAME token-free
+// function-name param published just above (no second StringParameter — that
+// would collide on construct id), and adds crm-billing's read + invoke IAM.
+backend.crmBilling.addEnvironment(
+  "BOOKING_PUBLIC_FUNCTION_PARAM",
+  bookingPublicNameParam
+);
+backend.crmBilling.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [`arn:aws:ssm:us-east-1:*:parameter${bookingPublicNameParam}`],
+  })
+);
+backend.crmBilling.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["lambda:InvokeFunction"],
+    resources: [
+      `arn:aws:lambda:us-east-1:*:function:amplify-${lockAppId}-*bookingpublic*`,
+    ],
+  })
+);
+
 // pricing-refresh is where ALL market-rate research runs now, so it needs
 // the same Anthropic key lookup as the engines that used to research inline.
 backend.pricingRefresh.addEnvironment("AMPLIFY_APP_ID", appId);

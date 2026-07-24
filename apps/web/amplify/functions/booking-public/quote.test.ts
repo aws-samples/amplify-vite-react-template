@@ -235,6 +235,24 @@ vi.mock("../shared/marketRate", () => ({
           : units <= 100
             ? "UNITS_51_100"
             : "UNITS_101_PLUS",
+  // Mirrors the real derivation: a one-time HOA visit is the per-unit
+  // QUARTERLY rate × the placeholder multiplier (3.5), rounded to cents.
+  hoaOneTimePerUnitCents: (
+    rates: Record<string, Record<string, number>>,
+    units: number
+  ) => {
+    const band =
+      units <= 10
+        ? "UNITS_1_10"
+        : units <= 25
+          ? "UNITS_11_25"
+          : units <= 50
+            ? "UNITS_26_50"
+            : units <= 100
+              ? "UNITS_51_100"
+              : "UNITS_101_PLUS";
+    return Math.round(rates[band].QUARTERLY * 3.5);
+  },
 }));
 
 vi.mock("@aws-sdk/client-ssm", () => ({
@@ -920,9 +938,30 @@ describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
       monthlyCents: 28800,
       initialFeeCents: 28800,
     });
-    expect(res.body.planOnly).toBe(true);
+    // A community may now book a one-time common-area visit too, so the quote
+    // is no longer plan-only.
+    expect(res.body.planOnly).toBeUndefined();
     // HOA/condo communities may pay by invoice at checkout.
     expect(res.body.invoiceEligible).toBe(true);
+  });
+
+  it("offers a one-time common-area visit derived from the per-unit QUARTERLY rate", async () => {
+    const res = await postQuote({ ...communityInput, recurringPreference: "" });
+
+    expect(res.body.decision).toBe("PRICED");
+    // 24 units → 11–25 band → QUARTERLY $8.50/unit × 3.5 = $29.75/unit one-time
+    // → × 24 units = $714 base (Zone A: no travel adder). The day board carries
+    // that one-time price (the quiet-day overlay may discount a given day, as
+    // it does for every one-time quote). The exact derivation is unit-tested in
+    // marketRate.test.ts; here it's enough that a real one-time price is priced.
+    const prices = (res.body.days as { priceCents: number }[]).map((d) => d.priceCents);
+    expect(prices.length).toBeGreaterThan(0);
+    for (const p of prices) {
+      expect(p).toBeGreaterThan(0);
+      expect(p).toBeLessThanOrEqual(71400);
+    }
+    // The quarterly plan is still offered as the alternative.
+    expect(res.body.recurringOffer).toMatchObject({ frequency: "QUARTERLY" });
   });
 
   it("defaults to the quarterly cadence", async () => {
@@ -934,14 +973,20 @@ describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
     });
   });
 
-  it("the day board picks the first visit — the plan price never varies by day", async () => {
+  it("still offers the plan the visitor requested alongside the one-time price", async () => {
     const res = await postQuote({ ...communityInput, recurringPreference: "MONTHLY" });
 
+    // The requested plan is the recurring offer; the day board carries the
+    // one-time price (a plan-requesting visitor picks a day, then confirms the
+    // plan or the one-time on the quote screen).
+    expect(res.body.recurringOffer).toMatchObject({
+      frequency: "MONTHLY",
+      monthlyCents: 28800,
+    });
     const prices = (res.body.days as { priceCents: number }[]).map(
       (d) => d.priceCents
     );
     expect(prices.length).toBeGreaterThan(0);
-    for (const p of prices) expect(p).toBe(28800);
   });
 
   it("adds the Zone B monthly adder to the plan", async () => {
@@ -963,12 +1008,13 @@ describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
     expect(res.body.errors.units).toMatch(/units/i);
   });
 
-  it("reports the plan on the pricing run without a phantom one-time price", async () => {
+  it("reports the plan and the derived one-time price on the pricing run", async () => {
     await postQuote({ ...communityInput, recurringPreference: "MONTHLY" });
 
     expect(pricingRuns[0].monthlyPriceCents).toBe(28800);
     expect(pricingRuns[0].initialFeeCents).toBe(28800);
-    expect(pricingRuns[0].oneTimePriceCents).toBeUndefined();
+    // The common-area one-time is now a real, bookable price, so it's reported.
+    expect(pricingRuns[0].oneTimePriceCents).toBe(71400);
   });
 
   it("returns PENDING when the HOA sheet is unavailable", async () => {

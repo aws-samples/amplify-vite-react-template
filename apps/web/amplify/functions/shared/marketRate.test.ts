@@ -131,6 +131,8 @@ const {
   enqueueRateResearch,
   getCachedRate,
   hoaBandFor,
+  hoaOneTimePerUnitCents,
+  HOA_ONE_TIME_MULTIPLIER,
   NOTIFY_CAP,
   pickServingRow,
   pricingPromptHash,
@@ -831,6 +833,29 @@ UNITS_101_PLUS_QUARTERLY_PER_UNIT_USD: 2.75`;
     expect(hoaBandFor(100)).toBe("UNITS_51_100");
     expect(hoaBandFor(101)).toBe("UNITS_101_PLUS");
     expect(hoaBandFor(500)).toBe("UNITS_101_PLUS");
+  });
+
+  it("derives the one-time per-unit visit from the band's QUARTERLY rate × the multiplier", () => {
+    const grid = {
+      UNITS_1_10: { MONTHLY: 2200, BIMONTHLY: 1800, QUARTERLY: 1500 },
+      UNITS_11_25: { MONTHLY: 1200, BIMONTHLY: 1000, QUARTERLY: 850 },
+      UNITS_26_50: { MONTHLY: 900, BIMONTHLY: 750, QUARTERLY: 600 },
+      UNITS_51_100: { MONTHLY: 675, BIMONTHLY: 550, QUARTERLY: 450 },
+      UNITS_101_PLUS: { MONTHLY: 425, BIMONTHLY: 350, QUARTERLY: 275 },
+    };
+    // 24 units → 11–25 band → QUARTERLY 850 × 3.5 = 2975 cents/unit.
+    expect(hoaOneTimePerUnitCents(grid, 24)).toBe(
+      Math.round(850 * HOA_ONE_TIME_MULTIPLIER)
+    );
+    expect(hoaOneTimePerUnitCents(grid, 24)).toBe(2975);
+    // Always keyed off QUARTERLY (the entry service level), never the biggest
+    // band or another cadence.
+    expect(hoaOneTimePerUnitCents(grid, 5)).toBe(
+      Math.round(1500 * HOA_ONE_TIME_MULTIPLIER)
+    );
+    expect(hoaOneTimePerUnitCents(grid, 300)).toBe(
+      Math.round(275 * HOA_ONE_TIME_MULTIPLIER)
+    );
   });
 });
 

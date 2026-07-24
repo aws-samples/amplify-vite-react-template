@@ -39,6 +39,10 @@ import {
 import { casGuardedUpdate } from "../shared/atomicLock";
 import { finalizeBooking } from "../shared/bookingFinalize";
 import {
+  ensureStripeCustomer,
+  getDefaultPaymentMethod,
+} from "../shared/subscription";
+import {
   discountFor,
   normalizeCode,
   promoLabel,
@@ -64,6 +68,7 @@ import {
   areaKeyFor,
   getCachedRate,
   hoaBandFor,
+  hoaOneTimePerUnitCents,
   rateKeyFor,
   sqftBucket,
   type MarketRateService,
@@ -277,9 +282,72 @@ const SQFT_SERVICES = new Set([
   "TERMITE",
 ]);
 
+/**
+ * A trusted internal invoke from crm-billing (portal add-service). QUOTE
+ * prices a new service for an existing customer and stamps the booking to
+ * them; BOOK charges their saved card for the quote they own and finalizes.
+ * The customerId is always the one crm-billing verified against the caller's
+ * Cognito identity — never anything a browser sent.
+ */
+type InternalOp =
+  | { kind: "QUOTE"; customerId: string; input: QuoteInput; sourceIp?: string }
+  | {
+      kind: "BOOK";
+      customerId: string;
+      body: Record<string, unknown>;
+      sourceIp?: string;
+      userAgent?: string;
+    };
+
+type InternalResult =
+  | { ok: true; data: unknown }
+  | { ok: false; status: number; error: string };
+
+async function handleInternalOp(op: InternalOp): Promise<InternalResult> {
+  try {
+    if (op.kind === "QUOTE") {
+      const data = await quote(op.input, op.sourceIp ?? "internal", undefined, {
+        customerId: op.customerId,
+      });
+      return { ok: true, data };
+    }
+    const data = await book(
+      op.body,
+      { sourceIp: op.sourceIp, userAgent: op.userAgent },
+      { customerId: op.customerId }
+    );
+    return { ok: true, data };
+  } catch (err) {
+    if (err instanceof HttpError) {
+      const payload = err.payload as { error?: string };
+      return { ok: false, status: err.status, error: payload.error ?? "Request failed" };
+    }
+    console.error("booking-public internal op failed", err);
+    return {
+      ok: false,
+      status: 500,
+      error: "Something went wrong and nothing was charged. Please try again.",
+    };
+  }
+}
+
 export const handler = async (
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> => {
+  // ── Trusted internal invoke (portal add-service) ──────────────────────
+  // crm-billing verifies the Cognito identity and owns-the-customer check,
+  // then invokes THIS Lambda directly (IAM InvokeCommand) to run a quote or a
+  // saved-card booking for that customer. The public Function URL can never
+  // reach this branch: it is entered ONLY when there is no requestContext.http
+  // (a direct invoke never has it; a Function URL request always does), so a
+  // forged `internalOp` in a public POST body falls straight through to the
+  // normal, unauthenticated funnel path. The response is returned raw (not
+  // API-Gateway-wrapped) because the caller reads the invoke payload.
+  const internalOp = (event as unknown as { internalOp?: InternalOp }).internalOp;
+  if (!event.requestContext?.http && internalOp) {
+    return (await handleInternalOp(internalOp)) as unknown as APIGatewayProxyResultV2;
+  }
+
   const origin = event.headers?.origin;
   const headers = corsHeaders(origin);
   const method = event.requestContext.http.method;
@@ -1002,7 +1070,11 @@ function quoteLeadNotes(
 async function quote(
   input: QuoteInput,
   sourceIp: string,
-  resume?: ResumeQuote
+  resume?: ResumeQuote,
+  // Trusted internal invoke (portal add-service): the quote is bound directly
+  // to this existing customer, so finalization attaches the new visit/plan to
+  // them and no new website lead is minted.
+  trusted?: { customerId: string }
 ) {
   const errors: Record<string, string> = {};
   const name = (input.name ?? "").trim();
@@ -1115,7 +1187,8 @@ async function quote(
   // Untrusted input: shape-checked, looked up by index, silently dropped when
   // it doesn't resolve — a stale or mangled token must never block a quote,
   // and the response never confirms whether it matched anything.
-  let leadCustomerId = await resolveLeadToken(client, input.leadToken);
+  let leadCustomerId =
+    trusted?.customerId ?? (await resolveLeadToken(client, input.leadToken));
 
   // A quote is a lead the moment it's requested. A visitor who arrived without
   // an office booking link has no CRM record yet, so durably capture them now —
@@ -1557,8 +1630,11 @@ async function quote(
       removalCount: count,
     });
   } else if (propertyKind === "COMMUNITY") {
-    // Any service asked at a community is a common-area plan quote from the
-    // HOA per-unit sheet: per-unit monthly × units for the chosen cadence.
+    // A common-area quote at a community: the HOA per-unit sheet prices the
+    // recurring plan (per-unit monthly × units for the chosen cadence), and a
+    // one-time visit is DERIVED from the same sheet (hoaOneTimePerUnitCents).
+    // The community may now book EITHER — the funnel offers one-time + plan
+    // exactly like residential general pest and commercial.
     const rate = await getCachedRate({
       service: "HOA",
       city: addr.city!,
@@ -1577,8 +1653,6 @@ async function quote(
     let monthly = perUnit * units;
     // R60: the same deterministic Zone B travel adder every plan carries.
     monthly += travelAdderCents(priceZone, freq);
-    baseCents = monthly;
-    planOnly = true;
     serviceLabel = serviceLabelFor("HOA_COMMON_AREA", { units });
     recurringOffer = {
       frequency: freq,
@@ -1587,6 +1661,13 @@ async function quote(
       // starts after the first completed visit, like every other plan.
       initialFeeCents: monthly,
     };
+    // The one-time common-area visit: per-unit one-time × units, plus the same
+    // one-time travel flat every other one-time price carries. planOnly stays
+    // false — the customer chooses one-time or the plan, and the day board
+    // shows the one-time price per day like every non-plan-only quote.
+    baseCents =
+      hoaOneTimePerUnitCents(hoa, units) * units +
+      travelAdderCents(priceZone, "ONE_TIME_FLAT");
   } else if (propertyKind === "COMMERCIAL") {
     // Commercial prices like residential general pest — one-time day-priced
     // plus a plan offer — but from the COMMERCIAL sheet for this sqft band.
@@ -2243,7 +2324,15 @@ async function promoPreview(body: Record<string, unknown>) {
 
 async function book(
   body: Record<string, unknown>,
-  req: { sourceIp?: string; userAgent?: string }
+  req: { sourceIp?: string; userAgent?: string },
+  // Present ONLY on a trusted internal invoke (crm-billing → this Lambda, IAM
+  // InvokeCommand) for a logged-in customer adding a service from the portal.
+  // The public Function URL can never set this: the internal path is entered
+  // solely on an event with no requestContext.http (see the handler entry),
+  // and the ownership of the quote is re-checked here against leadCustomerId.
+  // When set, the visit is charged to the customer's SAVED card off-session
+  // and finalized synchronously instead of returning a client secret.
+  trusted?: { customerId: string }
 ) {
   const bookingId = String(body.bookingId ?? "");
   const date = String(body.date ?? "");
@@ -2270,9 +2359,16 @@ async function book(
     throw new HttpError(404, { error: "Quote not found — request a new one." });
   }
   const bookingRow = booking;
-  // GL-06: a returning/refreshing/retrying customer retrieves the durable
-  // state — no payment state ever falls through to "Quote not found" or is
-  // invited to pay again without the truth about the prior attempt.
+  // A trusted saved-card booking may finalize ONLY the quote it owns: the
+  // internal quote stamped the customer's id as leadCustomerId, so a mismatch
+  // (or a public quote with no lead) is refused before any money moves. This
+  // is the second gate behind crm-billing's own assertCanActForCustomer — the
+  // customer id here already came from a verified Cognito identity.
+  if (trusted && booking.leadCustomerId !== trusted.customerId) {
+    throw new HttpError(403, {
+      error: "This quote isn't on your account — start a new one from your portal.",
+    });
+  }
   if (booking.status === "BOOKED") {
     throw new HttpError(409, {
       error:
@@ -2420,6 +2516,19 @@ async function book(
   }
   const holderUntil = attempt.holderUntil;
   try {
+    if (trusted) {
+      // A portal add-on always pays by the customer's saved card on a real
+      // day. Net-terms invoicing and date-less off-season enrollment are
+      // office-assisted paths, not self-serve — refuse them here rather than
+      // silently downgrading the customer's choice.
+      if (invoiceMode || offSeason) {
+        throw new HttpError(400, {
+          error:
+            "This service needs a quick call to set up — the office will reach out. Nothing was charged.",
+        });
+      }
+      return await bookDatedAttempt(trusted);
+    }
     if (invoiceMode) {
       return await bookInvoiceAttempt();
     }
@@ -2569,8 +2678,9 @@ async function book(
   }
 
   // The dated (and plan-only) checkout, INSIDE the attempt boundary — a
-  // closure so it shares every validated fact above.
-  async function bookDatedAttempt() {
+  // closure so it shares every validated fact above. `trusted` is set only on
+  // the portal saved-card path (charge the card on file, finalize inline).
+  async function bookDatedAttempt(trusted?: { customerId: string }) {
   // TS narrowing doesn't cross the closure boundary; the null check above
   // already threw. Shadow with the proven-non-null row.
   const booking = bookingRow;
@@ -2797,6 +2907,132 @@ async function book(
         ? "That day just sold out — pick another from a fresh quote."
         : capacityClaim.message,
     });
+  }
+
+  // ── Portal saved-card path ────────────────────────────────────────
+  // A logged-in customer adding a service: charge the card on file
+  // off-session and finalize synchronously (like the invoice path, but with
+  // a real charge instead of net terms). The capacity slot above is already
+  // claimed for this attempt; on any failure below it is released so nothing
+  // leaks. Reuses the exact off-session pattern crm-billing's chargeOneTimeJob
+  // uses, and hands finalizeBooking a real succeeded PaymentIntent.
+  if (trusted) {
+    const { stripeCustomerId } = await ensureStripeCustomer(s, trusted.customerId);
+    const pm = await getDefaultPaymentMethod(s, stripeCustomerId);
+    if (!pm) {
+      await releaseCapacityClaim(booking.id).catch(() => undefined);
+      throw new HttpError(402, {
+        error:
+          "There's no saved payment method on your account — add a card in Billing, then add this service. Nothing was charged.",
+      });
+    }
+    let intent: Stripe.PaymentIntent;
+    try {
+      intent = await s.paymentIntents.create(
+        {
+          amount: amountCents,
+          currency: "usd",
+          customer: stripeCustomerId,
+          payment_method: pm.id,
+          off_session: true,
+          confirm: true,
+          description: `${stored.serviceLabel ?? "BuzzKill service"} — ${date}`,
+          metadata: { bookingRequestId: booking.id },
+        },
+        // Deterministic per attempt generation: a double-submit under the lease
+        // replays the one intent instead of charging the card twice.
+        { idempotencyKey: `bk-saved-${booking.id}-${booking.stripePaymentIntentId ?? "first"}` }
+      );
+    } catch (err) {
+      // An off-session decline throws with the failed PaymentIntent attached.
+      // Give the slot back and tell the customer honestly — no visit is booked.
+      await releaseCapacityClaim(booking.id).catch(() => undefined);
+      const declineMsg =
+        err && typeof err === "object" && "code" in err && err.code === "authentication_required"
+          ? "Your card needs verification with your bank before we can charge it — pay this one from Billing, or use a different card. Nothing was charged."
+          : "Your saved card was declined, so nothing was charged. Update your card in Billing and try again.";
+      throw new HttpError(402, { error: declineMsg });
+    }
+    if (intent.status !== "succeeded" && intent.status !== "processing") {
+      // requires_action / requires_payment_method with no throw — treat as an
+      // un-completable off-session charge. Cancel it so nothing stays payable.
+      try {
+        await s.paymentIntents.cancel(intent.id);
+      } catch {
+        /* already canceled/expired — fine */
+      }
+      await releaseCapacityClaim(booking.id).catch(() => undefined);
+      throw new HttpError(402, {
+        error:
+          "We couldn't complete the charge on your saved card, so nothing was charged. Update your card in Billing and try again.",
+      });
+    }
+    const persisted = await persistCheckoutAttempt({
+      bookingId: booking.id,
+      holderUntil,
+      priorIntentId: booking.stripePaymentIntentId ?? null,
+      sets: {
+        status: "QUOTED",
+        selectedDate: date,
+        capacityTechnicianId: slot.technicianId,
+        capacityMinutes: slot.claimMinutes,
+        recurring,
+        amountCents,
+        ...promoSets,
+        stripeCustomerId,
+        stripePaymentIntentId: intent.id,
+        paymentFailedReason: null,
+        paymentFailedNoticeSentAt: null,
+        tcVersion,
+        tcAcceptedAt: new Date().toISOString(),
+        tcIp: req.sourceIp || null,
+        tcUserAgent: req.userAgent?.slice(0, 512) || null,
+      },
+    });
+    if (!persisted.ok) {
+      // Money captured but the attempt couldn't be recorded: refund/close the
+      // intent and give the slot back, exactly like the client-card path.
+      await settleUnpersistedIntent(
+        client as unknown as { models: Record<string, unknown> },
+        s,
+        booking,
+        intent.id,
+        amountCents
+      );
+      if (persisted.reason === "LOST") {
+        throw await truthfulCheckoutRefusal(client, booking.id);
+      }
+      await releaseCapacityClaim(booking.id).catch(() => undefined);
+      throw new HttpError(503, {
+        error:
+          "We couldn't save your booking after charging — we've reversed the charge. Please try again in a moment.",
+      });
+    }
+    // Synchronous finalize: a succeeded charge books now; a processing bank
+    // debit commits under finalize's GL-06 pending contract.
+    await finalizeBooking(
+      intent.status === "processing"
+        ? {
+            bookingRequestId: booking.id,
+            paymentIntentId: intent.id,
+            amountReceived: amountCents,
+            paymentMethodId: pm.id,
+            pending: { methodLabel: pm.type === "us_bank_account" ? "bank account" : "card" },
+          }
+        : {
+            bookingRequestId: booking.id,
+            paymentIntentId: intent.id,
+            amountReceived: intent.amount_received ?? amountCents,
+            paymentMethodId: pm.id,
+          }
+    );
+    return {
+      booked: true as const,
+      processing: intent.status === "processing" ? (true as const) : undefined,
+      amountCents,
+      statusToken: booking.cancelToken ?? undefined,
+      summary: summaryFor(stored, date, recurring),
+    };
   }
 
   const customerId =

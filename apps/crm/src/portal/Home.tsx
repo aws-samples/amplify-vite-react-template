@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, unwrap, type Customer, type Job, type ServicePlan } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
@@ -19,6 +20,7 @@ import { loadMyCustomers } from "./portalData";
 
 export default function PortalHome() {
   const roles = useRoles();
+  const navigate = useNavigate();
   const [customers, setCustomers] = useState<Customer[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [plans, setPlans] = useState<ServicePlan[]>([]);
@@ -91,6 +93,9 @@ export default function PortalHome() {
         />
       ) : (
         <>
+          <Button block onClick={() => navigate("/portal/add-service")}>
+            + Add a service
+          </Button>
           {activePlans.length > 0 ? (
             <Card title="My plan">
               {activePlans.map((p) => (

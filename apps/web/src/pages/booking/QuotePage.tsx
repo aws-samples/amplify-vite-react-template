@@ -805,7 +805,20 @@ export default function QuotePage() {
                         key={kind}
                         className={`bk-seg ${fields.propertyKind === kind ? "is-active" : ""}`}
                         aria-pressed={fields.propertyKind === kind}
-                        onClick={() => set("propertyKind")(kind)}
+                        onClick={() =>
+                          setFields((f) => ({
+                            ...f,
+                            propertyKind: kind,
+                            // Community is plan-first: default to a Quarterly
+                            // plan so the (newly priced) one-time visit is an
+                            // explicit opt-in. Leaving it "" would silently
+                            // default a common-area quote to one-time.
+                            recurringPreference:
+                              kind === "COMMUNITY" && f.recurringPreference === ""
+                                ? "QUARTERLY"
+                                : f.recurringPreference,
+                          }))
+                        }
                       >
                         {label}
                       </button>
@@ -942,12 +955,13 @@ export default function QuotePage() {
                     <label htmlFor="bq-cadence">How often should we visit?</label>
                     <select
                       id="bq-cadence"
-                      value={fields.recurringPreference || "QUARTERLY"}
+                      value={fields.recurringPreference}
                       onChange={(e) => set("recurringPreference")(e.target.value)}
                     >
                       <option value="QUARTERLY">Quarterly visits</option>
                       <option value="BIMONTHLY">Every-2-months visits</option>
                       <option value="MONTHLY">Monthly visits</option>
+                      <option value="">One-time visit only</option>
                     </select>
                   </div>
                 )}

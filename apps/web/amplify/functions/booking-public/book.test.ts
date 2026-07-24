@@ -65,12 +65,17 @@ const fakeDataClient = {
       get: async ({ id }: { id: string }) => ({
         data: {
           id,
+          displayName: "Dana Whitlock",
+          email: "dana@example.com",
+          // A saved-card customer already mirrors a Stripe customer.
+          stripeCustomerId: "cus_saved",
           serviceStreet: "9 Elm St",
           serviceCity: "Ware",
           serviceState: "MA",
           serviceZip: "01082",
         },
       }),
+      update: async () => ({ data: {} }),
     },
   },
 };
@@ -115,6 +120,13 @@ const customerCreate = vi.fn(
     _opts?: { idempotencyKey?: string }
   ) => ({ id: "cus_1" })
 );
+// The saved payment method getDefaultPaymentMethod resolves (null = no card).
+let savedPaymentMethod: Record<string, unknown> | null = { id: "pm_card", type: "card" };
+const customerRetrieve = vi.fn(async (_id: string, _opts?: unknown) => ({
+  id: "cus_saved",
+  deleted: false,
+  invoice_settings: { default_payment_method: savedPaymentMethod },
+}));
 vi.mock("stripe", () => ({
   default: class {
     paymentIntents = {
@@ -122,7 +134,7 @@ vi.mock("stripe", () => ({
       retrieve: intentRetrieve,
       cancel: intentCancel,
     };
-    customers = { create: customerCreate };
+    customers = { create: customerCreate, retrieve: customerRetrieve };
   },
 }));
 
@@ -238,6 +250,8 @@ beforeEach(() => {
   intentCancel.mockClear();
   intentCancel.mockImplementation(defaultIntentCancelImpl);
   customerCreate.mockClear();
+  customerRetrieve.mockClear();
+  savedPaymentMethod = { id: "pm_card", type: "card" };
   finalizeBookingMock.mockClear();
   finalizeBookingMock.mockImplementation(async () => {});
   jobRow = null;
@@ -280,6 +294,31 @@ const bookIt = (overrides: Record<string, unknown> = {}) =>
     tcVersion: BOOKING_TERMS_VERSION,
     ...overrides,
   });
+
+/** A trusted internal invoke (crm-billing → this Lambda): no requestContext.http,
+ *  the customerId already verified by crm-billing against the Cognito identity. */
+const internalBook = async (
+  customerId: string,
+  body: Record<string, unknown> = {}
+) => {
+  const res = (await handler({
+    internalOp: {
+      kind: "BOOK",
+      customerId,
+      sourceIp: "1.2.3.4",
+      body: {
+        bookingId: "b1",
+        date: "2026-07-22",
+        tcAccepted: true,
+        tcVersion: BOOKING_TERMS_VERSION,
+        ...body,
+      },
+    },
+  } as never)) as unknown as
+    | { ok: true; data: Record<string, unknown> }
+    | { ok: false; status: number; error: string };
+  return res;
+};
 
 describe("invoice-me — HOA/commercial book card-less on net terms", () => {
   it("refuses a residential invoice request server-side, even if the client asks", async () => {
@@ -1072,5 +1111,108 @@ describe("GL-17 corrective 3 — lifecycle-fenced checkout on EVERY /book branch
     expect(minted).toBe(1); // ONE intent, ever
     expect(booking.stripePaymentIntentId).toBe("pi_1");
     expect(booking.status).toBe("QUOTED"); // still payable, never clobbered
+  });
+});
+
+describe("portal add-service — charge the saved card off-session (trusted internal invoke)", () => {
+  const succeededCharge = () =>
+    intentCreate.mockImplementation(async (args: { amount: number }) => ({
+      id: "pi_saved",
+      client_secret: "cs_saved",
+      status: "succeeded",
+      amount: args.amount,
+      amount_received: args.amount,
+    }));
+
+  it("charges the card on file and finalizes synchronously — no client secret", async () => {
+    booking.leadCustomerId = "cust-1";
+    succeededCharge();
+
+    const res = await internalBook("cust-1");
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data).toMatchObject({ booked: true, amountCents: 31300 });
+    expect(res.data.clientSecret).toBeUndefined();
+    // Off-session charge on the saved payment method, one time.
+    expect(intentCreate).toHaveBeenCalledTimes(1);
+    expect(intentCreate.mock.calls[0][0]).toMatchObject({
+      amount: 31300,
+      customer: "cus_saved",
+      payment_method: "pm_card",
+      off_session: true,
+      confirm: true,
+    });
+    // finalize ran with the REAL succeeded intent, not the invoice anchor.
+    expect(finalizeBookingMock).toHaveBeenCalledTimes(1);
+    expect(finalizeBookingMock.mock.calls[0][0]).toMatchObject({
+      bookingRequestId: "b1",
+      paymentIntentId: "pi_saved",
+      amountReceived: 31300,
+      paymentMethodId: "pm_card",
+    });
+  });
+
+  it("refuses a quote that isn't on the caller's account — before any charge", async () => {
+    booking.leadCustomerId = "someone-else";
+    succeededCharge();
+
+    const res = await internalBook("cust-1");
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(403);
+    expect(intentCreate).not.toHaveBeenCalled();
+    expect(finalizeBookingMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses when there is no saved card — nothing is charged", async () => {
+    booking.leadCustomerId = "cust-1";
+    savedPaymentMethod = null;
+
+    const res = await internalBook("cust-1");
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(402);
+    expect(intentCreate).not.toHaveBeenCalled();
+    expect(finalizeBookingMock).not.toHaveBeenCalled();
+  });
+
+  it("a declined card books nothing and finalizes nothing", async () => {
+    booking.leadCustomerId = "cust-1";
+    intentCreate.mockImplementation(async () => {
+      const err = new Error("Your card was declined") as Error & { code?: string };
+      err.code = "card_declined";
+      throw err;
+    });
+
+    const res = await internalBook("cust-1");
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(402);
+    expect(finalizeBookingMock).not.toHaveBeenCalled();
+    // The booking is not advanced to a paid state.
+    expect(booking.status).toBe("QUOTED");
+  });
+
+  it("a forged internalOp on the PUBLIC Function URL is ignored — normal card checkout, no saved-card charge", async () => {
+    // A public POST carries requestContext.http, so the trusted branch is never
+    // entered even with an internalOp in the body — it falls through to the
+    // ordinary funnel, which returns a client secret for a fresh card.
+    const res = await postBook({
+      bookingId: "b1",
+      date: "2026-07-22",
+      tcAccepted: true,
+      tcVersion: BOOKING_TERMS_VERSION,
+      internalOp: { kind: "BOOK", customerId: "cust-1" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.clientSecret).toBe("cs_new");
+    // The saved card was never read, and finalize did not run inline.
+    expect(customerRetrieve).not.toHaveBeenCalled();
+    expect(finalizeBookingMock).not.toHaveBeenCalled();
   });
 });

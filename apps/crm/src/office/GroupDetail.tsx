@@ -26,6 +26,15 @@ export default function GroupDetail() {
   // When set, the group's email already signs in — hold the server's message
   // and let the office choose to reuse that login or cancel.
   const [reusePrompt, setReusePrompt] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [statusBusy, setStatusBusy] = useState(false);
+  // Draft edit fields (seeded when the edit sheet opens).
+  const [fName, setFName] = useState("");
+  const [fContact, setFContact] = useState("");
+  const [fEmail, setFEmail] = useState("");
+  const [fPhone, setFPhone] = useState("");
+  const [fNotes, setFNotes] = useState("");
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -102,10 +111,123 @@ export default function GroupDetail() {
     }
   };
 
+  const openEdit = () => {
+    if (!group) return;
+    setFName(group.name ?? "");
+    setFContact(group.contactName ?? "");
+    setFEmail(group.contactEmail ?? "");
+    setFPhone(group.contactPhone ?? "");
+    setFNotes(group.notes ?? "");
+    setError(null);
+    setEditing(true);
+  };
+
+  const saveEdit = async () => {
+    if (!group) return;
+    if (!fName.trim()) {
+      setError("Group name is required");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      // OWNER writes the group model directly (same path new groups are created
+      // on) — no dedicated mutation. Empty fields clear to null.
+      unwrap(
+        await api().models.CustomerGroup.update({
+          id: group.id,
+          name: fName.trim(),
+          contactName: fContact.trim() || null,
+          contactEmail: fEmail.trim() || null,
+          contactPhone: fPhone.trim() || null,
+          notes: fNotes.trim() || null,
+        })
+      );
+      setEditing(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save the group");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inactivate = async () => {
+    if (!group) return;
+    // Block while properties still point at the group — remove/reassign first so
+    // no member is left owned by a retired management company.
+    if (members.length > 0) {
+      setError(
+        `Remove or reassign all ${members.length} member${members.length === 1 ? "" : "s"} before inactivating this group.`
+      );
+      return;
+    }
+    if (
+      !window.confirm(
+        "Inactivate this group? Its portal login (if any) is disabled and it drops out of the group pickers. You can reactivate it later.",
+      )
+    )
+      return;
+    setStatusBusy(true);
+    setError(null);
+    try {
+      // Access half first — disable the group login before the group reads
+      // INACTIVE, so an inactive group never implies a live login. No-op when
+      // there is no login.
+      unwrap(await api().mutations.revokePortalAccess({ groupId: group.id }));
+      unwrap(
+        await api().models.CustomerGroup.update({
+          id: group.id,
+          status: "INACTIVE",
+        })
+      );
+      await load();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not inactivate the group"
+      );
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+
+  const reactivate = async () => {
+    if (!group) return;
+    setStatusBusy(true);
+    setError(null);
+    try {
+      unwrap(
+        await api().models.CustomerGroup.update({
+          id: group.id,
+          status: "ACTIVE",
+        })
+      );
+      await load();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not reactivate the group"
+      );
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+
+  const isInactive = group.status === "INACTIVE";
+
   return (
     <Page title={group.name} back="/customers">
       <ErrorNote error={error} />
-      <Card>
+      <Card
+        title="Group details"
+        actions={
+          <span className="inline-actions" style={{ gap: 8 }}>
+            <StatusBadge status={isInactive ? "INACTIVE" : "ACTIVE"} />
+            <Button small variant="ghost" onClick={openEdit}>
+              Edit
+            </Button>
+          </span>
+        }
+      >
         <dl className="kv">
           <dt>Contact</dt>
           <dd>{group.contactName ?? "—"}</dd>
@@ -113,31 +235,68 @@ export default function GroupDetail() {
           <dd>{group.contactEmail ?? "—"}</dd>
           <dt>Phone</dt>
           <dd>{group.contactPhone ?? "—"}</dd>
+          {group.notes ? (
+            <>
+              <dt>Notes</dt>
+              <dd>{group.notes}</dd>
+            </>
+          ) : null}
         </dl>
         <p className="muted small" style={{ marginTop: 10 }}>
           Portal users belonging to members of this group can view every
           member's service details.
         </p>
-        <div className="inline-actions" style={{ marginTop: 12 }}>
+        {!isInactive ? (
+          <div className="inline-actions" style={{ marginTop: 12 }}>
+            <p className="muted small" style={{ flex: 1 }}>
+              {group.portalUserSub
+                ? `Group login active${group.portalInvitedAt ? ` — invited ${new Date(group.portalInvitedAt).toLocaleDateString()}` : ""}. It sees every property below.`
+                : "No group login yet. Invite one to give a management contact a single login across all properties."}
+            </p>
+            <span
+              className="permission-tooltip"
+              title={!group.contactEmail ? "Add a contact email first." : undefined}
+            >
+              <Button
+                small
+                variant="subtle"
+                disabled={!group.contactEmail}
+                loading={inviting}
+                onClick={() => void invite(false)}
+              >
+                {group.portalUserSub ? "Resend group login" : "Invite group login"}
+              </Button>
+            </span>
+          </div>
+        ) : null}
+        <div
+          className="inline-actions"
+          style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 12 }}
+        >
           <p className="muted small" style={{ flex: 1 }}>
-            {group.portalUserSub
-              ? `Group login active${group.portalInvitedAt ? ` — invited ${new Date(group.portalInvitedAt).toLocaleDateString()}` : ""}. It sees every property below.`
-              : "No group login yet. Invite one to give a management contact a single login across all properties."}
+            {isInactive
+              ? "This group is inactive — hidden from group pickers and its login is disabled."
+              : "Inactivate a group you no longer manage. Remove its members first."}
           </p>
-          <span
-            className="permission-tooltip"
-            title={!group.contactEmail ? "Add a contact email first." : undefined}
-          >
+          {isInactive ? (
             <Button
               small
               variant="subtle"
-              disabled={!group.contactEmail}
-              loading={inviting}
-              onClick={() => void invite(false)}
+              loading={statusBusy}
+              onClick={() => void reactivate()}
             >
-              {group.portalUserSub ? "Resend group login" : "Invite group login"}
+              Reactivate group
             </Button>
-          </span>
+          ) : (
+            <Button
+              small
+              variant="danger"
+              loading={statusBusy}
+              onClick={() => void inactivate()}
+            >
+              Inactivate group
+            </Button>
+          )}
         </div>
       </Card>
 
@@ -175,6 +334,44 @@ export default function GroupDetail() {
           ))
         )}
       </Card>
+
+      <Sheet open={editing} onClose={() => setEditing(false)} title="Edit group">
+        <Field label="Group name">
+          <input value={fName} onChange={(e) => setFName(e.target.value)} />
+        </Field>
+        <Field label="Contact name">
+          <input value={fContact} onChange={(e) => setFContact(e.target.value)} />
+        </Field>
+        <Field label="Contact email">
+          <input
+            type="email"
+            value={fEmail}
+            onChange={(e) => setFEmail(e.target.value)}
+          />
+        </Field>
+        <Field label="Contact phone">
+          <input
+            type="tel"
+            value={fPhone}
+            onChange={(e) => setFPhone(e.target.value)}
+          />
+        </Field>
+        <Field label="Notes">
+          <textarea
+            rows={3}
+            value={fNotes}
+            onChange={(e) => setFNotes(e.target.value)}
+          />
+        </Field>
+        <div className="inline-actions" style={{ marginTop: 16 }}>
+          <Button loading={saving} onClick={() => void saveEdit()}>
+            Save changes
+          </Button>
+          <Button variant="ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </Button>
+        </div>
+      </Sheet>
 
       <Sheet open={adding} onClose={() => setAdding(false)} title="Add member">
         <Field label="Customer">

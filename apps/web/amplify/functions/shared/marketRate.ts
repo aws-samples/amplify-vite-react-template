@@ -138,6 +138,32 @@ export function hoaBandFor(units: number): HoaBand {
 /** HOA: per-unit MONTHLY price in cents, by unit-count band and cadence. */
 export type HoaPerUnitRates = Record<HoaBand, Record<PlanCadence, number>>;
 
+/**
+ * PLACEHOLDER, confirm with Jake before go-live (same status as the ZONE_C
+ * amounts): the multiplier that turns a per-unit HOA plan rate into a
+ * per-unit ONE-TIME common-area visit. The researched HOA sheet is
+ * subscription-only — common-area work has no one-time card — so a single
+ * visit is DERIVED, not researched. Rationale for the starting figure: a
+ * quarterly-plan community pays the per-unit QUARTERLY monthly rate every
+ * month for one visit a quarter, so a single visit is worth roughly three
+ * months of it (×3), plus a premium because a one-off carries no plan
+ * commitment (×~1.17). This is the ONLY knob — change it here.
+ */
+export const HOA_ONE_TIME_MULTIPLIER = 3.5;
+
+/**
+ * A one-time (single) HOA common-area visit, per unit, in cents. Always
+ * derived from the per-unit QUARTERLY rate (the entry service level), so the
+ * one-time price is independent of whichever plan cadence the customer was
+ * considering. Multiply by the unit count for the community's total.
+ */
+export function hoaOneTimePerUnitCents(
+  rates: HoaPerUnitRates,
+  units: number
+): number {
+  return Math.round(rates[hoaBandFor(units)].QUARTERLY * HOA_ONE_TIME_MULTIPLIER);
+}
+
 /** The full researched sheet stored on one MarketRate row (ratesJson). */
 export type RateSheet = {
   /** One-time treatment (WASP_NEST: the visit including the first nest).
