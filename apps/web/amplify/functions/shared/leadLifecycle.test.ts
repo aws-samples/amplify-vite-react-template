@@ -8,6 +8,7 @@ let createdSeq: number;
 let failActivityCreate: boolean;
 let customerUpdateCount: number;
 let workItems: Map<string, Row>;
+let plans: Map<string, Row>;
 
 const { findLeadDuplicates } = vi.hoisted(() => ({
   findLeadDuplicates: vi.fn(async () => [] as unknown[]),
@@ -72,6 +73,13 @@ vi.mock("./dataClient", () => ({
           return { data: row };
         },
         get: async ({ id }: { id: string }) => ({ data: activityRows.get(id) ?? null, errors: [] }),
+      },
+      ServicePlan: {
+        get: async ({ id }: { id: string }) => ({ data: plans.get(id) ?? null }),
+        create: async (input: Row) => {
+          plans.set(input.id, { ...input });
+          return { data: { ...input }, errors: undefined };
+        },
       },
       SuppressedEmail: { get: async () => ({ data: null, errors: [] }) },
       ConsentAudit: { create: async (input: Row) => ({ data: input }) },
@@ -139,6 +147,7 @@ beforeEach(() => {
   failActivityCreate = false;
   customerUpdateCount = 0;
   workItems = new Map();
+  plans = new Map();
   findLeadDuplicates.mockClear();
   findLeadDuplicates.mockResolvedValue([]);
   openOwnedWork.mockClear();
@@ -459,6 +468,58 @@ describe("setLeadDisposition (GL-02 R5)", () => {
     expect(resolveOwnedWork).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "LEAD_FOLLOWUP" })
     );
+  });
+
+  it("CONVERT adds an active-not-billing plan and turns the lead into a client", async () => {
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "Dana" });
+    await setLeadDisposition(
+      {
+        customerId: "l1",
+        disposition: "CONVERT",
+        planName: "Quarterly general pest",
+        priceCents: 14900,
+        serviceFrequency: "QUARTERLY",
+        idempotencyKey: "conv-1",
+      },
+      actor
+    );
+    // The lead is now an active client.
+    expect(customers.get("l1")).toMatchObject({
+      status: "ACTIVE",
+      nextAction: null,
+    });
+    // A plan exists — priced, active, but NOT billing (no stripeSubscriptionId).
+    const plan = [...plans.values()][0];
+    expect(plan).toMatchObject({
+      customerId: "l1",
+      planName: "Quarterly general pest",
+      priceCents: 14900,
+      serviceFrequency: "QUARTERLY",
+      status: "ACTIVE",
+    });
+    expect(plan.stripeSubscriptionId).toBeUndefined();
+    expect(resolveOwnedWork).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "LEAD_FOLLOWUP" })
+    );
+  });
+
+  it("CONVERT rejects a bad price or frequency before touching the record", async () => {
+    customers.set("l1", { id: "l1", status: "LEAD", displayName: "Dana" });
+    await expect(
+      setLeadDisposition(
+        {
+          customerId: "l1",
+          disposition: "CONVERT",
+          planName: "Plan",
+          priceCents: 0,
+          serviceFrequency: "QUARTERLY",
+          idempotencyKey: "conv-bad",
+        },
+        actor
+      )
+    ).rejects.toThrow(/valid plan price/i);
+    expect(customers.get("l1")).toMatchObject({ status: "LEAD" });
+    expect(plans.size).toBe(0);
   });
 
   it("do-not-contact records who decided", async () => {

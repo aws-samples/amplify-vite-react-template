@@ -2738,10 +2738,15 @@ export const schema = a.schema({
     .mutation()
     .arguments({
       customerId: a.string().required(),
-      /** LOST | DNC | CLEAR */
+      /** LOST | DNC | CLEAR | CONVERT */
       disposition: a.string().required(),
       reasonCode: a.string(),
       note: a.string(),
+      // CONVERT only: the manually-entered plan that turns this lead into a
+      // client. priceCents is the contract price billing reads verbatim.
+      planName: a.string(),
+      priceCents: a.integer(),
+      serviceFrequency: a.string(),
       idempotencyKey: a.string().required(),
     })
     .returns(a.json())
