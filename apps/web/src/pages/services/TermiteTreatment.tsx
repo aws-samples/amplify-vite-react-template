@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
-import SEO from "../../components/SEO";
+import SEO, { buildServiceSchema, buildBreadcrumbSchema } from "../../components/SEO";
 import QuoteCard from "../../components/QuoteCard";
 
 const FAMILIAR_ITEMS = [
@@ -200,6 +200,18 @@ export default function TermiteTreatment() {
       <SEO
         title="Termite Treatment Plans — MA & RI"
         description="Professional termite treatment and colony elimination for Massachusetts and Rhode Island homes. Licensed, targeted, lasting structural protection."
+        jsonLd={[
+          buildServiceSchema(
+            "Termite Treatment",
+            "Professional termite treatment and colony elimination for Massachusetts and Rhode Island homes. Licensed, targeted, lasting structural protection.",
+            "/services/termite/treatment",
+          ),
+          buildBreadcrumbSchema([
+            { name: "Home", url: "/" },
+            { name: "Termite", url: "/services/termite" },
+            { name: "Treatment", url: "/services/termite/treatment" },
+          ]),
+        ]}
       />
 
       {/* Back to Top */}

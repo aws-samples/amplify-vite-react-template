@@ -1,5 +1,5 @@
 import ComingSoon from "./ComingSoon";
-import SEO from "../components/SEO";
+import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 
 export default function Careers() {
   return (
@@ -7,6 +7,10 @@ export default function Careers() {
       <SEO
         title="Careers at BuzzKill Pest Control"
         description="Join the BuzzKill Pest Control team. Explore careers building New England's most trusted pest control and property protection company across Massachusetts and Rhode Island."
+        jsonLd={buildBreadcrumbSchema([
+          { name: "Home", url: "/" },
+          { name: "Careers", url: "/careers" },
+        ])}
       />
       <ComingSoon
         title="Join the BuzzKill Team"

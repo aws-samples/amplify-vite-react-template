@@ -1,5 +1,5 @@
 import QuoteCTA from "../components/QuoteCTA";
-import SEO from "../components/SEO";
+import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 
 export default function MAServiceArea() {
   return (
@@ -7,6 +7,10 @@ export default function MAServiceArea() {
       <SEO
         title="Massachusetts Pest Control Service Area"
         description="BuzzKill Pest Control services across Massachusetts — residential, commercial, condo, and HOA pest control. Licensed, pet-safe technicians. Get an instant quote."
+        jsonLd={buildBreadcrumbSchema([
+          { name: "Home", url: "/" },
+          { name: "Massachusetts", url: "/locations/massachusetts" },
+        ])}
       />
       <section style={{ padding: "80px 32px", maxWidth: 900, margin: "0 auto", textAlign: "center" }}>
         <p style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.2em", color: "var(--bk-green)", marginBottom: 12 }}>Service Area</p>

@@ -1,5 +1,5 @@
 import ComingSoon from "./ComingSoon";
-import SEO from "../components/SEO";
+import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 
 export default function Reviews() {
   return (
@@ -7,6 +7,10 @@ export default function Reviews() {
       <SEO
         title="Customer Reviews & Testimonials"
         description="See why homeowners, HOAs, and property managers across Massachusetts and Rhode Island trust BuzzKill Pest Control. Real customers, real results."
+        jsonLd={buildBreadcrumbSchema([
+          { name: "Home", url: "/" },
+          { name: "Reviews", url: "/reviews" },
+        ])}
       />
       <ComingSoon
         title="What Our Customers Say"
