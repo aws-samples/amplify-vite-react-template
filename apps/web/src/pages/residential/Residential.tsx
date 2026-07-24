@@ -2,6 +2,7 @@ import { useState, useRef } from "react";
 import { Link } from "react-router-dom";
 import Hero from "../../components/Hero";
 import FAQ from "../../components/FAQ";
+import SEO, { buildServiceSchema, buildBreadcrumbSchema } from "../../components/SEO";
 
 const LIFESTYLE_CARDS = [
   {
@@ -210,6 +211,21 @@ export default function Residential() {
 
   return (
     <>
+      <SEO
+        title="Residential Pest Control for MA & RI Homes"
+        description="Professional residential pest control for homes across Massachusetts and Rhode Island. Family and pet-safe treatments for ants, rodents, termites, mosquitoes, wildlife, and more. Get an instant quote."
+        jsonLd={[
+          buildServiceSchema(
+            "Residential Pest Control",
+            "Professional residential pest control for homes across Massachusetts and Rhode Island. Family and pet-safe treatments for ants, rodents, termites, mosquitoes, and wildlife.",
+            "/residential",
+          ),
+          buildBreadcrumbSchema([
+            { name: "Home", url: "/" },
+            { name: "Residential", url: "/residential" },
+          ]),
+        ]}
+      />
       {/* 1 — Hero */}
       <Hero
         announceBanner

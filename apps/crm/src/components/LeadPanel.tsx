@@ -102,6 +102,11 @@ export default function LeadPanel({
   const [clearReason, setClearReason] = useState("CUSTOMER_RECONSENTED");
   const [clearEvidence, setClearEvidence] = useState("");
   const [quote, setQuote] = useState<BookingRequest | null>(null);
+  const [convName, setConvName] = useState("");
+  const [convPrice, setConvPrice] = useState("");
+  const [convFreq, setConvFreq] = useState<
+    "MONTHLY" | "BIMONTHLY" | "QUARTERLY" | "SEMIANNUAL"
+  >("MONTHLY");
 
   const loadActivity = useCallback(async () => {
     try {
@@ -304,6 +309,82 @@ export default function LeadPanel({
               during an inbound conversation.
             </p>
           ) : null}
+
+          <details style={{ marginTop: 16 }}>
+            <summary className="small">Add a plan &amp; convert to client</summary>
+            <div className="form-grid" style={{ marginTop: 10 }}>
+              <p className="muted small" style={{ margin: 0 }}>
+                Records a plan you've agreed offline and turns this lead into a
+                client. The plan is active but not billing yet — collect a card
+                or bank on the customer page, then start billing.
+              </p>
+              <Field label="Plan name">
+                <input
+                  value={convName}
+                  onChange={(e) => setConvName(e.target.value)}
+                  placeholder="Quarterly general pest"
+                />
+              </Field>
+              <div className="form-row-2">
+                <Field label="Price (per bill)">
+                  <input
+                    inputMode="decimal"
+                    value={convPrice}
+                    onChange={(e) => setConvPrice(e.target.value)}
+                    placeholder="149.00"
+                  />
+                </Field>
+                <Field label="Billing frequency">
+                  <select
+                    value={convFreq}
+                    onChange={(e) =>
+                      setConvFreq(
+                        e.target.value as
+                          | "MONTHLY"
+                          | "BIMONTHLY"
+                          | "QUARTERLY"
+                          | "SEMIANNUAL"
+                      )
+                    }
+                  >
+                    <option value="MONTHLY">Monthly</option>
+                    <option value="BIMONTHLY">Every 2 months</option>
+                    <option value="QUARTERLY">Quarterly</option>
+                    <option value="SEMIANNUAL">Twice a year</option>
+                  </select>
+                </Field>
+              </div>
+              <div className="inline-actions">
+                <Button
+                  small
+                  loading={busy === "convert"}
+                  disabled={
+                    !convName.trim() || !(Number(convPrice) > 0)
+                  }
+                  onClick={() =>
+                    void act("convert", async () => {
+                      const priceCents = Math.round(Number(convPrice) * 100);
+                      const result = opResult(
+                        await setLeadDisposition({
+                          customerId: customer.id,
+                          disposition: "CONVERT",
+                          planName: convName.trim(),
+                          priceCents,
+                          serviceFrequency: convFreq,
+                          idempotencyKey: clientActionId("convert"),
+                        })
+                      );
+                      if (!result) throw new Error("The conversion did not complete.");
+                      setConvName("");
+                      setConvPrice("");
+                    })
+                  }
+                >
+                  Add plan &amp; convert
+                </Button>
+              </div>
+            </div>
+          </details>
 
           <details style={{ marginTop: 16 }}>
             <summary className="small">Close without a booking</summary>

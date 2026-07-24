@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import Hero from "../components/Hero";
 import FAQ from "../components/FAQ";
+import SEO, { buildServiceSchema, buildBreadcrumbSchema } from "../components/SEO";
 
 const WHO_CARDS = [
   {
@@ -150,6 +151,21 @@ export default function Communities() {
 
   return (
     <>
+      <SEO
+        title="Community Pest Control for HOAs & Condos — MA & RI"
+        description="Proactive pest control for condominiums, HOAs, and shared communities across Massachusetts and Rhode Island. Common-area programs with board-friendly reporting and optional in-unit service."
+        jsonLd={[
+          buildServiceSchema(
+            "Community & HOA Pest Control",
+            "Proactive pest control for condominiums, HOAs, and shared communities across Massachusetts and Rhode Island. Common-area programs with board-friendly reporting.",
+            "/communities",
+          ),
+          buildBreadcrumbSchema([
+            { name: "Home", url: "/" },
+            { name: "Communities", url: "/communities" },
+          ]),
+        ]}
+      />
       {/* 1 — Hero */}
       <Hero
         announceBanner

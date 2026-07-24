@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import FAQ from "../../components/FAQ";
 import Hero from "../../components/Hero";
-import SEO from "../../components/SEO";
+import SEO, { buildServiceSchema, buildBreadcrumbSchema } from "../../components/SEO";
 import QuoteCard from "../../components/QuoteCard";
 
 const FAMILIAR_ITEMS = [
@@ -214,8 +214,20 @@ export default function HumaneRemoval() {
   return (
     <>
       <SEO
-        title="Humane Wildlife Removal Services â€” MA & RI"
+        title="Humane Wildlife Removal Services — MA & RI"
         description="Licensed humane wildlife removal and exclusion for Massachusetts and Rhode Island homes. Safe for animals, effective for homeowners."
+        jsonLd={[
+          buildServiceSchema(
+            "Humane Wildlife Removal",
+            "Licensed humane wildlife removal and exclusion for Massachusetts and Rhode Island homes. Safe for animals, effective for homeowners.",
+            "/services/wildlife/humane-removal",
+          ),
+          buildBreadcrumbSchema([
+            { name: "Home", url: "/" },
+            { name: "Wildlife", url: "/services/wildlife" },
+            { name: "Humane Removal", url: "/services/wildlife/humane-removal" },
+          ]),
+        ]}
       />
 
       {/* Back to top */}
@@ -251,7 +263,7 @@ export default function HumaneRemoval() {
               onClick={() => scrollCarousel("left")}
               aria-label="Scroll left"
             >
-              â€¹
+              ‹
             </button>
             <div className="bk-carousel" ref={carouselRef}>
               {FAMILIAR_ITEMS.map((item, i) => (
@@ -266,7 +278,7 @@ export default function HumaneRemoval() {
               onClick={() => scrollCarousel("right")}
               aria-label="Scroll right"
             >
-              â€º
+              ›
             </button>
           </div>
         </div>

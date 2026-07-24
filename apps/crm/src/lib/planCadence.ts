@@ -18,6 +18,7 @@ const VISIT_INTERVAL: Record<string, string> = {
   MONTHLY: "technician visits every month",
   BIMONTHLY: "technician visits every 2 months",
   QUARTERLY: "technician visits every 3 months",
+  SEMIANNUAL: "technician visits twice a year",
 };
 
 /** e.g. "$45.00 per month · technician visits every 3 months". A seasonal plan

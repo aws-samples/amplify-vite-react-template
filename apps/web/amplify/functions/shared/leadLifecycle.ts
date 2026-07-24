@@ -25,6 +25,7 @@ import {
   workItemId,
 } from "./ownedWork";
 import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "./consentText";
+import { customerAccessGroups } from "./dynamicGroups";
 
 export type LeadActor = {
   sub: string | null;
@@ -668,6 +669,9 @@ export async function setLeadDisposition(
     disposition: string;
     reasonCode?: string | null;
     note?: string | null;
+    planName?: string | null;
+    priceCents?: number | null;
+    serviceFrequency?: string | null;
     idempotencyKey?: string;
   },
   actor: LeadActor
@@ -685,6 +689,85 @@ export async function setLeadDisposition(
     const prior = await client.models.Customer.get({ id: args.customerId });
     if (!prior.data || prior.data.status !== "LEAD") throw new Error("Open lead not found.");
     const nowIso = new Date().toISOString();
+
+    // CONVERT is its own self-contained transition: it turns the lead into an
+    // ACTIVE client with a manually-entered plan (ACTIVE-not-billing), rather
+    // than a keep-it-a-lead disposition like LOST/DNC/CLEAR. It returns before
+    // the shared lead-lifecycle tail below, which assumes the record stays a
+    // lead. Billing starts later once a payment method is on file.
+    if (args.disposition === "CONVERT") {
+      const planName = (args.planName ?? "").trim();
+      const priceCents = args.priceCents ?? 0;
+      const freq = (args.serviceFrequency ?? "").trim().toUpperCase();
+      if (!planName) throw new Error("Enter a plan name.");
+      if (!Number.isInteger(priceCents) || priceCents <= 0) {
+        throw new Error("Enter a valid plan price.");
+      }
+      if (!["MONTHLY", "BIMONTHLY", "QUARTERLY", "SEMIANNUAL"].includes(freq)) {
+        throw new Error("Choose a valid visit frequency.");
+      }
+      const today = nowIso.slice(0, 10);
+      const accessGroups = customerAccessGroups(args.customerId);
+      // Idempotent plan id off the mutation key: a retried CONVERT reuses the
+      // same plan rather than creating a duplicate.
+      const planId = `plan-${digest(mutationId)}`;
+      const existingPlan = await client.models.ServicePlan.get({ id: planId });
+      if (!existingPlan.data) {
+        const created = await client.models.ServicePlan.create({
+          id: planId,
+          customerId: args.customerId,
+          planName,
+          priceCents,
+          serviceFrequency: freq as
+            | "MONTHLY"
+            | "BIMONTHLY"
+            | "QUARTERLY"
+            | "SEMIANNUAL",
+          status: "ACTIVE",
+          startDate: today,
+          billingAnchorDate: today,
+          accessGroups,
+          // No stripeSubscriptionId — ACTIVE-not-billing until a card/bank is on
+          // file, exactly like the migrated book.
+          notes: `Added by the office when converting this lead${args.note ? `: ${args.note}` : ""}. Price locked; ACTIVE-not-billing until a payment method is on file.`,
+        });
+        if (!created.data) {
+          throw new Error(
+            created.errors?.map((e) => e.message).join("; ") ||
+              "Could not create the plan."
+          );
+        }
+      }
+      // Flip the lead to an active client (idempotent via leadMutationId).
+      const alreadyConverted = prior.data.leadMutationId === mutationId;
+      const converted = alreadyConverted
+        ? { data: prior.data }
+        : await client.models.Customer.update({
+            id: args.customerId,
+            status: "ACTIVE",
+            accessGroups,
+            nextAction: null,
+            nextActionAt: null,
+            leadMutationId: mutationId,
+          });
+      if (!converted.data) throw new Error("Could not convert the lead to a client.");
+      await appendLeadActivity({
+        customerId: args.customerId,
+        channel: "LIFECYCLE",
+        outcome: "NOTE",
+        note: `Converted to client — added plan "${planName}" ($${(priceCents / 100).toFixed(2)} ${freq.toLowerCase()}), ACTIVE-not-billing.${args.note ? ` ${args.note}` : ""}`,
+        actor,
+        mutationId,
+      });
+      // The lead's follow-up obligation is discharged by conversion.
+      await resolveOwnedWork({
+        kind: "LEAD_FOLLOWUP",
+        dedupeKey: args.customerId,
+        note: "Lead converted to client with a plan.",
+      });
+      return { ok: true, disposition: "CONVERT" };
+    }
+
     let patch: Record<string, unknown>;
     let activityNote: string;
     if (args.disposition === "LOST") {

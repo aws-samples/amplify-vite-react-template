@@ -154,9 +154,13 @@ export function logLeadTouch(input: {
 
 export function setLeadDisposition(input: {
   customerId: string;
-  disposition: "LOST" | "DNC" | "CLEAR";
+  disposition: "LOST" | "DNC" | "CLEAR" | "CONVERT";
   reasonCode?: string;
   note?: string;
+  // CONVERT only — the manually-entered plan that turns the lead into a client.
+  planName?: string;
+  priceCents?: number;
+  serviceFrequency?: "MONTHLY" | "BIMONTHLY" | "QUARTERLY" | "SEMIANNUAL";
   idempotencyKey: string;
 }): OpResult {
   return (

@@ -104,6 +104,23 @@ describe("scheduleNextRecurringVisit — INACTIVE customer guard", () => {
 
     expect(created).toHaveLength(1);
   });
+
+  it("a twice-a-year (SEMIANNUAL) plan queues the next visit ~6 months out", async () => {
+    customers.set("c1", { id: "c1", status: "ACTIVE" });
+    plans.set("p1", {
+      id: "p1",
+      customerId: "c1",
+      status: "ACTIVE",
+      serviceFrequency: "SEMIANNUAL",
+      planName: "Bi-annual farm",
+    });
+
+    await scheduleNextRecurringVisit(completedJob); // completed 2026-07-10
+
+    const next = created[0] as { scheduledDate: string };
+    // 2026-07-10 + 182 days = 2027-01-08.
+    expect(next.scheduledDate).toBe("2027-01-08");
+  });
 });
 
 describe("scheduleNextRecurringVisit — one-time type guard", () => {

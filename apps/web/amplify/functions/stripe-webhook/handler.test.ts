@@ -35,6 +35,18 @@ const fakeDataClient = {
         plans.set(patch.id, { ...plans.get(patch.id)!, ...patch });
         return { data: plans.get(patch.id) };
       },
+      list: async ({
+        filter,
+      }: {
+        filter?: { customerId?: { eq?: string }; status?: { eq?: string } };
+      }) => ({
+        data: [...plans.values()].filter(
+          (p) =>
+            (!filter?.customerId?.eq || p.customerId === filter.customerId.eq) &&
+            (!filter?.status?.eq || p.status === filter.status.eq)
+        ),
+        nextToken: null,
+      }),
     },
     BookingRequest: {
       get: async ({ id }: { id: string }) => ({ data: bookings.get(id) ?? null }),
@@ -53,6 +65,7 @@ const fakeDataClient = {
           groupId: null,
         },
       }),
+      update: async (patch: { id: string }) => ({ data: patch }),
     },
     Job: {
       listJobByServicePlanId: async ({
@@ -123,8 +136,20 @@ vi.mock("../shared/stripeClient", () => ({
     invoicePayments: {
       list: async () => ({ data: [] }),
     },
+    customers: { update: async () => ({}) },
+    paymentMethods: { retrieve: async () => ({ type: "card" }) },
   }),
   paymentMethodLabel: () => ({ label: "Visa ••4242", kind: "CARD" }),
+}));
+
+// startPlanBilling itself is covered by subscription.test.ts; here we only
+// prove the setup-intent webhook starts the RIGHT plans (ACTIVE-not-billing).
+const startPlanBilling = vi.fn(
+  async (_s: unknown, _id: string) => ({ started: true })
+);
+vi.mock("../shared/subscription", async (orig) => ({
+  ...(await orig<typeof import("../shared/subscription")>()),
+  startPlanBilling: (s: unknown, id: string) => startPlanBilling(s, id),
 }));
 
 const sendEmail = vi.fn(async (_opts?: unknown) => true);
@@ -214,6 +239,44 @@ beforeEach(() => {
   customerEmail = "dana@example.com";
   sendEmail.mockClear();
   notifyOffice.mockClear();
+  startPlanBilling.mockClear();
+});
+
+describe("setup_intent.succeeded starts ACTIVE-not-billing plans", () => {
+  const setupIntent = {
+    metadata: { crmCustomerId: "c1" },
+    payment_method: "pm_1",
+    customer: "cus_1",
+  };
+
+  it("starts a plan with no subscription, and leaves an already-billing one alone", async () => {
+    seedPlan({ id: "p_new", customerId: "c1", stripeSubscriptionId: undefined });
+    seedPlan({ id: "p_billing", customerId: "c1", stripeSubscriptionId: "sub_x" });
+
+    const res = await invoke("setup_intent.succeeded", setupIntent);
+
+    expect(res.statusCode).toBe(200);
+    expect(startPlanBilling).toHaveBeenCalledTimes(1);
+    expect(startPlanBilling).toHaveBeenCalledWith(expect.anything(), "p_new");
+  });
+
+  it("does not start another customer's plan", async () => {
+    seedPlan({ id: "p_mine", customerId: "c1", stripeSubscriptionId: undefined });
+    seedPlan({ id: "p_theirs", customerId: "c2", stripeSubscriptionId: undefined });
+
+    await invoke("setup_intent.succeeded", setupIntent);
+
+    expect(startPlanBilling).toHaveBeenCalledTimes(1);
+    expect(startPlanBilling).toHaveBeenCalledWith(expect.anything(), "p_mine");
+  });
+
+  it("starts nothing when the customer has no not-yet-billing plan", async () => {
+    seedPlan({ id: "p_billing", customerId: "c1", stripeSubscriptionId: "sub_x" });
+
+    await invoke("setup_intent.succeeded", setupIntent);
+
+    expect(startPlanBilling).not.toHaveBeenCalled();
+  });
 });
 
 describe("customer.subscription.deleted", () => {

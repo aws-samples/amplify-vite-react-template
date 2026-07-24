@@ -31,6 +31,7 @@ import { openOwnedWork } from "../shared/ownedWork";
 import { casGuardedUpdate } from "../shared/atomicLock";
 import {
   cancelQueuedPlanVisits,
+  startPlanBilling,
   type QueuedVisitsResolution,
 } from "../shared/subscription";
 
@@ -210,6 +211,44 @@ async function onSetupIntentSucceeded(intent: Stripe.SetupIntent) {
     paymentMethodLabel: label,
     paymentMethodKind: kind,
   });
+
+  // Now that a card/bank is on file, start billing on any ACTIVE-not-billing
+  // plan this customer holds — the migrated book and office-converted leads
+  // sit ACTIVE with no subscription until exactly this moment. Best-effort per
+  // plan: a failure is logged and the plan can still be started by hand from
+  // the customer page. startPlanBilling is idempotent (a plan already billing
+  // is a no-op) and anchors migrated plans to their stored bill day.
+  let nextToken: string | null | undefined;
+  const toStart: string[] = [];
+  do {
+    const page = await client.models.ServicePlan.list({
+      filter: {
+        customerId: { eq: crmCustomerId },
+        status: { eq: "ACTIVE" },
+      },
+      limit: 200,
+      nextToken,
+    });
+    for (const plan of page.data) {
+      if (!plan.stripeSubscriptionId) toStart.push(plan.id);
+    }
+    nextToken = page.nextToken;
+  } while (nextToken);
+  for (const planId of toStart) {
+    try {
+      const outcome = await startPlanBilling(stripe, planId);
+      if (!outcome.started) {
+        console.error(
+          "onSetupIntentSucceeded: could not start billing",
+          planId,
+          outcome.reason,
+          outcome.message
+        );
+      }
+    } catch (err) {
+      console.error("onSetupIntentSucceeded: start-billing threw", planId, err);
+    }
+  }
 }
 
 /** One-time job charges: settle the Invoice created by chargeOneTimeJob. */

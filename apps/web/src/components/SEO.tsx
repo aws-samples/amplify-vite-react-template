@@ -52,7 +52,14 @@ export default function SEO({
 }: SEOProps) {
   const { pathname } = useLocation();
   const fullTitle = title ? `${title} | ${SITE_NAME}` : DEFAULT_TITLE;
-  const canonicalUrl = `${SITE_URL}${pathname === "/" ? "" : pathname}`;
+  // Service pages are reachable at both /services/* and /residential/* (same
+  // component). Point the canonical at the /services/* version so Google
+  // indexes one URL instead of treating them as duplicates. The /residential
+  // landing page itself (exact) is a distinct page and is left untouched.
+  const canonicalPath = pathname.startsWith("/residential/")
+    ? pathname.replace("/residential/", "/services/")
+    : pathname;
+  const canonicalUrl = `${SITE_URL}${canonicalPath === "/" ? "" : canonicalPath}`;
   const fullImage = image.startsWith("http") ? image : `${SITE_URL}${image}`;
 
   useEffect(() => {
