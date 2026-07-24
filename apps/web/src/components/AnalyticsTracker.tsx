@@ -15,7 +15,10 @@ export default function AnalyticsTracker() {
   const { pathname, search } = useLocation();
 
   useEffect(() => {
-    const path = pathname + search;
+    // Report the homepage to GA as "/home" (its real URL stays "/") so it
+    // reads like every other page (/quote, /residential, ...) in path reports.
+    // page_location still carries the true "/" URL, so SEO/ads are unaffected.
+    const path = (pathname === "/" ? "/home" : pathname) + search;
     let fired = false;
     const fire = () => {
       if (fired) return;
