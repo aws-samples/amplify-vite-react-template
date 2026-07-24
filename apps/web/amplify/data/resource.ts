@@ -321,6 +321,12 @@ export const schema = a.schema({
       contactPhone: a.phone(),
       notes: a.string(),
       accessGroups: a.string().array(),
+      // The management-company portal login (grp-only), when one has been
+      // provisioned. A group is granted a single login keyed to contactEmail
+      // that sees every property in the portfolio but is bound to no one
+      // Customer — see grantGroupPortal / adminCreateUser(groupId).
+      portalUserSub: a.string(),
+      portalInvitedAt: a.datetime(),
       customers: a.hasMany("Customer", "groupId"),
     })
     // GL-13: a CustomerGroup carries organization-wide contacts and notes for a
@@ -2490,6 +2496,12 @@ export const schema = a.schema({
       name: a.string().required(),
       roles: a.string().required().array().required(),
       customerId: a.string(),
+      // A management-company (group-only) portal login: CUSTOMER role bound to
+      // this group instead of one customer. Mutually exclusive with customerId.
+      groupId: a.string(),
+      // Explicit acknowledgement that the email already signs in — proceed and
+      // reuse that login rather than erroring on the collision guard.
+      confirmReuse: a.boolean(),
       technicianId: a.string(),
       resend: a.boolean(),
     })
