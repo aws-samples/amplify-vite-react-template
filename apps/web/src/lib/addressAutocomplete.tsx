@@ -103,6 +103,10 @@ export function AddressAutocompleteInput({
   const [highlight, setHighlight] = useState(-1);
   const [sessionToken, setSessionToken] = useState(() => crypto.randomUUID());
   const skipNextLookup = useRef(false);
+  // Suggestions fire only after the user actually types. Without this, a
+  // prefilled address (a staff-assisted / lead-link quote) longer than the
+  // 3-char trigger pops the dropdown on its own when the form loads.
+  const userTyped = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const enabled = useMemo(() => Boolean(API_KEY), []);
@@ -113,6 +117,8 @@ export function AddressAutocompleteInput({
       skipNextLookup.current = false;
       return;
     }
+    // A prefilled value is not a search — wait for real typing.
+    if (!userTyped.current) return;
     const query = value.trim();
     if (query.length < 3) {
       setSuggestions([]);
@@ -168,7 +174,10 @@ export function AddressAutocompleteInput({
         role="combobox"
         aria-expanded={open}
         aria-autocomplete="list"
-        onChange={(e) => onChangeText(e.target.value)}
+        onChange={(e) => {
+          userTyped.current = true;
+          onChangeText(e.target.value);
+        }}
         onBlur={(e) => {
           inputProps.onBlur?.(e);
           // Delay so a mousedown on a suggestion can win the race.
