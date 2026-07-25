@@ -3,6 +3,7 @@ import { casGuardedAdd, casGuardedUpdate , type LockCondition } from "./atomicLo
 import { onsiteMinutesFor } from "./dispatchReadiness";
 import { driveMinutesBetween, HQ_ADDRESS } from "./driveTime";
 import { licenseFactsFromRecords, licenseRecordsFor } from "./licenses";
+import { openOwnedWork } from "./ownedWork";
 
 /**
  * GL-04 — the ONE capacity rule: PER-TECHNICIAN, PER-DAY minute feasibility,
@@ -476,6 +477,20 @@ export async function reserveSlot(
     ).catch(() => undefined);
   }
   if (res.reason === "UNSUPPORTED") return UNAVAILABLE;
+  // A day the nightly rebuild could not measure is pinned at the full window on
+  // purpose (fail closed) — so it refuses with the SAME shape as a genuinely
+  // full day. Saying "fully booked" there is a lie that sends the office
+  // hunting for space on a day that may be nearly empty; the real fix is one
+  // unroutable address. Read the row only on this refusal path and say so.
+  const slot = (await slotStates(date)).get(slotId(date, technicianId));
+  if (slot && !slot.verified) {
+    return {
+      ok: false,
+      soldOut: false,
+      message:
+        "That technician's day can't be routed — one of its stops has an address we can't find, so the day is held until it's fixed. See the exceptions queue, or pick another day.",
+    };
+  }
   return {
     ok: false,
     soldOut: true,
@@ -1014,7 +1029,13 @@ export async function stopsBySlotOn(
 // Tour-based day accounting — travel measured ONCE per day, not per stop
 // ---------------------------------------------------------------------------
 
-export type TourStop = { address: string | null; onsite: number };
+export type TourStop = {
+  address: string | null;
+  onsite: number;
+  /** Optional label (the customer's name) so an unroutable stop can be NAMED
+   *  in the exception the office has to act on, not just located. */
+  label?: string | null;
+};
 
 /**
  * The day's committed minutes split into its two real components:
@@ -1032,21 +1053,52 @@ export async function closedTourMinutes(
   base: string | null,
   stops: TourStop[],
   legMinutes: (from: string, to: string) => Promise<number | null>
-): Promise<{ travel: number; treatment: number; verified: boolean }> {
+): Promise<{
+  travel: number;
+  treatment: number;
+  verified: boolean;
+  /** When unverified: the stop that broke the tour, so the office is told WHICH
+   *  address to fix instead of just "that day is now fully booked". Absent when
+   *  the base itself is the missing fact. */
+  blockedBy?: { address: string | null; label?: string | null };
+}> {
   const treatment = stops.reduce((sum, s) => sum + s.onsite, 0);
   if (stops.length === 0) return { travel: 0, treatment, verified: true };
   if (!base) return { travel: 0, treatment, verified: false };
   let travel = 0;
   let prev = base;
   for (const stop of stops) {
-    if (!stop.address) return { travel: 0, treatment, verified: false };
+    // A stop with no address, or one Routes cannot resolve, is the reason the
+    // whole day becomes unsellable — name it.
+    if (!stop.address) {
+      return {
+        travel: 0,
+        treatment,
+        verified: false,
+        blockedBy: { address: null, label: stop.label ?? null },
+      };
+    }
     const leg = await legMinutes(prev, stop.address);
-    if (leg == null) return { travel: 0, treatment, verified: false };
+    if (leg == null) {
+      return {
+        travel: 0,
+        treatment,
+        verified: false,
+        blockedBy: { address: stop.address, label: stop.label ?? null },
+      };
+    }
     travel += leg;
     prev = stop.address;
   }
   const home = await legMinutes(prev, base);
-  if (home == null) return { travel: 0, treatment, verified: false };
+  if (home == null) {
+    return {
+      travel: 0,
+      treatment,
+      verified: false,
+      blockedBy: { address: prev, label: stops[stops.length - 1]?.label ?? null },
+    };
+  }
   travel += home;
   return { travel, treatment, verified: true };
 }
@@ -1203,6 +1255,10 @@ export async function reconcileCapacityDay(
     routeOrder: number;
     address: string | null;
     onsite: number;
+    /** Carried so an unroutable stop can be named (and linked) in the exception
+     *  the office has to act on. */
+    label: string | null;
+    customerId: string;
   };
   const jobsBySlot = new Map<string, StopJob[]>();
   const assignedStopsByTech = new Map<string, number>();
@@ -1253,6 +1309,8 @@ export async function reconcileCapacityDay(
         routeOrder: job.routeOrder ?? 999,
         address,
         onsite: onsiteMinutes(job.propertyClass),
+        label: customer?.displayName ?? null,
+        customerId: job.customerId,
       });
       jobsBySlot.set(key, list);
       // GL-07: ground truth for the assigned-stop day ledger — a stop is
@@ -1309,6 +1367,28 @@ export async function reconcileCapacityDay(
       travelMinutes = tour.travel;
       treatmentMinutes = tour.treatment;
       verified = tour.verified;
+      // An unmeasurable day is pinned to the full window below, so from the
+      // office's side it is indistinguishable from a full one — it just stops
+      // taking bookings. Name the stop that broke it, or the silence costs a
+      // technician's entire day of capacity until someone goes looking.
+      if (!verified && tour.blockedBy && stops.length > 0) {
+        const who = tour.blockedBy.label ?? "A stop";
+        const where = tour.blockedBy.address ?? "(no address on file)";
+        await openOwnedWork({
+          kind: "ADDRESS_UNROUTABLE",
+          // One case per technician-day: the office fixes the address once, and
+          // a retry of the same broken day re-announces rather than piling up.
+          dedupeKey: `unroutable:${date}:${techId}`,
+          title: `Can't route ${who} — ${date} is held`,
+          detail: `${who} (${where}) could not be resolved by Google Routes, so this technician's whole day for ${date} cannot be measured. The day is held at full capacity and will refuse new stops until the address is corrected — it is NOT actually full. Fix the service address on the customer, then the nightly rebuild (or the next scheduling change) frees the day.`,
+          customerId: stops.find((s) => s.label === tour.blockedBy?.label)?.customerId,
+          relatedId: `${date}#${techId}`,
+          sourceUrl: `/schedule`,
+          resolutionAction:
+            "Correct the customer's service address so it resolves in Google Maps, or mark the property outside the service area.",
+          ownerTeam: "OPS",
+        }).catch(() => undefined);
+      }
     }
     const minutes = travelMinutes + treatmentMinutes + claimMinutes;
     await ensureSlot(date, techId);

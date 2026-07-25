@@ -258,6 +258,10 @@ export const schema = a.schema({
     "SCOPE_MISMATCH",
     "PREP_MISSING",
     "DISPATCH_NOT_READY",
+    // GL-04: a stop's service address can't be resolved by Routes, so its
+    // technician's whole day is unmeasurable and (failing closed) stops selling
+    // capacity — it reads as "fully booked" while nearly empty.
+    "ADDRESS_UNROUTABLE",
     "OBLIGATION_RECOVERY",
     // GL-16: a combo exhausted its AI-research attempts and is parked.
     "PRICING_RESEARCH_EXHAUSTED",

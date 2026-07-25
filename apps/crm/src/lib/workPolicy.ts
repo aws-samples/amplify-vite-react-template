@@ -174,6 +174,18 @@ export const WORK_POLICY: Record<string, CrmWorkPolicy> = {
       OTHER,
     ],
   },
+  ADDRESS_UNROUTABLE: {
+    label: "Address can't be routed",
+    severity: "HIGH",
+    customerImpact:
+      "A service address can't be found, so its technician's whole day can't be routed and stops can't be booked onto it.",
+    verified: [],
+    manualReasons: [
+      { code: "ADDRESS_CORRECTED", label: "Address corrected" },
+      { code: "OUTSIDE_SERVICE_AREA", label: "Outside the service area" },
+      OTHER,
+    ],
+  },
   LOCATION_REVIEW: {
     label: "Location review",
     severity: "ROUTINE",

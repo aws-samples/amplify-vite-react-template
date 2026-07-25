@@ -46,6 +46,7 @@ export type WorkKind =
   | "SCOPE_MISMATCH"
   | "PREP_MISSING"
   | "DISPATCH_NOT_READY"
+  | "ADDRESS_UNROUTABLE"
   | "OBLIGATION_RECOVERY"
   | "PRICING_RESEARCH_EXHAUSTED"
   | "PRICING_CHANGE_REVIEW"
@@ -276,6 +277,23 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
       { code: "INTENT_CANCELED", label: "Canceled the intent in Stripe" },
       { code: "REFUNDED", label: "Refunded the customer" },
       { code: "RECONCILED", label: "Reconciled the booking to the intent" },
+      OTHER,
+    ],
+  },
+  ADDRESS_UNROUTABLE: {
+    // A stop whose address Google Routes cannot resolve makes its technician's
+    // WHOLE day unmeasurable, and an unmeasurable day fails closed — it holds
+    // the full window and sells nothing. Left silent, the office only ever sees
+    // "that day is now fully booked" on a day that is nearly empty, so this is
+    // graded on the revenue it quietly blocks, not on the one bad record.
+    severity: "HIGH",
+    customerImpact:
+      "A service address can't be found, so its technician's whole day can't be routed and stops can't be booked onto it.",
+    ownerTeam: "OPS",
+    verified: [],
+    manualReasons: [
+      { code: "ADDRESS_CORRECTED", label: "Address corrected" },
+      { code: "OUTSIDE_SERVICE_AREA", label: "Outside the service area" },
       OTHER,
     ],
   },
