@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode, ButtonHTMLAttributes } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -65,6 +65,54 @@ export function Card({
         </div>
       ) : null}
       {children}
+    </section>
+  );
+}
+
+/**
+ * A Card whose body collapses behind a header toggle. Long lists (plans,
+ * service history, invoices) start closed so a portfolio login — a management
+ * company with dozens of properties — lands on a page it can actually scan,
+ * and opens only what it wants.
+ *
+ * `count` rides in the header so the section is still informative while closed;
+ * `summary` is the one-line hint shown in place of the body.
+ */
+export function CollapsibleCard({
+  title,
+  count,
+  summary,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  count?: number;
+  summary?: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className="card">
+      <button
+        type="button"
+        className="card-collapse-toggle row-split"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <strong>
+          {title}
+          {typeof count === "number" ? ` (${count})` : ""}
+        </strong>
+        <span aria-hidden="true">{open ? "▲" : "▼"}</span>
+      </button>
+      {open ? (
+        children
+      ) : summary ? (
+        <p className="muted small" style={{ margin: "8px 0 0" }}>
+          {summary}
+        </p>
+      ) : null}
     </section>
   );
 }

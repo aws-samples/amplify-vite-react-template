@@ -15,6 +15,7 @@ import {
   Badge,
   Button,
   Card,
+  CollapsibleCard,
   ErrorNote,
   ListRow,
   Page,
@@ -127,33 +128,67 @@ export default function PortalBilling() {
       <SuccessNote message={notice} />
       {customers.map((c) => {
         const summary = pm[c.id];
+        // Until the summary actually arrives we know NOTHING about this
+        // property's payment method — so show nothing. Rendering the tile
+        // early flashed a false "needed" badge (and an "Add payment method"
+        // button) at a property that already had a card on file.
+        const checking = summary === undefined;
         return (
           <Card
             key={c.id}
             title={customers.length > 1 ? `Payment method — ${c.displayName}` : "Payment method"}
             actions={
-              summary?.hasPaymentMethod ? (
+              checking ? null : summary.hasPaymentMethod ? (
                 <Badge tone="ok">on file</Badge>
               ) : (
                 <Badge tone="warn">needed</Badge>
               )
             }
           >
-            <p style={{ marginBottom: 10 }}>
-              {summary === undefined
-                ? "Checking…"
-                : summary?.hasPaymentMethod
+            {/* Only the FACTS wait on the lookup — the action stays available.
+                A failed summary query never resolves, so gating the button on
+                it would leave a property unable to add a payment method. */}
+            {checking ? (
+              <p className="muted small" style={{ marginBottom: 10 }}>
+                Checking…
+              </p>
+            ) : (
+              <p style={{ marginBottom: 10 }}>
+                {summary.hasPaymentMethod
                   ? summary.label
                   : "Add a card or bank account so service can be billed."}
-            </p>
+              </p>
+            )}
             <Button small variant="subtle" onClick={() => setCollectFor(c.id)}>
-              {summary?.hasPaymentMethod ? "Update payment method" : "Add payment method"}
+              {checking
+                ? "Add or update payment method"
+                : summary.hasPaymentMethod
+                  ? "Update payment method"
+                  : "Add payment method"}
             </Button>
           </Card>
         );
       })}
 
-      <Card title="Invoices">
+      <CollapsibleCard
+        title="Invoices"
+        count={invoices.length}
+        // A collapsed card still has to surface money owed, or a portfolio
+        // login could close the page without noticing an overdue balance.
+        summary={
+          invoices.length === 0
+            ? "No invoices yet."
+            : (() => {
+                const open = invoices.filter(
+                  (i) => i.status === "OPEN" || i.status === "FAILED"
+                );
+                const due = open.reduce((sum, i) => sum + (i.amountCents ?? 0), 0);
+                return open.length === 0
+                  ? "All paid. Open to review."
+                  : `${open.length} awaiting payment · ${money(due)} due. Open to pay.`;
+              })()
+        }
+      >
         {invoices.length === 0 ? (
           <p className="muted small">No invoices yet.</p>
         ) : (
@@ -248,7 +283,7 @@ export default function PortalBilling() {
             email a receipt.
           </p>
         ) : null}
-      </Card>
+      </CollapsibleCard>
 
       {collectFor ? (
         <CollectPaymentSheet

@@ -8,6 +8,7 @@ import {
   Badge,
   Button,
   Card,
+  CollapsibleCard,
   EmptyState,
   ErrorNote,
   ListRow,
@@ -78,10 +79,14 @@ export default function PortalHome() {
     .filter((j) => j.status === "COMPLETED")
     .sort((a, b) => (b.scheduledDate ?? "").localeCompare(a.scheduledDate ?? ""));
   const activePlans = plans.filter((p) => p.status === "ACTIVE");
-  const nameFor = (j: Job) =>
+  // A management-company login sees several properties in one list, so every
+  // row has to say which property it belongs to. A single-property login has no
+  // ambiguity, so the label is omitted there.
+  const nameOf = (customerId?: string | null) =>
     customers.length > 1
-      ? customers.find((c) => c.id === j.customerId)?.displayName
+      ? (customers.find((c) => c.id === customerId)?.displayName ?? null)
       : null;
+  const nameFor = (j: Job) => nameOf(j.customerId);
 
   return (
     <Page title="My services">
@@ -97,11 +102,17 @@ export default function PortalHome() {
             + Add a service
           </Button>
           {activePlans.length > 0 ? (
-            <Card title="My plan">
-              {activePlans.map((p) => (
+            <CollapsibleCard
+              title={activePlans.length === 1 ? "My plan" : "My plans"}
+              count={activePlans.length}
+              summary="Your active service plans. Open to review or cancel."
+            >
+              {activePlans.map((p) => {
+                const propertyName = nameOf(p.customerId);
+                return (
                 <ListRow
                   key={p.id}
-                  title={p.planName}
+                  title={propertyName ? `${propertyName} — ${p.planName}` : p.planName}
                   subtitle={
                     <>
                       {planCadence(p.priceCents, p.serviceFrequency, p.seasonal)}
@@ -133,8 +144,9 @@ export default function PortalHome() {
                     </>
                   }
                 />
-              ))}
-            </Card>
+                );
+              })}
+            </CollapsibleCard>
           ) : null}
 
           <Card title="Upcoming visits">
@@ -152,20 +164,24 @@ export default function PortalHome() {
             )}
           </Card>
 
-          <Card title="Service history">
-            {past.length === 0 ? (
-              <p className="muted small">No completed services yet.</p>
-            ) : (
-              past.slice(0, 10).map((j) => (
-                <ListRow
-                  key={j.id}
-                  title={j.serviceType}
-                  subtitle={nameFor(j) ?? undefined}
-                  meta={<span>{fmtDate(j.scheduledDate, true)}</span>}
-                />
-              ))
-            )}
-          </Card>
+          <CollapsibleCard
+            title="Service history"
+            count={past.length}
+            summary={
+              past.length === 0
+                ? "No completed services yet."
+                : "Your completed visits. Open to review."
+            }
+          >
+            {past.slice(0, 10).map((j) => (
+              <ListRow
+                key={j.id}
+                title={j.serviceType}
+                subtitle={nameFor(j) ?? undefined}
+                meta={<span>{fmtDate(j.scheduledDate, true)}</span>}
+              />
+            ))}
+          </CollapsibleCard>
         </>
       )}
 
