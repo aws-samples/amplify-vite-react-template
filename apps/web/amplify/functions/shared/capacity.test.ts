@@ -843,6 +843,83 @@ describe("closedTourMinutes — travel is ONE tour, not a round trip per stop", 
     const res = await closedTourMinutes(null, [clusterStop(1, 30)], leg);
     expect(res.verified).toBe(false);
   });
+
+  it("NAMES the stop that broke the tour, so the office is told what to fix", async () => {
+    // The middle stop cannot be resolved by Routes. Reporting only
+    // "unverified" would surface to staff as a bare "that day is fully booked"
+    // on a day that is nearly empty — the whole point is to say WHICH address.
+    const legs = async (_from: string, to: string) =>
+      to.includes("Bad") ? null : 10;
+    const res = await closedTourMinutes(
+      BASE,
+      [
+        { address: "1 Good St", onsite: 30, label: "Fine Property" },
+        { address: "2 Bad St", onsite: 30, label: "Broken Property" },
+      ],
+      legs
+    );
+    expect(res.verified).toBe(false);
+    expect(res.blockedBy).toEqual({
+      address: "2 Bad St",
+      label: "Broken Property",
+    });
+  });
+
+  it("names a stop that has NO address at all", async () => {
+    const res = await closedTourMinutes(
+      BASE,
+      [{ address: null, onsite: 30, label: "No Address Property" }],
+      leg
+    );
+    expect(res.verified).toBe(false);
+    expect(res.blockedBy).toEqual({
+      address: null,
+      label: "No Address Property",
+    });
+  });
+});
+
+describe("reserveSlot — an unroutable day is not a full day", () => {
+  it("refuses an UNVERIFIED day with the real reason, not 'fully booked'", async () => {
+    // The nightly rebuild pins an unmeasurable day at the full window (fail
+    // closed), so it refuses exactly like a sold-out day. Staff must be told
+    // the difference: one is genuinely booked, the other is one bad address.
+    capacityDays.set(slotId(WED, "t1"), {
+      id: slotId(WED, "t1"),
+      date: WED,
+      technicianId: "t1",
+      committedMinutes: DAY_MINUTES,
+      verified: false,
+    });
+
+    const res = await reserveSlot(WED, "t1", 30);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.message).toMatch(/can't be routed/i);
+      expect(res.message).not.toMatch(/fully booked/i);
+      // Not "sold out" — there is capacity, it is being withheld.
+      expect(res.soldOut).toBe(false);
+    }
+  });
+
+  it("still says 'fully booked' when the day is genuinely full", async () => {
+    capacityDays.set(slotId(WED, "t1"), {
+      id: slotId(WED, "t1"),
+      date: WED,
+      technicianId: "t1",
+      committedMinutes: DAY_MINUTES,
+      verified: true,
+    });
+
+    const res = await reserveSlot(WED, "t1", 30);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.message).toMatch(/fully booked/i);
+      expect(res.soldOut).toBe(true);
+    }
+  });
 });
 
 describe("recomputeSlotMinutes — a mutation rebuilds the day to its real tour", () => {

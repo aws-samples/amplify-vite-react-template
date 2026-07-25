@@ -62,6 +62,10 @@ export const WORK_SLA_MINUTES: Record<WorkKind, number> = {
   // GL-13: an office member used emergency field access with a reason —
   // reviewed on the routine clock.
   OFFICE_FIELD_REVIEW: 24 * 60,
+  // GL-04: a stop's address can't be routed, so its technician's whole day is
+  // unmeasurable and sells nothing. Every hour it stands is booking capacity
+  // silently withheld — a prompt clock, not a routine one.
+  ADDRESS_UNROUTABLE: 60,
   // GL-17: a licence is expiring or expired — advance renewal/reassignment
   // work so customers move before a doorstep failure.
   LICENSE_LAPSE: 24 * 60,
