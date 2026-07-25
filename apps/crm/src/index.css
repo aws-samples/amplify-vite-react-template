@@ -1303,7 +1303,8 @@ a.customer-profile-value {
 .tech-day-detail-head { align-items: center; margin-bottom: 4px; }
 .tech-day-detail-head > strong { font-size: 14px; }
 
-.sched-capacity-toggle {
+.sched-capacity-toggle,
+.card-collapse-toggle {
   appearance: none;
   width: 100%;
   background: none;
@@ -1312,6 +1313,13 @@ a.customer-profile-value {
   cursor: pointer;
   color: var(--ink);
   align-items: center;
+}
+
+/* A collapsed card's header reads as the card's title. */
+.card-collapse-toggle strong {
+  font-size: 15.5px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
 }
 
 /* ---------- Schedule availability ---------- */

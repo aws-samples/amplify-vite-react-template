@@ -540,14 +540,35 @@ export default function CustomerDetail() {
       {roles.office && !isLead ? (
         <Card
           title="Payment method"
-          actions={<Badge tone={pm?.hasPaymentMethod ? "ok" : "warn"}>{pm?.hasPaymentMethod ? "on file" : "missing"}</Badge>}
+          // While the summary is still loading we know nothing — showing the
+          // badge early flashed "missing" at customers who do have a card.
+          actions={
+            pm === null ? null : (
+              <Badge tone={pm.hasPaymentMethod ? "ok" : "warn"}>
+                {pm.hasPaymentMethod ? "on file" : "missing"}
+              </Badge>
+            )
+          }
         >
-          <p style={{ marginBottom: 10 }}>
-            {pm === null ? "Checking…" : pm.hasPaymentMethod ? pm.label : "No payment method saved — collect before the first treatment."}
-          </p>
+          {/* Only the FACTS wait on the lookup — the actions stay available.
+              A failed summary query leaves pm null forever, so gating the
+              buttons on it would strip staff of "Collect now" entirely. */}
+          {pm === null ? (
+            <p className="muted small" style={{ marginBottom: 10 }}>
+              Checking…
+            </p>
+          ) : (
+            <p style={{ marginBottom: 10 }}>
+              {pm.hasPaymentMethod ? pm.label : "No payment method saved — collect before the first treatment."}
+            </p>
+          )}
           <div className="row-split">
             <Button small variant="subtle" onClick={() => setSheet("collect")}>
-              {pm?.hasPaymentMethod ? "Update card / bank" : "Collect now"}
+              {pm === null
+                ? "Collect / update"
+                : pm.hasPaymentMethod
+                  ? "Update card / bank"
+                  : "Collect now"}
             </Button>
             <Button
               small
