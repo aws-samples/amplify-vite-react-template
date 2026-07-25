@@ -77,6 +77,7 @@ import {
   reasonPolicy,
 } from "../shared/lifecycleReasons";
 import { stripeClient } from "../shared/stripeClient";
+import { streetLooksLikeItHidesAUnit } from "../shared/serviceAddress";
 import {
   recordStaffAccessEvent,
   type StaffAccessActor,
@@ -183,6 +184,7 @@ type UpdateCustomerContactArgs = {
   email?: string | null;
   phone?: string | null;
   serviceStreet?: string | null;
+  serviceUnit?: string | null;
   serviceCity?: string | null;
   serviceState?: string | null;
   serviceZip?: string | null;
@@ -338,6 +340,14 @@ export const handler = async (event: AppSyncResolverEvent<AdminArgs>) => {
         args.reasonCode ?? null
       );
     }
+    // OPS report, invoked DIRECTLY (no AppSync operation is spent — the stack
+    // is at its 500-resource ceiling). Read-only: it lists customers whose
+    // street line looks like it hides a unit or a second address, so a human
+    // can move the unit into serviceUnit. It NEVER rewrites an address —
+    // "Unit 3 Rd" is a real street somewhere, and a silent edit to a service
+    // address is how a technician is sent to the wrong building.
+    case "reportSuspectAddresses":
+      return await reportSuspectAddresses();
     case "updateCustomerContact":
       return updateCustomerContact(event.arguments as UpdateCustomerContactArgs);
     // GL-02 lead lifecycle. The actor is read from the token, never the request,
@@ -1596,6 +1606,7 @@ async function updateCustomerContact(args: UpdateCustomerContactArgs) {
     email,
     phone: trim(args.phone),
     serviceStreet: trim(args.serviceStreet),
+    serviceUnit: trim(args.serviceUnit),
     serviceCity: trim(args.serviceCity),
     serviceState: trim(args.serviceState),
     serviceZip: trim(args.serviceZip),
@@ -3244,4 +3255,43 @@ async function liftEmailSuppression(
     lifted: true,
     message: `${email} can receive email again. Now re-send the missed message so its case can close.`,
   };
+}
+
+
+/**
+ * GL-04 — customers whose street line looks like it also carries a unit (or a
+ * whole second address). Report only: an unroutable service address makes its
+ * technician's entire day unmeasurable and silently unbookable, so these are
+ * worth fixing before they surface one ADDRESS_UNROUTABLE case at a time.
+ */
+async function reportSuspectAddresses() {
+  const client = await dataClient();
+  const suspects: {
+    customerId: string;
+    displayName: string | null;
+    serviceStreet: string | null;
+    serviceUnit: string | null;
+    city: string | null;
+  }[] = [];
+  let scanned = 0;
+  let token: string | null | undefined;
+  do {
+    const page = await client.models.Customer.list({
+      limit: 500,
+      nextToken: token,
+    });
+    for (const c of page.data ?? []) {
+      scanned++;
+      if (!streetLooksLikeItHidesAUnit(c.serviceStreet)) continue;
+      suspects.push({
+        customerId: c.id,
+        displayName: c.displayName ?? null,
+        serviceStreet: c.serviceStreet ?? null,
+        serviceUnit: (c as { serviceUnit?: string | null }).serviceUnit ?? null,
+        city: c.serviceCity ?? null,
+      });
+    }
+    token = page.nextToken;
+  } while (token);
+  return { scanned, suspectCount: suspects.length, suspects };
 }

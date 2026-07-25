@@ -1788,6 +1788,7 @@ export default function CustomerDetail() {
                 email: v.email.trim() || null,
                 phone: v.phone.trim() || null,
                 serviceStreet: v.serviceStreet.trim() || null,
+                serviceUnit: v.serviceUnit.trim() || null,
                 serviceCity: v.serviceCity.trim() || null,
                 serviceState: v.serviceState.trim() || null,
                 serviceZip: v.serviceZip.trim() || null,

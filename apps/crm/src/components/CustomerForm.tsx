@@ -9,6 +9,7 @@ export type CustomerFormValues = {
   email: string;
   phone: string;
   serviceStreet: string;
+  serviceUnit: string;
   serviceCity: string;
   serviceState: string;
   serviceZip: string;
@@ -27,6 +28,7 @@ export function customerToForm(c?: Customer | null): CustomerFormValues {
     email: c?.email ?? "",
     phone: c?.phone ?? "",
     serviceStreet: c?.serviceStreet ?? "",
+    serviceUnit: c?.serviceUnit ?? "",
     serviceCity: c?.serviceCity ?? "",
     serviceState: c?.serviceState ?? "MA",
     serviceZip: c?.serviceZip ?? "",
@@ -119,6 +121,18 @@ export default function CustomerForm({
               serviceZip: a.zip || v.serviceZip,
             }))
           }
+        />
+      </Field>
+      {/* Its own field on purpose: a unit is not geocodable, so typing it into
+          the street line ("290 Eliot St, Unit 289") makes the address
+          unresolvable to Google Routes — which silently makes the technician's
+          whole day unbookable. Routing uses street/city/state/zip only. */}
+      <Field label="Unit / apt / suite (optional)" hint="Kept out of routing — the technician still sees it.">
+        <input
+          value={values.serviceUnit}
+          autoComplete="address-line2"
+          onChange={set("serviceUnit")}
+          placeholder="289"
         />
       </Field>
       <div className="form-row-3">

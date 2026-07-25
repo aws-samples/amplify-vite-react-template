@@ -14,9 +14,8 @@ import { nextContactPhrase } from "../shared/businessHours";
 import { oneBusinessDayDeadline } from "../shared/businessDays";
 import { CALL_CONSENT_TEXT_VERSION } from "../shared/consentText";
 import {
-  driveMinutesBetween,
+  driveMinutesFromNearestBase,
   driveMinutesFromPoint,
-  HQ_ADDRESS,
 } from "../shared/driveTime";
 import {
   zoneFromMinutes,
@@ -32,6 +31,7 @@ import {
   easternEpochMs,
 } from "../shared/cancellationPolicy";
 import {
+  activeTechBases,
   claimDaySlot,
   jobScheduleGuards,
   releaseJobCapacity,
@@ -1386,10 +1386,18 @@ async function quote(
   // be priced — with the fixed Zone C travel add-on — instead of bouncing to a
   // callback. A public visitor never gets here for OUT.
   const officeQuote = Boolean(input.leadToken);
+  // Zone is measured from the CLOSEST technician's home base, not a fixed HQ.
+  // There is no company HQ: every technician starts and ends the day at their
+  // own home, so a customer is only genuinely out of area when they are far
+  // from every base. Measuring from one hard-coded point priced the travel
+  // adder off a location no truck departs from, and bounced addresses that a
+  // technician lives minutes away from. A null roster read means "unknown",
+  // which falls through to the callback path below — never a refusal.
+  const techBases = hasStoredZone || !routesKey ? null : await activeTechBases();
   const minutes = hasStoredZone
     ? (resumedBooking?.driveMinutes ?? null)
-    : routesKey
-      ? await driveMinutesBetween(routesKey, HQ_ADDRESS, address)
+    : routesKey && techBases
+      ? await driveMinutesFromNearestBase(routesKey, techBases, address)
       : null;
   const zone: Zone = hasStoredZone
     ? (storedZone as Zone)
@@ -1405,7 +1413,9 @@ async function quote(
       undefined,
       `Outside the standard service area: Google Routes put this address at ${
         minutes != null ? `~${minutes} min` : "over 90 min"
-      } from base, past our 90-minute limit (Zone A ≤50 min, Zone B ≤90 min). If you want to service it, open "Quote this lead" — a prefilled quote applies the Zone C far-travel add-on (${money(
+      } from the CLOSEST technician's home base${
+        techBases ? ` (${techBases.length} base${techBases.length === 1 ? "" : "s"} checked)` : ""
+      }, past our 90-minute limit (Zone A ≤50 min, Zone B ≤90 min). If you want to service it, open "Quote this lead" — a prefilled quote applies the Zone C far-travel add-on (${money(
         ZONE_C.ONE_TIME_FLAT
       )} one-time / ${money(
         ZONE_C.MONTHLY
@@ -1415,22 +1425,31 @@ async function quote(
   if (zone === "UNKNOWN") {
     // R59: no zone, no price. A Routes outage or an expired key used to
     // silently reprice the whole funnel as Zone B; route the lead to the
-    // callback path instead and tell the office why.
+    // callback path instead and tell the office why. Zone now also depends on
+    // the technician roster, so an unreadable roster or a roster with no base
+    // configured gets its OWN diagnosis — otherwise a misconfigured base would
+    // masquerade as a Routes outage and every quote would quietly become a
+    // callback with nobody knowing which knob to turn.
+    const cause = !routesKey
+      ? "the Routes API key isn't configured"
+      : !techBases
+        ? "no active technician has a home base configured (or the roster could not be read), so there is no origin to measure the service area from"
+        : "Routes API returned no route from any technician base — outage or an address that won't geocode";
     return contact(
       "We just need to double-check your address against our service area",
       "with your exact price",
       { zone },
-      `<p style="color:#b91c1c;"><strong>Drive-time zone lookup failed for this address</strong>${
-        routesKey
-          ? " (the Routes API returned no route — possible outage or a bad address)"
-          : " (GOOGLE_ROUTES_API_KEY is not configured)"
-      }. Zone pricing is unavailable, so this quote fell back to a callback. If this keeps happening, check the Google Routes API key.</p>`,
+      `<p style="color:#b91c1c;"><strong>Drive-time zone lookup failed for this address</strong> (${cause}). Zone pricing is unavailable, so this quote fell back to a callback. ${
+        routesKey && !techBases
+          ? "Set each active technician's base under Technicians in the CRM."
+          : "If this keeps happening, check the Google Routes API key."
+      }</p>`,
       undefined,
-      `Drive-time zone lookup failed (${
-        routesKey
-          ? "Routes API returned no route — outage or an address that won't geocode"
-          : "the Routes API key isn't configured"
-      }), so the funnel couldn't determine a price. Verify the address, then quote by hand or on the office board.`
+      `Drive-time zone lookup failed (${cause}), so the funnel couldn't determine a price. ${
+        routesKey && !techBases
+          ? "Fix this in Technicians — every active technician needs a home base; it is the origin the whole service area is measured from."
+          : "Verify the address, then quote by hand or on the office board."
+      }`
     );
   }
   // An office-issued OUT quote prices as Zone C (fixed far-travel add-on); the

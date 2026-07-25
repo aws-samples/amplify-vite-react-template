@@ -355,6 +355,13 @@ export const schema = a.schema({
       email: a.email(),
       phone: a.phone(),
       serviceStreet: a.string(),
+      // Address line 2 — unit / apt / suite. Its OWN field on purpose: a unit
+      // is not geocodable, so folding it into serviceStreet ("290 Eliot St,
+      // Unit 289") makes the address unresolvable to Google Routes, which makes
+      // the technician's whole day unmeasurable and silently unbookable (see
+      // ADDRESS_UNROUTABLE). Routing uses street/city/state/zip only; the unit
+      // rides along for humans — the technician still has to find the door.
+      serviceUnit: a.string(),
       serviceCity: a.string(),
       serviceState: a.string(),
       serviceZip: a.string(),
@@ -2698,6 +2705,7 @@ export const schema = a.schema({
       email: a.string(),
       phone: a.string(),
       serviceStreet: a.string(),
+      serviceUnit: a.string(),
       serviceCity: a.string(),
       serviceState: a.string(),
       serviceZip: a.string(),
@@ -2730,6 +2738,7 @@ export const schema = a.schema({
       email: a.string(),
       phone: a.string(),
       serviceStreet: a.string(),
+      serviceUnit: a.string(),
       serviceCity: a.string(),
       serviceState: a.string(),
       serviceZip: a.string(),

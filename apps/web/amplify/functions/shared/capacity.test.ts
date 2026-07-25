@@ -72,6 +72,7 @@ vi.mock("./driveTime", () => ({
 }));
 
 const {
+  activeTechBases,
   bestSlotFor,
   claimDaySlot,
   closedTourMinutes,
@@ -137,6 +138,66 @@ beforeEach(() => {
 });
 
 afterEach(() => _setLockStoreForTests(null));
+
+describe("activeTechBases — the origin set the service area is measured from", () => {
+  it("returns each active technician's configured home base", async () => {
+    technicians.set("t2", {
+      id: "t2",
+      name: "Rae",
+      active: true,
+      baseStreet: "9 Elm St",
+      baseCity: "Marlborough",
+      baseState: "MA",
+      baseZip: "01752",
+    });
+
+    expect(await activeTechBases()).toEqual([
+      "5 Base Rd, Ware, MA, 01082",
+      "9 Elm St, Marlborough, MA, 01752",
+    ]);
+  });
+
+  it("ignores inactive technicians — they dispatch from nowhere", async () => {
+    technicians.set("t2", {
+      id: "t2",
+      active: false,
+      baseStreet: "9 Elm St",
+      baseCity: "Marlborough",
+      baseState: "MA",
+      baseZip: "01752",
+    });
+
+    expect(await activeTechBases()).toEqual(["5 Base Rd, Ware, MA, 01082"]);
+  });
+
+  it("dedupes technicians who share a base — one origin, not two matrix rows", async () => {
+    technicians.set("t2", {
+      id: "t2",
+      active: true,
+      baseStreet: "5 Base Rd",
+      baseCity: "Ware",
+      baseState: "MA",
+      baseZip: "01082",
+    });
+
+    expect(await activeTechBases()).toEqual(["5 Base Rd, Ware, MA, 01082"]);
+  });
+
+  it("NEVER falls back to a company HQ: an unconfigured roster is null, not Ware", async () => {
+    // The business has no central base. Silently substituting one would price
+    // and judge out-of-area from an address no truck departs from — the exact
+    // defect this accessor exists to prevent.
+    technicians.set("t1", { id: "t1", name: "Sam", active: true });
+
+    expect(await activeTechBases()).toBeNull();
+  });
+
+  it("is null when the roster read fails — the caller must not read that as far away", async () => {
+    baseModels.Technician.list.mockRejectedValueOnce(new Error("dynamo down"));
+
+    expect(await activeTechBases()).toBeNull();
+  });
+});
 
 describe("locked durations + the per-day ledger", () => {
   it("on-site minutes come from PROPERTY CLASS only: residential 30, commercial/community 60", () => {

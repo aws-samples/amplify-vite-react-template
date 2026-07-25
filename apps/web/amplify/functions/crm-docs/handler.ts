@@ -42,7 +42,7 @@ import {
   buildTechnicianJob,
 } from "../shared/technicianReads";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
-import { drivingDistanceMetersFromPoint, HQ_ADDRESS } from "../shared/driveTime";
+import { drivingDistanceMetersFromPoint } from "../shared/driveTime";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
 import {
   nextVisitDate,

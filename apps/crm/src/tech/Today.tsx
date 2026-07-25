@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { routingAddress, shortDisplayAddress } from "../lib/serviceAddress";
 import { useNavigate } from "react-router-dom";
 import { technicianDay, type Job, type TechnicianDay } from "../lib/api";
 import { clearAllDrafts } from "../lib/reportDraft";
@@ -102,9 +103,15 @@ export default function TechToday() {
 
   const customers = day?.customers ?? {};
   const jobs = day?.jobs ?? null;
+  // NAVIGATION address — geocodable, so no unit (see lib/serviceAddress).
   const addressFor = (j: Job) => {
     const c = customers[j.customerId];
-    return [c?.serviceStreet, c?.serviceCity].filter(Boolean).join(", ");
+    return c ? routingAddress(c) : "";
+  };
+  // What the technician READS — includes the unit so they find the door.
+  const shownAddressFor = (j: Job) => {
+    const c = customers[j.customerId];
+    return c ? shortDisplayAddress(c) : "";
   };
   // The whole day's route, in stop order, for one-tap Google Maps navigation.
   const routeUrl = googleRouteUrl((jobs ?? []).map(addressFor));
@@ -164,7 +171,8 @@ export default function TechToday() {
           }
         >
           {jobs.map((j, i) => {
-            const addr = addressFor(j);
+            const addr = addressFor(j);      // geocodable, for the maps link
+            const shownAddr = shownAddressFor(j); // read by the technician
             return (
               <ListRow
                 key={j.id}
@@ -182,7 +190,7 @@ export default function TechToday() {
                           style={{ color: "var(--brand)" }}
                           onClick={(e) => e.stopPropagation()}
                         >
-                          {addr}
+                          {shownAddr || addr}
                         </a>
                       </>
                     ) : null}

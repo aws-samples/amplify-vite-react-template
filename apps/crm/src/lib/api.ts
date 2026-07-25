@@ -120,6 +120,7 @@ export function createLead(input: {
   email?: string;
   phone?: string;
   serviceStreet?: string;
+  serviceUnit?: string;
   serviceCity?: string;
   serviceState?: string;
   serviceZip?: string;

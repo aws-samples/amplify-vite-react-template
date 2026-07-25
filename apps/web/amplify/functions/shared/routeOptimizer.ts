@@ -1,6 +1,7 @@
 import { dataClient } from "./dataClient";
 import { POOL_TECH, recomputeSlotMinutes, techBaseFor } from "./capacity";
 import { driveMatrixFrom } from "./driveTime";
+import { routingAddress } from "./serviceAddress";
 
 /**
  * Per-technician-day route optimization.
@@ -69,16 +70,8 @@ export async function optimizeTechDay(opts: {
         const { data: customer } = await client.models.Customer.get({
           id: job.customerId,
         });
-        const address = customer
-          ? [
-              customer.serviceStreet,
-              customer.serviceCity,
-              customer.serviceState,
-              customer.serviceZip,
-            ]
-              .filter(Boolean)
-              .join(", ")
-          : "";
+        // ROUTING address — the unit is deliberately excluded (serviceAddress.ts).
+        const address = customer ? routingAddress(customer) : "";
         // A stop with no address cannot be routed — fail closed, don't guess.
         if (!address) return { optimized: false };
         stops.push({ id: job.id, address, routeOrder: job.routeOrder ?? 999 });

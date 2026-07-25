@@ -199,6 +199,7 @@ export type CreateLeadArgs = {
   email?: string | null;
   phone?: string | null;
   serviceStreet?: string | null;
+  serviceUnit?: string | null;
   serviceCity?: string | null;
   serviceState?: string | null;
   serviceZip?: string | null;
@@ -271,6 +272,7 @@ export async function createLead(args: CreateLeadArgs, actor: LeadActor): Promis
         email,
         phone,
         serviceStreet: args.serviceStreet?.trim() || undefined,
+        serviceUnit: args.serviceUnit?.trim() || undefined,
         serviceCity: args.serviceCity?.trim() || undefined,
         serviceState: args.serviceState?.trim() || undefined,
         serviceZip: args.serviceZip?.trim() || undefined,

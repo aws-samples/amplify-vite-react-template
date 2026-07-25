@@ -155,9 +155,30 @@ vi.mock("@anthropic-ai/sdk", () => ({
   },
 }));
 
+/**
+ * The service area is measured from technician HOME bases (no company HQ), so
+ * the zone lookup is a computeRouteMatrix call over every base — one call,
+ * closest base wins. The response is a flat element array, not `{routes}`.
+ */
+const routeMatrix = (...minutesPerBase: number[]) =>
+  minutesPerBase.map((m, originIndex) => ({
+    originIndex,
+    duration: `${m * 60}s`,
+    condition: "ROUTE_EXISTS",
+  }));
+
+/** The technician home bases the service area is measured from. Mutable so a
+ *  test can stand up a multi-technician roster and assert the closest wins. */
+const roster = vi.hoisted(() => ({
+  bases: ["5 Base Rd, Marlborough, MA, 01752"] as string[] | null,
+}));
+vi.mock("../shared/capacity", () => ({
+  activeTechBases: async () => roster.bases,
+}));
+
 const fetchMock = vi.fn(async () => ({
   ok: true,
-  json: async () => ({ routes: [{ duration: "1200s" }] }), // 20 min → Zone A
+  json: async () => routeMatrix(20), // 20 min from the one base → Zone A
 }));
 vi.stubGlobal("fetch", fetchMock);
 
@@ -244,6 +265,7 @@ beforeEach(() => {
   leadEscalations.length = 0;
   messagesCreate.mockClear();
   fetchMock.mockClear();
+  roster.bases = ["5 Base Rd, Marlborough, MA, 01752"];
   marketRateMock.mockClear();
   enqueueMock.mockClear();
   enqueueMock.mockImplementation(async () => true);
@@ -315,6 +337,55 @@ describe("the licensing gate fails closed (R75)", () => {
 
     expect(run.decision).toBe("PASS");
     expect(String(run.reason)).toContain("outside MA/RI");
+  });
+});
+
+describe("the service area is measured from technician home bases, not an HQ", () => {
+  it("takes the CLOSEST base: a lead one tech lives near is quoted, not passed", async () => {
+    // The same lead against three bases. Measured from the farthest it is 120
+    // min — an automatic out-of-area PASS under the old fixed-origin rule.
+    // A technician lives 25 minutes away, so it is a Zone A job.
+    roster.bases = ["Far Rd, Athol, MA", "Mid Rd, Sturbridge, MA", "5 Base Rd, Marlborough, MA"];
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => routeMatrix(120, 95, 25),
+    } as never);
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("QUOTE");
+    expect(run.zone).toBe("A");
+    expect(run.driveMinutes).toBe(25);
+  });
+
+  it("passes only when EVERY base is beyond 90 minutes, and says so", async () => {
+    roster.bases = ["Far Rd, Athol, MA", "Mid Rd, Sturbridge, MA", "5 Base Rd, Marlborough, MA"];
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => routeMatrix(140, 96, 101),
+    } as never);
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    expect(run.decision).toBe("PASS");
+    expect(run.zone).toBe("OUT");
+    expect(run.driveMinutes).toBe(96); // the closest base, not the first
+    expect(String(run.reason)).toContain("closest technician base");
+    // The old copy blamed a town nobody dispatches from.
+    expect(String(run.reason)).not.toMatch(/Ware/i);
+  });
+
+  it("an unroutable base leaves the zone UNKNOWN — never a false out-of-area", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [{ originIndex: 0, condition: "ROUTE_NOT_FOUND" }],
+    } as never);
+
+    const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
+
+    // Refusing a paid lead because Routes hiccuped would burn the lead fee.
+    expect(run.decision).not.toBe("PASS");
+    expect(run.zone).not.toBe("OUT");
   });
 });
 
@@ -397,7 +468,7 @@ describe("every base price comes from the AI market-rate sheet", () => {
   it("lays the deterministic Zone B adders on top, exactly like the funnel", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ routes: [{ duration: "3600s" }] }), // 60 min → Zone B
+      json: async () => routeMatrix(60), // 60 min → Zone B
     } as never);
 
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
@@ -730,7 +801,7 @@ describe("termite, wildlife, and commercial auto-quote from the engine", () => {
   it("prices a commercial one-time from the sheet with the Zone B adder on top", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ routes: [{ duration: "3600s" }] }), // 60 min → Zone B
+      json: async () => routeMatrix(60), // 60 min → Zone B
     } as never);
     extraction = {
       ...baseExtraction,
