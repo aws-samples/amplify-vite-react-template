@@ -119,7 +119,7 @@ async function assertCanActForPlan(
   });
   if (!plan) throw new Error("Not authorized for this plan");
   try {
-    assertCanActForCustomer(identity, plan.customerId);
+    await assertCanActForCustomer(identity, plan.customerId);
   } catch {
     throw new Error("Not authorized for this plan");
   }
@@ -151,7 +151,7 @@ function assertChargeableAmount(_actor: Actor, amountCents: number) {
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
   switch (opFieldName(event)) {
     case "createSetupIntent": {
-      assertCanActForCustomer(event.identity, event.arguments.customerId!);
+      await assertCanActForCustomer(event.identity, event.arguments.customerId!);
       // Portal add-service (folded here to spend no AppSync op): the ownership
       // check above is the trust boundary — booking-public re-checks it, but a
       // customer can never quote/charge for someone else's account from here.
@@ -170,7 +170,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return createSetupIntent(event.arguments.customerId!);
     }
     case "getPaymentMethodSummary": {
-      assertCanActForCustomer(event.identity, event.arguments.customerId!);
+      await assertCanActForCustomer(event.identity, event.arguments.customerId!);
       return getPaymentMethodSummary(event.arguments.customerId!);
     }
     case "startSubscription": {
@@ -1065,7 +1065,7 @@ async function payInvoice(
   }
   if (!callerIsFinance(identity)) {
     try {
-      assertCanActForCustomer(identity, invoice.customerId);
+      await assertCanActForCustomer(identity, invoice.customerId);
     } catch {
       throw new Error("Not authorized for this invoice");
     }

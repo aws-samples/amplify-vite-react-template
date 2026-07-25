@@ -1,4 +1,5 @@
 import type { AppSyncIdentity, AppSyncIdentityCognito } from "aws-lambda";
+import { dataClient } from "./dataClient";
 import { cusGroup } from "./dynamicGroups";
 
 function cognitoIdentity(
@@ -113,14 +114,45 @@ export function assertOwner(
   if (!callerIsOwner(identity)) throw new Error("Owner role required");
 }
 
-/** An owner (staff), or the portal user whose dynamic cus-<id> group matches. */
-export function assertCanActForCustomer(
+/**
+ * May this caller ACT for a customer (pay, book, change a payment method)?
+ *
+ * Three ways in, checked cheapest first:
+ *  1. OWNER — staff.
+ *  2. The portal user whose own dynamic cus-<id> group matches.
+ *  3. A management-company GROUP login (grp-<groupId>) acting for one of its
+ *     member properties.
+ *
+ * (3) is decided by the SAME rule AppSync uses for row-level reads: the
+ * customer's own `accessGroups` stamp (cus-<id> + grp-<groupId>) is intersected
+ * with the caller's token groups. Reading the row's live stamp — rather than
+ * re-deriving membership or trusting a cus- list baked into the token — means a
+ * property removed from a group loses the group's ability to act on it
+ * IMMEDIATELY, with no re-issued token and no re-login.
+ *
+ * Only case (3) costs a read: owners and ordinary portal customers return on the
+ * token alone, so the existing hot path is unchanged.
+ */
+export async function assertCanActForCustomer(
   identity: AppSyncIdentity | undefined | null,
   customerId: string
-): void {
+): Promise<void> {
   const groups = callerGroups(identity);
   if (groups.includes("OWNER") || groups.includes(cusGroup(customerId))) {
     return;
+  }
+  // Only a token that carries a group membership can possibly qualify — anything
+  // else is refused without touching the database.
+  const callerGrpGroups = groups.filter((g) => g.startsWith("grp-"));
+  if (callerGrpGroups.length > 0) {
+    const client = await dataClient();
+    const { data: customer } = await client.models.Customer.get({
+      id: customerId,
+    });
+    const stamped = (customer?.accessGroups ?? []).filter(
+      (g): g is string => typeof g === "string"
+    );
+    if (stamped.some((g) => callerGrpGroups.includes(g))) return;
   }
   throw new Error("Not authorized for this customer");
 }

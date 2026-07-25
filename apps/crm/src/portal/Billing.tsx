@@ -171,10 +171,18 @@ export default function PortalBilling() {
             const today = todayEastern();
             const overdue = isOverdue(i, today);
             const daysLate = daysPastDue(i, today);
+            // A management-company login sees every property's invoices in one
+            // list, so each row must name the property it belongs to.
+            const propertyName =
+              customers.length > 1
+                ? customers.find((c) => c.id === i.customerId)?.displayName
+                : null;
             return (
               <ListRow
                 key={i.id}
-                title={money(i.amountCents)}
+                title={
+                  propertyName ? `${money(i.amountCents)} · ${propertyName}` : money(i.amountCents)
+                }
                 subtitle={
                   <>
                     {`${i.description} · ${fmtDate(i.issuedAt, true)}`}
