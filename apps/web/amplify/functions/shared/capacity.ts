@@ -4,6 +4,7 @@ import { onsiteMinutesFor } from "./dispatchReadiness";
 import { driveMinutesBetween, HQ_ADDRESS } from "./driveTime";
 import { licenseFactsFromRecords, licenseRecordsFor } from "./licenses";
 import { openOwnedWork } from "./ownedWork";
+import { routingAddress } from "./serviceAddress";
 
 /**
  * GL-04 — the ONE capacity rule: PER-TECHNICIAN, PER-DAY minute feasibility,
@@ -142,6 +143,67 @@ function baseAddressOf(t: TechRow): string {
     .map((p) => p?.trim())
     .filter(Boolean);
   return parts.length >= 2 ? parts.join(", ") : HQ_ADDRESS;
+}
+
+/** The technician's configured base, or null when it was never set. Unlike
+ *  `baseAddressOf` this never falls back to a company HQ — there is no company
+ *  HQ, so an unconfigured technician contributes no service area at all. */
+function configuredBaseOf(t: TechRow): string | null {
+  const parts = [t.baseStreet, t.baseCity, t.baseState, t.baseZip]
+    .map((p) => p?.trim())
+    .filter(Boolean);
+  return parts.length >= 2 ? parts.join(", ") : null;
+}
+
+/**
+ * Every active technician's home base, deduped — the origin set the service
+ * area is measured from.
+ *
+ * BuzzKill has no central base: a technician starts and ends the day at their
+ * own home, so a customer is "far" only if they are far from EVERY technician.
+ * Quote-time zone used to measure from a hard-coded HQ instead, which priced
+ * the travel adder off a point no truck departs from and refused addresses
+ * that a technician actually lives minutes away from.
+ *
+ * Returns null when the roster can't be read or no technician has a base
+ * configured. The caller must treat null as "unknown" and fall back to the
+ * callback path — never as "out of area", which would silently refuse
+ * customers on an infrastructure failure.
+ */
+export async function activeTechBases(): Promise<string[] | null> {
+  if (!(await capacityModelsReady())) return null;
+  const techs: TechRow[] = [];
+  // The client is created INSIDE the try and never annotated: naming
+  // `Awaited<ReturnType<typeof dataClient>>` trips TS2321 (excessive stack
+  // depth) — `tsc -p amplify` already sits at the depth ceiling.
+  try {
+    const client = await dataClient();
+    let token: string | null | undefined;
+    do {
+      const page = await client.models.Technician.list({
+        limit: 200,
+        nextToken: token,
+      });
+      techs.push(...((page.data ?? []) as TechRow[]));
+      token = page.nextToken;
+    } while (token);
+  } catch (err) {
+    console.error("activeTechBases: roster read failed", err);
+    return null;
+  }
+  const bases = new Set<string>();
+  for (const t of techs) {
+    if (!t.active) continue;
+    const base = configuredBaseOf(t);
+    if (base) bases.add(base);
+  }
+  if (bases.size === 0) {
+    console.error(
+      "activeTechBases: no active technician has a base configured — service area is undeterminable"
+    );
+    return null;
+  }
+  return [...bases];
 }
 
 /**
@@ -994,16 +1056,8 @@ export async function stopsBySlotOn(
       const { data: customer } = await client.models.Customer.get({
         id: job.customerId,
       });
-      const address = customer
-        ? [
-            customer.serviceStreet,
-            customer.serviceCity,
-            customer.serviceState,
-            customer.serviceZip,
-          ]
-            .filter(Boolean)
-            .join(", ")
-        : null;
+      // ROUTING address — the unit is deliberately excluded (serviceAddress.ts).
+      const address = customer ? routingAddress(customer) || null : null;
       push(slotId(date, stopTechId), address, job.routeOrder ?? 999);
     }
     token = page.nextToken;
@@ -1153,16 +1207,8 @@ export async function recomputeSlotMinutes(
         const { data: customer } = await client.models.Customer.get({
           id: job.customerId,
         });
-        const address = customer
-          ? [
-              customer.serviceStreet,
-              customer.serviceCity,
-              customer.serviceState,
-              customer.serviceZip,
-            ]
-              .filter(Boolean)
-              .join(", ")
-          : "";
+        // ROUTING address — the unit is deliberately excluded.
+        const address = customer ? routingAddress(customer) : "";
         stops.push({
           address: address || null,
           onsite: onsiteMinutes(job.propertyClass),
@@ -1293,16 +1339,8 @@ export async function reconcileCapacityDay(
       const { data: customer } = await client.models.Customer.get({
         id: job.customerId,
       });
-      const address = customer
-        ? [
-            customer.serviceStreet,
-            customer.serviceCity,
-            customer.serviceState,
-            customer.serviceZip,
-          ]
-            .filter(Boolean)
-            .join(", ")
-        : null;
+      // ROUTING address — the unit is deliberately excluded.
+      const address = customer ? routingAddress(customer) || null : null;
       const list = jobsBySlot.get(key) ?? [];
       list.push({
         id: job.id,

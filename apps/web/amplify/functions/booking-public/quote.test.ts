@@ -104,6 +104,14 @@ const fakeDataClient = {
             active: true,
             licenseNumber: "MA-1",
             licenseExpiresOn: "2099-01-01",
+            // The technician's HOME base is the origin the service area is
+            // measured from — there is no company HQ. A technician with no
+            // base configured contributes no service area at all, which is
+            // what `activeTechBases` returning null asserts below.
+            baseStreet: "5 Base Rd",
+            baseCity: "Marlborough",
+            baseState: "MA",
+            baseZip: "01752",
           },
         ],
       }),
@@ -163,11 +171,15 @@ vi.mock("../shared/email", () => ({
   },
 }));
 
-/** Drive time from HQ; null simulates a Routes outage / dead key. */
-let hqMinutes: number | null = 20;
+/** Drive time from the CLOSEST technician home base (there is no company HQ);
+ *  null simulates a Routes outage / dead key / an address that won't route. */
+let nearestBaseMinutes: number | null = 20;
 vi.mock("../shared/driveTime", () => ({
   HQ_ADDRESS: "81 Greenwich Rd, Ware, MA 01082",
-  driveMinutesBetween: async () => hqMinutes,
+  driveMinutesBetween: async () => nearestBaseMinutes,
+  driveMinutesFromNearestBase: async () => nearestBaseMinutes,
+  driveMatrixTo: async (_k: string, origins: string[]) =>
+    origins.map(() => nearestBaseMinutes),
   driveMatrixFrom: async (_k: string, _o: string, dests: string[]) =>
     dests.map(() => null),
 }));
@@ -389,7 +401,7 @@ beforeEach(() => {
   enqueueSucceeds = true;
   pricingInvokes.length = 0;
   stopsEveryDay = [];
-  hqMinutes = 20;
+  nearestBaseMinutes = 20;
   marketRateByService = {};
   marketRateResult = {
     priceCents: 19900,
@@ -406,7 +418,7 @@ beforeEach(() => {
 
 describe("zone UNKNOWN never prices (R59)", () => {
   it("falls to the callback path instead of silently pricing as Zone B", async () => {
-    hqMinutes = null; // Routes outage / dead key
+    nearestBaseMinutes = null; // Routes outage / dead key
 
     const res = await postQuote({ ...rodentInput, service: "GENERAL_PEST" });
 
@@ -417,7 +429,7 @@ describe("zone UNKNOWN never prices (R59)", () => {
   });
 
   it("tells the office the zone lookup failed, not just 'call this lead'", async () => {
-    hqMinutes = null;
+    nearestBaseMinutes = null;
 
     await postQuote(rodentInput);
 
@@ -431,7 +443,7 @@ describe("zone UNKNOWN never prices (R59)", () => {
   });
 
   it("promises a call only when the lead gave a phone and consent (GL-03)", async () => {
-    hqMinutes = null; // zone UNKNOWN → fallback
+    nearestBaseMinutes = null; // zone UNKNOWN → fallback
 
     const res = await postQuote({
       ...rodentInput,
@@ -448,7 +460,7 @@ describe("zone UNKNOWN never prices (R59)", () => {
 
 describe("market-rate services carry the Zone B adder (R60)", () => {
   it("adds the $25 one-time adder to a Zone B rodent quote", async () => {
-    hqMinutes = 80; // Zone B
+    nearestBaseMinutes = 80; // Zone B
 
     const res = await postQuote(rodentInput);
 
@@ -457,7 +469,7 @@ describe("market-rate services carry the Zone B adder (R60)", () => {
   });
 
   it("adds it to roach quotes too", async () => {
-    hqMinutes = 80;
+    nearestBaseMinutes = 80;
 
     const res = await postQuote({ ...rodentInput, service: "ROACH" });
 
@@ -466,7 +478,7 @@ describe("market-rate services carry the Zone B adder (R60)", () => {
   });
 
   it("leaves Zone A rodent quotes at the market rate", async () => {
-    hqMinutes = 20;
+    nearestBaseMinutes = 20;
 
     const res = await postQuote(rodentInput);
 
@@ -576,7 +588,7 @@ describe("GENERAL_PEST prices from the cached AI sheet", () => {
   });
 
   it("keeps the deterministic Zone B adders on top of the AI base", async () => {
-    hqMinutes = 80; // Zone B
+    nearestBaseMinutes = 80; // Zone B
 
     const res = await postQuote({ ...gpInput, recurringPreference: "MONTHLY" });
 
@@ -830,7 +842,7 @@ describe("TERMITE and WILDLIFE price from their sheets — no specialist callbac
   });
 
   it("adds the Zone B one-time adder to a wildlife quote (R60)", async () => {
-    hqMinutes = 80; // Zone B
+    nearestBaseMinutes = 80; // Zone B
 
     const res = await postQuote({
       ...rodentInput,
@@ -990,7 +1002,7 @@ describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
   });
 
   it("adds the Zone B monthly adder to the plan", async () => {
-    hqMinutes = 80; // Zone B
+    nearestBaseMinutes = 80; // Zone B
 
     const res = await postQuote({ ...communityInput, recurringPreference: "MONTHLY" });
 
@@ -1070,7 +1082,7 @@ describe("COMMERCIAL prices like residential GP from the COMMERCIAL sheet", () =
   });
 
   it("keeps the deterministic Zone B adders on top", async () => {
-    hqMinutes = 80; // Zone B
+    nearestBaseMinutes = 80; // Zone B
 
     const res = await postQuote({ ...commercialInput, recurringPreference: "QUARTERLY" });
 
@@ -1199,7 +1211,7 @@ describe("the live path is a pure read (serve-last-known-good)", () => {
 
 describe("the only surviving CONTACT outcomes", () => {
   it("zone OUT still falls to the callback path for a PUBLIC visitor", async () => {
-    hqMinutes = 120; // beyond the 90-minute zone
+    nearestBaseMinutes = 120; // beyond the 90-minute zone
 
     const res = await postQuote(rodentInput);
 
@@ -1208,7 +1220,7 @@ describe("the only surviving CONTACT outcomes", () => {
   });
 
   it("an OFFICE-issued quote (lead link) prices a far address as Zone C instead of a callback", async () => {
-    hqMinutes = 120; // out of area
+    nearestBaseMinutes = 120; // out of area
 
     const res = await postQuote({ ...rodentInput, leadToken: "lead-tok-1" });
 
@@ -1253,7 +1265,7 @@ describe("PRICED quotes carry the checkout terms (R17)", () => {
   });
 
   it("sends no terms on the CONTACT path — there is nothing to accept yet", async () => {
-    hqMinutes = null; // zone UNKNOWN → callback
+    nearestBaseMinutes = null; // zone UNKNOWN → callback
 
     const res = await postQuote(rodentInput);
 
@@ -1295,7 +1307,7 @@ describe("first-touch attribution rides on the booking", () => {
   });
 
   it("stores it on the CONTACT path too, and tells the office the source", async () => {
-    hqMinutes = null; // zone UNKNOWN → callback
+    nearestBaseMinutes = null; // zone UNKNOWN → callback
 
     const res = await postQuote({
       ...rodentInput,
@@ -1626,7 +1638,7 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
   });
 
   it("Zone B distance is priced inside the card exactly once", async () => {
-    hqMinutes = 80; // Zone B
+    nearestBaseMinutes = 80; // Zone B
 
     const res = await postQuote(mosquitoInput);
 

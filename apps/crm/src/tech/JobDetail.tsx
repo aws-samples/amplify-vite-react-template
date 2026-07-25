@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { displayAddress, routingAddress } from "../lib/serviceAddress";
 import { useParams } from "react-router-dom";
 import {
   api,
@@ -421,14 +422,11 @@ export default function TechJob() {
     );
   }
 
-  const address = [
-    customer.serviceStreet,
-    customer.serviceCity,
-    customer.serviceState,
-    customer.serviceZip,
-  ]
-    .filter(Boolean)
-    .join(", ");
+  // Two different strings on purpose: the maps link must be GEOCODABLE (no
+  // unit — Apple/Google can't resolve "Unit 289"), while the text the
+  // technician reads must include it, because that is how they find the door.
+  const navAddress = routingAddress(customer);
+  const address = displayAddress(customer);
 
   return (
     <Page title={customer.displayName} back="/tech">
@@ -464,7 +462,7 @@ export default function TechJob() {
           <dd>
             {address ? (
               <a
-                href={`https://maps.apple.com/?daddr=${encodeURIComponent(address)}`}
+                href={`https://maps.apple.com/?daddr=${encodeURIComponent(navAddress)}`}
                 target="_blank"
                 rel="noreferrer"
                 style={{ color: "var(--brand)" }}

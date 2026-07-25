@@ -31,6 +31,9 @@ const CUSTOMER_VISIT_FIELDS = [
   "email",
   "phone",
   "serviceStreet",
+  // The unit is field data the technician NEEDS — it is how they find the
+  // right door in a condo or apartment building.
+  "serviceUnit",
   "serviceCity",
   "serviceState",
   "serviceZip",

@@ -258,6 +258,7 @@ export default function Leads() {
               email: v.email.trim() || undefined,
               phone: v.phone.trim() || undefined,
               serviceStreet: v.serviceStreet.trim() || undefined,
+              serviceUnit: v.serviceUnit.trim() || undefined,
               serviceCity: v.serviceCity.trim() || undefined,
               serviceState: v.serviceState.trim() || undefined,
               serviceZip: v.serviceZip.trim() || undefined,

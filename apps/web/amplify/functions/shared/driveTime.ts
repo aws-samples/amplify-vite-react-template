@@ -1,7 +1,14 @@
 /**
- * Google Routes API helpers — drive times from BuzzKill HQ and between
- * arbitrary addresses. The key is API-restricted to the Routes API, so
- * plain address strings are used everywhere (no separate geocoding).
+ * Google Routes API helpers — drive times between arbitrary addresses. The key
+ * is API-restricted to the Routes API, so plain address strings are used
+ * everywhere (no separate geocoding).
+ *
+ * There is no company HQ: a technician starts and ends the day at their own
+ * home base, so "how far away is this address" is only meaningful relative to
+ * a technician's base. `driveMinutesFromNearestBase` is the origin-correct way
+ * to ask it; `HQ_ADDRESS` survives ONLY as the legacy fallback inside
+ * capacity's `baseAddressOf` for a technician whose base was never configured,
+ * and must never be used to price or to judge a customer out of area.
  */
 
 export const HQ_ADDRESS = "81 Greenwich Rd, Ware, MA 01082";
@@ -120,6 +127,73 @@ export async function driveMinutesFromPoint(
   } catch {
     return null;
   }
+}
+
+/**
+ * Drive minutes from many origins to ONE destination in a single
+ * computeRouteMatrix call — the mirror of `driveMatrixFrom`. Returns minutes
+ * per origin index; null for unroutable entries. Origins are capped at 50.
+ */
+export async function driveMatrixTo(
+  apiKey: string,
+  origins: string[],
+  destination: string
+): Promise<(number | null)[]> {
+  const origs = origins.slice(0, 50);
+  if (origs.length === 0) return [];
+  try {
+    const res = await fetch(MATRIX_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": "originIndex,destinationIndex,duration,condition",
+      },
+      body: JSON.stringify({
+        origins: origs.map((address) => ({ waypoint: { address } })),
+        destinations: [{ waypoint: { address: destination } }],
+        travelMode: "DRIVE",
+      }),
+    });
+    if (!res.ok) return origs.map(() => null);
+    const elements = (await res.json()) as {
+      originIndex?: number;
+      duration?: string;
+      condition?: string;
+    }[];
+    const out: (number | null)[] = origs.map(() => null);
+    for (const el of Array.isArray(elements) ? elements : []) {
+      if (el.condition !== "ROUTE_EXISTS") continue;
+      const idx = el.originIndex ?? -1;
+      const seconds = parseInt(el.duration ?? "", 10);
+      if (idx >= 0 && idx < out.length && Number.isFinite(seconds)) {
+        out[idx] = Math.round(seconds / 60);
+      }
+    }
+    return out;
+  } catch {
+    return origs.map(() => null);
+  }
+}
+
+/**
+ * Drive minutes from the CLOSEST of several technician bases to an address —
+ * the honest measure of "how far away is this customer" for a business with no
+ * central HQ. One Routes matrix call regardless of roster size, so this costs
+ * the same as the single-origin call it replaces.
+ *
+ * Null when no base routes at all: the caller must treat that as "unknown",
+ * never as "out of area".
+ */
+export async function driveMinutesFromNearestBase(
+  apiKey: string,
+  bases: string[],
+  destination: string
+): Promise<number | null> {
+  const mins = (await driveMatrixTo(apiKey, bases, destination)).filter(
+    (m): m is number => m != null
+  );
+  return mins.length > 0 ? Math.min(...mins) : null;
 }
 
 /**

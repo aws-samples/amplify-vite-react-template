@@ -13,6 +13,8 @@ import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
 import { callerEmail, callerIsOffice, callerIsOwner } from "../shared/authz";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
+import { activeTechBases } from "../shared/capacity";
+import { driveMinutesFromNearestBase } from "../shared/driveTime";
 import { notifyLeads } from "../shared/email";
 import {
   clearsLeadFee,
@@ -51,8 +53,6 @@ const BUCKET = () => {
   if (!b) throw new Error("DOCS_BUCKET is not configured");
   return b;
 };
-
-const HOME_BASE = "81 Greenwich Rd, Ware, MA 01082";
 
 /**
  * The public booking funnel — the one next step every quoted reply offers.
@@ -479,7 +479,7 @@ const EXTRACTION_SCHEMA = {
   },
 } as const;
 
-const EXTRACTION_SYSTEM = `You are the intake extractor for BuzzKill Pest Control's lead-pricing engine (office: Marlborough MA; technician dispatched from Ware MA; licensed in MA and RI only). You read a pasted Thumbtack lead (text and/or screenshot) and extract structured facts. You NEVER compute prices — a deterministic rate-card engine does that.
+const EXTRACTION_SYSTEM = `You are the intake extractor for BuzzKill Pest Control's lead-pricing engine (technicians are dispatched from their own home bases across eastern and central MA, not a single office; licensed in MA and RI only). You read a pasted Thumbtack lead (text and/or screenshot) and extract structured facts. You NEVER compute prices — a deterministic rate-card engine does that.
 
 Eligibility (hard passes):
 - "bed_bugs": any bed bug work.
@@ -545,36 +545,19 @@ async function extractLead(
 
 // ---------- zone (Google Routes API) ----------
 
+/**
+ * Minutes from the CLOSEST technician's home base. Lead triage PASSes a lead
+ * when this exceeds 90 minutes, so the origin decides whether a paid lead is
+ * refused: measuring from one fixed address discarded leads that a technician
+ * lives minutes from. Null (no key, unreadable roster, unroutable) leaves the
+ * zone UNKNOWN rather than PASSing — never refuse on an infrastructure fault.
+ */
 async function driveMinutes(address: string): Promise<number | null> {
   const key = await getSecret("GOOGLE_ROUTES_API_KEY");
   if (!key) return null;
-  try {
-    const res = await fetch(
-      "https://routes.googleapis.com/directions/v2:computeRoutes",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": key,
-          "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
-        },
-        body: JSON.stringify({
-          origin: { address: HOME_BASE },
-          destination: { address },
-          travelMode: "DRIVE",
-        }),
-      }
-    );
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      routes?: Array<{ duration?: string }>;
-    };
-    const dur = data.routes?.[0]?.duration;
-    if (!dur) return null;
-    return Math.round(parseInt(dur, 10) / 60);
-  } catch {
-    return null;
-  }
+  const bases = await activeTechBases();
+  if (!bases) return null;
+  return driveMinutesFromNearestBase(key, bases, address);
 }
 
 // ---------- pass scripts (deterministic, straight from the spec) ----------
@@ -959,7 +942,7 @@ async function priceLead(args: Args) {
   if (zone === "OUT") {
     const run = await persist({
       decision: "PASS",
-      reason: `Drive time ${minutes} min from Ware exceeds 90 minutes`,
+      reason: `Drive time ${minutes} min from the closest technician base exceeds 90 minutes`,
       replyText: PASS_SCRIPTS.out_of_area,
       zone,
       driveMinutes: minutes ?? undefined,

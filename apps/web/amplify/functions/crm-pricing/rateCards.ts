@@ -199,7 +199,9 @@ export function money(cents: number): string {
   return Number.isInteger(d) ? `$${d}` : `$${d.toFixed(2)}`;
 }
 
-/** Zone from drive minutes (from 81 Greenwich Rd, Ware MA). */
+/** Zone from drive minutes. Origin-agnostic by design: the minutes must be
+ *  measured from the CLOSEST technician's home base (there is no company HQ),
+ *  so callers pass `driveMinutesFromNearestBase`, never a fixed address. */
 export function zoneFromMinutes(minutes: number): Zone {
   if (minutes <= 50) return "A";
   if (minutes <= 90) return "B";
