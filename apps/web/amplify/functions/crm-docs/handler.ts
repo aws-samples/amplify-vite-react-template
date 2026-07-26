@@ -70,6 +70,8 @@ import {
   onsiteMinutes as slotOnsiteMinutes,
   jobCapacityFacts,
   jobScheduleGuards,
+  marginalTravelMinutes,
+  stopsBySlotOn,
   POOL_TECH,
   releaseJobCapacity,
   releasePoolMinutes,
@@ -81,6 +83,7 @@ import {
   DAY_MINUTES,
 } from "../shared/capacity";
 import { resequenceAndRebuildDay } from "../shared/routeOptimizer";
+import { routingAddress } from "../shared/serviceAddress";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
 import { isServiceMonth } from "../shared/season";
@@ -2637,9 +2640,29 @@ async function updateJobSchedule(
     // and when no key exists without the explicit dev escape — so a null
     // proof here can only be the ALLOW_UNVERIFIED_ROUTES local-dev path,
     // which schedules on the locked on-site minutes alone.
+    // The travel a stop actually ADDS to this technician's day, not a fresh
+    // base round trip per stop. Charging `driveMinutes * 2` double-counted the
+    // long haul on any day that already drives to the same cluster: a second
+    // Ashland stop from a Ware base was billed ~170 travel minutes instead of
+    // the ~10 it really adds, so a day with hours free refused work as "fully
+    // booked". This is the SAME function the funnel prices with and the same
+    // shape the nightly tour measures, so all three finally agree.
+    //
+    // An EMPTY day degenerates to exactly the old base out-and-back, and an
+    // unmeasurable seam falls back to the conservative round trip — this never
+    // claims LESS than we can prove.
+    const insertionTravel = await marginalTravelMinutes({
+      baseAddress: assignBase,
+      stops:
+        (await stopsBySlotOn(args.scheduledDate)).get(
+          slotId(args.scheduledDate, technician.id)
+        ) ?? [],
+      candidateAddress: routingAddress(customer),
+      legMinutes: makeLegResolver(process.env.GOOGLE_ROUTES_API_KEY ?? null),
+    }).catch(() => null);
     const slotMinutes =
       slotOnsiteMinutes(job.propertyClass) +
-      (routeProof ? routeProof.driveMinutes * 2 : 0);
+      (insertionTravel ?? (routeProof ? routeProof.driveMinutes * 2 : 0));
     // GL-07: DELTA-correct claims, mirroring rescheduleVisit. The job's
     // existing hold on a REAL technician's ledger counts — whether it is a
     // prior ASSIGNMENT (technicianId) or a funnel checkout hold that already
