@@ -80,6 +80,7 @@ const {
   dayEligibility,
   extendCapacityClaim,
   makeLegResolver,
+  marginalTravelMinutes,
   onsiteMinutes,
   reconcileCapacityDay,
   recomputeSlotMinutes,
@@ -937,6 +938,66 @@ describe("closedTourMinutes — travel is ONE tour, not a round trip per stop", 
       address: null,
       label: "No Address Property",
     });
+  });
+});
+
+describe("marginalTravelMinutes — what a stop really ADDS to a day", () => {
+  const BASE = "81 Greenwich Rd, Ware, MA";
+  // The real shape: base is 85 min from the cluster; hops inside it are 5.
+  const leg = async (from: string, to: string): Promise<number | null> => {
+    if (from === to) return 0;
+    const near = (a: string) => a.includes("Cluster");
+    return near(from) && near(to) ? 5 : 85;
+  };
+
+  it("an EMPTY day pays the full base round trip", async () => {
+    expect(
+      await marginalTravelMinutes({
+        baseAddress: BASE,
+        stops: [],
+        candidateAddress: "1 Cluster Way",
+        legMinutes: leg,
+      })
+    ).toBe(170); // 85 out + 85 back
+  });
+
+  it("a day ALREADY in the cluster pays only the detour, not another haul", async () => {
+    // This is the office-assign bug: charging driveMinutes × 2 billed ~170 for
+    // a stop next door to one the technician is already visiting.
+    expect(
+      await marginalTravelMinutes({
+        baseAddress: BASE,
+        stops: ["1 Cluster Way", "2 Cluster Way"],
+        candidateAddress: "3 Cluster Way",
+        legMinutes: leg,
+      })
+    ).toBe(5); // spliced between two cluster stops: 5 + 5 − 5
+  });
+
+  it("is null when no seam can be measured — the caller must fail closed", async () => {
+    expect(
+      await marginalTravelMinutes({
+        baseAddress: BASE,
+        stops: ["1 Cluster Way"],
+        candidateAddress: "3 Cluster Way",
+        legMinutes: async () => null,
+      })
+    ).toBeNull();
+  });
+
+  it("a far cluster day still fits well under the 540-minute window", async () => {
+    // Nathaniel's Tuesday: 157 travel + 210 treatment = 367 committed. Adding
+    // one more community stop in the same cluster must fit in the 173 left —
+    // the old round-trip charge (60 + 170 = 230) is what refused it.
+    const committed = 367;
+    const marginal = await marginalTravelMinutes({
+      baseAddress: BASE,
+      stops: ["1 Cluster Way", "2 Cluster Way", "3 Cluster Way"],
+      candidateAddress: "4 Cluster Way",
+      legMinutes: leg,
+    });
+    const claim = 60 + (marginal ?? 0); // community on-site + real detour
+    expect(claim).toBeLessThan(DAY_MINUTES - committed);
   });
 });
 

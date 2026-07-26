@@ -952,6 +952,46 @@ export type SlotFeasibility = {
  * caller supplies the leg resolver (a memoized wrapper over Routes) so a
  * calendar of days shares its Routes calls.
  */
+/**
+ * The TRUE extra drive time one more stop adds to a technician-day.
+ *
+ * The day is a closed tour base → stops → base. Inserting a candidate into the
+ * cheapest seam (a,b) costs leg(a,cand) + leg(cand,b) − leg(a,b); the minimum
+ * over every seam is what the day actually pays. An EMPTY day has the single
+ * seam (base, base), which correctly degenerates to a plain out-and-back.
+ *
+ * This exists because the office assign path used to charge
+ * `driveMinutes × 2` — a full base round trip PER STOP. On a day that already
+ * drives to a cluster that double-counts the long haul: a second Ashland stop
+ * from a Ware base was billed ~170 travel minutes instead of the ~10 it really
+ * adds, so a day with room refused new work as "fully booked". Every path that
+ * claims capacity must price a stop the same way the ledger will measure it.
+ *
+ * Null = no routable seam; the caller must fail closed, never guess.
+ */
+export async function marginalTravelMinutes(opts: {
+  baseAddress: string;
+  /** The day's existing stop addresses, in route order. */
+  stops: string[];
+  candidateAddress: string;
+  legMinutes: (from: string, to: string) => Promise<number | null>;
+}): Promise<number | null> {
+  const route = [opts.baseAddress, ...opts.stops, opts.baseAddress];
+  let best: number | null = null;
+  for (let i = 0; i < route.length - 1; i++) {
+    const a = route[i];
+    const b = route[i + 1];
+    const toCand = await opts.legMinutes(a, opts.candidateAddress);
+    const fromCand = await opts.legMinutes(opts.candidateAddress, b);
+    if (toCand == null || fromCand == null) continue; // this seam unroutable
+    const baseLeg = a === b ? 0 : await opts.legMinutes(a, b);
+    if (baseLeg == null) continue;
+    const delta = Math.max(0, toCand + fromCand - baseLeg);
+    if (best === null || delta < best) best = delta;
+  }
+  return best;
+}
+
 export async function bestSlotFor(opts: {
   date: string;
   onsite: number;
@@ -987,19 +1027,12 @@ export async function bestSlotFor(opts: {
     // minimum. An empty day is the single pair (base, base) — a plain
     // out-and-back. This is the delta the ledger will commit, so there is no
     // per-stop round-trip double-count.
-    const route = [tech.baseAddress, ...stops, tech.baseAddress];
-    let marginalTravel: number | null = null;
-    for (let i = 0; i < route.length - 1; i++) {
-      const a = route[i];
-      const b = route[i + 1];
-      const toCand = await opts.legMinutes(a, opts.candidateAddress);
-      const fromCand = await opts.legMinutes(opts.candidateAddress, b);
-      if (toCand == null || fromCand == null) continue; // this seam unroutable
-      const baseLeg = a === b ? 0 : await opts.legMinutes(a, b);
-      if (baseLeg == null) continue;
-      const delta = Math.max(0, toCand + fromCand - baseLeg);
-      if (marginalTravel === null || delta < marginalTravel) marginalTravel = delta;
-    }
+    const marginalTravel = await marginalTravelMinutes({
+      baseAddress: tech.baseAddress,
+      stops,
+      candidateAddress: opts.candidateAddress,
+      legMinutes: opts.legMinutes,
+    });
     if (marginalTravel == null) continue; // no routable seam → not sellable here
     const claimMinutes = onsite + marginalTravel;
     if (committed + claimMinutes > DAY_MINUTES) continue;
