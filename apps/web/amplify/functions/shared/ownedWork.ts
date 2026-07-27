@@ -164,6 +164,10 @@ type OpenOwnedWorkInput = {
  * Only fire-and-forget kinds belong here: some owned-work is load-bearing (the
  * lead pipeline's LEAD_FOLLOWUP obligation, report-delivery MISSING_CONTACT)
  * whose callers require the WorkItem to exist, so those are NOT suppressed here.
+ *
+ * Suppressing a kind must never change whether the DISCOVERING operation
+ * succeeds. That is enforced by returning WORK_SUPPRESSED (truthy) rather than
+ * null — see the note there for the outage this caused.
  */
 const SUPPRESSED_KINDS: ReadonlySet<WorkKind> = new Set<WorkKind>([
   "DISPATCH_NOT_READY",
@@ -173,6 +177,21 @@ const SUPPRESSED_KINDS: ReadonlySet<WorkKind> = new Set<WorkKind>([
 ]);
 
 /**
+ * Returned when a kind is deliberately SUPPRESSED. Suppression is a queue-noise
+ * decision and the call SUCCEEDED — as a no-op. It must never be reported as a
+ * write failure, so this is truthy: callers that gate on a result (some refuse
+ * to publish until their case is owned) proceed exactly as if a row had landed.
+ *
+ * Returning null here instead made suppression indistinguishable from "the
+ * database write failed", which silently BLOCKED every reschedule onto a day
+ * without a technician — visitChange refuses to publish an unstaffed visit
+ * whose UNSTAFFED_VISIT case could not be written, and that kind is suppressed.
+ * The Schedule board's "Needs scheduling" list is the real tracker for those
+ * visits, which is why the case is noise; the refusal was never intended.
+ */
+export const WORK_SUPPRESSED = "suppressed";
+
+/**
  * Open (or re-open) an owned exception without ever breaking the operation that
  * discovered it. A deterministic id collapses retries into one queue row;
  * every occurrence still gets its own WorkEvent.
@@ -180,10 +199,9 @@ const SUPPRESSED_KINDS: ReadonlySet<WorkKind> = new Set<WorkKind>([
 export async function openOwnedWork(
   input: OpenOwnedWorkInput
 ): Promise<string | null> {
-  // A suppressed routine kind never becomes a case (see SUPPRESSED_KINDS) —
-  // return the same null a no-op create would, so every best-effort caller is
-  // unaffected.
-  if (SUPPRESSED_KINDS.has(input.kind)) return null;
+  // A suppressed routine kind never becomes a case (see SUPPRESSED_KINDS), but
+  // that is a SUCCESSFUL no-op — never a failure the caller should refuse on.
+  if (SUPPRESSED_KINDS.has(input.kind)) return WORK_SUPPRESSED;
   const id = workItemId(input.kind, input.dedupeKey);
   const now = new Date();
   const nowIso = now.toISOString();

@@ -44,9 +44,12 @@ const fakeDataClient = {
 
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const { openOwnedWork, releaseOwnedWorkForSub, workItemId } = await import(
-  "./ownedWork"
-);
+const {
+  openOwnedWork,
+  releaseOwnedWorkForSub,
+  workItemId,
+  WORK_SUPPRESSED,
+} = await import("./ownedWork");
 
 const input = {
   kind: "CALLBACK_PROMISE" as const,
@@ -146,8 +149,13 @@ describe("suppressed routine kinds — trim the flood, keep money safety", () =>
       "PAYMENT_PROCESSING_OVERDUE",
     ] as const) {
       const id = await openOwnedWork({ ...input, kind });
-      expect(id).toBeNull();
+      // Truthy, NOT null: suppression is a successful no-op. Returning null
+      // here made it indistinguishable from a failed write, and callers that
+      // refuse to publish without their case (visitChange's UNSTAFFED_VISIT)
+      // blocked every reschedule onto an unstaffed day in production.
+      expect(id).toBe(WORK_SUPPRESSED);
     }
+    // Suppression still writes nothing — the queue stays quiet.
     expect(rows).toHaveLength(0);
     expect(events).toHaveLength(0);
   });
