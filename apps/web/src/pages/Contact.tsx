@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import { Link } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../components/SEO";
 import { submitLead } from "../lib/leadIntakeApi";
-import { trackFormSubmit, trackGenerateLead } from "../lib/analytics";
+import { trackFormSubmit, trackGenerateLead, trackAdsConversion, ADS_CONVERSIONS } from "../lib/analytics";
 
 const OFFICE_PHONE = "508-258-9294";
 const OFFICE_TEL = `tel:+1${OFFICE_PHONE.replace(/\D/g, "")}`;
@@ -56,6 +56,7 @@ export default function Contact() {
       setStatus("success");
       trackFormSubmit("contact", "success", { lead_id: result.leadId });
       trackGenerateLead("contact", result.leadId);
+      trackAdsConversion(ADS_CONVERSIONS.QUOTE_COMPLETED);
     } else {
       setStatus("error");
       setErrorMsg(result.error);

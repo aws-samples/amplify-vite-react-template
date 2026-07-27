@@ -29,7 +29,7 @@ import {
   saveFunnelState,
   type FunnelSelection,
 } from "../../lib/bookingFunnel";
-import { trackFormSubmit, trackPurchase } from "../../lib/analytics";
+import { trackFormSubmit, trackPurchase, trackAdsConversion, ADS_CONVERSIONS } from "../../lib/analytics";
 
 const publishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as
   | string
@@ -266,6 +266,11 @@ export default function BookPage() {
         const bookingId = urlBookingRef?.bookingId ?? stored?.quote.bookingId;
         const token = urlBookingRef?.t ?? stored?.quote.statusToken;
         trackPurchase(bookingId ?? paymentIntent.id, paymentIntent.amount);
+        trackAdsConversion(ADS_CONVERSIONS.BOOKING_CONFIRMED, {
+          value: paymentIntent.amount / 100,
+          currency: "USD",
+          transaction_id: bookingId ?? paymentIntent.id,
+        });
         if (bookingId && token) {
           enterFinalizing(bookingId, token);
         } else {
@@ -890,6 +895,12 @@ export default function BookPage() {
               onSucceeded={() => {
                 const token = statusToken ?? quote?.statusToken;
                 if (quote) trackPurchase(quote.bookingId, amountCents ?? 0);
+                if (quote)
+                  trackAdsConversion(ADS_CONVERSIONS.BOOKING_CONFIRMED, {
+                    value: (amountCents ?? 0) / 100,
+                    currency: "USD",
+                    transaction_id: quote.bookingId,
+                  });
                 if (quote && token) {
                   enterFinalizing(quote.bookingId, token);
                 } else {

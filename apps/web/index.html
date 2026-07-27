@@ -49,6 +49,9 @@
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
       gtag('config', window.GA_ID, { send_page_view: false });
+      // Google Ads base tag — same gtag.js instance (do NOT add a second
+      // gtag.js script). Conversion events fire from React success handlers.
+      gtag('config', 'AW-18345277313');
     </script>
 
     <!-- Microsoft Clarity (session replay + heatmaps). Loaded here in the SPA

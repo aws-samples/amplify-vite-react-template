@@ -96,3 +96,19 @@ export function trackPurchase(bookingId: string, amountCents: number) {
     currency: "USD",
   });
 }
+
+/**
+ * Google Ads conversion labels (from Google Ads → Conversions → event snippet).
+ * These are separate from the GA4 events above: firing with `send_to` routes
+ * the hit to the Ads account only, so it never affects GA4 data.
+ */
+export const ADS_CONVERSIONS = {
+  QUOTE_COMPLETED: "AW-18345277313/bc0bCMeQp9ccEIHv2qtE",
+  BOOKING_CONFIRMED: "AW-18345277313/9E1wCNLNwNccEIHv2qtE",
+  // CALL_CLICK: "AW-18345277313/<label>",         // add when created in Google Ads
+} as const;
+
+/** Fire a Google Ads conversion. `sendTo` is the full "AW-<id>/<label>". */
+export function trackAdsConversion(sendTo: string, params?: Record<string, unknown>) {
+  gtag("event", "conversion", { send_to: sendTo, ...params });
+}
