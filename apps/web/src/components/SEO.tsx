@@ -4,7 +4,7 @@ import { useLocation } from "react-router-dom";
 const SITE_URL = "https://www.pestbuzzkill.com";
 const SITE_NAME = "BuzzKill Pest Control";
 const DEFAULT_TITLE =
-  "BuzzKill Pest Control | HOA & Condo Pest Control in Massachusetts";
+  "Pest Control in Marlborough, MA & RI | Residential, Condo & HOA | BuzzKill";
 const DEFAULT_DESCRIPTION =
   "Professional pest control for condominiums, HOAs, and shared living communities across Massachusetts and Rhode Island. Common-area pest management and optional in-unit service.";
 const DEFAULT_IMAGE = `${SITE_URL}/images/hero-home-1.jpg`;

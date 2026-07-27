@@ -152,7 +152,7 @@ export default function Communities() {
   return (
     <>
       <SEO
-        title="Community Pest Control for HOAs & Condos — MA & RI"
+        title="Condo & HOA Pest Control in MA & RI | Communities"
         description="Proactive pest control for condominiums, HOAs, and shared communities across Massachusetts and Rhode Island. Common-area programs with board-friendly reporting and optional in-unit service."
         jsonLd={[
           buildServiceSchema(

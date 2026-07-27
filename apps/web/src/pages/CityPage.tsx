@@ -28,7 +28,7 @@ export default function CityPage() {
   return (
     <>
       <SEO
-        title={`${name} Pest Control | HOA & Condo Service in ${stateAbbr}`}
+        title={`${name} Pest Control | Home, Condo & HOA in ${stateAbbr}`}
         description={`Professional HOA and condo pest control in ${name}, ${stateAbbr}. Common-area pest management for boards and property managers, with optional discounted in-unit service for ${name} condo owners.`}
         jsonLd={[
           buildCitySchema(name, stateAbbr, state, city.slug),

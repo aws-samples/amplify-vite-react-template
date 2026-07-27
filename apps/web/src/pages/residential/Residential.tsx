@@ -212,7 +212,7 @@ export default function Residential() {
   return (
     <>
       <SEO
-        title="Residential Pest Control for MA & RI Homes"
+        title="Residential Pest Control in Marlborough, MA & RI"
         description="Professional residential pest control for homes across Massachusetts and Rhode Island. Family and pet-safe treatments for ants, rodents, termites, mosquitoes, wildlife, and more. Get an instant quote."
         jsonLd={[
           buildServiceSchema(
