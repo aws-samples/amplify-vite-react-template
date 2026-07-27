@@ -3,6 +3,7 @@ import { list, uploadData } from "aws-amplify/storage";
 import { ACORD_FORMS, listTemplateFields, type AcordFormDef } from "../lib/acord";
 import FileButton from "../components/FileButton";
 import Team from "./Team";
+import Licensing from "../components/Licensing";
 import type { UserProfile } from "../lib/client";
 
 type TemplateDef = AcordFormDef;
@@ -59,7 +60,7 @@ export default function Settings({ profile }: { profile: UserProfile }) {
   return (
     <>
       <h1>Settings</h1>
-      <p className="sub">Form templates</p>
+      <p className="sub">Form templates, licensing, and team</p>
 
       <div className="card">
         <h2>ACORD templates</h2>
@@ -110,6 +111,9 @@ export default function Settings({ profile }: { profile: UserProfile }) {
         ))}
         {error && <p className="error-text">{error}</p>}
       </div>
+
+      <h2 style={{ marginTop: 28 }}>Licensing</h2>
+      <Licensing profile={profile} />
 
       {profile.role === "ADMIN" && <Team profile={profile} />}
     </>

@@ -38,6 +38,7 @@ const schema = a
       "CARRIER",
       "CERTIFICATE",
       "USER_PROFILE",
+      "LICENSE",
     ]),
     DocumentCategory: a.enum([
       "PRIOR_POLICY",
@@ -54,6 +55,20 @@ const schema = a
     OcrStatus: a.enum(["PENDING", "PROCESSING", "COMPLETE", "FAILED", "SKIPPED"]),
     ExtractionStatus: a.enum(["PENDING", "PROCESSING", "COMPLETE", "FAILED"]),
     UserRole: a.enum(["ADMIN", "STAFF", "PRODUCER"]),
+    // ── Licensing ──
+    // FIRM  = the agency entity licensed in a state (agency/business entity license)
+    // PRODUCER = an individual staff member's personal license
+    LicenseHolderType: a.enum(["FIRM", "PRODUCER"]),
+    LicenseClass: a.enum([
+      "PRODUCER",
+      "AGENCY",
+      "SURPLUS_LINES",
+      "ADJUSTER",
+      "CONSULTANT",
+    ]),
+    // Every licensee has exactly one resident state; the rest are non-resident.
+    LicenseResidency: a.enum(["RESIDENT", "NON_RESIDENT"]),
+    LicenseStatus: a.enum(["ACTIVE", "PENDING", "INACTIVE", "LAPSED", "EXPIRED"]),
     // ISO construction classes
     ConstructionType: a.enum([
       "FRAME",
@@ -256,10 +271,16 @@ const schema = a
         role: a.ref("UserRole").required(), // privileges are placeholder for now
         npn: a.string(), // required for producers at onboarding (app-enforced)
         onboardingComplete: a.boolean().required(),
-        licenses: a.hasMany("ProducerLicense", "userProfileId"),
+        licenses: a.hasMany("ProducerLicense", "userProfileId"), // deprecated
+        stateLicenses: a.hasMany("License", "userProfileId"),
       })
       .secondaryIndexes((index) => [index("userId")]),
 
+    /**
+     * DEPRECATED — superseded by the unified `License` model below, which
+     * covers both firm and personal licenses with dates, files and status.
+     * Kept so existing onboarding rows aren't dropped; no new writes.
+     */
     ProducerLicense: a.model({
       userProfileId: a.id().required(),
       userProfile: a.belongsTo("UserProfile", "userProfileId"),
@@ -267,6 +288,37 @@ const schema = a
       licenseNumber: a.string().required(),
       expirationDate: a.date(),
       linesOfAuthority: a.string().array(),
+    }),
+
+    /**
+     * Unified licensing record — one row per (holder, state, license).
+     *
+     * Firm licenses (holderType=FIRM) have no userProfileId; personal
+     * licenses point at the producer's UserProfile. Both share the same
+     * fields so renewal tracking, file attachment and the state-coverage
+     * matrix are written once and work for either kind.
+     *
+     * Supporting files (the license PDF, renewal receipts, CE certificates)
+     * attach as Documents with entityType=LICENSE, entityId=<license id>.
+     */
+    License: a.model({
+      holderType: a.ref("LicenseHolderType").required(),
+      // Null for FIRM licenses; set for PRODUCER licenses.
+      userProfileId: a.id(),
+      userProfile: a.belongsTo("UserProfile", "userProfileId"),
+      // Denormalized so firm rows and orphaned rows still render a name.
+      holderName: a.string(),
+      state: a.string().required(),
+      licenseNumber: a.string().required(),
+      npn: a.string(), // National Producer Number (firms have one too)
+      licenseClass: a.ref("LicenseClass"),
+      residency: a.ref("LicenseResidency"),
+      linesOfAuthority: a.string().array(),
+      status: a.ref("LicenseStatus"),
+      effectiveDate: a.date(),
+      expirationDate: a.date(),
+      continuingEducationDueDate: a.date(),
+      notes: a.string(),
     }),
 
     // ── Public website → CRM lead intake ───────────────────────────────

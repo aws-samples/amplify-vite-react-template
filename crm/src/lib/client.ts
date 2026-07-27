@@ -13,6 +13,66 @@ export type CrmDocument = Schema["Document"]["type"];
 export type Certificate = Schema["Certificate"]["type"];
 export type UserProfile = Schema["UserProfile"]["type"];
 export type ProducerLicense = Schema["ProducerLicense"]["type"];
+export type License = Schema["License"]["type"];
+
+// Lines of authority are the licensing counterpart to lines of business —
+// they're what a state license actually grants. Alphabetical.
+export const LINES_OF_AUTHORITY = [
+  "Adjuster",
+  "Casualty",
+  "Health",
+  "Life",
+  "Personal Lines",
+  "Property",
+  "Surplus Lines",
+  "Variable Products",
+];
+
+export const LICENSE_CLASS_LABELS: Record<string, string> = {
+  AGENCY: "Agency / business entity",
+  ADJUSTER: "Adjuster",
+  CONSULTANT: "Consultant",
+  PRODUCER: "Producer",
+  SURPLUS_LINES: "Surplus lines",
+};
+
+export const LICENSE_STATUS_LABELS: Record<string, string> = {
+  ACTIVE: "Active",
+  EXPIRED: "Expired",
+  INACTIVE: "Inactive",
+  LAPSED: "Lapsed",
+  PENDING: "Pending",
+};
+
+/** Days until a date (negative = past). Null-safe. */
+export function daysUntilDate(d: string | null | undefined): number | null {
+  if (!d) return null;
+  const then = new Date(d + "T00:00:00").getTime();
+  const today = new Date(new Date().toDateString()).getTime();
+  return Math.round((then - today) / 86_400_000);
+}
+
+/**
+ * Compliance state of a license, derived from its expiration date and
+ * overlaid on the manually-set status. Expiry is the thing that actually
+ * stops you writing business, so a past date always wins over a stale
+ * "ACTIVE" flag.
+ */
+export function licenseHealth(l: {
+  status?: string | null;
+  expirationDate?: string | null;
+}): { level: "ok" | "soon" | "urgent" | "expired" | "unknown"; label: string; badge: string } {
+  if (l.status && l.status !== "ACTIVE" && l.status !== "PENDING") {
+    const label = LICENSE_STATUS_LABELS[l.status] ?? l.status;
+    return { level: "expired", label, badge: "red" };
+  }
+  const days = daysUntilDate(l.expirationDate);
+  if (days == null) return { level: "unknown", label: "No expiration on file", badge: "gray" };
+  if (days < 0) return { level: "expired", label: `Expired ${-days}d ago`, badge: "red" };
+  if (days <= 30) return { level: "urgent", label: `${days}d left`, badge: "red" };
+  if (days <= 60) return { level: "soon", label: `${days}d left`, badge: "amber" };
+  return { level: "ok", label: `${days}d left`, badge: "green" };
+}
 
 export const US_STATES = [
   "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
