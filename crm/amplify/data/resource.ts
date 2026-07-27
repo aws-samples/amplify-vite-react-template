@@ -272,7 +272,6 @@ const schema = a
         npn: a.string(), // required for producers at onboarding (app-enforced)
         onboardingComplete: a.boolean().required(),
         licenses: a.hasMany("ProducerLicense", "userProfileId"), // deprecated
-        stateLicenses: a.hasMany("License", "userProfileId"),
       })
       .secondaryIndexes((index) => [index("userId")]),
 
@@ -303,9 +302,15 @@ const schema = a
      */
     License: a.model({
       holderType: a.ref("LicenseHolderType").required(),
-      // Null for FIRM licenses; set for PRODUCER licenses.
+      /**
+       * Empty for FIRM licenses; set for PRODUCER licenses.
+       *
+       * Deliberately a plain field rather than a belongsTo: a relationship
+       * makes this a GSI key, and DynamoDB rejects a null index key — which
+       * every firm license would need. The UI joins against UserProfile
+       * client-side instead (it already lists profiles for the picker).
+       */
       userProfileId: a.id(),
-      userProfile: a.belongsTo("UserProfile", "userProfileId"),
       // Denormalized so firm rows and orphaned rows still render a name.
       holderName: a.string(),
       state: a.string().required(),

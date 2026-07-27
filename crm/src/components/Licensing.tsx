@@ -607,7 +607,8 @@ function LicenseForm({
     const holder = profiles.find((p) => p.id === form.userProfileId);
     const payload = {
       holderType,
-      userProfileId: holderType === "PRODUCER" ? form.userProfileId : null,
+      // Omitted (not null) for firm licenses — see the schema note.
+      userProfileId: holderType === "PRODUCER" ? form.userProfileId : undefined,
       holderName:
         holderType === "PRODUCER" && holder
           ? `${holder.firstName} ${holder.lastName}`
