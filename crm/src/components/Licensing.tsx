@@ -9,6 +9,7 @@ import {
   LINES_OF_AUTHORITY,
   US_STATES,
   type License,
+  type ProducerLicense,
   type UserProfile,
 } from "../lib/client";
 import DocumentsPanel from "./DocumentsPanel";
@@ -76,6 +77,14 @@ export default function Licensing({ profile }: { profile: UserProfile }) {
   return (
     <>
       {error && <p className="error-text">{error}</p>}
+
+      {isAdmin && (
+        <LegacyBackfill
+          licenses={licenses}
+          profiles={profiles}
+          onMigrated={(created) => setLicenses((ls) => [...ls, ...created])}
+        />
+      )}
 
       {(alerts.expired.length > 0 || alerts.soon.length > 0) && (
         <div className="card" style={{ borderLeft: "4px solid var(--red)" }}>
@@ -165,6 +174,160 @@ export default function Licensing({ profile }: { profile: UserProfile }) {
 
       <StateCoverage firm={firm} personal={personal} profiles={profiles} />
     </>
+  );
+}
+
+/**
+ * One-time migration of the deprecated ProducerLicense rows (captured at
+ * onboarding before this system existed) into the unified License table.
+ *
+ * Idempotent: a legacy row is skipped when a License already exists for the
+ * same holder + state + number, so re-running can't create duplicates. The
+ * card hides itself entirely once there's nothing left to migrate, and the
+ * legacy rows are left in place rather than deleted — nothing is destroyed.
+ */
+function LegacyBackfill({
+  licenses,
+  profiles,
+  onMigrated,
+}: {
+  licenses: License[];
+  profiles: UserProfile[];
+  onMigrated: (created: License[]) => void;
+}) {
+  const [legacy, setLegacy] = useState<ProducerLicense[] | null>(null);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    client.models.ProducerLicense.list()
+      .then(({ data }) => setLegacy(data))
+      .catch(() => setLegacy([]));
+  }, []);
+
+  const key = (userProfileId: unknown, state: unknown, num: unknown) =>
+    `${userProfileId ?? ""}|${state ?? ""}|${String(num ?? "").trim().toUpperCase()}`;
+
+  const pending = useMemo(() => {
+    if (!legacy) return [];
+    const have = new Set(
+      licenses
+        .filter((l) => l.holderType === "PRODUCER")
+        .map((l) => key(l.userProfileId, l.state, l.licenseNumber))
+    );
+    return legacy.filter(
+      (l) => !have.has(key(l.userProfileId, l.state, l.licenseNumber))
+    );
+  }, [legacy, licenses]);
+
+  async function run() {
+    setRunning(true);
+    setError("");
+    const created: License[] = [];
+    let failed = 0;
+    for (const l of pending) {
+      const holder = profiles.find((p) => p.id === l.userProfileId);
+      try {
+        const { data, errors } = await client.models.License.create({
+          holderType: "PRODUCER",
+          userProfileId: l.userProfileId,
+          holderName: holder ? `${holder.firstName} ${holder.lastName}` : null,
+          state: l.state,
+          licenseNumber: l.licenseNumber,
+          npn: holder?.npn ?? null,
+          licenseClass: "PRODUCER",
+          // Unknowable from the legacy row — left blank rather than guessed.
+          residency: null,
+          status: "ACTIVE",
+          expirationDate: l.expirationDate ?? null,
+          linesOfAuthority: (l.linesOfAuthority ?? []).filter(
+            (x): x is string => !!x
+          ),
+          notes: "Migrated from the original onboarding license record.",
+        });
+        if (errors?.length || !data) failed++;
+        else created.push(data);
+      } catch {
+        failed++;
+      }
+    }
+    setRunning(false);
+    onMigrated(created);
+    setResult(
+      `Migrated ${created.length} license${created.length === 1 ? "" : "s"}.` +
+        (failed ? ` ${failed} failed — re-run to retry just those.` : "")
+    );
+  }
+
+  if (legacy === null) return null; // still loading
+  if (pending.length === 0) {
+    // Nothing outstanding: show the confirmation once, then stay hidden.
+    return result ? (
+      <div className="card" style={{ borderLeft: "4px solid var(--green)" }}>
+        <p className="small" style={{ margin: 0, color: "var(--green)" }}>
+          {result} Legacy records were left untouched as a backup.
+        </p>
+      </div>
+    ) : null;
+  }
+
+  return (
+    <div className="card" style={{ borderLeft: "4px solid var(--accent-dark)" }}>
+      <h2 style={{ marginTop: 0 }}>Import licenses from onboarding</h2>
+      <p className="muted small">
+        {pending.length} license{pending.length === 1 ? "" : "s"} captured
+        during onboarding {pending.length === 1 ? "hasn't" : "haven't"} been
+        brought into licensing yet. Importing copies{" "}
+        {pending.length === 1 ? "it" : "them"} over — the original record
+        {pending.length === 1 ? " is" : "s are"} left in place, and running
+        this twice can't create duplicates.
+      </p>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Holder</th>
+              <th>State</th>
+              <th>License #</th>
+              <th>Expires</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pending.map((l) => {
+              const holder = profiles.find((p) => p.id === l.userProfileId);
+              return (
+                <tr key={l.id}>
+                  <td>
+                    {holder ? `${holder.firstName} ${holder.lastName}` : "(unknown)"}
+                  </td>
+                  <td>{l.state}</td>
+                  <td style={{ fontVariantNumeric: "tabular-nums" }}>
+                    {l.licenseNumber}
+                  </td>
+                  <td className="small">{fmtDate(l.expirationDate)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="form-actions">
+        <button className="primary" disabled={running} onClick={run}>
+          {running
+            ? "Importing…"
+            : `Import ${pending.length} license${pending.length === 1 ? "" : "s"}`}
+        </button>
+        {/* Partial failures leave rows pending, so surface the outcome here
+            too — not only in the all-done state below. */}
+        {result && <span className="error-text">{result}</span>}
+        {error && <span className="error-text">{error}</span>}
+      </div>
+      <p className="muted small">
+        Residency isn't recorded on the old rows, so it's left blank — set it
+        on each license afterward.
+      </p>
+    </div>
   );
 }
 

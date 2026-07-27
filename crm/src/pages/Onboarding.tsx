@@ -8,7 +8,15 @@ interface LicenseDraft {
   state: string;
   licenseNumber: string;
   expirationDate: string;
+  residency: "RESIDENT" | "NON_RESIDENT";
 }
+
+const emptyLicense = (): LicenseDraft => ({
+  state: "",
+  licenseNumber: "",
+  expirationDate: "",
+  residency: "RESIDENT",
+});
 
 /**
  * First-login onboarding. Staff onboard with just name + role; producers must
@@ -27,9 +35,7 @@ export default function Onboarding({
   const [lastName, setLastName] = useState(existing?.lastName ?? "");
   const [role, setRole] = useState<Role>(existing?.role ?? "STAFF");
   const [npn, setNpn] = useState(existing?.npn ?? "");
-  const [licenses, setLicenses] = useState<LicenseDraft[]>([
-    { state: "", licenseNumber: "", expirationDate: "" },
-  ]);
+  const [licenses, setLicenses] = useState<LicenseDraft[]>([emptyLicense()]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -76,10 +82,16 @@ export default function Onboarding({
 
       if (isProducer) {
         for (const l of validLicenses) {
-          await client.models.ProducerLicense.create({
+          await client.models.License.create({
+            holderType: "PRODUCER",
             userProfileId: profile.id,
+            holderName: `${firstName.trim()} ${lastName.trim()}`,
             state: l.state,
             licenseNumber: l.licenseNumber.trim(),
+            npn: npn.trim() || undefined,
+            licenseClass: "PRODUCER",
+            residency: l.residency,
+            status: "ACTIVE",
             expirationDate: l.expirationDate || undefined,
           });
         }
@@ -148,6 +160,20 @@ export default function Onboarding({
                   />
                 </div>
                 <div className="field">
+                  <label>Residency</label>
+                  <select
+                    value={l.residency}
+                    onChange={(e) =>
+                      setLicense(i, {
+                        residency: e.target.value as LicenseDraft["residency"],
+                      })
+                    }
+                  >
+                    <option value="NON_RESIDENT">Non-resident</option>
+                    <option value="RESIDENT">Resident</option>
+                  </select>
+                </div>
+                <div className="field">
                   <label>Expiration</label>
                   <input
                     type="date"
@@ -162,7 +188,9 @@ export default function Onboarding({
               onClick={() =>
                 setLicenses((ls) => [
                   ...ls,
-                  { state: "", licenseNumber: "", expirationDate: "" },
+                  // Additional licenses are non-resident by default — you only
+                  // ever hold one resident license.
+                  { ...emptyLicense(), residency: "NON_RESIDENT" },
                 ])
               }
             >
