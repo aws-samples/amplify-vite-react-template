@@ -379,22 +379,27 @@ function LicenseTable({
 
   return (
     <div className="card">
-      <h2>{title}</h2>
-      <p className="muted small" style={{ marginTop: 0 }}>
-        {blurb}
-      </p>
-
-      {canEdit && (
-        <div className="toolbar">
-          <div className="grow" />
+      <div className="toolbar" style={{ marginTop: 0, alignItems: "flex-start" }}>
+        <div>
+          <h2 style={{ margin: 0 }}>{title}</h2>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            {blurb}
+          </p>
+        </div>
+        <div className="grow" />
+        {canEdit && (
           <button className="primary" onClick={onAdd}>
             + Add license
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
       {rows.length === 0 ? (
-        <p className="muted small">None recorded yet.</p>
+        <p className="muted small">
+          {canEdit
+            ? "None recorded yet — use Add license to record the first one."
+            : "None recorded yet."}
+        </p>
       ) : (
         <div className="table-wrap">
           <table>

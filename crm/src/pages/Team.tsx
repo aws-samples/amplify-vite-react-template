@@ -121,9 +121,9 @@ export default function Team({ profile }: { profile: UserProfile }) {
           {error && <span className="error-text">{error}</span>}
         </div>
         <p className="muted small" style={{ marginBottom: 0 }}>
-          Role is a placeholder for now (privileges aren't enforced except
-          this Team page, which is admin-only). Producers complete licensing
-          during their first sign-in.
+          Producers complete their licensing details during first sign-in.
+          Role is recorded for the record — apart from admin-only screens,
+          it doesn't restrict access yet.
         </p>
       </div>
 
