@@ -19,6 +19,12 @@ const GOOGLE_API_KEY = import.meta.env.PUBLIC_GOOGLE_PLACES_KEY || "";
 
 function loadGooglePlaces(): Promise<void> {
   return new Promise((resolve, reject) => {
+    // No key configured — don't inject a script that can only fail with
+    // NoApiKeys/InvalidKey. The manual fallback below carries the flow.
+    if (!GOOGLE_API_KEY) {
+      reject(new Error("No Google Places key configured"));
+      return;
+    }
     if (window.google?.maps?.places) {
       resolve();
       return;
@@ -127,6 +133,11 @@ export function CoverageCalculator() {
   const [emailSent, setEmailSent] = useState(false);
   const [sending, setSending] = useState(false);
   const [unsupported, setUnsupported] = useState(false);
+  // Places is an enhancement, not a requirement: if it never resolves a
+  // state (no key, blocked script, offline, ad-blocker), the visitor picks
+  // one manually rather than being dead-ended on step 1.
+  const [needsManualState, setNeedsManualState] = useState(false);
+  const [manualState, setManualState] = useState("");
   const addressRef = useRef<HTMLInputElement>(null);
   const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
 
@@ -183,6 +194,25 @@ export function CoverageCalculator() {
       initAutocomplete();
     }
   });
+
+  /**
+   * Manual path forward. Uses the state Places already resolved when it's
+   * available; otherwise reveals a state picker (the coverage logic is
+   * state-driven, so it's the one field we genuinely can't infer).
+   */
+  function handleAddressContinue(e: React.FormEvent) {
+    e.preventDefault();
+    if (!address.trim()) return;
+    const st = stateAbbr || manualState;
+    if (!st) {
+      setNeedsManualState(true);
+      return;
+    }
+    setStateAbbr(st);
+    setStateName(STATE_ABBR_TO_NAME[st] || st);
+    setUnsupported(false);
+    setStep("units");
+  }
 
   function handleUnitSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -251,6 +281,8 @@ export function CoverageCalculator() {
     setEmail("");
     setEmailSent(false);
     setUnsupported(false);
+    setNeedsManualState(false);
+    setManualState("");
     autocompleteRef.current = null;
     setTimeout(() => initAutocomplete(), 100);
   }
@@ -271,7 +303,7 @@ export function CoverageCalculator() {
         {/* Step 1: Address */}
         {step === "address" && (
           <div className="calc-step calc-step--address">
-            <div className="calc-address-wrap">
+            <form className="calc-address-wrap" onSubmit={handleAddressContinue}>
               <div className="calc-field calc-field--large">
                 <label htmlFor="calc-address">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
@@ -287,12 +319,40 @@ export function CoverageCalculator() {
                   autoComplete="off"
                 />
               </div>
+
+              {needsManualState && !stateAbbr && (
+                <div className="calc-field calc-field--state">
+                  <label htmlFor="calc-state">Which state is it in?</label>
+                  <select
+                    id="calc-state"
+                    value={manualState}
+                    onChange={(e) => setManualState(e.target.value)}
+                    autoFocus
+                  >
+                    <option value="">Select a state…</option>
+                    {Object.entries(STATE_ABBR_TO_NAME)
+                      .sort((a, b) => a[1].localeCompare(b[1]))
+                      .map(([abbr, name]) => (
+                        <option key={abbr} value={abbr}>
+                          {name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+
+              {address.trim().length >= 4 && (
+                <button type="submit" className="btn btn-primary calc-btn">
+                  Continue
+                </button>
+              )}
+
               {unsupported && (
                 <p className="calc-unsupported">
                   We currently serve associations in MA, RI, NH, CT, NY, and OK. Select a property in one of these states.
                 </p>
               )}
-            </div>
+            </form>
           </div>
         )}
 
