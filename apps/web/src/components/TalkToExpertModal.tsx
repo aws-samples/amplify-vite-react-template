@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { submitLead } from "../lib/leadIntakeApi";
-import { trackFormSubmit, trackGenerateLead } from "../lib/analytics";
+import { trackFormSubmit, trackGenerateLead, trackAdsConversion, ADS_CONVERSIONS } from "../lib/analytics";
 
 const OFFICE_PHONE = "508-258-9294";
 const CONSENT_TEXT = "I agree BuzzKill may call or text me about my inquiry.";
@@ -90,6 +90,7 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
       setStatus("success");
       trackFormSubmit("talk_to_expert", "success", { lead_id: result.leadId });
       trackGenerateLead("talk_to_expert", result.leadId);
+      trackAdsConversion(ADS_CONVERSIONS.QUOTE_COMPLETED);
     } else {
       setStatus("error");
       setErrorMsg(result.error);

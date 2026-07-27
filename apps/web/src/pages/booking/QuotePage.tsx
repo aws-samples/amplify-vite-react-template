@@ -6,7 +6,7 @@ import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
 import BugZapper from "../../components/BugZapper";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
 import { WILDLIFE_REMOVAL_KINDS } from "../../../amplify/functions/shared/serviceCatalog";
-import { trackFormSubmit, trackGenerateLead } from "../../lib/analytics";
+import { trackFormSubmit, trackGenerateLead, trackAdsConversion, ADS_CONVERSIONS } from "../../lib/analytics";
 import {
   checkQuoteStatus,
   getLeadPrefill,
@@ -423,6 +423,8 @@ export default function QuotePage() {
     setSubmitting(false);
 
     if (result.ok) {
+      // Google Ads "Quote Completed" — any successful quote submission counts.
+      trackAdsConversion(ADS_CONVERSIONS.QUOTE_COMPLETED);
       if (result.body.decision === "PRICED") {
         acceptPricedQuote(result.body, isCommunity);
       } else if (result.body.decision === "PENDING") {
