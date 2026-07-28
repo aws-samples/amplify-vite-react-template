@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   client,
   fmtDate,
@@ -139,6 +139,7 @@ export default function Licensing({ profile }: { profile: UserProfile }) {
         profiles={profiles}
         canEdit={isAdmin}
         showHolder
+        groupByHolder
         onAdd={() => {
           setEditing(null);
           setAdding("PRODUCER");
@@ -344,6 +345,7 @@ function LicenseTable({
   profiles,
   canEdit,
   showHolder,
+  groupByHolder,
   onAdd,
   onEdit,
   onDelete,
@@ -356,6 +358,7 @@ function LicenseTable({
   profiles: UserProfile[];
   canEdit: boolean;
   showHolder?: boolean;
+  groupByHolder?: boolean;
   onAdd: () => void;
   onEdit: (l: License) => void;
   onDelete: (id: string) => void;
@@ -363,8 +366,14 @@ function LicenseTable({
   setOpenDocsFor: (id: string | null) => void;
 }) {
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
-  // Soonest expiration first — the ones that need action float to the top.
+  // Grouped tables carry the holder in the group header, so the per-row
+  // Holder column would just repeat it.
+  const showHolderCol = !!showHolder && !groupByHolder;
+
+  // Grouped: state order within each person. Flat: soonest expiration first,
+  // so whatever needs action floats to the top.
   const { sorted, sortKey, dir, toggle } = useSort(
     rows,
     {
@@ -374,7 +383,54 @@ function LicenseTable({
       class: (l) => l.licenseClass,
       expires: (l) => l.expirationDate,
     },
-    "expires"
+    groupByHolder ? "state" : "expires"
+  );
+
+  // Built off `sorted`, so the active column sort applies inside each group.
+  const groups = useMemo(() => {
+    if (!groupByHolder) return null;
+    const byHolder = new Map<string, License[]>();
+    for (const l of sorted) {
+      const name = holderLabel(l, profiles);
+      const bucket = byHolder.get(name);
+      if (bucket) bucket.push(l);
+      else byHolder.set(name, [l]);
+    }
+    return [...byHolder.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [sorted, groupByHolder, profiles]);
+
+  function toggleGroup(name: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  // state, number, class, LOA, expires, status, files (+holder, +actions)
+  const colSpan = 7 + (showHolderCol ? 1 : 0) + (canEdit ? 1 : 0);
+
+  const renderRow = (l: License) => (
+    <FragmentRow
+      key={l.id}
+      license={l}
+      health={licenseHealth(l)}
+      profiles={profiles}
+      showHolder={showHolderCol}
+      canEdit={canEdit}
+      colSpan={colSpan}
+      isOpen={openDocsFor === l.id}
+      onToggleDocs={() => setOpenDocsFor(openDocsFor === l.id ? null : l.id)}
+      onEdit={() => onEdit(l)}
+      confirming={confirmId === l.id}
+      onAskDelete={() => setConfirmId(l.id)}
+      onCancelDelete={() => setConfirmId(null)}
+      onConfirmDelete={() => {
+        onDelete(l.id);
+        setConfirmId(null);
+      }}
+    />
   );
 
   return (
@@ -406,7 +462,7 @@ function LicenseTable({
             <thead>
               <tr>
                 <SortTh label="State" colKey="state" sortKey={sortKey} dir={dir} onToggle={toggle} />
-                {showHolder && (
+                {showHolderCol && (
                   <SortTh label="Holder" colKey="holder" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 )}
                 <SortTh label="License #" colKey="number" sortKey={sortKey} dir={dir} onToggle={toggle} />
@@ -419,31 +475,44 @@ function LicenseTable({
               </tr>
             </thead>
             <tbody>
-              {sorted.map((l) => {
-                const h = licenseHealth(l);
-                return (
-                  <FragmentRow
-                    key={l.id}
-                    license={l}
-                    health={h}
-                    profiles={profiles}
-                    showHolder={showHolder}
-                    canEdit={canEdit}
-                    isOpen={openDocsFor === l.id}
-                    onToggleDocs={() =>
-                      setOpenDocsFor(openDocsFor === l.id ? null : l.id)
-                    }
-                    onEdit={() => onEdit(l)}
-                    confirming={confirmId === l.id}
-                    onAskDelete={() => setConfirmId(l.id)}
-                    onCancelDelete={() => setConfirmId(null)}
-                    onConfirmDelete={() => {
-                      onDelete(l.id);
-                      setConfirmId(null);
-                    }}
-                  />
-                );
-              })}
+              {groups
+                ? groups.map(([name, groupRows]) => {
+                    const isCollapsed = collapsed.has(name);
+                    const needsAttention = groupRows.filter((l) => {
+                      const lvl = licenseHealth(l).level;
+                      return lvl === "expired" || lvl === "urgent" || lvl === "soon";
+                    }).length;
+                    return (
+                      <Fragment key={name}>
+                        <tr className="license-group">
+                          <td colSpan={colSpan}>
+                            <button
+                              className="license-group-toggle"
+                              onClick={() => toggleGroup(name)}
+                              aria-expanded={!isCollapsed}
+                            >
+                              <span className="license-group-caret">
+                                {isCollapsed ? "▸" : "▾"}
+                              </span>
+                              <strong>{name}</strong>
+                              <span className="muted small">
+                                {groupRows.length} license
+                                {groupRows.length === 1 ? "" : "s"}
+                              </span>
+                              {needsAttention > 0 && (
+                                <span className="badge amber">
+                                  {needsAttention} need
+                                  {needsAttention === 1 ? "s" : ""} attention
+                                </span>
+                              )}
+                            </button>
+                          </td>
+                        </tr>
+                        {!isCollapsed && groupRows.map(renderRow)}
+                      </Fragment>
+                    );
+                  })
+                : sorted.map(renderRow)}
             </tbody>
           </table>
         </div>
@@ -458,6 +527,7 @@ function FragmentRow({
   profiles,
   showHolder,
   canEdit,
+  colSpan,
   isOpen,
   onToggleDocs,
   onEdit,
@@ -471,6 +541,7 @@ function FragmentRow({
   profiles: UserProfile[];
   showHolder?: boolean;
   canEdit: boolean;
+  colSpan: number;
   isOpen: boolean;
   onToggleDocs: () => void;
   onEdit: () => void;
@@ -479,8 +550,6 @@ function FragmentRow({
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
 }) {
-  // state, number, class, LOA, expires, status, files (+holder, +actions)
-  const colSpan = 7 + (showHolder ? 1 : 0) + (canEdit ? 1 : 0);
   return (
     <>
       <tr>

@@ -444,3 +444,25 @@ mark.ocr-current { background: #f79b32; color: #fff; border-radius: 2px; }
 .filter-row .field input { padding: 6px 8px; font-size: 13px; }
 .preset-btns { display: flex; gap: 6px; }
 .preset-btns button.on { border-color: var(--accent); color: var(--accent-dark); font-weight: 600; }
+
+/* ── Licensing: collapsible per-person groups ── */
+.license-group td { background: #f8fafc; padding: 0; }
+.license-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.license-group-toggle:hover { background: #eef2f7; }
+.license-group-caret {
+  width: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
