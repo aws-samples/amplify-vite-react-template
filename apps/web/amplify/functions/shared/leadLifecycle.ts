@@ -42,7 +42,7 @@ export const LEAD_LOST_REASONS = [
   "DUPLICATE",
   "OTHER",
 ] as const;
-export const LEAD_TOUCH_CHANNELS = ["CALL", "TEXT", "EMAIL", "BOOKING_LINK", "NOTE"] as const;
+export const LEAD_TOUCH_CHANNELS = ["CALL", "TEXT", "EMAIL", "BOOKING_LINK", "THUMBTACK", "NOTE"] as const;
 export const LEAD_TOUCH_OUTCOMES = [
   "REACHED",
   "DELIVERED",
@@ -63,6 +63,7 @@ const OUTCOMES_BY_CHANNEL: Record<string, readonly string[]> = {
   TEXT: ["REACHED", "DELIVERED", "SENT", "FAILED", "BOUNCED", "SUPPRESSED"],
   EMAIL: ["REACHED", "DELIVERED", "SENT", "FAILED", "BOUNCED", "SUPPRESSED"],
   BOOKING_LINK: ["REACHED", "DELIVERED", "SENT", "FAILED", "BOUNCED", "SUPPRESSED"],
+  THUMBTACK: ["REACHED", "DELIVERED", "SENT", "FAILED", "NOTE"],
   NOTE: ["QUALIFIED", "UNQUALIFIED", "NOTE"],
 };
 
@@ -207,6 +208,15 @@ export type CreateLeadArgs = {
   notes?: string | null;
   force?: boolean | null;
   idempotencyKey?: string | null;
+  /**
+   * `<platform>#<id>` for a lead that arrived on a marketplace thread we can
+   * reply on (Thumbtack). It is the join key for later messages on the same
+   * thread AND the reason such a lead is NOT missing contact: the thread is
+   * the contact method. Without it, every Thumbtack lead — which carries no
+   * email and often no phone — would open a MISSING_CONTACT work item and
+   * bury the real exception queue.
+   */
+  externalRef?: string | null;
   contactConsentChannels?: string[] | null;
   contactConsentSource?: string | null;
   contactConsentText?: string | null;
@@ -260,7 +270,7 @@ export async function createLead(args: CreateLeadArgs, actor: LeadActor): Promis
     const proposedDueAt = (await oneBusinessDayDueAt(now)).toISOString();
     const proposedNextAction = candidates.length
       ? "Resolve duplicate identity decision"
-      : email || phone
+      : email || phone || args.externalRef?.trim()
         ? "Make first response"
         : "Obtain a usable contact method";
     let lead = prior.data;
@@ -278,6 +288,7 @@ export async function createLead(args: CreateLeadArgs, actor: LeadActor): Promis
         serviceZip: args.serviceZip?.trim() || undefined,
         leadSource: args.leadSource?.trim() || undefined,
         leadNotes: args.notes?.trim() || undefined,
+        externalRef: args.externalRef?.trim() || undefined,
         status: "LEAD",
         leadOwnerSub: actor.sub ?? undefined,
         leadOwnerEmail: actor.email ?? defaultWorkOwner("SALES"),
@@ -305,7 +316,11 @@ export async function createLead(args: CreateLeadArgs, actor: LeadActor): Promis
       actor,
       mutationId: `intake:${intakeKey}`,
     });
-    if (!email && !phone) {
+    // A marketplace lead with no email/phone is NOT out of reach — we answer it
+    // on the platform thread, and `externalRef` is how we find that thread
+    // again. Opening MISSING_CONTACT for it would be false, and at Thumbtack
+    // volumes it would drown the queue items that ARE real.
+    if (!email && !phone && !args.externalRef?.trim()) {
       const missing = await openMissingContactWork({
         customerId: lead.id,
         displayName,
@@ -379,6 +394,11 @@ export async function createLead(args: CreateLeadArgs, actor: LeadActor): Promis
 export async function assertLeadOutreachAllowed(customer: Record<string, unknown>, channel: string) {
   if (channel === "NOTE") return;
   if (customer.doNotContact) throw new Error("Do-not-contact blocks this outreach.");
+  // THUMBTACK is a reply INSIDE the thread the customer opened, on their own
+  // marketplace account — the consent that governs cold email/call/text does
+  // not apply and we never hold any for these leads (Thumbtack sends no email
+  // address and only a proxy phone). Do-not-contact above still stops it.
+  if (channel === "THUMBTACK") return;
   if (["CALL", "TEXT", "EMAIL", "BOOKING_LINK"].includes(channel)) {
     const allowed = Array.isArray(customer.contactConsentChannels)
       ? customer.contactConsentChannels

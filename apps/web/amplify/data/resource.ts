@@ -2,6 +2,7 @@ import { type ClientSchema, a, defineData } from "@aws-amplify/backend";
 import { crmAdmin } from "../functions/crm-admin/resource";
 import { crmBilling } from "../functions/crm-billing/resource";
 import { stripeWebhook } from "../functions/stripe-webhook/resource";
+import { thumbtackWebhook } from "../functions/thumbtack-webhook/resource";
 import { crmDocs } from "../functions/crm-docs/resource";
 import { dailyReminders } from "../functions/daily-reminders/resource";
 import { postAuth } from "../functions/post-auth/resource";
@@ -390,6 +391,16 @@ export const schema = a.schema({
       status: a.ref("CustomerStatus").required(),
       leadSource: a.string().authorization(fieldNoTech),
       leadNotes: a.string().authorization(fieldNoTech),
+      /**
+       * Stable identity on the marketplace this lead came from, as
+       * `<platform>#<id>` (e.g. `thumbtack#585695115596185614`). Thumbtack
+       * never sends an email address and only sometimes a phone, so name/email
+       * matching cannot re-find the customer when the NEXT message on the same
+       * thread arrives — this is the join key, indexed below. It is also the
+       * evidence that the lead IS reachable (on the platform thread), which is
+       * why `createLead` skips MISSING_CONTACT when it is set.
+       */
+      externalRef: a.string().authorization(fieldNoTech),
       // TCPA evidence: whether this contact opted in to calls/texts, and when.
       // Absent or false means email-only follow-up.
       contactConsent: a.boolean().authorization(fieldNoTech),
@@ -475,6 +486,7 @@ export const schema = a.schema({
       index("status").sortKeys(["displayName"]),
       index("portalUserSub"),
       index("bookingLinkToken"),
+      index("externalRef"),
     ])
     // No browser delete: finalized service reports and signed agreements
     // reference this row, and a legal record whose customer can be
@@ -612,6 +624,11 @@ export const schema = a.schema({
         "PAYMENT_FAILED",
       ]),
       propertyKind: a.enum(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]),
+      // Condo/HOA only: the ask is for ONE unit, so it was quoted like a
+      // residential visit (residential sheet + 30-minute on-site) instead of a
+      // per-unit common-area program. propertyKind stays COMMUNITY — the
+      // property IS an association; only the pricing view differed.
+      inUnit: a.boolean(),
       service: a.enum([
         "GENERAL_PEST",
         "WASP_NEST",
@@ -3996,6 +4013,7 @@ export const schema = a.schema({
   allow.resource(crmAdmin),
   allow.resource(crmBilling),
   allow.resource(stripeWebhook),
+  allow.resource(thumbtackWebhook),
   allow.resource(crmDocs),
   allow.resource(dailyReminders),
   allow.resource(postAuth),

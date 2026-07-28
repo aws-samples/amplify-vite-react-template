@@ -88,6 +88,8 @@ type Fields = {
   callConsent: boolean;
   service: string;
   propertyKind: PropertyKind;
+  /** Condo/HOA only: one unit on its own — quoted like a residential visit. */
+  inUnit: boolean;
   street: string;
   city: string;
   state: string;
@@ -112,6 +114,7 @@ const EMPTY_FIELDS: Fields = {
   callConsent: false,
   service: "GENERAL_PEST",
   propertyKind: "RESIDENTIAL",
+  inUnit: false,
   street: "",
   city: "",
   state: "MA",
@@ -334,7 +337,7 @@ export default function QuotePage() {
   const set = (k: keyof Fields) => (v: string) =>
     setFields((f) => ({ ...f, [k]: v }));
 
-  const needs = quoteFieldNeeds(fields.service, fields.propertyKind);
+  const needs = quoteFieldNeeds(fields.service, fields.propertyKind, fields.inUnit);
   const isCommunity = fields.propertyKind === "COMMUNITY";
   // Wasp and wildlife are one-time visits priced by count at EVERY property
   // class — they carry no plan/cadence choice (the server never offers one).
@@ -389,6 +392,8 @@ export default function QuotePage() {
       callConsentTextVersion: CALL_CONSENT_TEXT_VERSION,
       service: fields.service as ServiceCode,
       propertyKind: fields.propertyKind,
+      // Only meaningful at a community; the server ignores it elsewhere.
+      inUnit: fields.propertyKind === "COMMUNITY" ? fields.inUnit : undefined,
       address: {
         street: fields.street.trim(),
         city: fields.city.trim(),
@@ -815,6 +820,10 @@ export default function QuotePage() {
                             // plan so the (newly priced) one-time visit is an
                             // explicit opt-in. Leaving it "" would silently
                             // default a common-area quote to one-time.
+                            // The flag only exists at a community — drop it
+                            // when leaving, so it can never silently ride along
+                            // on a residential or commercial quote.
+                            inUnit: kind === "COMMUNITY" ? f.inUnit : false,
                             recurringPreference:
                               kind === "COMMUNITY" && f.recurringPreference === ""
                                 ? "QUARTERLY"
@@ -827,6 +836,32 @@ export default function QuotePage() {
                     ))}
                   </div>
                 </div>
+
+                {/* Condo/HOA only: an ask for ONE unit is a single apartment
+                    treated on its own, not a common-area program priced per
+                    unit across the association — so it is quoted like a
+                    residential visit. */}
+                {fields.propertyKind === "COMMUNITY" ? (
+                  <div className="bk-field bk-full">
+                    <label htmlFor="bq-in-unit" className="bk-consent">
+                      <input
+                        id="bq-in-unit"
+                        type="checkbox"
+                        checked={Boolean(fields.inUnit)}
+                        onChange={(e) =>
+                          setFields((f) => ({ ...f, inUnit: e.target.checked }))
+                        }
+                      />
+                      <span>
+                        This request is for In-Unit service
+                        <span className="bk-hint">
+                          Treating one unit, not the common areas. We price it
+                          like a single-home visit.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                ) : null}
 
                 <div className="bk-field bk-full">
                   <label htmlFor="bq-service">Service</label>

@@ -75,6 +75,8 @@ export type QuoteRequest = {
   lotHalfAcres?: number;
   service: ServiceCode;
   propertyKind?: PropertyKind;
+  /** Condo/HOA only: one unit, treated on its own — priced like residential. */
+  inUnit?: boolean;
   address: { street: string; city: string; state: string; zip?: string };
   sqft?: number;
   nestCount?: number;

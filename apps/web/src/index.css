@@ -2061,6 +2061,16 @@ h6 {
   align-items: flex-start;
   cursor: pointer;
 }
+/* Secondary line under a checkbox label — explains what the toggle changes
+   without competing with the label itself. */
+.bk-hint {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  opacity: 0.72;
+}
+
 .bk-consent input[type="checkbox"] {
   flex: 0 0 auto;
   width: 16px;

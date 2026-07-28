@@ -75,7 +75,11 @@ const NO_NEEDS: QuoteFieldNeeds = {
 
 export function quoteFieldNeeds(
   service: string,
-  propertyKind: string
+  propertyKind: string,
+  /** Condo/HOA only: one unit, treated on its own. It prices like a residential
+   *  visit, so it collects the RESIDENTIAL inputs (sqft) — never the unit count,
+   *  which only sets the price of a whole-property common-area program. */
+  inUnit = false
 ): QuoteFieldNeeds {
   const svc = serviceOption(service);
   // GL-17: a seasonal plan prices on yard size alone at ANY property kind —
@@ -92,8 +96,17 @@ export function quoteFieldNeeds(
   if (service === "WILDLIFE") {
     return { ...NO_NEEDS, removalKind: true, removalCount: true };
   }
-  if (propertyKind === "COMMUNITY") {
+  if (propertyKind === "COMMUNITY" && !inUnit) {
     return { ...NO_NEEDS, units: true };
+  }
+  if (propertyKind === "COMMUNITY" && inUnit) {
+    // Quoted as residential: the service's own inputs stand.
+    const svc2 = serviceOption(service);
+    return {
+      ...NO_NEEDS,
+      sqft: svc2?.needsSqft ?? false,
+      nestCount: svc2?.needsNestCount ?? false,
+    };
   }
   if (propertyKind === "COMMERCIAL") {
     return { ...NO_NEEDS, sqft: true };
@@ -192,6 +205,8 @@ export type QuoteFormFields = {
   phone: string;
   service: string;
   propertyKind: string;
+  /** Condo/HOA only: this ask is for ONE unit, quoted like a residential visit. */
+  inUnit?: boolean;
   street: string;
   city: string;
   state: string;
@@ -210,7 +225,7 @@ export type QuoteFormFields = {
 export function validateQuoteForm(f: QuoteFormFields): Record<string, string> {
   const errors: Record<string, string> = {};
   const svc = serviceOption(f.service);
-  const needs = quoteFieldNeeds(f.service, f.propertyKind);
+  const needs = quoteFieldNeeds(f.service, f.propertyKind, f.inUnit);
   if (!f.name.trim()) errors.name = "Name is required";
   if (!EMAIL_RE.test(f.email.trim().toLowerCase()))
     errors.email = "A valid email is required";
