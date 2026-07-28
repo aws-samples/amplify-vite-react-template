@@ -169,6 +169,8 @@ function corsHeaders(origin: string | undefined): Record<string, string> {
 
 type QuoteInput = {
   propertyKind?: string;
+  /** Condo/HOA only: this ask is for ONE unit, so quote it residentially. */
+  inUnit?: boolean;
   name?: string;
   email?: string;
   phone?: string;
@@ -1042,6 +1044,11 @@ function quoteLeadNotes(
   };
   add("Service requested", service);
   add("Property type", propertyKind);
+  // Say it plainly: the price on this lead came off the residential sheet, not
+  // the per-unit common-area sheet, and staff must not "correct" it.
+  if (input.inUnit && propertyKind === "COMMUNITY") {
+    add("In-unit service", "Yes — quoted as a residential visit, not common area");
+  }
   add("Square footage", input.sqft);
   add("Units", input.units);
   add("Nests", input.nestCount);
@@ -1081,6 +1088,17 @@ async function quote(
   const email = (input.email ?? "").trim().toLowerCase();
   const service = (input.service ?? "").toUpperCase();
   const propertyKind = (input.propertyKind ?? "RESIDENTIAL").toUpperCase();
+  // An IN-UNIT request at a condo/HOA is one apartment treated on its own — not
+  // a common-area program priced per unit across the whole association — so it
+  // is quoted exactly like a residential visit: sqft in, residential sheet out,
+  // one residential on-site duration.
+  //
+  // Only the PRICING VIEW changes. The stored propertyKind stays COMMUNITY, so
+  // the property is still known to be an association for routing, reporting and
+  // invoice eligibility (the HOA is still the payer). The flag is meaningless
+  // anywhere else, so it is only honoured at a community.
+  const inUnit = propertyKind === "COMMUNITY" && input.inUnit === true;
+  const pricingKind = inUnit ? "RESIDENTIAL" : propertyKind;
   const addr = input.address ?? {};
   if (!name) errors.name = "Name is required";
   if (!EMAIL_RE.test(email)) errors.email = "A valid email is required";
@@ -1113,13 +1131,13 @@ async function quote(
     if (!input.removalCount || input.removalCount < 1) {
       errors.removalCount = "How many animals need removal?";
     }
-  } else if (propertyKind === "COMMUNITY") {
+  } else if (pricingKind === "COMMUNITY") {
     // A community asks for a common-area plan, priced per unit — the unit
     // count is the price input, so it is required.
     if (!input.units || input.units < 1) {
       errors.units = "How many units are in the community? The unit count sets the plan price.";
     }
-  } else if (propertyKind === "COMMERCIAL") {
+  } else if (pricingKind === "COMMERCIAL") {
     // Commercial quotes price from a sqft-banded sheet, whatever the pest.
     if (!input.sqft || input.sqft < 100 || input.sqft > 50000) {
       errors.sqft = "Square footage is required for a commercial quote";
@@ -1223,6 +1241,7 @@ async function quote(
         state: addr.state!.trim().toUpperCase(),
         zip: addr.zip?.trim() || undefined,
         propertyKind: propertyKind as "RESIDENTIAL" | "COMMUNITY" | "COMMERCIAL",
+        inUnit: inUnit || undefined,
         service: service as
           | "GENERAL_PEST"
           | "WASP_NEST"
@@ -1648,7 +1667,7 @@ async function quote(
       removalKind: input.removalKind,
       removalCount: count,
     });
-  } else if (propertyKind === "COMMUNITY") {
+  } else if (pricingKind === "COMMUNITY") {
     // A common-area quote at a community: the HOA per-unit sheet prices the
     // recurring plan (per-unit monthly × units for the chosen cadence), and a
     // one-time visit is DERIVED from the same sheet (hoaOneTimePerUnitCents).
@@ -1687,7 +1706,7 @@ async function quote(
     baseCents =
       hoaOneTimePerUnitCents(hoa, units) * units +
       travelAdderCents(priceZone, "ONE_TIME_FLAT");
-  } else if (propertyKind === "COMMERCIAL") {
+  } else if (pricingKind === "COMMERCIAL") {
     // Commercial prices like residential general pest — one-time day-priced
     // plus a plan offer — but from the COMMERCIAL sheet for this sqft band.
     const rate = await getCachedRate({
@@ -1771,7 +1790,7 @@ async function quote(
     baseCents: baseCents!,
     zone: priceZone,
     onsiteMinutes:
-      propertyKind === "COMMERCIAL" || propertyKind === "COMMUNITY" ? 60 : 30,
+      pricingKind === "COMMERCIAL" || pricingKind === "COMMUNITY" ? 60 : 30,
   });
   // GL-17: a seasonal plan's FIRST TREATMENT is only sold onto an
   // April–October date — the same rule the office paths hard-refuse. Late

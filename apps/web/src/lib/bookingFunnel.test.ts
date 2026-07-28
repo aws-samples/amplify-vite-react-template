@@ -222,6 +222,24 @@ describe("quoteFieldNeeds", () => {
     expect(quoteFieldNeeds("RODENT", "COMMUNITY")).toEqual(needs({ units: true }));
   });
 
+  it("an IN-UNIT community ask collects the RESIDENTIAL inputs, not the unit count", () => {
+    // One apartment treated on its own is a single-home visit: it prices off
+    // sqft from the residential sheet. Asking for the unit count would price a
+    // whole-property common-area program the customer never requested.
+    expect(quoteFieldNeeds("GENERAL_PEST", "COMMUNITY", true)).toEqual(
+      quoteFieldNeeds("GENERAL_PEST", "RESIDENTIAL")
+    );
+    expect(quoteFieldNeeds("GENERAL_PEST", "COMMUNITY", true).units).toBe(false);
+    // The flag is only honoured at a community — it never alters residential
+    // or commercial needs.
+    expect(quoteFieldNeeds("RODENT", "COMMERCIAL", true)).toEqual(
+      quoteFieldNeeds("RODENT", "COMMERCIAL")
+    );
+    expect(quoteFieldNeeds("RODENT", "RESIDENTIAL", true)).toEqual(
+      quoteFieldNeeds("RODENT", "RESIDENTIAL")
+    );
+  });
+
   it("commercial is sqft-banded for the sqft-priced services", () => {
     expect(quoteFieldNeeds("RODENT", "COMMERCIAL")).toEqual(needs({ sqft: true }));
   });

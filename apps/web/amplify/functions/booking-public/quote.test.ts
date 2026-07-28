@@ -957,6 +957,73 @@ describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
     expect(res.body.invoiceEligible).toBe(true);
   });
 
+  it("IN-UNIT: prices off the RESIDENTIAL sheet, never the per-unit HOA sheet", async () => {
+    // A condo owner asking us to treat ONE unit is a single-home visit. Pricing
+    // it per-unit across all 24 units would quote a whole-property program
+    // nobody asked for, at many times the real price.
+    marketRateByService = {
+      ...marketRateByService,
+      GENERAL_PEST: {
+        priceCents: 17500,
+        sheet: {
+          plans: {
+            MONTHLY: { monthlyCents: 9900, initialFeeCents: 11900 },
+            BIMONTHLY: { monthlyCents: 5900, initialFeeCents: 11900 },
+            QUARTERLY: { monthlyCents: 4900, initialFeeCents: 10900 },
+          },
+        },
+        basis: "test residential sheet",
+        cached: true,
+      },
+    };
+
+    const res = await postQuote({
+      ...communityInput,
+      inUnit: true,
+      sqft: 1200,
+      units: undefined,
+      recurringPreference: "",
+    });
+
+    expect(res.body.decision).toBe("PRICED");
+    // It asked the RESIDENTIAL sheet for this service — the HOA sheet is not
+    // consulted at all.
+    expect(marketRateCalls.some((c) => c.service === "GENERAL_PEST")).toBe(true);
+    expect(marketRateCalls.some((c) => c.service === "HOA")).toBe(false);
+    // Priced like a home: real one-time day prices, nothing per-unit.
+    const prices = (res.body.days as { priceCents: number }[]).map((d) => d.priceCents);
+    expect(prices.length).toBeGreaterThan(0);
+    for (const p of prices) expect(p).toBeGreaterThan(0);
+  });
+
+  it("IN-UNIT: asks for sqft, not the unit count", async () => {
+    const res = await postQuote({
+      ...communityInput,
+      inUnit: true,
+      units: undefined,
+      sqft: undefined,
+    });
+
+    expect(res.status).toBe(400);
+    // The residential input is what's missing — never "how many units".
+    expect(res.body.errors?.sqft).toBeTruthy();
+    expect(res.body.errors?.units).toBeUndefined();
+  });
+
+  it("the in-unit flag is IGNORED outside a community", async () => {
+    // It only means something at an association; a commercial quote must still
+    // price from the commercial sheet.
+    const res = await postQuote({
+      ...rodentInput,
+      propertyKind: "COMMERCIAL",
+      inUnit: true,
+      sqft: undefined,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors?.sqft).toBeTruthy();
+  });
+
   it("offers a one-time common-area visit derived from the per-unit QUARTERLY rate", async () => {
     const res = await postQuote({ ...communityInput, recurringPreference: "" });
 
