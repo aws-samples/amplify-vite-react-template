@@ -466,3 +466,33 @@ mark.ocr-current { background: #f79b32; color: #fff; border-radius: 2px; }
   color: var(--muted);
   font-size: 11px;
 }
+
+/* ── Licensing: summary + filter bar ── */
+.lic-bar { display: flex; flex-direction: column; gap: 12px; }
+.lic-stats { display: flex; gap: 26px; flex-wrap: wrap; }
+.lic-stat { display: flex; align-items: baseline; gap: 6px; }
+.lic-stat strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.lic-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.lic-search {
+  flex: 1 1 280px;
+  min-width: 0;
+  padding: 9px 12px;
+  font-size: 14px;
+}
+.lic-chip {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.lic-chip:hover { border-color: var(--accent); color: var(--accent-dark); }
+.lic-chip.on {
+  border-color: var(--accent);
+  background: var(--blue-bg);
+  color: var(--accent-dark);
+}

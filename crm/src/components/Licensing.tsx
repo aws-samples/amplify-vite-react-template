@@ -3,7 +3,6 @@ import {
   client,
   fmtDate,
   licenseHealth,
-  daysUntilDate,
   LICENSE_CLASS_LABELS,
   LICENSE_STATUS_LABELS,
   LINES_OF_AUTHORITY,
@@ -33,6 +32,8 @@ export default function Licensing({ profile }: { profile: UserProfile }) {
   const [editing, setEditing] = useState<License | null>(null);
   const [openDocsFor, setOpenDocsFor] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [attentionOnly, setAttentionOnly] = useState(false);
 
   const isAdmin = profile.role === "ADMIN";
 
@@ -52,19 +53,62 @@ export default function Licensing({ profile }: { profile: UserProfile }) {
     );
   }, []);
 
-  const firm = licenses.filter((l) => l.holderType === "FIRM");
-  const personal = licenses.filter((l) => l.holderType === "PRODUCER");
+  const allFirm = licenses.filter((l) => l.holderType === "FIRM");
+  const allPersonal = licenses.filter((l) => l.holderType === "PRODUCER");
 
-  // Compliance roll-up: expired and expiring-within-60-days across both kinds.
-  const alerts = useMemo(() => {
-    const expired: License[] = [];
-    const soon: License[] = [];
-    for (const l of licenses) {
-      const h = licenseHealth(l);
-      if (h.level === "expired") expired.push(l);
-      else if (h.level === "urgent" || h.level === "soon") soon.push(l);
+  /**
+   * One filter drives every section below. At 30+ licenses per producer,
+   * scanning is the bottleneck — typing "NH" should collapse the whole page
+   * to New Hampshire rather than making you hunt through three tables.
+   */
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (l: License) => {
+      if (attentionOnly) {
+        const lvl = licenseHealth(l).level;
+        if (lvl !== "expired" && lvl !== "urgent" && lvl !== "soon") return false;
+      }
+      if (!q) return true;
+      return [
+        l.state,
+        l.licenseNumber,
+        l.npn,
+        holderLabel(l, profiles),
+        l.licenseClass,
+        (l.linesOfAuthority ?? []).filter(Boolean).join(" "),
+      ]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(q));
+    };
+  }, [query, attentionOnly, profiles]);
+
+  const firm = allFirm.filter(matches);
+  const personal = allPersonal.filter(matches);
+  const filtering = query.trim().length > 0 || attentionOnly;
+
+  // Compliance roll-up: expired, inactive, or expiring within 60 days.
+  const attentionCount = useMemo(
+    () =>
+      licenses.filter((l) => {
+        const lvl = licenseHealth(l).level;
+        return lvl === "expired" || lvl === "urgent" || lvl === "soon";
+      }).length,
+    [licenses]
+  );
+
+  // How many states we can actually write in: firm licensed AND a producer
+  // licensed, both unexpired. Counted over every state that appears anywhere.
+  const { writableStates, touchedStates } = useMemo(() => {
+    const live = (l: License) => licenseHealth(l).level !== "expired";
+    const states = new Set(licenses.map((l) => l.state).filter(Boolean));
+    let writable = 0;
+    for (const s of states) {
+      const hasFirm = allFirm.some((l) => l.state === s && live(l));
+      const hasProducer = allPersonal.some((l) => l.state === s && live(l));
+      if (hasFirm && hasProducer) writable++;
     }
-    return { expired, soon };
+    return { writableStates: writable, touchedStates: states.size };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [licenses]);
 
   async function del(id: string) {
@@ -86,32 +130,61 @@ export default function Licensing({ profile }: { profile: UserProfile }) {
         />
       )}
 
-      {(alerts.expired.length > 0 || alerts.soon.length > 0) && (
-        <div className="card" style={{ borderLeft: "4px solid var(--red)" }}>
-          <h2 style={{ marginTop: 0 }}>Licensing attention needed</h2>
-          {alerts.expired.length > 0 && (
-            <p className="small" style={{ color: "var(--red)", margin: "4px 0" }}>
-              <strong>{alerts.expired.length} expired or inactive:</strong>{" "}
-              {alerts.expired
-                .map((l) => `${l.state} ${holderLabel(l, profiles)}`)
-                .join(", ")}
-            </p>
+      <div className="card lic-bar">
+        <div className="lic-stats">
+          <div className="lic-stat">
+            <strong>{allFirm.length}</strong>
+            <span className="muted small">firm</span>
+          </div>
+          <div className="lic-stat">
+            <strong>{allPersonal.length}</strong>
+            <span className="muted small">personal</span>
+          </div>
+          <div className="lic-stat">
+            <strong>{writableStates}</strong>
+            <span className="muted small">
+              of {touchedStates} states writable
+            </span>
+          </div>
+        </div>
+
+        <div className="lic-controls">
+          <input
+            className="lic-search"
+            type="search"
+            placeholder="Filter by state, license #, NPN, person…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {attentionCount > 0 && (
+            <button
+              className={`lic-chip${attentionOnly ? " on" : ""}`}
+              onClick={() => setAttentionOnly((v) => !v)}
+              title="Expired, inactive, or expiring within 60 days"
+            >
+              ⚠ {attentionCount} need{attentionCount === 1 ? "s" : ""} attention
+            </button>
           )}
-          {alerts.soon.length > 0 && (
-            <p className="small" style={{ color: "var(--amber)", margin: "4px 0" }}>
-              <strong>{alerts.soon.length} expiring within 60 days:</strong>{" "}
-              {alerts.soon
-                .map(
-                  (l) =>
-                    `${l.state} ${holderLabel(l, profiles)} (${daysUntilDate(
-                      l.expirationDate
-                    )}d)`
-                )
-                .join(", ")}
-            </p>
+          {filtering && (
+            <button
+              className="link"
+              onClick={() => {
+                setQuery("");
+                setAttentionOnly(false);
+              }}
+            >
+              Clear
+            </button>
           )}
         </div>
-      )}
+
+        {filtering && (
+          <p className="muted small" style={{ margin: "8px 0 0" }}>
+            Showing {firm.length + personal.length} of{" "}
+            {allFirm.length + allPersonal.length} licenses.
+          </p>
+        )}
+      </div>
 
       <LicenseTable
         title="Firm licenses"
@@ -855,6 +928,10 @@ function StateCoverage({
   personal: License[];
   profiles: UserProfile[];
 }) {
+  const [open, setOpen] = useState(true);
+  // Gaps are the actionable half; the writable states are just reassurance.
+  const [gapsOnly, setGapsOnly] = useState(true);
+
   const rows = useMemo(() => {
     const states = [
       ...new Set([...firm, ...personal].map((l) => l.state).filter(Boolean)),
@@ -876,16 +953,41 @@ function StateCoverage({
     });
   }, [firm, personal, profiles]);
 
+  const gaps = rows.filter((r) => !(r.firm && r.producers.length > 0));
+  const shown = gapsOnly ? gaps : rows;
+
   if (rows.length === 0) return null;
 
   return (
     <div className="card">
-      <h2>State coverage</h2>
-      <p className="muted small" style={{ marginTop: 0 }}>
-        A state is writable when the firm holds an active license there
-        <em> and</em> at least one producer is licensed. Expired licenses
-        don't count toward coverage.
-      </p>
+      <div className="toolbar" style={{ marginTop: 0, alignItems: "flex-start" }}>
+        <div>
+          <h2 style={{ margin: 0 }}>
+            State coverage{" "}
+            <span className="muted small" style={{ fontWeight: 400 }}>
+              · {rows.length - gaps.length} writable, {gaps.length} gap
+              {gaps.length === 1 ? "" : "s"}
+            </span>
+          </h2>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            A state is writable when the firm holds an active license there
+            <em> and</em> at least one producer is licensed. Expired licenses
+            don't count toward coverage.
+          </p>
+        </div>
+        <div className="grow" />
+        <button
+          className={`lic-chip${gapsOnly ? " on" : ""}`}
+          onClick={() => setGapsOnly((v) => !v)}
+        >
+          {gapsOnly ? "Showing gaps only" : "Show gaps only"}
+        </button>
+        <button className="link" onClick={() => setOpen((v) => !v)}>
+          {open ? "Hide" : "Show"}
+        </button>
+      </div>
+
+      {open && (
       <div className="table-wrap">
         <table>
           <thead>
@@ -897,7 +999,7 @@ function StateCoverage({
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {shown.map((r) => {
               const ok = r.firm && r.producers.length > 0;
               return (
                 <tr key={r.state}>
@@ -920,7 +1022,13 @@ function StateCoverage({
             })}
           </tbody>
         </table>
+        {shown.length === 0 && (
+          <p className="muted small">
+            No gaps — every state with a license on file is writable.
+          </p>
+        )}
       </div>
+      )}
     </div>
   );
 }
