@@ -16,6 +16,7 @@ import {
 import { fillAcord25 } from "../lib/acord";
 import DocumentsPanel from "../components/DocumentsPanel";
 import QuotesPanel, { commissionCell, termsSummary } from "../components/QuotesPanel";
+import CoverageForm from "../components/CoverageForm";
 import FilePreviewModal from "../components/FilePreview";
 import PropertyPanel from "../components/PropertyPanel";
 import FormsTab from "../components/FormsTab";
@@ -331,17 +332,26 @@ function DeleteLeadZone({ account }: { account: Account }) {
 
 function PoliciesTab({ accountId }: { accountId: string }) {
   const [policies, setPolicies] = useState<Policy[]>([]);
+  const [carriers, setCarriers] = useState<Carrier[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [editing, setEditing] = useState<Policy | null>(null);
+
+  async function refresh() {
+    const { data } = await client.models.Policy.list({
+      filter: { accountId: { eq: accountId } },
+    });
+    setPolicies(
+      data.sort((a, b) => (b.effectiveDate ?? "").localeCompare(a.effectiveDate ?? ""))
+    );
+    setLoaded(true);
+  }
 
   useEffect(() => {
-    client.models.Policy.list({ filter: { accountId: { eq: accountId } } }).then(
-      ({ data }) => {
-        setPolicies(
-          data.sort((a, b) => (b.effectiveDate ?? "").localeCompare(a.effectiveDate ?? ""))
-        );
-        setLoaded(true);
-      }
+    refresh();
+    client.models.Carrier.list().then(({ data }) =>
+      setCarriers(data.sort((a, b) => a.name.localeCompare(b.name)))
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
   async function updatePolicy(id: string, patch: Partial<Policy>) {
@@ -349,9 +359,28 @@ function PoliciesTab({ accountId }: { accountId: string }) {
     if (data) setPolicies((ps) => ps.map((p) => (p.id === id ? data : p)));
   }
 
+  const carrierName = (id: string | null | undefined) =>
+    carriers.find((c) => c.id === id)?.name ?? "—";
+
   return (
     <div className="card">
       <h2>Policies</h2>
+
+      {editing && (
+        <CoverageForm
+          key={editing.id}
+          kind="policy"
+          accountId={accountId}
+          carriers={carriers}
+          existing={editing}
+          onSaved={() => {
+            setEditing(null);
+            refresh();
+          }}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+
       {!loaded ? (
         <p className="muted small">Loading…</p>
       ) : policies.length === 0 ? (
@@ -364,6 +393,7 @@ function PoliciesTab({ accountId }: { accountId: string }) {
             <thead>
               <tr>
                 <th>Policy #</th>
+                <th>Carrier</th>
                 <th>Lines</th>
                 <th>Premium</th>
                 <th>Commission</th>
@@ -371,23 +401,14 @@ function PoliciesTab({ accountId }: { accountId: string }) {
                 <th>Effective</th>
                 <th>Expires</th>
                 <th>Status</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {policies.map((p) => (
                 <tr key={p.id}>
-                  <td>
-                    <input
-                      defaultValue={p.policyNumber ?? ""}
-                      placeholder="—"
-                      style={{ border: "1px solid transparent", background: "none", width: 140 }}
-                      onBlur={(e) => {
-                        const v = e.target.value.trim();
-                        if (v !== (p.policyNumber ?? ""))
-                          updatePolicy(p.id, { policyNumber: v || null });
-                      }}
-                    />
-                  </td>
+                  <td>{p.policyNumber || "—"}</td>
+                  <td className="small">{carrierName(p.carrierId)}</td>
                   <td className="small">{(p.lines ?? []).filter(Boolean).join(", ") || "—"}</td>
                   <td>{fmtMoney(p.premium)}</td>
                   <td className="small">{commissionCell(p)}</td>
@@ -405,6 +426,11 @@ function PoliciesTab({ accountId }: { accountId: string }) {
                         <option key={s}>{s}</option>
                       ))}
                     </select>
+                  </td>
+                  <td>
+                    <button className="link" onClick={() => setEditing(p)}>
+                      Edit
+                    </button>
                   </td>
                 </tr>
               ))}

@@ -3,11 +3,11 @@ import {
   client,
   fmtDate,
   fmtMoney,
-  LINES_OF_BUSINESS,
   type Account,
   type Carrier,
   type Quote,
 } from "../lib/client";
+import CoverageForm from "./CoverageForm";
 
 const STATUS_BADGE: Record<string, string> = {
   DRAFT: "gray",
@@ -64,6 +64,7 @@ export default function QuotesPanel({
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [carriers, setCarriers] = useState<Carrier[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<Quote | null>(null);
   const [binding, setBinding] = useState<Quote | null>(null);
   const [error, setError] = useState("");
 
@@ -96,18 +97,32 @@ export default function QuotesPanel({
     <div>
       <div className="toolbar">
         <div className="grow" />
-        <button className="primary" onClick={() => setShowForm(!showForm)}>
+        <button
+          className="primary"
+          onClick={() => {
+            setEditing(null);
+            setShowForm(!showForm);
+          }}
+        >
           {showForm ? "Cancel" : "+ New quote"}
         </button>
       </div>
 
-      {showForm && (
-        <QuoteForm
+      {(showForm || editing) && (
+        <CoverageForm
+          key={editing?.id ?? "new"}
+          kind="quote"
           accountId={account.id}
           carriers={carriers}
+          existing={editing}
           onSaved={() => {
             setShowForm(false);
+            setEditing(null);
             refresh();
+          }}
+          onCancel={() => {
+            setShowForm(false);
+            setEditing(null);
           }}
         />
       )}
@@ -144,6 +159,15 @@ export default function QuotesPanel({
                     </span>
                   </td>
                   <td style={{ whiteSpace: "nowrap" }}>
+                    <button
+                      className="link"
+                      onClick={() => {
+                        setShowForm(false);
+                        setEditing(qt);
+                      }}
+                    >
+                      Edit
+                    </button>
                     {(OPEN_STATUSES as readonly string[]).includes(qt.status) && (
                       <>
                         <select
@@ -186,188 +210,6 @@ export default function QuotesPanel({
         />
       )}
       {error && <p className="error-text">{error}</p>}
-    </div>
-  );
-}
-
-// Alphabetical by label.
-const RC_TYPES = [
-  ["ERC", "ERC — Extended Replacement Cost"],
-  ["GRC", "GRC — Guaranteed Replacement Cost"],
-  ["RC", "RC — Replacement Cost"],
-] as const;
-
-function QuoteForm({
-  accountId,
-  carriers,
-  onSaved,
-}: {
-  accountId: string;
-  carriers: Carrier[];
-  onSaved: () => void;
-}) {
-  const [carrierId, setCarrierId] = useState("");
-  const [lines, setLines] = useState<string[]>([]);
-  const [premium, setPremium] = useState("");
-  const [commissionPct, setCommissionPct] = useState("");
-  const [commissionTouched, setCommissionTouched] = useState(false);
-  const [perOccDed, setPerOccDed] = useState("");
-  const [perUnitDed, setPerUnitDed] = useState("");
-  const [blanketLimit, setBlanketLimit] = useState("");
-  const [coinsurance, setCoinsurance] = useState("");
-  const [rcType, setRcType] = useState("");
-  const [effectiveDate, setEffectiveDate] = useState("");
-  const [expirationDate, setExpirationDate] = useState("");
-  const [notes, setNotes] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  function toggleLine(line: string) {
-    setLines((ls) =>
-      ls.includes(line) ? ls.filter((l) => l !== line) : [...ls, line]
-    );
-  }
-
-  function pickCarrier(id: string) {
-    setCarrierId(id);
-    // Autofill the carrier's standard commission unless manually edited.
-    if (!commissionTouched) {
-      const std = carriers.find((c) => c.id === id)?.standardCommissionPct;
-      setCommissionPct(std != null ? String(std) : "");
-    }
-  }
-
-  async function save() {
-    setSaving(true);
-    await client.models.Quote.create({
-      accountId,
-      carrierId: carrierId || undefined,
-      status: "DRAFT",
-      lines,
-      premium: premium ? Number(premium) : undefined,
-      commissionPct: commissionPct ? Number(commissionPct) : undefined,
-      perOccurrenceDeductible: perOccDed ? Number(perOccDed) : undefined,
-      perUnitDeductible: perUnitDed ? Number(perUnitDed) : undefined,
-      blanketLimit: blanketLimit ? Number(blanketLimit) : undefined,
-      coinsurancePct: coinsurance ? Number(coinsurance) : undefined,
-      replacementCostType: (rcType || undefined) as Quote["replacementCostType"],
-      effectiveDate: effectiveDate || undefined,
-      expirationDate: expirationDate || undefined,
-      notes: notes || undefined,
-    });
-    setSaving(false);
-    onSaved();
-  }
-
-  return (
-    <div className="card" style={{ background: "#f8fafc" }}>
-      <div className="form-grid">
-        <div className="field">
-          <label>Carrier</label>
-          <select value={carrierId} onChange={(e) => pickCarrier(e.target.value)}>
-            <option value="">—</option>
-            {carriers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field">
-          <label>Premium ($)</label>
-          <input type="number" value={premium} onChange={(e) => setPremium(e.target.value)} />
-        </div>
-        <div className="field">
-          <label>Commission % (baked into premium)</label>
-          <input
-            type="number"
-            step="0.1"
-            min={0}
-            max={100}
-            value={commissionPct}
-            onChange={(e) => {
-              setCommissionTouched(true);
-              setCommissionPct(e.target.value);
-            }}
-          />
-        </div>
-        <div className="field">
-          <label>Effective date</label>
-          <input
-            type="date"
-            value={effectiveDate}
-            onChange={(e) => setEffectiveDate(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>Expiration date</label>
-          <input
-            type="date"
-            value={expirationDate}
-            onChange={(e) => setExpirationDate(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>Per-occurrence deductible ($)</label>
-          <input type="number" value={perOccDed} onChange={(e) => setPerOccDed(e.target.value)} />
-        </div>
-        <div className="field">
-          <label>Per-unit deductible ($)</label>
-          <input type="number" value={perUnitDed} onChange={(e) => setPerUnitDed(e.target.value)} />
-        </div>
-        <div className="field">
-          <label>Blanket limit ($)</label>
-          <input
-            type="number"
-            value={blanketLimit}
-            onChange={(e) => setBlanketLimit(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>Coinsurance %</label>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={coinsurance}
-            onChange={(e) => setCoinsurance(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>Replacement cost</label>
-          <select value={rcType} onChange={(e) => setRcType(e.target.value)}>
-            <option value="">—</option>
-            {RC_TYPES.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field full">
-          <label>Lines</label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
-            {LINES_OF_BUSINESS.map((l) => (
-              <label key={l} className="small" style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                <input
-                  type="checkbox"
-                  checked={lines.includes(l)}
-                  onChange={() => toggleLine(l)}
-                />
-                {l}
-              </label>
-            ))}
-          </div>
-        </div>
-        <div className="field full">
-          <label>Notes</label>
-          <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
-        </div>
-      </div>
-      <div className="form-actions">
-        <button className="primary" disabled={saving} onClick={save}>
-          {saving ? "Saving…" : "Save quote"}
-        </button>
-      </div>
     </div>
   );
 }
