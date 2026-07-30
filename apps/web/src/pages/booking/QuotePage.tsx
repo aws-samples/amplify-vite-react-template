@@ -90,6 +90,8 @@ type Fields = {
   propertyKind: PropertyKind;
   /** Condo/HOA only: one unit on its own — quoted like a residential visit. */
   inUnit: boolean;
+  /** "Tell us what you need" — freeform, read into the fields below. */
+  describe: string;
   street: string;
   city: string;
   state: string;
@@ -115,6 +117,7 @@ const EMPTY_FIELDS: Fields = {
   service: "GENERAL_PEST",
   propertyKind: "RESIDENTIAL",
   inUnit: false,
+  describe: "",
   street: "",
   city: "",
   state: "MA",
@@ -351,6 +354,10 @@ export default function QuotePage() {
   // quote sells exactly what the service's catalog entry says it sells (rodent
   // is a quarterly program only). Driving this from the catalog instead of a
   // hard-coded service list means adding a plan to a service is a catalog edit.
+  // "Tell us what you need" is a different WAY to fill the same form, not a
+  // different quote: the description is read into the same service/size fields
+  // and priced by the same engine, so nothing downstream has to know about it.
+  const describeMode = fields.service === "__DESCRIBE__";
   const planCadences: RecurringFrequency[] =
     fields.propertyKind === "COMMERCIAL"
       ? ["QUARTERLY", "BIMONTHLY", "MONTHLY"]
@@ -400,6 +407,7 @@ export default function QuotePage() {
       callConsent: fields.callConsent,
       callConsentTextVersion: CALL_CONSENT_TEXT_VERSION,
       service: fields.service as ServiceCode,
+      describe: describeMode ? fields.describe.trim() || undefined : undefined,
       propertyKind: fields.propertyKind,
       // Only meaningful at a community; the server ignores it elsewhere.
       inUnit: fields.propertyKind === "COMMUNITY" ? fields.inUnit : undefined,
@@ -619,6 +627,32 @@ export default function QuotePage() {
                   : "Pick a day. This quote is held until "}
               {expiresText}.
             </p>
+
+            {/* Priced straight from what they typed, so the reading behind the
+                price is stated plainly and is one click from being fixed. A
+                misread is only catchable here, before they book. */}
+            {priced.describedAs?.length ? (
+              <div className="bk-described" style={{ marginBottom: 16 }}>
+                <strong className="small">We read that as:</strong>
+                <ul style={{ margin: "6px 0 8px", paddingLeft: 18 }}>
+                  {priced.describedAs.map((a) => (
+                    <li key={a} className="small">
+                      {a}
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  className="bk-linklike"
+                  onClick={() => {
+                    setPriced(null);
+                    setFields((f) => ({ ...f, service: "" }));
+                  }}
+                >
+                  Not right? Pick your service instead
+                </button>
+              </div>
+            ) : null}
 
             <div className="bk-form-card">
               {offSeason && offer && (
@@ -904,8 +938,32 @@ export default function QuotePage() {
                         {s.label}
                       </option>
                     ))}
+                    <option value="__DESCRIBE__">
+                      Not sure — tell us what you need
+                    </option>
                   </select>
                   {fieldError("service")}
+                  {describeMode ? (
+                    <div style={{ marginTop: 10 }}>
+                      <label htmlFor="bq-describe">
+                        Tell us what you need
+                      </label>
+                      <textarea
+                        id="bq-describe"
+                        rows={4}
+                        maxLength={1000}
+                        value={fields.describe}
+                        onChange={(e) => set("describe")(e.target.value)}
+                        placeholder="e.g. Mice in the kitchen of my 2,000 sq ft house — I'd like ongoing service, not just one visit."
+                      />
+                      <p className="bk-hint" style={{ marginTop: 4 }}>
+                        Include the pest, the property size, and whether you
+                        want a one-time visit or ongoing service. We'll price it
+                        the same way as the form.
+                      </p>
+                      {fieldError("describe")}
+                    </div>
+                  ) : null}
                 </div>
 
                 {needs.sqft && (

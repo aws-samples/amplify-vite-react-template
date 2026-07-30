@@ -2,6 +2,13 @@ import type {
   APIGatewayProxyEventV2,
   APIGatewayProxyResultV2,
 } from "aws-lambda";
+import Anthropic from "@anthropic-ai/sdk";
+import {
+  extractLead,
+  quoteInputFromExtraction,
+  type ExtractionMapping,
+} from "../shared/leadExtraction";
+import { DEMAND_PRICING_MODEL } from "../shared/marketRate";
 import { randomUUID } from "node:crypto";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
@@ -168,6 +175,10 @@ function corsHeaders(origin: string | undefined): Record<string, string> {
 }
 
 type QuoteInput = {
+  /** "Tell us what you need" — freeform text instead of the structured
+   *  pickers. Extracted into the SAME fields the form collects; it never
+   *  reaches a pricing path of its own. */
+  describe?: string;
   propertyKind?: string;
   /** Condo/HOA only: this ask is for ONE unit, so quote it residentially. */
   inUnit?: boolean;
@@ -1078,6 +1089,50 @@ function quoteLeadNotes(
   return lines.join("\n");
 }
 
+/**
+ * Read "tell us what you need" into the structured inputs the form collects.
+ *
+ * The Anthropic key is fetched the same way every other secret here is. No key
+ * (or any failure) is an honest ask-back rather than a guess or a crash: the
+ * customer is told to use the pickers, and nothing is priced on invented facts.
+ */
+async function inputFromDescription(
+  describe: string
+): Promise<ExtractionMapping> {
+  // A cap, because this is an unauthenticated AI surface. Real descriptions are
+  // a sentence or two; anything longer is padding or an injection attempt, and
+  // truncating costs nothing a genuine customer needs.
+  const text = describe.trim().slice(0, 1000);
+  const apiKey = await getSecret("ANTHROPIC_API_KEY");
+  if (!apiKey) {
+    return {
+      ok: false,
+      eligibility: "unclear",
+      reason:
+        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+    };
+  }
+  try {
+    const extraction = await extractLead(
+      new Anthropic({ apiKey }),
+      text,
+      null,
+      // A closed schema needs no frontier model, and this runs on public
+      // traffic — the demand-pricing tier is the right cost/latency point.
+      DEMAND_PRICING_MODEL
+    );
+    return quoteInputFromExtraction(extraction);
+  } catch (err) {
+    console.error("inputFromDescription: extraction failed", err);
+    return {
+      ok: false,
+      eligibility: "unclear",
+      reason:
+        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+    };
+  }
+}
+
 async function quote(
   input: QuoteInput,
   sourceIp: string,
@@ -1087,6 +1142,25 @@ async function quote(
   // them and no new website lead is minted.
   trusted?: { customerId: string }
 ) {
+  // "Tell us what you need": read the freeform text into the SAME fields the
+  // structured form would have collected, then fall through to exactly the same
+  // validation and pricing. The model never returns money — it only chooses
+  // inputs — so there is no path from what a customer types to a price, and a
+  // description we cannot read confidently becomes a callback, never a guess.
+  let describeAssumptions: string[] = [];
+  if (!resume && (input.describe ?? "").trim()) {
+    const described = await inputFromDescription(input.describe!);
+    if (!described.ok) {
+      // Answer on the field they typed into, so they can add the one missing
+      // detail and resubmit. A wrong price shown instantly is worse than an
+      // honest "tell us a bit more" — and for work we don't do (bed bugs,
+      // fumigation) this states it plainly instead of promising a callback.
+      throw new HttpError(400, { errors: { describe: described.reason } });
+    }
+    input = { ...input, ...described.input };
+    describeAssumptions = described.assumptions;
+  }
+
   const errors: Record<string, string> = {};
   const name = (input.name ?? "").trim();
   const email = (input.email ?? "").trim().toLowerCase();
@@ -1939,6 +2013,11 @@ async function quote(
     service: quoteDisplayService(serviceLabel, requestedFrequency),
     recurringOffer,
     requestedFrequency,
+    // What we READ from a freeform description, so the customer can see the
+    // price rests on our reading of their words and correct it in one click.
+    // Priced directly from the extraction, so this is the only place a misread
+    // becomes visible before they book.
+    describedAs: describeAssumptions.length ? describeAssumptions : undefined,
     // Plan-only quotes (community common-area) carry no one-time offer: the
     // day picks the first visit and the amount charged is the first month.
     planOnly: planOnly || undefined,

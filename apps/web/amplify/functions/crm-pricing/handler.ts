@@ -11,6 +11,10 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
+import {
+  extractLead,
+  type Extraction,
+} from "../shared/leadExtraction";
 import { callerEmail, callerIsOffice, callerIsOwner } from "../shared/authz";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { activeTechBases } from "../shared/capacity";
@@ -402,146 +406,6 @@ async function getPricingUploadUrl(contentType: string) {
 
 // ---------- extraction (Claude) ----------
 
-type Extraction = {
-  eligibility:
-    | "ok"
-    | "wildlife"
-    | "bed_bugs"
-    | "food_service"
-    | "fumigation"
-    | "out_of_area";
-  propertyType:
-    | "residential"
-    | "association"
-    | "commercial"
-    | "mosquito"
-    | "specialty"
-    | "unknown";
-  specialtyKind:
-    | "wasp_nest"
-    | "rodent_nest"
-    | "rodent_exclusion"
-    | "roach"
-    | "termite"
-    | "none";
-  pest: string;
-  customerName: string | null;
-  town: string | null;
-  state: string | null;
-  fullAddress: string | null;
-  sqft: number | null;
-  units: number | null;
-  nestCount: number | null;
-  animalCount: number | null;
-  halfAcres: number | null;
-  tick: boolean;
-  frequencyInterest: "monthly" | "bimonthly" | "quarterly" | "one_time" | "unspecified";
-  leadFeeCents: number | null;
-  rodentInterest: boolean;
-  multiProperty: boolean;
-  competitorMatchBelowFloor: boolean;
-  complianceDocsRequested: boolean;
-  assumptions: string[];
-};
-
-const EXTRACTION_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "eligibility", "propertyType", "specialtyKind", "pest", "customerName",
-    "town", "state", "fullAddress", "sqft", "units", "nestCount", "animalCount", "halfAcres",
-    "tick", "frequencyInterest", "leadFeeCents", "rodentInterest",
-    "multiProperty", "competitorMatchBelowFloor", "complianceDocsRequested",
-    "assumptions",
-  ],
-  properties: {
-    eligibility: { type: "string", enum: ["ok", "wildlife", "bed_bugs", "food_service", "fumigation", "out_of_area"] },
-    propertyType: { type: "string", enum: ["residential", "association", "commercial", "mosquito", "specialty", "unknown"] },
-    specialtyKind: { type: "string", enum: ["wasp_nest", "rodent_nest", "rodent_exclusion", "roach", "termite", "none"] },
-    pest: { type: "string" },
-    customerName: { type: ["string", "null"] },
-    town: { type: ["string", "null"] },
-    state: { type: ["string", "null"] },
-    fullAddress: { type: ["string", "null"] },
-    sqft: { type: ["number", "null"] },
-    units: { type: ["number", "null"] },
-    nestCount: { type: ["number", "null"] },
-    animalCount: { type: ["number", "null"] },
-    halfAcres: { type: ["number", "null"] },
-    tick: { type: "boolean" },
-    frequencyInterest: { type: "string", enum: ["monthly", "bimonthly", "quarterly", "one_time", "unspecified"] },
-    leadFeeCents: { type: ["number", "null"] },
-    rodentInterest: { type: "boolean" },
-    multiProperty: { type: "boolean" },
-    competitorMatchBelowFloor: { type: "boolean" },
-    complianceDocsRequested: { type: "boolean" },
-    assumptions: { type: "array", items: { type: "string" } },
-  },
-} as const;
-
-const EXTRACTION_SYSTEM = `You are the intake extractor for BuzzKill Pest Control's lead-pricing engine (technicians are dispatched from their own home bases across eastern and central MA, not a single office; licensed in MA and RI only). You read a pasted Thumbtack lead (text and/or screenshot) and extract structured facts. You NEVER compute prices — a deterministic rate-card engine does that.
-
-Eligibility (hard passes):
-- "bed_bugs": any bed bug work.
-- "food_service": restaurants, cafés, bars, commercial kitchens, food processing/handling, grocery.
-- "fumigation": fumigation or tenting requests.
-- "out_of_area": service address clearly outside MA and RI (CT, NH, VT, NY — even if close).
-- "wildlife" is NOT a pass: set eligibility "wildlife" for wildlife work — squirrels, raccoons, bats, birds, snakes, skunks, opossums — and the engine quotes it as a one-time wildlife exclusion/removal visit. NOTE: dead rodents, mice, and rats INSIDE a structure are pest control (eligibility "ok"), not wildlife.
-Otherwise "ok".
-
-Property type: "association" for HOA/condo-association COMMON AREAS (unit counts); an individual condo unit is "residential". "mosquito" when the request is mosquito and/or tick yard treatment. "specialty" for wasp/hornet nest removal, rodent nest removal, rodent exclusion, a specialized roach/German-cockroach cleanout, or termite work (set specialtyKind). Otherwise "residential"/"commercial"/"unknown".
-
-Extraction rules:
-- sqft: null when not stated (the engine assumes 2,000 sqft and states the assumption). Do not guess.
-- nestCount: how many wasp/hornet nests the lead mentions; null when not stated (the engine assumes one and states the assumption).
-- animalCount: for wildlife work, how many animals need removed; null when not stated (the engine assumes one and states the assumption).
-- halfAcres: yard size in half-acre increments for mosquito/tick leads; null when unknown (engine assumes up to ½ acre).
-- leadFeeCents: the Thumbtack lead fee, in CENTS, when visible in the text/screenshot; null otherwise.
-- frequencyInterest: only when the lead stated one.
-- rodentInterest: true when mice/rats are mentioned at all.
-- multiProperty: investor/property-manager portfolios across multiple properties.
-- competitorMatchBelowFloor: they ask to match a lower competitor price.
-- complianceDocsRequested: commercial compliance documentation / audit support.
-- assumptions: every assumption you made, phrased for the customer reply (e.g. "assumed a typical ~2,000 sqft home — we'll confirm on the first visit").
-- Do not infer facts that aren't there; null is always better than a guess.`;
-
-async function extractLead(
-  anthropic: Anthropic,
-  inputText: string | null,
-  screenshot: { data: string; mediaType: string } | null
-): Promise<Extraction> {
-  const content: Anthropic.ContentBlockParam[] = [];
-  if (screenshot) {
-    content.push({
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: screenshot.mediaType as "image/png",
-        data: screenshot.data,
-      },
-    });
-  }
-  content.push({
-    type: "text",
-    text: `Extract the lead facts from this Thumbtack lead:\n\n${inputText ?? "(screenshot only)"}`,
-  });
-
-  const response = await anthropic.messages.create({
-    model: "claude-opus-4-8",
-    max_tokens: 4096,
-    system: EXTRACTION_SYSTEM,
-    messages: [{ role: "user", content }],
-    output_config: {
-      format: { type: "json_schema", schema: EXTRACTION_SCHEMA },
-    },
-  });
-  if (response.stop_reason === "refusal") {
-    throw new Error("The model declined to process this lead text");
-  }
-  const text = response.content.find((b) => b.type === "text");
-  if (!text || text.type !== "text") throw new Error("No extraction returned");
-  return JSON.parse(text.text) as Extraction;
-}
 
 // ---------- zone (Google Routes API) ----------
 

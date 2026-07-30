@@ -43,6 +43,9 @@ export const SERVICE_OPTIONS: ServiceOption[] = funnelCatalog().map((e) => ({
   seasonal: e.seasonal,
 }));
 
+/** Sentinel for the freeform "tell us what you need" path. */
+export const DESCRIBE_SERVICE = "__DESCRIBE__";
+
 export function serviceOption(code: string): ServiceOption | undefined {
   return SERVICE_OPTIONS.find((s) => s.code === code);
 }
@@ -86,6 +89,10 @@ export function quoteFieldNeeds(
    *  which only sets the price of a whole-property common-area program. */
   inUnit = false
 ): QuoteFieldNeeds {
+  // "Tell us what you need": the description supplies the service AND the size,
+  // so the structured size inputs are not collected — the server reads them out
+  // of the text and validates the result exactly as if they had been typed.
+  if (service === DESCRIBE_SERVICE) return NO_NEEDS;
   const svc = serviceOption(service);
   // GL-17: a seasonal plan prices on yard size alone at ANY property kind —
   // the community/commercial overrides don't apply.
@@ -212,6 +219,8 @@ export type QuoteFormFields = {
   propertyKind: string;
   /** Condo/HOA only: this ask is for ONE unit, quoted like a residential visit. */
   inUnit?: boolean;
+  /** Freeform "tell us what you need" text, when that path is chosen. */
+  describe?: string;
   street: string;
   city: string;
   state: string;
@@ -231,6 +240,9 @@ export function validateQuoteForm(f: QuoteFormFields): Record<string, string> {
   const errors: Record<string, string> = {};
   const svc = serviceOption(f.service);
   const needs = quoteFieldNeeds(f.service, f.propertyKind, f.inUnit);
+  if (f.service === DESCRIBE_SERVICE && !(f.describe ?? "").trim()) {
+    errors.describe = "Tell us what you need and we'll price it.";
+  }
   if (!f.name.trim()) errors.name = "Name is required";
   if (!EMAIL_RE.test(f.email.trim().toLowerCase()))
     errors.email = "A valid email is required";
