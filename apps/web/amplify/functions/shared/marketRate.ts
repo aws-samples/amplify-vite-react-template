@@ -69,7 +69,10 @@ export const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * computed from the actual spec content so an ad-hoc edit can never ship
  * unversioned (the recorded hash changes even when the label forgot to).
  */
-export const PRICING_PROMPT_VERSION = "2026-07-20.1";
+// 2026-07-27.1: RODENT also prices an ongoing quarterly program, so its sheet
+// gained plans.QUARTERLY. Cached rodent sheets predate it and carry no plan —
+// those quotes fall to the honest contact-for-price path until they refresh.
+export const PRICING_PROMPT_VERSION = "2026-07-27.1";
 export const PRICING_MODEL = "claude-opus-4-8";
 export const DEMAND_PRICING_MODEL = "claude-sonnet-5";
 
@@ -174,8 +177,10 @@ export type RateSheet = {
   /** WILDLIFE: incremental price per additional animal removed on the same
    *  visit (the base oneTimeCents covers the visit plus the first animal). */
   extraAnimalCents?: number;
-  /** GENERAL_PEST: recurring plans, each billed as a flat monthly price. */
-  plans?: Record<PlanCadence, PlanRate>;
+  /** Recurring plans, each billed as a flat monthly price. PARTIAL on purpose:
+   *  a service may sell only some cadences (rodent is quarterly-only), so every
+   *  reader must handle a missing cadence rather than assume all three. */
+  plans?: Partial<Record<PlanCadence, PlanRate>>;
   /** HOA: per-unit monthly rate by unit-count band and visit cadence. */
   hoaPerUnitMonthly?: HoaPerUnitRates;
 };
@@ -884,11 +889,30 @@ EXTRA_NEST_USD: <number>`,
     }),
   },
   RODENT: {
+    // Two DIFFERENT products, priced separately on purpose: the one-time job is
+    // trapping + exclusion to end an active infestation; the quarterly program
+    // is ongoing bait-station monitoring and re-baiting to keep it from coming
+    // back. The program is not a fraction of the treatment, so it is asked for
+    // on its own rather than derived from the one-time price.
     ask: (city, state, bucket) =>
-      `What do pest-control companies near ${city}, ${state} charge for a full interior+exterior rodent (mice/rats) treatment with trapping and exclusion check for a ~${bucket ?? 2000} sqft single-family home? ${LINE_INSTRUCTION}
-ONE_TIME_USD: <number>`,
-    lines: ["ONE_TIME_USD"],
-    assemble: (c) => ({ oneTimeCents: c.ONE_TIME_USD }),
+      `What do pest-control companies near ${city}, ${state} charge for rodent (mice/rats) control on a ~${bucket ?? 2000} sqft single-family home? Price BOTH: (1) a full one-time interior+exterior rodent treatment with trapping and an exclusion check; (2) an ongoing QUARTERLY rodent program with exterior bait stations, quarterly monitoring and re-baiting. The quarterly program is billed as a flat monthly subscription price regardless of visit cadence, and starts with a one-time initial/setup fee for the first intensive visit and station placement. ${LINE_INSTRUCTION}
+ONE_TIME_USD: <number>
+QUARTERLY_PLAN_PER_MONTH_USD: <number>
+QUARTERLY_PLAN_INITIAL_FEE_USD: <number>`,
+    lines: [
+      "ONE_TIME_USD",
+      "QUARTERLY_PLAN_PER_MONTH_USD",
+      "QUARTERLY_PLAN_INITIAL_FEE_USD",
+    ],
+    assemble: (c) => ({
+      oneTimeCents: c.ONE_TIME_USD,
+      plans: {
+        QUARTERLY: {
+          monthlyCents: c.QUARTERLY_PLAN_PER_MONTH_USD,
+          initialFeeCents: c.QUARTERLY_PLAN_INITIAL_FEE_USD,
+        },
+      },
+    }),
   },
   ROACH: {
     ask: (city, state, bucket) =>

@@ -250,12 +250,17 @@ describe("buildCancellationPreview", () => {
 
   it("a paid visit >72h out: STOPS, with the exact full-refund outcome named", async () => {
     // GL-08 R6: no keep-or-refund choice — the preview states the server's
-    // 72-hour result. 2026-08-01 is far out, so the payment refunds in full.
+    // 72-hour result. The date is computed FROM NOW, like its ≤72h sibling: a
+    // hard-coded one silently rots into the 72-hour window as the real calendar
+    // advances past it, turning a policy assertion into a wall-clock flake.
+    const farOut = new Date(Date.now() + 30 * 24 * 3600_000)
+      .toISOString()
+      .slice(0, 10);
     jobs.set("j1", {
       id: "j1",
       servicePlanId: "p1",
       status: "SCHEDULED",
-      scheduledDate: "2026-08-01",
+      scheduledDate: farOut,
       paidAt: "2026-07-01T00:00:00Z",
       priceCents: 12000,
     });

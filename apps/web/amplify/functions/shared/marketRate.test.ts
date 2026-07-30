@@ -235,7 +235,7 @@ describe("the live path — pure reads, serve-last-known-good", () => {
 
     expect(messagesCreate).not.toHaveBeenCalled();
     expect(res).toMatchObject({ priceCents: 31900, cached: true });
-    expect(res!.sheet.plans!.MONTHLY.monthlyCents).toBe(9900);
+    expect(res!.sheet.plans!.MONTHLY!.monthlyCents).toBe(9900);
     expect(rows).toHaveLength(1);
   });
 
@@ -248,7 +248,7 @@ describe("the live path — pure reads, serve-last-known-good", () => {
     expect(res).toMatchObject({ priceCents: 25000, cached: true });
     expect(res!.sheet.oneTimeCents).toBe(25000);
     // The rest of the sheet still serves.
-    expect(res!.sheet.plans!.QUARTERLY.monthlyCents).toBe(4900);
+    expect(res!.sheet.plans!.QUARTERLY!.monthlyCents).toBe(4900);
   });
 
   it("an EXPIRED row still serves — staleness beats a callback, expiry means due-for-refresh", async () => {
@@ -535,8 +535,8 @@ describe("researchAndCacheRate — the cron's machinery, and nobody else's", () 
 
     // Tidy $X9 rounding applies: 95 → $99, 60 → $59 — what matters here is
     // that each cadence kept its own researched value.
-    expect(res?.sheet.plans?.MONTHLY.monthlyCents).toBe(9900);
-    expect(res?.sheet.plans?.BIMONTHLY.monthlyCents).toBe(5900);
+    expect(res?.sheet.plans?.MONTHLY?.monthlyCents).toBe(9900);
+    expect(res?.sheet.plans?.BIMONTHLY?.monthlyCents).toBe(5900);
   });
 
   it("the Anthropic call throwing returns null", async () => {
@@ -552,7 +552,10 @@ describe("researchAndCacheRate — the cron's machinery, and nobody else's", () 
 describe("variable-cost floor — the only downside guardrail", () => {
   it("floors a researched one-time price at the deterministic Zone-A cost", async () => {
     // rodent_nest: (90+40)/60×$42 + 30mi×$0.30 + $55 = $155 variable cost.
-    researchText = "Cut-rate operators advertise $80.\nONE_TIME_USD: 80";
+    // RODENT now also prices the ongoing quarterly program, so a usable
+    // response must carry all three lines.
+    researchText =
+      "Cut-rate operators advertise $80.\nONE_TIME_USD: 80\nQUARTERLY_PLAN_PER_MONTH_USD: 59\nQUARTERLY_PLAN_INITIAL_FEE_USD: 325";
 
     const res = await researchAndCacheRate({
       anthropicKey: "test-key",
@@ -594,7 +597,7 @@ describe("variable-cost floor — the only downside guardrail", () => {
 
     const res = await gpResearch();
 
-    expect(res!.sheet.plans!.MONTHLY.monthlyCents).toBe(900); // tidy($10)
+    expect(res!.sheet.plans!.MONTHLY!.monthlyCents).toBe(900); // tidy($10)
     expect(String(created[0].basis)).toContain(
       "plan prices carry no variable-cost floor"
     );
@@ -876,7 +879,10 @@ describe("visibility, not a gate — one daily digest, never one email per rate 
   });
 
   it("records an applied floor on the row's basis for the digest and report to surface", async () => {
-    researchText = "Cut-rate operators advertise $80.\nONE_TIME_USD: 80";
+    // RODENT now also prices the ongoing quarterly program, so a usable
+    // response must carry all three lines.
+    researchText =
+      "Cut-rate operators advertise $80.\nONE_TIME_USD: 80\nQUARTERLY_PLAN_PER_MONTH_USD: 59\nQUARTERLY_PLAN_INITIAL_FEE_USD: 325";
 
     await researchAndCacheRate({
       anthropicKey: "test-key",

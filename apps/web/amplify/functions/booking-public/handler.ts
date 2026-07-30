@@ -1779,6 +1779,22 @@ async function quote(
     serviceLabel = serviceLabelFor(engineService, {
       sqftBucket: sqftBucket(input.sqft!),
     });
+    // Rodent also sells an ongoing quarterly program. It is OPTIONAL here on
+    // purpose: unlike general pest, a missing plan must not refuse the quote —
+    // the one-time treatment is still a complete, sellable answer, and rodent
+    // sheets cached before the program was priced simply carry no plan. Roach
+    // and termite price no plan at all, so they never reach this.
+    const rodentPlan =
+      engineService === "RODENT" ? rate.sheet.plans?.[freq] : undefined;
+    if (rodentPlan) {
+      recurringOffer = {
+        frequency: freq,
+        monthlyCents: rodentPlan.monthlyCents + travelAdderCents(priceZone, freq),
+        initialFeeCents:
+          rodentPlan.initialFeeCents +
+          travelAdderCents(priceZone, "ONE_TIME_FLAT"),
+      };
+    }
   }
 
   // Day-priced availability from the live schedule. The on-site duration is

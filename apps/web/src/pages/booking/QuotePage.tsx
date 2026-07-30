@@ -346,11 +346,20 @@ export default function QuotePage() {
   // GP-style plan preference: residential general pest and every commercial
   // service (commercial prices like general pest, one-time + plans).
   const isSeasonal = serviceOption(fields.service)?.seasonal === true;
+  // Which cadences THIS quote may offer. A commercial quote prices off the
+  // commercial sheet, which carries all three whatever the pest; a residential
+  // quote sells exactly what the service's catalog entry says it sells (rodent
+  // is a quarterly program only). Driving this from the catalog instead of a
+  // hard-coded service list means adding a plan to a service is a catalog edit.
+  const planCadences: RecurringFrequency[] =
+    fields.propertyKind === "COMMERCIAL"
+      ? ["QUARTERLY", "BIMONTHLY", "MONTHLY"]
+      : (serviceOption(fields.service)?.cadences ?? []);
   const offersPlanChoice =
     !isSeasonal &&
     !isCountOneTime &&
-    (fields.propertyKind === "COMMERCIAL" ||
-      (fields.propertyKind === "RESIDENTIAL" && fields.service === "GENERAL_PEST"));
+    fields.propertyKind !== "COMMUNITY" &&
+    planCadences.length > 0;
 
   function acceptPricedQuote(
     response: PricedQuote,
@@ -868,7 +877,27 @@ export default function QuotePage() {
                   <select
                     id="bq-service"
                     value={fields.service}
-                    onChange={(e) => set("service")(e.target.value)}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setFields((f) => {
+                        // A cadence the NEW service doesn't sell must not
+                        // survive the switch — it would quote a plan that has
+                        // no price (e.g. Monthly carried onto rodent).
+                        const allowed =
+                          f.propertyKind === "COMMERCIAL"
+                            ? (["QUARTERLY", "BIMONTHLY", "MONTHLY"] as RecurringFrequency[])
+                            : (serviceOption(next)?.cadences ?? []);
+                        return {
+                          ...f,
+                          service: next,
+                          recurringPreference:
+                            f.recurringPreference &&
+                            allowed.includes(f.recurringPreference)
+                              ? f.recurringPreference
+                              : "",
+                        };
+                      });
+                    }}
                   >
                     {SERVICE_OPTIONS.map((s) => (
                       <option key={s.code} value={s.code}>
@@ -1012,9 +1041,11 @@ export default function QuotePage() {
                       onChange={(e) => set("recurringPreference")(e.target.value)}
                     >
                       <option value="">One-time visit only</option>
-                      <option value="QUARTERLY">Quarterly plan</option>
-                      <option value="BIMONTHLY">Every-2-months plan</option>
-                      <option value="MONTHLY">Monthly plan</option>
+                      {planCadences.map((c) => (
+                        <option key={c} value={c}>
+                          {FREQUENCY_LABELS[c]} plan
+                        </option>
+                      ))}
                     </select>
                   </div>
                 )}

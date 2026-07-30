@@ -149,8 +149,12 @@ export const SERVICE_CATALOG: Record<CatalogServiceId, CatalogEntry> = {
     needsSqft: true,
     needsNestCount: false,
     needsUnits: false,
-    offersRecurring: false,
-    cadences: [],
+    // Rodent sells an ongoing QUARTERLY program (exterior bait stations,
+    // monitoring, re-baiting) alongside the one-time trapping/exclusion job.
+    // Quarterly only — monthly/bi-monthly rodent visits are not a product we
+    // price, so the sheet is never asked for them.
+    offersRecurring: true,
+    cadences: ["QUARTERLY"],
     seasonal: false,
     engineService: "RODENT",
     costKind: "rodent_nest",

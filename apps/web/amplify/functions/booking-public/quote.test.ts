@@ -911,6 +911,57 @@ describe("TERMITE and WILDLIFE price from their sheets — no specialist callbac
   });
 });
 
+describe("RODENT sells an ongoing quarterly program alongside the one-time job", () => {
+  it("offers the quarterly plan from the rodent sheet, priced like every other plan", async () => {
+    marketRateByService = {
+      RODENT: {
+        priceCents: 42500,
+        sheet: {
+          plans: {
+            QUARTERLY: { monthlyCents: 5900, initialFeeCents: 32500 },
+          },
+        },
+        basis: "test rodent sheet",
+        cached: true,
+      },
+    };
+
+    const res = await postQuote({ ...rodentInput, recurringPreference: "QUARTERLY" });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(res.body.recurringOffer).toEqual({
+      frequency: "QUARTERLY",
+      monthlyCents: 5900,
+      initialFeeCents: 32500,
+    });
+  });
+
+  it("a rodent sheet with NO plan still sells the one-time treatment", async () => {
+    // Sheets cached before the program was priced carry no plan. The one-time
+    // trapping/exclusion job is a complete answer on its own, so a missing plan
+    // must never refuse the quote — unlike general pest, where the plan IS the
+    // product and a missing one is an incomplete sheet.
+    marketRateByService = {
+      RODENT: {
+        priceCents: 42500,
+        sheet: {},
+        basis: "legacy rodent sheet",
+        cached: true,
+      },
+    };
+
+    const res = await postQuote({ ...rodentInput, recurringPreference: "QUARTERLY" });
+
+    expect(res.body.decision).toBe("PRICED");
+    // No plan offered (the payload carries it as null) — but the one-time
+    // treatment is still fully priced and bookable.
+    expect(res.body.recurringOffer ?? null).toBeNull();
+    const prices = (res.body.days as { priceCents: number }[]).map((d) => d.priceCents);
+    expect(prices.length).toBeGreaterThan(0);
+    for (const p of prices) expect(p).toBeGreaterThan(0);
+  });
+});
+
 describe("COMMUNITY prices the common-area plan from the HOA sheet", () => {
   const hoaGrid = {
     UNITS_1_10: { MONTHLY: 2200, BIMONTHLY: 1800, QUARTERLY: 1500 },

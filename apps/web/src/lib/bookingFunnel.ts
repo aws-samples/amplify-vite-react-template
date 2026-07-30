@@ -22,6 +22,10 @@ export type ServiceOption = {
   needsSqft: boolean;
   needsNestCount: boolean;
   offersRecurring: boolean;
+  /** Which cadences this service actually sells. A service may offer only some
+   *  (rodent sells a quarterly program and nothing else), so the funnel must
+   *  render THIS list rather than assume all three. */
+  cadences: RecurringFrequency[];
   /** GL-17: Apr–Oct treatment plan billed monthly year-round. */
   seasonal: boolean;
 };
@@ -35,6 +39,7 @@ export const SERVICE_OPTIONS: ServiceOption[] = funnelCatalog().map((e) => ({
   needsSqft: e.needsSqft,
   needsNestCount: e.needsNestCount,
   offersRecurring: e.offersRecurring,
+  cadences: e.cadences as RecurringFrequency[],
   seasonal: e.seasonal,
 }));
 
