@@ -294,7 +294,19 @@ describe("labels", () => {
     expect(serviceOption("GENERAL_PEST")?.needsSqft).toBe(true);
     expect(serviceOption("WASP_NEST")?.needsNestCount).toBe(true);
     expect(serviceOption("GENERAL_PEST")?.offersRecurring).toBe(true);
-    expect(serviceOption("RODENT")?.offersRecurring).toBe(false);
+    // Rodent now sells an ongoing quarterly program alongside the one-time
+    // trapping/exclusion job — and ONLY quarterly, so the funnel must not
+    // offer a monthly or bi-monthly rodent plan that has no price.
+    expect(serviceOption("RODENT")?.offersRecurring).toBe(true);
+    expect(serviceOption("RODENT")?.cadences).toEqual(["QUARTERLY"]);
+    // General pest still sells all three.
+    expect(serviceOption("GENERAL_PEST")?.cadences).toEqual([
+      "MONTHLY",
+      "BIMONTHLY",
+      "QUARTERLY",
+    ]);
+    // Services with no plan at all still declare none.
+    expect(serviceOption("TERMITE")?.cadences).toEqual([]);
     // Termite is sqft-banded; wildlife prices by animal count, not sqft.
     expect(serviceOption("TERMITE")?.needsSqft).toBe(true);
     expect(serviceOption("WILDLIFE")?.needsSqft).toBe(false);
