@@ -271,6 +271,10 @@ const SERVICES = new Set([
 ]);
 
 /** GL-17: the funnel's seasonal plan products. */
+/** The cadences a customer can explicitly ask for. Used both to resolve the
+ *  quoted frequency and to tell "they asked for a plan" apart from the default. */
+const PLAN_CADENCES: readonly string[] = ["MONTHLY", "BIMONTHLY", "QUARTERLY"];
+
 const SEASONAL_SERVICES = new Set(["MOSQUITO", "MOSQUITO_TICK"]);
 
 const PROPERTY_KINDS = new Set(["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]);
@@ -1582,9 +1586,7 @@ async function quote(
   // offer, and /book always books the plan.
   let planOnly = false;
 
-  const freq = (["MONTHLY", "BIMONTHLY", "QUARTERLY"].includes(
-    input.recurringPreference ?? ""
-  )
+  const freq = (PLAN_CADENCES.includes(input.recurringPreference ?? "")
     ? input.recurringPreference
     : "QUARTERLY") as PlanCadence;
 
@@ -1794,6 +1796,29 @@ async function quote(
           rodentPlan.initialFeeCents +
           travelAdderCents(priceZone, "ONE_TIME_FLAT"),
       };
+    } else if (
+      engineService === "RODENT" &&
+      PLAN_CADENCES.includes(input.recurringPreference ?? "")
+    ) {
+      // The customer ASKED for a plan this sheet cannot price — a rodent sheet
+      // researched before rodent sold a program carries no plans. Answering
+      // with the one-time price alone silently drops what they asked for, and
+      // nothing would ever fix it: a cached sheet serves indefinitely, and a
+      // PRICING_PROMPT_VERSION bump is deliberately NOT a refresh trigger. So
+      // treat it as the incomplete sheet it is and request research.
+      //
+      // The one-time price still stands, so the quote is never refused — the
+      // plan simply appears once the research lands, for this customer's next
+      // poll and for everyone after them in the area.
+      await enqueueRateResearch({
+        service: engineService,
+        city: addr.city!,
+        state: addr.state!,
+        sqft: input.sqft!,
+        notifyEmail: email,
+        requestedBy: "PUBLIC_QUOTE",
+        requestReason: "INCOMPLETE_RATE_SHEET",
+      }).catch(() => undefined);
     }
   }
 
