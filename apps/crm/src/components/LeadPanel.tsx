@@ -5,11 +5,13 @@ import {
   listLeadActivity,
   opResult,
   setLeadDisposition,
+  unwrap,
   LEAD_LOST_REASONS,
   type BookingRequest,
   type Customer,
   type LeadActivity,
 } from "../lib/api";
+import DocButton from "./DocButton";
 import { useRoles } from "../lib/auth";
 import { bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDateTime, money } from "../lib/format";
@@ -101,7 +103,7 @@ export default function LeadPanel({
   const [activityPage, setActivityPage] = useState(0);
   const [clearReason, setClearReason] = useState("CUSTOMER_RECONSENTED");
   const [clearEvidence, setClearEvidence] = useState("");
-  const [quote, setQuote] = useState<BookingRequest | null>(null);
+  const [quotes, setQuotes] = useState<BookingRequest[]>([]);
   const [convName, setConvName] = useState("");
   const [convPrice, setConvPrice] = useState("");
   const [convFreq, setConvFreq] = useState<
@@ -132,14 +134,17 @@ export default function LeadPanel({
       const res = await api().models.BookingRequest.listBookingRequestByLeadCustomerId(
         { leadCustomerId: customer.id }
       );
-      // The newest quote that actually produced (or became) a booking — skip a
-      // PENDING row whose price never finished computing.
+      // EVERY quote this lead was given, newest first — a customer who asked
+      // again (a different service, or the same one with a plan) produced a
+      // second row, and showing only the newest hid what they were told the
+      // first time. PENDING rows are still skipped: their price never finished
+      // computing, so there is nothing to show.
       const priced = (res.data ?? [])
         .filter((b) => b.status && b.status !== "PENDING")
         .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
-      setQuote(priced[0] ?? null);
+      setQuotes(priced);
     } catch {
-      setQuote(null); // best-effort: a missing quote never blocks the panel
+      setQuotes([]); // best-effort: a missing quote never blocks the panel
     }
   }, [customer.id]);
 
@@ -158,6 +163,36 @@ export default function LeadPanel({
     } catch (err) {
       setError(err instanceof Error ? err.message : "That action did not complete");
       throw err;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Remove one quote from this lead's history. Booked/processing quotes are
+   *  refused server-side — money is attached to those. */
+  const deleteQuote = async (q: BookingRequest) => {
+    if (
+      !window.confirm(
+        "Remove this quote from the lead's history? The customer's booking link for it stops working."
+      )
+    )
+      return;
+    setBusy(`del:${q.id}`);
+    try {
+      unwrap(
+        await setLeadDisposition({
+          customerId: customer.id,
+          disposition: "DELETE_QUOTE",
+          bookingRequestId: q.id,
+          idempotencyKey: clientActionId(`quote-delete:${q.id}`),
+        })
+      );
+      await loadQuote();
+      await loadActivity();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not remove that quote"
+      );
     } finally {
       setBusy(null);
     }
@@ -237,45 +272,92 @@ export default function LeadPanel({
           ) : null}
 
           {(() => {
-            const q = quote && summarizeQuote(quote);
-            if (!q) return null;
+            const rows = quotes
+              .map((row) => ({ row, q: summarizeQuote(row) }))
+              .filter((r): r is { row: BookingRequest; q: NonNullable<ReturnType<typeof summarizeQuote>> } =>
+                Boolean(r.q)
+              );
+            if (rows.length === 0) return null;
             return (
               <div className="lead-quote" style={{ marginTop: 12 }}>
-                <div className="row-split">
-                  <strong className="small">Last quote</strong>
-                  <Badge tone={q.tone}>{q.statusLabel}</Badge>
-                </div>
-                <p className="small" style={{ margin: "4px 0 0" }}>
-                  {q.service}
-                  {q.price ? (
-                    <>
-                      {" — "}
-                      <strong>{q.price}</strong>
-                    </>
-                  ) : null}
-                </p>
-                {q.bookLink ? (
-                  <div style={{ marginTop: 8 }}>
-                    <Button
-                      small
-                      variant="subtle"
-                      onClick={() => {
-                        void navigator.clipboard
-                          ?.writeText(q.bookLink!)
-                          .then(() => {
-                            setBusy("copied");
-                            setTimeout(() => setBusy(null), 1500);
-                          });
-                      }}
-                    >
-                      {busy === "copied" ? "Copied!" : "Copy booking link"}
-                    </Button>
-                    <p className="muted small" style={{ marginTop: 6 }}>
-                      Reopens this exact quote for the customer to book and pay —
-                      no need to fill the form again.
+                <strong className="small">
+                  {rows.length === 1 ? "Quote" : `Quotes (${rows.length})`}
+                </strong>
+                {rows.map(({ row, q }, i) => (
+                  <div
+                    key={row.id}
+                    style={
+                      i === 0
+                        ? { marginTop: 6 }
+                        : {
+                            marginTop: 10,
+                            paddingTop: 10,
+                            borderTop: "1px solid var(--line)",
+                          }
+                    }
+                  >
+                    <div className="row-split">
+                      <span className="muted small">
+                        {fmtDateTime(row.createdAt)}
+                      </span>
+                      <Badge tone={i === 0 ? q.tone : "muted"}>
+                        {/* Only the newest is still the live offer — an older
+                            one was replaced by the customer asking again, and
+                            saying "quoted — not booked yet" on all of them
+                            would read as several open offers. */}
+                        {i === 0 ? q.statusLabel : "superseded"}
+                      </Badge>
+                    </div>
+                    <p className="small" style={{ margin: "2px 0 0" }}>
+                      {q.service}
+                      {q.price ? (
+                        <>
+                          {" — "}
+                          <strong>{q.price}</strong>
+                        </>
+                      ) : null}
                     </p>
+                    <div className="inline-actions" style={{ marginTop: 6 }}>
+                      {/* Rendered on demand from the stored quote, so every
+                          quote in the history can be reprinted exactly as the
+                          customer was given it. */}
+                      <DocButton
+                        docKey={`quotes/${customer.id}/${row.id}.pdf`}
+                        label="Quote PDF"
+                      />
+                      <Button
+                        small
+                        variant="ghost"
+                        loading={busy === `del:${row.id}`}
+                        onClick={() => void deleteQuote(row)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                    {i === 0 && q.bookLink ? (
+                      <div style={{ marginTop: 8 }}>
+                        <Button
+                          small
+                          variant="subtle"
+                          onClick={() => {
+                            void navigator.clipboard
+                              ?.writeText(q.bookLink!)
+                              .then(() => {
+                                setBusy("copied");
+                                setTimeout(() => setBusy(null), 1500);
+                              });
+                          }}
+                        >
+                          {busy === "copied" ? "Copied!" : "Copy booking link"}
+                        </Button>
+                        <p className="muted small" style={{ marginTop: 6 }}>
+                          Reopens this exact quote for the customer to book and
+                          pay — no need to fill the form again.
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
+                ))}
               </div>
             );
           })()}

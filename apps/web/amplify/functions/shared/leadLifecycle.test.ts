@@ -31,6 +31,8 @@ const { openOwnedWork, openMissingContactWork, resolveOwnedWork } = vi.hoisted(
   })
 );
 
+const bookingRequests = new Map<string, Row>();
+
 vi.mock("./dataClient", () => ({
   dataClient: async () => ({
     models: {
@@ -57,6 +59,16 @@ vi.mock("./dataClient", () => ({
           data: [...customers.values()].filter((c) => c.status === status),
           nextToken: null,
         }),
+      },
+      BookingRequest: {
+        get: async ({ id }: { id: string }) => ({
+          data: bookingRequests.get(id) ?? null,
+        }),
+        delete: async ({ id }: { id: string }) => {
+          const row = bookingRequests.get(id) ?? null;
+          bookingRequests.delete(id);
+          return { data: row };
+        },
       },
       LeadActivity: {
         create: async (input: Record<string, unknown>) => {
@@ -621,5 +633,76 @@ describe("reassignLeadsForSub (GL-14 R6)", () => {
       reassigned: 0,
       failed: 0,
     });
+  });
+});
+
+describe("DELETE_QUOTE — a quote money is attached to is not deletable", () => {
+  const actor = { sub: "u1", email: "office@pestbuzzkill.com" };
+  const seed = (status: string) => {
+    customers.set("c1", { id: "c1", status: "LEAD", displayName: "Dana" });
+    bookingRequests.set("q1", {
+      id: "q1",
+      leadCustomerId: "c1",
+      status,
+      service: "RODENT",
+    });
+  };
+
+  it("removes an unbooked quote and leaves a note saying so", async () => {
+    seed("QUOTED");
+    const before = activities.length;
+
+    await setLeadDisposition(
+      {
+        customerId: "c1",
+        disposition: "DELETE_QUOTE",
+        bookingRequestId: "q1",
+        idempotencyKey: "k1",
+      },
+      actor
+    );
+
+    expect(bookingRequests.has("q1")).toBe(false);
+    // The quote itself is gone, so the note is the only remaining trace.
+    expect(activities.length).toBeGreaterThan(before);
+  });
+
+  it("REFUSES a booked quote — real money and a job sit behind it", async () => {
+    seed("BOOKED");
+    await expect(
+      setLeadDisposition(
+        {
+          customerId: "c1",
+          disposition: "DELETE_QUOTE",
+          bookingRequestId: "q1",
+          idempotencyKey: "k2",
+        },
+        actor
+      )
+    ).rejects.toThrow(/booked and paid/i);
+    expect(bookingRequests.has("q1")).toBe(true);
+  });
+
+  it("REFUSES while a payment is still clearing", async () => {
+    seed("PROCESSING");
+    await expect(
+      setLeadDisposition(
+        { customerId: "c1", disposition: "DELETE_QUOTE", bookingRequestId: "q1", idempotencyKey: "k3" },
+        actor
+      )
+    ).rejects.toThrow(/still clearing/i);
+    expect(bookingRequests.has("q1")).toBe(true);
+  });
+
+  it("REFUSES a quote belonging to a different customer", async () => {
+    seed("QUOTED");
+    bookingRequests.set("q1", { id: "q1", leadCustomerId: "someone-else", status: "QUOTED" });
+    await expect(
+      setLeadDisposition(
+        { customerId: "c1", disposition: "DELETE_QUOTE", bookingRequestId: "q1", idempotencyKey: "k4" },
+        actor
+      )
+    ).rejects.toThrow(/different customer/i);
+    expect(bookingRequests.has("q1")).toBe(true);
   });
 });

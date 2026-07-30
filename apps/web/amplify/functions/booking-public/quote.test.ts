@@ -936,6 +936,49 @@ describe("RODENT sells an ongoing quarterly program alongside the one-time job",
     });
   });
 
+  it("a REQUESTED cadence the sheet cannot price asks for research — and still sells the one-time job", async () => {
+    // The real case: a rodent sheet researched before rodent sold a program.
+    // Answering with the one-time price alone silently drops what the customer
+    // asked for, and nothing would ever fix it — a cached sheet serves
+    // indefinitely and a prompt-version bump is not a refresh trigger.
+    marketRateByService = {
+      RODENT: {
+        priceCents: 87400,
+        sheet: {},
+        basis: "sheet researched before rodent sold a program",
+        cached: true,
+      },
+    };
+
+    const res = await postQuote({ ...rodentInput, recurringPreference: "QUARTERLY" });
+
+    // Research was requested for the INCOMPLETE sheet…
+    const asked = enqueueCalls.filter((c) => c.service === "RODENT");
+    expect(asked).toHaveLength(1);
+    expect(asked[0].requestReason).toBe("INCOMPLETE_RATE_SHEET");
+    // …and the customer still got a real, bookable one-time price meanwhile.
+    expect(res.body.decision).toBe("PRICED");
+    expect(res.body.recurringOffer ?? null).toBeNull();
+  });
+
+  it("does NOT ask for research when no cadence was requested", async () => {
+    // A one-time rodent ask is fully answered by a plan-less sheet — asking for
+    // research there would buy AI work nobody needs.
+    marketRateByService = {
+      RODENT: {
+        priceCents: 87400,
+        sheet: {},
+        basis: "legacy rodent sheet",
+        cached: true,
+      },
+    };
+
+    const res = await postQuote({ ...rodentInput, recurringPreference: "" });
+
+    expect(res.body.decision).toBe("PRICED");
+    expect(enqueueCalls.filter((c) => c.service === "RODENT")).toHaveLength(0);
+  });
+
   it("a rodent sheet with NO plan still sells the one-time treatment", async () => {
     // Sheets cached before the program was priced carry no plan. The one-time
     // trapping/exclusion job is a complete answer on its own, so a missing plan

@@ -2815,6 +2815,10 @@ export const schema = a.schema({
       planName: a.string(),
       priceCents: a.integer(),
       serviceFrequency: a.string(),
+      // DELETE_QUOTE only: which of the lead's quotes to remove. Folded onto
+      // this op rather than spending one of the ~500 AppSync resources on a
+      // dedicated mutation.
+      bookingRequestId: a.string(),
       idempotencyKey: a.string().required(),
     })
     .returns(a.json())

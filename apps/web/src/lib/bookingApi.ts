@@ -63,6 +63,9 @@ export type PropertyKind = "RESIDENTIAL" | "COMMUNITY" | "COMMERCIAL";
 export type RecurringFrequency = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
 
 export type QuoteRequest = {
+  /** "Tell us what you need" — freeform text read into the same structured
+   *  inputs the pickers collect. Never priced on its own path. */
+  describe?: string;
   name: string;
   email: string;
   phone?: string;
@@ -125,6 +128,9 @@ export type PricedQuote = {
   /** The cadence explicitly requested on the lead form. When present, the
    *  quote must lead with this plan—not the optional one-time alternative. */
   requestedFrequency?: RecurringFrequency;
+  /** What we understood from a freeform description, shown with the price so a
+   *  misread is visible and correctable before booking. */
+  describedAs?: string[];
   days: QuoteDay[];
   expiresAt: string;
   /** R17 — the checkout terms this quote was issued under. */

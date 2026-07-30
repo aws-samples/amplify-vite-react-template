@@ -694,6 +694,8 @@ export async function setLeadDisposition(
     planName?: string | null;
     priceCents?: number | null;
     serviceFrequency?: string | null;
+    /** DELETE_QUOTE only: which quote to remove from this lead. */
+    bookingRequestId?: string | null;
     idempotencyKey?: string;
   },
   actor: LeadActor
@@ -711,6 +713,48 @@ export async function setLeadDisposition(
     const prior = await client.models.Customer.get({ id: args.customerId });
     if (!prior.data || prior.data.status !== "LEAD") throw new Error("Open lead not found.");
     const nowIso = new Date().toISOString();
+
+    // DELETE_QUOTE removes ONE quote from the lead's history. Like CONVERT it
+    // returns before the shared lead-lifecycle tail — the lead's own status,
+    // owner and follow-up are untouched; only a quote goes away.
+    if (args.disposition === "DELETE_QUOTE") {
+      const bookingRequestId = (args.bookingRequestId ?? "").trim();
+      if (!bookingRequestId) throw new Error("Which quote should be removed?");
+      const { data: booking } = await client.models.BookingRequest.get({
+        id: bookingRequestId,
+      });
+      if (!booking) return { ok: true, disposition: "DELETE_QUOTE" };
+      // The quote must belong to THIS lead — a valid id from another customer
+      // must not be deletable through this lead's panel.
+      if ((booking.leadCustomerId ?? booking.customerId) !== args.customerId) {
+        throw new Error("That quote belongs to a different customer.");
+      }
+      // A quote money is attached to is not a quote any more. BOOKED means a
+      // paid commitment with a job and an invoice behind it, and PROCESSING is
+      // money still clearing — deleting either would erase the record of a real
+      // transaction, so both refuse instead.
+      if (booking.status === "BOOKED" || booking.status === "PROCESSING") {
+        throw new Error(
+          booking.status === "BOOKED"
+            ? "That quote was booked and paid — it can't be deleted. Cancel the visit instead."
+            : "That quote's payment is still clearing — it can't be deleted yet."
+        );
+      }
+      await client.models.BookingRequest.delete({ id: bookingRequestId });
+      // The lead keeps a record that a quote was removed, and by whom: the
+      // quote itself is gone, so this note is the only remaining trace.
+      await appendLeadActivity({
+        customerId: args.customerId,
+        channel: "note",
+        outcome: "QUOTE_DELETED",
+        note: `Quote removed (${booking.service ?? "quote"}${
+          booking.status ? `, ${booking.status.toLowerCase()}` : ""
+        }).`,
+        actor,
+        mutationId: `quote-delete:${bookingRequestId}`,
+      }).catch(() => undefined);
+      return { ok: true, disposition: "DELETE_QUOTE" };
+    }
 
     // CONVERT is its own self-contained transition: it turns the lead into an
     // ACTIVE client with a manually-entered plan (ACTIVE-not-billing), rather

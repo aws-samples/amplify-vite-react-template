@@ -14,6 +14,7 @@ import {
   money,
   normalizePhone,
   quoteFieldNeeds,
+  DESCRIBE_SERVICE,
   saveFunnelState,
   clearFunnelState,
   serviceOption,
@@ -220,6 +221,15 @@ describe("quoteFieldNeeds", () => {
 
   it("community is a per-unit plan quote for the sqft/unit-priced services", () => {
     expect(quoteFieldNeeds("RODENT", "COMMUNITY")).toEqual(needs({ units: true }));
+  });
+
+  it("the describe path collects NO structured size inputs — the text supplies them", () => {
+    // The server reads service and size out of the description, so demanding
+    // them in the form too would make the freeform path harder than the form
+    // it exists to replace.
+    for (const kind of ["RESIDENTIAL", "COMMUNITY", "COMMERCIAL"]) {
+      expect(quoteFieldNeeds(DESCRIBE_SERVICE, kind)).toEqual(needs({}));
+    }
   });
 
   it("an IN-UNIT community ask collects the RESIDENTIAL inputs, not the unit count", () => {
