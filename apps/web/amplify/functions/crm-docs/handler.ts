@@ -83,6 +83,11 @@ import {
   DAY_MINUTES,
 } from "../shared/capacity";
 import { resequenceAndRebuildDay } from "../shared/routeOptimizer";
+import {
+  renderQuotePdfForBooking,
+  type QuotableBooking,
+} from "../shared/quoteDoc";
+import { OFF_SEASON_MESSAGE } from "../shared/bookingTerms";
 import { routingAddress } from "../shared/serviceAddress";
 import { queuePresenceReview } from "../shared/recovery";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
@@ -5769,7 +5774,7 @@ async function getDocumentUrl(
 ) {
   // reports/<cid>/…, agreements/<cid>/…, documents/<cid>/… (office uploads),
   // and jobs/<cid>/no-access/… (the no-access door-photo evidence, GL-15).
-  const match = /^(reports|agreements|documents|jobs)\/([^/]+)\//.exec(key);
+  const match = /^(reports|agreements|documents|jobs|quotes)\/([^/]+)\//.exec(key);
   if (!match) throw new Error("Invalid document key");
   if (match[1] === "jobs" && !/^jobs\/[^/]+\/no-access\//.test(key)) {
     throw new Error("Invalid document key");
@@ -5800,12 +5805,58 @@ async function getDocumentUrl(
     if (!allowed) throw new Error("Not authorized for this document");
   }
 
+  // A quote PDF is rendered on demand rather than stored at quote time: most
+  // quotes are never asked for, and printing every one would be work nobody
+  // needs. The key carries the customer id, so the entitlement check above
+  // already ran on it before we build anything.
+  if (match[1] === "quotes") {
+    await ensureQuotePdfObject(key, customerId);
+  }
+
   const url = await getSignedUrl(
     s3,
     new GetObjectCommand({ Bucket: BUCKET(), Key: key }),
     { expiresIn: 900 }
   );
   return { url, expiresInSeconds: 900 };
+}
+
+/**
+ * Build and store the quote PDF behind `quotes/<customerId>/<bookingId>.pdf`.
+ *
+ * The booking is re-read and re-checked against the customer in the key, so a
+ * caller entitled to ONE customer's documents cannot name another customer's
+ * booking id and have it rendered under a key they are allowed to read.
+ */
+async function ensureQuotePdfObject(key: string, customerId: string) {
+  const m = /^quotes\/[^/]+\/([^/]+)\.pdf$/.exec(key);
+  if (!m) throw new Error("Invalid document key");
+  const bookingId = m[1];
+  const client = await dataClient();
+  const { data: booking } = await client.models.BookingRequest.get({
+    id: bookingId,
+  });
+  if (!booking) throw new Error("That quote no longer exists.");
+  if ((booking.leadCustomerId ?? booking.customerId) !== customerId) {
+    throw new Error("Not authorized for this document");
+  }
+  const pdf = await renderQuotePdfForBooking(
+    booking as unknown as QuotableBooking,
+    OFF_SEASON_MESSAGE
+  );
+  if (!pdf) {
+    throw new Error(
+      "That quote has no priced details to print — it never finished pricing."
+    );
+  }
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET(),
+      Key: key,
+      Body: pdf,
+      ContentType: "application/pdf",
+    })
+  );
 }
 
 /**

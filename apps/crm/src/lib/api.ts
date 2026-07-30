@@ -155,13 +155,15 @@ export function logLeadTouch(input: {
 
 export function setLeadDisposition(input: {
   customerId: string;
-  disposition: "LOST" | "DNC" | "CLEAR" | "CONVERT";
+  disposition: "LOST" | "DNC" | "CLEAR" | "CONVERT" | "DELETE_QUOTE";
   reasonCode?: string;
   note?: string;
   // CONVERT only — the manually-entered plan that turns the lead into a client.
   planName?: string;
   priceCents?: number;
   serviceFrequency?: "MONTHLY" | "BIMONTHLY" | "QUARTERLY" | "SEMIANNUAL";
+  // DELETE_QUOTE only — which of the lead's quotes to remove.
+  bookingRequestId?: string;
   idempotencyKey: string;
 }): OpResult {
   return (

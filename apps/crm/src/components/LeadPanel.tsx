@@ -5,11 +5,13 @@ import {
   listLeadActivity,
   opResult,
   setLeadDisposition,
+  unwrap,
   LEAD_LOST_REASONS,
   type BookingRequest,
   type Customer,
   type LeadActivity,
 } from "../lib/api";
+import DocButton from "./DocButton";
 import { useRoles } from "../lib/auth";
 import { bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDateTime, money } from "../lib/format";
@@ -166,6 +168,36 @@ export default function LeadPanel({
     }
   };
 
+  /** Remove one quote from this lead's history. Booked/processing quotes are
+   *  refused server-side — money is attached to those. */
+  const deleteQuote = async (q: BookingRequest) => {
+    if (
+      !window.confirm(
+        "Remove this quote from the lead's history? The customer's booking link for it stops working."
+      )
+    )
+      return;
+    setBusy(`del:${q.id}`);
+    try {
+      unwrap(
+        await setLeadDisposition({
+          customerId: customer.id,
+          disposition: "DELETE_QUOTE",
+          bookingRequestId: q.id,
+          idempotencyKey: clientActionId(`quote-delete:${q.id}`),
+        })
+      );
+      await loadQuote();
+      await loadActivity();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not remove that quote"
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const openQuote = async () => {
     // Open synchronously so browser popup protection does not turn a
     // successful token mint into a button that appears to do nothing.
@@ -285,6 +317,23 @@ export default function LeadPanel({
                         </>
                       ) : null}
                     </p>
+                    <div className="inline-actions" style={{ marginTop: 6 }}>
+                      {/* Rendered on demand from the stored quote, so every
+                          quote in the history can be reprinted exactly as the
+                          customer was given it. */}
+                      <DocButton
+                        docKey={`quotes/${customer.id}/${row.id}.pdf`}
+                        label="Quote PDF"
+                      />
+                      <Button
+                        small
+                        variant="ghost"
+                        loading={busy === `del:${row.id}`}
+                        onClick={() => void deleteQuote(row)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
                     {i === 0 && q.bookLink ? (
                       <div style={{ marginTop: 8 }}>
                         <Button
