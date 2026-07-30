@@ -16,6 +16,7 @@ export default function Dashboard() {
   const [openQuotes, setOpenQuotes] = useState<Quote[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [carriers, setCarriers] = useState<Carrier[]>([]);
+  const [openTasks, setOpenTasks] = useState(0);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -37,6 +38,10 @@ export default function Dashboard() {
     }).then(({ data }) => setOpenQuotes(data));
     client.models.Policy.list().then(({ data }) => setPolicies(data));
     client.models.Carrier.list().then(({ data }) => setCarriers(data));
+    client.models.MarketingTask.list({
+      filter: { status: { eq: "OPEN" } },
+      limit: 1000,
+    }).then(({ data }) => setOpenTasks(data.length));
   }, []);
 
   return (
@@ -56,6 +61,11 @@ export default function Dashboard() {
           n={policies.length}
           label="Policies bound"
           onClick={() => navigate("/policies")}
+        />
+        <Tile
+          n={openTasks}
+          label="Open tasks"
+          onClick={() => navigate("/tasks")}
         />
       </div>
 

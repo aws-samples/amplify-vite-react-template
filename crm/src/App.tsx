@@ -15,6 +15,7 @@ import Settings from "./pages/Settings";
 import DocumentSearch from "./pages/DocumentSearch";
 import QuotesList from "./pages/QuotesList";
 import PoliciesList from "./pages/PoliciesList";
+import { AllMarketingTasks } from "./components/MarketingTasks";
 
 export default function App() {
   return (
@@ -119,6 +120,14 @@ function IconGrid() {
     </svg>
   );
 }
+function IconCheck() {
+  return (
+    <svg {...iconProps}>
+      <path d="M9 11l3 3L22 4" />
+      <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+    </svg>
+  );
+}
 function IconFunnel() {
   return (
     <svg {...iconProps}>
@@ -180,6 +189,7 @@ const NAV_ITEMS = [
   { to: "/", end: true, label: "Dashboard", icon: <IconGrid /> },
   { to: "/leads", label: "Leads", icon: <IconFunnel /> },
   { to: "/clients", label: "Clients", icon: <IconUsers /> },
+  { to: "/tasks", label: "Tasks", icon: <IconCheck /> },
   { to: "/carriers", label: "Carriers", icon: <IconBuilding /> },
   { to: "/documents", label: "Documents", icon: <IconFile /> },
   { to: "/settings", label: "Settings", icon: <IconGear /> },
@@ -230,6 +240,7 @@ function Shell({ profile, signOut }: { profile: UserProfile; signOut: () => void
           <Route path="/accounts/:id" element={<AccountDetail profile={profile} />} />
           <Route path="/carriers" element={<Carriers />} />
           <Route path="/carriers/:id" element={<CarrierDetail />} />
+          <Route path="/tasks" element={<AllMarketingTasks />} />
           <Route path="/quotes" element={<QuotesList />} />
           <Route path="/policies" element={<PoliciesList />} />
           <Route path="/documents" element={<DocumentSearch />} />

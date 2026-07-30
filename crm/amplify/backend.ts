@@ -15,6 +15,7 @@ import { leadIntake } from "./functions/lead-intake/resource";
 import { teamAdmin } from "./functions/team-admin/resource";
 import { extractLead } from "./functions/extract-lead/resource";
 import { certNumber } from "./functions/cert-number/resource";
+import { renewalTasks } from "./functions/renewal-tasks/resource";
 import {
   magicLinkDefine,
   magicLinkCreate,
@@ -30,6 +31,7 @@ const backend = defineBackend({
   teamAdmin,
   extractLead,
   certNumber,
+  renewalTasks,
   magicLinkDefine,
   magicLinkCreate,
   magicLinkVerify,

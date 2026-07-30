@@ -14,6 +14,7 @@ export type Certificate = Schema["Certificate"]["type"];
 export type UserProfile = Schema["UserProfile"]["type"];
 export type ProducerLicense = Schema["ProducerLicense"]["type"];
 export type License = Schema["License"]["type"];
+export type MarketingTask = Schema["MarketingTask"]["type"];
 
 // Lines of authority are the licensing counterpart to lines of business —
 // they're what a state license actually grants. Alphabetical.

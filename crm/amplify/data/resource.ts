@@ -4,6 +4,7 @@ import { leadIntake } from "../functions/lead-intake/resource";
 import { teamAdmin } from "../functions/team-admin/resource";
 import { extractLead } from "../functions/extract-lead/resource";
 import { certNumber } from "../functions/cert-number/resource";
+import { renewalTasks } from "../functions/renewal-tasks/resource";
 
 /**
  * HOA CRM data model.
@@ -55,6 +56,11 @@ const schema = a
     OcrStatus: a.enum(["PENDING", "PROCESSING", "COMPLETE", "FAILED", "SKIPPED"]),
     ExtractionStatus: a.enum(["PENDING", "PROCESSING", "COMPLETE", "FAILED"]),
     UserRole: a.enum(["ADMIN", "STAFF", "PRODUCER"]),
+    // ── Renewal marketing tasks ──
+    MarketingTaskStatus: a.enum(["OPEN", "COMPLETE"]),
+    // The only two ways a marketing task can be satisfied.
+    MarketingTaskResolution: a.enum(["QUOTED", "OUT_OF_APPETITE"]),
+    MarketingTaskSource: a.enum(["POLICY", "LEAD"]),
     // ── Licensing ──
     // FIRM  = the agency entity licensed in a state (agency/business entity license)
     // PRODUCER = an individual staff member's personal license
@@ -246,6 +252,46 @@ const schema = a
       })
       .secondaryIndexes((index) => [index("entityId")]),
 
+    /**
+     * Renewal marketing task: "submit this expiring risk to this carrier".
+     *
+     * Created by the scheduled renewal-tasks function once a risk enters its
+     * submission window (carrier lead time + 14 days before expiration), one
+     * per appetite-matched appointed carrier.
+     *
+     * Closed only two ways, per the agency's rule: a quote gets created for
+     * that carrier (QUOTED), or someone marks the carrier as not interested
+     * (OUT_OF_APPETITE).
+     *
+     * All foreign keys are plain fields, not belongsTo — relationships make
+     * them GSI keys, and policyId is legitimately empty for lead-sourced
+     * tasks. The UI joins client-side.
+     */
+    MarketingTask: a.model({
+      accountId: a.id().required(),
+      carrierId: a.id().required(),
+      // Set for POLICY-sourced tasks; empty when the source is a lead's
+      // current-policy expiration.
+      policyId: a.id(),
+      sourceType: a.ref("MarketingTaskSource").required(),
+      // "<sourceType>:<sourceId>:<carrierId>:<expirationDate>" — the job
+      // skips any key it has already created, so daily runs never duplicate.
+      dedupeKey: a.string().required(),
+      // Denormalized for display without extra reads.
+      accountName: a.string(),
+      carrierName: a.string(),
+      lines: a.string().array(),
+      expirationDate: a.date(), // the term that is ending
+      leadTimeDays: a.integer(), // carrier lead time the job resolved
+      submitBy: a.date(), // expiration − leadTime: the real submission deadline
+      triggerDate: a.date(), // submitBy − 14: when the task was raised
+      status: a.ref("MarketingTaskStatus").required(),
+      resolution: a.ref("MarketingTaskResolution"),
+      completedAt: a.datetime(),
+      completedBy: a.string(),
+      notes: a.string(),
+    }),
+
     // ── Certificates (ACORD 25 issuance history) ───────────────────────
     Certificate: a.model({
       accountId: a.id().required(),
@@ -396,6 +442,8 @@ const schema = a
     allow.resource(leadIntake),
     // The AI extraction function reads Documents and updates Accounts.
     allow.resource(extractLead),
+    // The daily sweep reads policies/carriers/quotes and writes MarketingTasks.
+    allow.resource(renewalTasks),
   ]);
 
 export type Schema = ClientSchema<typeof schema>;

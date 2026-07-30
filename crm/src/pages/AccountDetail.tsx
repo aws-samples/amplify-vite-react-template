@@ -17,6 +17,7 @@ import { fillAcord25 } from "../lib/acord";
 import DocumentsPanel from "../components/DocumentsPanel";
 import QuotesPanel, { commissionCell, termsSummary } from "../components/QuotesPanel";
 import CoverageForm from "../components/CoverageForm";
+import AccountMarketingTasks from "../components/MarketingTasks";
 import FilePreviewModal from "../components/FilePreview";
 import PropertyPanel from "../components/PropertyPanel";
 import FormsTab from "../components/FormsTab";
@@ -107,9 +108,15 @@ export default function AccountDetail({ profile }: { profile: UserProfile }) {
         </>
       )}
       {tab === "quotes" && (
-        <div className="card">
-          <QuotesPanel account={account} onAccountChange={setAccount} />
-        </div>
+        <>
+          <div className="card">
+            <QuotesPanel account={account} onAccountChange={setAccount} />
+          </div>
+          <AccountMarketingTasks
+            accountId={account.id}
+            completedByName={`${profile.firstName} ${profile.lastName}`}
+          />
+        </>
       )}
       {tab === "policies" && <PoliciesTab accountId={account.id} />}
       {tab === "documents" && (
