@@ -13,7 +13,7 @@ import {
   type Policy,
   type UserProfile,
 } from "../lib/client";
-import { fillAcord25 } from "../lib/acord";
+import { fillAcord25, signatureFor } from "../lib/acord";
 import DocumentsPanel from "../components/DocumentsPanel";
 import QuotesPanel, { commissionCell, termsSummary } from "../components/QuotesPanel";
 import CoverageForm from "../components/CoverageForm";
@@ -630,12 +630,7 @@ function CertificatesTab({
         cert,
         policies,
         carriers,
-        profile.signatureKey
-          ? {
-              key: profile.signatureKey,
-              name: `${profile.firstName} ${profile.lastName}`,
-            }
-          : null
+        await signatureFor(profile.id)
       );
       const path = `certificates/${account.id}/${cert.id}.pdf`;
       await uploadData({

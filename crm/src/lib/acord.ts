@@ -2,6 +2,7 @@ import { PDFDocument, PDFTextField, PDFCheckBox, PDFName, PDFBool } from "pdf-li
 import { downloadData } from "aws-amplify/storage";
 import { getUrl } from "aws-amplify/storage";
 import { AGENCY } from "./agency";
+import { client } from "./client";
 import type { Account, Carrier, Certificate, Policy } from "./client";
 
 /**
@@ -473,6 +474,29 @@ export interface SignatureInfo {
   name: string;
 }
 
+/**
+ * Read the signer's current signature straight from the record.
+ *
+ * The app loads the user's profile once at sign-in, so a signature added
+ * later in the same session isn't on that object — trusting the prop meant
+ * generation silently stamped nothing. One read per generation is cheap and
+ * can't go stale.
+ */
+export async function signatureFor(
+  profileId: string
+): Promise<SignatureInfo | null> {
+  try {
+    const { data } = await client.models.UserProfile.get({ id: profileId });
+    if (!data?.signatureKey) return null;
+    return {
+      key: data.signatureKey,
+      name: `${data.firstName} ${data.lastName}`.trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Fetch a stored signature PNG. Returns null when there isn't one. */
 async function loadSignature(key: string): Promise<Uint8Array | null> {
   try {
@@ -692,7 +716,9 @@ function buildAppFormValues(
    * — `currentPolicyExpiration` is a lead-only field and is meaningless once
    * bound policies exist.
    */
-  renewalDate?: string | null
+  renewalDate?: string | null,
+  /** Lines being applied for — ticks the line-of-business boxes. */
+  lines: string[] = []
 ): FieldValues {
   const totalSqft = buildings.reduce((s, b) => s + (b.sqft ?? 0), 0);
 
@@ -846,6 +872,77 @@ function buildAppFormValues(
       },
     } satisfies FieldValues);
 
+    // ── Lines of business ──
+    // Maps the CRM's line vocabulary onto the 125's checkboxes. Candidates
+    // that a template edition lacks are skipped, so unknowns cost nothing.
+    const LOB_FIELDS: Record<string, string[]> = {
+      "Property": ["Policy_LineOfBusiness_CommercialProperty_A", "Policy_LineOfBusiness_CommercialPropertyIndicator_A"],
+      "General Liability": ["Policy_LineOfBusiness_CommercialGeneralLiability_A", "Policy_LineOfBusiness_CommercialGeneralLiabilityIndicator_A"],
+      "Crime/Fidelity": ["Policy_LineOfBusiness_CrimeIndicator_A"],
+      "Umbrella": ["Policy_LineOfBusiness_UmbrellaIndicator_A", "Policy_LineOfBusiness_ExcessLiabilityIndicator_A"],
+      "Workers Comp": ["Policy_LineOfBusiness_WorkersCompensationIndicator_A"],
+      "Flood": ["Policy_LineOfBusiness_FloodIndicator_A"],
+      "Earthquake": ["Policy_LineOfBusiness_EarthquakeIndicator_A"],
+      "D&O": ["Policy_LineOfBusiness_ManagementLiabilityIndicator_A", "Policy_LineOfBusiness_DirectorsAndOfficersIndicator_A"],
+    };
+    for (const line of lines) {
+      const candidates = LOB_FIELDS[line];
+      if (!candidates) continue;
+      values[`lob_${line.replace(/\W+/g, "")}`] = { candidates, value: "x" };
+    }
+    // Anything without its own box goes in the Other row.
+    const otherLines = lines.filter((l) => !LOB_FIELDS[l]);
+    if (otherLines.length) {
+      values.lobOther = {
+        candidates: ["Policy_LineOfBusiness_OtherIndicator_A"],
+        value: "x",
+      };
+      values.lobOtherDesc = {
+        candidates: [
+          "Policy_LineOfBusiness_OtherDescription_A",
+          "OtherLineOfBusiness_LineOfBusinessDescription_A",
+        ],
+        value: otherLines.join(", "),
+      };
+    }
+
+    // ── Policy information ──
+    // A carrier submission is a request to quote, not an issued policy.
+    Object.assign(values, {
+      policyStatusQuote: {
+        candidates: ["Policy_Status_QuoteIndicator_A"],
+        value: "x",
+      },
+      policyNumber: {
+        candidates: ["Policy_PolicyNumberIdentifier_A"],
+        // New business has no number yet; a renewal carries the incumbent's.
+        value: account.priorPolicyNumber ?? "",
+      },
+      billingPlanDirect: {
+        candidates: ["CommercialPolicy_BillingPlan_DirectBillIndicator_A"],
+        value: "x",
+      },
+    } satisfies FieldValues);
+
+    // ── Attachments ──
+    // Only tick what we actually send, so the underwriter isn't hunting for
+    // a schedule that doesn't exist.
+    values.attachRemarks = {
+      candidates: [
+        "CommercialPolicy_Attachment_AdditionalRemarksScheduleIndicator_A",
+        "Policy_SectionAttached_AdditionalRemarksIndicator_A",
+      ],
+      value: (account.notes ?? "").trim() ? "x" : "",
+    };
+    values.attachPropertySection = {
+      candidates: ["Policy_SectionAttached_CommercialPropertyIndicator_A"],
+      value: lines.includes("Property") ? "x" : "",
+    };
+    values.attachGlSection = {
+      candidates: ["Policy_SectionAttached_CommercialGeneralLiabilityIndicator_A"],
+      value: lines.includes("General Liability") ? "x" : "",
+    };
+
     // ── Premises schedule ──
     // One row per building. Falls back to the account address when no
     // buildings are recorded, which is what the old mapping always did.
@@ -960,11 +1057,12 @@ export async function fillAcordApp(
   account: Account,
   buildings: BuildingInfo[],
   signature?: SignatureInfo | null,
-  renewalDate?: string | null
+  renewalDate?: string | null,
+  lines: string[] = []
 ): Promise<FillResult> {
   return fillTemplate(
     form.path,
-    buildAppFormValues(form.key, account, buildings, renewalDate),
+    buildAppFormValues(form.key, account, buildings, renewalDate, lines),
     signature
   );
 }

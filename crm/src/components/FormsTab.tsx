@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { uploadData } from "aws-amplify/storage";
 import { client, type Account, type CrmDocument } from "../lib/client";
-import { ACORD_FORMS, fillAcordApp, type AcordFormDef } from "../lib/acord";
+import { ACORD_FORMS, fillAcordApp, signatureFor, type AcordFormDef } from "../lib/acord";
 import type { UserProfile } from "../lib/client";
 import FilePreviewModal from "./FilePreview";
 
@@ -49,30 +49,39 @@ export default function FormsTab({
       // Clients renew off their bound policies; the lead-only
       // currentPolicyExpiration field isn't used once an account converts.
       let renewalDate: string | null = null;
+      let lines: string[] = [];
       if (account.stage === "CLIENT") {
         const { data: pols } = await client.models.Policy.list({
           filter: { accountId: { eq: account.id } },
         });
-        const ends = pols
-          .filter((p) => p.status === "ACTIVE" && p.expirationDate)
+        const active = pols.filter((p) => p.status === "ACTIVE");
+        const ends = active
+          .filter((p) => p.expirationDate)
           .map((p) => p.expirationDate as string)
           .sort();
         renewalDate = ends[0] ?? null;
+        // What we're applying for = what's on the book today.
+        lines = [
+          ...new Set(active.flatMap((p) => (p.lines ?? []).filter(Boolean))),
+        ] as string[];
       } else {
         renewalDate = account.currentPolicyExpiration ?? null;
+        // A prospect has no policy yet — fall back to whatever's been quoted.
+        const { data: qs } = await client.models.Quote.list({
+          filter: { accountId: { eq: account.id } },
+        });
+        lines = [
+          ...new Set(qs.flatMap((q) => (q.lines ?? []).filter(Boolean))),
+        ] as string[];
       }
 
       const { bytes, missing } = await fillAcordApp(
         form,
         account,
         buildings,
-        profile.signatureKey
-          ? {
-              key: profile.signatureKey,
-              name: `${profile.firstName} ${profile.lastName}`,
-            }
-          : null,
-        renewalDate
+        await signatureFor(profile.id),
+        renewalDate,
+        lines
       );
 
       const stamp = new Date().toISOString().slice(0, 10);
