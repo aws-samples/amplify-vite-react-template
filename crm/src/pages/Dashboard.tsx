@@ -4,6 +4,7 @@ import {
   client,
   fmtDate,
   fmtMoney,
+  listAllPages,
   type Account,
   type Carrier,
   type Policy,
@@ -38,10 +39,13 @@ export default function Dashboard() {
     }).then(({ data }) => setOpenQuotes(data));
     client.models.Policy.list().then(({ data }) => setPolicies(data));
     client.models.Carrier.list().then(({ data }) => setCarriers(data));
-    client.models.MarketingTask.list({
-      filter: { status: { eq: "OPEN" } },
-      limit: 1000,
-    }).then(({ data }) => setOpenTasks(data.length));
+    listAllPages((nextToken) =>
+      client.models.MarketingTask.list({
+        filter: { status: { eq: "OPEN" } },
+        limit: 500,
+        nextToken,
+      })
+    ).then((data) => setOpenTasks(data.length));
   }, []);
 
   return (

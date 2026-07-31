@@ -4,6 +4,7 @@ import {
   client,
   daysUntilDate,
   fmtDate,
+  listAllPages,
   type MarketingTask,
   type Quote,
 } from "../lib/client";
@@ -76,11 +77,21 @@ export default function AccountMarketingTasks({
   const settledOnce = useRef(false);
 
   async function load() {
-    const [{ data: ts }, { data: qs }] = await Promise.all([
-      client.models.MarketingTask.list({
-        filter: { accountId: { eq: accountId } },
-      }),
-      client.models.Quote.list({ filter: { accountId: { eq: accountId } } }),
+    const [ts, qs] = await Promise.all([
+      listAllPages((nextToken) =>
+        client.models.MarketingTask.list({
+          filter: { accountId: { eq: accountId } },
+          limit: 500,
+          nextToken,
+        })
+      ),
+      listAllPages((nextToken) =>
+        client.models.Quote.list({
+          filter: { accountId: { eq: accountId } },
+          limit: 500,
+          nextToken,
+        })
+      ),
     ]);
     // list() yields a structurally looser type than the model type.
     let rows = ts as MarketingTask[];
@@ -249,11 +260,14 @@ export function AllMarketingTasks() {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    client.models.MarketingTask.list({
-      filter: { status: { eq: "OPEN" } },
-      limit: 1000,
-    }).then(({ data }) => {
-      setTasks(data);
+    listAllPages((nextToken) =>
+      client.models.MarketingTask.list({
+        filter: { status: { eq: "OPEN" } },
+        limit: 500,
+        nextToken,
+      })
+    ).then((data) => {
+      setTasks(data as MarketingTask[]);
       setLoaded(true);
     });
   }, []);

@@ -16,6 +16,29 @@ export type ProducerLicense = Schema["ProducerLicense"]["type"];
 export type License = Schema["License"]["type"];
 export type MarketingTask = Schema["MarketingTask"]["type"];
 
+/**
+ * Page through a filtered list until it's exhausted.
+ *
+ * DynamoDB applies `filter` AFTER reading a page of rows, so a single
+ * `list({ filter })` silently returns nothing once the matching rows sit
+ * outside the first page — a bug that only appears as a table grows. Any
+ * filtered list that must be complete goes through here.
+ */
+export async function listAllPages<T>(
+  fetchPage: (
+    nextToken?: string
+  ) => Promise<{ data: T[]; nextToken?: string | null }>
+): Promise<T[]> {
+  const out: T[] = [];
+  let token: string | undefined;
+  do {
+    const page = await fetchPage(token);
+    out.push(...page.data);
+    token = page.nextToken ?? undefined;
+  } while (token);
+  return out;
+}
+
 // Lines of authority are the licensing counterpart to lines of business —
 // they're what a state license actually grants. Alphabetical.
 export const LINES_OF_AUTHORITY = [
