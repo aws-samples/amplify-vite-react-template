@@ -426,6 +426,20 @@ backend.crmPricing.addEnvironment(
   "PRICING_REFRESH_FUNCTION_NAME",
   backend.pricingRefresh.resources.lambda.functionName
 );
+// "Tell us what you need": the funnel sends freeform text INWARD to be read
+// into structured quote inputs. The extraction lives on crm-pricing because it
+// needs the Anthropic key, and booking-public is a PUBLIC unauthenticated
+// Function URL that deliberately does not hold that key (see the env block
+// above — the funnel is a pure rate reader). No cycle: crm-pricing references
+// pricing-refresh and the docs bucket, never booking-public.
+backend.crmPricing.resources.lambda.grantInvoke(
+  backend.bookingPublic.resources.lambda
+);
+backend.bookingPublic.addEnvironment(
+  "CRM_PRICING_FUNCTION_NAME",
+  backend.crmPricing.resources.lambda.functionName
+);
+
 // The reverse edge: pricing-refresh computes + persists a rate-ready lead's
 // exact quote (PENDING → QUOTED) by invoking booking-public's /quote-status,
 // so the "your exact prices are ready" email can attach a real priced-quote

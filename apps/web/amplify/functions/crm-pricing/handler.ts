@@ -11,8 +11,10 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
 import { opFieldName } from "../shared/opEvent";
+import { DEMAND_PRICING_MODEL } from "../shared/marketRate";
 import {
   extractLead,
+  quoteInputFromExtraction,
   type Extraction,
 } from "../shared/leadExtraction";
 import { callerEmail, callerIsOffice, callerIsOwner } from "../shared/authz";
@@ -80,6 +82,23 @@ type Args = {
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
+  // TRUSTED INTERNAL INVOKE. booking-public asks us to read a customer's
+  // freeform "tell us what you need" into structured quote inputs.
+  //
+  // This lives here, and not on booking-public, on purpose: booking-public is a
+  // PUBLIC unauthenticated Function URL, and the research key has no business
+  // on it. Routing the extraction inward keeps the key on an IAM-only function
+  // while the funnel still gets the answer.
+  //
+  // It arrives by direct Lambda invoke, so it carries no AppSync identity and
+  // could never satisfy the office check below. Only IAM principals we grant
+  // can reach it — the same shape booking-public's own internalOp uses.
+  const internal = (
+    event as unknown as { internalOp?: { op?: string; describe?: string } }
+  ).internalOp;
+  if (internal?.op === "extractQuoteIntent") {
+    return await extractQuoteIntent(internal.describe ?? "");
+  }
   if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
   switch (opFieldName(event)) {
     case "priceLead":
@@ -1435,4 +1454,54 @@ async function priceLead(args: Args) {
     researchRateKey: null,
   });
   return run;
+}
+
+
+/**
+ * Read freeform quote text into the structured inputs the public form collects.
+ *
+ * Returns the mapping verbatim — including its refusals — so booking-public
+ * renders one answer whether the text was readable or not, and never has to
+ * decide anything about pricing itself.
+ */
+async function extractQuoteIntent(describe: string) {
+  // Capped because the caller is public traffic. A real description is a
+  // sentence or two; anything longer is padding or an injection attempt, and
+  // truncating costs nothing a genuine customer needs.
+  const text = describe.trim().slice(0, 1000);
+  if (!text) {
+    return {
+      ok: false as const,
+      eligibility: "unclear" as const,
+      reason: "Tell us what you need and we'll price it.",
+    };
+  }
+  const apiKey = await getSecret("ANTHROPIC_API_KEY");
+  if (!apiKey) {
+    return {
+      ok: false as const,
+      eligibility: "unclear" as const,
+      reason:
+        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+    };
+  }
+  try {
+    const extraction = await extractLead(
+      new Anthropic({ apiKey }),
+      text,
+      null,
+      // A closed schema needs no frontier model, and this runs on public
+      // traffic — the demand-pricing tier is the right cost/latency point.
+      DEMAND_PRICING_MODEL
+    );
+    return quoteInputFromExtraction(extraction);
+  } catch (err) {
+    console.error("extractQuoteIntent failed", err);
+    return {
+      ok: false as const,
+      eligibility: "unclear" as const,
+      reason:
+        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+    };
+  }
 }

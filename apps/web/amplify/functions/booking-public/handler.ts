@@ -2,13 +2,7 @@ import type {
   APIGatewayProxyEventV2,
   APIGatewayProxyResultV2,
 } from "aws-lambda";
-import Anthropic from "@anthropic-ai/sdk";
-import {
-  extractLead,
-  quoteInputFromExtraction,
-  type ExtractionMapping,
-} from "../shared/leadExtraction";
-import { DEMAND_PRICING_MODEL } from "../shared/marketRate";
+import { type ExtractionMapping } from "../shared/leadExtraction";
 import { randomUUID } from "node:crypto";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
@@ -1099,37 +1093,41 @@ function quoteLeadNotes(
 async function inputFromDescription(
   describe: string
 ): Promise<ExtractionMapping> {
-  // A cap, because this is an unauthenticated AI surface. Real descriptions are
-  // a sentence or two; anything longer is padding or an injection attempt, and
-  // truncating costs nothing a genuine customer needs.
-  const text = describe.trim().slice(0, 1000);
-  const apiKey = await getSecret("ANTHROPIC_API_KEY");
-  if (!apiKey) {
-    return {
-      ok: false,
-      eligibility: "unclear",
-      reason:
-        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
-    };
-  }
+  // Extraction runs on crm-pricing, NOT here. This function is a public,
+  // unauthenticated Function URL, and the research key has no business on it —
+  // so the text goes inward over an IAM invoke and only the structured answer
+  // comes back. Any failure is an honest ask-back rather than a guess: the
+  // customer is told to use the pickers, and nothing is priced on invented
+  // facts.
+  const fnName = process.env.CRM_PRICING_FUNCTION_NAME;
+  const unreadable: ExtractionMapping = {
+    ok: false,
+    eligibility: "unclear",
+    reason:
+      "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+  };
+  if (!fnName) return unreadable;
   try {
-    const extraction = await extractLead(
-      new Anthropic({ apiKey }),
-      text,
-      null,
-      // A closed schema needs no frontier model, and this runs on public
-      // traffic — the demand-pricing tier is the right cost/latency point.
-      DEMAND_PRICING_MODEL
+    const out = await lambda.send(
+      new InvokeCommand({
+        FunctionName: fnName,
+        InvocationType: "RequestResponse",
+        Payload: Buffer.from(
+          JSON.stringify({ internalOp: { op: "extractQuoteIntent", describe } })
+        ),
+      })
     );
-    return quoteInputFromExtraction(extraction);
+    if (out.FunctionError || !out.Payload) return unreadable;
+    const parsed = JSON.parse(Buffer.from(out.Payload).toString("utf8"));
+    // Trust only the shape we defined; anything else is treated as unreadable
+    // rather than fed into pricing.
+    if (parsed && typeof parsed === "object" && typeof parsed.ok === "boolean") {
+      return parsed as ExtractionMapping;
+    }
+    return unreadable;
   } catch (err) {
-    console.error("inputFromDescription: extraction failed", err);
-    return {
-      ok: false,
-      eligibility: "unclear",
-      reason:
-        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
-    };
+    console.error("inputFromDescription: extraction invoke failed", err);
+    return unreadable;
   }
 }
 
@@ -1149,6 +1147,23 @@ async function quote(
   // description we cannot read confidently becomes a callback, never a guess.
   let describeAssumptions: string[] = [];
   if (!resume && (input.describe ?? "").trim()) {
+    // The SAME gate the rest of this endpoint carries, run BEFORE the paid
+    // extraction rather than after it. The general check further down happens
+    // past validation, which is too late here: reading a description costs an
+    // AI call, so a bot could otherwise burn research spend without ever
+    // proving it is a browser or hitting the per-IP ceiling.
+    if (!(await verifyBotToken(input.botToken))) {
+      throw new HttpError(400, {
+        error:
+          "We couldn't verify that request came from a browser — please reload and try again.",
+      });
+    }
+    if (!(await throttleOk(sourceIp))) {
+      throw new HttpError(429, {
+        error:
+          "That's a lot of quotes from one place — give it an hour, or call us at the office and we'll sort it out directly.",
+      });
+    }
     const described = await inputFromDescription(input.describe!);
     if (!described.ok) {
       // Answer on the field they typed into, so they can add the one missing
