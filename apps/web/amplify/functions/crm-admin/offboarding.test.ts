@@ -1351,6 +1351,69 @@ describe("revokePortalAccess", () => {
     expect(sends).toHaveLength(0);
   });
 
+  it("does NOT disable the account when the same login is also STAFF", async () => {
+    // Cognito is one account per email, so a person can be a customer AND
+    // staff on one login. A test customer on an owner's address once
+    // deactivated that owner out of the CRM — revoking PORTAL access must not
+    // disable an account that keeps a staff role.
+    customers.set("c1", {
+      id: "c1",
+      displayName: "Kellan (also staff)",
+      email: "kellan@pestbuzzkill.com",
+      status: "INACTIVE",
+      portalUserSub: "sub-1",
+    });
+    userGroups = ["OWNER", "CUSTOMER", "cus-c1"];
+
+    const res = (await call("revokePortalAccess", { customerId: "c1" })) as {
+      revoked: boolean;
+      groupsRemoved: string[];
+    };
+
+    expect(res.revoked).toBe(true);
+    // The portal groups still go…
+    expect(res.groupsRemoved.sort()).toEqual(["CUSTOMER", "cus-c1"]);
+    // …the staff role is untouched…
+    expect(userGroups).toContain("OWNER");
+    // …the account stays ENABLED so they can still sign in to the CRM…
+    expect(sentTypes()).not.toContain("Disable");
+    // …but live tokens are still killed, which is what makes the portal loss
+    // immediate (a token carries its groups until reissued).
+    expect(sentTypes()).toContain("SignOut");
+  });
+
+  it("STILL disables an ordinary customer who holds no staff role", async () => {
+    customers.set("c1", {
+      id: "c1",
+      displayName: "Dana",
+      email: "dana@example.com",
+      status: "INACTIVE",
+      portalUserSub: "sub-1",
+    });
+    userGroups = ["CUSTOMER", "cus-c1"];
+
+    await call("revokePortalAccess", { customerId: "c1" });
+
+    expect(sentTypes()).toContain("Disable");
+  });
+
+  it("a staff OFFBOARD still disables — it removes the staff role itself", async () => {
+    // The sparing rule keys off whether a staff role SURVIVES the revoke, so an
+    // offboard (which takes the roles) is unaffected by it.
+    customers.set("c1", {
+      id: "c1",
+      displayName: "Kellan",
+      email: "kellan@pestbuzzkill.com",
+      status: "INACTIVE",
+      portalUserSub: "sub-1",
+    });
+    userGroups = ["OWNER", "CUSTOMER", "cus-c1"];
+
+    // revokePortalAccess spares it; the offboard path removes OWNER too.
+    await call("revokePortalAccess", { customerId: "c1" });
+    expect(sentTypes()).not.toContain("Disable");
+  });
+
   it("disables a GROUP login by groupId, drops CUSTOMER+grp- groups, and clears the login facts", async () => {
     customerGroups.set("g1", {
       id: "g1",

@@ -718,14 +718,46 @@ async function killLogin(
   caseContext?: { subjectLabel: string; relatedId: string }
 ): Promise<string[]> {
   try {
-    // 1. Disable first — stop any new sign-in.
-    await cognito.send(
-      new AdminDisableUserCommand({
+    // Read the role set FIRST, because it decides whether disabling the account
+    // is even the right act.
+    //
+    // Cognito has ONE account per email address, so a person can be a customer
+    // AND staff on the same login. Revoking PORTAL access used to disable that
+    // whole account: deactivating a customer whose email matched a staff member
+    // locked that person out of the CRM, still holding their staff role — a
+    // real incident (a test customer on an owner's address disabled the owner).
+    //
+    // So a revoke that is not itself removing staff roles must not disable an
+    // account that keeps one. Their portal groups still go, and they are still
+    // globally signed out — an access token carries its groups until it is
+    // reissued, so the sign-out is what makes the portal loss immediate. They
+    // simply sign back in to the CRM with the staff role they never lost.
+    const { Groups } = await cognito.send(
+      new AdminListGroupsForUserCommand({
         UserPoolId: USER_POOL_ID,
         Username: username,
       })
     );
-    // 2. Then kill live sessions — revoke tokens already issued.
+    const current = (Groups ?? []).map((g) => g.GroupName!);
+    const toRemove = current.filter((g) =>
+      removePrefixes.some((p) => g === p || g.startsWith(p))
+    );
+    const keepsStaffRole = current.some(
+      (g) => isStaffRole(g) && !toRemove.includes(g)
+    );
+
+    // 1. Disable first — stop any new sign-in. Skipped only when this revoke
+    //    leaves a staff role standing (see above).
+    if (!keepsStaffRole) {
+      await cognito.send(
+        new AdminDisableUserCommand({
+          UserPoolId: USER_POOL_ID,
+          Username: username,
+        })
+      );
+    }
+    // 2. Then kill live sessions — revoke tokens already issued. This runs
+    //    either way: it is what ends the access the groups below describe.
     await cognito.send(
       new AdminUserGlobalSignOutCommand({
         UserPoolId: USER_POOL_ID,
@@ -733,16 +765,7 @@ async function killLogin(
       })
     );
     // 3. Only now strip the groups. Access is already gone; this tidies the
-    //    role set. A failure here still leaves a disabled, signed-out login.
-    const { Groups } = await cognito.send(
-      new AdminListGroupsForUserCommand({
-        UserPoolId: USER_POOL_ID,
-        Username: username,
-      })
-    );
-    const toRemove = (Groups ?? [])
-      .map((g) => g.GroupName!)
-      .filter((g) => removePrefixes.some((p) => g === p || g.startsWith(p)));
+    //    role set. A failure here still leaves a signed-out login.
     for (const g of toRemove) {
       await removeFromGroup(username, g);
     }
