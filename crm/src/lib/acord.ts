@@ -620,7 +620,14 @@ export function operationsSummary(
 function buildAppFormValues(
   formKey: string,
   account: Account,
-  buildings: BuildingInfo[]
+  buildings: BuildingInfo[],
+  /**
+   * When the coverage being applied for starts. For a lead that's the
+   * incumbent's expiration; for a client it's the expiring policy's end date
+   * — `currentPolicyExpiration` is a lead-only field and is meaningless once
+   * bound policies exist.
+   */
+  renewalDate?: string | null
 ): FieldValues {
   const totalSqft = buildings.reduce((s, b) => s + (b.sqft ?? 0), 0);
 
@@ -640,7 +647,9 @@ function buildAppFormValues(
   // all of them. Candidates with no matching field are skipped and reported,
   // so listing a field a given form lacks costs nothing.
   const legalName = account.legalName?.trim() || account.name;
-  const proposedEff = account.currentPolicyExpiration ?? "";
+  const proposedEff =
+    renewalDate ??
+    (account.stage === "CLIENT" ? "" : account.currentPolicyExpiration ?? "");
 
   const values: FieldValues = {
     date: {
@@ -680,9 +689,7 @@ function buildAppFormValues(
 
   if (formKey === "acord125") {
     // Commercial Insurance Application — producer, applicant, premises.
-    const legalName = account.legalName?.trim() || account.name;
-    // A renewal submission is proposed to start when the incumbent expires.
-    const proposedEff = account.currentPolicyExpiration ?? "";
+    // A renewal submission is proposed to start when the current term ends.
     const proposedExp = proposedEff
       ? (() => {
           const d = new Date(proposedEff + "T00:00:00");
@@ -703,8 +710,6 @@ function buildAppFormValues(
       producerPhone: { candidates: ["Producer_ContactPerson_PhoneNumber_A"], value: AGENCY.phone },
       producerEmail: { candidates: ["Producer_ContactPerson_EmailAddress_A"], value: AGENCY.email },
 
-      // Carriers match submissions on the legal entity, not the short name.
-      insured: { candidates: ["NamedInsured_FullName_A"], value: legalName },
       insuredAddr1: { candidates: ["NamedInsured_MailingAddress_LineOne_A"], value: addr },
       insuredCity: { candidates: ["NamedInsured_MailingAddress_CityName_A"], value: city },
       insuredState: { candidates: ["NamedInsured_MailingAddress_StateOrProvinceCode_A"], value: state },
@@ -889,11 +894,12 @@ export async function fillAcordApp(
   form: AcordFormDef,
   account: Account,
   buildings: BuildingInfo[],
-  signature?: SignatureInfo | null
+  signature?: SignatureInfo | null,
+  renewalDate?: string | null
 ): Promise<FillResult> {
   return fillTemplate(
     form.path,
-    buildAppFormValues(form.key, account, buildings),
+    buildAppFormValues(form.key, account, buildings, renewalDate),
     signature
   );
 }

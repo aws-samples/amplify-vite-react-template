@@ -41,6 +41,8 @@ interface FieldDef {
   vtype?: "int" | "float" | "bool"; // coercion for apply; default string
   current: (a: Account) => string;
   display?: (v: ExtractedField["value"]) => string;
+  /** Lead-only field — hidden once the account is a client. */
+  leadOnly?: boolean;
 }
 
 const fmtVal = (v: ExtractedField["value"]): string => {
@@ -73,7 +75,7 @@ const moneyDisplay = (v: ExtractedField["value"]): string => {
   return Number.isFinite(n) ? fmtMoney(n) : fmtVal(v);
 };
 
-const FIELD_DEFS: FieldDef[] = [
+const ALL_FIELD_DEFS: FieldDef[] = [
   { key: "contactFirstName", label: "Contact first name", kind: "patch", current: (a) => a.contactFirstName ?? "" },
   { key: "contactLastName", label: "Contact last name", kind: "patch", current: (a) => a.contactLastName ?? "" },
   { key: "contactEmail", label: "Contact email", kind: "patch", current: (a) => a.contactEmail ?? "" },
@@ -120,9 +122,17 @@ const FIELD_DEFS: FieldDef[] = [
     key: "currentPolicyExpiration",
     label: "Current policy expiration",
     kind: "patch",
+    // Clients renew off their bound policies, so this never applies to them.
+    leadOnly: true,
     current: (a) => a.currentPolicyExpiration ?? "",
   },
 ];
+
+/** Clients renew off bound policies, so lead-only fields drop out entirely. */
+const fieldDefsFor = (account: Account): FieldDef[] =>
+  account.stage === "CLIENT"
+    ? ALL_FIELD_DEFS.filter((d) => !d.leadOnly)
+    : ALL_FIELD_DEFS;
 
 function parseExtraction(raw: unknown): ExtractionResult | null {
   let v: unknown = raw;
@@ -174,7 +184,7 @@ export default function ExtractionPanel({
   useEffect(() => {
     if (!result) return;
     const initial: Record<string, boolean> = {};
-    for (const def of FIELD_DEFS) {
+    for (const def of fieldDefsFor(account)) {
       const f = result[def.key] as ExtractedField | undefined;
       if (f && !isEmpty(f.value)) initial[def.key] = f.confidence !== "low";
     }
@@ -212,7 +222,7 @@ export default function ExtractionPanel({
     try {
       const patch: Record<string, unknown> = {};
       const noteLines: string[] = [];
-      for (const def of FIELD_DEFS) {
+      for (const def of fieldDefsFor(account)) {
         if (!selected[def.key]) continue;
         const f = result[def.key] as ExtractedField | undefined;
         if (!f || isEmpty(f.value)) continue;
@@ -318,7 +328,7 @@ export default function ExtractionPanel({
                 </tr>
               </thead>
               <tbody>
-                {FIELD_DEFS.map((def) => {
+                {fieldDefsFor(account).map((def) => {
                   const f = result[def.key] as ExtractedField | undefined;
                   if (!f || isEmpty(f.value)) return null;
                   const cur = def.current(account);

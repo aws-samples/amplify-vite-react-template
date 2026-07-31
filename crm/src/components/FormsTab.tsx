@@ -46,6 +46,22 @@ export default function FormsTab({
       const { data: buildings } = await client.models.Building.list({
         filter: { accountId: { eq: account.id } },
       });
+      // Clients renew off their bound policies; the lead-only
+      // currentPolicyExpiration field isn't used once an account converts.
+      let renewalDate: string | null = null;
+      if (account.stage === "CLIENT") {
+        const { data: pols } = await client.models.Policy.list({
+          filter: { accountId: { eq: account.id } },
+        });
+        const ends = pols
+          .filter((p) => p.status === "ACTIVE" && p.expirationDate)
+          .map((p) => p.expirationDate as string)
+          .sort();
+        renewalDate = ends[0] ?? null;
+      } else {
+        renewalDate = account.currentPolicyExpiration ?? null;
+      }
+
       const { bytes, missing } = await fillAcordApp(
         form,
         account,
@@ -55,7 +71,8 @@ export default function FormsTab({
               key: profile.signatureKey,
               name: `${profile.firstName} ${profile.lastName}`,
             }
-          : null
+          : null,
+        renewalDate
       );
 
       const stamp = new Date().toISOString().slice(0, 10);

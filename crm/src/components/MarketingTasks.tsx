@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useSort, SortTh } from "../lib/useSort";
 import {
   client,
   daysUntilDate,
@@ -258,6 +259,7 @@ export default function AccountMarketingTasks({
 export function AllMarketingTasks() {
   const [tasks, setTasks] = useState<MarketingTask[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     listAllPages((nextToken) =>
@@ -272,9 +274,27 @@ export function AllMarketingTasks() {
     });
   }, []);
 
-  const sorted = tasks
-    .slice()
-    .sort((a, b) => (a.submitBy ?? "").localeCompare(b.submitBy ?? ""));
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? tasks.filter((t) =>
+        [t.accountName, t.carrierName, (t.lines ?? []).filter(Boolean).join(" ")]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))
+      )
+    : tasks;
+
+  // Soonest submit-by first — the work that's most at risk floats up.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    filtered,
+    {
+      account: (t) => t.accountName,
+      carrier: (t) => t.carrierName,
+      lines: (t) => (t.lines ?? []).filter(Boolean).join(", "),
+      expires: (t) => t.expirationDate,
+      submitBy: (t) => t.submitBy,
+    },
+    "submitBy"
+  );
 
   return (
     <>
@@ -284,23 +304,43 @@ export function AllMarketingTasks() {
       </p>
 
       <div className="card">
+        <div className="toolbar" style={{ marginTop: 0 }}>
+          <input
+            className="lic-search"
+            type="search"
+            placeholder="Filter by account, carrier, or line…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {q && (
+            <>
+              <span className="muted small">
+                {filtered.length} of {tasks.length}
+              </span>
+              <button className="link" onClick={() => setQuery("")}>
+                Clear
+              </button>
+            </>
+          )}
+        </div>
         {!loaded ? (
           <p className="muted small">Loading…</p>
         ) : sorted.length === 0 ? (
           <p className="muted small">
-            No open marketing tasks. The nightly sweep raises them once a
-            renewal enters its submission window.
+            {q
+              ? "No tasks match that filter."
+              : "No open marketing tasks. The nightly sweep raises them once a renewal enters its submission window."}
           </p>
         ) : (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Account</th>
-                  <th>Carrier</th>
-                  <th>Lines</th>
-                  <th>Expires</th>
-                  <th>Submit by</th>
+                  <SortTh label="Account" colKey="account" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Carrier" colKey="carrier" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Lines" colKey="lines" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Expires" colKey="expires" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Submit by" colKey="submitBy" sortKey={sortKey} dir={dir} onToggle={toggle} />
                   <th>Urgency</th>
                 </tr>
               </thead>

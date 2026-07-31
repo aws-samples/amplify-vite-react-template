@@ -81,10 +81,12 @@ export const handler = async () => {
   // ── Build the list of expiring risks ────────────────────────────────
   const risks: Risk[] = [];
 
+  // Clients renew off their bound policies. `currentPolicyExpiration` is a
+  // lead-only field and is deliberately ignored once an account converts.
   for (const p of policies) {
     if (p.status !== "ACTIVE" || !p.expirationDate) continue;
     const acct = accountById.get(p.accountId);
-    if (!acct) continue;
+    if (!acct || acct.stage !== "CLIENT") continue;
     risks.push({
       sourceType: "POLICY",
       sourceId: p.id,
@@ -97,7 +99,8 @@ export const handler = async () => {
   }
 
   for (const a of accounts) {
-    // Prospects carry their incumbent's expiration instead of a policy.
+    // Prospects have no bound policy, so their incumbent's expiration is the
+    // only renewal date available.
     if (a.stage !== "LEAD" || !a.currentPolicyExpiration) continue;
     risks.push({
       sourceType: "LEAD",

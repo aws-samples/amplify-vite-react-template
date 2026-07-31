@@ -319,6 +319,8 @@ function OverviewTab({
             onChange={set("priorTermExpiration")}
           />
         </div>
+        {/* Lead-only: once bound, the Policy records are authoritative. */}
+        {account.stage !== "CLIENT" && (
         <div className="field">
           <label>Current policy expiration</label>
           <input
@@ -327,6 +329,7 @@ function OverviewTab({
             onChange={set("currentPolicyExpiration")}
           />
         </div>
+        )}
         <div className="field">
           <label>Source</label>
           <input value={form.source} onChange={set("source")} />
