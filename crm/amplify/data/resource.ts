@@ -85,6 +85,7 @@ const schema = a
       "FIRE_RESISTIVE",
     ]),
     ReplacementCostType: a.enum(["RC", "ERC", "GRC"]),
+    AggregateAppliesTo: a.enum(["POLICY", "PROJECT", "LOCATION", "OTHER"]),
 
     // ── Account: Lead → Client, converted in place ─────────────────────
     Account: a
@@ -180,6 +181,16 @@ const schema = a
       // Agency commission, % of premium. NOTE: already baked into the
       // quoted premium — commission $ is informational, never additive.
       commissionPct: a.float(),
+      // ── General liability limits (printed on the ACORD 25 COI) ──
+      glEachOccurrence: a.float(),
+      glDamageToRentedPremises: a.float(),
+      glMedicalExpense: a.float(),
+      glPersonalAdvInjury: a.float(),
+      glGeneralAggregate: a.float(),
+      glProductsCompletedOps: a.float(),
+      // "Occurrence" vs "Claims made" form, and what the aggregate applies to.
+      glClaimsMade: a.boolean(),
+      glAggregateAppliesTo: a.ref("AggregateAppliesTo"),
       // ── Property terms ──
       perOccurrenceDeductible: a.float(),
       perUnitDeductible: a.float(),
@@ -206,6 +217,16 @@ const schema = a
       lines: a.string().array(),
       premium: a.float(),
       commissionPct: a.float(), // carried from the bound quote; baked into premium
+      // ── General liability limits (printed on the ACORD 25 COI) ──
+      glEachOccurrence: a.float(),
+      glDamageToRentedPremises: a.float(),
+      glMedicalExpense: a.float(),
+      glPersonalAdvInjury: a.float(),
+      glGeneralAggregate: a.float(),
+      glProductsCompletedOps: a.float(),
+      // "Occurrence" vs "Claims made" form, and what the aggregate applies to.
+      glClaimsMade: a.boolean(),
+      glAggregateAppliesTo: a.ref("AggregateAppliesTo"),
       perOccurrenceDeductible: a.float(),
       perUnitDeductible: a.float(),
       blanketLimit: a.float(),

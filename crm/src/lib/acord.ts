@@ -248,6 +248,58 @@ function buildAcord25Values(
       ],
       value: fmtUs(gl.expirationDate),
     };
+
+    // ── Limits ──
+    // A COI without limits is useless to the holder; this is the whole
+    // point of the certificate.
+    const amt = (n: number | null | undefined) =>
+      n == null ? "" : Math.round(n).toLocaleString("en-US");
+
+    values.glEachOccurrence = {
+      candidates: ["GeneralLiability_EachOccurrence_LimitAmount_A"],
+      value: amt(gl.glEachOccurrence),
+    };
+    values.glRentedPremises = {
+      candidates: ["GeneralLiability_FireDamageRentedPremises_EachOccurrenceLimitAmount_A"],
+      value: amt(gl.glDamageToRentedPremises),
+    };
+    values.glMedExp = {
+      candidates: ["GeneralLiability_MedicalExpense_EachPersonLimitAmount_A"],
+      value: amt(gl.glMedicalExpense),
+    };
+    values.glPersonalAdv = {
+      candidates: ["GeneralLiability_PersonalAndAdvertisingInjury_LimitAmount_A"],
+      value: amt(gl.glPersonalAdvInjury),
+    };
+    values.glGeneralAggregate = {
+      candidates: ["GeneralLiability_GeneralAggregate_LimitAmount_A"],
+      value: amt(gl.glGeneralAggregate),
+    };
+    values.glProductsAggregate = {
+      candidates: ["GeneralLiability_ProductsAndCompletedOperations_AggregateLimitAmount_A"],
+      value: amt(gl.glProductsCompletedOps),
+    };
+
+    // Occurrence is the default form; only tick claims-made when told.
+    values.glOccurrence = {
+      candidates: ["GeneralLiability_OccurrenceIndicator_A"],
+      value: gl.glClaimsMade ? "" : "x",
+    };
+    values.glClaimsMade = {
+      candidates: ["GeneralLiability_ClaimsMadeIndicator_A"],
+      value: gl.glClaimsMade ? "x" : "",
+    };
+
+    const aggMap: Record<string, string> = {
+      POLICY: "GeneralLiability_GeneralAggregate_LimitAppliesPerPolicyIndicator_A",
+      PROJECT: "GeneralLiability_GeneralAggregate_LimitAppliesPerProjectIndicator_A",
+      LOCATION: "GeneralLiability_GeneralAggregate_LimitAppliesPerLocationIndicator_A",
+      OTHER: "GeneralLiability_GeneralAggregate_LimitAppliesToOtherIndicator_A",
+    };
+    const aggField = aggMap[gl.glAggregateAppliesTo ?? "POLICY"];
+    if (aggField) {
+      values.glAggregateApplies = { candidates: [aggField], value: "x" };
+    }
   }
 
   const umbrella = rowFor("umbrella");
@@ -330,6 +382,19 @@ function buildAcord25Values(
     values.otherExpiration = {
       candidates: ["OtherPolicy_PolicyExpirationDate_A"],
       value: fmtUs(other.expirationDate),
+    };
+    // The OTHER block carries its own coverage rows — put the blanket limit
+    // (or TIV) against the first one so the holder sees a number.
+    values.otherCoverageCode = {
+      candidates: ["OtherPolicy_CoverageCode_A"],
+      value: other.replacementCostType ?? "",
+    };
+    values.otherCoverageLimit = {
+      candidates: ["OtherPolicy_CoverageLimitAmount_A"],
+      value:
+        other.blanketLimit != null
+          ? Math.round(other.blanketLimit).toLocaleString("en-US")
+          : "",
     };
   }
 

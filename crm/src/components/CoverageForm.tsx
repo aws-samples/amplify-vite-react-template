@@ -79,6 +79,17 @@ export default function CoverageForm({
   const [blanketLimit, setBlanketLimit] = useState(str(existing?.blanketLimit));
   const [coinsurance, setCoinsurance] = useState(str(existing?.coinsurancePct));
   const [rcType, setRcType] = useState(existing?.replacementCostType ?? "");
+  // GL limits — these are what actually print on a certificate.
+  const [glEachOcc, setGlEachOcc] = useState(str(existing?.glEachOccurrence));
+  const [glRented, setGlRented] = useState(str(existing?.glDamageToRentedPremises));
+  const [glMed, setGlMed] = useState(str(existing?.glMedicalExpense));
+  const [glPersAdv, setGlPersAdv] = useState(str(existing?.glPersonalAdvInjury));
+  const [glGenAgg, setGlGenAgg] = useState(str(existing?.glGeneralAggregate));
+  const [glProdAgg, setGlProdAgg] = useState(str(existing?.glProductsCompletedOps));
+  const [glClaimsMade, setGlClaimsMade] = useState(!!existing?.glClaimsMade);
+  const [glAggApplies, setGlAggApplies] = useState(
+    existing?.glAggregateAppliesTo ?? "POLICY"
+  );
   const [effectiveDate, setEffectiveDate] = useState(existing?.effectiveDate ?? "");
   const [expirationDate, setExpirationDate] = useState(existing?.expirationDate ?? "");
   const [notes, setNotes] = useState(existing?.notes ?? "");
@@ -117,6 +128,14 @@ export default function CoverageForm({
       blanketLimit: num(blanketLimit),
       coinsurancePct: num(coinsurance),
       replacementCostType: (rcType || null) as Quote["replacementCostType"],
+      glEachOccurrence: num(glEachOcc),
+      glDamageToRentedPremises: num(glRented),
+      glMedicalExpense: num(glMed),
+      glPersonalAdvInjury: num(glPersAdv),
+      glGeneralAggregate: num(glGenAgg),
+      glProductsCompletedOps: num(glProdAgg),
+      glClaimsMade,
+      glAggregateAppliesTo: glAggApplies as Quote["glAggregateAppliesTo"],
       effectiveDate: effectiveDate || null,
       expirationDate: expirationDate || null,
       notes: notes.trim() || null,
@@ -283,6 +302,57 @@ export default function CoverageForm({
               </option>
             ))}
           </select>
+        </div>
+        <div className="field full">
+          <h4 style={{ margin: "6px 0 0" }}>General liability limits</h4>
+          <p className="muted small" style={{ margin: "2px 0 0" }}>
+            These print on the certificate of insurance. A COI without limits
+            is of no use to the holder.
+          </p>
+        </div>
+        <div className="field">
+          <label>Each occurrence ($)</label>
+          <input type="number" value={glEachOcc} onChange={(e) => setGlEachOcc(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Damage to rented premises ($)</label>
+          <input type="number" value={glRented} onChange={(e) => setGlRented(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Medical expense, any one person ($)</label>
+          <input type="number" value={glMed} onChange={(e) => setGlMed(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Personal &amp; advertising injury ($)</label>
+          <input type="number" value={glPersAdv} onChange={(e) => setGlPersAdv(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>General aggregate ($)</label>
+          <input type="number" value={glGenAgg} onChange={(e) => setGlGenAgg(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Products &amp; completed ops aggregate ($)</label>
+          <input type="number" value={glProdAgg} onChange={(e) => setGlProdAgg(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Aggregate applies per</label>
+          <select value={glAggApplies} onChange={(e) => setGlAggApplies(e.target.value as typeof glAggApplies)}>
+            <option value="LOCATION">Location</option>
+            <option value="OTHER">Other</option>
+            <option value="POLICY">Policy</option>
+            <option value="PROJECT">Project</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>Coverage form</label>
+          <label className="small" style={{ display: "flex", gap: 6, alignItems: "center", height: 38 }}>
+            <input
+              type="checkbox"
+              checked={glClaimsMade}
+              onChange={(e) => setGlClaimsMade(e.target.checked)}
+            />
+            Claims made (otherwise occurrence)
+          </label>
         </div>
         <div className="field full">
           <label>Lines</label>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { client, fmtDate, fmtMoney, type Account, type Policy } from "../lib/client";
+import { client, fmtDate, fmtMoney, fmtNum, type Account, type Policy } from "../lib/client";
 import { useSort, SortTh } from "../lib/useSort";
 
 export default function AccountsList({ stage }: { stage: "LEAD" | "CLIENT" }) {
@@ -137,7 +137,7 @@ export default function AccountsList({ stage }: { stage: "LEAD" | "CLIENT" }) {
                         )}
                       </td>
                       <td>{[a.city, a.state].filter(Boolean).join(", ") || "—"}</td>
-                      <td>{a.unitCount ?? "—"}</td>
+                      <td>{fmtNum(a.unitCount)}</td>
                       <td>{fmtMoney(a.totalInsuredValue)}</td>
                       <td>{renewal ? fmtDate(renewal) : "—"}</td>
                     </tr>

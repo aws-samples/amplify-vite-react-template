@@ -118,6 +118,12 @@ export const LINES_OF_BUSINESS = [
   "Workers Comp",
 ];
 
+/** Whole numbers with thousands separators: 11000 -> "11,000". */
+export function fmtNum(n: number | null | undefined): string {
+  if (n == null) return "—";
+  return n.toLocaleString("en-US");
+}
+
 export function fmtMoney(n: number | null | undefined): string {
   if (n == null) return "—";
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
