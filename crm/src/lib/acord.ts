@@ -1,4 +1,5 @@
 import { PDFDocument, PDFTextField, PDFCheckBox, PDFName, PDFBool } from "pdf-lib";
+import { downloadData } from "aws-amplify/storage";
 import { getUrl } from "aws-amplify/storage";
 import { AGENCY } from "./agency";
 import type { Account, Carrier, Certificate, Policy } from "./client";
@@ -317,6 +318,89 @@ function buildAcord25Values(
   return values;
 }
 
+/**
+ * Draw a signature image into a form field's rectangle.
+ *
+ * ACORD signature slots are plain text fields, so there's nothing to "sign" —
+ * we locate the field's widget, then stamp the PNG onto that page at those
+ * coordinates and remove the field so it can't be typed over afterwards.
+ * Aspect ratio is preserved and the image is inset slightly so it sits on the
+ * ruled line rather than across it.
+ */
+async function stampSignature(
+  pdf: PDFDocument,
+  fieldName: string,
+  pngBytes: Uint8Array
+): Promise<boolean> {
+  const form = pdf.getForm();
+  let field;
+  try {
+    field = form.getField(fieldName);
+  } catch {
+    return false;
+  }
+  const widget = field.acroField.getWidgets()[0];
+  if (!widget) return false;
+
+  const rect = widget.getRectangle();
+  const pageRef = widget.P();
+  const page =
+    pdf.getPages().find((p) => p.ref === pageRef) ?? pdf.getPages()[0];
+
+  const png = await pdf.embedPng(pngBytes);
+  const pad = 1;
+  const maxW = rect.width - pad * 2;
+  const maxH = rect.height - pad * 2;
+  const scale = Math.min(maxW / png.width, maxH / png.height);
+  const w = png.width * scale;
+  const h = png.height * scale;
+
+  page.drawImage(png, {
+    x: rect.x + pad,
+    y: rect.y + pad,
+    width: w,
+    height: h,
+  });
+
+  // The slot is signed — drop the input so nothing can overwrite the mark.
+  try {
+    form.removeField(field);
+  } catch {
+    /* older pdf-lib: leaving the field is harmless */
+  }
+  return true;
+}
+
+/** Signature slots we know how to fill, in preference order. */
+const SIGNATURE_FIELDS = [
+  "Producer_AuthorizedRepresentative_Signature_A",
+  "Producer_Signature_A",
+  "AuthorizedRepresentative_Signature_A",
+];
+
+const SIGNATURE_NAME_FIELDS = [
+  "Producer_AuthorizedRepresentative_FullName_A",
+  "Producer_ContactPerson_FullName_A",
+];
+
+export interface SignatureInfo {
+  /** S3 key under signatures/ */
+  key: string;
+  /** Printed name that accompanies the mark. */
+  name: string;
+}
+
+/** Fetch a stored signature PNG. Returns null when there isn't one. */
+async function loadSignature(key: string): Promise<Uint8Array | null> {
+  try {
+    const { body } = await downloadData({ path: key }).result;
+    const blob = await body.blob();
+    return new Uint8Array(await blob.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
 async function fetchTemplate(path: string): Promise<ArrayBuffer> {
   const { url } = await getUrl({ path });
   const res = await fetch(url.toString());
@@ -339,7 +423,11 @@ export async function listTemplateFields(path: string): Promise<string[]> {
 }
 
 /** Shared fill core: first matching candidate wins; misses are reported. */
-async function fillTemplate(path: string, values: FieldValues): Promise<FillResult> {
+async function fillTemplate(
+  path: string,
+  values: FieldValues,
+  signature?: SignatureInfo | null
+): Promise<FillResult> {
   const pdf = await PDFDocument.load(await fetchTemplate(path), {
     ignoreEncryption: true,
   });
@@ -372,6 +460,30 @@ async function fillTemplate(path: string, values: FieldValues): Promise<FillResu
     }
   }
 
+  // ── Signature ──
+  // Stamped after the text fields so the printed name is already in place.
+  if (signature?.key) {
+    for (const nameField of SIGNATURE_NAME_FIELDS) {
+      if (!fieldNames.has(nameField)) continue;
+      try {
+        const f = form.getField(nameField);
+        if (f instanceof PDFTextField && !f.getText()) f.setText(signature.name);
+      } catch {
+        /* non-fatal */
+      }
+      break;
+    }
+    const png = await loadSignature(signature.key);
+    if (png) {
+      for (const sigField of SIGNATURE_FIELDS) {
+        if (!fieldNames.has(sigField)) continue;
+        const ok = await stampSignature(pdf, sigField, png);
+        if (ok) filled.push("signature");
+        break;
+      }
+    }
+  }
+
   // Deliberately NOT flattened — the PDF stays editable for manual touch-ups.
   // pdf-lib regenerates field appearances on save; complex ACORD templates
   // reference fonts pdf-lib can't rebuild, throwing during save. If that
@@ -395,11 +507,13 @@ export async function fillAcord25(
   account: Account,
   cert: Certificate,
   policies: Policy[],
-  carriers: Carrier[]
+  carriers: Carrier[],
+  signature?: SignatureInfo | null
 ): Promise<FillResult> {
   return fillTemplate(
     ACORD25_TEMPLATE_PATH,
-    buildAcord25Values(account, cert, policies, carriers)
+    buildAcord25Values(account, cert, policies, carriers),
+    signature
   );
 }
 
@@ -728,7 +842,12 @@ function buildAppFormValues(
 export async function fillAcordApp(
   form: AcordFormDef,
   account: Account,
-  buildings: BuildingInfo[]
+  buildings: BuildingInfo[],
+  signature?: SignatureInfo | null
 ): Promise<FillResult> {
-  return fillTemplate(form.path, buildAppFormValues(form.key, account, buildings));
+  return fillTemplate(
+    form.path,
+    buildAppFormValues(form.key, account, buildings),
+    signature
+  );
 }

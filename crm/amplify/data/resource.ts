@@ -337,6 +337,9 @@ const schema = a
         lastName: a.string().required(),
         role: a.ref("UserRole").required(), // privileges are placeholder for now
         npn: a.string(), // required for producers at onboarding (app-enforced)
+        // S3 key of a transparent-PNG signature, drawn into the signature
+        // fields of generated ACORD forms. See storage: signatures/*.
+        signatureKey: a.string(),
         onboardingComplete: a.boolean().required(),
         licenses: a.hasMany("ProducerLicense", "userProfileId"), // deprecated
       })

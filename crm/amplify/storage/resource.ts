@@ -39,6 +39,11 @@ export const storage = defineStorage({
       allow.authenticated.to(["read", "write", "delete"]),
       allow.groups(ALL_GROUPS).to(["read", "write", "delete"]),
     ],
+    // Producer signature images, stamped onto generated ACORD forms.
+    "signatures/*": [
+      allow.authenticated.to(["read", "write", "delete"]),
+      allow.groups(ALL_GROUPS).to(["read", "write", "delete"]),
+    ],
     // Property photos (cover, aerial, plot plan) — no OCR.
     "property-photos/*": [
       allow.authenticated.to(["read", "write", "delete"]),

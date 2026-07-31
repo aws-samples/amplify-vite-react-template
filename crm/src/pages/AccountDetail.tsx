@@ -125,7 +125,7 @@ export default function AccountDetail({ profile }: { profile: UserProfile }) {
             <DocumentsPanel entityType="ACCOUNT" entityId={account.id} />
           </div>
           <ExtractionPanel account={account} onChange={setAccount} />
-          <FormsTab account={account} />
+          <FormsTab account={account} profile={profile} />
         </>
       )}
       {tab === "certificates" && (
@@ -622,7 +622,18 @@ function CertificatesTab({
     setGenNote("");
     setError("");
     try {
-      const { bytes, missing } = await fillAcord25(account, cert, policies, carriers);
+      const { bytes, missing } = await fillAcord25(
+        account,
+        cert,
+        policies,
+        carriers,
+        profile.signatureKey
+          ? {
+              key: profile.signatureKey,
+              name: `${profile.firstName} ${profile.lastName}`,
+            }
+          : null
+      );
       const path = `certificates/${account.id}/${cert.id}.pdf`;
       await uploadData({
         path,

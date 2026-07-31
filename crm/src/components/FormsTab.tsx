@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { uploadData } from "aws-amplify/storage";
 import { client, type Account, type CrmDocument } from "../lib/client";
 import { ACORD_FORMS, fillAcordApp, type AcordFormDef } from "../lib/acord";
+import type { UserProfile } from "../lib/client";
 import FilePreviewModal from "./FilePreview";
 
 const APP_FORMS = ACORD_FORMS.filter((f) => f.key !== "acord25");
@@ -11,7 +12,13 @@ const APP_FORMS = ACORD_FORMS.filter((f) => f.key !== "acord25");
  * from this account's data, store the PDF under generated/, and track it as
  * an ACORD_FORM document.
  */
-export default function FormsTab({ account }: { account: Account }) {
+export default function FormsTab({
+  account,
+  profile,
+}: {
+  account: Account;
+  profile: UserProfile;
+}) {
   const [generated, setGenerated] = useState<CrmDocument[]>([]);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [note, setNote] = useState("");
@@ -39,7 +46,17 @@ export default function FormsTab({ account }: { account: Account }) {
       const { data: buildings } = await client.models.Building.list({
         filter: { accountId: { eq: account.id } },
       });
-      const { bytes, missing } = await fillAcordApp(form, account, buildings);
+      const { bytes, missing } = await fillAcordApp(
+        form,
+        account,
+        buildings,
+        profile.signatureKey
+          ? {
+              key: profile.signatureKey,
+              name: `${profile.firstName} ${profile.lastName}`,
+            }
+          : null
+      );
 
       const stamp = new Date().toISOString().slice(0, 10);
       const filename = `${form.key}-${account.name.replace(/[^\w-]+/g, "_")}-${stamp}.pdf`;
