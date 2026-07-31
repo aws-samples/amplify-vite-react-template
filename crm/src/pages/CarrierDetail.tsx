@@ -4,6 +4,7 @@ import {
   client,
   fmtMoney,
   LINES_OF_BUSINESS,
+  listAllPages,
   US_STATES,
   type AppetiteGuide,
   type Carrier,
@@ -308,134 +309,67 @@ function CarrierForm({
 function AppetiteGuides({ carrierId }: { carrierId: string }) {
   const [guides, setGuides] = useState<AppetiteGuide[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [lines, setLines] = useState<string[]>([]);
-  const [leadTime, setLeadTime] = useState("");
-  const [minValue, setMinValue] = useState("");
-  const [maxValue, setMaxValue] = useState("");
-  const [minYear, setMinYear] = useState("");
-  const [maxYear, setMaxYear] = useState("");
-  const [notes, setNotes] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [editing, setEditing] = useState<AppetiteGuide | null>(null);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
 
-  useEffect(() => {
-    client.models.AppetiteGuide.list({
-      filter: { carrierId: { eq: carrierId } },
-    }).then(({ data }) => setGuides(data));
-  }, [carrierId]);
-
-  async function add() {
-    // Inverted ranges silently break the Appetite Finder — catch them here.
-    const problems: string[] = [];
-    if (minValue && maxValue && Number(minValue) > Number(maxValue))
-      problems.push("Min TIV can't be greater than Max TIV.");
-    if (minYear && maxYear && Number(minYear) > Number(maxYear))
-      problems.push("Earliest construction year can't be after the latest.");
-    if ((minValue && Number(minValue) < 0) || (maxValue && Number(maxValue) < 0))
-      problems.push("TIV values can't be negative.");
-    if (problems.length) {
-      setError(problems.join(" "));
-      return;
-    }
-    setError("");
-    setSaving(true);
-    const { data } = await client.models.AppetiteGuide.create({
-      carrierId,
-      linesWritten: lines,
-      quoteSubmissionLeadTimeDays: leadTime ? Number(leadTime) : undefined,
-      minValue: minValue ? Number(minValue) : undefined,
-      maxValue: maxValue ? Number(maxValue) : undefined,
-      minConstructionYear: minYear ? Number(minYear) : undefined,
-      maxConstructionYear: maxYear ? Number(maxYear) : undefined,
-      notes: notes.trim() || undefined,
-    });
-    setSaving(false);
-    if (data) {
-      setGuides((gs) => [...gs, data]);
-      setShowForm(false);
-      setLines([]);
-      setLeadTime("");
-      setMinValue("");
-      setMaxValue("");
-      setMinYear("");
-      setMaxYear("");
-      setNotes("");
-    }
+  function load() {
+    listAllPages((nextToken) =>
+      client.models.AppetiteGuide.list({
+        filter: { carrierId: { eq: carrierId } },
+        limit: 500,
+        nextToken,
+      })
+    ).then((data) => setGuides(data as AppetiteGuide[]));
   }
+
+  useEffect(load, [carrierId]);
 
   async function del(id: string) {
     await client.models.AppetiteGuide.delete({ id });
     setGuides((gs) => gs.filter((g) => g.id !== id));
+    setConfirmId(null);
   }
 
   return (
     <div className="card">
-      <h2>Appetite guides</h2>
-      <div className="toolbar">
+      <div className="toolbar" style={{ marginTop: 0, alignItems: "flex-start" }}>
+        <div>
+          <h2 style={{ margin: 0 }}>Appetite guides</h2>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            What this carrier will look at. Drives the Appetite Finder and the
+            daily renewal marketing sweep.
+          </p>
+        </div>
         <div className="grow" />
-        <button className="primary" onClick={() => setShowForm(!showForm)}>
+        <button
+          className="primary"
+          onClick={() => {
+            setEditing(null);
+            setShowForm(!showForm);
+          }}
+        >
           {showForm ? "Cancel" : "+ Add appetite guide"}
         </button>
       </div>
 
-      {showForm && (
-        <div className="card" style={{ background: "#f8fafc" }}>
-          <div className="form-grid">
-            <div className="field full">
-              <label>Lines written</label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
-                {LINES_OF_BUSINESS.map((l) => (
-                  <label
-                    key={l}
-                    className="small"
-                    style={{ display: "flex", gap: 4, alignItems: "center" }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={lines.includes(l)}
-                      onChange={() =>
-                        setLines((ls) =>
-                          ls.includes(l) ? ls.filter((x) => x !== l) : [...ls, l]
-                        )
-                      }
-                    />
-                    {l}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="field">
-              <label>Submission lead time (days)</label>
-              <input type="number" value={leadTime} onChange={(e) => setLeadTime(e.target.value)} />
-            </div>
-            <div className="field">
-              <label>Min TIV ($)</label>
-              <input type="number" value={minValue} onChange={(e) => setMinValue(e.target.value)} />
-            </div>
-            <div className="field">
-              <label>Max TIV ($)</label>
-              <input type="number" value={maxValue} onChange={(e) => setMaxValue(e.target.value)} />
-            </div>
-            <div className="field">
-              <label>Earliest construction year</label>
-              <input type="number" value={minYear} onChange={(e) => setMinYear(e.target.value)} />
-            </div>
-            <div className="field">
-              <label>Latest construction year</label>
-              <input type="number" value={maxYear} onChange={(e) => setMaxYear(e.target.value)} />
-            </div>
-            <div className="field full">
-              <label>Notes</label>
-              <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
-            </div>
-          </div>
-          <div className="form-actions">
-            <button className="primary" disabled={saving} onClick={add}>
-              {saving ? "Saving…" : "Add guide"}
-            </button>
-            {error && <span className="error-text">{error}</span>}
-          </div>
-        </div>
+      {(showForm || editing) && (
+        <GuideForm
+          key={editing?.id ?? "new"}
+          carrierId={carrierId}
+          existing={editing}
+          onSaved={(g) => {
+            setGuides((gs) => {
+              const without = gs.filter((x) => x.id !== g.id);
+              return [...without, g];
+            });
+            setShowForm(false);
+            setEditing(null);
+          }}
+          onCancel={() => {
+            setShowForm(false);
+            setEditing(null);
+          }}
+        />
       )}
 
       {guides.length === 0 ? (
@@ -449,6 +383,7 @@ function AppetiteGuides({ carrierId }: { carrierId: string }) {
                 <th>Lead time</th>
                 <th>TIV range</th>
                 <th>Construction years</th>
+                <th>States</th>
                 <th>Notes</th>
                 <th></th>
               </tr>
@@ -470,11 +405,34 @@ function AppetiteGuides({ carrierId }: { carrierId: string }) {
                   <td className="small">
                     {g.minConstructionYear ?? "any"} – {g.maxConstructionYear ?? "any"}
                   </td>
+                  <td className="small">
+                    {(g.states ?? []).filter(Boolean).join(", ") || "carrier default"}
+                  </td>
                   <td className="small">{g.notes ?? ""}</td>
-                  <td>
-                    <button className="danger" onClick={() => del(g.id)}>
-                      Delete
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <button
+                      className="link"
+                      onClick={() => {
+                        setShowForm(false);
+                        setEditing(g);
+                      }}
+                    >
+                      Edit
                     </button>
+                    {confirmId === g.id ? (
+                      <>
+                        <button className="danger" onClick={() => del(g.id)}>
+                          Confirm
+                        </button>
+                        <button className="link" onClick={() => setConfirmId(null)}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button className="link" onClick={() => setConfirmId(g.id)}>
+                        Delete
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -482,6 +440,172 @@ function AppetiteGuides({ carrierId }: { carrierId: string }) {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Create/edit one appetite guide. */
+function GuideForm({
+  carrierId,
+  existing,
+  onSaved,
+  onCancel,
+}: {
+  carrierId: string;
+  existing: AppetiteGuide | null;
+  onSaved: (g: AppetiteGuide) => void;
+  onCancel: () => void;
+}) {
+  const str = (n: number | null | undefined) => (n == null ? "" : String(n));
+  const [lines, setLines] = useState<string[]>(
+    (existing?.linesWritten ?? []).filter((l): l is string => !!l)
+  );
+  const [states, setStates] = useState<string[]>(
+    (existing?.states ?? []).filter((s): s is string => !!s)
+  );
+  const [leadTime, setLeadTime] = useState(str(existing?.quoteSubmissionLeadTimeDays));
+  const [minValue, setMinValue] = useState(str(existing?.minValue));
+  const [maxValue, setMaxValue] = useState(str(existing?.maxValue));
+  const [minYear, setMinYear] = useState(str(existing?.minConstructionYear));
+  const [maxYear, setMaxYear] = useState(str(existing?.maxConstructionYear));
+  const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save() {
+    // Inverted ranges silently break the Appetite Finder — catch them here.
+    const problems: string[] = [];
+    if (minValue && maxValue && Number(minValue) > Number(maxValue))
+      problems.push("Min TIV can't be greater than Max TIV.");
+    if (minYear && maxYear && Number(minYear) > Number(maxYear))
+      problems.push("Earliest construction year can't be after the latest.");
+    if ((minValue && Number(minValue) < 0) || (maxValue && Number(maxValue) < 0))
+      problems.push("TIV values can't be negative.");
+    if (problems.length) {
+      setError(problems.join(" "));
+      return;
+    }
+    setError("");
+    setSaving(true);
+    const num = (v: string) => (v.trim() === "" ? null : Number(v));
+    const payload = {
+      linesWritten: lines,
+      states,
+      quoteSubmissionLeadTimeDays: num(leadTime),
+      minValue: num(minValue),
+      maxValue: num(maxValue),
+      minConstructionYear: num(minYear),
+      maxConstructionYear: num(maxYear),
+      notes: notes.trim() || null,
+    };
+    const { data, errors } = existing
+      ? await client.models.AppetiteGuide.update({ id: existing.id, ...payload })
+      : await client.models.AppetiteGuide.create({ carrierId, ...payload });
+    setSaving(false);
+    if (errors?.length || !data) {
+      setError(errors?.[0]?.message ?? "Save failed");
+      return;
+    }
+    onSaved(data);
+  }
+
+  return (
+    <div className="card" style={{ background: "#f8fafc" }}>
+      <h3 style={{ marginTop: 0 }}>
+        {existing ? "Edit" : "Add"} appetite guide
+      </h3>
+      <div className="form-grid">
+        <div className="field full">
+          <label>Lines written</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+            {LINES_OF_BUSINESS.map((l) => (
+              <label
+                key={l}
+                className="small"
+                style={{ display: "flex", gap: 4, alignItems: "center" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={lines.includes(l)}
+                  onChange={() =>
+                    setLines((ls) =>
+                      ls.includes(l) ? ls.filter((x) => x !== l) : [...ls, l].sort()
+                    )
+                  }
+                />
+                {l}
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="field">
+          <label>Submission lead time (days)</label>
+          <input
+            type="number"
+            min={0}
+            value={leadTime}
+            onChange={(e) => setLeadTime(e.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label>Min TIV ($)</label>
+          <input type="number" value={minValue} onChange={(e) => setMinValue(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Max TIV ($)</label>
+          <input type="number" value={maxValue} onChange={(e) => setMaxValue(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Earliest construction year</label>
+          <input type="number" value={minYear} onChange={(e) => setMinYear(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Latest construction year</label>
+          <input type="number" value={maxYear} onChange={(e) => setMaxYear(e.target.value)} />
+        </div>
+        <div className="field full">
+          <label>
+            States ({states.length || "carrier default"})
+          </label>
+          <p className="muted small" style={{ margin: "0 0 6px" }}>
+            Leave empty to use the carrier's states. Set them only when this
+            guide is narrower than the carrier's overall footprint.
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 10px" }}>
+            {US_STATES.map((s) => (
+              <label
+                key={s}
+                className="small"
+                style={{ display: "flex", gap: 3, alignItems: "center" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={states.includes(s)}
+                  onChange={() =>
+                    setStates((ss) =>
+                      ss.includes(s) ? ss.filter((x) => x !== s) : [...ss, s].sort()
+                    )
+                  }
+                />
+                {s}
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="field full">
+          <label>Notes</label>
+          <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+      </div>
+      <div className="form-actions">
+        <button className="primary" disabled={saving} onClick={save}>
+          {saving ? "Saving…" : existing ? "Save changes" : "Add guide"}
+        </button>
+        <button className="link" onClick={onCancel}>
+          Cancel
+        </button>
+        {error && <span className="error-text">{error}</span>}
+      </div>
     </div>
   );
 }
