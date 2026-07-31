@@ -57,6 +57,7 @@ import {
 } from "../ui/kit";
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
 import LeadPanel from "../components/LeadPanel";
+import QuoteHistory from "../components/QuoteHistory";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import VisitCancelSheet from "../components/VisitCancelSheet";
 import DocButton from "../components/DocButton";
@@ -536,6 +537,13 @@ export default function CustomerDetail() {
       {isLead && roles.office ? (
         <LeadPanel customer={customer} onChanged={() => void load()} />
       ) : null}
+
+      {/* Every quote this customer was given, for the whole life of the record.
+          It used to live inside LeadPanel, which is gated on status === LEAD —
+          so the history disappeared the moment a lead converted, even though
+          the quotes still existed. "What did we quote them?" is asked most
+          often after they become a customer. */}
+      {roles.office ? <QuoteHistory customer={customer} /> : null}
 
       {roles.office && !isLead ? (
         <Card
