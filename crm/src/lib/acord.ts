@@ -53,6 +53,24 @@ export const ACORD_FORMS: AcordFormDef[] = [
     label: "ACORD 140 — Property Section",
     note: "Generated from an account's Documents tab for carrier submissions.",
   },
+  // ── Additional submission / certificate forms ──
+  // Every ACORD eForm shares the header naming convention below, so these
+  // fill producer, insured and signature out of the box. Form-specific
+  // sections still need their own mapping — see buildAppFormValues.
+  { key: "acord131", path: "templates/acord131.pdf", label: "ACORD 131 — Umbrella / Excess Section", note: "Carrier submissions." },
+  { key: "acord141", path: "templates/acord141.pdf", label: "ACORD 141 — Crime Section", note: "Carrier submissions." },
+  { key: "acord159", path: "templates/acord159.pdf", label: "ACORD 159 — Contractors Supplement", note: "Carrier submissions." },
+  { key: "acord160", path: "templates/acord160.pdf", label: "ACORD 160 — Business Owners Section", note: "Carrier submissions." },
+  { key: "acord810", path: "templates/acord810.pdf", label: "ACORD 810 — Directors & Officers Application", note: "Carrier submissions." },
+  { key: "acord823", path: "templates/acord823.pdf", label: "ACORD 823 — Condominium Association Supplement", note: "Carrier submissions." },
+  { key: "acord45", path: "templates/acord45.pdf", label: "ACORD 45 — Additional Interest Schedule", note: "Attaches to an application." },
+  { key: "acord101", path: "templates/acord101.pdf", label: "ACORD 101 — Additional Remarks Schedule", note: "Overflow remarks for any form." },
+  { key: "acord24", path: "templates/acord24.pdf", label: "ACORD 24 — Certificate of Property Insurance", note: "Issued to holders." },
+  { key: "acord27", path: "templates/acord27.pdf", label: "ACORD 27 — Evidence of Property Insurance", note: "Issued to lenders." },
+  { key: "acord28", path: "templates/acord28.pdf", label: "ACORD 28 — Evidence of Commercial Property Insurance", note: "Issued to lenders." },
+  { key: "acord35", path: "templates/acord35.pdf", label: "ACORD 35 — Cancellation Request / Policy Release", note: "Servicing." },
+  { key: "acord36", path: "templates/acord36.pdf", label: "ACORD 36 — Agent / Broker of Record Change", note: "Servicing." },
+  { key: "acord75", path: "templates/acord75.pdf", label: "ACORD 75 — Insurance Binder", note: "Issued at bind." },
 ];
 
 type FieldValues = Record<string, { candidates: string[]; value: string }>;
@@ -617,17 +635,45 @@ function buildAppFormValues(
     ? CONSTRUCTION_LABELS[account.constructionType] ?? ""
     : "";
 
-  // Shared header — present on 125 / 126 / 140.
+  // ── Shared header ──
+  // Every ACORD eForm uses this naming convention, so this block applies to
+  // all of them. Candidates with no matching field are skipped and reported,
+  // so listing a field a given form lacks costs nothing.
+  const legalName = account.legalName?.trim() || account.name;
+  const proposedEff = account.currentPolicyExpiration ?? "";
+
   const values: FieldValues = {
     date: {
       candidates: ["Form_CompletionDate_A"],
       value: new Date().toLocaleDateString("en-US"),
     },
+
     producer: { candidates: ["Producer_FullName_A"], value: AGENCY.name },
-    insured: { candidates: ["NamedInsured_FullName_A"], value: account.name },
-    policyEffective: {
-      // The prospective policy's effective date isn't tracked; left blank.
-      candidates: ["Policy_EffectiveDate_A"],
+    producerContact: {
+      candidates: ["Producer_ContactPerson_FullName_A"],
+      value: AGENCY.contactName,
+    },
+    producerAddr1: { candidates: ["Producer_MailingAddress_LineOne_A"], value: AGENCY.addressLine1 },
+    producerCity: { candidates: ["Producer_MailingAddress_CityName_A"], value: AGENCY.city },
+    producerState: { candidates: ["Producer_MailingAddress_StateOrProvinceCode_A"], value: AGENCY.state },
+    producerZip: { candidates: ["Producer_MailingAddress_PostalCode_A"], value: AGENCY.zip },
+    producerPhone: { candidates: ["Producer_ContactPerson_PhoneNumber_A"], value: AGENCY.phone },
+    producerEmail: { candidates: ["Producer_ContactPerson_EmailAddress_A"], value: AGENCY.email },
+
+    // Carriers match submissions on the legal entity, not the short name.
+    insured: { candidates: ["NamedInsured_FullName_A"], value: legalName },
+    insuredAddr1: { candidates: ["NamedInsured_MailingAddress_LineOne_A"], value: account.address ?? "" },
+    insuredCity: { candidates: ["NamedInsured_MailingAddress_CityName_A"], value: account.city ?? "" },
+    insuredState: { candidates: ["NamedInsured_MailingAddress_StateOrProvinceCode_A"], value: account.state ?? "" },
+    insuredZip: { candidates: ["NamedInsured_MailingAddress_PostalCode_A"], value: account.zip ?? "" },
+    insuredPhone: { candidates: ["NamedInsured_Primary_PhoneNumber_A"], value: account.contactPhone ?? "" },
+    insuredFein: { candidates: ["NamedInsured_TaxIdentifier_A"], value: account.fein ?? "" },
+    insuredSic: { candidates: ["NamedInsured_SICCode_A"], value: account.sicCode ?? "" },
+    insuredNaics: { candidates: ["NamedInsured_NAICSCode_A"], value: account.naicsCode ?? "" },
+
+    policyEffective: { candidates: ["Policy_EffectiveDate_A"], value: fmtUs(proposedEff) },
+    carrierName: {
+      candidates: ["Policy_Insurer_FullName_A", "Insurer_FullName_A"],
       value: "",
     },
   };
