@@ -5,10 +5,11 @@ import { ACORD_FORMS, listTemplateFields, type AcordFormDef } from "../lib/acord
 import FileButton from "../components/FileButton";
 import Team from "./Team";
 import Licensing from "../components/Licensing";
+import SignatureManager from "../components/SignatureManager";
 import type { UserProfile } from "../lib/client";
 
 type TemplateDef = AcordFormDef;
-type Tab = "templates" | "licensing" | "team";
+type Tab = "templates" | "licensing" | "signature" | "team";
 
 /** New ACORD forms: add to ACORD_FORMS + a mapping in lib/acord.ts. */
 const TEMPLATES: TemplateDef[] = ACORD_FORMS;
@@ -20,6 +21,8 @@ export default function Settings({ profile }: { profile: UserProfile }) {
   const TABS: [Tab, string][] = [
     ["templates", "Form templates"],
     ["licensing", "Licensing"],
+    // Everyone manages their own signature; the Team tab manages others'.
+    ["signature", "My signature"],
     ...(isAdmin ? ([["team", "Team"]] as [Tab, string][]) : []),
   ];
 
@@ -55,6 +58,7 @@ export default function Settings({ profile }: { profile: UserProfile }) {
 
       {tab === "templates" && <TemplatesPanel />}
       {tab === "licensing" && <Licensing profile={profile} />}
+      {tab === "signature" && <MySignature profile={profile} />}
       {tab === "team" && isAdmin && <Team profile={profile} />}
     </>
   );
@@ -229,5 +233,23 @@ function TemplateRow({
         </tr>
       ) : null}
     </>
+  );
+}
+
+/**
+ * Self-service signature. Everyone can set their own without an admin —
+ * the Team tab exists to manage other people's.
+ */
+function MySignature({ profile }: { profile: UserProfile }) {
+  const [me, setMe] = useState(profile);
+  return (
+    <div className="card">
+      <h2>My signature</h2>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Stamped onto every ACORD form you generate — certificates and carrier
+        submissions. Draw it here, or upload an image if you already have one.
+      </p>
+      <SignatureManager profile={me} onChange={setMe} />
+    </div>
   );
 }

@@ -496,3 +496,20 @@ mark.ocr-current { background: #f79b32; color: #fff; border-radius: 2px; }
   background: var(--blue-bg);
   color: var(--accent-dark);
 }
+
+/* ── Draw-to-sign pad ── */
+.sig-pad { max-width: 460px; }
+.sig-canvas {
+  display: block;
+  width: 100%;
+  height: 150px;
+  /* The ruled line makes it obvious where to sign. */
+  background:
+    linear-gradient(var(--card), var(--card)) padding-box,
+    repeating-linear-gradient(transparent, transparent 118px, var(--border) 118px, var(--border) 119px);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  cursor: crosshair;
+  touch-action: none; /* let the pad capture drags instead of scrolling */
+}
+.sig-canvas:hover { border-color: var(--accent); }

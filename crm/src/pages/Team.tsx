@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import { uploadData, getUrl, remove } from "aws-amplify/storage";
 import { client, fmtDate, type UserProfile } from "../lib/client";
-import FileButton from "../components/FileButton";
+import SignatureManager from "../components/SignatureManager";
 
 interface TeamUser {
   userId: string;
@@ -179,7 +178,8 @@ export default function Team({ profile }: { profile: UserProfile }) {
                           )}
                         </td>
                         <td>
-                          <SignatureCell
+                          <SignatureManager
+                            compact
                             profile={p ?? null}
                             onChange={(updated) =>
                               setProfiles((ps) =>
@@ -200,117 +200,5 @@ export default function Team({ profile }: { profile: UserProfile }) {
         )}
       </div>
     </>
-  );
-}
-
-/**
- * Per-person signature used on generated ACORD forms.
- *
- * A transparent PNG works best — it's stamped straight onto the signature
- * line, so a white-background JPEG will cover the rule. Stored per profile at
- * signatures/<profileId>.<ext>, one current signature each.
- */
-function SignatureCell({
-  profile,
-  onChange,
-}: {
-  profile: UserProfile | null;
-  onChange: (p: UserProfile) => void;
-}) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const key = profile?.signatureKey ?? null;
-
-  useEffect(() => {
-    if (!key) {
-      setUrl(null);
-      return;
-    }
-    getUrl({ path: key })
-      .then(({ url }) => setUrl(url.toString()))
-      .catch(() => setUrl(null));
-  }, [key]);
-
-  if (!profile) return <span className="muted small">—</span>;
-
-  async function upload(file: File | undefined) {
-    if (!file || !profile) return;
-    if (!file.type.startsWith("image/")) {
-      setError("Signature must be an image (PNG preferred).");
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      const ext = file.name.split(".").pop()?.toLowerCase() || "png";
-      const path = `signatures/${profile.id}.${ext}`;
-      await uploadData({
-        path,
-        data: file,
-        options: { contentType: file.type },
-      }).result;
-      const { data } = await client.models.UserProfile.update({
-        id: profile.id,
-        signatureKey: path,
-      });
-      if (data) onChange(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function clear() {
-    if (!profile || !key) return;
-    setBusy(true);
-    try {
-      await remove({ path: key }).catch(() => {
-        /* the record is what matters; a stray object is harmless */
-      });
-      const { data } = await client.models.UserProfile.update({
-        id: profile.id,
-        signatureKey: null,
-      });
-      if (data) onChange(data);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      {url ? (
-        <img
-          src={url}
-          alt="signature"
-          style={{
-            height: 26,
-            maxWidth: 120,
-            objectFit: "contain",
-            background: "#fff",
-            border: "1px solid var(--border)",
-            borderRadius: 4,
-            padding: 2,
-          }}
-        />
-      ) : (
-        <span className="muted small">None</span>
-      )}
-      <FileButton
-        label={key ? "Replace" : "Upload"}
-        accept="image/*"
-        busy={busy}
-        onFiles={(files) => upload(files?.[0])}
-      />
-      {key && (
-        <button className="link" disabled={busy} onClick={clear}>
-          Remove
-        </button>
-      )}
-      {error && <span className="error-text small">{error}</span>}
-    </div>
   );
 }
