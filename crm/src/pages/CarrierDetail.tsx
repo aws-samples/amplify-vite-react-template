@@ -273,6 +273,28 @@ function CarrierForm({
         </div>
         <div className="field full">
           <label>States covered ({form.states.length})</label>
+          <div className="toolbar" style={{ marginTop: 0, marginBottom: 6 }}>
+            <button
+              className="secondary"
+              disabled={form.states.length === US_STATES.length}
+              onClick={() => {
+                setSaved(false);
+                setForm((f) => ({ ...f, states: [...US_STATES] }));
+              }}
+            >
+              All states
+            </button>
+            <button
+              className="secondary"
+              disabled={form.states.length === 0}
+              onClick={() => {
+                setSaved(false);
+                setForm((f) => ({ ...f, states: [] }));
+              }}
+            >
+              Clear
+            </button>
+          </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 10px" }}>
             {US_STATES.map((s) => (
               <label
