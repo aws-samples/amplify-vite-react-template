@@ -417,6 +417,65 @@ const CONSTRUCTION_LABELS: Record<string, string> = {
 export interface BuildingInfo {
   label?: string | null;
   sqft?: number | null;
+  streetAddress?: string | null;
+  description?: string | null;
+}
+
+/** ACORD 125 has four premises rows on the form; the rest go on a schedule. */
+const PREMISES_ROWS = ["A", "B", "C", "D"] as const;
+
+const CONSTRUCTION_PHRASE: Record<string, string> = {
+  FRAME: "wood-frame",
+  JOISTED_MASONRY: "joisted masonry",
+  NON_COMBUSTIBLE: "non-combustible",
+  MASONRY_NON_COMBUSTIBLE: "masonry non-combustible",
+  MODIFIED_FIRE_RESISTIVE: "modified fire-resistive",
+  FIRE_RESISTIVE: "fire-resistive",
+};
+
+const STOREY_WORD: Record<number, string> = {
+  1: "one-story",
+  2: "two-story",
+  3: "three-story",
+  4: "four-story",
+};
+
+/**
+ * Underwriters read this line first. Build it from what the CRM knows —
+ * "52-unit residential condominium association consisting of 13 two-story
+ * wood-frame buildings constructed 2016-2017" — rather than emitting a
+ * generic label that tells them nothing.
+ */
+export function operationsSummary(
+  account: Account,
+  buildingCount: number
+): string {
+  if (account.type !== "ASSOCIATION") return "";
+  const bits: string[] = [];
+  bits.push(
+    account.unitCount
+      ? `${account.unitCount}-unit residential condominium association`
+      : "Residential condominium association"
+  );
+  const shape = [
+    account.stories ? STOREY_WORD[account.stories] ?? `${account.stories}-story` : "",
+    account.constructionType
+      ? CONSTRUCTION_PHRASE[account.constructionType] ?? ""
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  if (buildingCount > 0) {
+    bits.push(
+      `consisting of ${buildingCount} ${shape ? shape + " " : ""}building${
+        buildingCount === 1 ? "" : "s"
+      }`
+    );
+  } else if (shape) {
+    bits.push(`${shape} construction`);
+  }
+  if (account.yearBuilt) bits.push(`constructed ${account.yearBuilt}`);
+  return bits.join(" ") + ".";
 }
 
 /**
@@ -460,19 +519,40 @@ function buildAppFormValues(
   };
 
   if (formKey === "acord125") {
-    // Commercial Insurance Application — producer + applicant + first premises.
+    // Commercial Insurance Application — producer, applicant, premises.
+    const legalName = account.legalName?.trim() || account.name;
+    // A renewal submission is proposed to start when the incumbent expires.
+    const proposedEff = account.currentPolicyExpiration ?? "";
+    const proposedExp = proposedEff
+      ? (() => {
+          const d = new Date(proposedEff + "T00:00:00");
+          d.setFullYear(d.getFullYear() + 1);
+          return d.toISOString().slice(0, 10);
+        })()
+      : "";
+
     Object.assign(values, {
+      producerContact: {
+        candidates: ["Producer_ContactPerson_FullName_A"],
+        value: AGENCY.contactName,
+      },
       producerAddr1: { candidates: ["Producer_MailingAddress_LineOne_A"], value: AGENCY.addressLine1 },
       producerCity: { candidates: ["Producer_MailingAddress_CityName_A"], value: AGENCY.city },
       producerState: { candidates: ["Producer_MailingAddress_StateOrProvinceCode_A"], value: AGENCY.state },
       producerZip: { candidates: ["Producer_MailingAddress_PostalCode_A"], value: AGENCY.zip },
       producerPhone: { candidates: ["Producer_ContactPerson_PhoneNumber_A"], value: AGENCY.phone },
       producerEmail: { candidates: ["Producer_ContactPerson_EmailAddress_A"], value: AGENCY.email },
+
+      // Carriers match submissions on the legal entity, not the short name.
+      insured: { candidates: ["NamedInsured_FullName_A"], value: legalName },
       insuredAddr1: { candidates: ["NamedInsured_MailingAddress_LineOne_A"], value: addr },
       insuredCity: { candidates: ["NamedInsured_MailingAddress_CityName_A"], value: city },
       insuredState: { candidates: ["NamedInsured_MailingAddress_StateOrProvinceCode_A"], value: state },
       insuredZip: { candidates: ["NamedInsured_MailingAddress_PostalCode_A"], value: zip },
       insuredPhone: { candidates: ["NamedInsured_Primary_PhoneNumber_A"], value: account.contactPhone ?? "" },
+      insuredFein: { candidates: ["NamedInsured_TaxIdentifier_A"], value: account.fein ?? "" },
+      insuredSic: { candidates: ["NamedInsured_SICCode_A"], value: account.sicCode ?? "" },
+      insuredNaics: { candidates: ["NamedInsured_NAICSCode_A"], value: account.naicsCode ?? "" },
       notForProfit: {
         candidates: ["NamedInsured_LegalEntity_NotForProfitIndicator_A"],
         value: account.type === "ASSOCIATION" ? "x" : "",
@@ -481,17 +561,124 @@ function buildAppFormValues(
         candidates: ["BusinessInformation_BusinessType_CondominiumsIndicator_A"],
         value: account.type === "ASSOCIATION" ? "x" : "",
       },
-      // First premises / structure block.
-      premisesAddr1: { candidates: ["CommercialStructure_PhysicalAddress_LineOne_A"], value: addr },
-      premisesCity: { candidates: ["CommercialStructure_PhysicalAddress_CityName_A"], value: city },
-      premisesState: { candidates: ["CommercialStructure_PhysicalAddress_StateOrProvinceCode_A"], value: state },
-      premisesZip: { candidates: ["CommercialStructure_PhysicalAddress_PostalCode_A"], value: zip },
-      buildingArea: { candidates: ["Construction_BuildingArea_A"], value: area },
+
+      proposedEffective: { candidates: ["Policy_EffectiveDate_A"], value: fmtUs(proposedEff) },
+      proposedExpiration: { candidates: ["Policy_ExpirationDate_A"], value: fmtUs(proposedExp) },
+
+      // Who the carrier's inspector calls to get on site.
+      inspectionLabel: {
+        candidates: ["NamedInsured_Contact_ContactDescription_A"],
+        value: account.inspectionContactName ? "Inspection" : "",
+      },
+      inspectionName: {
+        candidates: ["NamedInsured_Contact_FullName_A"],
+        value: account.inspectionContactName ?? "",
+      },
+      inspectionPhone: {
+        candidates: ["NamedInsured_Contact_PrimaryPhoneNumber_A"],
+        value: account.inspectionContactPhone ?? "",
+      },
+
+      // ── Incumbent coverage ──
+      priorCarrier: {
+        candidates: ["PriorCoverage_GeneralLiability_InsurerFullName_A"],
+        value: account.priorCarrierName ?? "",
+      },
+      priorPolicyNumber: {
+        candidates: ["PriorCoverage_GeneralLiability_PolicyNumberIdentifier_A"],
+        value: account.priorPolicyNumber ?? "",
+      },
+      priorPremium: {
+        candidates: ["PriorCoverage_GeneralLiability_TotalPremiumAmount_A"],
+        value: account.priorPremium != null ? account.priorPremium.toFixed(2) : "",
+      },
+      priorEffective: {
+        candidates: ["PriorCoverage_GeneralLiability_EffectiveDate_A"],
+        value: fmtUs(account.priorTermEffective),
+      },
+      priorExpiration: {
+        candidates: ["PriorCoverage_GeneralLiability_ExpirationDate_A"],
+        value: fmtUs(account.priorTermExpiration),
+      },
+      priorPolicyYear: {
+        candidates: ["PriorCoverage_PolicyYear_A"],
+        value: account.priorTermEffective
+          ? account.priorTermEffective.slice(0, 4)
+          : "",
+      },
+
       natureOfBusiness: {
-        candidates: ["CommercialPolicy_OperationsDescription_A", "BuildingOccupancy_OperationsDescription_A"],
-        value: account.type === "ASSOCIATION" ? "Condominium / Homeowners Association" : "",
+        candidates: [
+          "CommercialPolicy_OperationsDescription_A",
+          "BuildingOccupancy_OperationsDescription_A",
+        ],
+        value: operationsSummary(account, buildings.length),
       },
     } satisfies FieldValues);
+
+    // ── Premises schedule ──
+    // One row per building. Falls back to the account address when no
+    // buildings are recorded, which is what the old mapping always did.
+    const premises = buildings.length
+      ? buildings
+      : [{ streetAddress: addr, sqft: totalSqft || null, description: null }];
+
+    premises.slice(0, PREMISES_ROWS.length).forEach((b, i) => {
+      const row = PREMISES_ROWS[i];
+      const line1 = b.streetAddress?.trim() || b.label?.trim() || addr;
+      Object.assign(values, {
+        [`premisesNum${row}`]: {
+          candidates: [`CommercialStructure_Location_ProducerIdentifier_${row}`],
+          value: String(i + 1),
+        },
+        [`premisesAddr${row}`]: {
+          candidates: [`CommercialStructure_PhysicalAddress_LineOne_${row}`],
+          value: line1,
+        },
+        [`premisesCity${row}`]: {
+          candidates: [`CommercialStructure_PhysicalAddress_CityName_${row}`],
+          value: city,
+        },
+        [`premisesCounty${row}`]: {
+          candidates: [`CommercialStructure_PhysicalAddress_CountyName_${row}`],
+          value: account.county ?? "",
+        },
+        [`premisesState${row}`]: {
+          candidates: [`CommercialStructure_PhysicalAddress_StateOrProvinceCode_${row}`],
+          value: state,
+        },
+        [`premisesZip${row}`]: {
+          candidates: [`CommercialStructure_PhysicalAddress_PostalCode_${row}`],
+          value: zip,
+        },
+        [`premisesArea${row}`]: {
+          candidates: [`Construction_BuildingArea_${row}`],
+          value: b.sqft != null ? String(b.sqft) : "",
+        },
+        // An association owns its buildings and sits inside town limits.
+        [`premisesOwner${row}`]: {
+          candidates: [`CommercialStructure_InsuredInterest_OwnerIndicator_${row}`],
+          value: account.type === "ASSOCIATION" ? "x" : "",
+        },
+        [`premisesInCity${row}`]: {
+          candidates: [`CommercialStructure_RiskLocation_InsideCityLimitsIndicator_${row}`],
+          value: "x",
+        },
+        [`premisesDesc${row}`]: {
+          candidates: [`BuildingOccupancy_OperationsDescription_${row}`],
+          value: b.description?.trim() || "",
+        },
+      } satisfies FieldValues);
+    });
+
+    // More buildings than the form has rows — flag the attachment so the
+    // underwriter knows a schedule follows rather than assuming four.
+    if (buildings.length > PREMISES_ROWS.length) {
+      values.additionalPremises = {
+        candidates: ["CommercialPolicy_Attachment_AdditionalPremisesScheduleIndicator_A"],
+        value: "x",
+      };
+    }
   }
 
   if (formKey === "acord126") {

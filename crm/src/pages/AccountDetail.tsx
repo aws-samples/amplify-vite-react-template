@@ -144,6 +144,17 @@ function OverviewTab({
 }) {
   const [form, setForm] = useState({
     name: account.name,
+    legalName: account.legalName ?? "",
+    fein: account.fein ?? "",
+    sicCode: account.sicCode ?? "",
+    naicsCode: account.naicsCode ?? "",
+    inspectionContactName: account.inspectionContactName ?? "",
+    inspectionContactPhone: account.inspectionContactPhone ?? "",
+    priorCarrierName: account.priorCarrierName ?? "",
+    priorPolicyNumber: account.priorPolicyNumber ?? "",
+    priorPremium: account.priorPremium?.toString() ?? "",
+    priorTermEffective: account.priorTermEffective ?? "",
+    priorTermExpiration: account.priorTermExpiration ?? "",
     contactFirstName: account.contactFirstName ?? "",
     contactLastName: account.contactLastName ?? "",
     contactEmail: account.contactEmail ?? "",
@@ -174,6 +185,17 @@ function OverviewTab({
     const { data, errors } = await client.models.Account.update({
       id: account.id,
       name: form.name.trim() || account.name,
+      legalName: form.legalName.trim() || null,
+      fein: form.fein.trim() || null,
+      sicCode: form.sicCode.trim() || null,
+      naicsCode: form.naicsCode.trim() || null,
+      inspectionContactName: form.inspectionContactName.trim() || null,
+      inspectionContactPhone: form.inspectionContactPhone.trim() || null,
+      priorCarrierName: form.priorCarrierName.trim() || null,
+      priorPolicyNumber: form.priorPolicyNumber.trim() || null,
+      priorPremium: form.priorPremium ? Number(form.priorPremium) : null,
+      priorTermEffective: form.priorTermEffective || null,
+      priorTermExpiration: form.priorTermExpiration || null,
       contactFirstName: form.contactFirstName.trim() || null,
       contactLastName: form.contactLastName.trim() || null,
       contactEmail: form.contactEmail.trim() || null,
@@ -204,6 +226,40 @@ function OverviewTab({
           <input value={form.name} onChange={set("name")} />
         </div>
         <div className="field">
+          <label>Full legal name (carrier submissions)</label>
+          <input
+            placeholder={account.name}
+            value={form.legalName}
+            onChange={set("legalName")}
+          />
+        </div>
+        <div className="field">
+          <label>FEIN</label>
+          <input value={form.fein} onChange={set("fein")} />
+        </div>
+        <div className="field">
+          <label>SIC</label>
+          <input value={form.sicCode} onChange={set("sicCode")} />
+        </div>
+        <div className="field">
+          <label>NAICS</label>
+          <input value={form.naicsCode} onChange={set("naicsCode")} />
+        </div>
+        <div className="field">
+          <label>Inspection contact</label>
+          <input
+            value={form.inspectionContactName}
+            onChange={set("inspectionContactName")}
+          />
+        </div>
+        <div className="field">
+          <label>Inspection contact phone</label>
+          <input
+            value={form.inspectionContactPhone}
+            onChange={set("inspectionContactPhone")}
+          />
+        </div>
+        <div className="field">
           <label>Contact first name</label>
           <input value={form.contactFirstName} onChange={set("contactFirstName")} />
         </div>
@@ -230,6 +286,38 @@ function OverviewTab({
         <div className="field">
           <label>Current agent / broker</label>
           <input value={form.currentAgent} onChange={set("currentAgent")} />
+        </div>
+        <div className="field">
+          <label>Prior carrier</label>
+          <input value={form.priorCarrierName} onChange={set("priorCarrierName")} />
+        </div>
+        <div className="field">
+          <label>Prior policy number</label>
+          <input value={form.priorPolicyNumber} onChange={set("priorPolicyNumber")} />
+        </div>
+        <div className="field">
+          <label>Prior premium ($)</label>
+          <input
+            type="number"
+            value={form.priorPremium}
+            onChange={set("priorPremium")}
+          />
+        </div>
+        <div className="field">
+          <label>Prior term effective</label>
+          <input
+            type="date"
+            value={form.priorTermEffective}
+            onChange={set("priorTermEffective")}
+          />
+        </div>
+        <div className="field">
+          <label>Prior term expiration</label>
+          <input
+            type="date"
+            value={form.priorTermExpiration}
+            onChange={set("priorTermExpiration")}
+          />
         </div>
         <div className="field">
           <label>Current policy expiration</label>

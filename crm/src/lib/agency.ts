@@ -5,6 +5,7 @@
  */
 export const AGENCY = {
   name: "HOA Insurance Agency LLC",
+  contactName: "Jake Greasley", // producer contact person on ACORD forms
   addressLine1: "420 Lakeside Ave, Suite 202",
   city: "Marlborough",
   state: "MA",

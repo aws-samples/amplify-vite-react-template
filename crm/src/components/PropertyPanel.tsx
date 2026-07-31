@@ -49,6 +49,7 @@ function DetailsCard({
   const [form, setForm] = useState({
     address: account.address ?? "",
     city: account.city ?? "",
+    county: account.county ?? "",
     state: account.state ?? "",
     zip: account.zip ?? "",
     unitCount: account.unitCount?.toString() ?? "",
@@ -107,6 +108,7 @@ function DetailsCard({
       id: account.id,
       address: form.address.trim() || null,
       city: form.city.trim() || null,
+      county: form.county.trim() || null,
       state: form.state || null,
       zip: form.zip.trim() || null,
       unitCount: form.unitCount ? Number(form.unitCount) : null,
@@ -155,6 +157,14 @@ function DetailsCard({
                 zip: p.zip || f.zip,
               }));
             }}
+          />
+        </div>
+        <div className="field">
+          <label>County</label>
+          <input
+            placeholder="Middlesex"
+            value={form.county}
+            onChange={(e) => setF("county", e.target.value)}
           />
         </div>
         <div className="field">
@@ -310,6 +320,8 @@ function BuildingsCard({ accountId }: { accountId: string }) {
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [label, setLabel] = useState("");
   const [sqft, setSqft] = useState("");
+  const [street, setStreet] = useState("");
+  const [desc, setDesc] = useState("");
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
 
@@ -332,12 +344,16 @@ function BuildingsCard({ accountId }: { accountId: string }) {
       accountId,
       label: label.trim() || `Building ${buildings.length + 1}`,
       sqft: sqft ? n : undefined,
+      streetAddress: street.trim() || undefined,
+      description: desc.trim() || undefined,
     });
     setAdding(false);
     if (data) {
       setBuildings((bs) => [...bs, data]);
       setLabel("");
       setSqft("");
+      setStreet("");
+      setDesc("");
     }
   }
 
@@ -367,12 +383,29 @@ function BuildingsCard({ accountId }: { accountId: string }) {
           />
         </div>
         <div className="field">
+          <label>Street address</label>
+          <input
+            placeholder="2 John Hancock Dr"
+            value={street}
+            onChange={(e) => setStreet(e.target.value)}
+          />
+        </div>
+        <div className="field">
           <label>Sq ft</label>
           <input
             type="number"
             min={1}
             value={sqft}
             onChange={(e) => setSqft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && add()}
+          />
+        </div>
+        <div className="field" style={{ flex: "1 1 260px" }}>
+          <label>Description (prints on ACORD 125)</label>
+          <input
+            placeholder="2, 4, 10, 12 John Hancock. Two-story wood frame…"
+            value={desc}
+            onChange={(e) => setDesc(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && add()}
           />
         </div>

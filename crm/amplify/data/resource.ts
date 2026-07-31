@@ -91,7 +91,14 @@ const schema = a
       .model({
         stage: a.ref("AccountStage").required(),
         type: a.ref("AccountType").required(),
-        name: a.string().required(), // association / insured name
+        name: a.string().required(), // association / insured name (display)
+        // Full legal entity name as it must appear on carrier submissions,
+        // e.g. "Freedom Village at the Villages of the Americas Condominium
+        // Trust". Falls back to `name` on ACORD forms when empty.
+        legalName: a.string(),
+        fein: a.string(), // federal tax ID — ACORD 125 applicant block
+        sicCode: a.string(), // e.g. 8641
+        naicsCode: a.string(), // e.g. 813990
         contactFirstName: a.string(),
         contactLastName: a.string(),
         contactEmail: a.email(),
@@ -101,6 +108,7 @@ const schema = a
         city: a.string(),
         state: a.string(),
         zip: a.string(),
+        county: a.string(), // carriers rate by county; ACORD premises block
         unitCount: a.integer(),
         yearBuilt: a.integer(),
         totalInsuredValue: a.float(),
@@ -128,6 +136,15 @@ const schema = a
         // Incumbent policy expiration (drives lead renewal pipeline; for
         // clients the bound Policy records are authoritative)
         currentPolicyExpiration: a.date(),
+        // Who a carrier's inspector should call to get on site.
+        inspectionContactName: a.string(),
+        inspectionContactPhone: a.string(),
+        // ── Incumbent coverage (ACORD 125 prior-carrier block) ──
+        priorCarrierName: a.string(),
+        priorPolicyNumber: a.string(),
+        priorPremium: a.float(),
+        priorTermEffective: a.date(),
+        priorTermExpiration: a.date(),
         buildiumId: a.string(), // lineage from web lead forms / Buildium sync
         source: a.string(), // e.g. "website", "referral", "cold"
         notes: a.string(),
@@ -145,6 +162,10 @@ const schema = a
       account: a.belongsTo("Account", "accountId"),
       label: a.string(), // "Building A", "Clubhouse", …
       sqft: a.integer(),
+      // Each building is its own premises row on ACORD 125, so it needs a
+      // street address and an occupancy description of its own.
+      streetAddress: a.string(),
+      description: a.string(), // "2, 4, 10, 12 John Hancock. Two-story wood frame…"
     }),
 
     // ── Quotes: tied to an account; binding creates a Policy ───────────
