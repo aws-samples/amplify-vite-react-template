@@ -362,3 +362,47 @@ const QUOTE_STATUS_KIND = { … } as const satisfies Record<QuoteStatus, Kind>;
 One table, typed against the schema enum, with every list derived from it — so
 adding a status to `resource.ts` fails `tsc` until it is classified, and all
 four lists plus the GraphQL filter update from that one edit.
+
+---
+
+## 11. Migrating is where the primitive gets tested
+
+**Rule.** A primitive is a hypothesis until every call site adopts it. Migrate
+all of them or none — a half-migration leaves two patterns where there was one,
+and the reader can no longer tell which is canonical.
+
+**What "every call site or none" actually bought**, across eight migrations:
+
+- **The count is never right.** Every migration found sites the audit missed —
+  a 9th fetch triple, a 5th quote-status copy, three raw error idioms, a 14th
+  one-`useState`-per-field form. Migrate by grepping the pattern, not by
+  working down the audit's list.
+- **Two sites that look identical often aren't.** `CoverageForm`'s local `str`
+  is the *read* side; `formCodec`'s is the *write* side. Same name, opposite
+  direction. Swapping mechanically would have inverted 12 seed calls silently.
+- **The migration surfaces bugs the audit couldn't see.** `LicenseForm` had no
+  `key`, so editing licence A then B saved A's values onto B — invisible until
+  someone read every edit form in one pass and noticed one was different.
+
+**Do not let a migration quietly change behavior — and do not let it quietly
+preserve a bug either.** Both happened here and both were called out:
+
+- The audit's "redundant `.slice(0,10)` before `fmtDate`" is not redundant.
+  `fmtDate` appends `T00:00:00` only at length 10, so the slice pins the
+  nominal day where `fmtDate` renders the local one. Removing them would have
+  shifted dates by a day either side of UTC. **Left in place.**
+- Adding save feedback to a mutation that drops its `errors` array would have
+  made it report success on failure — worse than the silence it replaced. So
+  those 11 sites had to start surfacing errors. **That is a behavior change,
+  and it was ruled on rather than absorbed.**
+
+**Example** — the shape of a correct non-migration, from `acord.ts`:
+
+```ts
+const fmtUs = (d?: string | null) => (d ? fmtDate(d) : "");
+```
+
+`fmtDate` returns `"—"` for null; a PDF form field needs `""`. The em dash is a
+presentation-medium rule, not a formatting rule, so only the formatting is
+shared and the emptiness stays local. Migrating the whole helper would have
+printed a literal em dash onto a form a carrier reads.

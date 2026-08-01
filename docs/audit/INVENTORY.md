@@ -22,61 +22,60 @@ Resolved so far: filtered `.list()` without pagination
 
 ---
 
-## WAVE 3 STATUS — primitives exist, nothing is migrated
+## WAVE 4 STATUS — all eight migrations landed
 
-Twelve primitives are built and unit-tested (327 tests; Vitest is now set up
-in `crm`). **No call site uses any of them yet** — Wave 4 migrates, one
-primitive per commit, every call site or none. Until then each finding below
-is still fully present in the code.
+Every primitive built in Wave 3 now has its call sites. Nine commits
+(`de2e83b`…`80689d2`, plus `40902fd`). 339 tests, both apps typecheck and
+build.
 
-| Finding | Primitive | Location |
-|---|---|---|
-| [5.1](#51-async-resource-hook--8-occurrences) | `useAsyncResource` | `crm/src/lib/useAsyncResource.ts` |
-| [1.6](#16-form-handling--validation) state | `useFormState` | `crm/src/lib/useFormState.ts` |
-| [1.6](#16-form-handling--validation) validation | `validateDateRange`/`validateYear`/`validatePositiveInt`, `EMAIL_RE` | `crm/src/lib/client.ts` |
-| [1.3](#13-tablelist-rendering) filter | `useTextFilter` + `<FilterInput>` | `crm/src/lib/useTextFilter.tsx` |
-| [1.8](#18-toastsnotifications) | `<SaveStatus>` + `useSaveStatus` | `crm/src/components/SaveStatus.tsx` |
-| [1.9](#19-modals--overlays) | `<Modal>`, `<ConfirmButton>` | `crm/src/components/` |
-| [5.7](#57-badge--status-mapping-helper--5-maps--15-inline-ternaries) | `statusBadge`/`urgencyBadge`/`<Badge>` | `crm/src/lib/badges.tsx` |
-| [5.3](#53-shared-entity-edit-form--5-occurrences) | `str`/`num`/`inputValue` | `crm/src/lib/formCodec.ts` |
-| [5.8](#58-shared-open-quote-statuses-constant--4-occurrences) | `OPEN_QUOTE_STATUSES` + friends | `crm/src/lib/quoteStatus.ts` |
-| [5.5](#55-s3-upload--record-update--7-occurrences-3-orderings) | `uploadFile`/`uploadAndLink`/`uploadDocument`/`downloadFile`/`deleteFile` | `crm/src/lib/storage.ts` |
-| [1.7](#17-date--money--number-formatting) | `fmtDateTime`, `daysUntil` | `crm/src/lib/client.ts` |
-| [5.9](#59-shared-constants-between-crm-and-web--4-values-duplicated) | `AGENCY` + `AGENCY_FMT` | `shared/agency.ts` |
+| Migration | Result |
+|---|---|
+| `friendlyError` | 19 sites; template regex folded in, `NoSuchKey` and bare `403\|404` dropped |
+| `useSort` | 13 of 15 hand-rolled sorts; 11 tables gain sortable headers |
+| `useFormState` | 12 forms, 135 `useState` → 80 |
+| `useAsyncResource` | all 8 fetch triples; 4 structural bugs gone |
+| `SaveStatus` | 5 inline variants + the 9 silent mutations |
+| `Modal` / `ConfirmButton` | `FilePreview` rewritten, 5 call sites unchanged; 4 confirms + 2 unguarded deletes |
+| formatting + badges | 3 ladders → 1; `daysUntilDate` removed |
+| constants | `shared/agency.ts` + `quoteStatus.ts` wired; first cross-app import |
 
-### Wave 4 migration hazards found while building these
+**Behavior changes shipped deliberately.** Each is either the point of a
+finding or was ruled on explicitly:
 
-Each was discovered by reading the real call sites, and each will bite a
-mechanical migration:
+- 11 tables gained sortable headers; row order on first render is unchanged.
+- `AccountDetail`'s stage pill reads `Client`, not `CLIENT`.
+- `QuotesList` gained the status colours `QuotesPanel` already had.
+- Previews trap Tab. You could previously Tab out into the page behind.
+- `PropertyPanel`'s building delete and photo delete now prompt.
+- ~11 mutations that dropped their `errors` array now surface it.
+- `App` gained a full-screen profile-load failure card with retry and sign out.
+- Two `NaN` badge bugs died: a malformed date rendered a **green** pill
+  reading `"NaNd left"`.
+- `PropertyPanel`/`ExtractionPanel` sq-ft now render en-US for every reader.
+- `FormsTab`'s Generated column drops seconds and shows `—` not `Invalid Date`.
 
-1. **`CoverageForm`'s local `str` is the read side, not the write side** — it
-   is `inputValue`, not `str`. Migrating it to `str` silently inverts 12 seed
-   calls.
-2. **Removing the 5 redundant `.slice(0,10)` before `fmtDate` is a behavior
-   change, not a cleanup.** `fmtDate` parses a datetime through `new Date` and
-   renders the *local* day; the slice pins the *nominal* day. On a `createdAt`
-   these differ west of UTC. The audit's "redundant" call was wrong.
-3. **`AccountsList`'s search input will shift visually** on `<FilterInput>` —
-   it is the one of three not already using `lic-search`, and it loses its
-   border, radius, background, focus ring and 360px cap.
-4. **`AccountDetail`'s stage pill changes text** `CLIENT` → `Client` when it
-   adopts the shared badge table. Only user-visible text change in the batch.
-5. **`Licensing` and `Onboarding` have two live `undefined`-vs-`null` bugs**
-   (§4.4) that the coercion helpers do NOT cover — both are ternaries on a
-   non-string condition spread into *both* create and update, so a demoted
-   producer keeps a stale NPN forever. Needs a decision, not a swap.
-6. **`MarketingTasks` cannot adopt `useAsyncResource` as-is** — its `load()`
-   also *writes* (`settleSatisfiedTasks`), guarded by a `settledOnce` ref the
-   caller's effect resets. The hook owns that effect. Change the guard to
-   per-accountId inside the fetcher.
-7. **`Celebration.tsx` should be dropped from the `<Modal>` migration list.**
-   It is a self-dismissing toast, not a dialog; trapping focus in it would be
-   worse than its missing Escape.
-8. **`QuotesList` renders a flat grey badge for statuses `QuotesPanel`
-   colour-codes** — an omission, not a decision. Both adopt the shared table.
-9. **`Licensing`'s `result` string is rendered green in one branch and red in
-   another** for the same value, keyed on pending-row count rather than on
-   success. A clean migration shows up in error red.
+### Still open after Wave 4
+
+1. **~14 hardcoded phone/email spellings in `web` components and page meta**
+   bypass `web/src/constants.ts` — three of them in files already importing
+   from it. Now the only place an agency literal can drift.
+2. **Hoisting the duplicated fetches** (§1.2). `Carrier` is still read by 7
+   components, three inside a single `AccountDetail` render. The canonical is
+   hoist-to-route-and-prop-drill; that is structural and was deliberately not
+   attempted inside a migration wave.
+3. **`AllMarketingTasks` is a 9th fetch triple** the audit's §5.1 undercounted
+   — `.then()` with no `.catch()`, so a failed load sits on "Loading…" forever.
+4. **`CarrierDetail.del` and `Licensing.del` still drop their `errors` array** —
+   a rejected delete splices the row out of local state anyway, so the record
+   looks gone until reload. `ConfirmButton`'s `onError` is unused at both.
+5. **`acord.ts`'s `priorPremium.toFixed(2)`** has no shared helper: `fmtMoney`
+   adds `$` and drops cents, `fmtNum` rounds to whole dollars. Whether to round
+   a prior premium on a document a carrier reads is a data decision.
+6. **`DocumentSearch`'s snippet and empty-state read the live input**, not the
+   query that was searched, so typing after a search changes them under you.
+7. The **`DeleteLeadZone` confirm button** is now borderless red text rather
+   than filled red — there is no filled-danger class and adding CSS was out of
+   scope. Worth a look: it is the most destructive action in the app.
 
 ---
 
