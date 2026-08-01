@@ -22,6 +22,64 @@ Resolved so far: filtered `.list()` without pagination
 
 ---
 
+## WAVE 3 STATUS — primitives exist, nothing is migrated
+
+Twelve primitives are built and unit-tested (327 tests; Vitest is now set up
+in `crm`). **No call site uses any of them yet** — Wave 4 migrates, one
+primitive per commit, every call site or none. Until then each finding below
+is still fully present in the code.
+
+| Finding | Primitive | Location |
+|---|---|---|
+| [5.1](#51-async-resource-hook--8-occurrences) | `useAsyncResource` | `crm/src/lib/useAsyncResource.ts` |
+| [1.6](#16-form-handling--validation) state | `useFormState` | `crm/src/lib/useFormState.ts` |
+| [1.6](#16-form-handling--validation) validation | `validateDateRange`/`validateYear`/`validatePositiveInt`, `EMAIL_RE` | `crm/src/lib/client.ts` |
+| [1.3](#13-tablelist-rendering) filter | `useTextFilter` + `<FilterInput>` | `crm/src/lib/useTextFilter.tsx` |
+| [1.8](#18-toastsnotifications) | `<SaveStatus>` + `useSaveStatus` | `crm/src/components/SaveStatus.tsx` |
+| [1.9](#19-modals--overlays) | `<Modal>`, `<ConfirmButton>` | `crm/src/components/` |
+| [5.7](#57-badge--status-mapping-helper--5-maps--15-inline-ternaries) | `statusBadge`/`urgencyBadge`/`<Badge>` | `crm/src/lib/badges.tsx` |
+| [5.3](#53-shared-entity-edit-form--5-occurrences) | `str`/`num`/`inputValue` | `crm/src/lib/formCodec.ts` |
+| [5.8](#58-shared-open-quote-statuses-constant--4-occurrences) | `OPEN_QUOTE_STATUSES` + friends | `crm/src/lib/quoteStatus.ts` |
+| [5.5](#55-s3-upload--record-update--7-occurrences-3-orderings) | `uploadFile`/`uploadAndLink`/`uploadDocument`/`downloadFile`/`deleteFile` | `crm/src/lib/storage.ts` |
+| [1.7](#17-date--money--number-formatting) | `fmtDateTime`, `daysUntil` | `crm/src/lib/client.ts` |
+| [5.9](#59-shared-constants-between-crm-and-web--4-values-duplicated) | `AGENCY` + `AGENCY_FMT` | `shared/agency.ts` |
+
+### Wave 4 migration hazards found while building these
+
+Each was discovered by reading the real call sites, and each will bite a
+mechanical migration:
+
+1. **`CoverageForm`'s local `str` is the read side, not the write side** — it
+   is `inputValue`, not `str`. Migrating it to `str` silently inverts 12 seed
+   calls.
+2. **Removing the 5 redundant `.slice(0,10)` before `fmtDate` is a behavior
+   change, not a cleanup.** `fmtDate` parses a datetime through `new Date` and
+   renders the *local* day; the slice pins the *nominal* day. On a `createdAt`
+   these differ west of UTC. The audit's "redundant" call was wrong.
+3. **`AccountsList`'s search input will shift visually** on `<FilterInput>` —
+   it is the one of three not already using `lic-search`, and it loses its
+   border, radius, background, focus ring and 360px cap.
+4. **`AccountDetail`'s stage pill changes text** `CLIENT` → `Client` when it
+   adopts the shared badge table. Only user-visible text change in the batch.
+5. **`Licensing` and `Onboarding` have two live `undefined`-vs-`null` bugs**
+   (§4.4) that the coercion helpers do NOT cover — both are ternaries on a
+   non-string condition spread into *both* create and update, so a demoted
+   producer keeps a stale NPN forever. Needs a decision, not a swap.
+6. **`MarketingTasks` cannot adopt `useAsyncResource` as-is** — its `load()`
+   also *writes* (`settleSatisfiedTasks`), guarded by a `settledOnce` ref the
+   caller's effect resets. The hook owns that effect. Change the guard to
+   per-accountId inside the fetcher.
+7. **`Celebration.tsx` should be dropped from the `<Modal>` migration list.**
+   It is a self-dismissing toast, not a dialog; trapping focus in it would be
+   worse than its missing Escape.
+8. **`QuotesList` renders a flat grey badge for statuses `QuotesPanel`
+   colour-codes** — an omission, not a decision. Both adopt the shared table.
+9. **`Licensing`'s `result` string is rendered green in one branch and red in
+   another** for the same value, keyed on pending-row count rather than on
+   success. A clean migration shows up in error red.
+
+---
+
 ## RANKED SUMMARY
 
 | # | Finding | Blast radius | Frequency | Section |

@@ -318,3 +318,47 @@ not a fact.
 the app, which reads as dead to a grep, but `lead-intake` sets it and it is the
 only link to the Buildium property record. Write-only ≠ unused: check the
 producers, not just the consumers, before deleting a schema field.
+
+---
+
+## 10. The shared primitives
+
+**Rule.** Before hand-rolling a fetch triple, a form setter, a text filter, a
+save confirmation, a modal, a confirm-destructive, a status badge, a field
+coercion, an S3 upload, a date format, or an agency constant — import the one
+that exists. The registry and each primitive's location are in
+[INVENTORY.md's Wave 3 status table](INVENTORY.md#wave-3-status--primitives-exist-nothing-is-migrated).
+
+Every one was derived from the call site the audit named "most correct", then
+widened only where a second real site demanded it. They are unit-tested; the
+repo now has Vitest (`cd crm && npm run test:run`).
+
+**Three rules worth stating on their own, because they are not obvious from
+the code:**
+
+**A primitive is built from the real call sites, not from the finding.** Every
+one of these turned up something the audit missed — a fifth copy, an inverted
+helper, a "redundant" call that wasn't. The audit is a lead, not a spec. Read
+the sites.
+
+**Do not unify constants that differ for a reason.** The licence badge ladder
+is 30/60 and the marketing one is 7/21, and that is correct: the renewal sweep
+raises a task at most 14 days before its deadline, so on the licence ladder
+every task would be red on day one. Parameterize; don't average.
+
+**Where a helper lives is constrained by `generateClient()`.** `client.ts`
+calls it at module scope, so a Lambda cannot import from it — which is why
+`pagination.ts` exists, why `badges.tsx` and `formCodec.ts` are separate
+modules, and why the inline day math was deliberately *not* absorbed into
+`client.ts`: two of its four sites are in a handler, so it would have become a
+third implementation rather than removing the second.
+
+**Example** — the shape every primitive follows, from `crm/src/lib/quoteStatus.ts`:
+
+```ts
+const QUOTE_STATUS_KIND = { … } as const satisfies Record<QuoteStatus, Kind>;
+```
+
+One table, typed against the schema enum, with every list derived from it — so
+adding a status to `resource.ts` fails `tsc` until it is classified, and all
+four lists plus the GraphQL filter update from that one edit.
