@@ -231,6 +231,9 @@ export default function Licensing() {
 
       {(adding || editing) && (
         <LicenseForm
+          // Remount per subject: without this the form keeps the previously
+          // edited licence's values and saves them onto the next one.
+          key={editing?.id ?? "new"}
           holderType={editing ? (editing.holderType as HolderType) : adding!}
           existing={editing}
           profiles={profiles}
