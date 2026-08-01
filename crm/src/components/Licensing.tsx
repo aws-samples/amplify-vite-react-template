@@ -13,6 +13,7 @@ import {
   type UserProfile,
 } from "../lib/client";
 import DocumentsPanel from "./DocumentsPanel";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { useIsAdmin } from "../lib/auth";
 import { useSort, SortTh } from "../lib/useSort";
@@ -281,8 +282,12 @@ function LegacyBackfill({
   onMigrated: (created: License[]) => void;
 }) {
   const [legacy, setLegacy] = useState<ProducerLicense[] | null>(null);
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState("");
+  // `result` was one severity-free string printed green in the all-done card
+  // and red in the form actions, with each site guessing severity from
+  // `pending.length` — so a clean import could render red and the failed half
+  // of a partial one could render green. The state now carries its own
+  // severity and both sites render the same value the same way.
+  const importStatus = useSaveStatus();
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -311,42 +316,53 @@ function LegacyBackfill({
     );
   }, [legacy, licenses]);
 
+  const attempted = pending.length;
+
   async function run() {
-    setRunning(true);
     setError("");
-    const created: License[] = [];
-    let failed = 0;
-    for (const l of pending) {
-      const holder = profiles.find((p) => p.id === l.userProfileId);
-      try {
-        const { data, errors } = await client.models.License.create({
-          holderType: "PRODUCER",
-          userProfileId: l.userProfileId,
-          holderName: holder ? `${holder.firstName} ${holder.lastName}` : null,
-          state: l.state,
-          licenseNumber: l.licenseNumber,
-          npn: holder?.npn ?? null,
-          licenseClass: "PRODUCER",
-          // Unknowable from the legacy row — left blank rather than guessed.
-          residency: null,
-          status: "ACTIVE",
-          expirationDate: l.expirationDate ?? null,
-          linesOfAuthority: (l.linesOfAuthority ?? []).filter(
-            (x): x is string => !!x
-          ),
-          notes: "Migrated from the original onboarding license record.",
-        });
-        if (errors?.length || !data) failed++;
-        else created.push(data);
-      } catch {
-        failed++;
+    await importStatus.run(
+      async () => {
+        const created: License[] = [];
+        let failed = 0;
+        for (const l of pending) {
+          const holder = profiles.find((p) => p.id === l.userProfileId);
+          try {
+            const { data, errors } = await client.models.License.create({
+              holderType: "PRODUCER",
+              userProfileId: l.userProfileId,
+              holderName: holder ? `${holder.firstName} ${holder.lastName}` : null,
+              state: l.state,
+              licenseNumber: l.licenseNumber,
+              npn: holder?.npn ?? null,
+              licenseClass: "PRODUCER",
+              // Unknowable from the legacy row — left blank rather than guessed.
+              residency: null,
+              status: "ACTIVE",
+              expirationDate: l.expirationDate ?? null,
+              linesOfAuthority: (l.linesOfAuthority ?? []).filter(
+                (x): x is string => !!x
+              ),
+              notes: "Migrated from the original onboarding license record.",
+            });
+            if (errors?.length || !data) failed++;
+            else created.push(data);
+          } catch {
+            failed++;
+          }
+        }
+        onMigrated(created);
+        // Some rows failed ⇒ partial success ⇒ amber, carrying both halves of
+        // the sentence. None failed ⇒ clean success ⇒ green `savedMessage`.
+        return failed
+          ? `Migrated ${created.length} license${created.length === 1 ? "" : "s"}.` +
+              ` ${failed} failed — re-run to retry just those.`
+          : "";
+      },
+      {
+        // Every attempted row landed, so `attempted` is the count migrated.
+        savedMessage: `Migrated ${attempted} license${attempted === 1 ? "" : "s"}.`,
+        errorMessage: "Import failed",
       }
-    }
-    setRunning(false);
-    onMigrated(created);
-    setResult(
-      `Migrated ${created.length} license${created.length === 1 ? "" : "s"}.` +
-        (failed ? ` ${failed} failed — re-run to retry just those.` : "")
     );
   }
 
@@ -362,10 +378,14 @@ function LegacyBackfill({
       );
     }
     // Nothing outstanding: show the confirmation once, then stay hidden.
-    return result ? (
+    // Reaching zero pending means every attempted row landed, so this branch
+    // can only ever be the "saved" state — the green rule is now a fact about
+    // the state, not a guess made from `pending.length`.
+    return importStatus.status.state !== "idle" ? (
       <div className="card" style={{ borderLeft: "4px solid var(--green)" }}>
-        <p className="small" style={{ margin: 0, color: "var(--green)" }}>
-          {result} Legacy records were left untouched as a backup.
+        <p className="small" style={{ margin: 0 }}>
+          <SaveStatus {...importStatus.status} /> Legacy records were left
+          untouched as a backup.
         </p>
       </div>
     ) : null;
@@ -412,14 +432,15 @@ function LegacyBackfill({
         </table>
       </div>
       <div className="form-actions">
-        <button className="primary" disabled={running} onClick={run}>
-          {running
+        <button className="primary" disabled={importStatus.busy} onClick={run}>
+          {importStatus.busy
             ? "Importing…"
             : `Import ${pending.length} license${pending.length === 1 ? "" : "s"}`}
         </button>
         {/* Partial failures leave rows pending, so surface the outcome here
-            too — not only in the all-done state below. */}
-        {result && <span className="error-text">{result}</span>}
+            too — not only in the all-done state above. Same value, same
+            severity, both places. */}
+        <SaveStatus {...importStatus.status} />
         {error && <span className="error-text">{error}</span>}
       </div>
       <p className="muted small">

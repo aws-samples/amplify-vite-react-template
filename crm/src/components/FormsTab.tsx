@@ -18,6 +18,7 @@ import {
 import type { UserProfile } from "../lib/client";
 import { useSort, SortTh } from "../lib/useSort";
 import FilePreviewModal from "./FilePreview";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
 const APP_FORMS = ACORD_FORMS.filter((f) => f.key !== "acord25");
 
@@ -34,9 +35,12 @@ export default function FormsTab({
   profile: UserProfile;
 }) {
   const [generated, setGenerated] = useState<CrmDocument[]>([]);
+  // Which row's button reads "Generating…" — per-row, so it stays. The
+  // outcome is panel-level and belongs to the status machine.
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [note, setNote] = useState("");
-  const [error, setError] = useState("");
+  // Was an amber `note` for every outcome plus a separate red `error`; the
+  // note is now `run`'s warning arm and a clean generation is green.
+  const genStatus = useSaveStatus();
   const [preview, setPreview] = useState<CrmDocument | null>(null);
 
   useEffect(() => {
@@ -64,101 +68,118 @@ export default function FormsTab({
 
   async function generate(form: AcordFormDef) {
     setBusyKey(form.key);
-    setNote("");
-    setError("");
-    try {
-      const buildings = await listAllPages((nextToken) =>
-        client.models.Building.list({
-          filter: { accountId: { eq: account.id } },
-          nextToken,
-        })
-      );
-      // Clients renew off their bound policies; the lead-only
-      // currentPolicyExpiration field isn't used once an account converts.
-      let renewalDate: string | null = null;
-      let lines: string[] = [];
-      if (account.stage === "CLIENT") {
-        const pols = await listAllPages((nextToken) =>
-          client.models.Policy.list({
-            filter: { accountId: { eq: account.id } },
-            nextToken,
-          })
-        );
-        const active = pols.filter((p) => p.status === "ACTIVE");
-        const ends = active
-          .filter((p) => p.expirationDate)
-          .map((p) => p.expirationDate as string)
-          .sort();
-        renewalDate = ends[0] ?? null;
-        // What we're applying for = what's on the book today.
-        lines = [
-          ...new Set(active.flatMap((p) => (p.lines ?? []).filter(Boolean))),
-        ] as string[];
-      } else {
-        renewalDate = account.currentPolicyExpiration ?? null;
-        // A prospect has no policy yet — fall back to whatever's been quoted.
-        const qs = await listAllPages((nextToken) =>
-          client.models.Quote.list({
-            filter: { accountId: { eq: account.id } },
-            nextToken,
-          })
-        );
-        lines = [
-          ...new Set(qs.flatMap((q) => (q.lines ?? []).filter(Boolean))),
-        ] as string[];
-      }
+    await genStatus.run(
+      async () => {
+        try {
+          const buildings = await listAllPages((nextToken) =>
+            client.models.Building.list({
+              filter: { accountId: { eq: account.id } },
+              nextToken,
+            })
+          );
+          // Clients renew off their bound policies; the lead-only
+          // currentPolicyExpiration field isn't used once an account converts.
+          let renewalDate: string | null = null;
+          let lines: string[] = [];
+          if (account.stage === "CLIENT") {
+            const pols = await listAllPages((nextToken) =>
+              client.models.Policy.list({
+                filter: { accountId: { eq: account.id } },
+                nextToken,
+              })
+            );
+            const active = pols.filter((p) => p.status === "ACTIVE");
+            const ends = active
+              .filter((p) => p.expirationDate)
+              .map((p) => p.expirationDate as string)
+              .sort();
+            renewalDate = ends[0] ?? null;
+            // What we're applying for = what's on the book today.
+            lines = [
+              ...new Set(active.flatMap((p) => (p.lines ?? []).filter(Boolean))),
+            ] as string[];
+          } else {
+            renewalDate = account.currentPolicyExpiration ?? null;
+            // A prospect has no policy yet — fall back to whatever's been quoted.
+            const qs = await listAllPages((nextToken) =>
+              client.models.Quote.list({
+                filter: { accountId: { eq: account.id } },
+                nextToken,
+              })
+            );
+            lines = [
+              ...new Set(qs.flatMap((q) => (q.lines ?? []).filter(Boolean))),
+            ] as string[];
+          }
 
-      const { bytes, missing, unsigned } = await fillAcordApp(
-        form,
-        account,
-        buildings,
-        await signatureFor(profile.id),
-        renewalDate,
-        lines
-      );
+          const { bytes, missing, unsigned } = await fillAcordApp(
+            form,
+            account,
+            buildings,
+            await signatureFor(profile.id),
+            renewalDate,
+            lines
+          );
 
-      const stamp = new Date().toISOString().slice(0, 10);
-      const filename = `${form.key}-${account.name.replace(/[^\w-]+/g, "_")}-${stamp}.pdf`;
-      const path = `generated/${account.id}/${Date.now()}-${filename}`;
-      await uploadData({
-        path,
-        data: new Blob([bytes as BlobPart], { type: "application/pdf" }),
-        options: { contentType: "application/pdf" },
-      }).result;
+          const stamp = new Date().toISOString().slice(0, 10);
+          const filename = `${form.key}-${account.name.replace(/[^\w-]+/g, "_")}-${stamp}.pdf`;
+          const path = `generated/${account.id}/${Date.now()}-${filename}`;
+          await uploadData({
+            path,
+            data: new Blob([bytes as BlobPart], { type: "application/pdf" }),
+            options: { contentType: "application/pdf" },
+          }).result;
 
-      const { data: doc } = await client.models.Document.create({
-        entityType: "ACCOUNT",
-        entityId: account.id,
-        category: "ACORD_FORM",
-        name: filename,
-        s3Key: path,
-        contentType: "application/pdf",
-        sizeBytes: bytes.byteLength,
-        ocrStatus: "SKIPPED",
-      });
-      if (doc) setGenerated((ds) => [doc, ...ds]);
+          const { data: doc, errors } = await client.models.Document.create({
+            entityType: "ACCOUNT",
+            entityId: account.id,
+            category: "ACORD_FORM",
+            name: filename,
+            s3Key: path,
+            contentType: "application/pdf",
+            sizeBytes: bytes.byteLength,
+            ocrStatus: "SKIPPED",
+          });
+          // The PDF is in S3 either way, but without the Document row it
+          // never appears in "Generated forms" — previously that failure was
+          // silent and the panel still said "Generated".
+          if (errors?.length || !doc) {
+            throw new Error(
+              errors?.[0]?.message ??
+                "The PDF was created but couldn't be recorded — it won't appear in the list below."
+            );
+          }
+          setGenerated((ds) => [doc, ...ds]);
 
-      setNote(
-        [
-          missing.length
-            ? `Generated. Unmatched fields (extend the mapping via Settings → Inspect fields): ${missing.join(", ")}`
-            : "Generated — every mapped field matched.",
-          unsigned &&
-            `The form went out UNSIGNED — ${unsigned}. Sign it by hand before submitting.`,
-        ]
-          .filter(Boolean)
-          .join(" ")
-      );
-    } catch (err) {
-      const msg = friendlyError(err, "unknown error");
-      // A classified template failure already explains itself and says where
-      // to go; anything else keeps the prefix naming what was being done.
-      setError(
-        msg === TEMPLATE_MISSING_MESSAGE ? msg : `Generation failed: ${msg}`
-      );
-    } finally {
-      setBusyKey(null);
-    }
+          // Same sentences as before, composed the same way. What changed is
+          // severity: unmatched fields or an unsigned form are things the
+          // user has to act on, so they are `run`'s warning arm; a run with
+          // neither is a clean success and takes `savedMessage` instead of
+          // the same amber span every outcome used to share.
+          const note = [
+            missing.length
+              ? `Generated. Unmatched fields (extend the mapping via Settings → Inspect fields): ${missing.join(", ")}`
+              : "Generated — every mapped field matched.",
+            unsigned &&
+              `The form went out UNSIGNED — ${unsigned}. Sign it by hand before submitting.`,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          return missing.length || unsigned ? note : "";
+        } catch (err) {
+          const msg = friendlyError(err, "unknown error");
+          // A classified template failure already explains itself and says
+          // where to go; anything else keeps the prefix naming what was being
+          // done. `run` re-runs friendlyError over this, which is a no-op for
+          // both shapes — neither matches a classifier once prefixed.
+          throw new Error(
+            msg === TEMPLATE_MISSING_MESSAGE ? msg : `Generation failed: ${msg}`
+          );
+        }
+      },
+      { savedMessage: "Generated — every mapped field matched." }
+    );
+    setBusyKey(null);
   }
 
   return (
@@ -203,8 +224,11 @@ export default function FormsTab({
             </tbody>
           </table>
         </div>
-        {note && <p className="small" style={{ color: "var(--amber)" }}>{note}</p>}
-        {error && <p className="error-text">{error}</p>}
+        {genStatus.status.state !== "idle" && (
+          <p style={{ margin: "10px 0 0" }}>
+            <SaveStatus {...genStatus.status} />
+          </p>
+        )}
       </div>
 
       <div className="card">

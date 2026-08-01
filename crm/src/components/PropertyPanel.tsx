@@ -13,6 +13,7 @@ import FilePreviewModal from "./FilePreview";
 import { AddressAutocomplete } from "../lib/googlePlaces";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
 // Alphabetical by label.
 const CONSTRUCTION_TYPES = [
@@ -49,7 +50,10 @@ function DetailsCard({
   account: Account;
   onChange: (a: Account) => void;
 }) {
-  const { form, setF, patch, saved, markSaved } = useFormState({
+  // One owner for "is the confirmation still true": `useFormState`'s `saved`
+  // is left unread and `useSaveStatus` carries saving/saved/error together.
+  const saveStatus = useSaveStatus();
+  const { form, setF, patch } = useFormState({
     address: account.address ?? "",
     city: account.city ?? "",
     county: account.county ?? "",
@@ -67,9 +71,7 @@ function DetailsCard({
     electricalUpdatedYear: account.electricalUpdatedYear?.toString() ?? "",
     plumbingUpdatedYear: account.plumbingUpdatedYear?.toString() ?? "",
     otherUpdates: account.otherUpdates ?? "",
-  });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  }, { onEdit: saveStatus.markDirty });
 
   const yearOk = (v: string) => {
     if (!v) return true;
@@ -80,7 +82,7 @@ function DetailsCard({
   async function save() {
     const problems = validateAccountFields(form);
     if (problems.length) {
-      setError(problems.join(" "));
+      saveStatus.markError(problems.join(" "));
       return;
     }
     const badYears = (
@@ -92,47 +94,47 @@ function DetailsCard({
       ] as const
     ).filter(([k]) => !yearOk(form[k]));
     if (badYears.length) {
-      setError(`Check the ${badYears.map(([, l]) => l).join(", ")} year${badYears.length > 1 ? "s" : ""}.`);
+      saveStatus.markError(
+        `Check the ${badYears.map(([, l]) => l).join(", ")} year${badYears.length > 1 ? "s" : ""}.`
+      );
       return;
     }
     if (form.coastal && form.milesToCoast && Number(form.milesToCoast) < 0) {
-      setError("Miles to coast can't be negative.");
+      saveStatus.markError("Miles to coast can't be negative.");
       return;
     }
-    setSaving(true);
-    setError("");
-    const { data, errors } = await client.models.Account.update({
-      id: account.id,
-      address: form.address.trim() || null,
-      city: form.city.trim() || null,
-      county: form.county.trim() || null,
-      state: form.state || null,
-      zip: form.zip.trim() || null,
-      unitCount: form.unitCount ? Number(form.unitCount) : null,
-      yearBuilt: form.yearBuilt ? Number(form.yearBuilt) : null,
-      constructionType: (form.constructionType || null) as Account["constructionType"],
-      firewallsVerified: form.firewallsVerified,
-      stories: form.stories ? Number(form.stories) : null,
-      coastal: form.coastal,
-      milesToCoast:
-        form.coastal && form.milesToCoast ? Number(form.milesToCoast) : null,
-      roofUpdatedYear: form.roofUpdatedYear ? Number(form.roofUpdatedYear) : null,
-      hvacUpdatedYear: form.hvacUpdatedYear ? Number(form.hvacUpdatedYear) : null,
-      electricalUpdatedYear: form.electricalUpdatedYear
-        ? Number(form.electricalUpdatedYear)
-        : null,
-      plumbingUpdatedYear: form.plumbingUpdatedYear
-        ? Number(form.plumbingUpdatedYear)
-        : null,
-      otherUpdates: form.otherUpdates.trim() || null,
-    });
-    setSaving(false);
-    if (errors?.length || !data) {
-      setError(friendlyError(errors?.[0]?.message, "Save failed"));
-      return;
-    }
-    onChange(data);
-    markSaved();
+    await saveStatus.run(
+      async () => {
+        const { data, errors } = await client.models.Account.update({
+          id: account.id,
+          address: form.address.trim() || null,
+          city: form.city.trim() || null,
+          county: form.county.trim() || null,
+          state: form.state || null,
+          zip: form.zip.trim() || null,
+          unitCount: form.unitCount ? Number(form.unitCount) : null,
+          yearBuilt: form.yearBuilt ? Number(form.yearBuilt) : null,
+          constructionType: (form.constructionType || null) as Account["constructionType"],
+          firewallsVerified: form.firewallsVerified,
+          stories: form.stories ? Number(form.stories) : null,
+          coastal: form.coastal,
+          milesToCoast:
+            form.coastal && form.milesToCoast ? Number(form.milesToCoast) : null,
+          roofUpdatedYear: form.roofUpdatedYear ? Number(form.roofUpdatedYear) : null,
+          hvacUpdatedYear: form.hvacUpdatedYear ? Number(form.hvacUpdatedYear) : null,
+          electricalUpdatedYear: form.electricalUpdatedYear
+            ? Number(form.electricalUpdatedYear)
+            : null,
+          plumbingUpdatedYear: form.plumbingUpdatedYear
+            ? Number(form.plumbingUpdatedYear)
+            : null,
+          otherUpdates: form.otherUpdates.trim() || null,
+        });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        onChange(data);
+      },
+      { errorMessage: "Save failed" }
+    );
   }
 
   return (
@@ -301,11 +303,10 @@ function DetailsCard({
       </div>
 
       <div className="form-actions">
-        <button className="primary" disabled={saving} onClick={save}>
-          {saving ? "Saving…" : "Save property"}
+        <button className="primary" disabled={saveStatus.busy} onClick={save}>
+          {saveStatus.busy ? "Saving…" : "Save property"}
         </button>
-        {saved && <span className="small" style={{ color: "var(--green)" }}>Saved.</span>}
-        {error && <span className="error-text">{error}</span>}
+        <SaveStatus {...saveStatus.status} />
       </div>
     </div>
   );
@@ -313,14 +314,21 @@ function DetailsCard({
 
 function BuildingsCard({ accountId }: { accountId: string }) {
   const [buildings, setBuildings] = useState<Building[]>([]);
-  const { form, setF, reset } = useFormState({
-    label: "",
-    sqft: "",
-    street: "",
-    desc: "",
-  });
-  const [adding, setAdding] = useState(false);
-  const [error, setError] = useState("");
+  // Persistent: the new row is on screen next to the confirmation, so the
+  // message keeps describing something the user can still see.
+  const addStatus = useSaveStatus();
+  const { form, setF, reset } = useFormState(
+    {
+      label: "",
+      sqft: "",
+      street: "",
+      desc: "",
+    },
+    { onEdit: addStatus.markDirty }
+  );
+  // Auto-clearing: the row a delete confirmation refers to is gone, so
+  // nothing here will ever go dirty and clear it.
+  const delStatus = useSaveStatus({ autoClearMs: 4000 });
 
   useEffect(() => {
     listAllPages((nextToken) =>
@@ -334,30 +342,45 @@ function BuildingsCard({ accountId }: { accountId: string }) {
   async function add() {
     const n = Number(form.sqft);
     if (form.sqft && (!Number.isInteger(n) || n <= 0)) {
-      setError("Sq ft should be a positive whole number.");
+      addStatus.markError("Sq ft should be a positive whole number.");
       return;
     }
-    setError("");
-    setAdding(true);
-    const { data } = await client.models.Building.create({
-      accountId,
-      label: form.label.trim() || `Building ${buildings.length + 1}`,
-      sqft: form.sqft ? n : undefined,
-      streetAddress: form.street.trim() || undefined,
-      description: form.desc.trim() || undefined,
-    });
-    setAdding(false);
-    if (data) {
-      setBuildings((bs) => [...bs, data]);
-      // Baseline is still the blanks this mounted with — nothing ever calls
-      // markSaved here — so `reset()` is the four setters it replaces.
-      reset();
-    }
+    const label = form.label.trim() || `Building ${buildings.length + 1}`;
+    await addStatus.run(
+      async () => {
+        // `errors` used to be dropped: a rejected create cleared nothing and
+        // said nothing, so the form just sat there looking untouched.
+        const { data, errors } = await client.models.Building.create({
+          accountId,
+          label,
+          sqft: form.sqft ? n : undefined,
+          streetAddress: form.street.trim() || undefined,
+          description: form.desc.trim() || undefined,
+        });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        setBuildings((bs) => [...bs, data]);
+        // Baseline is still the blanks this mounted with — nothing ever calls
+        // markSaved here — so `reset()` is the four setters it replaces. Its
+        // `onEdit` fires while the status is still "saving", which markDirty
+        // deliberately ignores, so it can't wipe the confirmation below.
+        reset();
+      },
+      { savedMessage: `${label} added.`, errorMessage: "Couldn't add that building." }
+    );
   }
 
   async function del(id: string) {
-    await client.models.Building.delete({ id });
-    setBuildings((bs) => bs.filter((b) => b.id !== id));
+    const label = buildings.find((b) => b.id === id)?.label ?? "Building";
+    await delStatus.run(
+      async () => {
+        // `errors` used to be dropped: a rejected delete still removed the row
+        // from the table, so the building looked gone until the next reload.
+        const { errors } = await client.models.Building.delete({ id });
+        if (errors?.length) throw new Error(errors[0].message);
+        setBuildings((bs) => bs.filter((b) => b.id !== id));
+      },
+      { savedMessage: `${label} removed.`, errorMessage: "Couldn't remove that building." }
+    );
   }
 
   const totalSqft = buildings.reduce((s, b) => s + (b.sqft ?? 0), 0);
@@ -417,11 +440,12 @@ function BuildingsCard({ accountId }: { accountId: string }) {
             onKeyDown={(e) => e.key === "Enter" && add()}
           />
         </div>
-        <button className="secondary" disabled={adding} onClick={add}>
+        <button className="secondary" disabled={addStatus.busy} onClick={add}>
           + Add building
         </button>
-        {error && <span className="error-text">{error}</span>}
+        <SaveStatus {...addStatus.status} />
       </div>
+      <SaveStatus {...delStatus.status} />
       {buildings.length > 0 && (
         <div className="table-wrap">
           <table>

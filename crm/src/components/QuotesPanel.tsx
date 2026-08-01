@@ -12,6 +12,7 @@ import {
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import CoverageForm from "./CoverageForm";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
 const STATUS_BADGE: Record<string, string> = {
   DRAFT: "gray",
@@ -69,6 +70,11 @@ export default function QuotesPanel({
   const [editing, setEditing] = useState<Quote | null>(null);
   const [binding, setBinding] = useState<Quote | null>(null);
   const [bindError, setBindError] = useState("");
+  // Auto-clearing: the status change is made from a per-row <select> that
+  // then re-renders with the new value, and an open quote that moves to
+  // DECLINED/LOST leaves the table entirely — there is no form to go dirty
+  // and retire the confirmation, so a timer is what retires it.
+  const statusSave = useSaveStatus({ autoClearMs: 4000 });
 
   const quoteRes = useAsyncResource(
     () =>
@@ -98,8 +104,22 @@ export default function QuotesPanel({
   const carrierRows = carrierRes.data;
 
   async function setStatus(quote: Quote, status: Quote["status"]) {
-    await client.models.Quote.update({ id: quote.id, status });
-    refresh();
+    await statusSave.run(
+      async () => {
+        // `errors` used to be dropped: the refetch quietly restored the old
+        // value and the user was told nothing.
+        const { errors } = await client.models.Quote.update({
+          id: quote.id,
+          status,
+        });
+        if (errors?.length) throw new Error(errors[0].message);
+        refresh();
+      },
+      {
+        savedMessage: `Quote set to ${status}.`,
+        errorMessage: "Couldn't change that quote's status.",
+      }
+    );
   }
 
   // Carrier picker order only — no header to click, so the default stands.
@@ -127,6 +147,9 @@ export default function QuotesPanel({
   return (
     <div>
       <div className="toolbar">
+        {/* Per-row status changes have no per-row place to report; this is
+            the panel's one status line. */}
+        <SaveStatus {...statusSave.status} />
         <div className="grow" />
         <button
           className="primary"

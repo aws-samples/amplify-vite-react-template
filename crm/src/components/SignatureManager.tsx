@@ -3,6 +3,7 @@ import { uploadData, getUrl, remove } from "aws-amplify/storage";
 import { client, friendlyError, type UserProfile } from "../lib/client";
 import FileButton from "./FileButton";
 import SignaturePad from "./SignaturePad";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
 /**
  * Manage one person's signature — draw it, or upload an image.
@@ -23,6 +24,11 @@ export default function SignatureManager({
   const [url, setUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [drawing, setDrawing] = useState(false);
+  // Persistent: the new signature is rendered right beside the confirmation,
+  // so the message keeps describing what is on screen.
+  const saveStatus = useSaveStatus();
+  // `error` is now only the *read* failure from the getUrl below — a stored
+  // signature that won't load is not a save outcome.
   const [error, setError] = useState("");
 
   const key = profile?.signatureKey ?? null;
@@ -48,34 +54,36 @@ export default function SignatureManager({
   async function store(data: Blob | File, ext: string, contentType: string) {
     if (!profile) return;
     setBusy(true);
-    setError("");
-    try {
-      const path = `signatures/${profile.id}.${ext}`;
-      await uploadData({ path, data, options: { contentType } }).result;
-      const { data: updated } = await client.models.UserProfile.update({
-        id: profile.id,
-        signatureKey: path,
-      });
-      if (updated) {
+    await saveStatus.run(
+      async () => {
+        const path = `signatures/${profile.id}.${ext}`;
+        await uploadData({ path, data, options: { contentType } }).result;
+        // `errors` used to be dropped: the upload landed in S3 but the
+        // profile row didn't point at it, and the panel said nothing at all.
+        const { data: updated, errors } = await client.models.UserProfile.update({
+          id: profile.id,
+          signatureKey: path,
+        });
+        if (errors?.length || !updated) throw new Error(errors?.[0]?.message);
         onChange(updated);
         // Same key on replace, so bust the cached URL to show the new mark.
         setUrl(null);
         getUrl({ path })
           .then(({ url }) => setUrl(url.toString()))
           .catch(() => undefined);
-      }
-      setDrawing(false);
-    } catch (err) {
-      setError(friendlyError(err, "Save failed"));
-    } finally {
-      setBusy(false);
-    }
+        setDrawing(false);
+      },
+      { savedMessage: "Signature saved.", errorMessage: "Save failed" }
+    );
+    setBusy(false);
   }
 
   async function uploadFile(file: File | undefined) {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      setError("Signature must be an image (transparent PNG works best).");
+      saveStatus.markError(
+        "Signature must be an image (transparent PNG works best)."
+      );
       return;
     }
     const ext = file.name.split(".").pop()?.toLowerCase() || "png";
@@ -118,12 +126,18 @@ export default function SignatureManager({
   );
 
   if (drawing) {
+    // A failed save leaves the pad open so the drawing isn't lost — which
+    // means the status has to be reachable from in here, or the failure this
+    // migration surfaces would be invisible on the draw path.
     return (
-      <SignaturePad
-        busy={busy}
-        onCancel={() => setDrawing(false)}
-        onSave={(png) => store(png, "png", "image/png")}
-      />
+      <>
+        <SaveStatus {...saveStatus.status} />
+        <SignaturePad
+          busy={busy}
+          onCancel={() => setDrawing(false)}
+          onSave={(png) => store(png, "png", "image/png")}
+        />
+      </>
     );
   }
 
@@ -155,6 +169,7 @@ export default function SignatureManager({
           Remove
         </button>
       )}
+      <SaveStatus {...saveStatus.status} />
       {error && <span className="error-text small">{error}</span>}
     </div>
   );

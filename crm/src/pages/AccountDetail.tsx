@@ -28,6 +28,7 @@ import PropertyPanel from "../components/PropertyPanel";
 import FormsTab from "../components/FormsTab";
 import ExtractionPanel from "../components/ExtractionPanel";
 import Celebration from "../components/Celebration";
+import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
 import { useFormState } from "../lib/useFormState";
 
 type Tab = "overview" | "quotes" | "policies" | "documents" | "certificates";
@@ -148,7 +149,12 @@ function OverviewTab({
   account: Account;
   onChange: (a: Account) => void;
 }) {
-  const { form, setF, saved, markSaved } = useFormState({
+  // `useSaveStatus` owns the confirmation here — it carries saving and error
+  // as well, which the two local flags used to split between them.
+  // `useFormState`'s own `saved` is deliberately not destructured: two flags
+  // answering "is the confirmation still true" is the bug this replaces.
+  const saveStatus = useSaveStatus();
+  const { form, setF } = useFormState({
     name: account.name,
     legalName: account.legalName ?? "",
     fein: account.fein ?? "",
@@ -170,51 +176,47 @@ function OverviewTab({
     currentPolicyExpiration: account.currentPolicyExpiration ?? "",
     source: account.source ?? "",
     notes: account.notes ?? "",
-  });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  }, { onEdit: saveStatus.markDirty });
 
   async function save() {
     const problems = validateAccountFields(form);
     if (problems.length) {
-      setError(problems.join(" "));
+      saveStatus.markError(problems.join(" "));
       return;
     }
-    setSaving(true);
-    setError("");
-    const { data, errors } = await client.models.Account.update({
-      id: account.id,
-      name: form.name.trim() || account.name,
-      legalName: form.legalName.trim() || null,
-      fein: form.fein.trim() || null,
-      sicCode: form.sicCode.trim() || null,
-      naicsCode: form.naicsCode.trim() || null,
-      inspectionContactName: form.inspectionContactName.trim() || null,
-      inspectionContactPhone: form.inspectionContactPhone.trim() || null,
-      priorCarrierName: form.priorCarrierName.trim() || null,
-      priorPolicyNumber: form.priorPolicyNumber.trim() || null,
-      priorPremium: form.priorPremium ? Number(form.priorPremium) : null,
-      priorTermEffective: form.priorTermEffective || null,
-      priorTermExpiration: form.priorTermExpiration || null,
-      contactFirstName: form.contactFirstName.trim() || null,
-      contactLastName: form.contactLastName.trim() || null,
-      contactEmail: form.contactEmail.trim() || null,
-      contactPhone: form.contactPhone.trim() || null,
-      totalInsuredValue: form.totalInsuredValue
-        ? Number(form.totalInsuredValue)
-        : null,
-      currentAgent: form.currentAgent.trim() || null,
-      currentPolicyExpiration: form.currentPolicyExpiration || null,
-      source: form.source.trim() || null,
-      notes: form.notes.trim() || null,
-    });
-    setSaving(false);
-    if (errors?.length || !data) {
-      setError(friendlyError(errors?.[0]?.message, "Save failed"));
-      return;
-    }
-    onChange(data);
-    markSaved();
+    await saveStatus.run(
+      async () => {
+        const { data, errors } = await client.models.Account.update({
+          id: account.id,
+          name: form.name.trim() || account.name,
+          legalName: form.legalName.trim() || null,
+          fein: form.fein.trim() || null,
+          sicCode: form.sicCode.trim() || null,
+          naicsCode: form.naicsCode.trim() || null,
+          inspectionContactName: form.inspectionContactName.trim() || null,
+          inspectionContactPhone: form.inspectionContactPhone.trim() || null,
+          priorCarrierName: form.priorCarrierName.trim() || null,
+          priorPolicyNumber: form.priorPolicyNumber.trim() || null,
+          priorPremium: form.priorPremium ? Number(form.priorPremium) : null,
+          priorTermEffective: form.priorTermEffective || null,
+          priorTermExpiration: form.priorTermExpiration || null,
+          contactFirstName: form.contactFirstName.trim() || null,
+          contactLastName: form.contactLastName.trim() || null,
+          contactEmail: form.contactEmail.trim() || null,
+          contactPhone: form.contactPhone.trim() || null,
+          totalInsuredValue: form.totalInsuredValue
+            ? Number(form.totalInsuredValue)
+            : null,
+          currentAgent: form.currentAgent.trim() || null,
+          currentPolicyExpiration: form.currentPolicyExpiration || null,
+          source: form.source.trim() || null,
+          notes: form.notes.trim() || null,
+        });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        onChange(data);
+      },
+      { errorMessage: "Save failed" }
+    );
   }
 
   return (
@@ -340,11 +342,10 @@ function OverviewTab({
         </div>
       </div>
       <div className="form-actions">
-        <button className="primary" disabled={saving} onClick={save}>
-          {saving ? "Saving…" : "Save changes"}
+        <button className="primary" disabled={saveStatus.busy} onClick={save}>
+          {saveStatus.busy ? "Saving…" : "Save changes"}
         </button>
-        {saved && <span className="small" style={{ color: "var(--green)" }}>Saved.</span>}
-        {error && <span className="error-text">{error}</span>}
+        <SaveStatus {...saveStatus.status} />
       </div>
     </div>
   );
@@ -443,6 +444,9 @@ function DeleteLeadZone({ account }: { account: Account }) {
 
 function PoliciesTab({ accountId }: { accountId: string }) {
   const [editing, setEditing] = useState<Policy | null>(null);
+  // Persistent: the row this refers to stays on screen, so nothing about it
+  // stops being true after a few seconds.
+  const saveStatus = useSaveStatus();
 
   const policyRes = useAsyncResource(
     () =>
@@ -472,8 +476,16 @@ function PoliciesTab({ accountId }: { accountId: string }) {
   const carrierRows = carrierRes.data;
 
   async function updatePolicy(id: string, patch: Partial<Policy>) {
-    const { data } = await client.models.Policy.update({ id, ...patch });
-    if (data) setPolicies((ps) => ps.map((p) => (p.id === id ? data : p)));
+    await saveStatus.run(
+      async () => {
+        // `errors` used to be dropped on the floor here: a rejected status
+        // change left the <select> showing the value it had failed to save.
+        const { data, errors } = await client.models.Policy.update({ id, ...patch });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        setPolicies((ps) => ps.map((p) => (p.id === id ? data : p)));
+      },
+      { savedMessage: "Policy updated.", errorMessage: "Couldn't update that policy." }
+    );
   }
 
   // Carrier picker order only — no header to click, so the default stands.
@@ -502,6 +514,9 @@ function PoliciesTab({ accountId }: { accountId: string }) {
   return (
     <div className="card">
       <h2>Policies</h2>
+      {/* Status changes are made from the per-row <select>, so the panel-level
+          line is where their outcome lands. */}
+      <SaveStatus {...saveStatus.status} />
 
       {editing && (
         <CoverageForm
@@ -603,8 +618,13 @@ function CertificatesTab({
     selectedPolicies: [] as string[],
   });
   const [saving, setSaving] = useState(false);
+  // Which certificate is being filled — the button label is per row, so this
+  // stays alongside the panel-level status below.
   const [generating, setGenerating] = useState<string | null>(null);
-  const [genNote, setGenNote] = useState("");
+  // The amber "generated UNSIGNED" note and the red failure were two separate
+  // pieces of state that could both be on screen at once, describing the same
+  // run. One state machine now, with the note as `run`'s warning return.
+  const genStatus = useSaveStatus();
   const [error, setError] = useState("");
   const [previewCert, setPreviewCert] = useState<Certificate | null>(null);
 
@@ -672,50 +692,63 @@ function CertificatesTab({
 
   async function generatePdf(cert: Certificate) {
     setGenerating(cert.id);
-    setGenNote("");
     setError("");
-    try {
-      const { bytes, missing, unsigned } = await fillAcord25(
-        account,
-        cert,
-        policies,
-        carriers,
-        await signatureFor(profile.id)
-      );
-      const path = `certificates/${account.id}/${cert.id}.pdf`;
-      await uploadData({
-        path,
-        data: new Blob([bytes as BlobPart], { type: "application/pdf" }),
-        options: { contentType: "application/pdf" },
-      }).result;
-      const { data } = await client.models.Certificate.update({
-        id: cert.id,
-        s3Key: path,
-      });
-      if (data) setCerts((cs) => cs.map((c) => (c.id === cert.id ? data : c)));
-      const notes: string[] = [];
-      if (missing.length) {
-        notes.push(
-          `Generated, but these fields had no match in the template: ${missing.join(", ")}. ` +
-            "Use Settings → Inspect fields to extend the mapping."
+    await genStatus.run(async () => {
+      try {
+        const { bytes, missing, unsigned } = await fillAcord25(
+          account,
+          cert,
+          policies,
+          carriers,
+          await signatureFor(profile.id)
+        );
+        const path = `certificates/${account.id}/${cert.id}.pdf`;
+        await uploadData({
+          path,
+          data: new Blob([bytes as BlobPart], { type: "application/pdf" }),
+          options: { contentType: "application/pdf" },
+        }).result;
+        const { data, errors } = await client.models.Certificate.update({
+          id: cert.id,
+          s3Key: path,
+        });
+        // The PDF is in S3 either way, but without the s3Key on the record
+        // the Preview/Download buttons never appear — previously that failure
+        // was silent and the row just kept saying "Generate PDF".
+        if (errors?.length || !data) {
+          throw new Error(
+            errors?.[0]?.message ??
+              "The PDF was created but couldn't be attached to the certificate — try Regenerate."
+          );
+        }
+        setCerts((cs) => cs.map((c) => (c.id === cert.id ? data : c)));
+        const notes: string[] = [];
+        if (missing.length) {
+          notes.push(
+            `Generated, but these fields had no match in the template: ${missing.join(", ")}. ` +
+              "Use Settings → Inspect fields to extend the mapping."
+          );
+        }
+        if (unsigned) {
+          notes.push(
+            `The certificate went out UNSIGNED — ${unsigned}. Sign it by hand before sending it to the holder.`
+          );
+        }
+        // A note means the PDF exists but the user has to act on it: that is
+        // `run`'s warning arm, not a second success flag.
+        return notes.join(" ");
+      } catch (err) {
+        const msg = friendlyError(err, "unknown error");
+        // A classified template failure already explains itself and says where
+        // to go; anything else keeps the prefix naming what was being done.
+        // `run` re-runs friendlyError over this, which is a no-op for both
+        // shapes — neither matches a classifier once it has been prefixed.
+        throw new Error(
+          msg === TEMPLATE_MISSING_MESSAGE ? msg : `PDF generation failed: ${msg}`
         );
       }
-      if (unsigned) {
-        notes.push(
-          `The certificate went out UNSIGNED — ${unsigned}. Sign it by hand before sending it to the holder.`
-        );
-      }
-      if (notes.length) setGenNote(notes.join(" "));
-    } catch (err) {
-      const msg = friendlyError(err, "unknown error");
-      // A classified template failure already explains itself and says where
-      // to go; anything else keeps the prefix naming what was being done.
-      setError(
-        msg === TEMPLATE_MISSING_MESSAGE ? msg : `PDF generation failed: ${msg}`
-      );
-    } finally {
-      setGenerating(null);
-    }
+    }, { savedMessage: "Certificate PDF generated." });
+    setGenerating(null);
   }
 
   async function downloadPdf(cert: Certificate) {
@@ -821,7 +854,11 @@ function CertificatesTab({
             </div>
           )}
 
-          {genNote && <p className="small" style={{ color: "var(--amber)" }}>{genNote}</p>}
+          {genStatus.status.state !== "idle" && (
+            <p style={{ margin: "10px 0" }}>
+              <SaveStatus {...genStatus.status} />
+            </p>
+          )}
           {error && <p className="error-text">{error}</p>}
 
           {certs.length === 0 ? (

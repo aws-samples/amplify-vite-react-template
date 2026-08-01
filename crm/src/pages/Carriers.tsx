@@ -9,13 +9,19 @@ import {
 } from "../lib/client";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
+import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
 
 export default function Carriers() {
   const [carriers, setCarriers] = useState<Carrier[]>([]);
   const [guides, setGuides] = useState<AppetiteGuide[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const { form, setF } = useFormState({ name: "", appointed: true });
-  const [saving, setSaving] = useState(false);
+  // Persistent: a successful create navigates away, so what this is really
+  // for is the failure that used to be swallowed entirely.
+  const saveStatus = useSaveStatus();
+  const { form, setF } = useFormState(
+    { name: "", appointed: true },
+    { onEdit: saveStatus.markDirty }
+  );
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -37,13 +43,19 @@ export default function Carriers() {
 
   async function create() {
     if (!form.name.trim()) return;
-    setSaving(true);
-    const { data } = await client.models.Carrier.create({
-      name: form.name.trim(),
-      appointed: form.appointed,
-    });
-    setSaving(false);
-    if (data) navigate(`/carriers/${data.id}`);
+    await saveStatus.run(
+      async () => {
+        // `errors` used to be dropped: a rejected create just re-enabled the
+        // button, leaving no carrier and no explanation.
+        const { data, errors } = await client.models.Carrier.create({
+          name: form.name.trim(),
+          appointed: form.appointed,
+        });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        navigate(`/carriers/${data.id}`);
+      },
+      { errorMessage: "Couldn't create that carrier." }
+    );
   }
 
   return (
@@ -79,9 +91,14 @@ export default function Carriers() {
             </div>
           </div>
           <div className="form-actions">
-            <button className="primary" disabled={saving || !form.name.trim()} onClick={create}>
-              {saving ? "Creating…" : "Create carrier"}
+            <button
+              className="primary"
+              disabled={saveStatus.busy || !form.name.trim()}
+              onClick={create}
+            >
+              {saveStatus.busy ? "Creating…" : "Create carrier"}
             </button>
+            <SaveStatus {...saveStatus.status} />
           </div>
         </div>
       )}

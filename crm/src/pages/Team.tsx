@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { client, fmtDate, friendlyError, type UserProfile } from "../lib/client";
+import { client, fmtDate, type UserProfile } from "../lib/client";
 import SignatureManager from "../components/SignatureManager";
+import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
@@ -22,10 +22,14 @@ const NO_USERS: TeamUser[] = [];
  * so there's no check of its own here.
  */
 export default function Team({ profile }: { profile: UserProfile }) {
-  const { form, setF } = useFormState({ email: "", role: "STAFF" });
-  const [inviting, setInviting] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [inviteError, setInviteError] = useState("");
+  // The invite confirmation used to be a `notice` string nothing ever
+  // cleared — it sat over the form while you typed the next invitee's
+  // address. `markDirty` in `onEdit` is what retires it now.
+  const inviteStatus = useSaveStatus();
+  const { form, setF } = useFormState(
+    { email: "", role: "STAFF" },
+    { onEdit: inviteStatus.markDirty }
+  );
 
   const parse = (raw: unknown): Record<string, unknown> => {
     if (typeof raw === "string") {
@@ -72,30 +76,29 @@ export default function Team({ profile }: { profile: UserProfile }) {
   }
 
   async function invite() {
-    if (!form.email.trim()) return;
-    setInviting(true);
-    setNotice("");
-    setInviteError("");
-    try {
-      const { data, errors } = await client.mutations.inviteUser({
-        email: form.email.trim().toLowerCase(),
-        role: form.role,
-      });
-      if (errors?.length) throw new Error(errors[0].message);
-      const body = parse(data);
-      if (!body.ok) throw new Error(String(body.error ?? "Invite failed"));
-      setNotice(
-        `Invited ${form.email.trim().toLowerCase()} as ${form.role}. They'll get an email with the portal link — they sign in with a magic link, no password.`
-      );
-      // Not `reset()`: the baseline would put the role back to STAFF too, and
-      // inviting a second person to the same role is the common case.
-      setF("email", "");
-      reload();
-    } catch (err) {
-      setInviteError(friendlyError(err, "Invite failed"));
-    } finally {
-      setInviting(false);
-    }
+    const email = form.email.trim().toLowerCase();
+    if (!email) return;
+    await inviteStatus.run(
+      async () => {
+        const { data, errors } = await client.mutations.inviteUser({
+          email,
+          role: form.role,
+        });
+        if (errors?.length) throw new Error(errors[0].message);
+        const body = parse(data);
+        if (!body.ok) throw new Error(String(body.error ?? "Invite failed"));
+        // Not `reset()`: the baseline would put the role back to STAFF too, and
+        // inviting a second person to the same role is the common case. Its
+        // `onEdit` fires while the status is still "saving", which markDirty
+        // ignores — so clearing the field can't erase the confirmation.
+        setF("email", "");
+        reload();
+      },
+      {
+        savedMessage: `Invited ${email} as ${form.role}. They'll get an email with the portal link — they sign in with a magic link, no password.`,
+        errorMessage: "Invite failed",
+      }
+    );
   }
 
   const profileFor = (u: TeamUser) =>
@@ -148,19 +151,13 @@ export default function Team({ profile }: { profile: UserProfile }) {
         <div className="form-actions">
           <button
             className="primary"
-            disabled={inviting || !form.email.trim()}
+            disabled={inviteStatus.busy || !form.email.trim()}
             onClick={invite}
           >
-            {inviting ? "Inviting…" : "Send invite"}
+            {inviteStatus.busy ? "Inviting…" : "Send invite"}
           </button>
-          {notice && (
-            <span className="small" style={{ color: "var(--green)" }}>
-              {notice}
-            </span>
-          )}
-          {(inviteError || team.error) && (
-            <span className="error-text">{inviteError || team.error}</span>
-          )}
+          <SaveStatus {...inviteStatus.status} />
+          {team.error && <span className="error-text">{team.error}</span>}
         </div>
         <p className="muted small" style={{ marginBottom: 0 }}>
           Producers complete their licensing details during first sign-in.

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAsyncResource } from "../lib/useAsyncResource";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 import { useSort, SortTh } from "../lib/useSort";
 import {
   client,
@@ -77,7 +78,13 @@ export default function AccountMarketingTasks({
   completedByName: string;
 }) {
   const [showDone, setShowDone] = useState(false);
+  // Which row's button is disabled — per-row, and `busy` from the hook can't
+  // replace it: one panel-level flag would disable every row's button.
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Auto-clearing: both mutations move the row between the open and the
+  // completed table, so the row the message names is no longer where the
+  // user was looking and nothing else would ever retire it.
+  const saveStatus = useSaveStatus({ autoClearMs: 4000 });
   // Which account the settle pass has already run for. This used to be a
   // boolean reset by the caller's own effect immediately before `load()`;
   // the hook owns that effect now, so the guard carries the identity it is
@@ -132,27 +139,48 @@ export default function AccountMarketingTasks({
 
   async function markOutOfAppetite(t: MarketingTask) {
     setBusyId(t.id);
-    const { data } = await client.models.MarketingTask.update({
-      id: t.id,
-      status: "COMPLETE",
-      resolution: "OUT_OF_APPETITE",
-      completedAt: new Date().toISOString(),
-      completedBy: completedByName,
-    });
-    if (data) setTasks((ts) => ts.map((x) => (x.id === t.id ? data : x)));
+    await saveStatus.run(
+      async () => {
+        // `errors` used to be dropped: the row simply stayed open, which is
+        // exactly what it looks like when nothing was clicked.
+        const { data, errors } = await client.models.MarketingTask.update({
+          id: t.id,
+          status: "COMPLETE",
+          resolution: "OUT_OF_APPETITE",
+          completedAt: new Date().toISOString(),
+          completedBy: completedByName,
+        });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        setTasks((ts) => ts.map((x) => (x.id === t.id ? data : x)));
+      },
+      {
+        savedMessage: `${t.carrierName ?? "Task"} marked out of appetite.`,
+        errorMessage: "Couldn't close that task.",
+      }
+    );
     setBusyId(null);
   }
 
   async function reopen(t: MarketingTask) {
     setBusyId(t.id);
-    const { data } = await client.models.MarketingTask.update({
-      id: t.id,
-      status: "OPEN",
-      resolution: null,
-      completedAt: null,
-      completedBy: null,
-    });
-    if (data) setTasks((ts) => ts.map((x) => (x.id === t.id ? data : x)));
+    await saveStatus.run(
+      async () => {
+        // Same previously-dropped `errors` as above.
+        const { data, errors } = await client.models.MarketingTask.update({
+          id: t.id,
+          status: "OPEN",
+          resolution: null,
+          completedAt: null,
+          completedBy: null,
+        });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        setTasks((ts) => ts.map((x) => (x.id === t.id ? data : x)));
+      },
+      {
+        savedMessage: `${t.carrierName ?? "Task"} reopened.`,
+        errorMessage: "Couldn't reopen that task.",
+      }
+    );
     setBusyId(null);
   }
 
@@ -193,6 +221,9 @@ export default function AccountMarketingTasks({
           </p>
         </div>
         <div className="grow" />
+        {/* Closing and reopening are per-row actions with no per-row place to
+            report; this is the card's one status line. */}
+        <SaveStatus {...saveStatus.status} />
         {done.length > 0 && (
           <button className="link" onClick={() => setShowDone((v) => !v)}>
             {showDone ? "Hide" : `Show ${done.length} completed`}

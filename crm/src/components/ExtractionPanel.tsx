@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { client, fmtMoney, friendlyError, type Account } from "../lib/client";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
 /**
  * AI document extraction: kick off the Claude extraction over the account's
@@ -155,9 +156,10 @@ export default function ExtractionPanel({
   onChange: (a: Account) => void;
 }) {
   const [starting, setStarting] = useState(false);
-  const [applying, setApplying] = useState(false);
+  // `error` now belongs to `start()` alone; `apply()`'s whole lifecycle —
+  // in-flight, applied, failed — is the one state machine below.
   const [error, setError] = useState("");
-  const [applied, setApplied] = useState(false);
+  const applyStatus = useSaveStatus();
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [selectedBuildings, setSelectedBuildings] = useState<Record<number, boolean>>({});
   const [showReview, setShowReview] = useState(true);
@@ -194,8 +196,11 @@ export default function ExtractionPanel({
       if (bd && (!isEmpty(bd.label as never) || !isEmpty(bd.sqft as never))) b[i] = true;
     });
     setSelectedBuildings(b);
-    setApplied(false);
+    // A fresh extraction means the previous "Applied" no longer describes
+    // what is on screen — the same event the form setters signal elsewhere.
+    applyStatus.markDirty();
     setShowReview(true); // expand on a fresh extraction
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result]);
 
   async function start() {
@@ -217,53 +222,63 @@ export default function ExtractionPanel({
 
   async function apply() {
     if (!result) return;
-    setApplying(true);
-    setError("");
-    try {
-      const patch: Record<string, unknown> = {};
-      const noteLines: string[] = [];
-      for (const def of fieldDefsFor(account)) {
-        if (!selected[def.key]) continue;
-        const f = result[def.key] as ExtractedField | undefined;
-        if (!f || isEmpty(f.value)) continue;
-        const coerced = coerce(def, f.value);
-        if (coerced === undefined) continue;
-        if (def.kind === "patch") {
-          patch[def.key] = coerced;
-        } else {
-          const shown = def.display ? def.display(f.value) : String(coerced);
-          noteLines.push(`${def.label.replace(" → notes", "")}: ${shown}`);
+    await applyStatus.run(
+      async () => {
+        const patch: Record<string, unknown> = {};
+        const noteLines: string[] = [];
+        for (const def of fieldDefsFor(account)) {
+          if (!selected[def.key]) continue;
+          const f = result[def.key] as ExtractedField | undefined;
+          if (!f || isEmpty(f.value)) continue;
+          const coerced = coerce(def, f.value);
+          if (coerced === undefined) continue;
+          if (def.kind === "patch") {
+            patch[def.key] = coerced;
+          } else {
+            const shown = def.display ? def.display(f.value) : String(coerced);
+            noteLines.push(`${def.label.replace(" → notes", "")}: ${shown}`);
+          }
         }
-      }
-      if (noteLines.length) {
-        patch.notes = [account.notes, `[From documents] ${noteLines.join(" · ")}`]
-          .filter(Boolean)
-          .join("\n");
-      }
+        if (noteLines.length) {
+          patch.notes = [account.notes, `[From documents] ${noteLines.join(" · ")}`]
+            .filter(Boolean)
+            .join("\n");
+        }
 
-      const { data, errors } = await client.models.Account.update({
-        id: account.id,
-        ...patch,
-      });
-      if (errors?.length || !data) throw new Error(errors?.[0]?.message);
-
-      const buildings = (result.buildings ?? []).filter((_, i) => selectedBuildings[i]);
-      for (const [i, b] of buildings.entries()) {
-        const sqftNum = Math.round(Number(String(b.sqft ?? "").replace(/[^0-9.]/g, "")));
-        await client.models.Building.create({
-          accountId: account.id,
-          label: (b.label as string) || `Building ${i + 1}`,
-          sqft: Number.isFinite(sqftNum) && sqftNum > 0 ? sqftNum : undefined,
+        const { data, errors } = await client.models.Account.update({
+          id: account.id,
+          ...patch,
         });
-      }
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
 
-      onChange(data);
-      setApplied(true);
-    } catch (err) {
-      setError(friendlyError(err, "Apply failed"));
-    } finally {
-      setApplying(false);
-    }
+        const buildings = (result.buildings ?? []).filter((_, i) => selectedBuildings[i]);
+        // These `errors` used to be dropped entirely, so a building that
+        // failed to create reported the same green "Applied" as one that did.
+        // The account fields did land, so this is a partial success, not a
+        // failure: it comes back as `run`'s warning, not a throw.
+        let buildingFailures = 0;
+        for (const [i, b] of buildings.entries()) {
+          const sqftNum = Math.round(Number(String(b.sqft ?? "").replace(/[^0-9.]/g, "")));
+          const { data: made, errors: bErrors } = await client.models.Building.create({
+            accountId: account.id,
+            label: (b.label as string) || `Building ${i + 1}`,
+            sqft: Number.isFinite(sqftNum) && sqftNum > 0 ? sqftNum : undefined,
+          });
+          if (bErrors?.length || !made) buildingFailures++;
+        }
+
+        onChange(data);
+        return buildingFailures
+          ? `Fields applied — review the Overview tab. ${buildingFailures} building${
+              buildingFailures === 1 ? "" : "s"
+            } couldn't be created; add ${buildingFailures === 1 ? "it" : "them"} by hand under Property.`
+          : "";
+      },
+      {
+        savedMessage: "Applied — review the Overview tab.",
+        errorMessage: "Apply failed",
+      }
+    );
   }
 
   return (
@@ -396,16 +411,12 @@ export default function ExtractionPanel({
           </div>
 
           <div className="form-actions">
-            <button className="primary" disabled={applying} onClick={apply}>
-              {applying
+            <button className="primary" disabled={applyStatus.busy} onClick={apply}>
+              {applyStatus.busy
                 ? "Applying…"
                 : `Apply selected to ${account.stage === "CLIENT" ? "client" : "lead"}`}
             </button>
-            {applied && (
-              <span className="small" style={{ color: "var(--green)" }}>
-                Applied — review the Overview tab.
-              </span>
-            )}
+            <SaveStatus {...applyStatus.status} />
           </div>
           </>
           )}

@@ -4,6 +4,7 @@ import { client, friendlyError, type CrmDocument } from "../lib/client";
 import type { Schema } from "../../amplify/data/resource";
 import FilePreviewModal, { canPreview } from "./FilePreview";
 import FileButton from "./FileButton";
+import { SaveStatus, useSaveStatus } from "./SaveStatus";
 import { useSort, SortTh } from "../lib/useSort";
 
 type EntityType = Schema["DocumentEntityType"]["type"];
@@ -48,6 +49,9 @@ export default function DocumentsPanel({
   const [error, setError] = useState("");
   const [openDocId, setOpenDocId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // Auto-clearing: the row this confirmation names is gone from the table, so
+  // nothing on screen would ever go dirty and retire the message.
+  const delStatus = useSaveStatus({ autoClearMs: 4000 });
   const [previewDoc, setPreviewDoc] = useState<CrmDocument | null>(null);
   const [ocrSearch, setOcrSearch] = useState("");
   const [matchIdx, setMatchIdx] = useState(0);
@@ -109,10 +113,23 @@ export default function DocumentsPanel({
   }
 
   async function deleteDoc(doc: CrmDocument) {
-    if (doc.s3Key && doc.s3Key !== "pending") {
-      await remove({ path: doc.s3Key }).catch(() => {});
-    }
-    await client.models.Document.delete({ id: doc.id });
+    await delStatus.run(
+      async () => {
+        if (doc.s3Key && doc.s3Key !== "pending") {
+          await remove({ path: doc.s3Key }).catch(() => {});
+        }
+        // `errors` used to be dropped: the observeQuery subscription simply
+        // kept the row, which reads as "the Confirm delete button missed".
+        const { errors } = await client.models.Document.delete({ id: doc.id });
+        if (errors?.length) throw new Error(errors[0].message);
+      },
+      {
+        savedMessage: `"${doc.name}" deleted.`,
+        errorMessage: "Couldn't delete that document.",
+      }
+    );
+    // Unconditional, as before: the confirm/keep pair closes either way and
+    // the outcome is reported above.
     setConfirmDeleteId(null);
   }
 
@@ -191,6 +208,9 @@ export default function DocumentsPanel({
           />
         </div>
         {error && <span className="error-text">{error}</span>}
+        {/* Deletes are per-row with no per-row place to report; this is the
+            panel's one status line. */}
+        <SaveStatus {...delStatus.status} />
       </div>
 
       {docs.length === 0 ? (

@@ -11,6 +11,7 @@ import {
   type Carrier,
 } from "../lib/client";
 import DocumentsPanel from "../components/DocumentsPanel";
+import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
 import { useFormState } from "../lib/useFormState";
 
 export default function CarrierDetail() {
@@ -52,7 +53,10 @@ function CarrierForm({
   carrier: Carrier;
   onChange: (c: Carrier) => void;
 }) {
-  const { form, setF, saved, markSaved } = useFormState({
+  // `useSaveStatus` owns the confirmation; `useFormState`'s `saved` is left
+  // unread so there is exactly one answer to "did that save land".
+  const saveStatus = useSaveStatus();
+  const { form, setF } = useFormState({
     name: carrier.name,
     appointed: carrier.appointed,
     dateAppointed: carrier.dateAppointed ?? "",
@@ -73,9 +77,7 @@ function CarrierForm({
     commercialLines: carrier.commercialLines ?? false,
     personalLines: carrier.personalLines ?? false,
     notes: carrier.notes ?? "",
-  });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  }, { onEdit: saveStatus.markDirty });
 
   function toggleState(s: string) {
     setF("states", (ss) =>
@@ -84,44 +86,42 @@ function CarrierForm({
   }
 
   async function save() {
-    setSaving(true);
-    setError("");
-    const { data, errors } = await client.models.Carrier.update({
-      id: carrier.id,
-      name: form.name.trim() || carrier.name,
-      appointed: form.appointed,
-      dateAppointed: form.dateAppointed || null,
-      primaryContactName: form.primaryContactName.trim() || null,
-      primaryContactEmail: form.primaryContactEmail.trim() || null,
-      primaryContactPhone: form.primaryContactPhone.trim() || null,
-      primaryUnderwriterName: form.primaryUnderwriterName.trim() || null,
-      primaryUnderwriterEmail: form.primaryUnderwriterEmail.trim() || null,
-      primaryUnderwriterPhone: form.primaryUnderwriterPhone.trim() || null,
-      states: form.states,
-      naicCode: form.naicCode.trim() || null,
-      standardCommissionPct: form.standardCommissionPct
-        ? Number(form.standardCommissionPct)
-        : null,
-      annualMinimumPremium: form.annualMinimumPremium
-        ? Number(form.annualMinimumPremium)
-        : null,
-      profitSharingPremiumThreshold: form.profitSharingPremiumThreshold
-        ? Number(form.profitSharingPremiumThreshold)
-        : null,
-      profitSharingLossRatioThreshold: form.profitSharingLossRatioThreshold
-        ? Number(form.profitSharingLossRatioThreshold)
-        : null,
-      commercialLines: form.commercialLines,
-      personalLines: form.personalLines,
-      notes: form.notes.trim() || null,
-    });
-    setSaving(false);
-    if (errors?.length || !data) {
-      setError(friendlyError(errors?.[0]?.message, "Save failed"));
-      return;
-    }
-    onChange(data);
-    markSaved();
+    await saveStatus.run(
+      async () => {
+        const { data, errors } = await client.models.Carrier.update({
+          id: carrier.id,
+          name: form.name.trim() || carrier.name,
+          appointed: form.appointed,
+          dateAppointed: form.dateAppointed || null,
+          primaryContactName: form.primaryContactName.trim() || null,
+          primaryContactEmail: form.primaryContactEmail.trim() || null,
+          primaryContactPhone: form.primaryContactPhone.trim() || null,
+          primaryUnderwriterName: form.primaryUnderwriterName.trim() || null,
+          primaryUnderwriterEmail: form.primaryUnderwriterEmail.trim() || null,
+          primaryUnderwriterPhone: form.primaryUnderwriterPhone.trim() || null,
+          states: form.states,
+          naicCode: form.naicCode.trim() || null,
+          standardCommissionPct: form.standardCommissionPct
+            ? Number(form.standardCommissionPct)
+            : null,
+          annualMinimumPremium: form.annualMinimumPremium
+            ? Number(form.annualMinimumPremium)
+            : null,
+          profitSharingPremiumThreshold: form.profitSharingPremiumThreshold
+            ? Number(form.profitSharingPremiumThreshold)
+            : null,
+          profitSharingLossRatioThreshold: form.profitSharingLossRatioThreshold
+            ? Number(form.profitSharingLossRatioThreshold)
+            : null,
+          commercialLines: form.commercialLines,
+          personalLines: form.personalLines,
+          notes: form.notes.trim() || null,
+        });
+        if (errors?.length || !data) throw new Error(errors?.[0]?.message);
+        onChange(data);
+      },
+      { errorMessage: "Save failed" }
+    );
   }
 
   return (
@@ -293,11 +293,10 @@ function CarrierForm({
         </div>
       </div>
       <div className="form-actions">
-        <button className="primary" disabled={saving} onClick={save}>
-          {saving ? "Saving…" : "Save changes"}
+        <button className="primary" disabled={saveStatus.busy} onClick={save}>
+          {saveStatus.busy ? "Saving…" : "Save changes"}
         </button>
-        {saved && <span className="small" style={{ color: "var(--green)" }}>Saved.</span>}
-        {error && <span className="error-text">{error}</span>}
+        <SaveStatus {...saveStatus.status} />
       </div>
     </div>
   );
