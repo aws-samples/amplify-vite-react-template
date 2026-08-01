@@ -103,12 +103,6 @@ export function firstWeekdayOf(monthKey: string): string {
   return `${monthKey}-01`;
 }
 
-/** The customer-facing cadence sentence for a seasonal plan — the same words
- *  the CRM mirror renders, so offer, portal, and office never disagree. */
-export function seasonalCadenceCopy(): string {
-  return "billed monthly year-round · treatments monthly April–October";
-}
-
 /** Whether a plan name is a launch seasonal plan (mosquito / mosquito+tick).
  *  Used to stamp facts at enrollment when the offer carries no explicit flag —
  *  matching is deliberately generous on wording, never on behavior. */
