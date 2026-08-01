@@ -8,7 +8,7 @@
  * plain relative import work from an Astro page, a React island, a Vite SPA
  * module, and a Vitest test without any build-system plumbing.
  *
- *   from crm:  import { AGENCY } from "../../shared/agency";        // crm/src/lib/*
+ *   from crm:  import { AGENCY } from "../../../shared/agency";     // crm/src/lib/*
  *   from web:  import { AGENCY } from "../../shared/agency";        // web/src/*
  *
  * ─ Stored vs. derived ────────────────────────────────────────────────────────

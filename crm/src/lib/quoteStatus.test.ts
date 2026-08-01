@@ -133,8 +133,9 @@ describe("SELECTABLE_QUOTE_STATUSES", () => {
   });
 
   it("reproduces the two hand-written superset copies", () => {
-    // CoverageForm.tsx:19 QUOTE_STATUSES, and QuotesPanel.tsx:184's
-    // [...OPEN_STATUSES, "DECLINED", "LOST"] — same set, either order.
+    // The two lists this replaced: CoverageForm's `QUOTE_STATUSES` and
+    // QuotesPanel's `[...OPEN_STATUSES, "DECLINED", "LOST"]` — same set,
+    // either order. Kept as a regression lock on the migrated values.
     const coverageForm = [
       "DRAFT",
       "SUBMITTED",

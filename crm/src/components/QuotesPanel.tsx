@@ -14,8 +14,10 @@ import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import CoverageForm from "./CoverageForm";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
-
-const OPEN_STATUSES = ["DRAFT", "SUBMITTED", "QUOTED", "PRESENTED"] as const;
+import {
+  isOpenQuoteStatus,
+  SELECTABLE_QUOTE_STATUSES,
+} from "../lib/quoteStatus";
 
 /** Commission is baked into the premium — the $ figure is the agency's cut,
  * never an addition on top. */
@@ -218,7 +220,7 @@ export default function QuotesPanel({
                     >
                       Edit
                     </button>
-                    {(OPEN_STATUSES as readonly string[]).includes(qt.status) && (
+                    {isOpenQuoteStatus(qt.status) && (
                       <>
                         <select
                           className="small"
@@ -227,8 +229,7 @@ export default function QuotesPanel({
                             setStatus(qt, e.target.value as Quote["status"])
                           }
                         >
-                          {[...OPEN_STATUSES, "DECLINED", "LOST"]
-                            .slice()
+                          {[...SELECTABLE_QUOTE_STATUSES]
                             .sort((a, b) => a.localeCompare(b))
                             .map((s) => (
                               <option key={s}>{s}</option>

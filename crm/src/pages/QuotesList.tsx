@@ -10,8 +10,7 @@ import {
 } from "../lib/client";
 import { Badge, statusBadge, QUOTE_STATUS_BADGE } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
-
-const OPEN = ["DRAFT", "SUBMITTED", "QUOTED", "PRESENTED"];
+import { isOpenQuoteStatus } from "../lib/quoteStatus";
 
 export default function QuotesList() {
   const [quotes, setQuotes] = useState<Quote[]>([]);
@@ -35,7 +34,9 @@ export default function QuotesList() {
     [carriers]
   );
 
-  const visible = openOnly ? quotes.filter((q) => OPEN.includes(q.status)) : quotes;
+  const visible = openOnly
+    ? quotes.filter((q) => isOpenQuoteStatus(q.status))
+    : quotes;
 
   const { sorted, sortKey, dir, toggle } = useSort(
     visible,

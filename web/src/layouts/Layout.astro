@@ -2,6 +2,7 @@
 import Navbar from "../components/Navbar.astro";
 import Footer from "../components/Footer.astro";
 import "../styles/global.css";
+import { AGENCY, AGENCY_FMT } from "../../../shared/agency";
 
 interface Props {
   title: string;
@@ -28,14 +29,14 @@ const baseSchema = {
   "@type": "InsuranceAgency",
   name: "HOA Insurance Agency",
   url: siteUrl,
-  telephone: "+1-508-233-2261",
-  email: "insurance@ProtectMyHOA.com",
+  telephone: AGENCY_FMT.phoneIntl,
+  email: AGENCY.email,
   address: {
     "@type": "PostalAddress",
-    streetAddress: "420 Lakeside Ave, Suite 202",
-    addressLocality: "Marlborough",
-    addressRegion: "MA",
-    postalCode: "01752",
+    streetAddress: AGENCY.addressLine1,
+    addressLocality: AGENCY.city,
+    addressRegion: AGENCY.state,
+    postalCode: AGENCY.zip,
     addressCountry: "US",
   },
   areaServed: [

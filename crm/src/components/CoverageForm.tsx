@@ -8,6 +8,7 @@ import {
   type Quote,
 } from "../lib/client";
 import { useFormState } from "../lib/useFormState";
+import { SELECTABLE_QUOTE_STATUSES } from "../lib/quoteStatus";
 
 /**
  * Shared create/edit form for quotes and policies.
@@ -17,15 +18,6 @@ import { useFormState } from "../lib/useFormState";
  * term is added. Quotes can be created here; policies only ever come into
  * existence by binding a quote, so policy mode is edit-only.
  */
-
-const QUOTE_STATUSES = [
-  "DRAFT",
-  "SUBMITTED",
-  "QUOTED",
-  "PRESENTED",
-  "DECLINED",
-  "LOST",
-] as const;
 
 const POLICY_STATUSES = [
   "ACTIVE",
@@ -190,7 +182,7 @@ export default function CoverageForm({
     ? [...POLICY_STATUSES]
     : existing?.status === "BOUND"
       ? ["BOUND"]
-      : [...QUOTE_STATUSES];
+      : [...SELECTABLE_QUOTE_STATUSES];
 
   return (
     <div className="card" style={{ background: "#f8fafc" }}>

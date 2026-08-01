@@ -1,14 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AGENCY, AGENCY_FMT } from "../../../shared/agency";
+import { AGENCY as CRM_AGENCY } from "../lib/agency";
+import * as WEB_CONSTANTS from "../../../web/src/constants";
 
 /**
  * Tests for the repo-root shared agency module (`shared/agency.ts`).
  *
  * They live here because Vitest is configured in `crm` only, and `crm`'s
- * `include: ["src"]` is what pulls the shared module into `tsc -b`. Nothing in
- * `crm` imports the shared module yet — Wave 4 does the migration — so this
- * file is currently its sole consumer and its sole typecheck coverage.
+ * `include: ["src"]` is what pulls the shared module into `tsc -b`. Wave 4
+ * migrated both apps onto it, so the two consumer modules are imported above
+ * and their exported values — not just their source text — are checked below.
  */
 
 const read = (relToThisFile: string) =>
@@ -164,15 +166,31 @@ describe("shared/agency — derived shapes", () => {
   });
 });
 
-describe("shared/agency — drift check against the un-migrated files", () => {
+describe("shared/agency — drift check against the consumer files", () => {
   it("agrees with every literal still in crm/src/lib/agency.ts", () => {
+    // Source-text half: nothing may be hand-typed back in and diverge.
     const literals = parseObjectStrings(read(CRM_AGENCY_PATH));
     expect(findDrift(literals, CRM_CANONICAL)).toEqual([]);
+    // Value half: the module's real export, whatever route it took to get
+    // there. Post-migration this is what carries the weight — the literal map
+    // above is empty, so on its own it would prove nothing.
+    expect(Object.keys(CRM_AGENCY).sort()).toEqual(
+      Object.keys(CRM_CANONICAL).sort()
+    );
+    for (const [name, expected] of Object.entries(CRM_CANONICAL)) {
+      expect(CRM_AGENCY[name as keyof typeof CRM_AGENCY]).toBe(expected);
+    }
   });
 
   it("agrees with every literal still in web/src/constants.ts", () => {
     const literals = parseExportedStrings(read(WEB_CONSTANTS_PATH));
     expect(findDrift(literals, WEB_CANONICAL)).toEqual([]);
+    // Same two halves as above: the seven agency-derived exports must hold the
+    // canonical value at runtime, not merely fail to contradict it in source.
+    for (const [name, expected] of Object.entries(WEB_CANONICAL)) {
+      expect(WEB_CONSTANTS).toHaveProperty(name);
+      expect(WEB_CONSTANTS[name as keyof typeof WEB_CONSTANTS]).toBe(expected);
+    }
   });
 
   it("is still a real check — each file holds the literals or imports shared", () => {

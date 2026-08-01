@@ -2,6 +2,7 @@
 import { InstantAssessment } from "../../components/InstantAssessment";
 import { landingPages } from "../../data/landing-pages";
 import "../../styles/quote.css";
+import { AGENCY, AGENCY_FMT } from "../../../../shared/agency";
 
 export function getStaticPaths() {
   // Generic page (no slug)
@@ -81,14 +82,14 @@ const { page } = Astro.props;
       "@type": "InsuranceAgency",
       name: "HOA Insurance Agency",
       url: "https://www.protectmyhoa.com",
-      telephone: "+1-508-233-2261",
-      email: "insurance@ProtectMyHOA.com",
+      telephone: AGENCY_FMT.phoneIntl,
+      email: AGENCY.email,
       address: {
         "@type": "PostalAddress",
-        streetAddress: "420 Lakeside Ave, Suite 202",
-        addressLocality: "Marlborough",
-        addressRegion: "MA",
-        postalCode: "01752",
+        streetAddress: AGENCY.addressLine1,
+        addressLocality: AGENCY.city,
+        addressRegion: AGENCY.state,
+        postalCode: AGENCY.zip,
         addressCountry: "US",
       },
     })} />

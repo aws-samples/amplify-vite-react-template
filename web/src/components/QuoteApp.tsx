@@ -10,6 +10,7 @@ import {
   type CSSProperties,
 } from "react";
 import { submitCrmLead, type CrmLeadInput } from "../lib/crmLead";
+import { FORMSUBMIT_URL } from "../constants";
 
 /* ──────────────────────────────────────────────────────────
    PALETTES — dark (night) + light (day)
@@ -532,8 +533,6 @@ function getFlow(role: string | null, data: FormData): string[] {
    Uses FormSubmit (formsubmit.co) — no API key required.
    First send to a new address triggers a confirmation email.
    ────────────────────────────────────────────────────────── */
-const SUBMIT_TO = "insurance@protectmyhoa.com";
-const SUBMIT_URL = `https://formsubmit.co/ajax/${SUBMIT_TO}`;
 
 const ROLE_LABELS: Record<string, string> = {
   board: "Board Member / Trustee",
@@ -685,7 +684,7 @@ function buildCrmLead(data: FormData, agentName: string): CrmLeadInput {
 
 async function sendQuoteEmail(data: FormData, agentName: string): Promise<void> {
   const payload = buildSubmission(data, agentName);
-  const res = await fetch(SUBMIT_URL, {
+  const res = await fetch(FORMSUBMIT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

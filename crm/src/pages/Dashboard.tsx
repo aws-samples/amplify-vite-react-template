@@ -19,6 +19,7 @@ import {
   RENEWAL_HORIZON_SCALE,
 } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
+import { openQuoteStatusFilter } from "../lib/quoteStatus";
 
 export default function Dashboard() {
   const [leads, setLeads] = useState<Account[]>([]);
@@ -38,14 +39,7 @@ export default function Dashboard() {
     ).then((data) => setClients(data));
     listAllPages((nextToken) =>
       client.models.Quote.list({
-        filter: {
-          or: [
-            { status: { eq: "DRAFT" } },
-            { status: { eq: "SUBMITTED" } },
-            { status: { eq: "QUOTED" } },
-            { status: { eq: "PRESENTED" } },
-          ],
-        },
+        filter: openQuoteStatusFilter(),
         nextToken,
       })
     ).then((data) => setOpenQuotes(data));

@@ -1,11 +1,13 @@
-export const PHONE = "508-233-2261";
-export const PHONE_HREF = "tel:+15082332261";
-export const EMAIL = "insurance@ProtectMyHOA.com";
-export const EMAIL_HREF = "mailto:insurance@ProtectMyHOA.com";
-export const ADDRESS_LINE1 = "420 Lakeside Ave, Suite 202";
-export const ADDRESS_LINE2 = "Marlborough, MA 01752";
+import { AGENCY, AGENCY_FMT } from "../../shared/agency";
+
+export const PHONE = AGENCY.phone;
+export const PHONE_HREF = AGENCY_FMT.phoneHref;
+export const EMAIL = AGENCY.email;
+export const EMAIL_HREF = AGENCY_FMT.emailHref;
+export const ADDRESS_LINE1 = AGENCY.addressLine1;
+export const ADDRESS_LINE2 = AGENCY_FMT.addressLine2;
 export const QUOTE_URL = "/quote";
-export const FORMSUBMIT_URL = "https://formsubmit.co/ajax/insurance@protectmyhoa.com";
+export const FORMSUBMIT_URL = AGENCY_FMT.formsubmitUrl;
 
 export const SOCIAL = {
   instagram: "https://www.instagram.com/hoainsuranceagency",

@@ -106,9 +106,10 @@ export const CLOSED_QUOTE_STATUSES: readonly ClosedQuoteStatus[] =
   Object.freeze(ALL.filter(isClosedQuoteStatus));
 
 /**
- * Statuses a human may pick. This is the list `CoverageForm` calls
- * `QUOTE_STATUSES` and `QuotesPanel` spells `[...OPEN_STATUSES, "DECLINED",
- * "LOST"]` — a superset of the open set, and deliberately not the same list.
+ * Statuses a human may pick. This is the list `CoverageForm` used to call
+ * `QUOTE_STATUSES` and `QuotesPanel` used to spell `[...OPEN_STATUSES,
+ * "DECLINED", "LOST"]` — a superset of the open set, and deliberately not the
+ * same list. Both now read it from here.
  */
 export const SELECTABLE_QUOTE_STATUSES: readonly SelectableQuoteStatus[] =
   Object.freeze(ALL.filter(isSelectableQuoteStatus));
