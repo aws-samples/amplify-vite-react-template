@@ -52,28 +52,28 @@ describe("dueBasis", () => {
 
 describe("agingBucketForDays — boundary days", () => {
   it("is current at and before the due date", () => {
-    expect(agingBucketForDays(-5)).toBe("current");
-    expect(agingBucketForDays(0)).toBe("current");
+    expect(agingBucketForDays(-5)).toBe("CURRENT");
+    expect(agingBucketForDays(0)).toBe("CURRENT");
   });
 
   it("opens 1-30 on the first day past due and holds it through day 30", () => {
-    expect(agingBucketForDays(1)).toBe("1-30");
-    expect(agingBucketForDays(30)).toBe("1-30");
+    expect(agingBucketForDays(1)).toBe("D1_30");
+    expect(agingBucketForDays(30)).toBe("D1_30");
   });
 
   it("opens 31-60 on day 31 and holds it through day 60", () => {
-    expect(agingBucketForDays(31)).toBe("31-60");
-    expect(agingBucketForDays(60)).toBe("31-60");
+    expect(agingBucketForDays(31)).toBe("D31_60");
+    expect(agingBucketForDays(60)).toBe("D31_60");
   });
 
   it("opens 61-90 on day 61 and holds it through day 90", () => {
-    expect(agingBucketForDays(61)).toBe("61-90");
-    expect(agingBucketForDays(90)).toBe("61-90");
+    expect(agingBucketForDays(61)).toBe("D61_90");
+    expect(agingBucketForDays(90)).toBe("D61_90");
   });
 
   it("opens 90+ only past day 90", () => {
-    expect(agingBucketForDays(91)).toBe("90+");
-    expect(agingBucketForDays(365)).toBe("90+");
+    expect(agingBucketForDays(91)).toBe("D90_PLUS");
+    expect(agingBucketForDays(365)).toBe("D90_PLUS");
   });
 });
 
@@ -81,7 +81,7 @@ describe("daysPastDue / agingBucket", () => {
   it("ages from the due date", () => {
     const inv: AgingInvoice = { amountCents: 100, status: "OPEN", dueDate: "2026-06-17" };
     expect(daysPastDue(inv, TODAY)).toBe(30);
-    expect(agingBucket(inv, TODAY)).toBe("1-30");
+    expect(agingBucket(inv, TODAY)).toBe("D1_30");
   });
 
   it("ages from the issue date when there is no due date", () => {
@@ -91,13 +91,13 @@ describe("daysPastDue / agingBucket", () => {
       issuedAt: "2026-05-17T09:00:00Z",
     };
     expect(daysPastDue(inv, TODAY)).toBe(61);
-    expect(agingBucket(inv, TODAY)).toBe("61-90");
+    expect(agingBucket(inv, TODAY)).toBe("D61_90");
   });
 
   it("treats a future due date as current", () => {
     const inv: AgingInvoice = { amountCents: 100, status: "OPEN", dueDate: "2026-08-01" };
     expect(daysPastDue(inv, TODAY)).toBeLessThan(0);
-    expect(agingBucket(inv, TODAY)).toBe("current");
+    expect(agingBucket(inv, TODAY)).toBe("CURRENT");
   });
 });
 
@@ -119,17 +119,17 @@ describe("agingSummary", () => {
 
   it("drops each receivable into the right bucket", () => {
     const s = agingSummary(invoices, TODAY);
-    expect(s.buckets.current).toEqual({ totalCents: 10000, count: 1 });
-    expect(s.buckets["1-30"]).toEqual({ totalCents: 20000, count: 1 });
-    expect(s.buckets["31-60"]).toEqual({ totalCents: 30000, count: 1 });
-    expect(s.buckets["61-90"]).toEqual({ totalCents: 0, count: 0 });
-    expect(s.buckets["90+"]).toEqual({ totalCents: 40000, count: 1 });
+    expect(s.buckets.CURRENT).toEqual({ totalCents: 10000, count: 1 });
+    expect(s.buckets.D1_30).toEqual({ totalCents: 20000, count: 1 });
+    expect(s.buckets.D31_60).toEqual({ totalCents: 30000, count: 1 });
+    expect(s.buckets.D61_90).toEqual({ totalCents: 0, count: 0 });
+    expect(s.buckets.D90_PLUS).toEqual({ totalCents: 40000, count: 1 });
   });
 
   it("is all zeros for an empty ledger", () => {
     const s = agingSummary([], TODAY);
     expect(s.totalCents).toBe(0);
     expect(s.count).toBe(0);
-    expect(s.buckets.current).toEqual({ totalCents: 0, count: 0 });
+    expect(s.buckets.CURRENT).toEqual({ totalCents: 0, count: 0 });
   });
 });

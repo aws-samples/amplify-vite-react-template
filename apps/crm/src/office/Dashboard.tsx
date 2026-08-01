@@ -547,7 +547,7 @@ export default function Dashboard() {
                 }`}
                 value={money(aging.buckets[b].totalCents)}
                 tone={
-                  aging.buckets[b].totalCents > 0 && b !== "current"
+                  aging.buckets[b].totalCents > 0 && b !== "CURRENT"
                     ? bucketTone(b)
                     : undefined
                 }
@@ -867,11 +867,11 @@ function DrillPanel({
 /** Older receivable is louder: the money least likely to ever arrive. */
 function bucketTone(b: AgingBucket): BadgeTone {
   switch (b) {
-    case "61-90":
-    case "90+":
+    case "D61_90":
+    case "D90_PLUS":
       return "danger";
-    case "31-60":
-    case "1-30":
+    case "D31_60":
+    case "D1_30":
       return "warn";
     default:
       return "info";

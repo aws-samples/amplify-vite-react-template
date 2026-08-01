@@ -1,54 +1,32 @@
 /**
  * AR aging buckets for the office Dashboard.
  *
- * A pure module because these are the numbers the business reads to decide how
- * bad its receivables are, and they must agree — to the dollar — with the
- * backend's shared/recovery.ts. The bucket boundaries below are the contract:
- * change them here and you have to change them there, or the Dashboard and any
- * server-side aging report drift apart. Boundaries are pinned by aging.test.ts
- * rather than by a screenshot of the Dashboard.
- *
- * Aging is measured from an invoice's dueDate, falling back to issuedAt when an
- * invoice predates due dates or never got one. "Days past due" is whole days
- * elapsed since that basis date; anything not yet due is `current`.
+ * The contract — bucket boundaries, the dueDate-falling-back-to-issuedAt
+ * basis rule, whole-day UTC arithmetic — lives in the backend's
+ * shared/agingMath.ts (a pure leaf, value-imported), so the Dashboard and
+ * every server-side aging report agree to the dollar by construction. What
+ * stays here is the CRM's shape of it: invoice-first wrappers that take an
+ * explicit `today` (YYYY-MM-DD, the caller's Eastern wall-clock day — the
+ * server ages against UTC-now instead, a deliberate divergence), plus the
+ * receivable filter and the Dashboard's bucket summary.
  */
 
-export type AgingBucket = "current" | "1-30" | "31-60" | "61-90" | "90+";
+import {
+  AGING_BUCKET_ORDER,
+  agingBucketForDays,
+  daysBetween,
+  dueBasis as sharedDueBasis,
+  type AgingBucket,
+} from "../../../web/amplify/functions/shared/agingMath";
 
-export const AGING_BUCKETS: readonly AgingBucket[] = [
-  "current",
-  "1-30",
-  "31-60",
-  "61-90",
-  "90+",
-] as const;
-
-export const AGING_BUCKET_LABEL: Record<AgingBucket, string> = {
-  current: "Current",
-  "1-30": "1–30 days",
-  "31-60": "31–60 days",
-  "61-90": "61–90 days",
-  "90+": "90+ days",
-};
-
-/** The date portion (YYYY-MM-DD) of an ISO date or datetime string. */
-export function toYmd(iso: string): string {
-  return iso.slice(0, 10);
-}
-
-function ymdToUTC(ymd: string): number {
-  const [y, m, d] = ymd.split("-").map(Number);
-  return Date.UTC(y, (m ?? 1) - 1, d ?? 1);
-}
-
-/**
- * Whole days from `fromYmd` to `toYmd`, positive when `toYmd` is later. Both
- * are YYYY-MM-DD; the diff is taken in UTC so a DST change never adds or drops
- * a day.
- */
-export function daysBetween(fromYmd: string, toYmd: string): number {
-  return Math.round((ymdToUTC(toYmd) - ymdToUTC(fromYmd)) / 86_400_000);
-}
+export {
+  AGING_BUCKET_LABEL,
+  AGING_BUCKET_ORDER as AGING_BUCKETS,
+  agingBucketForDays,
+  daysBetween,
+  toYmd,
+} from "../../../web/amplify/functions/shared/agingMath";
+export type { AgingBucket } from "../../../web/amplify/functions/shared/agingMath";
 
 export type AgingInvoice = {
   amountCents: number;
@@ -57,14 +35,9 @@ export type AgingInvoice = {
   issuedAt?: string | null;
 };
 
-/**
- * The date an invoice's clock runs from: its due date, or the day it was
- * issued if it has no due date. Null when neither is known (nothing to age).
- */
+/** The shared basis rule (due date, else issue date), typed for CRM rows. */
 export function dueBasis(inv: AgingInvoice): string | null {
-  if (inv.dueDate) return toYmd(inv.dueDate);
-  if (inv.issuedAt) return toYmd(inv.issuedAt);
-  return null;
+  return sharedDueBasis(inv);
 }
 
 /** Whole days past due as of `today` (YYYY-MM-DD). Not-yet-due is <= 0. */
@@ -72,22 +45,6 @@ export function daysPastDue(inv: AgingInvoice, today: string): number {
   const basis = dueBasis(inv);
   if (!basis) return 0;
   return daysBetween(basis, today);
-}
-
-/**
- * Which aging bucket a given days-past-due lands in. The boundaries:
- *   <= 0  current (not yet due)
- *   1–30  1-30
- *   31–60 31-60
- *   61–90 61-90   (90 days past due is still 61-90, not 90+)
- *   > 90  90+
- */
-export function agingBucketForDays(days: number): AgingBucket {
-  if (days <= 0) return "current";
-  if (days <= 30) return "1-30";
-  if (days <= 60) return "31-60";
-  if (days <= 90) return "61-90";
-  return "90+";
 }
 
 /** The aging bucket for an invoice as of `today`. */
@@ -109,13 +66,9 @@ export type AgingSummary = {
 };
 
 function emptyBuckets(): Record<AgingBucket, AgingBucketTotal> {
-  return {
-    current: { totalCents: 0, count: 0 },
-    "1-30": { totalCents: 0, count: 0 },
-    "31-60": { totalCents: 0, count: 0 },
-    "61-90": { totalCents: 0, count: 0 },
-    "90+": { totalCents: 0, count: 0 },
-  };
+  return Object.fromEntries(
+    AGING_BUCKET_ORDER.map((b) => [b, { totalCents: 0, count: 0 }])
+  ) as Record<AgingBucket, AgingBucketTotal>;
 }
 
 /**

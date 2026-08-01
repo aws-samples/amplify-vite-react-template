@@ -4,6 +4,7 @@ import {
   LEAD_LOST_REASONS as LEAD_LOST_REASON_CODES,
   LEAD_LOST_REASON_LABEL,
 } from "../../../web/amplify/functions/shared/leadReasons";
+import type { InvoiceTerms } from "../../../web/amplify/functions/shared/agingMath";
 
 /**
  * Typed Amplify Data client against the shared backend schema (type-only
@@ -354,7 +355,7 @@ export function recordNoticeAlternateDelivery(input: {
  * HOA/commercial segment), the dunning cadence fields the webhook stamps as it
  * retries a failed charge, and a single recovery owner.
  */
-export type InvoiceTerms = "DUE_ON_RECEIPT" | "NET_15" | "NET_30";
+export type { InvoiceTerms } from "../../../web/amplify/functions/shared/agingMath";
 
 export type Invoice = Schema["Invoice"]["type"] & {
   dueDate?: string | null;
@@ -685,19 +686,10 @@ export function recordOfflinePayment(input: {
   ).recordOfflinePayment(input);
 }
 
-/** Compute the due date a set of terms produces from an issue date (client
- * mirror of the backend's dueDateForTerms — for display only; the server is
- * authoritative). YYYY-MM-DD in, YYYY-MM-DD out. */
-export function dueDateForTerms(terms: InvoiceTerms, issuedYmd: string): string {
-  const days = terms === "NET_15" ? 15 : terms === "NET_30" ? 30 : 0;
-  return addDaysUTC(issuedYmd, days);
-}
-
-function addDaysUTC(ymd: string, days: number): string {
-  const d = new Date(`${ymd}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
+/** The due date a set of terms produces from an issue date — the backend's
+ * own rule (shared/agingMath.ts, a pure leaf), so the date shown before
+ * saving is the date the server will stamp. YYYY-MM-DD in, YYYY-MM-DD out. */
+export { dueDateForTerms } from "../../../web/amplify/functions/shared/agingMath";
 
 /**
  * Email the customer a link to pay their outstanding balance (R52). Uses the
