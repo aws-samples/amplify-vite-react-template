@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   client,
   fmtDate,
+  friendlyError,
   licenseHealth,
   LICENSE_CLASS_LABELS,
   LICENSE_STATUS_LABELS,
@@ -787,7 +788,7 @@ function LicenseForm({
       : await client.models.License.create(payload);
     setSaving(false);
     if (errors?.length || !data) {
-      setError(errors?.[0]?.message ?? "Save failed");
+      setError(friendlyError(errors?.[0]?.message, "Save failed"));
       return;
     }
     onSaved(data);

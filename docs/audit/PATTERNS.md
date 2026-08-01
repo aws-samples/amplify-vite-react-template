@@ -209,3 +209,78 @@ right-hand operand is a server-assigned `createdAt`.
 
 The rule is still written twice. Extracting it into one importable module is
 tracked at [INVENTORY.md §5.12](INVENTORY.md#512-shared-business-rule-frontend--lambda).
+
+---
+
+## 7. Authorization derives from the Cognito group, never a database row
+
+**Rule.** A privilege check reads `cognito:groups` off the ID token. It never
+reads `UserProfile.role`. `role` is a display mirror of the group — writing it
+grants nothing, and nothing may gate on it.
+
+The two were independent stores for the life of the app: `inviteUser` wrote the
+group, Onboarding wrote the role, nothing reconciled them. A user could hold
+`role: "ADMIN"` with no group (sees every admin screen, every mutation 401s) or
+the reverse (full team-admin power, tab hidden). And `role` sat under
+`allow.authenticated()`, so picking `"ADMIN"` from a dropdown — or a one-line
+`update` from the browser console — was the whole escalation.
+
+**Canonical.** [`crm/src/lib/auth.ts`](../../crm/src/lib/auth.ts) — `fetchUserGroups()`
+reads the claim, `isAdminGroup`/`roleFromGroups` derive from it, `AdminContext`
++ `useIsAdmin()` distribute it.
+
+Two properties that are load-bearing, not incidental:
+
+- The claim is **omitted entirely** when a user is in no group — it is
+  `undefined`, not `[]`. Narrow with `Array.isArray`, never index it directly.
+- Groups resolve in `ProfileGate` inside the *existing* `Promise.all`, behind
+  the *existing* loading flag. Admin status is known before `Shell` first
+  paints. Resolving it later makes every gated control flash hidden→shown.
+
+**Example** — `crm/src/pages/Settings.tsx`:
+
+```tsx
+const isAdmin = useIsAdmin();   // was: profile.role === "ADMIN"
+```
+
+**Corollary — a UI gate is not a control.** Every gate here was cosmetic until
+§8 landed. `DeleteLeadZone` returning `null` removes a button, not the ability
+to cascade-delete a lead through the API.
+
+---
+
+## 8. Per-model authorization, and what Lambdas actually bypass
+
+**Rule.** A model that needs more than "any signed-in user" declares its own
+`.authorization()`. The schema-level default at the bottom of
+[`resource.ts`](../../crm/amplify/data/resource.ts) is a floor, not a policy.
+
+**Canonical.** The four hardened models. Shapes, and why each is shaped that way:
+
+| Model | Rule | Why |
+|---|---|---|
+| `UserProfile` | authenticated read; `ownerDefinedIn("userId").identityClaim("sub")` create/update; ADMIN delete | Reads stay open because Licensing and Team both join the full roster for holder names — scoping reads renders them as `—`, which looks like data loss, not a denial |
+| `Policy`, `Certificate` | authenticated read/create/update; ADMIN delete | No ownership anchor exists: `Account.producerId` is declared but never read or written (null on every row) and `Certificate.issuedBy` is a display name, not an id |
+| `License` | authenticated read/create; ADMIN update/delete | Create stays open because producers self-create their licenses at onboarding, before an admin sees them |
+
+**`.identityClaim("sub")` is required, not decoration.** The default owner claim
+is `sub::username`, which matches no row this app has ever written —
+`Onboarding` stores the bare sub. Omitting it locks every non-admin out of
+their own profile.
+
+**Two things that look like traps and are not:**
+
+1. **`allow.resource()` does not need re-declaring per model.** The model-level
+   allow modifier is `Omit<AllowModifier, 'resource'>` — it isn't callable
+   there. `allow.resource()` is stripped before any `@auth` directive is
+   generated and becomes an API-wide IAM policy.
+2. **Lambda data access bypasses `@auth` entirely.** Amplify sets
+   `enableIamAuthorizationMode: true` unconditionally; the construct's own docs
+   say *"If enabled @auth directive rules are not applied."* So no model rule
+   can break the four handlers — and equally, no model rule confines them. Only
+   handler code does.
+
+**Before adding a rule, check what the read path is.** `App.tsx` loads the
+profile with a filtered `list`, not a `get`. A rule that returns `[]` there
+produces `profile === null`, which renders Onboarding, which `create`s a
+**duplicate profile row** — a silent re-onboarding, not an error.

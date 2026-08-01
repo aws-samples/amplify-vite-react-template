@@ -17,7 +17,8 @@ next pass. Canonical implementations for resolved findings live in
 
 Resolved so far: filtered `.list()` without pagination
 ([PATTERNS.md §1](PATTERNS.md#1-paginated-list-reads)); Wave 0 shipping bugs
-([PATTERNS.md §2–§6](PATTERNS.md)).
+([PATTERNS.md §2–§6](PATTERNS.md)); Wave 1 authorization
+([PATTERNS.md §7–§8](PATTERNS.md)).
 
 ---
 
@@ -25,21 +26,21 @@ Resolved so far: filtered `.list()` without pagination
 
 | # | Finding | Blast radius | Frequency | Section |
 |---|---|---|---|---|
-| 1 | UI permission checks are decorative; backend is `allow.authenticated()` for every model | Very high | 12 models, 5 UI gates | [1.5](#15-authpermission-checks) |
-| 2 | Two unsynchronized notions of "admin" (`UserProfile.role` vs Cognito group) + self-selected role at onboarding | Very high | 2 authorities, 5 consumers | [1.5](#15-authpermission-checks) |
-| 3 | `acord.ts` — 1,092 lines, 8 responsibilities | High | 1 file, all PDF output | [2](#2-file-size-offenders) |
-| 4 | Error handling: `friendlyError` bypassed at 15 of 22 sites | Medium-high | 22 sites | [1.4](#14-error-handling) |
-| 5 | Same entity re-fetched by up to 7 components independently | Medium | 7 models | [1.2](#12-state-management) |
-| 6 | Sorting: 15 hand-rolled sorts vs 6 using `useSort` | Medium | 21 tables | [1.3](#13-tablelist-rendering) |
-| 7 | Form state: 13 forms one-`useState`-per-field vs 5 object-based | Medium | 18 forms | [1.6](#16-form-handling--validation) |
-| 8 | `as never` ×4 and `as` ×40 papering over enum/list-type mismatches | Medium | 44 casts | [4](#4-type-drift) |
-| 9 | Date/money formatting bypassing the shared helpers | Medium | 24 sites | [1.7](#17-date--money--number-formatting) |
-| 10 | Timezone split: UTC in Lambda, local in browser, on the same fields | Medium | 5 sites | [1.7](#17-date--money--number-formatting) |
-| 11 | 18 remaining silent catches (the 6 hiding data loss are fixed) | Medium | 18 sites | [1.4](#14-error-handling) |
-| 12 | Business rule "quote satisfies task" implemented twice (semantics now agree) | Medium | 2 impls | [5.12](#512-shared-business-rule-frontend--lambda) |
-| 13 | No toast system — 6 success-feedback variants, 8 mutations with no feedback | Low-medium | 14 sites | [1.8](#18-toastsnotifications) |
-| 14 | Confirm-destructive rebuilt 4× with 3 label sets; 2 destructive actions unguarded | Medium | 6 sites | [1.9](#19-modals--overlays) |
-| 15 | 15 of 18 registered ACORD forms still have no field mapping (Generate is now disabled for them) | Low-medium | 15 forms | [3.5](#35-registered-but-unmapped-acord-forms) |
+| 1 | `signatures/*` storage is writable by every authenticated user; signatures are stamped onto issued certificates | High | 1 prefix | [1.5](#15-authpermission-checks) |
+| 2 | `acord.ts` — 1,092 lines, 8 responsibilities | High | 1 file, all PDF output | [2](#2-file-size-offenders) |
+| 3 | Error handling: `friendlyError` bypassed at 10 of 22 sites | Medium-high | 22 sites | [1.4](#14-error-handling) |
+| 4 | Same entity re-fetched by up to 7 components independently | Medium | 7 models | [1.2](#12-state-management) |
+| 5 | Sorting: 15 hand-rolled sorts vs 6 using `useSort` | Medium | 21 tables | [1.3](#13-tablelist-rendering) |
+| 6 | Form state: 13 forms one-`useState`-per-field vs 5 object-based | Medium | 18 forms | [1.6](#16-form-handling--validation) |
+| 7 | `as never` ×4 and `as` ×40 papering over enum/list-type mismatches | Medium | 44 casts | [4](#4-type-drift) |
+| 8 | Date/money formatting bypassing the shared helpers | Medium | 24 sites | [1.7](#17-date--money--number-formatting) |
+| 9 | Timezone split: UTC in Lambda, local in browser, on the same fields | Medium | 5 sites | [1.7](#17-date--money--number-formatting) |
+| 10 | 18 remaining silent catches (the 6 hiding data loss are fixed) | Medium | 18 sites | [1.4](#14-error-handling) |
+| 11 | Business rule "quote satisfies task" implemented twice (semantics now agree) | Medium | 2 impls | [5.12](#512-shared-business-rule-frontend--lambda) |
+| 12 | No toast system — 6 success-feedback variants, 8 mutations with no feedback | Low-medium | 14 sites | [1.8](#18-toastsnotifications) |
+| 13 | Confirm-destructive rebuilt 4× with 3 label sets; 2 destructive actions unguarded | Medium | 6 sites | [1.9](#19-modals--overlays) |
+| 14 | 15 of 18 registered ACORD forms still have no field mapping (Generate is now disabled for them) | Low-medium | 15 forms | [3.5](#35-registered-but-unmapped-acord-forms) |
+| 15 | 8 models still on the `allow.authenticated()` schema default | Low-medium | 8 models | [1.5](#15-authpermission-checks) |
 | 16 | Dead schema fields and unused exports | Low | 21 symbols | [3](#3-dead-code) |
 
 ---
@@ -174,33 +175,51 @@ Unawaited CRM writes (`void submitCrmLead(...)`) — failures invisible: `Associ
 
 ### 1.5 Auth/permission checks
 
-**UI gating**
+**Resolved in Wave 1** ([PATTERNS.md §7](PATTERNS.md#7-authorization-derives-from-the-cognito-group-never-a-database-row),
+[§8](PATTERNS.md#8-per-model-authorization-and-what-lambdas-actually-bypass)).
 
-- `crm/src/components/Licensing.tsx:38` — `profile.role === "ADMIN"` → `:125`, `:194`, `:213`, `:519`, `:656`
-- `crm/src/pages/Settings.tsx:19` — `profile.role === "ADMIN"` → `:26`, `:62`
-- `crm/src/pages/Team.tsx:14` — comment claims ADMIN-only; **no check in the component**, relies on `Settings.tsx:62`
-- `crm/src/pages/Onboarding.tsx:36,124-125` — user **self-selects their own role, including ADMIN**, written to `UserProfile.role` at `:73`
-- No role gating in `web/src`
+The two unsynchronized authorities are gone. Every UI gate now reads
+`cognito:groups` off the ID token via `crm/src/lib/auth.ts`; `UserProfile.role`
+is written from the user's actual group and gates nothing. ADMIN is no longer
+selectable at onboarding — the picker is read-only. `UserProfile`, `License`,
+`Certificate` and `Policy` carry per-model `.authorization()`, with
+`UserProfile` writes owner-scoped on `userId`. `DeleteLeadZone` is admin-only.
+Five error sites that will now deny were moved to `friendlyError`.
 
-**Backend authorization** (verified)
+**Still open:**
 
-- `crm/amplify/data/resource.ts:483` — `allow.authenticated()` as the schema-wide default for **all 12 models**; comment at `:481` calls it a placeholder. No model declares its own `.authorization()`.
-- `:454`, `:460` — `inviteUser`, `listTeamUsers`: `allow.groups(["ADMIN"])` — the only enforced role check
-- `:443` — `submitWebLead`: `allow.publicApiKey()` (365-day key, `:502`)
-- `:468`, `:477` — `startLeadExtraction`, `reserveCertificateNumber`: `allow.authenticated()`
-- `crm/amplify/auth/resource.ts:14` — comment: "Groups are role placeholders; privileges are not enforced yet."
+1. **`signatures/*` is writable by any authenticated user** — see summary row 1.
+   The path is `signatures/{UserProfile.id}.{ext}`, a predictable key on an id
+   every signed-in user can list. Not fixable in place: Amplify's `{entity_id}`
+   token substitutes the Cognito *identity-pool* id, and `signatures/*` cannot
+   coexist with `signatures/{entity_id}/*`. Needs an `identityId` on
+   `UserProfile`, a new prefix, a backfill of existing keys, and a retargeted
+   `SignatureManager`. Reasoning recorded at `crm/amplify/storage/resource.ts:42`.
+2. **8 models remain on the schema-level `allow.authenticated()` default** —
+   `Account`, `Building`, `Quote`, `Carrier`, `AppetiteGuide`, `Document`,
+   `MarketingTask`, `ProducerLicense`. Notably a non-admin can still
+   cascade-delete a lead through the API; Wave 1 removed the button, not the
+   ability.
+3. **`startLeadExtraction` and `reserveCertificateNumber` are
+   `allow.authenticated()`** (`resource.ts:535`, `:545`) — any signed-in user
+   can burn certificate sequence numbers from a gap-free ledger, or trigger
+   paid Anthropic extraction calls.
+4. **`leadIntake` has IAM access to the whole API.** `allow.resource()` grants
+   are API-wide, not model-scoped, and it is reachable via the public-API-key
+   `submitWebLead`. Only its handler code confines it to creating leads.
+5. **No in-app way to change a group after invite.** `inviteUser` sets the group
+   only at `AdminCreateUser` time, and the Lambda's IAM policy has no
+   `AdminRemoveUserFromGroup`. Role changes are an AWS console job. The
+   originally-planned `teamAdmin`-writes-role work was not needed to close the
+   escalation path and is deferred with this.
+6. `UserProfile.role` is owner-writable, so a user can still set their own to
+   `"ADMIN"`. Nothing reads it for authorization, so this is cosmetic drift —
+   but it will mislead anyone reading the row.
 
-**Inconsistencies**
-
-1. **Two unsynchronized authorities.** UI gates on `UserProfile.role` (a user-writable DynamoDB string); enforcement gates on the Cognito group. `Team.tsx:170` renders `u.groups[0] ?? p?.role ?? "—"`, silently falling back between them. A user can hold `role:"ADMIN"` with no ADMIN group (sees the tab, both mutations 401) or an ADMIN group with `role:"STAFF"` (full team-admin power, tab hidden).
-2. **`Onboarding.tsx:124` is a self-service privilege path for the UI layer** — any invitee selects ADMIN and gains the Licensing edit affordances and Team tab. The `inviteUser` `role` argument (`resource.ts:451`) is overwritten by the invitee's choice.
-3. **Licensing gating is cosmetic.** `License` inherits `allow.authenticated()`, so `Licensing.tsx:115,306,771-772` succeed for any signed-in user regardless of the hidden buttons.
-4. **`UserProfile` writes are unrestricted.** `SignatureManager.tsx:49,86` write `signatureKey` for an arbitrary `profile.id` under `authenticated()` — any user can overwrite or delete any other user's signature. Signatures are stamped onto issued certificates (`acord.ts:487`, `AccountDetail.tsx:633`), making this a document-integrity issue.
-5. **`DeleteLeadZone` has no role check** — gated only on `account.stage === "LEAD"` (`AccountDetail.tsx:107`); cascades deletes across Quote, Document, S3, Account (`:367-385`).
-6. Backend-enforced failures surface as raw GraphQL strings (`Team.tsx:43,73`) rather than through `friendlyError`, which has a "You don't have permission to do that." branch at `client.ts:180`.
-
-- Most correct: `resource.ts:454,460` `allow.groups(["ADMIN"])` — the only check enforced server-side against the token rather than a user-writable field.
-- **Canonical: derive `isAdmin` from the ID token's `cognito:groups` claim in a shared `crm/src/lib/auth.ts`; make `UserProfile.role` display-only, written by the `teamAdmin` Lambda; remove ADMIN from the `Onboarding.tsx:125` picker; add per-model `.authorization()` to `License`, `UserProfile`, `Certificate`, `Policy`.**
+**Unverified.** No rule in Wave 1b is exercised by anything — there are no tests,
+and `tsc` covers `amplify/data/resource.ts` only (via the `Schema` import in
+`client.ts`), not storage, `backend.ts`, or any handler. First real check is a
+deployed sandbox.
 
 ### 1.6 Form handling + validation
 
@@ -534,7 +553,7 @@ See [1.9](#19-modals--overlays).
 
 ### 5.6 Role/permission helper — 2 declarations, 7 threaded positions
 
-`profile.role === "ADMIN"` at `Licensing.tsx:38` and `Settings.tsx:19`, threaded as `canEdit` through `Licensing.tsx:194`, `:213`, `:419`, `:432`, `:485`, `:494`, `:602`. See [1.5](#15-authpermission-checks).
+Resolved in Wave 1 — one `useIsAdmin()` reading the Cognito group. See [1.5](#15-authpermission-checks).
 
 ### 5.7 Badge / status-mapping helper — 5 maps + ~15 inline ternaries
 

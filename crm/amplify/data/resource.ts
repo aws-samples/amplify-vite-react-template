@@ -205,6 +205,14 @@ const schema = a
     }),
 
     // ── Policies: created on bind; source data for COI generation ──────
+    //
+    // Authenticated read/write, ADMIN-only delete. There is no usable
+    // ownership anchor to scope on: Account.producerId is declared but never
+    // read or written anywhere, so it is null on every row.
+    //
+    // The nightly renewal sweep lists Policy (renewal-tasks/handler.ts:59)
+    // without an explicit authMode. It is NOT affected by this rule — see the
+    // note on `allow.resource` at the bottom of this file.
     Policy: a.model({
       accountId: a.id().required(),
       account: a.belongsTo("Account", "accountId"),
@@ -236,7 +244,11 @@ const schema = a
       expirationDate: a.date(),
       limits: a.json(), // per-line limits/deductibles, shape evolves with ACORD needs
       notes: a.string(),
-    }),
+    })
+      .authorization((allow) => [
+        allow.authenticated().to(["read", "create", "update"]),
+        allow.groups(["ADMIN"]),
+      ]),
 
     // ── Carriers & appointments ────────────────────────────────────────
     Carrier: a.model({
@@ -335,6 +347,11 @@ const schema = a
     }),
 
     // ── Certificates (ACORD 25 issuance history) ───────────────────────
+    //
+    // Authenticated read/write, ADMIN-only delete. `issuedBy` is a display
+    // name string, not a user id, so it can't anchor owner-scoping — and an
+    // issuance record shouldn't be erasable by whoever issued it anyway.
+    // No Lambda touches this model.
     Certificate: a.model({
       accountId: a.id().required(),
       account: a.belongsTo("Account", "accountId"),
@@ -347,9 +364,39 @@ const schema = a
       s3Key: a.string(), // generated PDF
       issuedBy: a.string(),
       issuedAt: a.datetime(),
-    }),
+    })
+      .authorization((allow) => [
+        allow.authenticated().to(["read", "create", "update"]),
+        allow.groups(["ADMIN"]),
+      ]),
 
     // ── Users & onboarding ─────────────────────────────────────────────
+    /**
+     * Reads stay open to every authenticated user; writes are owner-or-ADMIN.
+     *
+     * Reads must stay open because Licensing and Team both list the whole
+     * roster and join against it for holder names — scoping reads would
+     * silently render teammates as "—" rather than fail visibly. ACORD
+     * generation also reads another user's profile to fetch their signature.
+     *
+     * The read rule is `allow.authenticated()`, which is STATIC: it authorizes
+     * list/get outright, so no owner filter is ever attached to the query.
+     * That matters because App.tsx resolves the signed-in user with a filtered
+     * `list` on userId, not a `get` — if that list came back empty the app
+     * would decide the user has no profile and re-render Onboarding, which
+     * creates a second profile row. The owner rule below deliberately grants
+     * only create/update, so it never participates in query authorization.
+     *
+     * `userId` holds the raw Cognito sub (written from AuthUser.userId, which
+     * is idToken.payload.sub), so the owner rule must compare against the
+     * "sub" claim — the default identity claim is "sub::username" and would
+     * match no existing row.
+     *
+     * ADMIN gets everything because managing a teammate's signature from the
+     * Team tab is deliberate (see SignatureManager). Delete is ADMIN-only:
+     * nothing in the app deletes a profile, and letting someone delete their
+     * own would just silently re-onboard them.
+     */
     UserProfile: a
       .model({
         userId: a.string().required(), // Cognito sub
@@ -364,7 +411,15 @@ const schema = a
         onboardingComplete: a.boolean().required(),
         licenses: a.hasMany("ProducerLicense", "userProfileId"), // deprecated
       })
-      .secondaryIndexes((index) => [index("userId")]),
+      .secondaryIndexes((index) => [index("userId")])
+      .authorization((allow) => [
+        allow.authenticated().to(["read"]),
+        allow
+          .ownerDefinedIn("userId")
+          .identityClaim("sub")
+          .to(["create", "update"]),
+        allow.groups(["ADMIN"]),
+      ]),
 
     /**
      * DEPRECATED — superseded by the unified `License` model below, which
@@ -390,6 +445,14 @@ const schema = a
      *
      * Supporting files (the license PDF, renewal receipts, CE certificates)
      * attach as Documents with entityType=LICENSE, entityId=<license id>.
+     *
+     * Create stays open to authenticated users: producers self-create their
+     * own License rows during onboarding (Onboarding.tsx), before any admin
+     * has seen them. Editing and deleting a license — the operations that can
+     * make the agency look licensed where it isn't — are ADMIN-only, which is
+     * what the Licensing screen already gates its edit/delete controls on.
+     * userProfileId is caller-supplied and unverified, so it can't anchor
+     * owner-scoping. No Lambda touches this model.
      */
     License: a.model({
       holderType: a.ref("LicenseHolderType").required(),
@@ -415,7 +478,11 @@ const schema = a
       expirationDate: a.date(),
       continuingEducationDueDate: a.date(),
       notes: a.string(),
-    }),
+    })
+      .authorization((allow) => [
+        allow.authenticated().to(["read", "create"]),
+        allow.groups(["ADMIN"]),
+      ]),
 
     // ── Public website → CRM lead intake ───────────────────────────────
     // API-key-only surface for protectmyhoa.com forms. The handler forces
@@ -478,8 +545,23 @@ const schema = a
       .handler(a.handler.function(certNumber)),
   })
   .authorization((allow) => [
-    // Placeholder privileges: any signed-in user has full access.
-    // Tighten with group-based rules when roles are built out.
+    // Default for every model that doesn't declare its own rules. A model
+    // with its own `.authorization()` replaces `allow.authenticated()` below
+    // for that model — but NOT the `allow.resource()` grants, which are not
+    // per-model at all:
+    //
+    //   - `allow.resource()` rules are stripped out of the schema auth list
+    //     before any @auth directive is generated (data-schema's
+    //     extractFunctionSchemaAccess) and turned into an IAM policy granting
+    //     appsync:GraphQL on <api>/types/Query|Mutation|Subscription/* — the
+    //     whole API, every field.
+    //   - Amplify always sets iamConfig.enableIamAuthorizationMode: true,
+    //     documented as "Enables access for IAM principals. If enabled @auth
+    //     directive rules are not applied."
+    //
+    // So these four functions keep full data access regardless of what any
+    // model declares, and the model-level `allow` builder doesn't even expose
+    // `.resource()` to re-declare with. Do not try.
     allow.authenticated(),
     // The Textract pipeline function writes OCR results back to Document.
     allow.resource(processDocument),

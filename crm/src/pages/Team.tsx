@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { client, fmtDate, type UserProfile } from "../lib/client";
+import { client, fmtDate, friendlyError, type UserProfile } from "../lib/client";
 import SignatureManager from "../components/SignatureManager";
 
 interface TeamUser {
@@ -44,7 +44,7 @@ export default function Team({ profile }: { profile: UserProfile }) {
       const body = parse(data);
       setUsers((body.users as TeamUser[]) ?? []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load team");
+      setError(friendlyError(err, "Failed to load team"));
       setUsers([]);
     }
     client.models.UserProfile.list().then(({ data }) => setProfiles(data));
@@ -74,7 +74,7 @@ export default function Team({ profile }: { profile: UserProfile }) {
       setEmail("");
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Invite failed");
+      setError(friendlyError(err, "Invite failed"));
     } finally {
       setInviting(false);
     }

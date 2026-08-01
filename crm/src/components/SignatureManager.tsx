@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { uploadData, getUrl, remove } from "aws-amplify/storage";
-import { client, type UserProfile } from "../lib/client";
+import { client, friendlyError, type UserProfile } from "../lib/client";
 import FileButton from "./FileButton";
 import SignaturePad from "./SignaturePad";
 
@@ -66,7 +66,7 @@ export default function SignatureManager({
       }
       setDrawing(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Save failed");
+      setError(friendlyError(err, "Save failed"));
     } finally {
       setBusy(false);
     }

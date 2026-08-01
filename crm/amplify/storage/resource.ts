@@ -39,7 +39,32 @@ export const storage = defineStorage({
       allow.authenticated.to(["read", "write", "delete"]),
       allow.groups(ALL_GROUPS).to(["read", "write", "delete"]),
     ],
-    // Producer signature images, stamped onto generated ACORD forms.
+    /**
+     * Producer signature images, stamped onto generated ACORD forms.
+     *
+     * KNOWN GAP — deliberately left open, do not "fix" by narrowing this list.
+     * The path is `signatures/{UserProfile.id}.{ext}` (SignatureManager), a
+     * predictable key on an id every signed-in user can list off UserProfile.
+     * So any signed-in user can overwrite anyone's signature, and that image
+     * gets stamped onto issued certificates.
+     *
+     * It is not fixable here. Per-user scoping in Amplify storage is only
+     * expressible with the `{entity_id}` token, which substitutes the Cognito
+     * *identity-pool* id — not UserProfile.id and not the user-pool sub. And
+     * "signatures/*" cannot coexist with a "signatures/{entity_id}/*" path:
+     * validateStorageAccessPaths rejects any path that is a prefix of an
+     * entity-token path.
+     *
+     * Closing it properly needs all of: a new top-level prefix, storing each
+     * user's identityId on UserProfile at onboarding (the Team tab lets an
+     * admin manage a teammate's signature, and an admin's browser cannot
+     * otherwise derive another user's identity id), and a backfill of existing
+     * signatureKey values. That is its own commit.
+     *
+     * Narrowing write/delete to ADMIN here is NOT the interim fix: it breaks
+     * self-service signatures for staff and producers and leaves the overwrite
+     * hole open for every admin anyway.
+     */
     "signatures/*": [
       allow.authenticated.to(["read", "write", "delete"]),
       allow.groups(ALL_GROUPS).to(["read", "write", "delete"]),

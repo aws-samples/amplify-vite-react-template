@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { AuthUser } from "aws-amplify/auth";
-import { client, US_STATES, type UserProfile } from "../lib/client";
+import { client, friendlyError, US_STATES, type UserProfile } from "../lib/client";
 import type { Role } from "../lib/auth";
 
 const ROLE_LABELS: Record<Role, string> = {
@@ -108,7 +108,7 @@ export default function Onboarding({
       }
       onComplete(profile);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save profile.");
+      setError(friendlyError(err, "Failed to save profile."));
     } finally {
       setSaving(false);
     }
