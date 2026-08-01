@@ -16,6 +16,7 @@ import {
   type AcordFormDef,
 } from "../lib/acord";
 import type { UserProfile } from "../lib/client";
+import { useSort, SortTh } from "../lib/useSort";
 import FilePreviewModal from "./FilePreview";
 
 const APP_FORMS = ACORD_FORMS.filter((f) => f.key !== "acord25");
@@ -47,12 +48,19 @@ export default function FormsTab({
         },
         nextToken,
       })
-    ).then((data) =>
-      setGenerated(
-        data.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
-      )
-    );
+    ).then((data) => setGenerated(data));
   }, [account.id]);
+
+  // Most recently generated first, as the fetch used to order them.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    generated,
+    {
+      file: (d) => d.name,
+      generated: (d) => d.createdAt,
+    },
+    "generated",
+    "desc"
+  );
 
   async function generate(form: AcordFormDef) {
     setBusyKey(form.key);
@@ -208,13 +216,13 @@ export default function FormsTab({
             <table>
               <thead>
                 <tr>
-                  <th>File</th>
-                  <th>Generated</th>
+                  <SortTh label="File" colKey="file" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Generated" colKey="generated" sortKey={sortKey} dir={dir} onToggle={toggle} />
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {generated.map((d) => (
+                {sorted.map((d) => (
                   <tr key={d.id}>
                     <td>{d.name}</td>
                     <td className="small">

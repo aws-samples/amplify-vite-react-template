@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { client, fmtDate, friendlyError, type UserProfile } from "../lib/client";
 import SignatureManager from "../components/SignatureManager";
+import { useSort, SortTh } from "../lib/useSort";
 
 interface TeamUser {
   userId: string;
@@ -8,6 +9,10 @@ interface TeamUser {
   createdAt: string | null;
   groups: string[];
 }
+
+// Stable identity for "not loaded yet", so the sort memo isn't rebuilt on
+// every render while the team list is still in flight.
+const NO_USERS: TeamUser[] = [];
 
 /**
  * ADMIN-only. Rendered only for the Cognito ADMIN group (Settings gates the
@@ -81,6 +86,23 @@ export default function Team({ profile }: { profile: UserProfile }) {
   const profileFor = (u: TeamUser) =>
     profiles.find((p) => p.userId === u.userId || p.email === u.email);
 
+  // By email; a user with no email sorts last, which useSort does for nulls
+  // in either direction.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    users ?? NO_USERS,
+    {
+      email: (u) => u.email,
+      name: (u) => {
+        const p = profileFor(u);
+        return p ? `${p.firstName} ${p.lastName}` : null;
+      },
+      role: (u) => u.groups[0] ?? profileFor(u)?.role,
+      onboarded: (u) => (profileFor(u)?.onboardingComplete ? "Yes" : "Invited"),
+      invited: (u) => u.createdAt,
+    },
+    "email"
+  );
+
   return (
     <>
       <div className="card">
@@ -142,69 +164,59 @@ export default function Team({ profile }: { profile: UserProfile }) {
             <table>
               <thead>
                 <tr>
-                  <th>Email</th>
-                  <th>Name</th>
-                  <th>Role</th>
-                  <th>Onboarded</th>
+                  <SortTh label="Email" colKey="email" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Name" colKey="name" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Role" colKey="role" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                  <SortTh label="Onboarded" colKey="onboarded" sortKey={sortKey} dir={dir} onToggle={toggle} />
                   <th>Signature</th>
-                  <th>Invited</th>
+                  <SortTh label="Invited" colKey="invited" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 </tr>
               </thead>
               <tbody>
-                {[...users]
-                  .sort((a, b) => {
-                    // A user with no email sorts last, not to the top of the list.
-                    const x = a.email ?? "";
-                    const y = b.email ?? "";
-                    if (!x && !y) return 0;
-                    if (!x) return 1;
-                    if (!y) return -1;
-                    return x.localeCompare(y);
-                  })
-                  .map((u) => {
-                    const p = profileFor(u);
-                    return (
-                      <tr key={u.userId}>
-                        <td>
-                          {u.email}
-                          {u.email === profile.email && (
-                            <span className="badge blue" style={{ marginLeft: 6 }}>
-                              you
-                            </span>
-                          )}
-                        </td>
-                        <td>
-                          {p ? `${p.firstName} ${p.lastName}` : <span className="muted">—</span>}
-                        </td>
-                        <td>
-                          <span className="badge gray">
-                            {u.groups[0] ?? p?.role ?? "—"}
+                {sorted.map((u) => {
+                  const p = profileFor(u);
+                  return (
+                    <tr key={u.userId}>
+                      <td>
+                        {u.email}
+                        {u.email === profile.email && (
+                          <span className="badge blue" style={{ marginLeft: 6 }}>
+                            you
                           </span>
-                        </td>
-                        <td>
-                          {p?.onboardingComplete ? (
-                            <span className="badge green">Yes</span>
-                          ) : (
-                            <span className="badge amber">Invited</span>
-                          )}
-                        </td>
-                        <td>
-                          <SignatureManager
-                            compact
-                            profile={p ?? null}
-                            onChange={(updated) =>
-                              setProfiles((ps) =>
-                                ps.map((x) => (x.id === updated.id ? updated : x))
-                              )
-                            }
-                          />
-                        </td>
-                        <td className="small">
-                          {fmtDate(u.createdAt?.slice(0, 10))}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                        )}
+                      </td>
+                      <td>
+                        {p ? `${p.firstName} ${p.lastName}` : <span className="muted">—</span>}
+                      </td>
+                      <td>
+                        <span className="badge gray">
+                          {u.groups[0] ?? p?.role ?? "—"}
+                        </span>
+                      </td>
+                      <td>
+                        {p?.onboardingComplete ? (
+                          <span className="badge green">Yes</span>
+                        ) : (
+                          <span className="badge amber">Invited</span>
+                        )}
+                      </td>
+                      <td>
+                        <SignatureManager
+                          compact
+                          profile={p ?? null}
+                          onChange={(updated) =>
+                            setProfiles((ps) =>
+                              ps.map((x) => (x.id === updated.id ? updated : x))
+                            )
+                          }
+                        />
+                      </td>
+                      <td className="small">
+                        {fmtDate(u.createdAt?.slice(0, 10))}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

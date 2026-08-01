@@ -9,6 +9,11 @@ import {
   type CrmDocument,
 } from "../lib/client";
 import FilePreviewModal, { canPreview } from "../components/FilePreview";
+import { useSort, SortTh } from "../lib/useSort";
+
+// Stable identity for "no search run yet", so the sort memo isn't rebuilt
+// on every render before the first search.
+const NO_RESULTS: CrmDocument[] = [];
 
 /**
  * Global "where is that document?" search — matches file names and OCR'd
@@ -39,9 +44,7 @@ export default function DocumentSearch() {
           }),
         { maxPages: 25 }
       );
-      setResults(
-        found.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
-      );
+      setResults(found);
     } catch (err) {
       setError(friendlyError(err, "Search failed"));
     } finally {
@@ -64,6 +67,18 @@ export default function DocumentSearch() {
     const end = Math.min(text.length, idx + q.length + 60);
     return `${start > 0 ? "…" : ""}${text.slice(start, end).replace(/\s+/g, " ")}${end < text.length ? "…" : ""}`;
   }
+
+  // Most recently uploaded first, as the search used to order the hits.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    results ?? NO_RESULTS,
+    {
+      document: (d) => d.name,
+      attached: (d) => d.entityType,
+      uploaded: (d) => d.createdAt,
+    },
+    "uploaded",
+    "desc"
+  );
 
   function entityLink(doc: CrmDocument) {
     if (doc.entityType === "ACCOUNT")
@@ -109,15 +124,15 @@ export default function DocumentSearch() {
               <table>
                 <thead>
                   <tr>
-                    <th>Document</th>
+                    <SortTh label="Document" colKey="document" sortKey={sortKey} dir={dir} onToggle={toggle} />
                     <th>Match</th>
-                    <th>Attached to</th>
-                    <th>Uploaded</th>
+                    <SortTh label="Attached to" colKey="attached" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                    <SortTh label="Uploaded" colKey="uploaded" sortKey={sortKey} dir={dir} onToggle={toggle} />
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {results.map((d) => (
+                  {sorted.map((d) => (
                     <tr key={d.id}>
                       <td>
                         <strong>{d.name}</strong>

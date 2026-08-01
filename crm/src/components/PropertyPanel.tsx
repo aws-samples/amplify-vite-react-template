@@ -11,6 +11,7 @@ import {
 } from "../lib/client";
 import FilePreviewModal from "./FilePreview";
 import { AddressAutocomplete } from "../lib/googlePlaces";
+import { useSort, SortTh } from "../lib/useSort";
 
 // Alphabetical by label.
 const CONSTRUCTION_TYPES = [
@@ -332,19 +333,7 @@ function BuildingsCard({ accountId }: { accountId: string }) {
         filter: { accountId: { eq: accountId } },
         nextToken,
       })
-    ).then((data) =>
-      setBuildings(
-        data.sort((a, b) => {
-          // Unlabelled buildings sort last, not first.
-          const x = a.label ?? "";
-          const y = b.label ?? "";
-          if (!x && !y) return 0;
-          if (!x) return 1;
-          if (!y) return -1;
-          return x.localeCompare(y);
-        })
-      )
-    );
+    ).then((data) => setBuildings(data));
   }, [accountId]);
 
   async function add() {
@@ -378,6 +367,16 @@ function BuildingsCard({ accountId }: { accountId: string }) {
   }
 
   const totalSqft = buildings.reduce((s, b) => s + (b.sqft ?? 0), 0);
+
+  // By label, unlabelled last — useSort puts nulls last in either direction.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    buildings,
+    {
+      building: (b) => b.label,
+      sqft: (b) => b.sqft,
+    },
+    "building"
+  );
 
   return (
     <div className="card">
@@ -434,13 +433,13 @@ function BuildingsCard({ accountId }: { accountId: string }) {
           <table>
             <thead>
               <tr>
-                <th>Building</th>
-                <th>Sq ft</th>
+                <SortTh label="Building" colKey="building" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Sq ft" colKey="sqft" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {buildings.map((b) => (
+              {sorted.map((b) => (
                 <tr key={b.id}>
                   <td>{b.label}</td>
                   <td>{b.sqft?.toLocaleString() ?? "—"}</td>

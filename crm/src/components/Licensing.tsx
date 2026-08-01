@@ -951,7 +951,7 @@ function StateCoverage({
   const rows = useMemo(() => {
     const states = [
       ...new Set([...firm, ...personal].map((l) => l.state).filter(Boolean)),
-    ].sort();
+    ];
     const live = (l: License) => {
       const h = licenseHealth(l);
       return h.level !== "expired";
@@ -971,6 +971,18 @@ function StateCoverage({
 
   const gaps = rows.filter((r) => !(r.firm && r.producers.length > 0));
   const shown = gapsOnly ? gaps : rows;
+
+  // Alphabetical by state, as the derived state list used to be ordered.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    shown,
+    {
+      state: (r) => r.state,
+      firm: (r) => (r.firm ? "Active" : "Missing"),
+      producers: (r) => r.producers.join(", "),
+      canWrite: (r) => (r.firm && r.producers.length > 0 ? "Yes" : "Gap"),
+    },
+    "state"
+  );
 
   if (rows.length === 0) return null;
 
@@ -1008,14 +1020,14 @@ function StateCoverage({
         <table>
           <thead>
             <tr>
-              <th>State</th>
-              <th>Firm license</th>
-              <th>Licensed producers</th>
-              <th>Can write?</th>
+              <SortTh label="State" colKey="state" sortKey={sortKey} dir={dir} onToggle={toggle} />
+              <SortTh label="Firm license" colKey="firm" sortKey={sortKey} dir={dir} onToggle={toggle} />
+              <SortTh label="Licensed producers" colKey="producers" sortKey={sortKey} dir={dir} onToggle={toggle} />
+              <SortTh label="Can write?" colKey="canWrite" sortKey={sortKey} dir={dir} onToggle={toggle} />
             </tr>
           </thead>
           <tbody>
-            {shown.map((r) => {
+            {sorted.map((r) => {
               const ok = r.firm && r.producers.length > 0;
               return (
                 <tr key={r.state}>

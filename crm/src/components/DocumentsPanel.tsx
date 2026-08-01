@@ -4,6 +4,7 @@ import { client, friendlyError, type CrmDocument } from "../lib/client";
 import type { Schema } from "../../amplify/data/resource";
 import FilePreviewModal, { canPreview } from "./FilePreview";
 import FileButton from "./FileButton";
+import { useSort, SortTh } from "../lib/useSort";
 
 type EntityType = Schema["DocumentEntityType"]["type"];
 type Category = NonNullable<Schema["DocumentCategory"]["type"]>;
@@ -57,12 +58,7 @@ export default function DocumentsPanel({
     const sub = client.models.Document.observeQuery({
       filter: { entityId: { eq: entityId } },
     }).subscribe({
-      next: ({ items }) =>
-        setDocs(
-          [...items].sort((a, b) =>
-            (b.createdAt ?? "").localeCompare(a.createdAt ?? "")
-          )
-        ),
+      next: ({ items }) => setDocs([...items]),
     });
     return () => sub.unsubscribe();
   }, [entityId]);
@@ -128,6 +124,20 @@ export default function DocumentsPanel({
     );
   }
 
+  // Most recently uploaded first, as the subscription used to order them.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    docs,
+    {
+      name: (d) => d.name,
+      category: (d) => CATEGORIES.find((c) => c.value === d.category)?.label,
+      ocr: (d) => OCR_BADGE[d.ocrStatus ?? "PENDING"]?.label,
+      size: (d) => d.sizeBytes,
+      created: (d) => d.createdAt,
+    },
+    "created",
+    "desc"
+  );
+
   const openDoc = docs.find((d) => d.id === openDocId);
   const openTables = openDoc ? parseTables(openDoc.ocrTables) : null;
 
@@ -190,15 +200,15 @@ export default function DocumentsPanel({
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Category</th>
-                <th>OCR</th>
-                <th>Size</th>
+                <SortTh label="Name" colKey="name" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Category" colKey="category" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="OCR" colKey="ocr" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Size" colKey="size" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {docs.map((d) => {
+              {sorted.map((d) => {
                 const badge = OCR_BADGE[d.ocrStatus ?? "PENDING"] ?? OCR_BADGE.PENDING;
                 return (
                   <tr key={d.id}>

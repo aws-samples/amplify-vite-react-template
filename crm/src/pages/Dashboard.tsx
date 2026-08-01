@@ -10,6 +10,7 @@ import {
   type Policy,
   type Quote,
 } from "../lib/client";
+import { useSort, SortTh } from "../lib/useSort";
 
 export default function Dashboard() {
   const [leads, setLeads] = useState<Account[]>([]);
@@ -154,12 +155,22 @@ function RenewalsCard({
         detail: "Incumbent policy expires",
       });
     }
-    return out
-      .filter((r) => r.days <= horizon)
-      .sort((a, b) => a.days - b.days);
+    return out.filter((r) => r.days <= horizon);
   }, [leads, clients, policies, horizon]);
 
   const within = (d: number) => rows.filter((r) => r.days <= d && r.days >= 0).length;
+
+  // Soonest renewal first — the work that's most at risk floats up.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    rows,
+    {
+      account: (r) => r.name,
+      renewal: (r) => r.date,
+      days: (r) => r.days,
+      detail: (r) => r.detail,
+    },
+    "days"
+  );
 
   return (
     <div className="card">
@@ -189,15 +200,15 @@ function RenewalsCard({
           <table>
             <thead>
               <tr>
-                <th>Account</th>
+                <SortTh label="Account" colKey="account" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th></th>
-                <th>Renewal</th>
-                <th>Days</th>
-                <th>Detail</th>
+                <SortTh label="Renewal" colKey="renewal" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Days" colKey="days" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Detail" colKey="detail" sortKey={sortKey} dir={dir} onToggle={toggle} />
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {sorted.map((r, i) => (
                 <tr
                   key={`${r.accountId}-${i}`}
                   className="clickable"

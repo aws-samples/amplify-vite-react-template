@@ -156,6 +156,19 @@ export default function AccountMarketingTasks({
   const open = tasks.filter((t) => t.status === "OPEN");
   const done = tasks.filter((t) => t.status === "COMPLETE");
 
+  // Soonest submit-by first; no submit-by date sorts last, which useSort
+  // does for nulls in either direction.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    open,
+    {
+      carrier: (t) => t.carrierName,
+      lines: (t) => (t.lines ?? []).filter(Boolean).join(", "),
+      expires: (t) => t.expirationDate,
+      submitBy: (t) => t.submitBy,
+    },
+    "submitBy"
+  );
+
   if (!loaded) return null;
   if (error)
     return (
@@ -191,53 +204,42 @@ export default function AccountMarketingTasks({
           <table>
             <thead>
               <tr>
-                <th>Carrier</th>
-                <th>Lines</th>
-                <th>Expires</th>
-                <th>Submit by</th>
+                <SortTh label="Carrier" colKey="carrier" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Lines" colKey="lines" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Expires" colKey="expires" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Submit by" colKey="submitBy" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th>Urgency</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {open
-                .slice()
-                .sort((a, b) => {
-                  // No submit-by date sorts last — it never beats a real deadline.
-                  const x = a.submitBy ?? "";
-                  const y = b.submitBy ?? "";
-                  if (!x && !y) return 0;
-                  if (!x) return 1;
-                  if (!y) return -1;
-                  return x.localeCompare(y);
-                })
-                .map((t) => {
-                  const u = taskUrgency(t);
-                  return (
-                    <tr key={t.id}>
-                      <td>
-                        <strong>{t.carrierName ?? "—"}</strong>
-                      </td>
-                      <td className="small">
-                        {(t.lines ?? []).filter(Boolean).join(", ") || "—"}
-                      </td>
-                      <td className="small">{fmtDate(t.expirationDate)}</td>
-                      <td className="small">{fmtDate(t.submitBy)}</td>
-                      <td>
-                        <span className={`badge ${u.badge}`}>{u.label}</span>
-                      </td>
-                      <td style={{ whiteSpace: "nowrap" }}>
-                        <button
-                          className="link"
-                          disabled={busyId === t.id}
-                          onClick={() => markOutOfAppetite(t)}
-                        >
-                          Out of appetite
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
+              {sorted.map((t) => {
+                const u = taskUrgency(t);
+                return (
+                  <tr key={t.id}>
+                    <td>
+                      <strong>{t.carrierName ?? "—"}</strong>
+                    </td>
+                    <td className="small">
+                      {(t.lines ?? []).filter(Boolean).join(", ") || "—"}
+                    </td>
+                    <td className="small">{fmtDate(t.expirationDate)}</td>
+                    <td className="small">{fmtDate(t.submitBy)}</td>
+                    <td>
+                      <span className={`badge ${u.badge}`}>{u.label}</span>
+                    </td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <button
+                        className="link"
+                        disabled={busyId === t.id}
+                        onClick={() => markOutOfAppetite(t)}
+                      >
+                        Out of appetite
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

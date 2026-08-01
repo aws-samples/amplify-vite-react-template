@@ -17,6 +17,7 @@ import {
 } from "../lib/client";
 import { fillAcord25, signatureFor } from "../lib/acord";
 import { useIsAdmin } from "../lib/auth";
+import { useSort, SortTh } from "../lib/useSort";
 import DocumentsPanel from "../components/DocumentsPanel";
 import QuotesPanel, { commissionCell, termsSummary } from "../components/QuotesPanel";
 import CoverageForm from "../components/CoverageForm";
@@ -446,7 +447,7 @@ function DeleteLeadZone({ account }: { account: Account }) {
 
 function PoliciesTab({ accountId }: { accountId: string }) {
   const [policies, setPolicies] = useState<Policy[]>([]);
-  const [carriers, setCarriers] = useState<Carrier[]>([]);
+  const [carrierRows, setCarrierRows] = useState<Carrier[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState<Policy | null>(null);
 
@@ -457,17 +458,13 @@ function PoliciesTab({ accountId }: { accountId: string }) {
         nextToken,
       })
     );
-    setPolicies(
-      data.sort((a, b) => (b.effectiveDate ?? "").localeCompare(a.effectiveDate ?? ""))
-    );
+    setPolicies(data);
     setLoaded(true);
   }
 
   useEffect(() => {
     refresh();
-    client.models.Carrier.list().then(({ data }) =>
-      setCarriers(data.sort((a, b) => a.name.localeCompare(b.name)))
-    );
+    client.models.Carrier.list().then(({ data }) => setCarrierRows(data));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
@@ -476,8 +473,28 @@ function PoliciesTab({ accountId }: { accountId: string }) {
     if (data) setPolicies((ps) => ps.map((p) => (p.id === id ? data : p)));
   }
 
+  // Carrier picker order only — no header to click, so the default stands.
+  const { sorted: carriers } = useSort(carrierRows, { name: (c) => c.name }, "name");
+
   const carrierName = (id: string | null | undefined) =>
     carriers.find((c) => c.id === id)?.name ?? "—";
+
+  // Most recently effective policy first, as the fetch used to order them.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    policies,
+    {
+      number: (p) => p.policyNumber,
+      carrier: (p) => (p.carrierId ? carrierName(p.carrierId) : null),
+      lines: (p) => (p.lines ?? []).filter(Boolean).join(", "),
+      premium: (p) => p.premium,
+      commission: (p) => p.commissionPct,
+      effective: (p) => p.effectiveDate,
+      expires: (p) => p.expirationDate,
+      status: (p) => p.status,
+    },
+    "effective",
+    "desc"
+  );
 
   return (
     <div className="card">
@@ -509,20 +526,20 @@ function PoliciesTab({ accountId }: { accountId: string }) {
           <table>
             <thead>
               <tr>
-                <th>Policy #</th>
-                <th>Carrier</th>
-                <th>Lines</th>
-                <th>Premium</th>
-                <th>Commission</th>
+                <SortTh label="Policy #" colKey="number" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Carrier" colKey="carrier" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Lines" colKey="lines" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Premium" colKey="premium" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Commission" colKey="commission" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th>Terms</th>
-                <th>Effective</th>
-                <th>Expires</th>
-                <th>Status</th>
+                <SortTh label="Effective" colKey="effective" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Expires" colKey="expires" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Status" colKey="status" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {policies.map((p) => (
+              {sorted.map((p) => (
                 <tr key={p.id}>
                   <td>{p.policyNumber || "—"}</td>
                   <td className="small">{carrierName(p.carrierId)}</td>
@@ -586,9 +603,7 @@ function CertificatesTab({
         filter: { accountId: { eq: account.id } },
         nextToken,
       })
-    ).then((data) =>
-      setCerts(data.sort((a, b) => (b.issuedAt ?? "").localeCompare(a.issuedAt ?? "")))
-    );
+    ).then((data) => setCerts(data));
     listAllPages((nextToken) =>
       client.models.Policy.list({
         filter: { accountId: { eq: account.id } },
@@ -699,6 +714,20 @@ function CertificatesTab({
     window.open(url.toString(), "_blank");
   }
 
+  // Most recently issued first, as the fetch used to order them.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    certs,
+    {
+      number: (c) => c.certificateNumber,
+      holder: (c) => c.holderName,
+      form: (c) => c.formType ?? "ACORD_25",
+      issued: (c) => c.issuedAt,
+      by: (c) => c.issuedBy,
+    },
+    "issued",
+    "desc"
+  );
+
   return (
     <div className="card">
       <h2>Certificates of Insurance</h2>
@@ -792,16 +821,16 @@ function CertificatesTab({
               <table>
                 <thead>
                   <tr>
-                    <th>Cert #</th>
-                    <th>Holder</th>
-                    <th>Form</th>
-                    <th>Issued</th>
-                    <th>By</th>
+                    <SortTh label="Cert #" colKey="number" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                    <SortTh label="Holder" colKey="holder" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                    <SortTh label="Form" colKey="form" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                    <SortTh label="Issued" colKey="issued" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                    <SortTh label="By" colKey="by" sortKey={sortKey} dir={dir} onToggle={toggle} />
                     <th>PDF</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {certs.map((c) => (
+                  {sorted.map((c) => (
                     <tr key={c.id}>
                       <td style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
                         {c.certificateNumber ?? "—"}

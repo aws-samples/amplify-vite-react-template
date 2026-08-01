@@ -9,6 +9,7 @@ import {
   type Carrier,
   type Quote,
 } from "../lib/client";
+import { useSort, SortTh } from "../lib/useSort";
 import CoverageForm from "./CoverageForm";
 
 const STATUS_BADGE: Record<string, string> = {
@@ -64,7 +65,7 @@ export default function QuotesPanel({
   onAccountChange: (a: Account) => void;
 }) {
   const [quotes, setQuotes] = useState<Quote[]>([]);
-  const [carriers, setCarriers] = useState<Carrier[]>([]);
+  const [carrierRows, setCarrierRows] = useState<Carrier[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Quote | null>(null);
   const [binding, setBinding] = useState<Quote | null>(null);
@@ -77,16 +78,12 @@ export default function QuotesPanel({
         nextToken,
       })
     );
-    setQuotes(
-      data.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
-    );
+    setQuotes(data);
   }
 
   useEffect(() => {
     refresh();
-    client.models.Carrier.list().then(({ data }) =>
-      setCarriers(data.sort((a, b) => a.name.localeCompare(b.name)))
-    );
+    client.models.Carrier.list().then(({ data }) => setCarrierRows(data));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account.id]);
 
@@ -95,8 +92,27 @@ export default function QuotesPanel({
     refresh();
   }
 
+  // Carrier picker order only — no header to click, so the default stands.
+  const { sorted: carriers } = useSort(carrierRows, { name: (c) => c.name }, "name");
+
   const carrierName = (id: string | null | undefined) =>
     carriers.find((c) => c.id === id)?.name ?? "—";
+
+  // Newest quote first, as the fetch used to order them.
+  const { sorted, sortKey, dir, toggle } = useSort(
+    quotes,
+    {
+      carrier: (q) => (q.carrierId ? carrierName(q.carrierId) : null),
+      lines: (q) => (q.lines ?? []).filter(Boolean).join(", "),
+      premium: (q) => q.premium,
+      commission: (q) => q.commissionPct,
+      effective: (q) => q.effectiveDate,
+      status: (q) => q.status,
+      created: (q) => q.createdAt,
+    },
+    "created",
+    "desc"
+  );
 
   return (
     <div>
@@ -139,18 +155,18 @@ export default function QuotesPanel({
           <table>
             <thead>
               <tr>
-                <th>Carrier</th>
-                <th>Lines</th>
-                <th>Premium</th>
-                <th>Commission</th>
+                <SortTh label="Carrier" colKey="carrier" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Lines" colKey="lines" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Premium" colKey="premium" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Commission" colKey="commission" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th>Terms</th>
-                <th>Effective</th>
-                <th>Status</th>
+                <SortTh label="Effective" colKey="effective" sortKey={sortKey} dir={dir} onToggle={toggle} />
+                <SortTh label="Status" colKey="status" sortKey={sortKey} dir={dir} onToggle={toggle} />
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {quotes.map((qt) => (
+              {sorted.map((qt) => (
                 <tr key={qt.id}>
                   <td>{carrierName(qt.carrierId)}</td>
                   <td className="small">{(qt.lines ?? []).filter(Boolean).join(", ") || "—"}</td>
