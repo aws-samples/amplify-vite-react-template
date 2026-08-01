@@ -1,5 +1,6 @@
 import { generateClient } from "aws-amplify/data";
 import type { Schema } from "../../amplify/data/resource";
+import { urgencyBadge, LICENSE_EXPIRY_SCALE, type BadgeClass } from "./badges";
 
 export const client = generateClient<Schema>();
 
@@ -49,34 +50,49 @@ export const LICENSE_STATUS_LABELS: Record<string, string> = {
   PENDING: "Pending",
 };
 
-/** Days until a date (negative = past). Null-safe. */
-export function daysUntilDate(d: string | null | undefined): number | null {
-  if (!d) return null;
-  const then = new Date(d + "T00:00:00").getTime();
-  const today = new Date(new Date().toDateString()).getTime();
-  return Math.round((then - today) / 86_400_000);
-}
+/**
+ * Licensing's own vocabulary for where a licence sits.
+ *
+ * Deliberately not `UrgencyLevel`: a licence that has run out is "expired",
+ * not "overdue" (nothing is late — the permission is simply gone), and a
+ * licence with months left is "ok" rather than "calm". `Licensing` branches on
+ * these words in seven places.
+ */
+export type LicenseLevel = "ok" | "soon" | "urgent" | "expired" | "unknown";
 
 /**
  * Compliance state of a license, derived from its expiration date and
  * overlaid on the manually-set status. Expiry is the thing that actually
  * stops you writing business, so a past date always wins over a stale
  * "ACTIVE" flag.
+ *
+ * A wrapper around `urgencyBadge`, not a replacement for it, for two reasons
+ * the ladder cannot express:
+ *
+ *  1. The status override runs *before* the ladder. A LAPSED licence is red
+ *     and reads "Lapsed" however far off its expiration date is, so this is a
+ *     branch above the arithmetic rather than another rung on it.
+ *  2. The level is renamed at this boundary — see `LicenseLevel`.
+ *
+ * The cutoffs themselves live in `LICENSE_EXPIRY_SCALE`.
  */
 export function licenseHealth(l: {
   status?: string | null;
   expirationDate?: string | null;
-}): { level: "ok" | "soon" | "urgent" | "expired" | "unknown"; label: string; badge: string } {
+}): { level: LicenseLevel; label: string; cls: BadgeClass } {
   if (l.status && l.status !== "ACTIVE" && l.status !== "PENDING") {
     const label = LICENSE_STATUS_LABELS[l.status] ?? l.status;
-    return { level: "expired", label, badge: "red" };
+    return { level: "expired", label, cls: "red" };
   }
-  const days = daysUntilDate(l.expirationDate);
-  if (days == null) return { level: "unknown", label: "No expiration on file", badge: "gray" };
-  if (days < 0) return { level: "expired", label: `Expired ${-days}d ago`, badge: "red" };
-  if (days <= 30) return { level: "urgent", label: `${days}d left`, badge: "red" };
-  if (days <= 60) return { level: "soon", label: `${days}d left`, badge: "amber" };
-  return { level: "ok", label: `${days}d left`, badge: "green" };
+  const { cls, label, level } = urgencyBadge(
+    daysUntil(l.expirationDate),
+    LICENSE_EXPIRY_SCALE
+  );
+  return {
+    cls,
+    label,
+    level: level === "overdue" ? "expired" : level === "calm" ? "ok" : level,
+  };
 }
 
 export const US_STATES = [
@@ -365,7 +381,8 @@ function utcDayMs(year: number, month: number, day: number): number {
  * and a UTC `createdAt` keeps its UTC day rather than sliding a day west of
  * Greenwich. Anything after position 10 is ignored.
  *
- * Differences from `daysUntilDate`, which this replaces in Wave 4:
+ * Differences from the `daysUntilDate` this replaced in Wave 4 (removed in the
+ * same commit that migrated its last two call sites):
  * - Malformed input returns `null`, not `NaN`. `NaN` slipped through
  *   `licenseHealth`'s `days == null` guard and rendered "NaNd left" in a
  *   green pill; `null` lands in the "No expiration on file" branch.

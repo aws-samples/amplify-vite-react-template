@@ -1,4 +1,5 @@
 import { client, fmtDate, type UserProfile } from "../lib/client";
+import { Badge, flagBadge } from "../lib/badges";
 import SignatureManager from "../components/SignatureManager";
 import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
 import { useAsyncResource } from "../lib/useAsyncResource";
@@ -208,11 +209,15 @@ export default function Team({ profile }: { profile: UserProfile }) {
                         </span>
                       </td>
                       <td>
-                        {p?.onboardingComplete ? (
-                          <span className="badge green">Yes</span>
-                        ) : (
-                          <span className="badge amber">Invited</span>
-                        )}
+                        {/* One-off pair — onboarding state is badged here and
+                            nowhere else. Note `p` may be absent entirely,
+                            which `flagBadge` reads as not-onboarded. */}
+                        <Badge
+                          {...flagBadge(p?.onboardingComplete, {
+                            on: { cls: "green", label: "Yes" },
+                            off: { cls: "amber", label: "Invited" },
+                          })}
+                        />
                       </td>
                       <td>
                         <SignatureManager

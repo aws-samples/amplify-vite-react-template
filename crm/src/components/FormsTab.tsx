@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { uploadData } from "aws-amplify/storage";
 import {
   client,
+  fmtDateTime,
   friendlyError,
   listAllPages,
   TEMPLATE_MISSING_MESSAGE,
@@ -250,7 +251,7 @@ export default function FormsTab({
                   <tr key={d.id}>
                     <td>{d.name}</td>
                     <td className="small">
-                      {d.createdAt ? new Date(d.createdAt).toLocaleString("en-US") : "—"}
+                      {fmtDateTime(d.createdAt)}
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button className="link" onClick={() => setPreview(d)}>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   client,
+  daysUntil,
   fmtDate,
   fmtMoney,
   listAllPages,
@@ -10,6 +11,13 @@ import {
   type Policy,
   type Quote,
 } from "../lib/client";
+import {
+  Badge,
+  statusBadge,
+  urgencyBadge,
+  ACCOUNT_STAGE_BADGE,
+  RENEWAL_HORIZON_SCALE,
+} from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
 
 export default function Dashboard() {
@@ -109,12 +117,6 @@ interface RenewalRow {
   detail: string;
 }
 
-function daysUntil(date: string): number {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return Math.round((new Date(date + "T00:00:00").getTime() - today.getTime()) / 86_400_000);
-}
-
 function RenewalsCard({
   leads,
   clients,
@@ -131,27 +133,35 @@ function RenewalsCard({
     const out: RenewalRow[] = [];
     const clientById = new Map(clients.map((c) => [c.id, c]));
 
+    // A date `daysUntil` can't read is dropped rather than carried as a row
+    // with no number in it. The local `daysUntil` this replaced returned NaN
+    // there, and `NaN <= horizon` is false, so such a row never reached the
+    // table under either version.
     for (const p of policies) {
       if (p.status !== "ACTIVE" || !p.expirationDate) continue;
       const acct = clientById.get(p.accountId);
       if (!acct) continue;
+      const days = daysUntil(p.expirationDate);
+      if (days == null) continue;
       out.push({
         accountId: acct.id,
         name: acct.name,
         kind: "CLIENT",
         date: p.expirationDate,
-        days: daysUntil(p.expirationDate),
+        days,
         detail: `Policy ${p.policyNumber || "—"} · ${(p.lines ?? []).filter(Boolean).join(", ") || "—"}`,
       });
     }
     for (const l of leads) {
       if (!l.currentPolicyExpiration) continue;
+      const days = daysUntil(l.currentPolicyExpiration);
+      if (days == null) continue;
       out.push({
         accountId: l.id,
         name: l.name,
         kind: "LEAD",
         date: l.currentPolicyExpiration,
-        days: daysUntil(l.currentPolicyExpiration),
+        days,
         detail: "Incumbent policy expires",
       });
     }
@@ -218,19 +228,11 @@ function RenewalsCard({
                     <strong>{r.name}</strong>
                   </td>
                   <td>
-                    <span className={`badge ${r.kind === "CLIENT" ? "green" : "blue"}`}>
-                      {r.kind === "CLIENT" ? "Client" : "Lead"}
-                    </span>
+                    <Badge {...statusBadge(ACCOUNT_STAGE_BADGE, r.kind)} />
                   </td>
                   <td>{fmtDate(r.date)}</td>
                   <td className="days-badge">
-                    {r.days < 0 ? (
-                      <span className="badge red">{Math.abs(r.days)}d overdue</span>
-                    ) : r.days <= 30 ? (
-                      <span className="badge amber">{r.days}d</span>
-                    ) : (
-                      <span className="badge gray">{r.days}d</span>
-                    )}
+                    <Badge {...urgencyBadge(r.days, RENEWAL_HORIZON_SCALE)} />
                   </td>
                   <td className="small muted">{r.detail}</td>
                 </tr>

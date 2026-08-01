@@ -5,12 +5,19 @@ import { SaveStatus, useSaveStatus } from "./SaveStatus";
 import { useSort, SortTh } from "../lib/useSort";
 import {
   client,
-  daysUntilDate,
+  daysUntil,
   fmtDate,
   listAllPages,
   type MarketingTask,
   type Quote,
 } from "../lib/client";
+import {
+  Badge,
+  statusBadge,
+  urgencyBadge,
+  MARKETING_RESOLUTION_BADGE,
+  MARKETING_SUBMIT_SCALE,
+} from "../lib/badges";
 
 /**
  * Renewal marketing tasks — "submit this expiring risk to this carrier".
@@ -20,17 +27,11 @@ import {
  * clicked), or someone marks the carrier out of appetite.
  */
 
-function taskUrgency(t: MarketingTask): {
-  badge: string;
-  label: string;
-} {
-  const days = daysUntilDate(t.submitBy);
-  if (days == null) return { badge: "gray", label: "—" };
-  if (days < 0) return { badge: "red", label: `${-days}d past submit-by` };
-  if (days <= 7) return { badge: "red", label: `submit in ${days}d` };
-  if (days <= 21) return { badge: "amber", label: `submit in ${days}d` };
-  return { badge: "green", label: `submit in ${days}d` };
-}
+/** How close this task is to its submit-by. The 7/21 cutoffs and the wording
+ *  live in `MARKETING_SUBMIT_SCALE` — see there for why they are tighter than
+ *  the licence ladder's. */
+const taskUrgency = (t: MarketingTask) =>
+  urgencyBadge(daysUntil(t.submitBy), MARKETING_SUBMIT_SCALE);
 
 /**
  * Close any open task whose carrier already has a quote on this account.
@@ -260,7 +261,7 @@ export default function AccountMarketingTasks({
                     <td className="small">{fmtDate(t.expirationDate)}</td>
                     <td className="small">{fmtDate(t.submitBy)}</td>
                     <td>
-                      <span className={`badge ${u.badge}`}>{u.label}</span>
+                      <Badge {...u} />
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button
@@ -287,13 +288,16 @@ export default function AccountMarketingTasks({
                 <tr key={t.id}>
                   <td>{t.carrierName ?? "—"}</td>
                   <td>
-                    <span
-                      className={`badge ${
-                        t.resolution === "QUOTED" ? "green" : "gray"
-                      }`}
-                    >
-                      {t.resolution === "QUOTED" ? "Quoted" : "Out of appetite"}
-                    </span>
+                    {/* A completed task with no resolution recorded reads as
+                        out-of-appetite, which is what the ternary this
+                        replaces did — the only two ways a task closes. */}
+                    <Badge
+                      {...statusBadge(
+                        MARKETING_RESOLUTION_BADGE,
+                        t.resolution,
+                        MARKETING_RESOLUTION_BADGE.OUT_OF_APPETITE
+                      )}
+                    />
                   </td>
                   <td className="small">
                     {t.completedAt ? fmtDate(t.completedAt.slice(0, 10)) : "—"}
@@ -424,7 +428,7 @@ export function AllMarketingTasks() {
                       <td className="small">{fmtDate(t.expirationDate)}</td>
                       <td className="small">{fmtDate(t.submitBy)}</td>
                       <td>
-                        <span className={`badge ${u.badge}`}>{u.label}</span>
+                        <Badge {...u} />
                       </td>
                     </tr>
                   );

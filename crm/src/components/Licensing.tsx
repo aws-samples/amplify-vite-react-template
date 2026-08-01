@@ -12,6 +12,7 @@ import {
   type ProducerLicense,
   type UserProfile,
 } from "../lib/client";
+import { Badge, flagBadge } from "../lib/badges";
 import ConfirmButton from "./ConfirmButton";
 import DocumentsPanel from "./DocumentsPanel";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
@@ -681,7 +682,7 @@ function FragmentRow({
           {fmtDate(l.expirationDate)}
         </td>
         <td>
-          <span className={`badge ${h.badge}`}>{h.label}</span>
+          <Badge {...h} />
         </td>
         <td>
           <button className="link" onClick={onToggleDocs}>
@@ -1041,15 +1042,24 @@ function StateCoverage({
                     <strong>{r.state}</strong>
                   </td>
                   <td>
-                    <span className={`badge ${r.firm ? "green" : "red"}`}>
-                      {r.firm ? "Active" : "Missing"}
-                    </span>
+                    {/* Both pairs are one-offs — this matrix is the only
+                        place either is rendered — so the wording stays here
+                        rather than becoming a named table in badges.tsx. */}
+                    <Badge
+                      {...flagBadge(r.firm, {
+                        on: { cls: "green", label: "Active" },
+                        off: { cls: "red", label: "Missing" },
+                      })}
+                    />
                   </td>
                   <td className="small">{r.producers.join(", ") || "—"}</td>
                   <td>
-                    <span className={`badge ${ok ? "green" : "amber"}`}>
-                      {ok ? "Yes" : "Gap"}
-                    </span>
+                    <Badge
+                      {...flagBadge(ok, {
+                        on: { cls: "green", label: "Yes" },
+                        off: { cls: "amber", label: "Gap" },
+                      })}
+                    />
                   </td>
                 </tr>
               );

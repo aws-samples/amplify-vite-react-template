@@ -17,7 +17,7 @@ import type { CSSProperties } from "react";
  *
  * Deliberately importing nothing but a React type: `client.ts` calls
  * `generateClient()` at module scope, so a colour table must not live behind
- * it. Callers pass `daysUntilDate(...)`'s result in; this module never reads
+ * it. Callers pass `daysUntil(...)`'s result in; this module never reads
  * a clock, which is also why every test below is deterministic.
  */
 

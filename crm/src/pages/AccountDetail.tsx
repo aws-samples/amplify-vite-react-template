@@ -16,6 +16,7 @@ import {
   type UserProfile,
 } from "../lib/client";
 import { fillAcord25, signatureFor } from "../lib/acord";
+import { Badge, statusBadge, ACCOUNT_STAGE_BADGE } from "../lib/badges";
 import { useIsAdmin } from "../lib/auth";
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
@@ -79,9 +80,9 @@ export default function AccountDetail({ profile }: { profile: UserProfile }) {
       )}
       <h1>
         {account.name}{" "}
-        <span className={`badge ${account.stage === "CLIENT" ? "green" : "blue"}`}>
-          {account.stage}
-        </span>
+        {/* Reads "Client"/"Lead" now, not "CLIENT"/"LEAD" — the shared table
+            has one spelling and the dashboard's sentence case is it. */}
+        <Badge {...statusBadge(ACCOUNT_STAGE_BADGE, account.stage)} />
       </h1>
       <p className="sub">
         {account.type} · {[account.city, account.state].filter(Boolean).join(", ") || "no location"}

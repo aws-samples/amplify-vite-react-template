@@ -7,6 +7,7 @@ import {
   type AppetiteGuide,
   type Carrier,
 } from "../lib/client";
+import { Badge, flagBadge, CARRIER_APPOINTMENT_BADGE } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
 import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
@@ -135,9 +136,7 @@ export default function Carriers() {
                         <strong>{c.name}</strong>
                       </td>
                       <td>
-                        <span className={`badge ${c.appointed ? "green" : "amber"}`}>
-                          {c.appointed ? "Appointed" : "Prospective"}
-                        </span>
+                        <Badge {...flagBadge(c.appointed, CARRIER_APPOINTMENT_BADGE)} />
                       </td>
                       <td>{c.primaryUnderwriterName ?? "—"}</td>
                       <td>{c.standardCommissionPct != null ? `${c.standardCommissionPct}%` : "—"}</td>

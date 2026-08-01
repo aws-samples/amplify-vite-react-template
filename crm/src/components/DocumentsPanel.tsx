@@ -6,6 +6,7 @@ import FilePreviewModal, { canPreview } from "./FilePreview";
 import FileButton from "./FileButton";
 import ConfirmButton from "./ConfirmButton";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
+import { Badge, statusBadge, OCR_STATUS_BADGE } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
 
 type EntityType = Schema["DocumentEntityType"]["type"];
@@ -23,14 +24,6 @@ const CATEGORIES: { value: Category; label: string }[] = [
   { value: "PRIOR_POLICY", label: "Prior policy packet" },
   { value: "QUOTE_DOC", label: "Quote document" },
 ];
-
-const OCR_BADGE: Record<string, { cls: string; label: string }> = {
-  PENDING: { cls: "gray", label: "OCR queued" },
-  PROCESSING: { cls: "amber", label: "OCR running" },
-  COMPLETE: { cls: "green", label: "OCR done" },
-  FAILED: { cls: "red", label: "OCR failed" },
-  SKIPPED: { cls: "gray", label: "No OCR" },
-};
 
 /**
  * Attach-to-anything documents panel: uploads to
@@ -147,7 +140,9 @@ export default function DocumentsPanel({
     {
       name: (d) => d.name,
       category: (d) => CATEGORIES.find((c) => c.value === d.category)?.label,
-      ocr: (d) => OCR_BADGE[d.ocrStatus ?? "PENDING"]?.label,
+      // Sorts on the words in the badge, so the column orders the way it reads.
+      ocr: (d) =>
+        statusBadge(OCR_STATUS_BADGE, d.ocrStatus, OCR_STATUS_BADGE.PENDING).label,
       size: (d) => d.sizeBytes,
       created: (d) => d.createdAt,
     },
@@ -229,7 +224,14 @@ export default function DocumentsPanel({
             </thead>
             <tbody>
               {sorted.map((d) => {
-                const badge = OCR_BADGE[d.ocrStatus ?? "PENDING"] ?? OCR_BADGE.PENDING;
+                // No OCR status yet, or one this table doesn't know, both read
+                // as "queued" — the state a document is in before the Textract
+                // Lambda has said anything about it.
+                const badge = statusBadge(
+                  OCR_STATUS_BADGE,
+                  d.ocrStatus,
+                  OCR_STATUS_BADGE.PENDING
+                );
                 return (
                   <tr key={d.id}>
                     <td>{d.name}</td>
@@ -239,7 +241,7 @@ export default function DocumentsPanel({
                       </span>
                     </td>
                     <td>
-                      <span className={`badge ${badge.cls}`}>{badge.label}</span>
+                      <Badge {...badge} />
                       {d.ocrStatus === "FAILED" && d.ocrError && (
                         <div className="muted small">{d.ocrError}</div>
                       )}

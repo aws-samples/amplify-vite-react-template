@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { client, fmtMoney, friendlyError, type Account } from "../lib/client";
+import { client, fmtMoney, fmtNum, friendlyError, type Account } from "../lib/client";
+import { Badge, statusBadge, CONFIDENCE_BADGE } from "../lib/badges";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
 /**
@@ -145,8 +146,6 @@ function parseExtraction(raw: unknown): ExtractionResult | null {
   }
   return v && typeof v === "object" ? (v as ExtractionResult) : null;
 }
-
-const CONF_BADGE: Record<string, string> = { high: "green", medium: "amber", low: "red" };
 
 export default function ExtractionPanel({
   account,
@@ -365,9 +364,7 @@ export default function ExtractionPanel({
                         <strong>{extracted}</strong>
                       </td>
                       <td>
-                        <span className={`badge ${CONF_BADGE[f.confidence] ?? "gray"}`}>
-                          {f.confidence}
-                        </span>
+                        <Badge {...statusBadge(CONFIDENCE_BADGE, f.confidence)} />
                       </td>
                       <td className="small muted" style={{ maxWidth: 320 }}>
                         {f.evidence ?? "—"}
@@ -396,7 +393,7 @@ export default function ExtractionPanel({
                     <td>
                       <strong>
                         {(b.label as string) || `Building ${i + 1}`}
-                        {hasSqft ? ` · ${sqftNum.toLocaleString()} sq ft` : ""}
+                        {hasSqft ? ` · ${fmtNum(sqftNum)} sq ft` : ""}
                       </strong>
                     </td>
                     <td>

@@ -8,6 +8,7 @@ import {
   type Carrier,
   type Quote,
 } from "../lib/client";
+import { Badge, statusBadge, QUOTE_STATUS_BADGE } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
 
 const OPEN = ["DRAFT", "SUBMITTED", "QUOTED", "PRESENTED"];
@@ -93,7 +94,7 @@ export default function QuotesList() {
                     <td>{fmtMoney(q.premium)}</td>
                     <td>{fmtDate(q.effectiveDate)}</td>
                     <td>
-                      <span className="badge gray">{q.status}</span>
+                      <Badge {...statusBadge(QUOTE_STATUS_BADGE, q.status)} />
                     </td>
                   </tr>
                 ))}

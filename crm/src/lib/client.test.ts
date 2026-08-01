@@ -12,7 +12,6 @@ import {
   EMAIL_RE,
   TEMPLATE_MISSING_MESSAGE,
   daysUntil,
-  daysUntilDate,
   fmtDate,
   fmtDateTime,
   friendlyError,
@@ -20,6 +19,19 @@ import {
   validatePositiveInt,
   validateYear,
 } from "./client";
+
+/**
+ * `client.ts`'s `daysUntilDate` verbatim, as it stood before Wave 4 deleted
+ * it. Kept here — and only here — so the two tests that pin `daysUntil`
+ * against the behaviour it replaced still compare against the real thing
+ * rather than against a remembered description of it.
+ */
+function legacyDaysUntilDate(d: string | null | undefined): number | null {
+  if (!d) return null;
+  const then = new Date(d + "T00:00:00").getTime();
+  const today = new Date(new Date().toDateString()).getTime();
+  return Math.round((then - today) / 86_400_000);
+}
 
 describe("EMAIL_RE", () => {
   it("accepts ordinary addresses", () => {
@@ -515,9 +527,10 @@ describe("daysUntil", () => {
     ]) {
       expect(daysUntil(bad)).toBeNull();
     }
-    // The regression this fixes: `daysUntilDate` returned NaN, which slid
-    // through `licenseHealth`'s `days == null` guard into a green "NaNd left".
-    expect(Number.isNaN(daysUntilDate("garbage") as number)).toBe(true);
+    // The regression this fixes: the `daysUntilDate` removed in Wave 4
+    // returned NaN here, which slid through `licenseHealth`'s `days == null`
+    // guard into a green "NaNd left".
+    expect(Number.isNaN(legacyDaysUntilDate("garbage") as number)).toBe(true);
   });
 
   it("reads a full datetime string as its nominal day", () => {
@@ -597,7 +610,7 @@ describe("daysUntil", () => {
     }
   });
 
-  it("matches daysUntilDate on every well-formed input, so Wave 4 is a rename", () => {
+  it("matches the removed daysUntilDate on every well-formed input, so Wave 4 was a rename", () => {
     pin("America/Los_Angeles", NOON);
     for (const d of [
       "2026-07-31",
@@ -607,9 +620,9 @@ describe("daysUntil", () => {
       "2025-01-01",
       "2027-02-28",
     ]) {
-      expect(daysUntil(d)).toBe(daysUntilDate(d));
+      expect(daysUntil(d)).toBe(legacyDaysUntilDate(d));
     }
-    expect(daysUntil(null)).toBe(daysUntilDate(null));
+    expect(daysUntil(null)).toBe(legacyDaysUntilDate(null));
   });
 });
 
@@ -627,9 +640,9 @@ describe("fmtDateTime", () => {
     expect(fmtDateTime(STAMP)).toBe("7/31/2026, 3:04 PM");
   });
 
-  it("drops the seconds FormsTab's bare toLocaleString prints", () => {
+  it("drops the seconds FormsTab's bare toLocaleString printed", () => {
     pin("America/Los_Angeles", STAMP);
-    // The current call site: `new Date(d.createdAt).toLocaleString("en-US")`.
+    // The call site this replaced: `new Date(d.createdAt).toLocaleString("en-US")`.
     expect(new Date(STAMP).toLocaleString("en-US")).toBe("7/31/2026, 3:04:05 PM");
     expect(fmtDateTime(STAMP)).toBe("7/31/2026, 3:04 PM");
   });

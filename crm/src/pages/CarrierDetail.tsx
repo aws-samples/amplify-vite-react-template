@@ -10,6 +10,7 @@ import {
   type AppetiteGuide,
   type Carrier,
 } from "../lib/client";
+import { Badge, flagBadge, CARRIER_APPOINTMENT_BADGE } from "../lib/badges";
 import ConfirmButton from "../components/ConfirmButton";
 import DocumentsPanel from "../components/DocumentsPanel";
 import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
@@ -30,9 +31,7 @@ export default function CarrierDetail() {
     <>
       <h1>
         {carrier.name}{" "}
-        <span className={`badge ${carrier.appointed ? "green" : "amber"}`}>
-          {carrier.appointed ? "Appointed" : "Prospective"}
-        </span>
+        <Badge {...flagBadge(carrier.appointed, CARRIER_APPOINTMENT_BADGE)} />
       </h1>
       <p className="sub">Carrier appointment &amp; appetite</p>
 

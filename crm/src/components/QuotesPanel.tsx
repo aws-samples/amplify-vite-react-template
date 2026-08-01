@@ -9,20 +9,11 @@ import {
   type Carrier,
   type Quote,
 } from "../lib/client";
+import { Badge, statusBadge, QUOTE_STATUS_BADGE } from "../lib/badges";
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import CoverageForm from "./CoverageForm";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
-
-const STATUS_BADGE: Record<string, string> = {
-  DRAFT: "gray",
-  SUBMITTED: "blue",
-  QUOTED: "amber",
-  PRESENTED: "amber",
-  BOUND: "green",
-  DECLINED: "red",
-  LOST: "red",
-};
 
 const OPEN_STATUSES = ["DRAFT", "SUBMITTED", "QUOTED", "PRESENTED"] as const;
 
@@ -215,9 +206,7 @@ export default function QuotesPanel({
                   <td className="small">{termsSummary(qt)}</td>
                   <td>{fmtDate(qt.effectiveDate)}</td>
                   <td>
-                    <span className={`badge ${STATUS_BADGE[qt.status] ?? "gray"}`}>
-                      {qt.status}
-                    </span>
+                    <Badge {...statusBadge(QUOTE_STATUS_BADGE, qt.status)} />
                   </td>
                   <td style={{ whiteSpace: "nowrap" }}>
                     <button

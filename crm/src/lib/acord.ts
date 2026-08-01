@@ -2,7 +2,7 @@ import { PDFDocument, PDFTextField, PDFCheckBox, PDFName, PDFBool } from "pdf-li
 import { downloadData } from "aws-amplify/storage";
 import { getUrl } from "aws-amplify/storage";
 import { AGENCY } from "./agency";
-import { client } from "./client";
+import { client, fmtDate, fmtNum } from "./client";
 import type { Account, Carrier, Certificate, Policy } from "./client";
 
 /**
@@ -83,8 +83,42 @@ interface FillResult {
   unsigned?: string; // why the signature isn't on the document, if it isn't
 }
 
-const fmtUs = (d: string | null | undefined) =>
-  d ? new Date(d + "T00:00:00").toLocaleDateString("en-US") : "";
+// ── Rendering values into PDF form fields ────────────────────────────
+//
+// Both helpers below are `fmtDate`/`fmtNum` with one deliberate difference:
+// **absent renders as blank, not as "—".** A screen can say "—" to mean "we
+// don't hold this"; a printed ACORD field cannot — an em dash typed into
+// `Policy_ExpirationDate_A` is a literal mark on a form a carrier or a
+// mortgagee reads, and it looks like data. An empty field is how paper says
+// "not provided". So the *emptiness* rule is local to this module and the
+// *formatting* rule is shared, rather than the whole thing being copied.
+
+/** A date as `fmtDate` renders it everywhere else; blank when there isn't one. */
+const fmtUs = (d: string | null | undefined) => (d ? fmtDate(d) : "");
+
+/**
+ * A coverage limit as whole dollars: `fmtNum` plus the rounding these fields
+ * want (cents on a $1,000,000 aggregate are noise, and the boxes are narrow).
+ * Blank when there is no figure.
+ *
+ * Module-level so the OTHER-policy blanket limit can call it — that site had
+ * this same body inlined, in a block the previous function-local declaration
+ * was out of scope for.
+ */
+const amt = (n: number | null | undefined) =>
+  n == null ? "" : fmtNum(Math.round(n));
+
+/** Today, rendered by the same `fmtDate` as every other date on the form.
+ *  The local calendar day, matching what `new Date().toLocaleDateString()`
+ *  printed here before — the reader of a form completed at 9pm in Boston
+ *  expects today's date on it, not tomorrow's UTC one. */
+function todayUs(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return fmtDate(
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  );
+}
 
 /** Candidate names cover the ACORD 25 (2016/03) eForm and common older editions. */
 function buildAcord25Values(
@@ -96,7 +130,7 @@ function buildAcord25Values(
   const values: FieldValues = {
     date: {
       candidates: ["Form_CompletionDate_A", "DATE", "Date"],
-      value: new Date().toLocaleDateString("en-US"),
+      value: todayUs(),
     },
     certificateNumber: {
       candidates: [
@@ -254,9 +288,6 @@ function buildAcord25Values(
     // ── Limits ──
     // A COI without limits is useless to the holder; this is the whole
     // point of the certificate.
-    const amt = (n: number | null | undefined) =>
-      n == null ? "" : Math.round(n).toLocaleString("en-US");
-
     values.glEachOccurrence = {
       candidates: ["GeneralLiability_EachOccurrence_LimitAmount_A"],
       value: amt(gl.glEachOccurrence),
@@ -393,10 +424,7 @@ function buildAcord25Values(
     };
     values.otherCoverageLimit = {
       candidates: ["OtherPolicy_CoverageLimitAmount_A"],
-      value:
-        other.blanketLimit != null
-          ? Math.round(other.blanketLimit).toLocaleString("en-US")
-          : "",
+      value: amt(other.blanketLimit),
     };
   }
 
@@ -769,7 +797,7 @@ function buildAppFormValues(
   const values: FieldValues = {
     date: {
       candidates: ["Form_CompletionDate_A"],
-      value: new Date().toLocaleDateString("en-US"),
+      value: todayUs(),
     },
 
     producer: { candidates: ["Producer_FullName_A"], value: AGENCY.name },

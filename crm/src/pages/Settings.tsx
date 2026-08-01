@@ -7,6 +7,7 @@ import Team from "./Team";
 import Licensing from "../components/Licensing";
 import SignatureManager from "../components/SignatureManager";
 import { friendlyError, type UserProfile } from "../lib/client";
+import { Badge, flagBadge } from "../lib/badges";
 import { useIsAdmin } from "../lib/auth";
 
 type TemplateDef = AcordFormDef;
@@ -195,9 +196,14 @@ function TemplateRow({
           <div className="muted small">{tpl.note}</div>
         </td>
         <td>
-          <span className={`badge ${isUploaded ? "green" : "amber"}`}>
-            {isUploaded ? "Uploaded" : "Missing"}
-          </span>
+          {/* One-off pair: this is the only place a template's presence is
+              badged, so the wording stays at the call site. */}
+          <Badge
+            {...flagBadge(isUploaded, {
+              on: { cls: "green", label: "Uploaded" },
+              off: { cls: "amber", label: "Missing" },
+            })}
+          />
         </td>
         <td style={{ whiteSpace: "nowrap" }}>
           <div className="toolbar" style={{ margin: 0 }}>

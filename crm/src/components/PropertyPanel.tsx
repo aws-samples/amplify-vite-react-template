@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { uploadData, getUrl, remove } from "aws-amplify/storage";
 import {
   client,
+  fmtNum,
   friendlyError,
   listAllPages,
   US_STATES,
@@ -402,7 +403,7 @@ function BuildingsCard({ accountId }: { accountId: string }) {
         Buildings{" "}
         <span className="muted small" style={{ fontWeight: 400 }}>
           — {buildings.length} total
-          {totalSqft ? ` · ${totalSqft.toLocaleString()} sq ft` : ""}
+          {totalSqft ? ` · ${fmtNum(totalSqft)} sq ft` : ""}
         </span>
       </h2>
       <div className="toolbar">
@@ -461,7 +462,7 @@ function BuildingsCard({ accountId }: { accountId: string }) {
               {sorted.map((b) => (
                 <tr key={b.id}>
                   <td>{b.label}</td>
-                  <td>{b.sqft?.toLocaleString() ?? "—"}</td>
+                  <td>{fmtNum(b.sqft)}</td>
                   <td>
                     {/* Was unguarded: one click deleted the building. */}
                     <ConfirmButton

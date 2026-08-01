@@ -8,6 +8,7 @@ import {
   type Carrier,
   type Policy,
 } from "../lib/client";
+import { Badge, statusBadge, POLICY_STATUS_BADGE } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
 
 export default function PoliciesList() {
@@ -84,9 +85,7 @@ export default function PoliciesList() {
                     <td>{fmtDate(p.effectiveDate)}</td>
                     <td>{fmtDate(p.expirationDate)}</td>
                     <td>
-                      <span className={`badge ${p.status === "ACTIVE" ? "green" : "gray"}`}>
-                        {p.status}
-                      </span>
+                      <Badge {...statusBadge(POLICY_STATUS_BADGE, p.status)} />
                     </td>
                   </tr>
                 ))}
