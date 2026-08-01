@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { uploadData } from "aws-amplify/storage";
-import { client, type Account, type CrmDocument } from "../lib/client";
+import { client, listAllPages, type Account, type CrmDocument } from "../lib/client";
 import { ACORD_FORMS, fillAcordApp, signatureFor, type AcordFormDef } from "../lib/acord";
 import type { UserProfile } from "../lib/client";
 import FilePreviewModal from "./FilePreview";
@@ -26,12 +26,15 @@ export default function FormsTab({
   const [preview, setPreview] = useState<CrmDocument | null>(null);
 
   useEffect(() => {
-    client.models.Document.list({
-      filter: {
-        entityId: { eq: account.id },
-        category: { eq: "ACORD_FORM" },
-      },
-    }).then(({ data }) =>
+    listAllPages((nextToken) =>
+      client.models.Document.list({
+        filter: {
+          entityId: { eq: account.id },
+          category: { eq: "ACORD_FORM" },
+        },
+        nextToken,
+      })
+    ).then((data) =>
       setGenerated(
         data.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
       )
@@ -43,17 +46,23 @@ export default function FormsTab({
     setNote("");
     setError("");
     try {
-      const { data: buildings } = await client.models.Building.list({
-        filter: { accountId: { eq: account.id } },
-      });
+      const buildings = await listAllPages((nextToken) =>
+        client.models.Building.list({
+          filter: { accountId: { eq: account.id } },
+          nextToken,
+        })
+      );
       // Clients renew off their bound policies; the lead-only
       // currentPolicyExpiration field isn't used once an account converts.
       let renewalDate: string | null = null;
       let lines: string[] = [];
       if (account.stage === "CLIENT") {
-        const { data: pols } = await client.models.Policy.list({
-          filter: { accountId: { eq: account.id } },
-        });
+        const pols = await listAllPages((nextToken) =>
+          client.models.Policy.list({
+            filter: { accountId: { eq: account.id } },
+            nextToken,
+          })
+        );
         const active = pols.filter((p) => p.status === "ACTIVE");
         const ends = active
           .filter((p) => p.expirationDate)
@@ -67,9 +76,12 @@ export default function FormsTab({
       } else {
         renewalDate = account.currentPolicyExpiration ?? null;
         // A prospect has no policy yet — fall back to whatever's been quoted.
-        const { data: qs } = await client.models.Quote.list({
-          filter: { accountId: { eq: account.id } },
-        });
+        const qs = await listAllPages((nextToken) =>
+          client.models.Quote.list({
+            filter: { accountId: { eq: account.id } },
+            nextToken,
+          })
+        );
         lines = [
           ...new Set(qs.flatMap((q) => (q.lines ?? []).filter(Boolean))),
         ] as string[];

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { getUrl } from "aws-amplify/storage";
-import { client, fmtDate, type CrmDocument } from "../lib/client";
+import { client, fmtDate, listAllPages, type CrmDocument } from "../lib/client";
 import FilePreviewModal, { canPreview } from "../components/FilePreview";
 
 /**
@@ -22,20 +22,17 @@ export default function DocumentSearch() {
     setSearching(true);
     setError("");
     try {
-      const found: CrmDocument[] = [];
-      let nextToken: string | null | undefined;
       // Paginate the filtered scan to the end (bounded to stay sane).
-      for (let page = 0; page < 25; page++) {
-        const res = await client.models.Document.list({
-          filter: {
-            or: [{ name: { contains: q } }, { ocrText: { contains: q } }],
-          },
-          nextToken: nextToken ?? undefined,
-        });
-        found.push(...res.data);
-        nextToken = res.nextToken;
-        if (!nextToken) break;
-      }
+      const found = await listAllPages(
+        (nextToken) =>
+          client.models.Document.list({
+            filter: {
+              or: [{ name: { contains: q } }, { ocrText: { contains: q } }],
+            },
+            nextToken,
+          }),
+        { maxPages: 25 }
+      );
       setResults(
         found.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
       );

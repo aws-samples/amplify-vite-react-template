@@ -21,22 +21,25 @@ export default function Dashboard() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    client.models.Account.list({ filter: { stage: { eq: "LEAD" } } }).then(
-      ({ data }) => setLeads(data)
-    );
-    client.models.Account.list({ filter: { stage: { eq: "CLIENT" } } }).then(
-      ({ data }) => setClients(data)
-    );
-    client.models.Quote.list({
-      filter: {
-        or: [
-          { status: { eq: "DRAFT" } },
-          { status: { eq: "SUBMITTED" } },
-          { status: { eq: "QUOTED" } },
-          { status: { eq: "PRESENTED" } },
-        ],
-      },
-    }).then(({ data }) => setOpenQuotes(data));
+    listAllPages((nextToken) =>
+      client.models.Account.list({ filter: { stage: { eq: "LEAD" } }, nextToken })
+    ).then((data) => setLeads(data));
+    listAllPages((nextToken) =>
+      client.models.Account.list({ filter: { stage: { eq: "CLIENT" } }, nextToken })
+    ).then((data) => setClients(data));
+    listAllPages((nextToken) =>
+      client.models.Quote.list({
+        filter: {
+          or: [
+            { status: { eq: "DRAFT" } },
+            { status: { eq: "SUBMITTED" } },
+            { status: { eq: "QUOTED" } },
+            { status: { eq: "PRESENTED" } },
+          ],
+        },
+        nextToken,
+      })
+    ).then((data) => setOpenQuotes(data));
     client.models.Policy.list().then(({ data }) => setPolicies(data));
     client.models.Carrier.list().then(({ data }) => setCarriers(data));
     listAllPages((nextToken) =>

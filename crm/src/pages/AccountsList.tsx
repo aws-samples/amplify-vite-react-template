@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { client, fmtDate, fmtMoney, fmtNum, type Account, type Policy } from "../lib/client";
+import {
+  client,
+  fmtDate,
+  fmtMoney,
+  fmtNum,
+  listAllPages,
+  type Account,
+  type Policy,
+} from "../lib/client";
 import { useSort, SortTh } from "../lib/useSort";
 
 export default function AccountsList({ stage }: { stage: "LEAD" | "CLIENT" }) {
@@ -12,12 +20,12 @@ export default function AccountsList({ stage }: { stage: "LEAD" | "CLIENT" }) {
 
   useEffect(() => {
     setLoading(true);
-    client.models.Account.list({ filter: { stage: { eq: stage } } }).then(
-      ({ data }) => {
-        setAccounts(data);
-        setLoading(false);
-      }
-    );
+    listAllPages((nextToken) =>
+      client.models.Account.list({ filter: { stage: { eq: stage } }, nextToken })
+    ).then((data) => {
+      setAccounts(data);
+      setLoading(false);
+    });
     client.models.Policy.list().then(({ data }) => setPolicies(data));
   }, [stage]);
 

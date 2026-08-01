@@ -6,6 +6,7 @@ import {
   fmtDate,
   fmtMoney,
   friendlyError,
+  listAllPages,
   validateAccountFields,
   type Account,
   type Carrier,
@@ -364,14 +365,20 @@ function DeleteLeadZone({ account }: { account: Account }) {
     setDeleting(true);
     setError("");
     try {
-      const { data: quotes } = await client.models.Quote.list({
-        filter: { accountId: { eq: account.id } },
-      });
+      const quotes = await listAllPages((nextToken) =>
+        client.models.Quote.list({
+          filter: { accountId: { eq: account.id } },
+          nextToken,
+        })
+      );
       await Promise.all(quotes.map((q) => client.models.Quote.delete({ id: q.id })));
 
-      const { data: docs } = await client.models.Document.list({
-        filter: { entityId: { eq: account.id } },
-      });
+      const docs = await listAllPages((nextToken) =>
+        client.models.Document.list({
+          filter: { entityId: { eq: account.id } },
+          nextToken,
+        })
+      );
       await Promise.all(
         docs.map(async (d) => {
           if (d.s3Key && d.s3Key !== "pending") {
@@ -435,9 +442,12 @@ function PoliciesTab({ accountId }: { accountId: string }) {
   const [editing, setEditing] = useState<Policy | null>(null);
 
   async function refresh() {
-    const { data } = await client.models.Policy.list({
-      filter: { accountId: { eq: accountId } },
-    });
+    const data = await listAllPages((nextToken) =>
+      client.models.Policy.list({
+        filter: { accountId: { eq: accountId } },
+        nextToken,
+      })
+    );
     setPolicies(
       data.sort((a, b) => (b.effectiveDate ?? "").localeCompare(a.effectiveDate ?? ""))
     );
@@ -562,14 +572,20 @@ function CertificatesTab({
   const [previewCert, setPreviewCert] = useState<Certificate | null>(null);
 
   useEffect(() => {
-    client.models.Certificate.list({
-      filter: { accountId: { eq: account.id } },
-    }).then(({ data }) =>
+    listAllPages((nextToken) =>
+      client.models.Certificate.list({
+        filter: { accountId: { eq: account.id } },
+        nextToken,
+      })
+    ).then((data) =>
       setCerts(data.sort((a, b) => (b.issuedAt ?? "").localeCompare(a.issuedAt ?? "")))
     );
-    client.models.Policy.list({ filter: { accountId: { eq: account.id } } }).then(
-      ({ data }) => setPolicies(data)
-    );
+    listAllPages((nextToken) =>
+      client.models.Policy.list({
+        filter: { accountId: { eq: account.id } },
+        nextToken,
+      })
+    ).then((data) => setPolicies(data));
     client.models.Carrier.list().then(({ data }) => setCarriers(data));
   }, [account.id]);
 

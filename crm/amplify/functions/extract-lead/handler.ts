@@ -4,6 +4,7 @@ import { getAmplifyDataClientConfig } from "@aws-amplify/backend/function/runtim
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Schema } from "../../data/resource";
+import { listAllPages } from "../../../src/lib/pagination";
 
 /**
  * Two invocation modes:
@@ -190,28 +191,6 @@ const CATEGORY_PRIORITY: Record<string, number> = {
 
 const TOTAL_CHAR_BUDGET = 400_000; // ~100K tokens of document text
 
-/**
- * Page through a filtered list until it's exhausted.
- *
- * Generic over the page shape rather than deriving the model type — naming
- * the client's return type directly (ReturnType<typeof ...list>) makes tsc
- * bail with "type instantiation is excessively deep".
- */
-async function listAll<T>(
-  fetchPage: (
-    nextToken?: string
-  ) => Promise<{ data: T[]; nextToken?: string | null }>
-): Promise<T[]> {
-  const out: T[] = [];
-  let token: string | undefined;
-  do {
-    const page = await fetchPage(token);
-    out.push(...page.data);
-    token = page.nextToken ?? undefined;
-  } while (token);
-  return out;
-}
-
 function renderTables(raw: unknown): string {
   let v: unknown = raw;
   try {
@@ -234,7 +213,7 @@ async function runExtraction(accountId: string) {
     // returns nothing once the account's documents fall outside the first
     // ~100 scanned rows — which is exactly what happens as the table grows
     // across accounts. Page through until the token is exhausted.
-    const docs = await listAll((nextToken) =>
+    const docs = await listAllPages((nextToken) =>
       client.models.Document.list({
         filter: { entityId: { eq: accountId }, ocrStatus: { eq: "COMPLETE" } },
         limit: 1000,

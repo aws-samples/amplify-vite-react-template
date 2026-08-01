@@ -2,6 +2,7 @@ import { Amplify } from "aws-amplify";
 import { generateClient } from "aws-amplify/data";
 import { getAmplifyDataClientConfig } from "@aws-amplify/backend/function/runtime";
 import type { Schema } from "../../data/resource";
+import { listAllPages } from "../../../src/lib/pagination";
 
 /**
  * Daily renewal-marketing sweep. See resource.ts for the why.
@@ -25,20 +26,6 @@ async function getDataClient() {
     dataClient = generateClient<Schema>();
   }
   return dataClient;
-}
-
-/** `.list()` caps at 100 — every read here must cover the whole table. */
-async function listAll<T>(
-  fetchPage: (token?: string) => Promise<{ data: T[]; nextToken?: string | null }>
-): Promise<T[]> {
-  const out: T[] = [];
-  let token: string | undefined;
-  do {
-    const page = await fetchPage(token);
-    out.push(...page.data);
-    token = page.nextToken ?? undefined;
-  } while (token);
-  return out;
 }
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
@@ -67,12 +54,17 @@ export const handler = async () => {
   const today = isoDay(new Date());
 
   const [accounts, policies, carriers, guides, quotes, tasks] = await Promise.all([
-    listAll((nextToken) => client.models.Account.list({ nextToken, limit: 200 })),
-    listAll((nextToken) => client.models.Policy.list({ nextToken, limit: 200 })),
-    listAll((nextToken) => client.models.Carrier.list({ nextToken, limit: 200 })),
-    listAll((nextToken) => client.models.AppetiteGuide.list({ nextToken, limit: 200 })),
-    listAll((nextToken) => client.models.Quote.list({ nextToken, limit: 200 })),
-    listAll((nextToken) => client.models.MarketingTask.list({ nextToken, limit: 200 })),
+    // `.list()` caps at 100 — every read here must cover the whole table.
+    listAllPages((nextToken) => client.models.Account.list({ nextToken, limit: 200 })),
+    listAllPages((nextToken) => client.models.Policy.list({ nextToken, limit: 200 })),
+    listAllPages((nextToken) => client.models.Carrier.list({ nextToken, limit: 200 })),
+    listAllPages((nextToken) =>
+      client.models.AppetiteGuide.list({ nextToken, limit: 200 })
+    ),
+    listAllPages((nextToken) => client.models.Quote.list({ nextToken, limit: 200 })),
+    listAllPages((nextToken) =>
+      client.models.MarketingTask.list({ nextToken, limit: 200 })
+    ),
   ]);
 
   const accountById = new Map(accounts.map((a) => [a.id, a]));

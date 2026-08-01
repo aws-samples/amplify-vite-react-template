@@ -3,6 +3,7 @@ import {
   client,
   fmtDate,
   fmtMoney,
+  listAllPages,
   type Account,
   type Carrier,
   type Quote,
@@ -69,9 +70,12 @@ export default function QuotesPanel({
   const [error, setError] = useState("");
 
   async function refresh() {
-    const { data } = await client.models.Quote.list({
-      filter: { accountId: { eq: account.id } },
-    });
+    const data = await listAllPages((nextToken) =>
+      client.models.Quote.list({
+        filter: { accountId: { eq: account.id } },
+        nextToken,
+      })
+    );
     setQuotes(
       data.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
     );

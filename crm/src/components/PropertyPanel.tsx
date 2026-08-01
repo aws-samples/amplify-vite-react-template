@@ -3,6 +3,7 @@ import { uploadData, getUrl, remove } from "aws-amplify/storage";
 import {
   client,
   friendlyError,
+  listAllPages,
   US_STATES,
   validateAccountFields,
   type Account,
@@ -326,9 +327,13 @@ function BuildingsCard({ accountId }: { accountId: string }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    client.models.Building.list({ filter: { accountId: { eq: accountId } } }).then(
-      ({ data }) =>
-        setBuildings(data.sort((a, b) => (a.label ?? "").localeCompare(b.label ?? "")))
+    listAllPages((nextToken) =>
+      client.models.Building.list({
+        filter: { accountId: { eq: accountId } },
+        nextToken,
+      })
+    ).then((data) =>
+      setBuildings(data.sort((a, b) => (a.label ?? "").localeCompare(b.label ?? "")))
     );
   }, [accountId]);
 

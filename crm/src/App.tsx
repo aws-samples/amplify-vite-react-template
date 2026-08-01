@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react";
 import type { AuthUser } from "aws-amplify/auth";
-import { client, type UserProfile } from "./lib/client";
+import { client, listAllPages, type UserProfile } from "./lib/client";
 import MagicLinkSignIn from "./components/MagicLinkSignIn";
 import Dashboard from "./pages/Dashboard";
 import AccountsList from "./pages/AccountsList";
@@ -63,9 +63,12 @@ function ProfileGate({ user, signOut }: { user: AuthUser; signOut: () => void })
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    client.models.UserProfile.list({
-      filter: { userId: { eq: user.userId } },
-    }).then(({ data }) => {
+    listAllPages((nextToken) =>
+      client.models.UserProfile.list({
+        filter: { userId: { eq: user.userId } },
+        nextToken,
+      })
+    ).then((data) => {
       setProfile(data[0] ?? null);
       setLoading(false);
     });
