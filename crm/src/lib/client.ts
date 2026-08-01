@@ -181,7 +181,7 @@ export const TEMPLATE_MISSING_MESSAGE =
   "templates, upload the fillable PDF, then try again — nothing you entered was lost.";
 
 /**
- * Only `fetchTemplate` (`lib/acord.ts`) produces this string, and it only ever
+ * Only `fetchTemplate` (`lib/acordPdf.ts`) produces this string, and it only ever
  * fetches templates, so the token cannot appear on any other code path.
  *
  * The two regexes this replaces also matched a bare `403|404`, and
