@@ -85,20 +85,19 @@ finding or was ruled on explicitly:
 |---|---|---|---|---|
 | 1 | `signatures/*` storage is writable by every authenticated user; signatures are stamped onto issued certificates | High | 1 prefix | [1.5](#15-authpermission-checks) |
 | 2 | `acord.ts` — 1,092 lines, 8 responsibilities | High | 1 file, all PDF output | [2](#2-file-size-offenders) |
-| 3 | Error handling: `friendlyError` bypassed at 10 of 22 sites | Medium-high | 22 sites | [1.4](#14-error-handling) |
-| 4 | Same entity re-fetched by up to 7 components independently | Medium | 7 models | [1.2](#12-state-management) |
-| 5 | Sorting: 15 hand-rolled sorts vs 6 using `useSort` | Medium | 21 tables | [1.3](#13-tablelist-rendering) |
-| 6 | Form state: 13 forms one-`useState`-per-field vs 5 object-based | Medium | 18 forms | [1.6](#16-form-handling--validation) |
-| 7 | `as never` ×4 and `as` ×40 papering over enum/list-type mismatches | Medium | 44 casts | [4](#4-type-drift) |
-| 8 | Date/money formatting bypassing the shared helpers | Medium | 24 sites | [1.7](#17-date--money--number-formatting) |
-| 9 | Timezone split: UTC in Lambda, local in browser, on the same fields | Medium | 5 sites | [1.7](#17-date--money--number-formatting) |
-| 10 | 18 remaining silent catches (the 6 hiding data loss are fixed) | Medium | 18 sites | [1.4](#14-error-handling) |
-| 11 | Business rule "quote satisfies task" implemented twice (semantics now agree) | Medium | 2 impls | [5.12](#512-shared-business-rule-frontend--lambda) |
-| 12 | No toast system — 6 success-feedback variants, 8 mutations with no feedback | Low-medium | 14 sites | [1.8](#18-toastsnotifications) |
-| 13 | Confirm-destructive rebuilt 4× with 3 label sets; 2 destructive actions unguarded | Medium | 6 sites | [1.9](#19-modals--overlays) |
-| 14 | 15 of 18 registered ACORD forms still have no field mapping (Generate is now disabled for them) | Low-medium | 15 forms | [3.5](#35-registered-but-unmapped-acord-forms) |
-| 15 | 8 models still on the `allow.authenticated()` schema default | Low-medium | 8 models | [1.5](#15-authpermission-checks) |
-| 16 | Dead schema fields and unused exports | Low | 21 symbols | [3](#3-dead-code) |
+| 3 | Same entity re-fetched by up to 7 components independently | Medium | 7 models | [1.2](#12-state-management) |
+| 4 | `as never` ×4 and `as` ×40 papering over enum/list-type mismatches | Medium | 44 casts | [4](#4-type-drift) |
+| 5 | Timezone split: UTC in Lambda, local in browser, on the same fields | Medium | 5 sites | [1.7](#17-date--money--number-formatting) |
+| 6 | ~18 silent catches remaining (the 6 hiding data loss are fixed) | Medium | 18 sites | [1.4](#14-error-handling) |
+| 7 | Business rule "quote satisfies task" implemented twice (semantics now agree) | Medium | 2 impls | [5.12](#512-shared-business-rule-frontend--lambda) |
+| 8 | ~14 hardcoded phone/email spellings in `web` bypass `constants.ts` | Low-medium | 14 sites | [5.9](#59-shared-constants-between-crm-and-web--4-values-duplicated) |
+| 9 | 15 of 18 registered ACORD forms still have no field mapping (Generate is disabled for them) | Low-medium | 15 forms | [3.5](#35-registered-but-unmapped-acord-forms) |
+| 10 | 8 models still on the `allow.authenticated()` schema default | Low-medium | 8 models | [1.5](#15-authpermission-checks) |
+| 11 | Unfiltered `.list()` still caps at 100 rows; page size diverges across callers | Low-medium | 18 sites | [1.1](#11-apidata-fetching) |
+
+Resolved and removed this pass: error-handling divergence, sorting, form
+state, save feedback, confirm-destructive, date/money formatting, dead code.
+Their canonical implementations are in [PATTERNS.md](PATTERNS.md).
 
 ---
 
