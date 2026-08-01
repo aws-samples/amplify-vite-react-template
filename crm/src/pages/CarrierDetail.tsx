@@ -11,6 +11,7 @@ import {
   type Carrier,
 } from "../lib/client";
 import DocumentsPanel from "../components/DocumentsPanel";
+import { useFormState } from "../lib/useFormState";
 
 export default function CarrierDetail() {
   const { id } = useParams<{ id: string }>();
@@ -51,7 +52,7 @@ function CarrierForm({
   carrier: Carrier;
   onChange: (c: Carrier) => void;
 }) {
-  const [form, setForm] = useState({
+  const { form, setF, saved, markSaved } = useFormState({
     name: carrier.name,
     appointed: carrier.appointed,
     dateAppointed: carrier.dateAppointed ?? "",
@@ -74,24 +75,12 @@ function CarrierForm({
     notes: carrier.notes ?? "",
   });
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
 
-  const set =
-    (k: keyof typeof form) =>
-    (e: { target: { value: string } }) => {
-      setSaved(false);
-      setForm((f) => ({ ...f, [k]: e.target.value }));
-    };
-
   function toggleState(s: string) {
-    setSaved(false);
-    setForm((f) => ({
-      ...f,
-      states: f.states.includes(s)
-        ? f.states.filter((x) => x !== s)
-        : [...f.states, s].sort(),
-    }));
+    setF("states", (ss) =>
+      ss.includes(s) ? ss.filter((x) => x !== s) : [...ss, s].sort()
+    );
   }
 
   async function save() {
@@ -132,7 +121,7 @@ function CarrierForm({
       return;
     }
     onChange(data);
-    setSaved(true);
+    markSaved();
   }
 
   return (
@@ -141,16 +130,13 @@ function CarrierForm({
       <div className="form-grid">
         <div className="field">
           <label>Name</label>
-          <input value={form.name} onChange={set("name")} />
+          <input value={form.name} onChange={(e) => setF("name", e.target.value)} />
         </div>
         <div className="field">
           <label>Status</label>
           <select
             value={form.appointed ? "1" : "0"}
-            onChange={(e) => {
-              setSaved(false);
-              setForm((f) => ({ ...f, appointed: e.target.value === "1" }));
-            }}
+            onChange={(e) => setF("appointed", e.target.value === "1")}
           >
             <option value="1">Appointed</option>
             <option value="0">Prospective</option>
@@ -158,11 +144,11 @@ function CarrierForm({
         </div>
         <div className="field">
           <label>Date appointed</label>
-          <input type="date" value={form.dateAppointed} onChange={set("dateAppointed")} />
+          <input type="date" value={form.dateAppointed} onChange={(e) => setF("dateAppointed", e.target.value)} />
         </div>
         <div className="field">
           <label>NAIC code</label>
-          <input value={form.naicCode} onChange={set("naicCode")} />
+          <input value={form.naicCode} onChange={(e) => setF("naicCode", e.target.value)} />
         </div>
         <div className="field">
           <label>Standard commission % (autofills new quotes)</label>
@@ -172,7 +158,7 @@ function CarrierForm({
             min={0}
             max={100}
             value={form.standardCommissionPct}
-            onChange={set("standardCommissionPct")}
+            onChange={(e) => setF("standardCommissionPct", e.target.value)}
           />
         </div>
         <div className="field">
@@ -182,7 +168,7 @@ function CarrierForm({
             step="1"
             min={0}
             value={form.annualMinimumPremium}
-            onChange={set("annualMinimumPremium")}
+            onChange={(e) => setF("annualMinimumPremium", e.target.value)}
           />
         </div>
         <div className="field">
@@ -192,7 +178,7 @@ function CarrierForm({
             step="1"
             min={0}
             value={form.profitSharingPremiumThreshold}
-            onChange={set("profitSharingPremiumThreshold")}
+            onChange={(e) => setF("profitSharingPremiumThreshold", e.target.value)}
           />
         </div>
         <div className="field">
@@ -203,7 +189,7 @@ function CarrierForm({
             min={0}
             max={100}
             value={form.profitSharingLossRatioThreshold}
-            onChange={set("profitSharingLossRatioThreshold")}
+            onChange={(e) => setF("profitSharingLossRatioThreshold", e.target.value)}
           />
         </div>
         <div className="field">
@@ -216,10 +202,7 @@ function CarrierForm({
               <input
                 type="checkbox"
                 checked={form.commercialLines}
-                onChange={(e) => {
-                  setSaved(false);
-                  setForm((f) => ({ ...f, commercialLines: e.target.checked }));
-                }}
+                onChange={(e) => setF("commercialLines", e.target.checked)}
               />
               Commercial lines
             </label>
@@ -230,10 +213,7 @@ function CarrierForm({
               <input
                 type="checkbox"
                 checked={form.personalLines}
-                onChange={(e) => {
-                  setSaved(false);
-                  setForm((f) => ({ ...f, personalLines: e.target.checked }));
-                }}
+                onChange={(e) => setF("personalLines", e.target.checked)}
               />
               Personal lines
             </label>
@@ -241,35 +221,35 @@ function CarrierForm({
         </div>
         <div className="field">
           <label>Primary contact</label>
-          <input value={form.primaryContactName} onChange={set("primaryContactName")} />
+          <input value={form.primaryContactName} onChange={(e) => setF("primaryContactName", e.target.value)} />
         </div>
         <div className="field">
           <label>Contact email</label>
-          <input value={form.primaryContactEmail} onChange={set("primaryContactEmail")} />
+          <input value={form.primaryContactEmail} onChange={(e) => setF("primaryContactEmail", e.target.value)} />
         </div>
         <div className="field">
           <label>Contact phone</label>
-          <input value={form.primaryContactPhone} onChange={set("primaryContactPhone")} />
+          <input value={form.primaryContactPhone} onChange={(e) => setF("primaryContactPhone", e.target.value)} />
         </div>
         <div className="field">
           <label>Primary underwriter</label>
           <input
             value={form.primaryUnderwriterName}
-            onChange={set("primaryUnderwriterName")}
+            onChange={(e) => setF("primaryUnderwriterName", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Underwriter email</label>
           <input
             value={form.primaryUnderwriterEmail}
-            onChange={set("primaryUnderwriterEmail")}
+            onChange={(e) => setF("primaryUnderwriterEmail", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Underwriter phone</label>
           <input
             value={form.primaryUnderwriterPhone}
-            onChange={set("primaryUnderwriterPhone")}
+            onChange={(e) => setF("primaryUnderwriterPhone", e.target.value)}
           />
         </div>
         <div className="field full">
@@ -278,20 +258,14 @@ function CarrierForm({
             <button
               className="secondary"
               disabled={form.states.length === US_STATES.length}
-              onClick={() => {
-                setSaved(false);
-                setForm((f) => ({ ...f, states: [...US_STATES] }));
-              }}
+              onClick={() => setF("states", [...US_STATES])}
             >
               All states
             </button>
             <button
               className="secondary"
               disabled={form.states.length === 0}
-              onClick={() => {
-                setSaved(false);
-                setForm((f) => ({ ...f, states: [] }));
-              }}
+              onClick={() => setF("states", [])}
             >
               Clear
             </button>
@@ -315,7 +289,7 @@ function CarrierForm({
         </div>
         <div className="field full">
           <label>Notes</label>
-          <textarea rows={3} value={form.notes} onChange={set("notes")} />
+          <textarea rows={3} value={form.notes} onChange={(e) => setF("notes", e.target.value)} />
         </div>
       </div>
       <div className="form-actions">
@@ -479,30 +453,33 @@ function GuideForm({
   onSaved: (g: AppetiteGuide) => void;
   onCancel: () => void;
 }) {
+  // Read side: column value → input string. (Not `formCodec`'s `str`, which
+  // runs the other way; that boundary is a separate migration.)
   const str = (n: number | null | undefined) => (n == null ? "" : String(n));
-  const [lines, setLines] = useState<string[]>(
-    (existing?.linesWritten ?? []).filter((l): l is string => !!l)
-  );
-  const [states, setStates] = useState<string[]>(
-    (existing?.states ?? []).filter((s): s is string => !!s)
-  );
-  const [leadTime, setLeadTime] = useState(str(existing?.quoteSubmissionLeadTimeDays));
-  const [minValue, setMinValue] = useState(str(existing?.minValue));
-  const [maxValue, setMaxValue] = useState(str(existing?.maxValue));
-  const [minYear, setMinYear] = useState(str(existing?.minConstructionYear));
-  const [maxYear, setMaxYear] = useState(str(existing?.maxConstructionYear));
-  const [notes, setNotes] = useState(existing?.notes ?? "");
+  const { form, setF } = useFormState({
+    lines: (existing?.linesWritten ?? []).filter((l): l is string => !!l),
+    states: (existing?.states ?? []).filter((s): s is string => !!s),
+    leadTime: str(existing?.quoteSubmissionLeadTimeDays),
+    minValue: str(existing?.minValue),
+    maxValue: str(existing?.maxValue),
+    minYear: str(existing?.minConstructionYear),
+    maxYear: str(existing?.maxConstructionYear),
+    notes: existing?.notes ?? "",
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   async function save() {
     // Inverted ranges silently break the Appetite Finder — catch them here.
     const problems: string[] = [];
-    if (minValue && maxValue && Number(minValue) > Number(maxValue))
+    if (form.minValue && form.maxValue && Number(form.minValue) > Number(form.maxValue))
       problems.push("Min TIV can't be greater than Max TIV.");
-    if (minYear && maxYear && Number(minYear) > Number(maxYear))
+    if (form.minYear && form.maxYear && Number(form.minYear) > Number(form.maxYear))
       problems.push("Earliest construction year can't be after the latest.");
-    if ((minValue && Number(minValue) < 0) || (maxValue && Number(maxValue) < 0))
+    if (
+      (form.minValue && Number(form.minValue) < 0) ||
+      (form.maxValue && Number(form.maxValue) < 0)
+    )
       problems.push("TIV values can't be negative.");
     if (problems.length) {
       setError(problems.join(" "));
@@ -512,14 +489,14 @@ function GuideForm({
     setSaving(true);
     const num = (v: string) => (v.trim() === "" ? null : Number(v));
     const payload = {
-      linesWritten: lines,
-      states,
-      quoteSubmissionLeadTimeDays: num(leadTime),
-      minValue: num(minValue),
-      maxValue: num(maxValue),
-      minConstructionYear: num(minYear),
-      maxConstructionYear: num(maxYear),
-      notes: notes.trim() || null,
+      linesWritten: form.lines,
+      states: form.states,
+      quoteSubmissionLeadTimeDays: num(form.leadTime),
+      minValue: num(form.minValue),
+      maxValue: num(form.maxValue),
+      minConstructionYear: num(form.minYear),
+      maxConstructionYear: num(form.maxYear),
+      notes: form.notes.trim() || null,
     };
     const { data, errors } = existing
       ? await client.models.AppetiteGuide.update({ id: existing.id, ...payload })
@@ -549,9 +526,9 @@ function GuideForm({
               >
                 <input
                   type="checkbox"
-                  checked={lines.includes(l)}
+                  checked={form.lines.includes(l)}
                   onChange={() =>
-                    setLines((ls) =>
+                    setF("lines", (ls) =>
                       ls.includes(l) ? ls.filter((x) => x !== l) : [...ls, l].sort()
                     )
                   }
@@ -566,29 +543,29 @@ function GuideForm({
           <input
             type="number"
             min={0}
-            value={leadTime}
-            onChange={(e) => setLeadTime(e.target.value)}
+            value={form.leadTime}
+            onChange={(e) => setF("leadTime", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Min TIV ($)</label>
-          <input type="number" value={minValue} onChange={(e) => setMinValue(e.target.value)} />
+          <input type="number" value={form.minValue} onChange={(e) => setF("minValue", e.target.value)} />
         </div>
         <div className="field">
           <label>Max TIV ($)</label>
-          <input type="number" value={maxValue} onChange={(e) => setMaxValue(e.target.value)} />
+          <input type="number" value={form.maxValue} onChange={(e) => setF("maxValue", e.target.value)} />
         </div>
         <div className="field">
           <label>Earliest construction year</label>
-          <input type="number" value={minYear} onChange={(e) => setMinYear(e.target.value)} />
+          <input type="number" value={form.minYear} onChange={(e) => setF("minYear", e.target.value)} />
         </div>
         <div className="field">
           <label>Latest construction year</label>
-          <input type="number" value={maxYear} onChange={(e) => setMaxYear(e.target.value)} />
+          <input type="number" value={form.maxYear} onChange={(e) => setF("maxYear", e.target.value)} />
         </div>
         <div className="field full">
           <label>
-            States ({states.length || "carrier default"})
+            States ({form.states.length || "carrier default"})
           </label>
           <p className="muted small" style={{ margin: "0 0 6px" }}>
             Leave empty to use the carrier's states. Set them only when this
@@ -603,9 +580,9 @@ function GuideForm({
               >
                 <input
                   type="checkbox"
-                  checked={states.includes(s)}
+                  checked={form.states.includes(s)}
                   onChange={() =>
-                    setStates((ss) =>
+                    setF("states", (ss) =>
                       ss.includes(s) ? ss.filter((x) => x !== s) : [...ss, s].sort()
                     )
                   }
@@ -617,7 +594,7 @@ function GuideForm({
         </div>
         <div className="field full">
           <label>Notes</label>
-          <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          <textarea rows={2} value={form.notes} onChange={(e) => setF("notes", e.target.value)} />
         </div>
       </div>
       <div className="form-actions">

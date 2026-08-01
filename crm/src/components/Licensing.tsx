@@ -15,6 +15,7 @@ import {
 import DocumentsPanel from "./DocumentsPanel";
 import { useIsAdmin } from "../lib/auth";
 import { useSort, SortTh } from "../lib/useSort";
+import { useFormState } from "../lib/useFormState";
 
 type HolderType = "FIRM" | "PRODUCER";
 
@@ -719,29 +720,29 @@ function LicenseForm({
   onCancel: () => void;
   onSaved: (l: License) => void;
 }) {
-  const [form, setForm] = useState({
+  const { form, setF } = useFormState({
     userProfileId: existing?.userProfileId ?? "",
     state: existing?.state ?? "",
     licenseNumber: existing?.licenseNumber ?? "",
     npn: existing?.npn ?? "",
-    licenseClass: existing?.licenseClass ?? (holderType === "FIRM" ? "AGENCY" : "PRODUCER"),
-    residency: existing?.residency ?? "NON_RESIDENT",
-    status: existing?.status ?? "ACTIVE",
+    // Held as plain strings, as they always were: these three are `<select>`
+    // values, and the payload below already casts them back to their enums.
+    // (The curried setter erased the type by spreading a computed key; the
+    // typed setter needs it said out loud.)
+    licenseClass: (existing?.licenseClass ??
+      (holderType === "FIRM" ? "AGENCY" : "PRODUCER")) as string,
+    residency: (existing?.residency ?? "NON_RESIDENT") as string,
+    status: (existing?.status ?? "ACTIVE") as string,
     effectiveDate: existing?.effectiveDate ?? "",
     expirationDate: existing?.expirationDate ?? "",
     continuingEducationDueDate: existing?.continuingEducationDueDate ?? "",
     notes: existing?.notes ?? "",
+    // Was hoisted out of `form` only because the curried setter couldn't type
+    // a `string[]`; it is a field like any other.
+    loa: (existing?.linesOfAuthority ?? []).filter((x): x is string => !!x),
   });
-  const [loa, setLoa] = useState<string[]>(
-    (existing?.linesOfAuthority ?? []).filter((x): x is string => !!x)
-  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-
-  const set =
-    (k: keyof typeof form) =>
-    (e: { target: { value: string } }) =>
-      setForm((f) => ({ ...f, [k]: e.target.value }));
 
   async function save() {
     if (!form.state || !form.licenseNumber.trim()) {
@@ -777,7 +778,7 @@ function LicenseForm({
       licenseClass: form.licenseClass as never,
       residency: form.residency as never,
       status: form.status as never,
-      linesOfAuthority: loa,
+      linesOfAuthority: form.loa,
       effectiveDate: form.effectiveDate || null,
       expirationDate: form.expirationDate || null,
       continuingEducationDueDate: form.continuingEducationDueDate || null,
@@ -804,7 +805,7 @@ function LicenseForm({
         {holderType === "PRODUCER" && (
           <div className="field">
             <label>Team member *</label>
-            <select value={form.userProfileId} onChange={set("userProfileId")}>
+            <select value={form.userProfileId} onChange={(e) => setF("userProfileId", e.target.value)}>
               <option value="">—</option>
               {[...profiles]
                 .sort((a, b) =>
@@ -822,7 +823,7 @@ function LicenseForm({
         )}
         <div className="field">
           <label>State *</label>
-          <select value={form.state} onChange={set("state")}>
+          <select value={form.state} onChange={(e) => setF("state", e.target.value)}>
             <option value="">—</option>
             {US_STATES.map((s) => (
               <option key={s}>{s}</option>
@@ -831,15 +832,15 @@ function LicenseForm({
         </div>
         <div className="field">
           <label>License number *</label>
-          <input value={form.licenseNumber} onChange={set("licenseNumber")} />
+          <input value={form.licenseNumber} onChange={(e) => setF("licenseNumber", e.target.value)} />
         </div>
         <div className="field">
           <label>NPN</label>
-          <input value={form.npn} onChange={set("npn")} />
+          <input value={form.npn} onChange={(e) => setF("npn", e.target.value)} />
         </div>
         <div className="field">
           <label>License class</label>
-          <select value={form.licenseClass} onChange={set("licenseClass")}>
+          <select value={form.licenseClass} onChange={(e) => setF("licenseClass", e.target.value)}>
             {Object.entries(LICENSE_CLASS_LABELS)
               .sort((a, b) => a[1].localeCompare(b[1]))
               .map(([v, label]) => (
@@ -851,14 +852,14 @@ function LicenseForm({
         </div>
         <div className="field">
           <label>Residency</label>
-          <select value={form.residency} onChange={set("residency")}>
+          <select value={form.residency} onChange={(e) => setF("residency", e.target.value)}>
             <option value="NON_RESIDENT">Non-resident</option>
             <option value="RESIDENT">Resident</option>
           </select>
         </div>
         <div className="field">
           <label>Status</label>
-          <select value={form.status} onChange={set("status")}>
+          <select value={form.status} onChange={(e) => setF("status", e.target.value)}>
             {Object.entries(LICENSE_STATUS_LABELS)
               .sort((a, b) => a[1].localeCompare(b[1]))
               .map(([v, label]) => (
@@ -870,18 +871,18 @@ function LicenseForm({
         </div>
         <div className="field">
           <label>Effective date</label>
-          <input type="date" value={form.effectiveDate} onChange={set("effectiveDate")} />
+          <input type="date" value={form.effectiveDate} onChange={(e) => setF("effectiveDate", e.target.value)} />
         </div>
         <div className="field">
           <label>Expiration date</label>
-          <input type="date" value={form.expirationDate} onChange={set("expirationDate")} />
+          <input type="date" value={form.expirationDate} onChange={(e) => setF("expirationDate", e.target.value)} />
         </div>
         <div className="field">
           <label>CE due date</label>
           <input
             type="date"
             value={form.continuingEducationDueDate}
-            onChange={set("continuingEducationDueDate")}
+            onChange={(e) => setF("continuingEducationDueDate", e.target.value)}
           />
         </div>
         <div className="field full">
@@ -895,9 +896,9 @@ function LicenseForm({
               >
                 <input
                   type="checkbox"
-                  checked={loa.includes(l)}
+                  checked={form.loa.includes(l)}
                   onChange={() =>
-                    setLoa((ls) =>
+                    setF("loa", (ls) =>
                       ls.includes(l) ? ls.filter((x) => x !== l) : [...ls, l].sort()
                     )
                   }
@@ -909,7 +910,7 @@ function LicenseForm({
         </div>
         <div className="field full">
           <label>Notes</label>
-          <textarea rows={2} value={form.notes} onChange={set("notes")} />
+          <textarea rows={2} value={form.notes} onChange={(e) => setF("notes", e.target.value)} />
         </div>
       </div>
       <div className="form-actions">

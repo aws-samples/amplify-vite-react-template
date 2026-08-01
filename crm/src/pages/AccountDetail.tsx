@@ -27,6 +27,7 @@ import PropertyPanel from "../components/PropertyPanel";
 import FormsTab from "../components/FormsTab";
 import ExtractionPanel from "../components/ExtractionPanel";
 import Celebration from "../components/Celebration";
+import { useFormState } from "../lib/useFormState";
 
 type Tab = "overview" | "quotes" | "policies" | "documents" | "certificates";
 
@@ -146,7 +147,7 @@ function OverviewTab({
   account: Account;
   onChange: (a: Account) => void;
 }) {
-  const [form, setForm] = useState({
+  const { form, setF, saved, markSaved } = useFormState({
     name: account.name,
     legalName: account.legalName ?? "",
     fein: account.fein ?? "",
@@ -170,13 +171,7 @@ function OverviewTab({
     notes: account.notes ?? "",
   });
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
-
-  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => {
-    setSaved(false);
-    setForm((f) => ({ ...f, [k]: e.target.value }));
-  };
 
   async function save() {
     const problems = validateAccountFields(form);
@@ -218,7 +213,7 @@ function OverviewTab({
       return;
     }
     onChange(data);
-    setSaved(true);
+    markSaved();
   }
 
   return (
@@ -227,84 +222,84 @@ function OverviewTab({
       <div className="form-grid">
         <div className="field">
           <label>Name</label>
-          <input value={form.name} onChange={set("name")} />
+          <input value={form.name} onChange={(e) => setF("name", e.target.value)} />
         </div>
         <div className="field">
           <label>Full legal name (carrier submissions)</label>
           <input
             placeholder={account.name}
             value={form.legalName}
-            onChange={set("legalName")}
+            onChange={(e) => setF("legalName", e.target.value)}
           />
         </div>
         <div className="field">
           <label>FEIN</label>
-          <input value={form.fein} onChange={set("fein")} />
+          <input value={form.fein} onChange={(e) => setF("fein", e.target.value)} />
         </div>
         <div className="field">
           <label>SIC</label>
-          <input value={form.sicCode} onChange={set("sicCode")} />
+          <input value={form.sicCode} onChange={(e) => setF("sicCode", e.target.value)} />
         </div>
         <div className="field">
           <label>NAICS</label>
-          <input value={form.naicsCode} onChange={set("naicsCode")} />
+          <input value={form.naicsCode} onChange={(e) => setF("naicsCode", e.target.value)} />
         </div>
         <div className="field">
           <label>Inspection contact</label>
           <input
             value={form.inspectionContactName}
-            onChange={set("inspectionContactName")}
+            onChange={(e) => setF("inspectionContactName", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Inspection contact phone</label>
           <input
             value={form.inspectionContactPhone}
-            onChange={set("inspectionContactPhone")}
+            onChange={(e) => setF("inspectionContactPhone", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Contact first name</label>
-          <input value={form.contactFirstName} onChange={set("contactFirstName")} />
+          <input value={form.contactFirstName} onChange={(e) => setF("contactFirstName", e.target.value)} />
         </div>
         <div className="field">
           <label>Contact last name</label>
-          <input value={form.contactLastName} onChange={set("contactLastName")} />
+          <input value={form.contactLastName} onChange={(e) => setF("contactLastName", e.target.value)} />
         </div>
         <div className="field">
           <label>Contact email</label>
-          <input value={form.contactEmail} onChange={set("contactEmail")} />
+          <input value={form.contactEmail} onChange={(e) => setF("contactEmail", e.target.value)} />
         </div>
         <div className="field">
           <label>Contact phone</label>
-          <input value={form.contactPhone} onChange={set("contactPhone")} />
+          <input value={form.contactPhone} onChange={(e) => setF("contactPhone", e.target.value)} />
         </div>
         <div className="field">
           <label>Total insured value ($)</label>
           <input
             type="number"
             value={form.totalInsuredValue}
-            onChange={set("totalInsuredValue")}
+            onChange={(e) => setF("totalInsuredValue", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Current agent / broker</label>
-          <input value={form.currentAgent} onChange={set("currentAgent")} />
+          <input value={form.currentAgent} onChange={(e) => setF("currentAgent", e.target.value)} />
         </div>
         <div className="field">
           <label>Prior carrier</label>
-          <input value={form.priorCarrierName} onChange={set("priorCarrierName")} />
+          <input value={form.priorCarrierName} onChange={(e) => setF("priorCarrierName", e.target.value)} />
         </div>
         <div className="field">
           <label>Prior policy number</label>
-          <input value={form.priorPolicyNumber} onChange={set("priorPolicyNumber")} />
+          <input value={form.priorPolicyNumber} onChange={(e) => setF("priorPolicyNumber", e.target.value)} />
         </div>
         <div className="field">
           <label>Prior premium ($)</label>
           <input
             type="number"
             value={form.priorPremium}
-            onChange={set("priorPremium")}
+            onChange={(e) => setF("priorPremium", e.target.value)}
           />
         </div>
         <div className="field">
@@ -312,7 +307,7 @@ function OverviewTab({
           <input
             type="date"
             value={form.priorTermEffective}
-            onChange={set("priorTermEffective")}
+            onChange={(e) => setF("priorTermEffective", e.target.value)}
           />
         </div>
         <div className="field">
@@ -320,7 +315,7 @@ function OverviewTab({
           <input
             type="date"
             value={form.priorTermExpiration}
-            onChange={set("priorTermExpiration")}
+            onChange={(e) => setF("priorTermExpiration", e.target.value)}
           />
         </div>
         {/* Lead-only: once bound, the Policy records are authoritative. */}
@@ -330,17 +325,17 @@ function OverviewTab({
           <input
             type="date"
             value={form.currentPolicyExpiration}
-            onChange={set("currentPolicyExpiration")}
+            onChange={(e) => setF("currentPolicyExpiration", e.target.value)}
           />
         </div>
         )}
         <div className="field">
           <label>Source</label>
-          <input value={form.source} onChange={set("source")} />
+          <input value={form.source} onChange={(e) => setF("source", e.target.value)} />
         </div>
         <div className="field full">
           <label>Notes</label>
-          <textarea rows={4} value={form.notes} onChange={set("notes")} />
+          <textarea rows={4} value={form.notes} onChange={(e) => setF("notes", e.target.value)} />
         </div>
       </div>
       <div className="form-actions">
@@ -587,10 +582,12 @@ function CertificatesTab({
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [carriers, setCarriers] = useState<Carrier[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [holderName, setHolderName] = useState("");
-  const [holderAddress, setHolderAddress] = useState("");
-  const [description, setDescription] = useState("");
-  const [selectedPolicies, setSelectedPolicies] = useState<string[]>([]);
+  const { form, setF, reset } = useFormState({
+    holderName: "",
+    holderAddress: "",
+    description: "",
+    selectedPolicies: [] as string[],
+  });
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState<string | null>(null);
   const [genNote, setGenNote] = useState("");
@@ -614,7 +611,7 @@ function CertificatesTab({
   }, [account.id]);
 
   async function issue() {
-    if (!holderName.trim()) return;
+    if (!form.holderName.trim()) return;
     setSaving(true);
     setError("");
 
@@ -640,10 +637,10 @@ function CertificatesTab({
     const { data } = await client.models.Certificate.create({
       accountId: account.id,
       certificateNumber,
-      policyIds: selectedPolicies,
-      holderName: holderName.trim(),
-      holderAddress: holderAddress.trim() || undefined,
-      descriptionOfOperations: description.trim() || undefined,
+      policyIds: form.selectedPolicies,
+      holderName: form.holderName.trim(),
+      holderAddress: form.holderAddress.trim() || undefined,
+      descriptionOfOperations: form.description.trim() || undefined,
       formType: "ACORD_25",
       issuedBy: `${profile.firstName} ${profile.lastName}`,
       issuedAt: new Date().toISOString(),
@@ -652,10 +649,9 @@ function CertificatesTab({
     if (data) {
       setCerts((cs) => [data, ...cs]);
       setShowForm(false);
-      setHolderName("");
-      setHolderAddress("");
-      setDescription("");
-      setSelectedPolicies([]);
+      // Baseline is still the blanks this mounted with — markSaved is never
+      // called here — so `reset()` is the four setters it replaces.
+      reset();
       generatePdf(data); // fire the fill immediately; failures leave a retry button
     }
   }
@@ -753,21 +749,21 @@ function CertificatesTab({
               <div className="form-grid">
                 <div className="field">
                   <label>Certificate holder *</label>
-                  <input value={holderName} onChange={(e) => setHolderName(e.target.value)} />
+                  <input value={form.holderName} onChange={(e) => setF("holderName", e.target.value)} />
                 </div>
                 <div className="field">
                   <label>Holder address</label>
                   <input
-                    value={holderAddress}
-                    onChange={(e) => setHolderAddress(e.target.value)}
+                    value={form.holderAddress}
+                    onChange={(e) => setF("holderAddress", e.target.value)}
                   />
                 </div>
                 <div className="field full">
                   <label>Description of operations</label>
                   <textarea
                     rows={2}
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
+                    value={form.description}
+                    onChange={(e) => setF("description", e.target.value)}
                   />
                 </div>
                 <div className="field full">
@@ -783,9 +779,9 @@ function CertificatesTab({
                       >
                         <input
                           type="checkbox"
-                          checked={selectedPolicies.includes(p.id)}
+                          checked={form.selectedPolicies.includes(p.id)}
                           onChange={(e) =>
-                            setSelectedPolicies((ids) =>
+                            setF("selectedPolicies", (ids) =>
                               e.target.checked
                                 ? [...ids, p.id]
                                 : ids.filter((i) => i !== p.id)
@@ -802,7 +798,7 @@ function CertificatesTab({
               <div className="form-actions">
                 <button
                   className="primary"
-                  disabled={saving || !holderName.trim()}
+                  disabled={saving || !form.holderName.trim()}
                   onClick={issue}
                 >
                   {saving ? "Saving…" : "Record certificate"}

@@ -8,13 +8,13 @@ import {
   type Carrier,
 } from "../lib/client";
 import { useSort, SortTh } from "../lib/useSort";
+import { useFormState } from "../lib/useFormState";
 
 export default function Carriers() {
   const [carriers, setCarriers] = useState<Carrier[]>([]);
   const [guides, setGuides] = useState<AppetiteGuide[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [name, setName] = useState("");
-  const [appointed, setAppointed] = useState(true);
+  const { form, setF } = useFormState({ name: "", appointed: true });
   const [saving, setSaving] = useState(false);
   const navigate = useNavigate();
 
@@ -36,11 +36,11 @@ export default function Carriers() {
   );
 
   async function create() {
-    if (!name.trim()) return;
+    if (!form.name.trim()) return;
     setSaving(true);
     const { data } = await client.models.Carrier.create({
-      name: name.trim(),
-      appointed,
+      name: form.name.trim(),
+      appointed: form.appointed,
     });
     setSaving(false);
     if (data) navigate(`/carriers/${data.id}`);
@@ -65,13 +65,13 @@ export default function Carriers() {
           <div className="form-grid">
             <div className="field">
               <label>Carrier name *</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} />
+              <input value={form.name} onChange={(e) => setF("name", e.target.value)} />
             </div>
             <div className="field">
               <label>Status</label>
               <select
-                value={appointed ? "1" : "0"}
-                onChange={(e) => setAppointed(e.target.value === "1")}
+                value={form.appointed ? "1" : "0"}
+                onChange={(e) => setF("appointed", e.target.value === "1")}
               >
                 <option value="1">Appointed</option>
                 <option value="0">Prospective</option>
@@ -79,7 +79,7 @@ export default function Carriers() {
             </div>
           </div>
           <div className="form-actions">
-            <button className="primary" disabled={saving || !name.trim()} onClick={create}>
+            <button className="primary" disabled={saving || !form.name.trim()} onClick={create}>
               {saving ? "Creating…" : "Create carrier"}
             </button>
           </div>

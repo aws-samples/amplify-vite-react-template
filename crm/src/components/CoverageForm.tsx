@@ -7,6 +7,7 @@ import {
   type Policy,
   type Quote,
 } from "../lib/client";
+import { useFormState } from "../lib/useFormState";
 
 /**
  * Shared create/edit form for quotes and policies.
@@ -41,6 +42,9 @@ const RC_TYPES = [
 ] as const;
 
 const num = (v: string) => (v.trim() === "" ? null : Number(v));
+// Read side: column value → input string, seeding the form below. This runs
+// the opposite way from `formCodec`'s same-named `str` (input → column);
+// adopting that codec is a separate migration.
 const str = (v: number | null | undefined) => (v == null ? "" : String(v));
 
 export default function CoverageForm({
@@ -62,57 +66,62 @@ export default function CoverageForm({
   const editing = !!existing;
   const asPolicy = existing as Policy | null;
 
-  const [carrierId, setCarrierId] = useState(existing?.carrierId ?? "");
-  const [policyNumber, setPolicyNumber] = useState(asPolicy?.policyNumber ?? "");
-  const [status, setStatus] = useState<string>(
-    existing?.status ?? (isPolicy ? "ACTIVE" : "DRAFT")
-  );
-  const [lines, setLines] = useState<string[]>(
-    (existing?.lines ?? []).filter((l): l is string => !!l)
-  );
-  const [premium, setPremium] = useState(str(existing?.premium));
-  const [commissionPct, setCommissionPct] = useState(str(existing?.commissionPct));
+  const { form, setF, patch } = useFormState({
+    carrierId: existing?.carrierId ?? "",
+    policyNumber: asPolicy?.policyNumber ?? "",
+    status: (existing?.status ?? (isPolicy ? "ACTIVE" : "DRAFT")) as string,
+    lines: (existing?.lines ?? []).filter((l): l is string => !!l),
+    premium: str(existing?.premium),
+    commissionPct: str(existing?.commissionPct),
+    perOccDed: str(existing?.perOccurrenceDeductible),
+    perUnitDed: str(existing?.perUnitDeductible),
+    blanketLimit: str(existing?.blanketLimit),
+    coinsurance: str(existing?.coinsurancePct),
+    rcType: existing?.replacementCostType ?? "",
+    // GL limits — these are what actually print on a certificate.
+    glEachOcc: str(existing?.glEachOccurrence),
+    glRented: str(existing?.glDamageToRentedPremises),
+    glMed: str(existing?.glMedicalExpense),
+    glPersAdv: str(existing?.glPersonalAdvInjury),
+    glGenAgg: str(existing?.glGeneralAggregate),
+    glProdAgg: str(existing?.glProductsCompletedOps),
+    glClaimsMade: !!existing?.glClaimsMade,
+    glAggApplies: existing?.glAggregateAppliesTo ?? "POLICY",
+    effectiveDate: existing?.effectiveDate ?? "",
+    expirationDate: existing?.expirationDate ?? "",
+    notes: existing?.notes ?? "",
+  });
   // Only autofill the carrier's standard rate on an untouched new quote —
   // never clobber a rate already negotiated on an existing record.
+  //
+  // Deliberately *not* a field of `form`: it is interaction history, not a
+  // value. Deriving it from the form (current ≠ initial) would re-arm the
+  // autofill the moment someone typed the standard rate back by hand.
   const [commissionTouched, setCommissionTouched] = useState(editing);
-  const [perOccDed, setPerOccDed] = useState(str(existing?.perOccurrenceDeductible));
-  const [perUnitDed, setPerUnitDed] = useState(str(existing?.perUnitDeductible));
-  const [blanketLimit, setBlanketLimit] = useState(str(existing?.blanketLimit));
-  const [coinsurance, setCoinsurance] = useState(str(existing?.coinsurancePct));
-  const [rcType, setRcType] = useState(existing?.replacementCostType ?? "");
-  // GL limits — these are what actually print on a certificate.
-  const [glEachOcc, setGlEachOcc] = useState(str(existing?.glEachOccurrence));
-  const [glRented, setGlRented] = useState(str(existing?.glDamageToRentedPremises));
-  const [glMed, setGlMed] = useState(str(existing?.glMedicalExpense));
-  const [glPersAdv, setGlPersAdv] = useState(str(existing?.glPersonalAdvInjury));
-  const [glGenAgg, setGlGenAgg] = useState(str(existing?.glGeneralAggregate));
-  const [glProdAgg, setGlProdAgg] = useState(str(existing?.glProductsCompletedOps));
-  const [glClaimsMade, setGlClaimsMade] = useState(!!existing?.glClaimsMade);
-  const [glAggApplies, setGlAggApplies] = useState(
-    existing?.glAggregateAppliesTo ?? "POLICY"
-  );
-  const [effectiveDate, setEffectiveDate] = useState(existing?.effectiveDate ?? "");
-  const [expirationDate, setExpirationDate] = useState(existing?.expirationDate ?? "");
-  const [notes, setNotes] = useState(existing?.notes ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   function toggleLine(line: string) {
-    setLines((ls) =>
+    setF("lines", (ls) =>
       ls.includes(line) ? ls.filter((l) => l !== line) : [...ls, line]
     );
   }
 
   function pickCarrier(id: string) {
-    setCarrierId(id);
-    if (!commissionTouched) {
-      const std = carriers.find((c) => c.id === id)?.standardCommissionPct;
-      setCommissionPct(std != null ? String(std) : "");
+    if (commissionTouched) {
+      setF("carrierId", id);
+      return;
     }
+    const std = carriers.find((c) => c.id === id)?.standardCommissionPct;
+    patch({ carrierId: id, commissionPct: std != null ? String(std) : "" });
   }
 
   async function save() {
-    if (effectiveDate && expirationDate && effectiveDate > expirationDate) {
+    if (
+      form.effectiveDate &&
+      form.expirationDate &&
+      form.effectiveDate > form.expirationDate
+    ) {
       setError("Effective date can't be after the expiration date.");
       return;
     }
@@ -120,26 +129,26 @@ export default function CoverageForm({
     setError("");
 
     const shared = {
-      carrierId: carrierId || null,
-      lines,
-      premium: num(premium),
-      commissionPct: num(commissionPct),
-      perOccurrenceDeductible: num(perOccDed),
-      perUnitDeductible: num(perUnitDed),
-      blanketLimit: num(blanketLimit),
-      coinsurancePct: num(coinsurance),
-      replacementCostType: (rcType || null) as Quote["replacementCostType"],
-      glEachOccurrence: num(glEachOcc),
-      glDamageToRentedPremises: num(glRented),
-      glMedicalExpense: num(glMed),
-      glPersonalAdvInjury: num(glPersAdv),
-      glGeneralAggregate: num(glGenAgg),
-      glProductsCompletedOps: num(glProdAgg),
-      glClaimsMade,
-      glAggregateAppliesTo: glAggApplies as Quote["glAggregateAppliesTo"],
-      effectiveDate: effectiveDate || null,
-      expirationDate: expirationDate || null,
-      notes: notes.trim() || null,
+      carrierId: form.carrierId || null,
+      lines: form.lines,
+      premium: num(form.premium),
+      commissionPct: num(form.commissionPct),
+      perOccurrenceDeductible: num(form.perOccDed),
+      perUnitDeductible: num(form.perUnitDed),
+      blanketLimit: num(form.blanketLimit),
+      coinsurancePct: num(form.coinsurance),
+      replacementCostType: (form.rcType || null) as Quote["replacementCostType"],
+      glEachOccurrence: num(form.glEachOcc),
+      glDamageToRentedPremises: num(form.glRented),
+      glMedicalExpense: num(form.glMed),
+      glPersonalAdvInjury: num(form.glPersAdv),
+      glGeneralAggregate: num(form.glGenAgg),
+      glProductsCompletedOps: num(form.glProdAgg),
+      glClaimsMade: form.glClaimsMade,
+      glAggregateAppliesTo: form.glAggApplies as Quote["glAggregateAppliesTo"],
+      effectiveDate: form.effectiveDate || null,
+      expirationDate: form.expirationDate || null,
+      notes: form.notes.trim() || null,
     };
 
     try {
@@ -148,22 +157,22 @@ export default function CoverageForm({
         const { errors } = await client.models.Policy.update({
           id: existing.id,
           ...shared,
-          policyNumber: policyNumber.trim() || null,
-          status: status as Policy["status"],
+          policyNumber: form.policyNumber.trim() || null,
+          status: form.status as Policy["status"],
         });
         if (errors?.length) throw new Error(errors[0].message);
       } else if (existing) {
         const { errors } = await client.models.Quote.update({
           id: existing.id,
           ...shared,
-          status: status as Quote["status"],
+          status: form.status as Quote["status"],
         });
         if (errors?.length) throw new Error(errors[0].message);
       } else {
         const { errors } = await client.models.Quote.create({
           accountId,
           ...shared,
-          status: status as Quote["status"],
+          status: form.status as Quote["status"],
         });
         if (errors?.length) throw new Error(errors[0].message);
       }
@@ -191,7 +200,7 @@ export default function CoverageForm({
       <div className="form-grid">
         <div className="field">
           <label>Carrier</label>
-          <select value={carrierId} onChange={(e) => pickCarrier(e.target.value)}>
+          <select value={form.carrierId} onChange={(e) => pickCarrier(e.target.value)}>
             <option value="">—</option>
             {carriers.map((c) => (
               <option key={c.id} value={c.id}>
@@ -204,16 +213,16 @@ export default function CoverageForm({
           <div className="field">
             <label>Policy number</label>
             <input
-              value={policyNumber}
-              onChange={(e) => setPolicyNumber(e.target.value)}
+              value={form.policyNumber}
+              onChange={(e) => setF("policyNumber", e.target.value)}
             />
           </div>
         )}
         <div className="field">
           <label>Status</label>
           <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
+            value={form.status}
+            onChange={(e) => setF("status", e.target.value)}
             disabled={statusOptions.length === 1}
           >
             {[...statusOptions].sort((a, b) => a.localeCompare(b)).map((s) => (
@@ -225,8 +234,8 @@ export default function CoverageForm({
           <label>Premium ($)</label>
           <input
             type="number"
-            value={premium}
-            onChange={(e) => setPremium(e.target.value)}
+            value={form.premium}
+            onChange={(e) => setF("premium", e.target.value)}
           />
         </div>
         <div className="field">
@@ -236,10 +245,10 @@ export default function CoverageForm({
             step="0.1"
             min={0}
             max={100}
-            value={commissionPct}
+            value={form.commissionPct}
             onChange={(e) => {
               setCommissionTouched(true);
-              setCommissionPct(e.target.value);
+              setF("commissionPct", e.target.value);
             }}
           />
         </div>
@@ -247,40 +256,40 @@ export default function CoverageForm({
           <label>Effective date</label>
           <input
             type="date"
-            value={effectiveDate}
-            onChange={(e) => setEffectiveDate(e.target.value)}
+            value={form.effectiveDate}
+            onChange={(e) => setF("effectiveDate", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Expiration date</label>
           <input
             type="date"
-            value={expirationDate}
-            onChange={(e) => setExpirationDate(e.target.value)}
+            value={form.expirationDate}
+            onChange={(e) => setF("expirationDate", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Per-occurrence deductible ($)</label>
           <input
             type="number"
-            value={perOccDed}
-            onChange={(e) => setPerOccDed(e.target.value)}
+            value={form.perOccDed}
+            onChange={(e) => setF("perOccDed", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Per-unit deductible ($)</label>
           <input
             type="number"
-            value={perUnitDed}
-            onChange={(e) => setPerUnitDed(e.target.value)}
+            value={form.perUnitDed}
+            onChange={(e) => setF("perUnitDed", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Blanket limit ($)</label>
           <input
             type="number"
-            value={blanketLimit}
-            onChange={(e) => setBlanketLimit(e.target.value)}
+            value={form.blanketLimit}
+            onChange={(e) => setF("blanketLimit", e.target.value)}
           />
         </div>
         <div className="field">
@@ -289,13 +298,13 @@ export default function CoverageForm({
             type="number"
             min={0}
             max={100}
-            value={coinsurance}
-            onChange={(e) => setCoinsurance(e.target.value)}
+            value={form.coinsurance}
+            onChange={(e) => setF("coinsurance", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Replacement cost</label>
-          <select value={rcType} onChange={(e) => setRcType(e.target.value)}>
+          <select value={form.rcType} onChange={(e) => setF("rcType", e.target.value)}>
             <option value="">—</option>
             {RC_TYPES.map(([v, l]) => (
               <option key={v} value={v}>
@@ -313,31 +322,31 @@ export default function CoverageForm({
         </div>
         <div className="field">
           <label>Each occurrence ($)</label>
-          <input type="number" value={glEachOcc} onChange={(e) => setGlEachOcc(e.target.value)} />
+          <input type="number" value={form.glEachOcc} onChange={(e) => setF("glEachOcc", e.target.value)} />
         </div>
         <div className="field">
           <label>Damage to rented premises ($)</label>
-          <input type="number" value={glRented} onChange={(e) => setGlRented(e.target.value)} />
+          <input type="number" value={form.glRented} onChange={(e) => setF("glRented", e.target.value)} />
         </div>
         <div className="field">
           <label>Medical expense, any one person ($)</label>
-          <input type="number" value={glMed} onChange={(e) => setGlMed(e.target.value)} />
+          <input type="number" value={form.glMed} onChange={(e) => setF("glMed", e.target.value)} />
         </div>
         <div className="field">
           <label>Personal &amp; advertising injury ($)</label>
-          <input type="number" value={glPersAdv} onChange={(e) => setGlPersAdv(e.target.value)} />
+          <input type="number" value={form.glPersAdv} onChange={(e) => setF("glPersAdv", e.target.value)} />
         </div>
         <div className="field">
           <label>General aggregate ($)</label>
-          <input type="number" value={glGenAgg} onChange={(e) => setGlGenAgg(e.target.value)} />
+          <input type="number" value={form.glGenAgg} onChange={(e) => setF("glGenAgg", e.target.value)} />
         </div>
         <div className="field">
           <label>Products &amp; completed ops aggregate ($)</label>
-          <input type="number" value={glProdAgg} onChange={(e) => setGlProdAgg(e.target.value)} />
+          <input type="number" value={form.glProdAgg} onChange={(e) => setF("glProdAgg", e.target.value)} />
         </div>
         <div className="field">
           <label>Aggregate applies per</label>
-          <select value={glAggApplies} onChange={(e) => setGlAggApplies(e.target.value as typeof glAggApplies)}>
+          <select value={form.glAggApplies} onChange={(e) => setF("glAggApplies", e.target.value as typeof form.glAggApplies)}>
             <option value="LOCATION">Location</option>
             <option value="OTHER">Other</option>
             <option value="POLICY">Policy</option>
@@ -349,8 +358,8 @@ export default function CoverageForm({
           <label className="small" style={{ display: "flex", gap: 6, alignItems: "center", height: 38 }}>
             <input
               type="checkbox"
-              checked={glClaimsMade}
-              onChange={(e) => setGlClaimsMade(e.target.checked)}
+              checked={form.glClaimsMade}
+              onChange={(e) => setF("glClaimsMade", e.target.checked)}
             />
             Claims made (otherwise occurrence)
           </label>
@@ -366,7 +375,7 @@ export default function CoverageForm({
               >
                 <input
                   type="checkbox"
-                  checked={lines.includes(l)}
+                  checked={form.lines.includes(l)}
                   onChange={() => toggleLine(l)}
                 />
                 {l}
@@ -376,7 +385,7 @@ export default function CoverageForm({
         </div>
         <div className="field full">
           <label>Notes</label>
-          <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          <textarea rows={2} value={form.notes} onChange={(e) => setF("notes", e.target.value)} />
         </div>
       </div>
       <div className="form-actions">

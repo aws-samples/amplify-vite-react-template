@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { AuthUser } from "aws-amplify/auth";
 import { client, friendlyError, US_STATES, type UserProfile } from "../lib/client";
 import type { Role } from "../lib/auth";
+import { useFormState } from "../lib/useFormState";
 
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Admin",
@@ -42,28 +43,30 @@ export default function Onboarding({
   role: Role;
   onComplete: (p: UserProfile) => void;
 }) {
-  const [firstName, setFirstName] = useState(existing?.firstName ?? "");
-  const [lastName, setLastName] = useState(existing?.lastName ?? "");
-  const [npn, setNpn] = useState(existing?.npn ?? "");
-  const [licenses, setLicenses] = useState<LicenseDraft[]>([emptyLicense()]);
+  const { form, setF } = useFormState({
+    firstName: existing?.firstName ?? "",
+    lastName: existing?.lastName ?? "",
+    npn: existing?.npn ?? "",
+    licenses: [emptyLicense()] as LicenseDraft[],
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   const isProducer = role === "PRODUCER";
-  const validLicenses = licenses.filter(
+  const validLicenses = form.licenses.filter(
     (l) => l.state && l.licenseNumber.trim()
   );
 
   function setLicense(i: number, patch: Partial<LicenseDraft>) {
-    setLicenses((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+    setF("licenses", (ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
   }
 
   async function submit() {
-    if (!firstName.trim() || !lastName.trim()) {
+    if (!form.firstName.trim() || !form.lastName.trim()) {
       setError("First and last name are required.");
       return;
     }
-    if (isProducer && !npn.trim()) {
+    if (isProducer && !form.npn.trim()) {
       setError("Producers must provide their NPN.");
       return;
     }
@@ -79,10 +82,10 @@ export default function Onboarding({
       const payload = {
         userId: user.userId,
         email,
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
+        firstName: form.firstName.trim(),
+        lastName: form.lastName.trim(),
         role,
-        npn: isProducer ? npn.trim() : undefined,
+        npn: isProducer ? form.npn.trim() : undefined,
         onboardingComplete: true,
       };
       const { data: profile, errors } = existing
@@ -95,10 +98,10 @@ export default function Onboarding({
           await client.models.License.create({
             holderType: "PRODUCER",
             userProfileId: profile.id,
-            holderName: `${firstName.trim()} ${lastName.trim()}`,
+            holderName: `${form.firstName.trim()} ${form.lastName.trim()}`,
             state: l.state,
             licenseNumber: l.licenseNumber.trim(),
-            npn: npn.trim() || undefined,
+            npn: form.npn.trim() || undefined,
             licenseClass: "PRODUCER",
             residency: l.residency,
             status: "ACTIVE",
@@ -123,11 +126,11 @@ export default function Onboarding({
         <div className="form-grid">
           <div className="field">
             <label>First name *</label>
-            <input value={firstName} onChange={(e) => setFirstName(e.target.value)} />
+            <input value={form.firstName} onChange={(e) => setF("firstName", e.target.value)} />
           </div>
           <div className="field">
             <label>Last name *</label>
-            <input value={lastName} onChange={(e) => setLastName(e.target.value)} />
+            <input value={form.lastName} onChange={(e) => setF("lastName", e.target.value)} />
           </div>
           <div className="field">
             <label>Role</label>
@@ -139,7 +142,7 @@ export default function Onboarding({
           {isProducer && (
             <div className="field">
               <label>NPN (National Producer Number) *</label>
-              <input value={npn} onChange={(e) => setNpn(e.target.value)} />
+              <input value={form.npn} onChange={(e) => setF("npn", e.target.value)} />
             </div>
           )}
         </div>
@@ -147,7 +150,7 @@ export default function Onboarding({
         {isProducer && (
           <>
             <h3>State licenses *</h3>
-            {licenses.map((l, i) => (
+            {form.licenses.map((l, i) => (
               <div className="form-grid" key={i} style={{ marginBottom: 8 }}>
                 <div className="field">
                   <label>State</label>
@@ -195,7 +198,7 @@ export default function Onboarding({
             <button
               className="secondary"
               onClick={() =>
-                setLicenses((ls) => [
+                setF("licenses", (ls) => [
                   ...ls,
                   // Additional licenses are non-resident by default — you only
                   // ever hold one resident license.

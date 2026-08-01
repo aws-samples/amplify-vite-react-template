@@ -4,6 +4,7 @@ import { uploadData } from "aws-amplify/storage";
 import { client, friendlyError, US_STATES, validateAccountFields } from "../lib/client";
 import { AddressAutocomplete } from "../lib/googlePlaces";
 import FileButton from "../components/FileButton";
+import { useFormState } from "../lib/useFormState";
 
 export default function NewLead() {
   const navigate = useNavigate();
@@ -12,7 +13,7 @@ export default function NewLead() {
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   // Set once the lead exists — pressing Create again would duplicate it.
   const [createdId, setCreatedId] = useState<string | null>(null);
-  const [form, setForm] = useState({
+  const { form, setF, patch } = useFormState({
     type: "ASSOCIATION",
     name: "",
     contactFirstName: "",
@@ -31,9 +32,6 @@ export default function NewLead() {
     source: "",
     notes: "",
   });
-
-  const set = (k: keyof typeof form) => (e: { target: { value: string } }) =>
-    setForm((f) => ({ ...f, [k]: e.target.value }));
 
   async function save() {
     if (!form.name.trim()) {
@@ -133,7 +131,7 @@ export default function NewLead() {
         <div className="form-grid">
           <div className="field">
             <label>Type</label>
-            <select value={form.type} onChange={set("type")}>
+            <select value={form.type} onChange={(e) => setF("type", e.target.value)}>
               <option value="ASSOCIATION">Association / HOA</option>
               <option value="COMMERCIAL_OTHER">Commercial — other</option>
               <option value="PERSONAL">Personal (HO-6)</option>
@@ -141,40 +139,39 @@ export default function NewLead() {
           </div>
           <div className="field">
             <label>Name (association / insured) *</label>
-            <input value={form.name} onChange={set("name")} />
+            <input value={form.name} onChange={(e) => setF("name", e.target.value)} />
           </div>
           <div className="field">
             <label>Source</label>
             <input
               placeholder="website, referral, cold…"
               value={form.source}
-              onChange={set("source")}
+              onChange={(e) => setF("source", e.target.value)}
             />
           </div>
           <div className="field">
             <label>Contact first name</label>
-            <input value={form.contactFirstName} onChange={set("contactFirstName")} />
+            <input value={form.contactFirstName} onChange={(e) => setF("contactFirstName", e.target.value)} />
           </div>
           <div className="field">
             <label>Contact last name</label>
-            <input value={form.contactLastName} onChange={set("contactLastName")} />
+            <input value={form.contactLastName} onChange={(e) => setF("contactLastName", e.target.value)} />
           </div>
           <div className="field">
             <label>Contact email</label>
-            <input type="email" value={form.contactEmail} onChange={set("contactEmail")} />
+            <input type="email" value={form.contactEmail} onChange={(e) => setF("contactEmail", e.target.value)} />
           </div>
           <div className="field">
             <label>Contact phone</label>
-            <input value={form.contactPhone} onChange={set("contactPhone")} />
+            <input value={form.contactPhone} onChange={(e) => setF("contactPhone", e.target.value)} />
           </div>
           <div className="field">
             <label>Street address</label>
             <AddressAutocomplete
               value={form.address}
-              onChange={(v) => setForm((f) => ({ ...f, address: v }))}
+              onChange={(v) => setF("address", v)}
               onPlace={(p) =>
-                setForm((f) => ({
-                  ...f,
+                patch((f) => ({
                   address: p.address || f.address,
                   city: p.city || f.city,
                   state: p.state || f.state,
@@ -185,11 +182,11 @@ export default function NewLead() {
           </div>
           <div className="field">
             <label>City</label>
-            <input value={form.city} onChange={set("city")} />
+            <input value={form.city} onChange={(e) => setF("city", e.target.value)} />
           </div>
           <div className="field">
             <label>State</label>
-            <select value={form.state} onChange={set("state")}>
+            <select value={form.state} onChange={(e) => setF("state", e.target.value)}>
               <option value="">—</option>
               {US_STATES.map((s) => (
                 <option key={s}>{s}</option>
@@ -198,24 +195,24 @@ export default function NewLead() {
           </div>
           <div className="field">
             <label>ZIP</label>
-            <input value={form.zip} onChange={set("zip")} />
+            <input value={form.zip} onChange={(e) => setF("zip", e.target.value)} />
           </div>
           {!isPersonal && (
             <div className="field">
               <label>Unit count</label>
-              <input type="number" min={0} value={form.unitCount} onChange={set("unitCount")} />
+              <input type="number" min={0} value={form.unitCount} onChange={(e) => setF("unitCount", e.target.value)} />
             </div>
           )}
           <div className="field">
             <label>Year built</label>
-            <input type="number" value={form.yearBuilt} onChange={set("yearBuilt")} />
+            <input type="number" value={form.yearBuilt} onChange={(e) => setF("yearBuilt", e.target.value)} />
           </div>
           <div className="field">
             <label>Total insured value ($)</label>
             <input
               type="number"
               value={form.totalInsuredValue}
-              onChange={set("totalInsuredValue")}
+              onChange={(e) => setF("totalInsuredValue", e.target.value)}
             />
           </div>
           <div className="field">
@@ -223,7 +220,7 @@ export default function NewLead() {
             <input
               placeholder="Incumbent agency"
               value={form.currentAgent}
-              onChange={set("currentAgent")}
+              onChange={(e) => setF("currentAgent", e.target.value)}
             />
           </div>
           <div className="field">
@@ -231,12 +228,12 @@ export default function NewLead() {
             <input
               type="date"
               value={form.currentPolicyExpiration}
-              onChange={set("currentPolicyExpiration")}
+              onChange={(e) => setF("currentPolicyExpiration", e.target.value)}
             />
           </div>
           <div className="field full">
             <label>Notes</label>
-            <textarea rows={3} value={form.notes} onChange={set("notes")} />
+            <textarea rows={3} value={form.notes} onChange={(e) => setF("notes", e.target.value)} />
           </div>
         </div>
 

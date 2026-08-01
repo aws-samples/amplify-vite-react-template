@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { client, fmtDate, friendlyError, type UserProfile } from "../lib/client";
 import SignatureManager from "../components/SignatureManager";
 import { useSort, SortTh } from "../lib/useSort";
+import { useFormState } from "../lib/useFormState";
 
 interface TeamUser {
   userId: string;
@@ -22,8 +23,7 @@ const NO_USERS: TeamUser[] = [];
 export default function Team({ profile }: { profile: UserProfile }) {
   const [users, setUsers] = useState<TeamUser[] | null>(null);
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState("STAFF");
+  const { form, setF } = useFormState({ email: "", role: "STAFF" });
   const [inviting, setInviting] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -59,22 +59,24 @@ export default function Team({ profile }: { profile: UserProfile }) {
   }, []);
 
   async function invite() {
-    if (!email.trim()) return;
+    if (!form.email.trim()) return;
     setInviting(true);
     setNotice("");
     setError("");
     try {
       const { data, errors } = await client.mutations.inviteUser({
-        email: email.trim().toLowerCase(),
-        role,
+        email: form.email.trim().toLowerCase(),
+        role: form.role,
       });
       if (errors?.length) throw new Error(errors[0].message);
       const body = parse(data);
       if (!body.ok) throw new Error(String(body.error ?? "Invite failed"));
       setNotice(
-        `Invited ${email.trim().toLowerCase()} as ${role}. They'll get an email with the portal link — they sign in with a magic link, no password.`
+        `Invited ${form.email.trim().toLowerCase()} as ${form.role}. They'll get an email with the portal link — they sign in with a magic link, no password.`
       );
-      setEmail("");
+      // Not `reset()`: the baseline would put the role back to STAFF too, and
+      // inviting a second person to the same role is the common case.
+      setF("email", "");
       load();
     } catch (err) {
       setError(friendlyError(err, "Invite failed"));
@@ -116,14 +118,14 @@ export default function Team({ profile }: { profile: UserProfile }) {
             <label>Email</label>
             <input
               type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              value={form.email}
+              onChange={(e) => setF("email", e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && invite()}
             />
           </div>
           <div className="field">
             <label>Role</label>
-            <select value={role} onChange={(e) => setRole(e.target.value)}>
+            <select value={form.role} onChange={(e) => setF("role", e.target.value)}>
               <option value="ADMIN">Admin</option>
               <option value="PRODUCER">Producer</option>
               <option value="STAFF">Staff</option>
@@ -133,7 +135,7 @@ export default function Team({ profile }: { profile: UserProfile }) {
         <div className="form-actions">
           <button
             className="primary"
-            disabled={inviting || !email.trim()}
+            disabled={inviting || !form.email.trim()}
             onClick={invite}
           >
             {inviting ? "Inviting…" : "Send invite"}

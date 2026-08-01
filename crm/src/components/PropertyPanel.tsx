@@ -12,6 +12,7 @@ import {
 import FilePreviewModal from "./FilePreview";
 import { AddressAutocomplete } from "../lib/googlePlaces";
 import { useSort, SortTh } from "../lib/useSort";
+import { useFormState } from "../lib/useFormState";
 
 // Alphabetical by label.
 const CONSTRUCTION_TYPES = [
@@ -48,7 +49,7 @@ function DetailsCard({
   account: Account;
   onChange: (a: Account) => void;
 }) {
-  const [form, setForm] = useState({
+  const { form, setF, patch, saved, markSaved } = useFormState({
     address: account.address ?? "",
     city: account.city ?? "",
     county: account.county ?? "",
@@ -68,13 +69,7 @@ function DetailsCard({
     otherUpdates: account.otherUpdates ?? "",
   });
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
-
-  const setF = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => {
-    setSaved(false);
-    setForm((f) => ({ ...f, [k]: v }));
-  };
 
   const yearOk = (v: string) => {
     if (!v) return true;
@@ -137,7 +132,7 @@ function DetailsCard({
       return;
     }
     onChange(data);
-    setSaved(true);
+    markSaved();
   }
 
   return (
@@ -149,16 +144,14 @@ function DetailsCard({
           <AddressAutocomplete
             value={form.address}
             onChange={(v) => setF("address", v)}
-            onPlace={(p) => {
-              setSaved(false);
-              setForm((f) => ({
-                ...f,
+            onPlace={(p) =>
+              patch((f) => ({
                 address: p.address || f.address,
                 city: p.city || f.city,
                 state: p.state || f.state,
                 zip: p.zip || f.zip,
-              }));
-            }}
+              }))
+            }
           />
         </div>
         <div className="field">
@@ -320,10 +313,12 @@ function DetailsCard({
 
 function BuildingsCard({ accountId }: { accountId: string }) {
   const [buildings, setBuildings] = useState<Building[]>([]);
-  const [label, setLabel] = useState("");
-  const [sqft, setSqft] = useState("");
-  const [street, setStreet] = useState("");
-  const [desc, setDesc] = useState("");
+  const { form, setF, reset } = useFormState({
+    label: "",
+    sqft: "",
+    street: "",
+    desc: "",
+  });
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
 
@@ -337,8 +332,8 @@ function BuildingsCard({ accountId }: { accountId: string }) {
   }, [accountId]);
 
   async function add() {
-    const n = Number(sqft);
-    if (sqft && (!Number.isInteger(n) || n <= 0)) {
+    const n = Number(form.sqft);
+    if (form.sqft && (!Number.isInteger(n) || n <= 0)) {
       setError("Sq ft should be a positive whole number.");
       return;
     }
@@ -346,18 +341,17 @@ function BuildingsCard({ accountId }: { accountId: string }) {
     setAdding(true);
     const { data } = await client.models.Building.create({
       accountId,
-      label: label.trim() || `Building ${buildings.length + 1}`,
-      sqft: sqft ? n : undefined,
-      streetAddress: street.trim() || undefined,
-      description: desc.trim() || undefined,
+      label: form.label.trim() || `Building ${buildings.length + 1}`,
+      sqft: form.sqft ? n : undefined,
+      streetAddress: form.street.trim() || undefined,
+      description: form.desc.trim() || undefined,
     });
     setAdding(false);
     if (data) {
       setBuildings((bs) => [...bs, data]);
-      setLabel("");
-      setSqft("");
-      setStreet("");
-      setDesc("");
+      // Baseline is still the blanks this mounted with — nothing ever calls
+      // markSaved here — so `reset()` is the four setters it replaces.
+      reset();
     }
   }
 
@@ -392,16 +386,16 @@ function BuildingsCard({ accountId }: { accountId: string }) {
           <label>Label</label>
           <input
             placeholder={`Building ${buildings.length + 1}`}
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
+            value={form.label}
+            onChange={(e) => setF("label", e.target.value)}
           />
         </div>
         <div className="field">
           <label>Street address</label>
           <input
             placeholder="2 John Hancock Dr"
-            value={street}
-            onChange={(e) => setStreet(e.target.value)}
+            value={form.street}
+            onChange={(e) => setF("street", e.target.value)}
           />
         </div>
         <div className="field">
@@ -409,8 +403,8 @@ function BuildingsCard({ accountId }: { accountId: string }) {
           <input
             type="number"
             min={1}
-            value={sqft}
-            onChange={(e) => setSqft(e.target.value)}
+            value={form.sqft}
+            onChange={(e) => setF("sqft", e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && add()}
           />
         </div>
@@ -418,8 +412,8 @@ function BuildingsCard({ accountId }: { accountId: string }) {
           <label>Description (prints on ACORD 125)</label>
           <input
             placeholder="2, 4, 10, 12 John Hancock. Two-story wood frame…"
-            value={desc}
-            onChange={(e) => setDesc(e.target.value)}
+            value={form.desc}
+            onChange={(e) => setF("desc", e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && add()}
           />
         </div>
