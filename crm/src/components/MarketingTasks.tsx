@@ -5,6 +5,7 @@ import {
   client,
   daysUntilDate,
   fmtDate,
+  friendlyError,
   listAllPages,
   type MarketingTask,
   type Quote,
@@ -120,7 +121,7 @@ export default function AccountMarketingTasks({
     load().catch((e) => {
       // The card hides itself when there are no tasks, so a swallowed
       // failure is indistinguishable from an account with none.
-      setError(e instanceof Error ? e.message : "Failed to load marketing tasks");
+      setError(friendlyError(e, "Failed to load marketing tasks"));
       setLoaded(true);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps

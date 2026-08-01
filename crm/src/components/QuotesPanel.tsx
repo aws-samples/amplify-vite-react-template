@@ -3,6 +3,7 @@ import {
   client,
   fmtDate,
   fmtMoney,
+  friendlyError,
   listAllPages,
   type Account,
   type Carrier,
@@ -288,7 +289,7 @@ function BindForm({
       }
       onDone(updated);
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Bind failed");
+      onError(friendlyError(err, "Bind failed"));
       onDone(null);
     } finally {
       setSaving(false);

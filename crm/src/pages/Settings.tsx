@@ -6,7 +6,7 @@ import FileButton from "../components/FileButton";
 import Team from "./Team";
 import Licensing from "../components/Licensing";
 import SignatureManager from "../components/SignatureManager";
-import type { UserProfile } from "../lib/client";
+import { friendlyError, type UserProfile } from "../lib/client";
 import { useIsAdmin } from "../lib/auth";
 
 type TemplateDef = AcordFormDef;
@@ -92,7 +92,7 @@ function TemplatesPanel() {
       setUploaded((u) => ({ ...u, [tpl.path]: true }));
       setFields((f) => ({ ...f, [tpl.path]: [] }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Upload failed");
+      setError(friendlyError(err, "Upload failed"));
     } finally {
       setBusy(null);
     }
@@ -105,7 +105,7 @@ function TemplatesPanel() {
       const names = await listTemplateFields(tpl.path);
       setFields((f) => ({ ...f, [tpl.path]: names }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not read template");
+      setError(friendlyError(err, "Could not read template"));
     } finally {
       setBusy(null);
     }

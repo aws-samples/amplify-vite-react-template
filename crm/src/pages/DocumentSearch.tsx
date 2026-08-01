@@ -1,7 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { getUrl } from "aws-amplify/storage";
-import { client, fmtDate, listAllPages, type CrmDocument } from "../lib/client";
+import {
+  client,
+  fmtDate,
+  friendlyError,
+  listAllPages,
+  type CrmDocument,
+} from "../lib/client";
 import FilePreviewModal, { canPreview } from "../components/FilePreview";
 
 /**
@@ -37,7 +43,7 @@ export default function DocumentSearch() {
         found.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Search failed");
+      setError(friendlyError(err, "Search failed"));
     } finally {
       setSearching(false);
     }

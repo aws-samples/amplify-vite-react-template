@@ -153,9 +153,39 @@ export function validateAccountFields(f: {
   return problems;
 }
 
+/**
+ * The one message for "the ACORD template isn't in S3". `AccountDetail` and
+ * `FormsTab` each had their own wording for it; both now come from here so
+ * the advice can only be changed in one place. Exported so those two can
+ * tell a classified template failure from an unclassified one and keep their
+ * own "Generation failed: …" prefix off it — see `friendlyError`.
+ */
+export const TEMPLATE_MISSING_MESSAGE =
+  "That ACORD template hasn't been uploaded yet. Go to Settings → ACORD " +
+  "templates, upload the fillable PDF, then try again — nothing you entered was lost.";
+
+/**
+ * Only `fetchTemplate` (`lib/acord.ts`) produces this string, and it only ever
+ * fetches templates, so the token cannot appear on any other code path.
+ *
+ * The two regexes this replaces also matched a bare `403|404`, and
+ * `AccountDetail`'s also matched `NoSuchKey`. Both are dropped deliberately:
+ *
+ *  - Neither can occur on the template path. `fetchTemplate` calls `getUrl`
+ *    without `validateObjectExistence`, so a missing object never surfaces as
+ *    `NoSuchKey` — the presigned URL resolves and the `fetch` 404s, which is
+ *    already reported as "Template fetch failed (404)".
+ *  - Both are unsafe as substring tests now that this helper runs at every
+ *    call site: `NoSuchKey` is exactly what a genuinely deleted *document*
+ *    raises in `FilePreview`/`DocumentsPanel`, and `404` matches any message
+ *    that merely contains those three digits (an id, an amount, a field name).
+ */
+const TEMPLATE_MISSING_RE = /Template fetch failed/;
+
 /** Turn raw GraphQL/AppSync errors into something a human can act on. */
 export function friendlyError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : String(err ?? "");
+  if (TEMPLATE_MISSING_RE.test(msg)) return TEMPLATE_MISSING_MESSAGE;
   const varMatch = msg.match(/Variable '(\w+)' has an invalid value/);
   if (varMatch) return `"${varMatch[1]}" has an invalid value — please check that field.`;
   if (/Not Authorized|Unauthorized/i.test(msg))

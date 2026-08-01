@@ -71,7 +71,7 @@ export default function NewLead() {
     });
     if (errors?.length || !data) {
       setSaving(false);
-      setError(friendlyError(new Error(errors?.[0]?.message), "Failed to create lead."));
+      setError(friendlyError(errors?.[0]?.message, "Failed to create lead."));
       return;
     }
 

@@ -51,7 +51,7 @@ export default function Licensing() {
 
   useEffect(() => {
     load().catch((e) =>
-      setError(e instanceof Error ? e.message : "Failed to load licenses")
+      setError(friendlyError(e, "Failed to load licenses"))
     );
   }, []);
 
@@ -283,7 +283,7 @@ function LegacyBackfill({
         // An empty list hides this card, so a failed read would look exactly
         // like "nothing left to migrate" — and the import never gets offered.
         setLegacy([]);
-        setError(e instanceof Error ? e.message : "Failed to load legacy licenses");
+        setError(friendlyError(e, "Failed to load legacy licenses"));
       });
   }, []);
 

@@ -10,10 +10,12 @@ vi.mock("aws-amplify/data", () => ({
 
 import {
   EMAIL_RE,
+  TEMPLATE_MISSING_MESSAGE,
   daysUntil,
   daysUntilDate,
   fmtDate,
   fmtDateTime,
+  friendlyError,
   validateDateRange,
   validatePositiveInt,
   validateYear,
@@ -55,6 +57,125 @@ describe("EMAIL_RE", () => {
     expect(EMAIL_RE.flags).toBe("");
     expect(EMAIL_RE.test("jake@getgim.com")).toBe(true);
     expect(EMAIL_RE.test("jake@getgim.com")).toBe(true);
+  });
+});
+
+// friendlyError is the one classifier every error-rendering site in crm/src
+// now routes through, so a misfire is a misfire everywhere at once. These
+// pin each arm, the precedence between them, and — most of all — the things
+// the template arm must NOT claim.
+describe("friendlyError", () => {
+  describe("template-missing arm", () => {
+    it("classifies what fetchTemplate actually throws", () => {
+      // acord.ts's fetchTemplate: `Template fetch failed (${res.status})`.
+      // 404 = object absent, 403 = read denied; both mean "not usable yet".
+      expect(friendlyError(new Error("Template fetch failed (404)"), "x")).toBe(
+        TEMPLATE_MISSING_MESSAGE
+      );
+      expect(friendlyError(new Error("Template fetch failed (403)"), "x")).toBe(
+        TEMPLATE_MISSING_MESSAGE
+      );
+    });
+
+    it("does NOT claim a NoSuchKey document error", () => {
+      // The regression this arm was narrowed to avoid. NoSuchKey is what a
+      // genuinely deleted *document* raises through getUrl in FilePreview and
+      // DocumentsPanel — both of which route through friendlyError. It can
+      // never come from the template path: fetchTemplate calls getUrl without
+      // validateObjectExistence, so a missing template 404s at the fetch and
+      // arrives as "Template fetch failed (404)" instead.
+      const msg = "NoSuchKey: The specified key does not exist.";
+      expect(friendlyError(new Error(msg), "Could not load file")).toBe(msg);
+    });
+
+    it("does NOT swallow an unrelated message that merely contains 403/404", () => {
+      // The other half of the narrowing: the two regexes this replaced each
+      // matched a bare `403|404`, which any id, amount or field name can hit.
+      for (const msg of [
+        "Quote 404 could not be found",
+        "Building sqft must not be 40400",
+        "Conflict on record a404b-403f",
+      ]) {
+        expect(friendlyError(new Error(msg), "Save failed")).toBe(msg);
+      }
+    });
+
+    it("wins over the other arms when a message could match several", () => {
+      // A 403 template read is a permission failure, but "upload the template"
+      // is the advice that actually unblocks the user.
+      expect(
+        friendlyError(new Error("Not Authorized: Template fetch failed (403)"), "x")
+      ).toBe(TEMPLATE_MISSING_MESSAGE);
+    });
+  });
+
+  describe("the pre-existing arms", () => {
+    it("names the offending field from an AppSync variable error", () => {
+      expect(
+        friendlyError(new Error("Variable 'unitCount' has an invalid value"), "x")
+      ).toBe('"unitCount" has an invalid value — please check that field.');
+    });
+
+    it("translates authorization failures, either spelling, any case", () => {
+      for (const msg of ["Not Authorized to access createAccount", "unauthorized"]) {
+        expect(friendlyError(new Error(msg), "Save failed")).toBe(
+          "You don't have permission to do that."
+        );
+      }
+    });
+
+    it("translates network failures", () => {
+      for (const msg of ["NetworkError when attempting to fetch", "Failed to fetch"]) {
+        expect(friendlyError(new Error(msg), "Save failed")).toBe(
+          "Network problem — check your connection and try again."
+        );
+      }
+    });
+  });
+
+  describe("the unclassified path", () => {
+    it("returns an unrecognized message verbatim rather than the fallback", () => {
+      expect(friendlyError(new Error("Carrier is out of appetite"), "Save failed")).toBe(
+        "Carrier is out of appetite"
+      );
+    });
+
+    it("falls back only when there is no message at all", () => {
+      expect(friendlyError(new Error(""), "Save failed")).toBe("Save failed");
+      expect(friendlyError(undefined, "Could not load")).toBe("Could not load");
+      expect(friendlyError(null, "Search failed")).toBe("Search failed");
+      expect(friendlyError("", "Bind failed")).toBe("Bind failed");
+    });
+  });
+
+  describe("input shapes", () => {
+    // The migration stopped three sites wrapping `errors?.[0]?.message` back
+    // into an Error just to feed this helper. That is only safe if a bare
+    // string and a missing string behave exactly as the wrapped forms did.
+    it("treats a raw string identically to the same string in an Error", () => {
+      for (const msg of [
+        "Template fetch failed (404)",
+        "Not Authorized",
+        "Conditional request failed",
+      ]) {
+        expect(friendlyError(msg, "Save failed")).toBe(
+          friendlyError(new Error(msg), "Save failed")
+        );
+      }
+    });
+
+    it("treats a missing errors[0].message as new Error(undefined) did", () => {
+      // `new Error(undefined).message` is "", so both must reach the fallback.
+      expect(friendlyError(undefined, "Save failed")).toBe(
+        friendlyError(new Error(undefined), "Save failed")
+      );
+    });
+
+    it("never throws, whatever it is handed", () => {
+      for (const weird of [0, false, NaN, {}, [], Symbol.iterator, () => {}]) {
+        expect(() => friendlyError(weird, "Save failed")).not.toThrow();
+      }
+    });
   });
 });
 

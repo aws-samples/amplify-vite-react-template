@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { uploadData } from "aws-amplify/storage";
-import { client, listAllPages, type Account, type CrmDocument } from "../lib/client";
+import {
+  client,
+  friendlyError,
+  listAllPages,
+  TEMPLATE_MISSING_MESSAGE,
+  type Account,
+  type CrmDocument,
+} from "../lib/client";
 import {
   ACORD_FORMS,
   MAPPED_APP_FORM_KEYS,
@@ -135,11 +142,11 @@ export default function FormsTab({
           .join(" ")
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "";
+      const msg = friendlyError(err, "unknown error");
+      // A classified template failure already explains itself and says where
+      // to go; anything else keeps the prefix naming what was being done.
       setError(
-        /Template fetch failed|403|404/.test(msg)
-          ? `The ${form.label.split("—")[0].trim()} template isn't uploaded yet — add it in Settings → ACORD templates first.`
-          : `Generation failed: ${msg || "unknown error"}`
+        msg === TEMPLATE_MISSING_MESSAGE ? msg : `Generation failed: ${msg}`
       );
     } finally {
       setBusyKey(null);

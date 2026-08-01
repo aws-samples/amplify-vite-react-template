@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getUrl } from "aws-amplify/storage";
+import { friendlyError } from "../lib/client";
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
 const INLINE_EXT = new Set(["pdf", "txt", ...IMAGE_EXT]);
@@ -28,9 +29,7 @@ export default function FilePreviewModal({
   useEffect(() => {
     getUrl({ path: s3Key })
       .then(({ url }) => setUrl(url.toString()))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Could not load file")
-      );
+      .catch((err) => setError(friendlyError(err, "Could not load file")));
   }, [s3Key]);
 
   useEffect(() => {

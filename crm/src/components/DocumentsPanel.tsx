@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { uploadData, getUrl, remove } from "aws-amplify/storage";
-import { client, type CrmDocument } from "../lib/client";
+import { client, friendlyError, type CrmDocument } from "../lib/client";
 import type { Schema } from "../../amplify/data/resource";
 import FilePreviewModal, { canPreview } from "./FilePreview";
 import FileButton from "./FileButton";
@@ -100,9 +100,7 @@ export default function DocumentsPanel({
           await client.models.Document.delete({ id: docId }).catch(() => {});
         }
         setError(
-          `"${file.name}" failed to upload — ${
-            err instanceof Error ? err.message : "unknown error"
-          }`
+          `"${file.name}" failed to upload — ${friendlyError(err, "unknown error")}`
         );
       }
     }

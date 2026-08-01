@@ -132,7 +132,7 @@ function DetailsCard({
     });
     setSaving(false);
     if (errors?.length || !data) {
-      setError(friendlyError(new Error(errors?.[0]?.message), "Save failed"));
+      setError(friendlyError(errors?.[0]?.message, "Save failed"));
       return;
     }
     onChange(data);

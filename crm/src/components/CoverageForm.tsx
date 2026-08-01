@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   client,
+  friendlyError,
   LINES_OF_BUSINESS,
   type Carrier,
   type Policy,
@@ -168,7 +169,7 @@ export default function CoverageForm({
       }
       onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Save failed");
+      setError(friendlyError(err, "Save failed"));
     } finally {
       setSaving(false);
     }

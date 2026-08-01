@@ -7,6 +7,7 @@ import {
   fmtMoney,
   friendlyError,
   listAllPages,
+  TEMPLATE_MISSING_MESSAGE,
   validateAccountFields,
   type Account,
   type Carrier,
@@ -212,7 +213,7 @@ function OverviewTab({
     });
     setSaving(false);
     if (errors?.length || !data) {
-      setError(friendlyError(new Error(errors?.[0]?.message), "Save failed"));
+      setError(friendlyError(errors?.[0]?.message, "Save failed"));
       return;
     }
     onChange(data);
@@ -615,7 +616,7 @@ function CertificatesTab({
       setSaving(false);
       setError(
         "Couldn't reserve a certificate number: " +
-          (err instanceof Error ? err.message : "unknown error") +
+          friendlyError(err, "unknown error") +
           ". Nothing was saved — try again."
       );
       return;
@@ -681,11 +682,11 @@ function CertificatesTab({
       }
       if (notes.length) setGenNote(notes.join(" "));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "";
+      const msg = friendlyError(err, "unknown error");
+      // A classified template failure already explains itself and says where
+      // to go; anything else keeps the prefix naming what was being done.
       setError(
-        /Template fetch failed|NoSuchKey|403|404/.test(msg)
-          ? "The ACORD 25 template hasn't been uploaded yet. Go to Settings → ACORD templates, upload the fillable PDF, then hit Generate again — this certificate record is saved and waiting."
-          : `PDF generation failed: ${msg || "unknown error"}`
+        msg === TEMPLATE_MISSING_MESSAGE ? msg : `PDF generation failed: ${msg}`
       );
     } finally {
       setGenerating(null);

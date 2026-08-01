@@ -39,7 +39,7 @@ export default function SignatureManager({
         // There IS a signature on record — failing quietly here shows
         // "None on file", which reads as a missing signature.
         setUrl(null);
-        setError(err instanceof Error ? err.message : "Couldn't load signature");
+        setError(friendlyError(err, "Couldn't load signature"));
       });
   }, [key]);
 

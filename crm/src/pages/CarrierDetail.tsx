@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import {
   client,
   fmtMoney,
+  friendlyError,
   LINES_OF_BUSINESS,
   listAllPages,
   US_STATES,
@@ -127,7 +128,7 @@ function CarrierForm({
     });
     setSaving(false);
     if (errors?.length || !data) {
-      setError(errors?.[0]?.message ?? "Save failed");
+      setError(friendlyError(errors?.[0]?.message, "Save failed"));
       return;
     }
     onChange(data);
@@ -525,7 +526,7 @@ function GuideForm({
       : await client.models.AppetiteGuide.create({ carrierId, ...payload });
     setSaving(false);
     if (errors?.length || !data) {
-      setError(errors?.[0]?.message ?? "Save failed");
+      setError(friendlyError(errors?.[0]?.message, "Save failed"));
       return;
     }
     onSaved(data);
