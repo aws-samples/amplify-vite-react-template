@@ -11,6 +11,7 @@
  */
 
 import { dataClient } from "./dataClient";
+import { listAll } from "./pagination";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -85,40 +86,32 @@ export async function findLeadDuplicates(input: {
 
   const client = await dataClient();
   const out: LeadCandidate[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Customer.list({
-      limit: 200,
-      nextToken: token,
-    });
-    if (page.errors?.length) {
-      throw new Error(page.errors.map((error) => error.message).join("; "));
+  const rows = (await listAll((nextToken) =>
+    client.models.Customer.list({ limit: 200, nextToken })
+  )) as CustomerRow[];
+  for (const raw of rows) {
+    if (input.excludeId && raw.id === input.excludeId) continue;
+    const cEmail = normalizeEmail(raw.email);
+    const cPhone = normalizePhone(raw.phone);
+    const cName = normalizeName(raw.displayName) ?? normalizeName(raw.contactName);
+    const cZip = normalizeZip(raw.serviceZip);
+    let matchedOn: LeadCandidate["matchedOn"] | null = null;
+    if (email && cEmail && email === cEmail) matchedOn = "email";
+    else if (phone && cPhone && phone === cPhone) matchedOn = "phone";
+    else if (name && zip && cName && cZip && name === cName && zip === cZip) {
+      matchedOn = "name+zip";
     }
-      for (const raw of (page.data ?? []) as CustomerRow[]) {
-        if (input.excludeId && raw.id === input.excludeId) continue;
-        const cEmail = normalizeEmail(raw.email);
-        const cPhone = normalizePhone(raw.phone);
-        const cName = normalizeName(raw.displayName) ?? normalizeName(raw.contactName);
-        const cZip = normalizeZip(raw.serviceZip);
-        let matchedOn: LeadCandidate["matchedOn"] | null = null;
-        if (email && cEmail && email === cEmail) matchedOn = "email";
-        else if (phone && cPhone && phone === cPhone) matchedOn = "phone";
-        else if (name && zip && cName && cZip && name === cName && zip === cZip) {
-          matchedOn = "name+zip";
-        }
-        if (matchedOn) {
-          out.push({
-            id: raw.id,
-            displayName: raw.displayName,
-            status: String(raw.status ?? ""),
-            email: raw.email ?? null,
-            phone: raw.phone ?? null,
-            serviceCity: raw.serviceCity ?? null,
-            matchedOn,
-          });
-        }
-      }
-    token = page.nextToken;
-  } while (token);
+    if (matchedOn) {
+      out.push({
+        id: raw.id,
+        displayName: raw.displayName,
+        status: String(raw.status ?? ""),
+        email: raw.email ?? null,
+        phone: raw.phone ?? null,
+        serviceCity: raw.serviceCity ?? null,
+        matchedOn,
+      });
+    }
+  }
   return out;
 }

@@ -14,6 +14,7 @@ import {
   type QueuedVisitsResolution,
 } from "./subscription";
 import { computeVisitCancellationPolicy } from "./cancellationPolicy";
+import { listAll } from "./pagination";
 import {
   ALREADY_CANCELED_MESSAGE,
   coverageEndingDescription,
@@ -98,27 +99,24 @@ const todayEastern = (): string =>
  *  cancel stops future billing but does not erase a debt already owed. */
 async function outstandingBalanceForPlan(servicePlanId: string): Promise<number> {
   const client = await dataClient();
+  const invoices = await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: {
+          servicePlanId: { eq: servicePlanId },
+          or: [{ status: { eq: "OPEN" } }, { status: { eq: "FAILED" } }],
+        },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
   let total = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({
-      filter: {
-        servicePlanId: { eq: servicePlanId },
-        or: [{ status: { eq: "OPEN" } }, { status: { eq: "FAILED" } }],
-      },
-      limit: 200,
-      nextToken: token,
-    });
-    for (const inv of page.data) {
-      // Net of refunds — the schema's own rule for every revenue figure. A
-      // partially refunded bill is owed only its remainder.
-      total += Math.max(
-        0,
-        (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0)
-      );
-    }
-    token = page.nextToken;
-  } while (token);
+  for (const inv of invoices) {
+    // Net of refunds — the schema's own rule for every revenue figure. A
+    // partially refunded bill is owed only its remainder.
+    total += Math.max(0, (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0));
+  }
   return total;
 }
 
@@ -140,55 +138,55 @@ async function listQueuedVisits(
     );
   }
   const today = todayEastern();
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByServicePlanId(
-      { servicePlanId },
-      { nextToken: token, limit: 200 }
-    );
-    for (const job of page.data) {
-      if (job.status === "IN_PROGRESS") {
-        visits.push({
-          jobId: job.id,
-          scheduledDate: job.scheduledDate ?? null,
-          disposition: "REMAINS",
-          reason: "a technician is on site right now",
-        });
-        continue;
-      }
-      if (job.status !== "UNSCHEDULED" && job.status !== "SCHEDULED") continue;
-      const paidCents =
-        paidByJob.get(job.id) ?? (job.paidAt ? Math.max(0, job.priceCents ?? 0) : 0);
-      if (paidCents > 0) {
-        // GL-08 R6: the preview states the SERVER-calculated 72-hour outcome —
-        // never a keep-or-refund choice, never credit. Hour-exact against the
-        // visit's Eastern start (judged NOW, the moment the customer is looking)
-        // so the preview matches what the dispositive cancel will actually do.
-        const policy = computeVisitCancellationPolicy({
-          scheduledDate: job.scheduledDate ?? null,
-          amountPaidCents: paidCents,
-          today,
-          nowMs: Date.now(),
-        });
-        visits.push({
-          jobId: job.id,
-          scheduledDate: job.scheduledDate ?? null,
-          disposition: "STOPS",
-          reason: policy.withinFreeWindow
-            ? `paid — the $${(paidCents / 100).toFixed(2)} you paid will be refunded in full (it's more than 72 hours away)`
-            : `paid — it's within 72 hours, so per our cancellation policy the $${(paidCents / 100).toFixed(2)} paid isn't refunded`,
-        });
-        continue;
-      }
+  const jobs = await listAll(
+    (nextToken) =>
+      client.models.Job.listJobByServicePlanId(
+        { servicePlanId },
+        { nextToken, limit: 200 }
+      ),
+    { pageErrors: "ignore" }
+  );
+  for (const job of jobs) {
+    if (job.status === "IN_PROGRESS") {
+      visits.push({
+        jobId: job.id,
+        scheduledDate: job.scheduledDate ?? null,
+        disposition: "REMAINS",
+        reason: "a technician is on site right now",
+      });
+      continue;
+    }
+    if (job.status !== "UNSCHEDULED" && job.status !== "SCHEDULED") continue;
+    const paidCents =
+      paidByJob.get(job.id) ?? (job.paidAt ? Math.max(0, job.priceCents ?? 0) : 0);
+    if (paidCents > 0) {
+      // GL-08 R6: the preview states the SERVER-calculated 72-hour outcome —
+      // never a keep-or-refund choice, never credit. Hour-exact against the
+      // visit's Eastern start (judged NOW, the moment the customer is looking)
+      // so the preview matches what the dispositive cancel will actually do.
+      const policy = computeVisitCancellationPolicy({
+        scheduledDate: job.scheduledDate ?? null,
+        amountPaidCents: paidCents,
+        today,
+        nowMs: Date.now(),
+      });
       visits.push({
         jobId: job.id,
         scheduledDate: job.scheduledDate ?? null,
         disposition: "STOPS",
-        reason: "not yet done — it comes off the schedule",
+        reason: policy.withinFreeWindow
+          ? `paid — the $${(paidCents / 100).toFixed(2)} you paid will be refunded in full (it's more than 72 hours away)`
+          : `paid — it's within 72 hours, so per our cancellation policy the $${(paidCents / 100).toFixed(2)} paid isn't refunded`,
       });
+      continue;
     }
-    token = page.nextToken;
-  } while (token);
+    visits.push({
+      jobId: job.id,
+      scheduledDate: job.scheduledDate ?? null,
+      disposition: "STOPS",
+      reason: "not yet done — it comes off the schedule",
+    });
+  }
   return visits;
 }
 
@@ -416,42 +414,42 @@ export async function planCancellationSettled(
   // and payments made BEFORE the request. The stamped cancelDisposition is
   // the policy outcome; the invoices prove the money actually moved.
   {
-    let jobToken: string | null | undefined;
-    do {
-      const page = await client.models.Job.listJobByServicePlanId(
-        { servicePlanId },
-        { limit: 200, nextToken: jobToken }
-      );
-      for (const job of page.data ?? []) {
-        if (job.status === "IN_PROGRESS") {
-          return {
-            settled: false,
-            reason: `A technician is on site for visit ${job.id} — its final outcome must be recorded before the cancellation can settle.`,
-          };
-        }
-        if (job.status !== "CANCELED") continue;
-        const facts = await jobInvoiceFacts(job.id);
-        if (facts.inFlightCents > 0) {
-          return {
-            settled: false,
-            reason: `A payment is still in motion on canceled visit ${job.id} — it must settle to its exact 72-hour outcome first.`,
-          };
-        }
-        const disposition = (job as { cancelDisposition?: string | null })
-          .cancelDisposition;
-        if (disposition === "FEE_RETAINED") continue; // the recorded policy outcome
-        if (facts.paidRemainingCents > 0) {
-          // REFUND_OWED, AWAIT_SETTLEMENT, or an unstamped legacy cancel with
-          // money still held: not settled until the exact refund posts (or a
-          // recorded retained outcome exists).
-          return {
-            settled: false,
-            reason: `Canceled visit ${job.id} still holds $${(facts.paidRemainingCents / 100).toFixed(2)} with no full refund and no recorded retained-fee outcome.`,
-          };
-        }
+    const planJobs = await listAll(
+      (nextToken) =>
+        client.models.Job.listJobByServicePlanId(
+          { servicePlanId },
+          { limit: 200, nextToken }
+        ),
+      { pageErrors: "ignore" }
+    );
+    for (const job of planJobs) {
+      if (job.status === "IN_PROGRESS") {
+        return {
+          settled: false,
+          reason: `A technician is on site for visit ${job.id} — its final outcome must be recorded before the cancellation can settle.`,
+        };
       }
-      jobToken = page.nextToken;
-    } while (jobToken);
+      if (job.status !== "CANCELED") continue;
+      const facts = await jobInvoiceFacts(job.id);
+      if (facts.inFlightCents > 0) {
+        return {
+          settled: false,
+          reason: `A payment is still in motion on canceled visit ${job.id} — it must settle to its exact 72-hour outcome first.`,
+        };
+      }
+      const disposition = (job as { cancelDisposition?: string | null })
+        .cancelDisposition;
+      if (disposition === "FEE_RETAINED") continue; // the recorded policy outcome
+      if (facts.paidRemainingCents > 0) {
+        // REFUND_OWED, AWAIT_SETTLEMENT, or an unstamped legacy cancel with
+        // money still held: not settled until the exact refund posts (or a
+        // recorded retained outcome exists).
+        return {
+          settled: false,
+          reason: `Canceled visit ${job.id} still holds $${(facts.paidRemainingCents / 100).toFixed(2)} with no full refund and no recorded retained-fee outcome.`,
+        };
+      }
+    }
   }
   const invoices = await listPlanInvoices(servicePlanId);
   const liveCharge = invoices.some(
@@ -544,27 +542,27 @@ async function jobInvoiceFacts(jobId: string): Promise<{
   inFlightCents: number;
 }> {
   const client = await dataClient();
+  const invoices = await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { jobId: { eq: jobId } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
   let paidRemainingCents = 0;
   let inFlightCents = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({
-      filter: { jobId: { eq: jobId } },
-      limit: 200,
-      nextToken: token,
-    });
-    for (const inv of page.data ?? []) {
-      if (inv.status === "PAID" || inv.status === "REFUNDED") {
-        paidRemainingCents += Math.max(
-          0,
-          (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0)
-        );
-      } else if (inv.status === "OPEN" && inv.stripePaymentIntentId) {
-        inFlightCents += inv.amountCents ?? 0;
-      }
+  for (const inv of invoices) {
+    if (inv.status === "PAID" || inv.status === "REFUNDED") {
+      paidRemainingCents += Math.max(
+        0,
+        (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0)
+      );
+    } else if (inv.status === "OPEN" && inv.stripePaymentIntentId) {
+      inFlightCents += inv.amountCents ?? 0;
     }
-    token = page.nextToken;
-  } while (token);
+  }
   return { paidRemainingCents, inFlightCents };
 }
 
@@ -581,18 +579,15 @@ type PlanInvoiceRow = {
 };
 async function listPlanInvoices(servicePlanId: string): Promise<PlanInvoiceRow[]> {
   const client = await dataClient();
-  const out: PlanInvoiceRow[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({
-      filter: { servicePlanId: { eq: servicePlanId } },
-      limit: 200,
-      nextToken: token,
-    });
-    for (const inv of page.data) out.push(inv);
-    token = page.nextToken;
-  } while (token);
-  return out;
+  return listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { servicePlanId: { eq: servicePlanId } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
 }
 
 /**

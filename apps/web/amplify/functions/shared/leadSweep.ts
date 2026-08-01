@@ -7,6 +7,7 @@ import {
 } from "./leadClaim";
 import { isLeadOpen } from "./leadStage";
 import { defaultWorkOwner, openOwnedWork, workItemId } from "./ownedWork";
+import { forEachPage } from "./pagination";
 
 const MAX_HEALTHY_GAP_MS = 35 * 60_000;
 
@@ -57,138 +58,138 @@ export async function sweepLeads(now: Date = new Date()) {
 
   let scanned = 0;
   let failed = 0;
-  let token: string | null | undefined;
   try {
-    do {
-      const page = await client.models.Customer.listCustomerByStatusAndDisplayName(
-        { status: "LEAD" },
-        { limit: 200, nextToken: token }
-      );
-      if (page.errors?.length) throw new Error(page.errors.map((e) => e.message).join("; "));
-      for (const listedLead of page.data ?? []) {
-        scanned++;
-        if (!isLeadOpen(listedLead)) continue;
-        const mutationId = `sweep:${nowIso}`;
-        const claim = await acquireLeadLifecycleClaim(listedLead.id, mutationId);
-        // A staff action or another sweep owns this lead. Its winner must
-        // reconcile the obligation; the next 15-minute sweep verifies it.
-        if (!claim.won) continue;
-        try {
-          const current = await client.models.Customer.get({ id: listedLead.id });
-          if (current.errors?.length || !current.data) {
-            throw new Error("Lead could not be re-read under its lifecycle claim.");
-          }
-          const lead = current.data;
-          if (!isLeadOpen(lead)) continue;
-          if (!lead.nextAction || !lead.nextActionAt || lead.leadOwnerTeam !== "SALES") {
-            throw new Error("Lead is missing its action, deadline, or staffed Sales-team owner.");
-          }
-          const itemId = workItemId("LEAD_FOLLOWUP", lead.id);
-          let item = await client.models.WorkItem.get({ id: itemId });
-          if (item.errors?.length) throw new Error(item.errors.map((e) => e.message).join("; "));
-          if (!item.data || item.data.status !== "OPEN") {
-            const opened = await openOwnedWork({
-              kind: "LEAD_FOLLOWUP",
-              dedupeKey: lead.id,
-              title: `${lead.nextAction}: ${lead.displayName}`,
-              detail: `Current action: ${lead.nextAction}. Due ${lead.nextActionAt}.`,
-              customerId: lead.id,
-              relatedId: lead.id,
-              sourceUrl: `/customers/${lead.id}`,
-              resolutionAction:
-                "Open the lead and record the actual controlled outcome; the next obligation is replaced automatically.",
-              ownerTeam: "SALES",
-              ownerSub: lead.leadOwnerSub ?? undefined,
-              ownerEmail: lead.leadOwnerEmail ?? defaultWorkOwner("SALES"),
-              dueAt: lead.nextActionAt,
-            });
-            if (!opened) throw new Error("The lead follow-up could not be repaired.");
-            item = await client.models.WorkItem.get({ id: itemId });
-          }
-          if (
-            item.data?.status === "OPEN" &&
-            (item.data.dueAt !== lead.nextActionAt ||
-              item.data.title !== `${lead.nextAction}: ${lead.displayName}`)
-          ) {
-            const synced = await client.models.WorkItem.update({
-              id: itemId,
-              title: `${lead.nextAction}: ${lead.displayName}`,
-              detail: `Current action: ${lead.nextAction}. Due ${lead.nextActionAt}.`,
-              dueAt: lead.nextActionAt,
-              escalatedAt: null,
-            });
-            if (!synced.data) throw new Error("Lead obligation could not be synchronized.");
-            item = { data: synced.data };
-          }
-          if (
-            now.getTime() >= Date.parse(lead.nextActionAt) &&
-            item.data?.status === "OPEN" &&
-            !item.data.escalatedAt
-          ) {
-            const eventId = `lead-overdue:${lead.id}:${lead.nextActionAt}`;
-            const existingEvent = await client.models.WorkEvent.get({ id: eventId });
-            if (existingEvent.errors?.length) throw new Error("Lead escalation history could not be read.");
-            if (!existingEvent.data) {
-              const event = await client.models.WorkEvent.create({
-                id: eventId,
-                workItemId: itemId,
-                eventType: "OVERDUE",
-                actorEmail: "system@pestbuzzkill.com",
-                note: `The real lead deadline passed at ${lead.nextActionAt}; escalated to the shared Sales queue.`,
-                occurredAt: nowIso,
+    await forEachPage(
+      (nextToken) =>
+        client.models.Customer.listCustomerByStatusAndDisplayName(
+          { status: "LEAD" },
+          { limit: 200, nextToken }
+        ),
+      async (leads) => {
+        for (const listedLead of leads) {
+          scanned++;
+          if (!isLeadOpen(listedLead)) continue;
+          const mutationId = `sweep:${nowIso}`;
+          const claim = await acquireLeadLifecycleClaim(listedLead.id, mutationId);
+          // A staff action or another sweep owns this lead. Its winner must
+          // reconcile the obligation; the next 15-minute sweep verifies it.
+          if (!claim.won) continue;
+          try {
+            const current = await client.models.Customer.get({ id: listedLead.id });
+            if (current.errors?.length || !current.data) {
+              throw new Error("Lead could not be re-read under its lifecycle claim.");
+            }
+            const lead = current.data;
+            if (!isLeadOpen(lead)) continue;
+            if (!lead.nextAction || !lead.nextActionAt || lead.leadOwnerTeam !== "SALES") {
+              throw new Error("Lead is missing its action, deadline, or staffed Sales-team owner.");
+            }
+            const itemId = workItemId("LEAD_FOLLOWUP", lead.id);
+            let item = await client.models.WorkItem.get({ id: itemId });
+            if (item.errors?.length) throw new Error(item.errors.map((e) => e.message).join("; "));
+            if (!item.data || item.data.status !== "OPEN") {
+              const opened = await openOwnedWork({
+                kind: "LEAD_FOLLOWUP",
+                dedupeKey: lead.id,
+                title: `${lead.nextAction}: ${lead.displayName}`,
+                detail: `Current action: ${lead.nextAction}. Due ${lead.nextActionAt}.`,
+                customerId: lead.id,
+                relatedId: lead.id,
+                sourceUrl: `/customers/${lead.id}`,
+                resolutionAction:
+                  "Open the lead and record the actual controlled outcome; the next obligation is replaced automatically.",
+                ownerTeam: "SALES",
+                ownerSub: lead.leadOwnerSub ?? undefined,
+                ownerEmail: lead.leadOwnerEmail ?? defaultWorkOwner("SALES"),
+                dueAt: lead.nextActionAt,
               });
-              if (!event.data) {
-                const raced = await client.models.WorkEvent.get({ id: eventId });
-                if (!raced.data) throw new Error("Lead escalation history could not be recorded.");
+              if (!opened) throw new Error("The lead follow-up could not be repaired.");
+              item = await client.models.WorkItem.get({ id: itemId });
+            }
+            if (
+              item.data?.status === "OPEN" &&
+              (item.data.dueAt !== lead.nextActionAt ||
+                item.data.title !== `${lead.nextAction}: ${lead.displayName}`)
+            ) {
+              const synced = await client.models.WorkItem.update({
+                id: itemId,
+                title: `${lead.nextAction}: ${lead.displayName}`,
+                detail: `Current action: ${lead.nextAction}. Due ${lead.nextActionAt}.`,
+                dueAt: lead.nextActionAt,
+                escalatedAt: null,
+              });
+              if (!synced.data) throw new Error("Lead obligation could not be synchronized.");
+              item = { data: synced.data };
+            }
+            if (
+              now.getTime() >= Date.parse(lead.nextActionAt) &&
+              item.data?.status === "OPEN" &&
+              !item.data.escalatedAt
+            ) {
+              const eventId = `lead-overdue:${lead.id}:${lead.nextActionAt}`;
+              const existingEvent = await client.models.WorkEvent.get({ id: eventId });
+              if (existingEvent.errors?.length) throw new Error("Lead escalation history could not be read.");
+              if (!existingEvent.data) {
+                const event = await client.models.WorkEvent.create({
+                  id: eventId,
+                  workItemId: itemId,
+                  eventType: "OVERDUE",
+                  actorEmail: "system@pestbuzzkill.com",
+                  note: `The real lead deadline passed at ${lead.nextActionAt}; escalated to the shared Sales queue.`,
+                  occurredAt: nowIso,
+                });
+                if (!event.data) {
+                  const raced = await client.models.WorkEvent.get({ id: eventId });
+                  if (!raced.data) throw new Error("Lead escalation history could not be recorded.");
+                }
+              }
+              const escalated = await casGuardedUpdate(
+                "WorkItem",
+                itemId,
+                {
+                  escalatedAt: nowIso,
+                  ownerSub: null,
+                  ownerEmail: defaultWorkOwner("SALES"),
+                },
+                [
+                  { kind: "fieldEquals", field: "status", value: "OPEN" },
+                  { kind: "fieldEquals", field: "dueAt", value: lead.nextActionAt },
+                  { kind: "fieldMissingOrNull", field: "escalatedAt" },
+                ]
+              );
+              if (!escalated.ok) {
+                throw new Error("Lead obligation changed while escalation was being recorded.");
+              }
+              const verified = await client.models.WorkItem.get({ id: itemId });
+              if (
+                verified.data?.escalatedAt !== nowIso ||
+                verified.data.ownerSub
+              ) {
+                throw new Error("Lead escalation could not be durably confirmed.");
               }
             }
-            const escalated = await casGuardedUpdate(
-              "WorkItem",
-              itemId,
-              {
-                escalatedAt: nowIso,
-                ownerSub: null,
-                ownerEmail: defaultWorkOwner("SALES"),
-              },
-              [
-                { kind: "fieldEquals", field: "status", value: "OPEN" },
-                { kind: "fieldEquals", field: "dueAt", value: lead.nextActionAt },
-                { kind: "fieldMissingOrNull", field: "escalatedAt" },
-              ]
-            );
-            if (!escalated.ok) {
-              throw new Error("Lead obligation changed while escalation was being recorded.");
-            }
-            const verified = await client.models.WorkItem.get({ id: itemId });
-            if (
-              verified.data?.escalatedAt !== nowIso ||
-              verified.data.ownerSub
-            ) {
-              throw new Error("Lead escalation could not be durably confirmed.");
-            }
+          } catch (error) {
+            failed++;
+            const recovery = await openOwnedWork({
+              kind: "LEAD_LIFECYCLE_RECOVERY",
+              dedupeKey: `sweep:${listedLead.id}`,
+              title: `Lead sweep could not verify ${listedLead.displayName}`,
+              detail: error instanceof Error ? error.message : String(error),
+              customerId: listedLead.id,
+              relatedId: listedLead.id,
+              sourceUrl: `/customers/${listedLead.id}`,
+              resolutionAction:
+                "Open the lead and run its one safe current action; confirm owner, action, due time, and shared follow-up all agree.",
+              ownerTeam: "SALES",
+              dueAt: recoveryDueAt,
+            });
+            if (!recovery) console.error("lead sweep recovery work also failed", listedLead.id);
+          } finally {
+            await releaseLeadLifecycleClaim(listedLead.id, claim.holder);
           }
-        } catch (error) {
-          failed++;
-          const recovery = await openOwnedWork({
-            kind: "LEAD_LIFECYCLE_RECOVERY",
-            dedupeKey: `sweep:${listedLead.id}`,
-            title: `Lead sweep could not verify ${listedLead.displayName}`,
-            detail: error instanceof Error ? error.message : String(error),
-            customerId: listedLead.id,
-            relatedId: listedLead.id,
-            sourceUrl: `/customers/${listedLead.id}`,
-            resolutionAction:
-              "Open the lead and run its one safe current action; confirm owner, action, due time, and shared follow-up all agree.",
-            ownerTeam: "SALES",
-            dueAt: recoveryDueAt,
-          });
-          if (!recovery) console.error("lead sweep recovery work also failed", listedLead.id);
-        } finally {
-          await releaseLeadLifecycleClaim(listedLead.id, claim.holder);
         }
       }
-      token = page.nextToken;
-    } while (token);
+    );
   } catch (scanError) {
     await client.models.LeadSweepState.update({ id: "lead-sweep", scanned, failed: Math.max(1, failed) });
     const owned = await openOwnedWork({

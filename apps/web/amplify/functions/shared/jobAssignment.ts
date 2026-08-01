@@ -4,6 +4,7 @@ import { assertTechnicianCompliance, hasCurrentLicense } from "./compliance";
 import { licenseFactsFor } from "./licenses";
 import { dataClient } from "./dataClient";
 import { openOwnedWork } from "./ownedWork";
+import { forEachPage } from "./pagination";
 
 /**
  * GL-13 — technician least-privilege and assignment enforcement.
@@ -240,19 +241,22 @@ export async function technicianDocumentAllowed(
     // A report PDF: find the row whose pdfKey is exactly this key. There is no
     // key index, so page the customer's reports (bounded by one customer).
     const customerId = key.split("/")[1];
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.ServiceReport.list({
-        filter: { customerId: { eq: customerId } },
-        limit: 200,
-        nextToken: token,
-      });
-      report =
-        ((page.data as ReportRow[]) ?? []).find(
-          (r) => r.pdfKey === key || (r.photoKeys ?? []).includes(key)
-        ) ?? null;
-      token = report ? null : page.nextToken;
-    } while (token);
+    await forEachPage(
+      (nextToken) =>
+        client.models.ServiceReport.list({
+          filter: { customerId: { eq: customerId } },
+          limit: 200,
+          nextToken,
+        }),
+      (items) => {
+        report =
+          ((items as ReportRow[]) ?? []).find(
+            (r) => r.pdfKey === key || (r.photoKeys ?? []).includes(key)
+          ) ?? null;
+        if (report) return false;
+      },
+      { pageErrors: "ignore" }
+    );
   } else {
     // agreements/ and anything else: never a technician document.
     return false;

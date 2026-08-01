@@ -1,5 +1,6 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
+import { forEachPage } from "./pagination";
 import { sendRefundNotice } from "./receipts";
 
 /**
@@ -206,16 +207,20 @@ export async function applyRefundToInvoice(opts: {
     // after a REAL refund. The filter scan is PAGINATED to exhaustion: the
     // filter applies after each scanned page, so the matching row can sit
     // on any page.
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Invoice.list({
-        filter: { stripeInvoiceId: { eq: opts.stripeInvoiceId } },
-        limit: 200,
-        nextToken: token,
-      });
-      invoice = (page.data[0] as RefundTargetRow | undefined) ?? null;
-      token = invoice ? null : page.nextToken;
-    } while (token);
+    const stripeInvoiceId = opts.stripeInvoiceId;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Invoice.list({
+          filter: { stripeInvoiceId: { eq: stripeInvoiceId } },
+          limit: 200,
+          nextToken,
+        }),
+      (items) => {
+        invoice = (items[0] as RefundTargetRow | undefined) ?? null;
+        if (invoice) return false;
+      },
+      { pageErrors: "ignore" }
+    );
   }
   if (!invoice) {
     console.warn(

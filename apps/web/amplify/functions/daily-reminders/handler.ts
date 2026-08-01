@@ -1,7 +1,7 @@
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { oneBusinessDayDeadline } from "../shared/businessDays";
 import { dataClient } from "../shared/dataClient";
-import { listAll } from "../shared/pagination";
+import { forEachPage, listAll } from "../shared/pagination";
 import {
   emailShell,
   notifyOffice,
@@ -91,17 +91,14 @@ async function allInvoicesByStatus(
   status: "OPEN" | "FAILED" | "PAID" | "DRAFT" | "VOID" | "REFUNDED"
 ): Promise<OwedInvoice[]> {
   const client = await dataClient();
-  const rows: OwedInvoice[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.listInvoiceByStatusAndIssuedAt(
-      { status },
-      { nextToken, limit: 200 }
-    );
-    rows.push(...(page.data as OwedInvoice[]));
-    nextToken = page.nextToken;
-  } while (nextToken);
-  return rows;
+  return (await listAll(
+    (nextToken) =>
+      client.models.Invoice.listInvoiceByStatusAndIssuedAt(
+        { status },
+        { nextToken, limit: 200 }
+      ),
+    { pageErrors: "ignore" }
+  )) as OwedInvoice[];
 }
 
 /** How many days before dueDate a due-soon reminder fires. */
@@ -313,33 +310,35 @@ export async function reconcileLifecycleTransitions() {
   let escalated = 0;
   try {
     const now = Date.now();
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.CustomerLifecycleCommand.list({
-        limit: 200,
-        nextToken: token,
-      });
-      for (const cmd of page.data ?? []) {
-        if (cmd.stage === "COMPLETE" || cmd.stage === "FAILED") continue;
-        const leaseExpired =
-          !cmd.leaseUntil || Date.parse(cmd.leaseUntil) < now;
-        if (!leaseExpired) continue;
-        stale++;
-        const opened = await openOwnedWork({
-          kind: "LIFECYCLE_RECOVERY",
-          dedupeKey: `lifecycle-command:${cmd.id}`,
-          title: `A customer ${cmd.action.toLowerCase()} is stuck mid-transition`,
-          detail: `Command ${cmd.id} for customer ${cmd.customerId} stopped at stage ${cmd.stage}${cmd.lastError ? ` (${cmd.lastError})` : ""}. Billing, schedule, access, status, audit, or the customer notice may be part-done.`,
-          customerId: cmd.customerId,
-          relatedId: cmd.customerId,
-          sourceUrl: `/customers/${cmd.customerId}`,
-          resolutionAction: `Open the customer and re-run the ${cmd.action === "DEACTIVATE" ? "deactivation" : "reactivation"} — it is idempotent and resumes from the last confirmed step — then confirm the command reads COMPLETE.`,
-          ownerTeam: "OPS",
-        });
-        if (opened) escalated++;
-      }
-      token = page.nextToken;
-    } while (token);
+    await forEachPage(
+      (nextToken) =>
+        client.models.CustomerLifecycleCommand.list({
+          limit: 200,
+          nextToken,
+        }),
+      async (items) => {
+        for (const cmd of items) {
+          if (cmd.stage === "COMPLETE" || cmd.stage === "FAILED") continue;
+          const leaseExpired =
+            !cmd.leaseUntil || Date.parse(cmd.leaseUntil) < now;
+          if (!leaseExpired) continue;
+          stale++;
+          const opened = await openOwnedWork({
+            kind: "LIFECYCLE_RECOVERY",
+            dedupeKey: `lifecycle-command:${cmd.id}`,
+            title: `A customer ${cmd.action.toLowerCase()} is stuck mid-transition`,
+            detail: `Command ${cmd.id} for customer ${cmd.customerId} stopped at stage ${cmd.stage}${cmd.lastError ? ` (${cmd.lastError})` : ""}. Billing, schedule, access, status, audit, or the customer notice may be part-done.`,
+            customerId: cmd.customerId,
+            relatedId: cmd.customerId,
+            sourceUrl: `/customers/${cmd.customerId}`,
+            resolutionAction: `Open the customer and re-run the ${cmd.action === "DEACTIVATE" ? "deactivation" : "reactivation"} — it is idempotent and resumes from the last confirmed step — then confirm the command reads COMPLETE.`,
+            ownerTeam: "OPS",
+          });
+          if (opened) escalated++;
+        }
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error("reconcileLifecycleTransitions failed", err);
   }
@@ -362,42 +361,44 @@ export async function sweepDispatchReadiness() {
   let notReady = 0;
   try {
     const tomorrow = easternPlusDays(1);
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.listJobByScheduledDate(
-        { scheduledDate: tomorrow },
-        { limit: 200, nextToken: token }
-      );
-      for (const job of page.data ?? []) {
-        if (job.status !== "SCHEDULED") continue;
-        checked++;
-        const { data: customer } = await client.models.Customer.get({
-          id: job.customerId,
-        });
-        try {
-          assertDispatchFacts(customer ?? {}, {
-            propertyClass: job.propertyClass,
-            serviceType: job.serviceType,
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.listJobByScheduledDate(
+          { scheduledDate: tomorrow },
+          { limit: 200, nextToken }
+        ),
+      async (items) => {
+        for (const job of items) {
+          if (job.status !== "SCHEDULED") continue;
+          checked++;
+          const { data: customer } = await client.models.Customer.get({
+            id: job.customerId,
           });
-        } catch (err) {
-          notReady++;
-          await openOwnedWork({
-            kind: "DISPATCH_NOT_READY",
-            dedupeKey: `dispatch-ready:${job.id}`,
-            title: `Tomorrow's visit isn't dispatch-ready: ${customer?.displayName ?? job.customerId}`,
-            detail:
-              err instanceof Error ? err.message : "The dispatch facts are incomplete.",
-            customerId: job.customerId,
-            relatedId: job.id,
-            sourceUrl: `/customers/${job.customerId}`,
-            resolutionAction:
-              "Fix the named facts on the customer/visit, then confirm the visit is dispatch-ready (or reschedule it with the customer).",
-            ownerTeam: "OPS",
-          });
+          try {
+            assertDispatchFacts(customer ?? {}, {
+              propertyClass: job.propertyClass,
+              serviceType: job.serviceType,
+            });
+          } catch (err) {
+            notReady++;
+            await openOwnedWork({
+              kind: "DISPATCH_NOT_READY",
+              dedupeKey: `dispatch-ready:${job.id}`,
+              title: `Tomorrow's visit isn't dispatch-ready: ${customer?.displayName ?? job.customerId}`,
+              detail:
+                err instanceof Error ? err.message : "The dispatch facts are incomplete.",
+              customerId: job.customerId,
+              relatedId: job.id,
+              sourceUrl: `/customers/${job.customerId}`,
+              resolutionAction:
+                "Fix the named facts on the customer/visit, then confirm the visit is dispatch-ready (or reschedule it with the customer).",
+              ownerTeam: "OPS",
+            });
+          }
         }
-      }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error("sweepDispatchReadiness failed", err);
   }
@@ -429,13 +430,14 @@ export async function sweepLicenseLapses() {
     const warnDate = new Date(Date.now() + LICENSE_WARN_DAYS * 86400_000)
       .toISOString()
       .slice(0, 10);
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Technician.list({
-        limit: 200,
-        nextToken: token,
-      });
-      for (const tech of page.data ?? []) {
+    await forEachPage(
+      (nextToken) =>
+        client.models.Technician.list({
+          limit: 200,
+          nextToken,
+        }),
+      async (techs) => {
+      for (const tech of techs) {
         if (!tech.active) continue;
         const factsNow = await licenseFactsFor(tech, today);
         const factsAtWarn = await licenseFactsFor(tech, warnDate);
@@ -475,36 +477,39 @@ export async function sweepLicenseLapses() {
             "Record a current licence, or reassign their future visits and offboard/deactivate — then confirm.",
           ownerTeam: "OPS",
         });
-        let jobToken: string | null | undefined;
-        do {
-          const jobsPage = await client.models.Job.list({
-            filter: { technicianId: { eq: tech.id } },
-            limit: 200,
-            nextToken: jobToken,
-          });
-          for (const job of jobsPage.data ?? []) {
-            if (job.status !== "SCHEDULED" || (job.scheduledDate ?? "") < today) {
-              continue;
+        await forEachPage(
+          (nextToken) =>
+            client.models.Job.list({
+              filter: { technicianId: { eq: tech.id } },
+              limit: 200,
+              nextToken,
+            }),
+          async (jobs) => {
+            for (const job of jobs) {
+              if (job.status !== "SCHEDULED" || (job.scheduledDate ?? "") < today) {
+                continue;
+              }
+              visitsFlagged++;
+              await openOwnedWork({
+                kind: "UNSTAFFED_VISIT",
+                dedupeKey: `license-unstaffed:${job.id}`,
+                title: `Visit assigned to an unlicensed technician: ${tech.name}`,
+                detail: `Visit ${job.id} (${job.scheduledDate ?? "undated"}) is assigned to ${tech.name}, who has no current applicator licence. It cannot legally happen as scheduled — reassign or reschedule it with the customer.`,
+                customerId: job.customerId,
+                relatedId: job.id,
+                sourceUrl: "/schedule",
+                resolutionAction:
+                  "Reassign the visit to a licensed technician (or reschedule/cancel it with the customer), then confirm it is staffed.",
+                ownerTeam: "OPS",
+              });
             }
-            visitsFlagged++;
-            await openOwnedWork({
-              kind: "UNSTAFFED_VISIT",
-              dedupeKey: `license-unstaffed:${job.id}`,
-              title: `Visit assigned to an unlicensed technician: ${tech.name}`,
-              detail: `Visit ${job.id} (${job.scheduledDate ?? "undated"}) is assigned to ${tech.name}, who has no current applicator licence. It cannot legally happen as scheduled — reassign or reschedule it with the customer.`,
-              customerId: job.customerId,
-              relatedId: job.id,
-              sourceUrl: "/schedule",
-              resolutionAction:
-                "Reassign the visit to a licensed technician (or reschedule/cancel it with the customer), then confirm it is staffed.",
-              ownerTeam: "OPS",
-            });
-          }
-          jobToken = jobsPage.nextToken;
-        } while (jobToken);
+          },
+          { pageErrors: "ignore" }
+        );
       }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error("sweepLicenseLapses failed", err);
   }
@@ -527,14 +532,15 @@ export async function sweepSeasonalObligations() {
   let skipped = 0;
   try {
     const nowMonth = monthKeyOf(new Date().toISOString());
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.ServicePlan.list({
-        filter: { status: { eq: "ACTIVE" } },
-        limit: 200,
-        nextToken: token,
-      });
-      for (const plan of page.data ?? []) {
+    await forEachPage(
+      (nextToken) =>
+        client.models.ServicePlan.list({
+          filter: { status: { eq: "ACTIVE" } },
+          limit: 200,
+          nextToken,
+        }),
+      async (plansPage) => {
+      for (const plan of plansPage) {
         if (!plan.seasonal) continue;
         // Current month, when in season, is a visible obligation.
         if (isServiceMonth(plan, nowMonth)) {
@@ -569,8 +575,9 @@ export async function sweepSeasonalObligations() {
           }
         }
       }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error("sweepSeasonalObligations failed", err);
   }
@@ -591,34 +598,36 @@ export async function reconcilePresenceReviews() {
   let requeued = 0;
   let failed = 0;
   try {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.ServiceReport.list({
-        filter: { presenceReviewStatus: { eq: "FLAGGED" } },
-        limit: 200,
-        nextToken: token,
-      });
-      for (const report of page.data ?? []) {
-        try {
-          const { data: customer } = await client.models.Customer.get({
-            id: report.customerId,
-          });
-          const ok = await queuePresenceReview({
-            reportId: report.id,
-            customerId: report.customerId,
-            customerName: customer?.displayName ?? "a customer",
-            serviceType: "service",
-            detail: `A finalized service report (${report.id}) was flagged for an on-site presence review, but the review case did not persist when it was finalized. The record stands; this is a check, not a hold.`,
-          });
-          if (ok) requeued++;
-          else failed++;
-        } catch (err) {
-          console.error("reconcilePresenceReviews: report failed", report.id, err);
-          failed++;
+    await forEachPage(
+      (nextToken) =>
+        client.models.ServiceReport.list({
+          filter: { presenceReviewStatus: { eq: "FLAGGED" } },
+          limit: 200,
+          nextToken,
+        }),
+      async (reports) => {
+        for (const report of reports) {
+          try {
+            const { data: customer } = await client.models.Customer.get({
+              id: report.customerId,
+            });
+            const ok = await queuePresenceReview({
+              reportId: report.id,
+              customerId: report.customerId,
+              customerName: customer?.displayName ?? "a customer",
+              serviceType: "service",
+              detail: `A finalized service report (${report.id}) was flagged for an on-site presence review, but the review case did not persist when it was finalized. The record stands; this is a check, not a hold.`,
+            });
+            if (ok) requeued++;
+            else failed++;
+          } catch (err) {
+            console.error("reconcilePresenceReviews: report failed", report.id, err);
+            failed++;
+          }
         }
-      }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error("reconcilePresenceReviews failed", err);
     failed++;
@@ -645,16 +654,16 @@ export async function reconcileVisitChanges() {
     };
   }
   const stripe = stripeClient();
-  const ids: string[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.VisitChangeClaim.list({
-      limit: 200,
-      nextToken: token,
-    });
-    for (const cmd of page.data) ids.push(cmd.id);
-    token = page.nextToken;
-  } while (token);
+  const ids: string[] = (
+    await listAll(
+      (nextToken) =>
+        client.models.VisitChangeClaim.list({
+          limit: 200,
+          nextToken,
+        }),
+      { pageErrors: "ignore" }
+    )
+  ).map((cmd) => cmd.id);
 
   let completed = 0;
   let stillPending = 0;
@@ -711,20 +720,19 @@ export async function reconcilePlanCancellations() {
   }
   const stripe = stripeClient();
   const ids: string[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.PlanCancellationClaim.list({
-      limit: 200,
-      nextToken: token,
-    });
-    for (const cmd of page.data) {
-      // Settled commands persist as the readable outcome (stage COMPLETE) —
-      // they are done, not open work.
-      if (cmd.stage === "COMPLETE") continue;
-      ids.push(cmd.id);
-    }
-    token = page.nextToken;
-  } while (token);
+  for (const cmd of await listAll(
+    (nextToken) =>
+      client.models.PlanCancellationClaim.list({
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  )) {
+    // Settled commands persist as the readable outcome (stage COMPLETE) —
+    // they are done, not open work.
+    if (cmd.stage === "COMPLETE") continue;
+    ids.push(cmd.id);
+  }
 
   let completed = 0;
   let stillPending = 0;
@@ -810,14 +818,15 @@ async function reportStaleLeads() {
   const now = new Date();
   let opened = 0;
   let scanned = 0;
-  let token: string | null | undefined;
   try {
-    do {
-      const page = await client.models.Customer.listCustomerByStatusAndDisplayName(
-        { status: "LEAD" },
-        { limit: 200, nextToken: token }
-      );
-      for (const lead of page.data ?? []) {
+    await forEachPage(
+      (nextToken) =>
+        client.models.Customer.listCustomerByStatusAndDisplayName(
+          { status: "LEAD" },
+          { limit: 200, nextToken }
+        ),
+      async (leads) => {
+      for (const lead of leads) {
         scanned++;
         if (!isLeadOpen(lead) || !isLeadActionOverdue(lead, now)) continue;
         const reason =
@@ -839,8 +848,9 @@ async function reportStaleLeads() {
         });
         opened++;
       }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error("reportStaleLeads failed", err);
   }
@@ -880,17 +890,14 @@ async function reportLowStock() {
     unit: string;
   }[] = [];
   for (const p of tracked) {
-    const entries: { deltaBaseUnits?: number | null }[] = [];
-    let nextToken: string | null | undefined;
-    do {
-      const page =
-        await client.models.ProductStockEntry.listProductStockEntryByProductId(
+    const entries: { deltaBaseUnits?: number | null }[] = await listAll(
+      (nextToken) =>
+        client.models.ProductStockEntry.listProductStockEntryByProductId(
           { productId: p.id },
           { nextToken, limit: 500 }
-        );
-      entries.push(...page.data);
-      nextToken = page.nextToken;
-    } while (nextToken);
+        ),
+      { pageErrors: "ignore" }
+    );
     const onHand = onHandFromEntries(entries);
     if (isLowStock(p, onHand)) {
       low.push({
@@ -934,17 +941,15 @@ async function reportPlansNotBilling() {
     priceCents: number;
     status: string | null;
     stripeSubscriptionId?: string | null;
-  }[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.ServicePlan.list({
-      filter: { status: { eq: "ACTIVE" } },
-      nextToken,
-      limit: 200,
-    });
-    plans.push(...page.data);
-    nextToken = page.nextToken;
-  } while (nextToken);
+  }[] = await listAll(
+    (nextToken) =>
+      client.models.ServicePlan.list({
+        filter: { status: { eq: "ACTIVE" } },
+        nextToken,
+        limit: 200,
+      }),
+    { pageErrors: "ignore" }
+  );
 
   const unbilled = plans.filter((p) => !p.stripeSubscriptionId);
   if (unbilled.length === 0) {
@@ -1015,16 +1020,14 @@ async function reportUnchargedOneTimeJobs() {
     paidAt?: string | null;
     completedAt?: string | null;
     scheduledDate?: string | null;
-  }[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByStatusAndScheduledDate(
-      { status: "COMPLETED" },
-      { filter: { type: { eq: "ONE_TIME" } }, nextToken, limit: 200 }
-    );
-    jobs.push(...page.data);
-    nextToken = page.nextToken;
-  } while (nextToken);
+  }[] = await listAll(
+    (nextToken) =>
+      client.models.Job.listJobByStatusAndScheduledDate(
+        { status: "COMPLETED" },
+        { filter: { type: { eq: "ONE_TIME" } }, nextToken, limit: 200 }
+      ),
+    { pageErrors: "ignore" }
+  );
 
   // paidAt means paid up front at online booking. Zero-priced jobs are left
   // out: there is nothing for the Charge button to take, and a row nobody can
@@ -1039,19 +1042,21 @@ async function reportUnchargedOneTimeJobs() {
   // wrong — neither answers the job's money question. OPEN, PAID and REFUNDED
   // all do. chargeOneTimeJob enforces the same rule server-side.
   const covered = new Set<string>();
-  let invToken: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({
-      nextToken: invToken,
-      limit: 200,
-    });
-    for (const inv of page.data) {
-      if (inv.jobId && inv.status !== "FAILED" && inv.status !== "VOID") {
-        covered.add(inv.jobId);
+  await forEachPage(
+    (nextToken) =>
+      client.models.Invoice.list({
+        nextToken,
+        limit: 200,
+      }),
+    (invs) => {
+      for (const inv of invs) {
+        if (inv.jobId && inv.status !== "FAILED" && inv.status !== "VOID") {
+          covered.add(inv.jobId);
+        }
       }
-    }
-    invToken = page.nextToken;
-  } while (invToken);
+    },
+    { pageErrors: "ignore" }
+  );
 
   const uncharged = candidates.filter((j) => !covered.has(j.id));
   if (uncharged.length === 0) {
@@ -1107,17 +1112,15 @@ async function reportPlansWithoutNextVisit() {
     priceCents: number;
     status: string | null;
     stripeSubscriptionId?: string | null;
-  }[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.ServicePlan.list({
-      filter: { status: { eq: "ACTIVE" } },
-      nextToken,
-      limit: 200,
-    });
-    plans.push(...page.data);
-    nextToken = page.nextToken;
-  } while (nextToken);
+  }[] = await listAll(
+    (nextToken) =>
+      client.models.ServicePlan.list({
+        filter: { status: { eq: "ACTIVE" } },
+        nextToken,
+        limit: 200,
+      }),
+    { pageErrors: "ignore" }
+  );
 
   // A plan has a next visit if anything is queued (UNSCHEDULED), on the
   // calendar today or later (SCHEDULED), or being worked right now
@@ -1126,20 +1129,23 @@ async function reportPlansWithoutNextVisit() {
   const missing: typeof plans = [];
   for (const plan of plans) {
     let hasVisit = false;
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.listJobByServicePlanId(
-        { servicePlanId: plan.id },
-        { nextToken: token, limit: 200 }
-      );
-      hasVisit = page.data.some(
-        (j) =>
-          j.status === "UNSCHEDULED" ||
-          j.status === "IN_PROGRESS" ||
-          (j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= today)
-      );
-      token = hasVisit ? null : page.nextToken;
-    } while (token);
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.listJobByServicePlanId(
+          { servicePlanId: plan.id },
+          { nextToken, limit: 200 }
+        ),
+      (jobsPage) => {
+        hasVisit = jobsPage.some(
+          (j) =>
+            j.status === "UNSCHEDULED" ||
+            j.status === "IN_PROGRESS" ||
+            (j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= today)
+        );
+        if (hasVisit) return false;
+      },
+      { pageErrors: "ignore" }
+    );
     if (!hasVisit) missing.push(plan);
   }
 
@@ -1315,16 +1321,14 @@ async function reportUnstaffedJobs(
 
 async function remind(date: string, phrasing: string, staffingGate: boolean) {
   const client = await dataClient();
-  const jobs: DatedJob[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByScheduledDate(
-      { scheduledDate: date },
-      { nextToken, limit: 200 }
-    );
-    jobs.push(...page.data);
-    nextToken = page.nextToken;
-  } while (nextToken);
+  const jobs: DatedJob[] = await listAll(
+    (nextToken) =>
+      client.models.Job.listJobByScheduledDate(
+        { scheduledDate: date },
+        { nextToken, limit: 200 }
+      ),
+    { pageErrors: "ignore" }
+  );
 
   const scheduled = jobs.filter((j) => j.status === "SCHEDULED");
 
@@ -1663,23 +1667,21 @@ async function reportArAging() {
 async function reportDisputeDeadlines() {
   const client = await dataClient();
   const now = Date.now();
-  const disputes: {
+  const disputes = (await listAll(
+    (nextToken) =>
+      client.models.Dispute.listDisputeByStatus(
+        { status: "NEEDS_RESPONSE" },
+        { nextToken, limit: 200 }
+      ),
+    { pageErrors: "ignore" }
+  )) as {
     id: string;
     stripeDisputeId: string;
     customerId?: string | null;
     amountCents: number;
     evidenceDueBy?: string | null;
     ownerEmail?: string | null;
-  }[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.Dispute.listDisputeByStatus(
-      { status: "NEEDS_RESPONSE" },
-      { nextToken, limit: 200 }
-    );
-    disputes.push(...(page.data as (typeof disputes)[number][]));
-    nextToken = page.nextToken;
-  } while (nextToken);
+  }[];
 
   const soon = disputes.filter((d) => {
     if (!d.evidenceDueBy) return false;
@@ -1759,7 +1761,7 @@ export async function reconcileProcessingPayments() {
   // Unit fakes (and a container straddling a deploy) may lack the model.
   if (!("BookingRequest" in client.models)) return { processingPayments: 0 };
   const now = new Date();
-  const rows: {
+  type ProcessingBookingRow = {
     id: string;
     jobId?: string | null;
     stripePaymentIntentId?: string | null;
@@ -1771,23 +1773,22 @@ export async function reconcileProcessingPayments() {
     amountCents?: number | null;
     selectedDate?: string | null;
     customerId?: string | null;
-  }[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.BookingRequest.list({
-      filter: { status: { eq: "PROCESSING" } },
-      nextToken,
-      limit: 200,
-    });
-    // Belt-and-braces status filter — a lister that ignores the filter (unit
-    // fakes) must not make this pass reconcile settled bookings.
-    rows.push(
-      ...(page.data as unknown as (typeof rows[number] & {
-        status?: string | null;
-      })[]).filter((b) => b.status === "PROCESSING")
-    );
-    nextToken = page.nextToken;
-  } while (nextToken);
+  };
+  // Belt-and-braces status filter — a lister that ignores the filter (unit
+  // fakes) must not make this pass reconcile settled bookings.
+  const rows: ProcessingBookingRow[] = (
+    (await listAll(
+      (nextToken) =>
+        client.models.BookingRequest.list({
+          filter: { status: { eq: "PROCESSING" } },
+          nextToken,
+          limit: 200,
+        }),
+      { pageErrors: "ignore" }
+    )) as unknown as (ProcessingBookingRow & {
+      status?: string | null;
+    })[]
+  ).filter((b) => b.status === "PROCESSING");
   if (rows.length === 0) {
     return { processingPayments: 0 };
   }
@@ -2055,13 +2056,10 @@ export async function reconcileMoneyDaily() {
     if (!startingAfter) break;
   }
 
-  const invoices: LedgerInvoice[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({ nextToken, limit: 200 });
-    invoices.push(...(page.data as unknown as LedgerInvoice[]));
-    nextToken = page.nextToken;
-  } while (nextToken);
+  const invoices: LedgerInvoice[] = (await listAll(
+    (nextToken) => client.models.Invoice.list({ nextToken, limit: 200 }),
+    { pageErrors: "ignore" }
+  )) as unknown as LedgerInvoice[];
 
   const { mismatches, summary } = computeMoneyMismatches({
     payments,
@@ -2098,23 +2096,18 @@ export async function reconcilePlansDaily() {
     startingAfter = page.data[page.data.length - 1]?.id;
     if (!startingAfter) break;
   }
-  const plans: PlanRow[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.ServicePlan.list({ nextToken, limit: 200 });
-    plans.push(...(page.data as unknown as PlanRow[]));
-    nextToken = page.nextToken;
-  } while (nextToken);
-  const jobs: PlanJobRow[] = [];
-  let jobsToken: string | null | undefined;
-  do {
-    const page = await client.models.Job.list({
-      nextToken: jobsToken,
-      limit: 200,
-    });
-    jobs.push(...(page.data as unknown as PlanJobRow[]));
-    jobsToken = page.nextToken;
-  } while (jobsToken);
+  const plans: PlanRow[] = (await listAll(
+    (nextToken) => client.models.ServicePlan.list({ nextToken, limit: 200 }),
+    { pageErrors: "ignore" }
+  )) as unknown as PlanRow[];
+  const jobs: PlanJobRow[] = (await listAll(
+    (nextToken) =>
+      client.models.Job.list({
+        nextToken,
+        limit: 200,
+      }),
+    { pageErrors: "ignore" }
+  )) as unknown as PlanJobRow[];
 
   const { mismatches, summary } = computePlanMismatches({
     subscriptions,
@@ -2194,13 +2187,14 @@ export async function reconcileRequestOwnership() {
   };
 
   if ("PortalRequest" in client.models) {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.PortalRequest.list({
-        limit: 200,
-        nextToken: token,
-      });
-      for (const req of page.data ?? []) {
+    await forEachPage(
+      (nextToken) =>
+        client.models.PortalRequest.list({
+          limit: 200,
+          nextToken,
+        }),
+      async (reqs) => {
+      for (const req of reqs) {
         if (req.status !== "OPEN") continue;
         if (!(await itemMissingOrResolved("CUSTOMER_REQUEST", req.id))) continue;
         const opened = await openOwnedWork({
@@ -2217,8 +2211,9 @@ export async function reconcileRequestOwnership() {
         });
         if (opened) portalRepaired++;
       }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   }
 
   // GL-03: a website CONTACT promise (the funnel's review fallback) may
@@ -2226,15 +2221,16 @@ export async function reconcileRequestOwnership() {
   // when the promise was MADE (the booking's creation), not to when this
   // sweep found it — the customer's one-business-day clock never restarts.
   if ("BookingRequest" in client.models) {
-    let token: string | null | undefined;
-    do {
-      const page = await (
-        client.models.BookingRequest.list as (a: object) => Promise<{
-          data: Record<string, unknown>[];
-          nextToken?: string | null;
-        }>
-      )({ limit: 200, nextToken: token });
-      for (const b of page.data ?? []) {
+    await forEachPage(
+      (nextToken) =>
+        (
+          client.models.BookingRequest.list as (a: object) => Promise<{
+            data: Record<string, unknown>[];
+            nextToken?: string | null;
+          }>
+        )({ limit: 200, nextToken }),
+      async (bookings) => {
+      for (const b of bookings) {
         if (b.status !== "CONTACT") continue;
         const id = String(b.id);
         if (!(await itemMissingOrResolved("CALLBACK_PROMISE", id))) continue;
@@ -2253,18 +2249,20 @@ export async function reconcileRequestOwnership() {
         });
         if (opened) contactRepaired++;
       }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   }
 
   if ("CallbackRequest" in client.models) {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.CallbackRequest.list({
-        limit: 200,
-        nextToken: token,
-      });
-      for (const cb of page.data ?? []) {
+    await forEachPage(
+      (nextToken) =>
+        client.models.CallbackRequest.list({
+          limit: 200,
+          nextToken,
+        }),
+      async (callbacks) => {
+      for (const cb of callbacks) {
         if (cb.status !== "REQUESTED") continue;
         if (!(await itemMissingOrResolved("CALLBACK_PROMISE", cb.id))) continue;
         const opened = await openOwnedWork({
@@ -2281,8 +2279,9 @@ export async function reconcileRequestOwnership() {
         });
         if (opened) callbacksRepaired++;
       }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   }
 
   return {
@@ -2337,10 +2336,10 @@ export async function reconcileGroupChanges() {
       };
     }
   ).GroupChangeCommand;
-  let token: string | null | undefined;
-  do {
-    const page = await model.list({ limit: 200, nextToken: token });
-    for (const cmd of page.data ?? []) {
+  await forEachPage(
+    (nextToken) => model.list({ limit: 200, nextToken }),
+    async (cmds) => {
+    for (const cmd of cmds) {
       const stage = String(cmd.stage ?? "");
       if (stage === "COMPLETE" || stage === "FAILED") continue;
       const leaseLive =
@@ -2386,8 +2385,9 @@ export async function reconcileGroupChanges() {
       );
       resumed++;
     }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "ignore" }
+  );
   return { task: "reconcileGroupChanges", resumed, escalated };
 }
 
@@ -2425,10 +2425,10 @@ export async function retryQueuedEmails() {
       };
     }
   ).EmailLog;
-  let token: string | null | undefined;
-  do {
-    const page = await model.list({ limit: 200, nextToken: token });
-    for (const row of page.data ?? []) {
+  await forEachPage(
+    (nextToken) => model.list({ limit: 200, nextToken }),
+    async (logRows) => {
+    for (const row of logRows) {
       const status = String(row.deliveryStatus ?? "");
       const at = row.sentAt ? Date.parse(String(row.sentAt)) : now;
       if (status === "SENDING" && now - at > STUCK_SENDING_MS) {
@@ -2517,8 +2517,9 @@ export async function retryQueuedEmails() {
         if (opened) escalated++;
       }
     }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "ignore" }
+  );
   return { task: "retryQueuedEmails", resent, stillQueued, escalated, expired };
 }
 
@@ -2795,12 +2796,14 @@ async function fetchSucceededBookingPayments(): Promise<{
 async function allBookingsForReconcile(): Promise<ReconBooking[]> {
   const client = await dataClient();
   const rows: ReconBooking[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.BookingRequest.list({ nextToken, limit: 200 });
-    for (const b of page.data as unknown as (ReconBooking & {
-      selectedDate?: string | null;
-    })[]) {
+  const bookings = (await listAll(
+    (nextToken) =>
+      client.models.BookingRequest.list({ nextToken, limit: 200 }),
+    { pageErrors: "ignore" }
+  )) as unknown as (ReconBooking & {
+    selectedDate?: string | null;
+  })[];
+  for (const b of bookings) {
       rows.push({
         id: b.id,
         status: b.status,
@@ -2816,9 +2819,7 @@ async function allBookingsForReconcile(): Promise<ReconBooking[]> {
         // GL-05: the committed date, for the relationship check.
         selectedDate: b.selectedDate,
       } as ReconBooking);
-    }
-    nextToken = page.nextToken;
-  } while (nextToken);
+  }
   return rows;
 }
 
@@ -2831,10 +2832,11 @@ type ReconInvoiceRow = ReconInvoice & {
 async function allInvoicesForReconcile(): Promise<ReconInvoiceRow[]> {
   const client = await dataClient();
   const rows: ReconInvoiceRow[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({ nextToken, limit: 200 });
-    for (const inv of page.data as unknown as ReconInvoiceRow[]) {
+  const invoices = (await listAll(
+    (nextToken) => client.models.Invoice.list({ nextToken, limit: 200 }),
+    { pageErrors: "ignore" }
+  )) as unknown as ReconInvoiceRow[];
+  for (const inv of invoices) {
       rows.push({
         id: inv.id,
         status: inv.status,
@@ -2845,9 +2847,7 @@ async function allInvoicesForReconcile(): Promise<ReconInvoiceRow[]> {
         jobId: inv.jobId,
         amountCents: inv.amountCents,
       });
-    }
-    nextToken = page.nextToken;
-  } while (nextToken);
+  }
   return rows;
 }
 
@@ -2951,18 +2951,16 @@ export async function escalateOverdueOwnedWork() {
     ownerTeam: string;
     dueAt: string;
     customerId?: string | null;
-  }[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await client.models.WorkItem.listWorkItemByStatusAndDueAt(
-      { status: "OPEN" },
-      { nextToken, limit: 200 }
-    );
-    overdue.push(
-      ...page.data.filter((item) => !item.escalatedAt && item.dueAt < now)
-    );
-    nextToken = page.nextToken;
-  } while (nextToken);
+  }[] = (
+    await listAll(
+      (nextToken) =>
+        client.models.WorkItem.listWorkItemByStatusAndDueAt(
+          { status: "OPEN" },
+          { nextToken, limit: 200 }
+        ),
+      { pageErrors: "ignore" }
+    )
+  ).filter((item) => !item.escalatedAt && item.dueAt < now);
 
   let escalated = 0;
   for (const item of overdue) {

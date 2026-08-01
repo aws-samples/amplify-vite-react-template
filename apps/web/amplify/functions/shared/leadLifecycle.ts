@@ -27,6 +27,7 @@ import {
 import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "./consentText";
 import { customerAccessGroups } from "./dynamicGroups";
 import { LEAD_LOST_REASONS } from "./leadReasons";
+import { forEachPage } from "./pagination";
 
 export type LeadActor = {
   sub: string | null;
@@ -1001,56 +1002,56 @@ export async function reassignLeadsForSub(input: { sub: string; actorEmail?: str
   let failed = 0;
   if (!input.sub) return { reassigned, failed };
   const client = await dataClient();
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Customer.listCustomerByStatusAndDisplayName(
-      { status: "LEAD" },
-      { limit: 200, nextToken: token }
-    );
-    if (page.errors?.length) throw new Error(page.errors.map((e) => e.message).join("; "));
-    for (const lead of page.data ?? []) {
-      if (lead.leadOwnerSub !== input.sub) continue;
-      const mutationId = `offboard:${input.sub}:${lead.id}`;
-      const claim = await acquireLeadLifecycleClaim(lead.id, mutationId);
-      if (!claim.won) { failed++; continue; }
-      try {
-        await appendLeadActivity({
-          customerId: lead.id,
-          channel: "LIFECYCLE",
-          outcome: "NOTE",
-          note: "Lead owner was offboarded — current lead and follow-up returned together to Sales.",
-          actor: { sub: null, email: input.actorEmail ?? "system@pestbuzzkill.com" },
-          mutationId,
-        });
-        const moved = await casGuardedUpdate(
-          "Customer",
-          lead.id,
-          { leadOwnerSub: null, leadOwnerEmail: defaultWorkOwner("SALES"), leadOwnerTeam: "SALES" },
-          [{ kind: "fieldEquals", field: "leadOwnerSub", value: input.sub }]
-        );
-        if (!moved.ok) throw new Error("The owner changed after handoff began; no assignment was overwritten.");
-        const followupId = workItemId("LEAD_FOLLOWUP", lead.id);
-        const work = await client.models.WorkItem.get({ id: followupId });
-        if (work.data?.status === "OPEN" && work.data.ownerSub === input.sub) {
-          const transferred = await casGuardedUpdate(
-            "WorkItem",
-            followupId,
-            { ownerSub: null, ownerEmail: defaultWorkOwner("SALES") },
-            [{ kind: "fieldEquals", field: "ownerSub", value: input.sub }]
+  await forEachPage(
+    (nextToken) =>
+      client.models.Customer.listCustomerByStatusAndDisplayName(
+        { status: "LEAD" },
+        { limit: 200, nextToken }
+      ),
+    async (leads) => {
+      for (const lead of leads) {
+        if (lead.leadOwnerSub !== input.sub) continue;
+        const mutationId = `offboard:${input.sub}:${lead.id}`;
+        const claim = await acquireLeadLifecycleClaim(lead.id, mutationId);
+        if (!claim.won) { failed++; continue; }
+        try {
+          await appendLeadActivity({
+            customerId: lead.id,
+            channel: "LIFECYCLE",
+            outcome: "NOTE",
+            note: "Lead owner was offboarded — current lead and follow-up returned together to Sales.",
+            actor: { sub: null, email: input.actorEmail ?? "system@pestbuzzkill.com" },
+            mutationId,
+          });
+          const moved = await casGuardedUpdate(
+            "Customer",
+            lead.id,
+            { leadOwnerSub: null, leadOwnerEmail: defaultWorkOwner("SALES"), leadOwnerTeam: "SALES" },
+            [{ kind: "fieldEquals", field: "leadOwnerSub", value: input.sub }]
           );
-          if (!transferred.ok) throw new Error("The follow-up owner changed during handoff; verify the staffed destination.");
+          if (!moved.ok) throw new Error("The owner changed after handoff began; no assignment was overwritten.");
+          const followupId = workItemId("LEAD_FOLLOWUP", lead.id);
+          const work = await client.models.WorkItem.get({ id: followupId });
+          if (work.data?.status === "OPEN" && work.data.ownerSub === input.sub) {
+            const transferred = await casGuardedUpdate(
+              "WorkItem",
+              followupId,
+              { ownerSub: null, ownerEmail: defaultWorkOwner("SALES") },
+              [{ kind: "fieldEquals", field: "ownerSub", value: input.sub }]
+            );
+            if (!transferred.ok) throw new Error("The follow-up owner changed during handoff; verify the staffed destination.");
+          }
+          const verify = await client.models.Customer.get({ id: lead.id });
+          if (verify.data?.leadOwnerSub) throw new Error("The Sales-team handoff could not be confirmed.");
+          reassigned++;
+        } catch (error) {
+          failed++;
+          await openLeadRecovery({ dedupeKey: mutationId, customerId: lead.id, title: `Lead handoff needs recovery: ${lead.displayName}`, detail: error instanceof Error ? error.message : String(error) });
+        } finally {
+          await releaseLeadLifecycleClaim(lead.id, claim.holder);
         }
-        const verify = await client.models.Customer.get({ id: lead.id });
-        if (verify.data?.leadOwnerSub) throw new Error("The Sales-team handoff could not be confirmed.");
-        reassigned++;
-      } catch (error) {
-        failed++;
-        await openLeadRecovery({ dedupeKey: mutationId, customerId: lead.id, title: `Lead handoff needs recovery: ${lead.displayName}`, detail: error instanceof Error ? error.message : String(error) });
-      } finally {
-        await releaseLeadLifecycleClaim(lead.id, claim.holder);
       }
     }
-    token = page.nextToken;
-  } while (token);
+  );
   return { reassigned, failed };
 }

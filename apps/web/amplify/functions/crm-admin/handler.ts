@@ -43,6 +43,7 @@ import {
   workItemId,
 } from "../shared/ownedWork";
 import { disposeStaleDrafts } from "../shared/jobAssignment";
+import { forEachPage } from "../shared/pagination";
 import { callerEmail, callerIsOwner, callerSub } from "../shared/authz";
 import {
   assignLeadOwner,
@@ -1697,65 +1698,67 @@ async function reassignFutureJobs(
   let jobsUnassigned = 0;
   let jobsFailed = 0;
   const inProgress: { id: string; scheduledDate: string | null }[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.list({
-      filter: { technicianId: { eq: technicianId } },
-      nextToken: token,
-      limit: 200,
-    });
-    for (const job of page.data) {
-      if (job.status === "IN_PROGRESS") {
-        inProgress.push({ id: job.id, scheduledDate: job.scheduledDate ?? null });
-        continue;
-      }
-      if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
-        try {
-          // Re-read right before writing: if the office already moved this job
-          // to ANOTHER technician mid-offboard, that newer assignment stands —
-          // this handoff must never overwrite it back to UNSCHEDULED.
-          const { data: fresh } = await client.models.Job.get({ id: job.id });
-          if (
-            !fresh ||
-            fresh.technicianId !== technicianId ||
-            fresh.status !== "SCHEDULED"
-          ) {
-            continue;
-          }
-          // GUARDED on the re-read snapshot: an office ASSIGN to another
-          // technician that lands between this read and write makes the sweep
-          // LOSE — the newer assignment stands instead of being knocked back
-          // to UNSCHEDULED, and the read-back counts the job honestly.
-          const swept = await casGuardedUpdate(
-            "Job",
-            job.id,
-            {
-              status: "UNSCHEDULED",
-              routeId: null,
-              routeOrder: null,
-              technicianId: null,
-              notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
-            },
-            jobScheduleGuards(fresh)
-          );
-          if (swept.ok) {
-            jobsUnassigned++;
-            // GL-13: an unsent draft on a swept job gets a recorded office
-            // disposition; a failed case write keeps the offboard PARTIAL.
-            const { caseConfirmed } = await disposeStaleDrafts(
+  await forEachPage(
+    (nextToken) =>
+      client.models.Job.list({
+        filter: { technicianId: { eq: technicianId } },
+        nextToken,
+        limit: 200,
+      }),
+    async (jobs) => {
+      for (const job of jobs) {
+        if (job.status === "IN_PROGRESS") {
+          inProgress.push({ id: job.id, scheduledDate: job.scheduledDate ?? null });
+          continue;
+        }
+        if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
+          try {
+            // Re-read right before writing: if the office already moved this job
+            // to ANOTHER technician mid-offboard, that newer assignment stands —
+            // this handoff must never overwrite it back to UNSCHEDULED.
+            const { data: fresh } = await client.models.Job.get({ id: job.id });
+            if (
+              !fresh ||
+              fresh.technicianId !== technicianId ||
+              fresh.status !== "SCHEDULED"
+            ) {
+              continue;
+            }
+            // GUARDED on the re-read snapshot: an office ASSIGN to another
+            // technician that lands between this read and write makes the sweep
+            // LOSE — the newer assignment stands instead of being knocked back
+            // to UNSCHEDULED, and the read-back counts the job honestly.
+            const swept = await casGuardedUpdate(
+              "Job",
               job.id,
-              technicianId,
-              null
+              {
+                status: "UNSCHEDULED",
+                routeId: null,
+                routeOrder: null,
+                technicianId: null,
+                notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
+              },
+              jobScheduleGuards(fresh)
             );
-            if (!caseConfirmed) jobsFailed++;
-          } else jobsFailed++;
-        } catch {
-          jobsFailed++;
+            if (swept.ok) {
+              jobsUnassigned++;
+              // GL-13: an unsent draft on a swept job gets a recorded office
+              // disposition; a failed case write keeps the offboard PARTIAL.
+              const { caseConfirmed } = await disposeStaleDrafts(
+                job.id,
+                technicianId,
+                null
+              );
+              if (!caseConfirmed) jobsFailed++;
+            } else jobsFailed++;
+          } catch {
+            jobsFailed++;
+          }
         }
       }
-    }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "ignore" }
+  );
   return { jobsUnassigned, jobsFailed, inProgress };
 }
 
@@ -1771,20 +1774,22 @@ async function countAssignedFutureJobs(technicianId: string): Promise<number> {
     const client = await dataClient();
     const today = new Date().toISOString().slice(0, 10);
     let count = 0;
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.list({
-        filter: { technicianId: { eq: technicianId } },
-        nextToken: token,
-        limit: 200,
-      });
-      for (const job of page.data) {
-        if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
-          count++;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.list({
+          filter: { technicianId: { eq: technicianId } },
+          nextToken,
+          limit: 200,
+        }),
+      (jobs) => {
+        for (const job of jobs) {
+          if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
+            count++;
+          }
         }
-      }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
     return count;
   } catch (err) {
     console.error("countAssignedFutureJobs failed", technicianId, err);
@@ -3297,24 +3302,26 @@ async function reportSuspectAddresses() {
     city: string | null;
   }[] = [];
   let scanned = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Customer.list({
-      limit: 500,
-      nextToken: token,
-    });
-    for (const c of page.data ?? []) {
-      scanned++;
-      if (!streetLooksLikeItHidesAUnit(c.serviceStreet)) continue;
-      suspects.push({
-        customerId: c.id,
-        displayName: c.displayName ?? null,
-        serviceStreet: c.serviceStreet ?? null,
-        serviceUnit: (c as { serviceUnit?: string | null }).serviceUnit ?? null,
-        city: c.serviceCity ?? null,
-      });
-    }
-    token = page.nextToken;
-  } while (token);
+  await forEachPage(
+    (nextToken) =>
+      client.models.Customer.list({
+        limit: 500,
+        nextToken,
+      }),
+    (customers) => {
+      for (const c of customers) {
+        scanned++;
+        if (!streetLooksLikeItHidesAUnit(c.serviceStreet)) continue;
+        suspects.push({
+          customerId: c.id,
+          displayName: c.displayName ?? null,
+          serviceStreet: c.serviceStreet ?? null,
+          serviceUnit: (c as { serviceUnit?: string | null }).serviceUnit ?? null,
+          city: c.serviceCity ?? null,
+        });
+      }
+    },
+    { pageErrors: "ignore" }
+  );
   return { scanned, suspectCount: suspects.length, suspects };
 }

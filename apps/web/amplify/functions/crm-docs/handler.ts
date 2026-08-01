@@ -41,6 +41,7 @@ import {
   buildTechnicianDay,
   buildTechnicianJob,
 } from "../shared/technicianReads";
+import { forEachPage, listAll } from "../shared/pagination";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { drivingDistanceMetersFromPoint } from "../shared/driveTime";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
@@ -1068,22 +1069,25 @@ async function runWorkVerifier(
       if ("EmailLog" in client.models) {
         const since = item.createdAt ?? "";
         let sentSince = false;
-        let token: string | null | undefined;
         let scanned = 0;
-        do {
-          const page = await client.models.EmailLog.list({
-            filter: { customerId: { eq: id } },
-            limit: 200,
-            nextToken: token,
-          });
-          sentSince = (page.data ?? []).some(
-            (l) =>
-              (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
-              String(l.createdAt ?? "") >= since
-          );
-          scanned += (page.data ?? []).length;
-          token = sentSince ? null : page.nextToken;
-        } while (token && scanned < 1000);
+        await forEachPage(
+          (nextToken) =>
+            client.models.EmailLog.list({
+              filter: { customerId: { eq: id } },
+              limit: 200,
+              nextToken,
+            }),
+          (logs) => {
+            sentSince = logs.some(
+              (l) =>
+                (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
+                String(l.createdAt ?? "") >= since
+            );
+            scanned += logs.length;
+            if (sentSince || scanned >= 1000) return false;
+          },
+          { pageErrors: "ignore" }
+        );
         if (!sentSince) {
           return {
             ok: false,
@@ -1152,18 +1156,21 @@ async function runWorkVerifier(
         }
         // Route capacity: the day must actually hold this stop.
         let stops = 0;
-        let token: string | null | undefined;
-        do {
-          const page = await client.models.Job.list({
-            filter: { routeId: { eq: job.routeId } },
-            limit: 200,
-            nextToken: token,
-          });
-          stops += (page.data ?? []).filter(
-            (j) => j.status !== "CANCELED"
-          ).length;
-          token = page.nextToken;
-        } while (token);
+        const routeId = job.routeId;
+        await forEachPage(
+          (nextToken) =>
+            client.models.Job.list({
+              filter: { routeId: { eq: routeId } },
+              limit: 200,
+              nextToken,
+            }),
+          (jobs) => {
+            stops += jobs.filter(
+              (j) => j.status !== "CANCELED"
+            ).length;
+          },
+          { pageErrors: "ignore" }
+        );
         if (stops > STOPS_PER_TECH) {
           return {
             ok: false,
@@ -1258,35 +1265,35 @@ async function runWorkVerifier(
       });
       if (!cust) return { ok: false, message: "The customer could not be read." };
       const problems: string[] = [];
-      let planToken: string | null | undefined;
-      do {
-        const page = await client.models.ServicePlan.list({
-          filter: { customerId: { eq: cust.id } },
-          limit: 200,
-          nextToken: planToken,
-        });
-        for (const plan of page.data ?? []) {
-          if (cust.status === "INACTIVE" && plan.status === "ACTIVE") {
-            problems.push(`plan ${plan.planName} is still ACTIVE`);
-          }
-        }
-        planToken = page.nextToken;
-      } while (planToken);
-      if (cust.status === "INACTIVE") {
-        let jobToken: string | null | undefined;
-        do {
-          const page = await client.models.Job.list({
+      const plans = await listAll(
+        (nextToken) =>
+          client.models.ServicePlan.list({
             filter: { customerId: { eq: cust.id } },
             limit: 200,
-            nextToken: jobToken,
-          });
-          for (const job of page.data ?? []) {
-            if (job.status === "SCHEDULED" && !job.paidAt) {
-              problems.push(`visit ${job.id} is still scheduled`);
-            }
+            nextToken,
+          }),
+        { pageErrors: "ignore" }
+      );
+      for (const plan of plans) {
+        if (cust.status === "INACTIVE" && plan.status === "ACTIVE") {
+          problems.push(`plan ${plan.planName} is still ACTIVE`);
+        }
+      }
+      if (cust.status === "INACTIVE") {
+        const jobs = await listAll(
+          (nextToken) =>
+            client.models.Job.list({
+              filter: { customerId: { eq: cust.id } },
+              limit: 200,
+              nextToken,
+            }),
+          { pageErrors: "ignore" }
+        );
+        for (const job of jobs) {
+          if (job.status === "SCHEDULED" && !job.paidAt) {
+            problems.push(`visit ${job.id} is still scheduled`);
           }
-          jobToken = page.nextToken;
-        } while (jobToken);
+        }
       }
       if ("CustomerLifecycleCommand" in client.models) {
         // Paginated to exhaustion — a settled verdict computed over one page
@@ -1326,18 +1333,21 @@ async function runWorkVerifier(
       if (!tech.active) {
         const today = new Date().toISOString().slice(0, 10);
         let hasFuture = false;
-        let token: string | null | undefined;
-        do {
-          const page = await client.models.Job.list({
-            filter: { technicianId: { eq: tech.id } },
-            limit: 200,
-            nextToken: token,
-          });
-          hasFuture = (page.data ?? []).some(
-            (j) => j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= today
-          );
-          token = hasFuture ? null : page.nextToken;
-        } while (token);
+        await forEachPage(
+          (nextToken) =>
+            client.models.Job.list({
+              filter: { technicianId: { eq: tech.id } },
+              limit: 200,
+              nextToken,
+            }),
+          (jobs) => {
+            hasFuture = jobs.some(
+              (j) => j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= today
+            );
+            if (hasFuture) return false;
+          },
+          { pageErrors: "ignore" }
+        );
         if (!hasFuture) return { ok: true, message: "" };
         return {
           ok: false,

@@ -13,6 +13,7 @@ import {
   reserveSlot,
 } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
+import { forEachPage, listAll } from "./pagination";
 import { resequenceAndRebuildDay } from "./routeOptimizer";
 
 /** Give back minutes a finalize attempt reserved but could not stamp. */
@@ -71,19 +72,21 @@ async function ensureRouteAndOrder(
   // Append after the route's last stop. There is no by-route Job index, so
   // scan the date and take the max order already on this route.
   let maxOrder = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByScheduledDate(
-      { scheduledDate: date },
-      { limit: 200, nextToken: token }
-    );
-    for (const j of page.data ?? []) {
-      if (j.routeId === routeId && typeof j.routeOrder === "number") {
-        maxOrder = Math.max(maxOrder, j.routeOrder);
+  await forEachPage(
+    (nextToken) =>
+      client.models.Job.listJobByScheduledDate(
+        { scheduledDate: date },
+        { limit: 200, nextToken }
+      ),
+    (items) => {
+      for (const j of items) {
+        if (j.routeId === routeId && typeof j.routeOrder === "number") {
+          maxOrder = Math.max(maxOrder, j.routeOrder);
+        }
       }
-    }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "ignore" }
+  );
   return { routeId, routeOrder: maxOrder + 1 };
 }
 import {
@@ -972,9 +975,7 @@ async function findCustomersByContact(
   const target = email.trim().toLowerCase();
   const targetPhone = normalizePhone(phone);
   if (!target && !targetPhone) return [];
-  const hits: ExistingCustomer[] = [];
-  let nextToken: string | null | undefined;
-  do {
+  const rows = await listAll(async (nextToken) => {
     const page = await client.models.Customer.list({ nextToken, limit: 200 });
     if (page.errors?.length) {
       throw new Error(
@@ -983,17 +984,13 @@ async function findCustomersByContact(
           .join("; ")}`
       );
     }
-    hits.push(
-      ...page.data.filter(
-        (c) =>
-          (Boolean(target) &&
-            (c.email ?? "").trim().toLowerCase() === target) ||
-          (Boolean(targetPhone) && normalizePhone(c.phone) === targetPhone)
-      )
-    );
-    nextToken = page.nextToken;
-  } while (nextToken);
-  return hits;
+    return page;
+  });
+  return rows.filter(
+    (c) =>
+      (Boolean(target) && (c.email ?? "").trim().toLowerCase() === target) ||
+      (Boolean(targetPhone) && normalizePhone(c.phone) === targetPhone)
+  );
 }
 
 /**
@@ -1179,23 +1176,25 @@ async function markPricingRunsWon(
   customerId: string
 ): Promise<void> {
   try {
-    let nextToken: string | null | undefined;
-    do {
-      const page = await client.models.LeadPricingRun.list({
-        filter: { customerId: { eq: customerId } },
-        nextToken,
-        limit: 200,
-      });
-      for (const run of page.data) {
-        if (run.outcome === "PENDING") {
-          await client.models.LeadPricingRun.update({
-            id: run.id,
-            outcome: "WON",
-          });
+    await forEachPage(
+      (nextToken) =>
+        client.models.LeadPricingRun.list({
+          filter: { customerId: { eq: customerId } },
+          nextToken,
+          limit: 200,
+        }),
+      async (items) => {
+        for (const run of items) {
+          if (run.outcome === "PENDING") {
+            await client.models.LeadPricingRun.update({
+              id: run.id,
+              outcome: "WON",
+            });
+          }
         }
-      }
-      nextToken = page.nextToken;
-    } while (nextToken);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error(
       `finalizeBooking: could not flip pricing runs to WON for customer ${customerId}`,

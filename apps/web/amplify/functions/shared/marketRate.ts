@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createHash } from "node:crypto";
 import { dataClient } from "./dataClient";
+import { listAll } from "./pagination";
 import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
 import {
   areaKeyFor,
@@ -374,27 +375,22 @@ export async function writeCatalogSnapshot(
       };
     };
     if (!models.CatalogVersion) return null;
-    const rows: {
-      id: string;
-      rateKey: string;
-      active: boolean;
-      pinned?: boolean | null;
-      researchedAt?: string | null;
-    }[] = [];
-    let token: string | null | undefined;
-    do {
-      const page = (await (
-        client.models.MarketRate.list as (a: object) => Promise<{
-          data: typeof rows;
-          nextToken?: string | null;
-        }>
-      )({ limit: 500, nextToken: token })) as {
-        data: typeof rows;
-        nextToken?: string | null;
-      };
-      rows.push(...(page.data ?? []));
-      token = page.nextToken;
-    } while (token);
+    const rows = await listAll(
+      (nextToken) =>
+        (
+          client.models.MarketRate.list as (a: object) => Promise<{
+            data: {
+              id: string;
+              rateKey: string;
+              active: boolean;
+              pinned?: boolean | null;
+              researchedAt?: string | null;
+            }[];
+            nextToken?: string | null;
+          }>
+        )({ limit: 500, nextToken }),
+      { pageErrors: "ignore" }
+    );
     const byKey = new Map<string, typeof rows>();
     for (const r of rows) {
       const list = byKey.get(r.rateKey) ?? [];

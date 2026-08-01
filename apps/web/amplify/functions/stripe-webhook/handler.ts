@@ -29,6 +29,7 @@ import {
 } from "../shared/recovery";
 import { openOwnedWork } from "../shared/ownedWork";
 import { casGuardedUpdate } from "../shared/atomicLock";
+import { forEachPage, listAll } from "../shared/pagination";
 import {
   cancelQueuedPlanVisits,
   startPlanBilling,
@@ -218,22 +219,21 @@ async function onSetupIntentSucceeded(intent: Stripe.SetupIntent) {
   // plan: a failure is logged and the plan can still be started by hand from
   // the customer page. startPlanBilling is idempotent (a plan already billing
   // is a no-op) and anchors migrated plans to their stored bill day.
-  let nextToken: string | null | undefined;
-  const toStart: string[] = [];
-  do {
-    const page = await client.models.ServicePlan.list({
-      filter: {
-        customerId: { eq: crmCustomerId },
-        status: { eq: "ACTIVE" },
-      },
-      limit: 200,
-      nextToken,
-    });
-    for (const plan of page.data) {
-      if (!plan.stripeSubscriptionId) toStart.push(plan.id);
-    }
-    nextToken = page.nextToken;
-  } while (nextToken);
+  const plans = await listAll(
+    (nextToken) =>
+      client.models.ServicePlan.list({
+        filter: {
+          customerId: { eq: crmCustomerId },
+          status: { eq: "ACTIVE" },
+        },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
+  const toStart: string[] = plans
+    .filter((plan) => !plan.stripeSubscriptionId)
+    .map((plan) => plan.id);
   for (const planId of toStart) {
     try {
       const outcome = await startPlanBilling(stripe, planId);
@@ -377,20 +377,21 @@ async function onSubscriptionInvoice(
   // FAILED→PAID transition path — a row hiding past the first filter-scan
   // page would otherwise be duplicated on the smart-retry success.
   const existing: { id: string; amountCents: number; description?: string | null; status?: string | null }[] = [];
-  {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Invoice.list({
+  await forEachPage(
+    (nextToken) =>
+      client.models.Invoice.list({
         filter: { stripeInvoiceId: { eq: stripeInvoice.id } },
         limit: 200,
-        nextToken: token,
-      });
+        nextToken,
+      }),
+    (invoices) => {
       existing.push(
-        ...((page.data ?? []) as unknown as typeof existing)
+        ...(invoices as unknown as typeof existing)
       );
-      token = existing.length ? null : page.nextToken;
-    } while (token);
-  }
+      if (existing.length) return false;
+    },
+    { pageErrors: "ignore" }
+  );
   const paidAt =
     status === "PAID"
       ? new Date(
@@ -824,32 +825,34 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
   // invoice.paid is never redelivered, so this rescan is the only path that
   // catches them.
   try {
-    let invToken: string | null | undefined;
-    do {
-      const page = await client.models.Invoice.list({
-        filter: { servicePlanId: { eq: crmServicePlanId } },
-        limit: 200,
-        nextToken: invToken,
-      });
-      for (const inv of page.data ?? []) {
-        const paidAt = inv.paidAt ?? inv.issuedAt ?? "";
-        if (
-          inv.status === "PAID" &&
-          paidAt >= canceledAtIso &&
-          (inv.refundedAmountCents ?? 0) < (inv.amountCents ?? 0)
-        ) {
-          await stagePostCancellationCharge({
-            servicePlanId: crmServicePlanId,
-            planName: sub.planName ?? null,
-            customerId: sub.customerId,
-            invoiceId: inv.id,
-            amountCents: inv.amountCents ?? 0,
-            requestedAt: canceledAtIso,
-          });
+    await forEachPage(
+      (nextToken) =>
+        client.models.Invoice.list({
+          filter: { servicePlanId: { eq: crmServicePlanId } },
+          limit: 200,
+          nextToken,
+        }),
+      async (invoices) => {
+        for (const inv of invoices) {
+          const paidAt = inv.paidAt ?? inv.issuedAt ?? "";
+          if (
+            inv.status === "PAID" &&
+            paidAt >= canceledAtIso &&
+            (inv.refundedAmountCents ?? 0) < (inv.amountCents ?? 0)
+          ) {
+            await stagePostCancellationCharge({
+              servicePlanId: crmServicePlanId,
+              planName: sub.planName ?? null,
+              customerId: sub.customerId,
+              invoiceId: inv.id,
+              amountCents: inv.amountCents ?? 0,
+              requestedAt: canceledAtIso,
+            });
+          }
         }
-      }
-      invToken = page.nextToken;
-    } while (invToken);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     // The settlement gate (full-refund-required) still blocks the close;
     // this rescan failing only delays the staged case, never the truth.

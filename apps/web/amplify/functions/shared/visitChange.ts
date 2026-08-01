@@ -10,6 +10,7 @@ import {
 } from "./atomicLock";
 import { emailShell, sendEmail } from "./email";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
+import { listAll } from "./pagination";
 import { refundInvoice, refundableRemaining } from "./refund";
 import { assertTechnicianCompliance } from "./compliance";
 import { licenseFactsFor } from "./licenses";
@@ -127,18 +128,15 @@ type InvoiceRow = {
  *  against rows scanned, so it must be paged to be sure the paid one is seen. */
 async function invoicesForJob(jobId: string): Promise<InvoiceRow[]> {
   const client = await dataClient();
-  const rows: InvoiceRow[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({
-      filter: { jobId: { eq: jobId } },
-      nextToken: token,
-      limit: 200,
-    });
-    rows.push(...(page.data as InvoiceRow[]));
-    token = page.nextToken;
-  } while (token);
-  return rows;
+  return (await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { jobId: { eq: jobId } },
+        nextToken,
+        limit: 200,
+      }),
+    { pageErrors: "ignore" }
+  )) as InvoiceRow[];
 }
 
 /** GL-07 R2: EVERY refundable paid invoice and EVERY open/unpaid invoice on

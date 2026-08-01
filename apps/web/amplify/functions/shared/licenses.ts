@@ -1,5 +1,6 @@
 import { dataClient } from "./dataClient";
 import { hasCurrentLicense } from "./compliance";
+import { listAll } from "./pagination";
 
 /**
  * GL-17 — one-to-many licence records, and THE single answer to "is this
@@ -112,18 +113,14 @@ export async function licenseRecordsFor(
   try {
     const client = await dataClient();
     if (!("TechnicianLicense" in client.models)) return [];
-    const out: LicenseRecordLike[] = [];
-    let token: string | null | undefined;
-    do {
-      const page =
-        await client.models.TechnicianLicense.listTechnicianLicenseByTechnicianId(
+    return (await listAll(
+      (nextToken) =>
+        client.models.TechnicianLicense.listTechnicianLicenseByTechnicianId(
           { technicianId },
-          { limit: 100, nextToken: token }
-        );
-      out.push(...((page.data ?? []) as LicenseRecordLike[]));
-      token = page.nextToken;
-    } while (token);
-    return out;
+          { limit: 100, nextToken }
+        ),
+      { pageErrors: "ignore" }
+    )) as LicenseRecordLike[];
   } catch (err) {
     console.error("licenseRecordsFor failed", technicianId, err);
     return null;
