@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "sandbox": "ampx sandbox"
+    "sandbox": "ampx sandbox",
+    "test": "vitest",
+    "test:run": "vitest run"
   },
   "overrides": {
     "@opentelemetry/core": "^2.0.0"
@@ -31,6 +33,10 @@
     "@aws-sdk/client-secrets-manager": "^3.1093.0",
     "@aws-sdk/client-sesv2": "^3.1093.0",
     "@aws-sdk/client-textract": "^3.750.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/aws-lambda": "^8.10.145",
     "@types/google.maps": "^3.65.3",
     "@types/node": "^26.1.1",
@@ -40,8 +46,10 @@
     "aws-cdk-lib": "^2.180.0",
     "constructs": "^10.4.2",
     "esbuild": "^0.25.0",
+    "jsdom": "^29.1.1",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3",
-    "vite": "^6.1.0"
+    "vite": "^6.1.0",
+    "vitest": "^4.1.10"
   }
 }
