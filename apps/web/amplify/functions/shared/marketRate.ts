@@ -2,6 +2,34 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createHash } from "node:crypto";
 import { dataClient } from "./dataClient";
 import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
+import {
+  areaKeyFor,
+  HOA_BANDS,
+  hoaBandFor,
+  mirrorCents,
+  parseSheet,
+  PLAN_CADENCES,
+  sqftBucket,
+  type HoaBand,
+  type HoaPerUnitRates,
+  type MarketRateService,
+  type PlanCadence,
+  type PlanRate,
+  type RateSheet,
+} from "./marketRateKeys";
+
+// The engine's vocabulary and key/sheet arithmetic live in marketRateKeys.ts
+// (a pure leaf the CRM shares). Re-exported here so the engine's importers
+// keep one import site.
+export { areaKeyFor, HOA_BANDS, hoaBandFor, PLAN_CADENCES, sqftBucket };
+export type {
+  HoaBand,
+  HoaPerUnitRates,
+  MarketRateService,
+  PlanCadence,
+  PlanRate,
+  RateSheet,
+};
 
 /**
  * AI-researched market rates — the base-price engine for every service.
@@ -93,54 +121,6 @@ export const RESEARCH_PROFILES: Record<
   DEMAND: { model: DEMAND_PRICING_MODEL, maxSearches: 3, timeoutMs: 120_000 },
 };
 
-export type MarketRateService =
-  | "GENERAL_PEST"
-  | "WASP_NEST"
-  | "RODENT"
-  | "ROACH"
-  | "TERMITE"
-  | "WILDLIFE"
-  | "COMMERCIAL"
-  | "HOA";
-
-export type PlanCadence = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
-export const PLAN_CADENCES: PlanCadence[] = [
-  "MONTHLY",
-  "BIMONTHLY",
-  "QUARTERLY",
-];
-
-export type PlanRate = { monthlyCents: number; initialFeeCents: number };
-
-/**
- * HOA unit-count bands, mirroring the brackets the retired deterministic
- * association card used (≤10 base, 11–25, 26–50, 51–100, 101+).
- */
-export type HoaBand =
-  | "UNITS_1_10"
-  | "UNITS_11_25"
-  | "UNITS_26_50"
-  | "UNITS_51_100"
-  | "UNITS_101_PLUS";
-export const HOA_BANDS: HoaBand[] = [
-  "UNITS_1_10",
-  "UNITS_11_25",
-  "UNITS_26_50",
-  "UNITS_51_100",
-  "UNITS_101_PLUS",
-];
-
-export function hoaBandFor(units: number): HoaBand {
-  if (units <= 10) return "UNITS_1_10";
-  if (units <= 25) return "UNITS_11_25";
-  if (units <= 50) return "UNITS_26_50";
-  if (units <= 100) return "UNITS_51_100";
-  return "UNITS_101_PLUS";
-}
-
-/** HOA: per-unit MONTHLY price in cents, by unit-count band and cadence. */
-export type HoaPerUnitRates = Record<HoaBand, Record<PlanCadence, number>>;
-
 /**
  * PLACEHOLDER, confirm with Jake before go-live (same status as the ZONE_C
  * amounts): the multiplier that turns a per-unit HOA plan rate into a
@@ -167,24 +147,6 @@ export function hoaOneTimePerUnitCents(
   return Math.round(rates[hoaBandFor(units)].QUARTERLY * HOA_ONE_TIME_MULTIPLIER);
 }
 
-/** The full researched sheet stored on one MarketRate row (ratesJson). */
-export type RateSheet = {
-  /** One-time treatment (WASP_NEST: the visit including the first nest).
-   *  Absent on HOA sheets — common-area work has no one-time card. */
-  oneTimeCents?: number;
-  /** WASP_NEST: incremental price per additional nest on the same visit. */
-  extraNestCents?: number;
-  /** WILDLIFE: incremental price per additional animal removed on the same
-   *  visit (the base oneTimeCents covers the visit plus the first animal). */
-  extraAnimalCents?: number;
-  /** Recurring plans, each billed as a flat monthly price. PARTIAL on purpose:
-   *  a service may sell only some cadences (rodent is quarterly-only), so every
-   *  reader must handle a missing cadence rather than assume all three. */
-  plans?: Partial<Record<PlanCadence, PlanRate>>;
-  /** HOA: per-unit monthly rate by unit-count band and visit cadence. */
-  hoaPerUnitMonthly?: HoaPerUnitRates;
-};
-
 export type MarketRateResult = {
   /** Mirrors sheet.oneTimeCents (continuity field). HOA sheets have no
    *  one-time, so the mirror is the smallest band's monthly per-unit rate. */
@@ -196,25 +158,10 @@ export type MarketRateResult = {
   pinned?: boolean;
 };
 
-/** What the row's required priceCents column mirrors for a given sheet. */
-function mirrorCents(sheet: RateSheet): number {
-  return (
-    sheet.oneTimeCents ?? sheet.hoaPerUnitMonthly?.UNITS_1_10.MONTHLY ?? 0
-  );
-}
-
 /** Round to a tidy $X9 ending like the rest of the rate card. */
 function tidy(cents: number): number {
   const dollars = Math.round(cents / 100);
   return (Math.max(1, Math.round((dollars + 1) / 10)) * 10 - 1) * 100;
-}
-
-export function sqftBucket(sqft: number): number {
-  return Math.max(500, Math.ceil(sqft / 500) * 500);
-}
-
-export function areaKeyFor(city: string, state: string): string {
-  return `${city.trim().toLowerCase().replace(/\s+/g, "-")}-${state.trim().toLowerCase()}`;
 }
 
 // ---------------------------------------------------- variable-cost floor
@@ -287,24 +234,6 @@ function applyFloor(
 }
 
 // ---------------------------------------------------- the live path (reads)
-
-function parseSheet(raw: unknown): RateSheet | null {
-  if (raw == null) return null;
-  try {
-    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      (typeof (value as RateSheet).oneTimeCents === "number" ||
-        typeof (value as RateSheet).hoaPerUnitMonthly === "object")
-    ) {
-      return value as RateSheet;
-    }
-  } catch {
-    /* corrupt ratesJson — treat as sheet-less row */
-  }
-  return null;
-}
 
 /** The combo key: identical for MarketRate.rateKey and RateCoverage.id. */
 export function rateKeyFor(
