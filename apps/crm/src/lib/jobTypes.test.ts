@@ -11,7 +11,7 @@ import {
  */
 describe("isOfficeCompletableServiceType", () => {
   it("no administrative type is defined today — nothing is office-completable", () => {
-    expect(ADMIN_JOB_SERVICE_TYPES).toHaveLength(0);
+    expect(ADMIN_JOB_SERVICE_TYPES.size).toBe(0);
     expect(isOfficeCompletableServiceType("General Pest Treatment")).toBe(false);
     expect(isOfficeCompletableServiceType("Wasp nest removal")).toBe(false);
   });

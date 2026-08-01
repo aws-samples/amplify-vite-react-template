@@ -90,6 +90,10 @@ import {
 import { OFF_SEASON_MESSAGE } from "../shared/bookingTerms";
 import { routingAddress } from "../shared/serviceAddress";
 import { queuePresenceReview } from "../shared/recovery";
+import {
+  ADMIN_JOB_SERVICE_TYPES,
+  isOfficeCompletableServiceType,
+} from "../shared/adminJobTypes";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
 import { isServiceMonth } from "../shared/season";
 import {
@@ -4881,27 +4885,10 @@ async function startBillingForPlan(job: {
  * Marks the job COMPLETED, starts plan billing, and queues the next recurring
  * visit, mirroring what finalizeServiceReport does after a report.
  */
-/**
- * The defined set of administrative job types the office may complete
- * WITHOUT a technician's finalized report — stored lowercased for a
- * case-insensitive match. Field and pesticide work is never here: its
- * completion IS the tech's finalized service report, which is the legal
- * pesticide application record. Office-completing such a job would mark it
- * done with no record behind it — the exact editable-regulatory-gap the
- * report immutability work closed, reopened from the office side.
- *
- * Empty today: no administrative job type is defined, so every job
- * completes via a finalized report. Add an exact (lowercased) serviceType
- * here to make that one type office-completable. KEEP IN SYNC with
- * apps/crm/src/lib/jobTypes.ts (the UI hides the button for the same set).
- */
-export const ADMIN_JOB_SERVICE_TYPES = new Set<string>([]);
-
-export function isOfficeCompletableServiceType(
-  serviceType: string | null | undefined
-): boolean {
-  return ADMIN_JOB_SERVICE_TYPES.has((serviceType ?? "").trim().toLowerCase());
-}
+// The set and the match rule live in shared/adminJobTypes.ts — one copy, read
+// by this gate and by the CRM's "✓ Complete" button. Re-exported here so
+// anything already importing them from this handler keeps working.
+export { ADMIN_JOB_SERVICE_TYPES, isOfficeCompletableServiceType };
 
 async function completeJob(jobId: string) {
   const client = await dataClient();
