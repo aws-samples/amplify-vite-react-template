@@ -4,11 +4,11 @@ import { getUrl } from "aws-amplify/storage";
 import {
   client,
   fmtDate,
-  friendlyError,
   listAllPages,
   type CrmDocument,
 } from "../lib/client";
 import FilePreviewModal, { canPreview } from "../components/FilePreview";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 
 // Stable identity for "no search run yet", so the sort memo isn't rebuilt
@@ -22,19 +22,23 @@ const NO_RESULTS: CrmDocument[] = [];
  */
 export default function DocumentSearch() {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<CrmDocument[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [error, setError] = useState("");
   const [previewDoc, setPreviewDoc] = useState<CrmDocument | null>(null);
 
-  async function search() {
-    const q = query.trim();
-    if (q.length < 2) return;
-    setSearching(true);
-    setError("");
-    try {
+  // `manual` because this resource has no deps to watch — it exists only when
+  // someone presses Search. The hook has no "don't run" escape, so the
+  // two-character floor stays at the call site below rather than becoming an
+  // early `return` inside the fetcher that would look like an empty result.
+  const {
+    data: results,
+    loading: searching,
+    loaded,
+    error,
+    refetch,
+  } = useAsyncResource(
+    () => {
+      const q = query.trim();
       // Paginate the filtered scan to the end (bounded to stay sane).
-      const found = await listAllPages(
+      return listAllPages(
         (nextToken) =>
           client.models.Document.list({
             filter: {
@@ -44,12 +48,14 @@ export default function DocumentSearch() {
           }),
         { maxPages: 25 }
       );
-      setResults(found);
-    } catch (err) {
-      setError(friendlyError(err, "Search failed"));
-    } finally {
-      setSearching(false);
-    }
+    },
+    [],
+    { manual: true, initialData: NO_RESULTS, errorMessage: "Search failed" }
+  );
+
+  function search() {
+    if (query.trim().length < 2) return;
+    void refetch();
   }
 
   async function download(doc: CrmDocument) {
@@ -70,7 +76,7 @@ export default function DocumentSearch() {
 
   // Most recently uploaded first, as the search used to order the hits.
   const { sorted, sortKey, dir, toggle } = useSort(
-    results ?? NO_RESULTS,
+    results,
     {
       document: (d) => d.name,
       attached: (d) => d.entityType,
@@ -115,7 +121,7 @@ export default function DocumentSearch() {
       </div>
       {error && <p className="error-text">{error}</p>}
 
-      {results && (
+      {loaded && !error && (
         <div className="card">
           {results.length === 0 ? (
             <p className="muted small">No documents match “{query.trim()}”.</p>

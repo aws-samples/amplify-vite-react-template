@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react";
 import type { AuthUser } from "aws-amplify/auth";
 import { client, listAllPages, type UserProfile } from "./lib/client";
+import { useAsyncResource } from "./lib/useAsyncResource";
 import {
   AdminContext,
   fetchUserGroups,
@@ -65,28 +66,56 @@ function AuthGate() {
 }
 
 function ProfileGate({ user, signOut }: { user: AuthUser; signOut: () => void }) {
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [groups, setGroups] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Profile and Cognito groups resolve behind ONE loading gate: settling
+  // admin status after first paint would flash the admin-only controls
+  // into (or out of) a page that's already on screen. That is why this is a
+  // single hook over a tuple rather than one hook per read.
+  const { data, loading, error, refetch, setData } = useAsyncResource(
+    async () => {
+      const [rows, gs] = await Promise.all([
+        listAllPages((nextToken) =>
+          client.models.UserProfile.list({
+            filter: { userId: { eq: user.userId } },
+            nextToken,
+          })
+        ),
+        fetchUserGroups(),
+      ]);
+      return { profile: rows[0] ?? null, groups: gs };
+    },
+    [user.userId],
+    {
+      initialData: { profile: null as UserProfile | null, groups: [] as string[] },
+      errorMessage: "Couldn't load your profile.",
+    }
+  );
+  const { profile, groups } = data;
 
-  useEffect(() => {
-    // Profile and Cognito groups resolve behind ONE loading gate: settling
-    // admin status after first paint would flash the admin-only controls
-    // into (or out of) a page that's already on screen.
-    Promise.all([
-      listAllPages((nextToken) =>
-        client.models.UserProfile.list({
-          filter: { userId: { eq: user.userId } },
-          nextToken,
-        })
-      ),
-      fetchUserGroups(),
-    ]).then(([data, gs]) => {
-      setProfile(data[0] ?? null);
-      setGroups(gs);
-      setLoading(false);
-    });
-  }, [user.userId]);
+  // This read used to have no catch at all: a failed profile/groups fetch
+  // left "Loading…" on screen forever. It is the app's front door, so the
+  // failure gets a real screen with a way out.
+  if (error) {
+    return (
+      <div className="main">
+        <div className="card" style={{ maxWidth: 480, textAlign: "center", marginTop: 40 }}>
+          <h2>Couldn't load your profile</h2>
+          <p className="error-text">{error}</p>
+          <p className="muted small">
+            You're signed in — this is the profile read failing, so a retry
+            usually clears it.
+          </p>
+          <div className="form-actions" style={{ justifyContent: "center" }}>
+            <button className="primary" onClick={() => void refetch()}>
+              Try again
+            </button>
+            <button className="secondary" onClick={signOut}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) return <div className="main">Loading…</div>;
 
@@ -96,7 +125,7 @@ function ProfileGate({ user, signOut }: { user: AuthUser; signOut: () => void })
         user={user}
         existing={profile}
         role={roleFromGroups(groups)}
-        onComplete={(p) => setProfile(p)}
+        onComplete={(p) => setData((d) => ({ ...d, profile: p }))}
       />
     );
   }

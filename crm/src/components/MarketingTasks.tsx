@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import {
   client,
   daysUntilDate,
   fmtDate,
-  friendlyError,
   listAllPages,
   type MarketingTask,
   type Quote,
@@ -76,56 +76,59 @@ export default function AccountMarketingTasks({
   accountId: string;
   completedByName: string;
 }) {
-  const [tasks, setTasks] = useState<MarketingTask[]>([]);
-  const [loaded, setLoaded] = useState(false);
   const [showDone, setShowDone] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState("");
-  const settledOnce = useRef(false);
+  // Which account the settle pass has already run for. This used to be a
+  // boolean reset by the caller's own effect immediately before `load()`;
+  // the hook owns that effect now, so the guard carries the identity it is
+  // guarding instead of relying on two effects firing in declaration order.
+  // Same semantics — once per account per mount — with no sibling to keep in
+  // step, and a refetch of the same account still won't re-settle.
+  const settledFor = useRef<string | null>(null);
 
-  async function load() {
-    const [ts, qs] = await Promise.all([
-      listAllPages((nextToken) =>
-        client.models.MarketingTask.list({
-          filter: { accountId: { eq: accountId } },
-          limit: 500,
-          nextToken,
-        })
-      ),
-      listAllPages((nextToken) =>
-        client.models.Quote.list({
-          filter: { accountId: { eq: accountId } },
-          limit: 500,
-          nextToken,
-        })
-      ),
-    ]);
-    // list() yields a structurally looser type than the model type.
-    let rows = ts as MarketingTask[];
-    // Run the quote-satisfies-task check once per mount, not on every render.
-    if (!settledOnce.current) {
-      settledOnce.current = true;
-      const settled = await settleSatisfiedTasks(rows, qs as Quote[]);
-      if (settled.length) {
-        const byId = new Map(settled.map((s) => [s.id, s]));
-        rows = rows.map((t) => byId.get(t.id) ?? t);
+  const taskRes = useAsyncResource(
+    async () => {
+      const [ts, qs] = await Promise.all([
+        listAllPages((nextToken) =>
+          client.models.MarketingTask.list({
+            filter: { accountId: { eq: accountId } },
+            limit: 500,
+            nextToken,
+          })
+        ),
+        listAllPages((nextToken) =>
+          client.models.Quote.list({
+            filter: { accountId: { eq: accountId } },
+            limit: 500,
+            nextToken,
+          })
+        ),
+      ]);
+      // list() yields a structurally looser type than the model type.
+      let rows = ts as MarketingTask[];
+      // Run the quote-satisfies-task check once per account, not on every
+      // read — it writes, and re-running it would re-stamp completedAt.
+      if (settledFor.current !== accountId) {
+        settledFor.current = accountId;
+        const settled = await settleSatisfiedTasks(rows, qs as Quote[]);
+        if (settled.length) {
+          const byId = new Map(settled.map((s) => [s.id, s]));
+          rows = rows.map((t) => byId.get(t.id) ?? t);
+        }
       }
-    }
-    setTasks(rows);
-    setLoaded(true);
-  }
-
-  useEffect(() => {
-    settledOnce.current = false;
-    setError("");
-    load().catch((e) => {
+      return rows;
+    },
+    [accountId],
+    {
+      initialData: [] as MarketingTask[],
       // The card hides itself when there are no tasks, so a swallowed
       // failure is indistinguishable from an account with none.
-      setError(friendlyError(e, "Failed to load marketing tasks"));
-      setLoaded(true);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId]);
+      errorMessage: "Failed to load marketing tasks",
+    }
+  );
+  const tasks = taskRes.data;
+  const setTasks = taskRes.setData;
+  const { loaded, error } = taskRes;
 
   async function markOutOfAppetite(t: MarketingTask) {
     setBusyId(t.id);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   client,
   fmtDate,
@@ -9,6 +9,7 @@ import {
   type Carrier,
   type Quote,
 } from "../lib/client";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import CoverageForm from "./CoverageForm";
 
@@ -64,28 +65,37 @@ export default function QuotesPanel({
   account: Account;
   onAccountChange: (a: Account) => void;
 }) {
-  const [quotes, setQuotes] = useState<Quote[]>([]);
-  const [carrierRows, setCarrierRows] = useState<Carrier[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Quote | null>(null);
   const [binding, setBinding] = useState<Quote | null>(null);
-  const [error, setError] = useState("");
+  const [bindError, setBindError] = useState("");
 
-  async function refresh() {
-    const data = await listAllPages((nextToken) =>
-      client.models.Quote.list({
-        filter: { accountId: { eq: account.id } },
-        nextToken,
-      })
-    );
-    setQuotes(data);
-  }
+  const quoteRes = useAsyncResource(
+    () =>
+      listAllPages((nextToken) =>
+        client.models.Quote.list({
+          filter: { accountId: { eq: account.id } },
+          nextToken,
+        })
+      ),
+    [account.id],
+    { initialData: [] as Quote[], errorMessage: "Failed to load quotes" }
+  );
+  const quotes = quoteRes.data;
+  // Identity-stable, so passing it to CoverageForm/BindForm no longer
+  // re-renders them on every render of this panel.
+  const refresh = quoteRes.refetch;
 
-  useEffect(() => {
-    refresh();
-    client.models.Carrier.list().then(({ data }) => setCarrierRows(data));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [account.id]);
+  // Carriers are agency-wide, not account-scoped, so they are their own
+  // resource on their own (empty) deps: refreshing the quotes after a status
+  // change or a bind must not re-read the whole carrier table, and switching
+  // accounts must not blank the carrier names while it re-reads.
+  const carrierRes = useAsyncResource(
+    async () => (await client.models.Carrier.list()).data,
+    [],
+    { initialData: [] as Carrier[] }
+  );
+  const carrierRows = carrierRes.data;
 
   async function setStatus(quote: Quote, status: Quote["status"]) {
     await client.models.Quote.update({ id: quote.id, status });
@@ -148,7 +158,14 @@ export default function QuotesPanel({
         />
       )}
 
-      {quotes.length === 0 ? (
+      {/* Surfaced rather than ignored: without carriers every row's first
+          column reads "—", which is indistinguishable from quotes genuinely
+          having no carrier set. */}
+      {carrierRes.error && <p className="error-text">{carrierRes.error}</p>}
+
+      {quoteRes.error ? (
+        <p className="error-text">{quoteRes.error}</p>
+      ) : quotes.length === 0 ? (
         <p className="muted small">No quotes yet.</p>
       ) : (
         <div className="table-wrap">
@@ -227,10 +244,10 @@ export default function QuotesPanel({
             refresh();
             if (updated) onAccountChange(updated);
           }}
-          onError={setError}
+          onError={setBindError}
         />
       )}
-      {error && <p className="error-text">{error}</p>}
+      {bindError && <p className="error-text">{bindError}</p>}
     </div>
   );
 }

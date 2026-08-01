@@ -17,6 +17,7 @@ import {
 } from "../lib/client";
 import { fillAcord25, signatureFor } from "../lib/acord";
 import { useIsAdmin } from "../lib/auth";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import DocumentsPanel from "../components/DocumentsPanel";
 import QuotesPanel, { commissionCell, termsSummary } from "../components/QuotesPanel";
@@ -441,27 +442,34 @@ function DeleteLeadZone({ account }: { account: Account }) {
 }
 
 function PoliciesTab({ accountId }: { accountId: string }) {
-  const [policies, setPolicies] = useState<Policy[]>([]);
-  const [carrierRows, setCarrierRows] = useState<Carrier[]>([]);
-  const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState<Policy | null>(null);
 
-  async function refresh() {
-    const data = await listAllPages((nextToken) =>
-      client.models.Policy.list({
-        filter: { accountId: { eq: accountId } },
-        nextToken,
-      })
-    );
-    setPolicies(data);
-    setLoaded(true);
-  }
+  const policyRes = useAsyncResource(
+    () =>
+      listAllPages((nextToken) =>
+        client.models.Policy.list({
+          filter: { accountId: { eq: accountId } },
+          nextToken,
+        })
+      ),
+    [accountId],
+    { initialData: [] as Policy[], errorMessage: "Failed to load policies" }
+  );
+  const policies = policyRes.data;
+  const setPolicies = policyRes.setData;
+  // Identity-stable, so CoverageForm's `onSaved` no longer closes over a
+  // fresh function every render.
+  const refresh = policyRes.refetch;
 
-  useEffect(() => {
-    refresh();
-    client.models.Carrier.list().then(({ data }) => setCarrierRows(data));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId]);
+  // Agency-wide, not account-scoped — its own resource on its own deps, so a
+  // policy refresh doesn't re-read the carrier table and an account switch
+  // doesn't blank the carrier names while it does.
+  const carrierRes = useAsyncResource(
+    async () => (await client.models.Carrier.list()).data,
+    [],
+    { initialData: [] as Carrier[] }
+  );
+  const carrierRows = carrierRes.data;
 
   async function updatePolicy(id: string, patch: Partial<Policy>) {
     const { data } = await client.models.Policy.update({ id, ...patch });
@@ -510,8 +518,14 @@ function PoliciesTab({ accountId }: { accountId: string }) {
         />
       )}
 
-      {!loaded ? (
+      {/* Surfaced rather than ignored: without carriers every row's carrier
+          column reads "—", indistinguishable from a policy with none set. */}
+      {carrierRes.error && <p className="error-text">{carrierRes.error}</p>}
+
+      {!policyRes.loaded ? (
         <p className="muted small">Loading…</p>
+      ) : policyRes.error ? (
+        <p className="error-text">{policyRes.error}</p>
       ) : policies.length === 0 ? (
         <p className="muted small">
           No policies. Policies are created by binding a quote.

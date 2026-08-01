@@ -13,6 +13,7 @@ import {
   type UserProfile,
 } from "../lib/client";
 import DocumentsPanel from "./DocumentsPanel";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { useIsAdmin } from "../lib/auth";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
@@ -28,33 +29,37 @@ type HolderType = "FIRM" | "PRODUCER";
  * attach per-license as Documents with entityType=LICENSE.
  */
 export default function Licensing() {
-  const [licenses, setLicenses] = useState<License[]>([]);
-  const [profiles, setProfiles] = useState<UserProfile[]>([]);
-  const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState<HolderType | null>(null);
   const [editing, setEditing] = useState<License | null>(null);
   const [openDocsFor, setOpenDocsFor] = useState<string | null>(null);
-  const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [attentionOnly, setAttentionOnly] = useState(false);
 
   const isAdmin = useIsAdmin();
 
-  async function load() {
-    const [{ data: ls }, { data: ps }] = await Promise.all([
-      client.models.License.list(),
-      client.models.UserProfile.list(),
-    ]);
-    setLicenses(ls);
-    setProfiles(ps);
-    setLoading(false);
-  }
-
-  useEffect(() => {
-    load().catch((e) =>
-      setError(friendlyError(e, "Failed to load licenses"))
-    );
-  }, []);
+  // Two hooks rather than one `{licenses, profiles}` fetcher: this screen
+  // never refetches, it patches `licenses` locally in three places (delete,
+  // append after backfill, upsert after save), and those stay one-liners only
+  // while `licenses` is its own resource. The single loading gate the two
+  // reads shared is reproduced below by OR-ing the two flags.
+  const lic = useAsyncResource(
+    async () => (await client.models.License.list()).data,
+    [],
+    { initialData: [] as License[], errorMessage: "Failed to load licenses" }
+  );
+  const prof = useAsyncResource(
+    async () => (await client.models.UserProfile.list()).data,
+    [],
+    { initialData: [] as UserProfile[], errorMessage: "Failed to load team profiles" }
+  );
+  const licenses = lic.data;
+  const setLicenses = lic.setData;
+  const profiles = prof.data;
+  const loading = lic.loading || prof.loading;
+  // The profiles read is secondary but not ignorable — without it personal
+  // licences lose their holder name, the holder filter stops matching, and
+  // the form can't pick a producer. It shares the page's one error slot.
+  const error = lic.error || prof.error;
 
   const allFirm = licenses.filter((l) => l.holderType === "FIRM");
   const allPersonal = licenses.filter((l) => l.holderType === "PRODUCER");

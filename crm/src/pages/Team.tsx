@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { client, fmtDate, friendlyError, type UserProfile } from "../lib/client";
 import SignatureManager from "../components/SignatureManager";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
 
@@ -11,8 +12,8 @@ interface TeamUser {
   groups: string[];
 }
 
-// Stable identity for "not loaded yet", so the sort memo isn't rebuilt on
-// every render while the team list is still in flight.
+// Stable identity for "not loaded yet" (and for a failed read), so the sort
+// memo isn't rebuilt on every render while the team list is still in flight.
 const NO_USERS: TeamUser[] = [];
 
 /**
@@ -21,12 +22,10 @@ const NO_USERS: TeamUser[] = [];
  * so there's no check of its own here.
  */
 export default function Team({ profile }: { profile: UserProfile }) {
-  const [users, setUsers] = useState<TeamUser[] | null>(null);
-  const [profiles, setProfiles] = useState<UserProfile[]>([]);
   const { form, setF } = useFormState({ email: "", role: "STAFF" });
   const [inviting, setInviting] = useState(false);
   const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
+  const [inviteError, setInviteError] = useState("");
 
   const parse = (raw: unknown): Record<string, unknown> => {
     if (typeof raw === "string") {
@@ -39,30 +38,44 @@ export default function Team({ profile }: { profile: UserProfile }) {
     return (raw as Record<string, unknown>) ?? {};
   };
 
-  async function load() {
-    setError("");
-    try {
+  // `client.queries.*` reports failure by *resolving* with an `errors` array,
+  // so the unwrap has to stay inside the fetcher — nothing above it would see
+  // a rejection otherwise.
+  const team = useAsyncResource(
+    async () => {
       const { data, errors } = await client.queries.listTeamUsers();
       if (errors?.length) throw new Error(errors[0].message);
-      const body = parse(data);
-      setUsers((body.users as TeamUser[]) ?? []);
-    } catch (err) {
-      setError(friendlyError(err, "Failed to load team"));
-      setUsers([]);
-    }
-    client.models.UserProfile.list().then(({ data }) => setProfiles(data));
-  }
+      return (parse(data).users as TeamUser[] | undefined) ?? NO_USERS;
+    },
+    [],
+    { initialData: NO_USERS, errorMessage: "Failed to load team" }
+  );
+  const users = team.data;
 
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Profiles decorate the roster (name, onboarding, signature) — the roster
+  // itself renders without them, so this read's failure is deliberately not
+  // surfaced, exactly as the bare `.then()` it replaces did not surface it.
+  // The hook still catches it, which is the part that was missing.
+  const profileRes = useAsyncResource(
+    async () => (await client.models.UserProfile.list()).data,
+    [],
+    { initialData: [] as UserProfile[] }
+  );
+  const profiles = profileRes.data;
+  const setProfiles = profileRes.setData;
+
+  // An invite adds a Cognito user, so both reads are re-run — same as the
+  // single `load()` that used to do both.
+  function reload() {
+    void team.refetch();
+    void profileRes.refetch();
+  }
 
   async function invite() {
     if (!form.email.trim()) return;
     setInviting(true);
     setNotice("");
-    setError("");
+    setInviteError("");
     try {
       const { data, errors } = await client.mutations.inviteUser({
         email: form.email.trim().toLowerCase(),
@@ -77,9 +90,9 @@ export default function Team({ profile }: { profile: UserProfile }) {
       // Not `reset()`: the baseline would put the role back to STAFF too, and
       // inviting a second person to the same role is the common case.
       setF("email", "");
-      load();
+      reload();
     } catch (err) {
-      setError(friendlyError(err, "Invite failed"));
+      setInviteError(friendlyError(err, "Invite failed"));
     } finally {
       setInviting(false);
     }
@@ -91,7 +104,7 @@ export default function Team({ profile }: { profile: UserProfile }) {
   // By email; a user with no email sorts last, which useSort does for nulls
   // in either direction.
   const { sorted, sortKey, dir, toggle } = useSort(
-    users ?? NO_USERS,
+    users,
     {
       email: (u) => u.email,
       name: (u) => {
@@ -145,7 +158,9 @@ export default function Team({ profile }: { profile: UserProfile }) {
               {notice}
             </span>
           )}
-          {error && <span className="error-text">{error}</span>}
+          {(inviteError || team.error) && (
+            <span className="error-text">{inviteError || team.error}</span>
+          )}
         </div>
         <p className="muted small" style={{ marginBottom: 0 }}>
           Producers complete their licensing details during first sign-in.
@@ -157,7 +172,7 @@ export default function Team({ profile }: { profile: UserProfile }) {
 
       <div className="card">
         <h2>Team members</h2>
-        {users === null ? (
+        {!team.loaded ? (
           <p className="muted small">Loading…</p>
         ) : users.length === 0 ? (
           <p className="muted small">No users found.</p>

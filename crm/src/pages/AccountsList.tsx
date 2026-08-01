@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   client,
@@ -9,25 +9,34 @@ import {
   type Account,
   type Policy,
 } from "../lib/client";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 
 export default function AccountsList({ stage }: { stage: "LEAD" | "CLIENT" }) {
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [policies, setPolicies] = useState<Policy[]>([]);
   const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    setLoading(true);
-    listAllPages((nextToken) =>
-      client.models.Account.list({ filter: { stage: { eq: stage } }, nextToken })
-    ).then((data) => {
-      setAccounts(data);
-      setLoading(false);
-    });
-    client.models.Policy.list().then(({ data }) => setPolicies(data));
-  }, [stage]);
+  const {
+    data: accounts,
+    loading,
+    error,
+  } = useAsyncResource(
+    () =>
+      listAllPages((nextToken) =>
+        client.models.Account.list({ filter: { stage: { eq: stage } }, nextToken })
+      ),
+    [stage],
+    { initialData: [] as Account[], errorMessage: "Failed to load accounts" }
+  );
+
+  // Renewal dates only. A failure here costs the "Renewal" column its dates
+  // and nothing else, so it stays out of the page-level error — the accounts
+  // table is still worth showing without it.
+  const { data: policies } = useAsyncResource(
+    async () => (await client.models.Policy.list()).data,
+    [],
+    { initialData: [] as Policy[] }
+  );
 
   // Renewal date: clients → earliest ACTIVE policy expiration;
   // leads → incumbent policy expiration.
@@ -101,6 +110,8 @@ export default function AccountsList({ stage }: { stage: "LEAD" | "CLIENT" }) {
       <div className="card">
         {loading ? (
           <p className="muted small">Loading…</p>
+        ) : error ? (
+          <p className="error-text">{error}</p>
         ) : sorted.length === 0 ? (
           <p className="muted small">No {label.toLowerCase()} found.</p>
         ) : (
