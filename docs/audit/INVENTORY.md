@@ -6,7 +6,8 @@ Structural audit. Findings are removed from this document as they are fixed.
 
 | Item | Commit | What closed |
 |---|---|---|
-| #1, the migratable half | `4779b7e` | Seven of the thirteen hand-mirrored modules and constant blocks now have one copy, with the CRM re-exporting it. The rule is written up in [PATTERNS.md](PATTERNS.md). Six mirrors remain — they need a pure-leaf extraction first and are still listed in [5.1](#51-the-remaining-hand-mirrored-modules). |
+| #1, the migratable half | `4779b7e` | Seven of the thirteen hand-mirrored modules and constant blocks now have one copy, with the CRM re-exporting it. The rule is written up in [PATTERNS.md](PATTERNS.md). |
+| #1, the remaining six mirrors — **item closed** | `b2e8339` `810c485` `0c129ab` `03bb6fb` `d81922c` | Each impure server module had its pure half extracted into a new leaf (`adminJobTypes`, `leadReasons`, `marketRateKeys`, `agingMath`), the engine re-exports its old surface, and the CRM barrels over the leaf — pattern 2 in [PATTERNS.md](PATTERNS.md). The sixth "mirror" (`planCadence` ← `seasonalCadenceCopy`) was not one; the phantom zero-caller canonical was deleted. One related gap stays open in [5.1](#51-hand-mirrored-modules--closed-one-related-gap-remains). |
 
 **Scope:** `apps/web/src` (marketing + funnel), `apps/web/amplify` (backend), `apps/crm/src` (CRM + portal + tech). 360 non-test TS/TSX files.
 **Excluded:** `node_modules`, `dist`, `creative`, and `.claude/worktrees/**` — the latter are three stale full-tree copies of the repo that inflate every file-count metric; nothing in this document refers to them.
@@ -21,7 +22,6 @@ Structural audit. Findings are removed from this document as they are fixed.
 
 | # | Finding | Section | Blast radius | Drifted today? |
 |---|---|---|---|---|
-| 1 | 6 hand-mirrored modules still duplicated, each blocked on a non-browser-safe server module | [5.1](#51-the-remaining-hand-mirrored-modules) | Both apps + backend | No — the drifted pairs are fixed |
 | 2 | Pagination: 4 `listAll` impls, 23 truncating `.list()` calls, 87 inline loops | [1.1](#11-apidata-fetching) | ~114 sites | Yes — silent truncation |
 | 3 | `err instanceof Error ? …` — 155 backend + ~102 frontend sites, zero helpers | [1.5](#15-error-handling) | ~200 sites | N/A (uniform) |
 | 4 | Money formatting: 15 impls, 3 incompatible output shapes | [1.2](#12-money-formatting) | ~110 sites | Yes — customer-facing |
@@ -420,8 +420,7 @@ All three stem from `apps/crm/src/lib/auth.tsx:54-58` collapsing `owner`/`office
 | `apps/web/amplify/functions/shared/bookingPayment.ts:185` | `bookingToBooked` |
 | `apps/web/amplify/functions/shared/bookingPayment.ts:258` | `getBooking` |
 | `apps/web/amplify/functions/shared/fieldRoutesImport.ts:163` | `adaptFieldRoutesRows` |
-| `apps/web/amplify/functions/shared/recovery.ts:110` | `invoiceAgingBucket` |
-| `apps/web/amplify/functions/shared/season.ts:108` | `seasonalCadenceCopy` |
+| `apps/web/amplify/functions/shared/recovery.ts` | `invoiceAgingBucket` |
 | `apps/web/amplify/functions/shared/staffAccessLog.ts:107` | `findStaffAccessEventByKey` |
 
 `bookingPayment.ts` itself is live (`booking-public/handler.ts:53-57`, `daily-reminders/handler.ts:55` import other symbols); three of its state-transition functions are dead.
@@ -599,26 +598,13 @@ Safe but shim-induced: `portal/Requests.tsx:111,122`, `QuoteHistory.tsx:216`.
 
 # 5. Missing patterns
 
-## 5.1 The remaining hand-mirrored modules
+## 5.1 Hand-mirrored modules — CLOSED; one related gap remains
 
-**Partly closed by `4779b7e`.** The original finding framed this as needing a `packages/` workspace. It did not: cross-app value imports already worked and already shipped, so seven of the thirteen mirrors became re-exports. The rule and the migration are in [PATTERNS.md](PATTERNS.md); what follows is only what is left.
+**Item #1 is fully closed** — see the resolved table at the top for commits, and [PATTERNS.md](PATTERNS.md) for the two rules it established (server-owned re-export; pure-leaf extraction). This section keeps only what those commits deliberately did NOT fix.
 
-**Six mirrors remain, all blocked on the same thing** — the server module is not browser-safe, so the CRM cannot import it. Each needs a pure-leaf extraction first (the `marketRate.ts` → `rateServing.ts` precedent).
+**A related gap, unfixed:** the CRM's `LEAD_TOUCH_CHANNELS` (`lib/api.ts`) has 4 channels where the server has 6 (`shared/leadLifecycle.ts:45` adds `BOOKING_LINK`, `THUMBTACK`), and the outcome list is ordered differently, which changes dropdown order. `LEAD_TOUCH_OUTCOMES` is likewise still hand-mirrored. This is a functional gap, not just duplication — fixing it is a behaviour change (dropdown contents change) and belongs in its own commit; when it lands, both vocabularies belong in `shared/leadReasons.ts` next to `LEAD_LOST_REASONS`.
 
-| Mirror | Blocker |
-|---|---|
-| `lib/aging.ts` + `lib/recovery.ts` ← `shared/recovery.ts` | Server module imports `dataClient`, `openOwnedWork`, `receipts` (SES), `subscription` → `stripeClient` (Stripe secret). Also incompatible bucket vocabulary (`"1-30"` vs `"D1_30"`) and different signatures. Needs a pure `agingMath.ts`. `shared/recovery.ts:16` and `lib/aging.ts:5-8` both carry "must agree — to the dollar" comments. |
-| `dueDateForTerms` (`lib/api.ts:688`) | Same blocker — it lives in `shared/recovery.ts`. |
-| `lib/jobTypes.ts` ← `crm-docs/handler.ts:4895` | Counterpart is inside a 5,900-line Lambda handler. Both sides carry "KEEP IN SYNC" comments. Empty today, so no drift yet, but `Set` vs `array` and a differing empty-string guard diverge the moment an entry is added. |
-| `lib/marketRates.ts` value helpers ← `shared/marketRate.ts` | Server module imports `@anthropic-ai/sdk`, `node:crypto`, `dataClient`. Six helpers are byte-identical (`PLAN_CADENCES`, `HOA_BANDS`, `hoaBandFor`, `areaKeyFor`, `sqftBucket`, `mirrorCents`). The existing **type-only** import at `marketRates.ts:1` must stay `import type`. |
-| `LEAD_LOST_REASONS` (`lib/api.ts:43`) | `shared/leadLifecycle.ts` is impure, and the shapes differ (`{code,label}[]` vs `string[]`). |
-| `lib/planCadence.ts` ← `shared/season.ts:107` | Shapes differ — the CRM interpolates a price, the server takes no arguments. `seasonalCadenceCopy()` has zero callers repo-wide; the real duplication is the literal string, which also appears at `bookingFinalize.ts:1818`, `bookingTerms.ts:35`, `booking-public/handler.ts:1973`, `resource.ts:640`. |
-
-**A related gap, unfixed:** the CRM's `LEAD_TOUCH_CHANNELS` (`lib/api.ts:52-56`) has 4 channels where the server has 6 (`shared/leadLifecycle.ts:44` adds `BOOKING_LINK`, `THUMBTACK`), and the outcome list is ordered differently, which changes dropdown order. This is a functional gap, not just duplication — fixing it is a behaviour change and belongs in its own commit.
-
-**Nothing enforces the remaining mirrors.** `apps/crm/package.json` `"test": "vitest run"` does **not** typecheck (unlike `apps/web`'s `"tsc --noEmit -p amplify && vitest run"`), and the CRM has **no eslint config at all**. The one cross-app parity test that existed (`lib/workPolicy.test.ts`) became unnecessary when that pair collapsed to a single copy. The remaining six have no guard; a parity test is the cheap interim measure until each is extracted.
-
-**Context that still holds:** there is no `packages/` directory and no root `package.json`. The CRM reaches backend code through deep relative paths (`../../../web/amplify/...`), which `amplify.yml:47-53` supports by running `cd ../web && npm ci` in the CRM `preBuild`, with `amplify.yml:81` caching `../web/node_modules/**/*`. That comment in `amplify.yml` still claims "nothing from apps/web ships in the CRM bundle", which has been false since `serviceCatalog` was value-imported.
+**Context that still holds:** there is no `packages/` directory and no root `package.json`. The CRM reaches backend code through deep relative paths (`../../../web/amplify/...`), which `amplify.yml:47-53` supports by running `cd ../web && npm ci` in the CRM `preBuild`, with `amplify.yml:81` caching `../web/node_modules/**/*`. That comment in `amplify.yml` still claims "nothing from apps/web ships in the CRM bundle", which has been false since `serviceCatalog` was value-imported — and is more false with each new leaf.
 
 
 ## 5.2 Repeated shapes with no home

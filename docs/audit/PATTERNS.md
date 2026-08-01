@@ -126,16 +126,13 @@ questions, name the questions in a comment and keep both.
 
 ### Blocked — do not attempt as a re-export
 
-These look migratable and are not. Each needs a pure-leaf extraction first.
+These look migratable and are not without more work. When the server module
+is impure, the fix is a pure-leaf extraction — that is pattern [2](#2-a-shared-fact-trapped-in-an-impure-module-gets-a-pure-leaf-extraction)
+below, and every mirror that was listed here has since been closed by it.
 
-| Mirror | Blocker |
-|---|---|
-| `lib/aging.ts` + `lib/recovery.ts` vs `shared/recovery.ts` | Server module imports `dataClient`, `openOwnedWork`, `receipts` (SES), and `subscription` to `stripeClient` (Stripe secret). Not browser-safe. Also different bucket vocabulary (`"1-30"` vs `"D1_30"`) and different signatures. Needs a pure `agingMath.ts`. |
-| `dueDateForTerms` (`lib/api.ts`) | Same blocker: it lives in `shared/recovery.ts`. |
-| `lib/jobTypes.ts` | Its counterpart is inside `crm-docs/handler.ts`, a 5,900-line Lambda. Needs extraction. |
-| `lib/marketRates.ts` value helpers | `shared/marketRate.ts` imports `@anthropic-ai/sdk`, `node:crypto`, `dataClient`. Needs a pure `marketRateKeys.ts`, following the `rateServing.ts` precedent. Its existing **type-only** import must stay `import type`. |
-| `LEAD_LOST_REASONS` (`lib/api.ts`) | `shared/leadLifecycle.ts` is impure, and the shapes differ (`{code,label}[]` vs `string[]`). |
-| `lib/planCadence.ts`, `lib/billingDisclosure.ts`, `lib/customerPresentation.ts` | No backend original. These are not mirrors. |
+| Mirror | Blocker | Outcome |
+|---|---|---|
+| `lib/planCadence.ts`, `lib/billingDisclosure.ts`, `lib/customerPresentation.ts` | No backend original. These are not mirrors. | `planCadence.ts` header now says so; the phantom `seasonalCadenceCopy()` (zero callers) was deleted in `d81922c`. |
 
 `shared/units.ts` is now load-bearing via `COMMON_UNITS`. It was previously
 listed as dead code; do not delete it in a dead-code pass.
@@ -173,3 +170,93 @@ shapes, and the 6 reason vocabularies before and after. Delete it once green.
   not wired into `amplify.yml`.
 - The `amplify.yml` CRM preBuild comment says "nothing from apps/web ships in the
   CRM bundle". That has been false since `serviceCatalog` was value-imported.
+
+---
+
+## 2. A shared fact trapped in an impure module gets a pure-leaf extraction
+
+*Established 2026-07-31 while closing the second half of INVENTORY.md item #1.*
+
+### The rule
+
+> When a fact both apps need lives inside a server module that is not a pure
+> leaf (it imports an SDK, `node:*`, or `dataClient`), do **not** copy the fact
+> into the CRM and do not try to import the impure module. Instead:
+>
+> 1. **Extract** the pure half into a new leaf under
+>    `apps/web/amplify/functions/shared/` — definitions moved **verbatim**,
+>    zero imports.
+> 2. The impure module **imports the leaf and re-exports its old public
+>    surface**, so none of its existing importers change.
+> 3. The CRM **value-imports the leaf** (directly, or through its existing
+>    `lib/` barrel so CRM callers don't change either).
+>
+> Both sides keep their own wrappers when they answer differently-shaped
+> questions — the *fact* is shared, the *signature* need not be.
+
+The result is that pattern [1](#1-shared-facts-live-on-the-server-and-are-re-exported-never-re-declared)
+applies again: one copy, on the server, re-exported.
+
+### Canonical location
+
+```
+apps/web/amplify/functions/shared/<domain>.ts       <- impure engine (unchanged surface)
+apps/web/amplify/functions/shared/<domainLeaf>.ts   <- NEW pure leaf: the extracted facts
+apps/crm/src/lib/<module>.ts                        <- barrel over the leaf + CRM-only extras
+```
+
+Leaves created this way, with the engine each was cut from:
+
+| Leaf | Cut from | Facts |
+|---|---|---|
+| `agingMath.ts` | `recovery.ts` (Stripe/SES/dataClient) | AR bucket boundaries + labels, due-basis rule, whole-day UTC arithmetic, terms→due-date |
+| `marketRateKeys.ts` | `marketRate.ts` (Anthropic SDK, `node:crypto`) | rate vocabulary/types, area/sqft/HOA-band keys, `parseSheet`, `mirrorCents` |
+| `adminJobTypes.ts` | `crm-docs/handler.ts` (5,900-line Lambda) | office-completable job types + match rule |
+| `leadReasons.ts` | `leadLifecycle.ts` (`node:crypto`, dataClient) | lead lost-reason codes **and** their dropdown labels |
+| `rateServing.ts` | `marketRate.ts` | (pre-existing precedent this pattern generalizes) |
+
+### Example
+
+`shared/recovery.ts` and the CRM's `lib/aging.ts` each carried the AR aging
+contract, and each said so — "mirrored on the frontend — keep the boundaries
+identical" on one side, "must agree — to the dollar" on the other. The CRM
+could not import the server copy because `recovery.ts` charges cards.
+
+The contract moved to `shared/agingMath.ts`; `recovery.ts` re-exports its old
+names (`export { agingBucketForDays as agingBucket } from "./agingMath"`), so
+`daily-reminders`, `stripe-webhook`, and `crm-billing` were untouched. The
+CRM's `aging.ts` became a barrel plus the CRM-shaped wrappers — its
+`daysPastDue(inv, today)` takes an explicit Eastern `today` while the server
+ages against UTC-now, a deliberate divergence now named in its header. The
+CRM's `api.ts` had a *third* private copy of `dueDateForTerms`; it is now a
+re-export.
+
+Commits: `03bb6fb` (agingMath), `0c129ab` (marketRateKeys), `b2e8339`
+(adminJobTypes), `810c485` (leadReasons), `d81922c` (planCadence — the
+sixth listed mirror, which turned out not to be one; its phantom zero-caller
+"canonical" was deleted instead).
+
+### What to watch
+
+- **Verbatim means verbatim.** The leaf's function bodies are cut-pasted, not
+  rewritten. Where the two old copies disagreed in shape (Set vs array,
+  differing empty-string guards in `adminJobTypes`), reconcile explicitly and
+  pin the reconciliation with the equivalence test below.
+- **Renamed identifiers are allowed only when internal.** The aging migration
+  unified the CRM's bucket ids onto the server's (`"1-30"` → `"D1_30"`). That
+  was safe because the ids never left the process — `useState` drill keys and
+  a `switch` — and every user-visible label was asserted identical. An id that
+  is persisted, or in a URL, is an API: keep it or migrate the stored data.
+- **Sentences are not facts.** Five sites "duplicating" the seasonal-cadence
+  wording were each composing their own customer-facing sentence around the
+  same facts. Sharing the facts (`season.ts`) is right; collapsing the
+  sentences would be a customer-visible copy change, not a refactor.
+- **The equivalence gate from pattern 1 applies with more force here**, since
+  extraction touches the engine too: run the pre-migration implementations
+  (verbatim, from `git show HEAD:<path>`) against the new code across boundary
+  inputs — bucket edges, DST/leap dates, parse-tolerance cases — then delete
+  the scratch test. The engine side should additionally stay pinned by its
+  existing unit tests without edits (`recovery.test.ts`, `marketRate.test.ts`
+  did).
+- **Run the bundle guard from pattern 1 after every one of these** — each adds
+  a new cross-app value import, which is exactly the silent-leak scenario.
