@@ -333,7 +333,17 @@ function BuildingsCard({ accountId }: { accountId: string }) {
         nextToken,
       })
     ).then((data) =>
-      setBuildings(data.sort((a, b) => (a.label ?? "").localeCompare(b.label ?? "")))
+      setBuildings(
+        data.sort((a, b) => {
+          // Unlabelled buildings sort last, not first.
+          const x = a.label ?? "";
+          const y = b.label ?? "";
+          if (!x && !y) return 0;
+          if (!x) return 1;
+          if (!y) return -1;
+          return x.localeCompare(y);
+        })
+      )
     );
   }, [accountId]);
 

@@ -277,7 +277,12 @@ function LegacyBackfill({
   useEffect(() => {
     client.models.ProducerLicense.list()
       .then(({ data }) => setLegacy(data))
-      .catch(() => setLegacy([]));
+      .catch((e) => {
+        // An empty list hides this card, so a failed read would look exactly
+        // like "nothing left to migrate" — and the import never gets offered.
+        setLegacy([]);
+        setError(e instanceof Error ? e.message : "Failed to load legacy licenses");
+      });
   }, []);
 
   const key = (userProfileId: unknown, state: unknown, num: unknown) =>
@@ -336,6 +341,15 @@ function LegacyBackfill({
 
   if (legacy === null) return null; // still loading
   if (pending.length === 0) {
+    if (error) {
+      return (
+        <div className="card">
+          <p className="error-text" style={{ margin: 0 }}>
+            Couldn't check onboarding for licenses to import: {error}
+          </p>
+        </div>
+      );
+    }
     // Nothing outstanding: show the confirmation once, then stay hidden.
     return result ? (
       <div className="card" style={{ borderLeft: "4px solid var(--green)" }}>

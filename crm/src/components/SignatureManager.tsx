@@ -32,9 +32,15 @@ export default function SignatureManager({
       setUrl(null);
       return;
     }
+    setError("");
     getUrl({ path: key })
       .then(({ url }) => setUrl(url.toString()))
-      .catch(() => setUrl(null));
+      .catch((err) => {
+        // There IS a signature on record — failing quietly here shows
+        // "None on file", which reads as a missing signature.
+        setUrl(null);
+        setError(err instanceof Error ? err.message : "Couldn't load signature");
+      });
   }, [key]);
 
   if (!profile) return <span className="muted small">—</span>;
@@ -108,7 +114,7 @@ export default function SignatureManager({
       }}
     />
   ) : (
-    <span className="muted small">None on file</span>
+    <span className="muted small">{key ? "—" : "None on file"}</span>
   );
 
   if (drawing) {

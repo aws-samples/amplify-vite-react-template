@@ -9,6 +9,7 @@ import {
   type ReactNode,
   type CSSProperties,
 } from "react";
+import { submitCrmLead, type CrmLeadInput } from "../lib/crmLead";
 
 /* ──────────────────────────────────────────────────────────
    PALETTES — dark (night) + light (day)
@@ -627,6 +628,59 @@ function buildSubmission(data: FormData, agentName: string) {
   }
 
   return payload;
+}
+
+/** Map the wizard's answers onto the CRM's web-lead shape. */
+function buildCrmLead(data: FormData, agentName: string): CrmLeadInput {
+  const get = (k: string) => (typeof data[k] === "string" ? (data[k] as string) : "");
+  const role = get("role");
+  const isOwner = role === "owner";
+  const contactName = get("contactName");
+  const association = get("associationName");
+  const nameParts = contactName.split(/\s+/).filter(Boolean);
+  const state = get("state");
+  const coverage = data.coverageNeeds;
+
+  const notes = [
+    `Role: ${ROLE_LABELS[role] || role || "—"}`,
+    `Assigned agent: ${agentName}`,
+    isOwner && association ? `Association: ${association}` : undefined,
+    !isOwner && get("unitCount") ? `Unit count: ${get("unitCount")}` : undefined,
+    !isOwner && get("propertyType")
+      ? `Property type: ${PROPERTY_LABELS[get("propertyType")] || get("propertyType")}`
+      : undefined,
+    !isOwner && get("yearBuilt") ? `Year built: ${get("yearBuilt")}` : undefined,
+    !isOwner && Array.isArray(coverage) && coverage.length
+      ? `Coverage needs: ${coverage.map((v) => COVERAGE_LABELS[v] || v).join(", ")}`
+      : undefined,
+    !isOwner && get("renewalDate") ? `Renewal date: ${get("renewalDate")}` : undefined,
+    isOwner && get("masterDeductible")
+      ? `Knows master deductible: ${DEDUCTIBLE_LABELS[get("masterDeductible")] || get("masterDeductible")}`
+      : undefined,
+    isOwner && get("deductibleAmount")
+      ? `Master policy deductible: ${get("deductibleAmount")}`
+      : undefined,
+    isOwner && get("ho6Need")
+      ? `What they need: ${HO6_LABELS[get("ho6Need")] || get("ho6Need")}`
+      : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    type: isOwner ? "PERSONAL" : "ASSOCIATION",
+    name: (isOwner ? contactName || association : association || contactName) || "Quote request",
+    contactFirstName: nameParts[0] || undefined,
+    contactLastName: nameParts.slice(1).join(" ") || undefined,
+    contactEmail: get("contactEmail") || undefined,
+    contactPhone: get("contactPhone") || undefined,
+    city: get("city") || undefined,
+    // "OTHER" is a flow branch, not a state — don't write it to the CRM.
+    state: state && state !== "OTHER" ? state : undefined,
+    currentCarrier: (!isOwner && get("currentCarrier")) || undefined,
+    source: "website-quote",
+    notes,
+  };
 }
 
 async function sendQuoteEmail(data: FormData, agentName: string): Promise<void> {
@@ -1362,6 +1416,8 @@ function QuoteFlow({ isDay, onToggleTheme }: { isDay: boolean; onToggleTheme: ()
   async function submitForm(finalData: FormData) {
     setSubmitting(true);
     setError("");
+    // CRM lead (fail-soft, runs alongside the notification email)
+    void submitCrmLead(buildCrmLead(finalData, agent.name));
     try {
       await sendQuoteEmail(finalData, agent.name);
       setDirection(1);

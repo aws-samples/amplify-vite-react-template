@@ -16,7 +16,8 @@ next pass. Canonical implementations for resolved findings live in
 [PATTERNS.md](PATTERNS.md).
 
 Resolved so far: filtered `.list()` without pagination
-([PATTERNS.md §1](PATTERNS.md#1-paginated-list-reads)).
+([PATTERNS.md §1](PATTERNS.md#1-paginated-list-reads)); Wave 0 shipping bugs
+([PATTERNS.md §2–§6](PATTERNS.md)).
 
 ---
 
@@ -26,21 +27,20 @@ Resolved so far: filtered `.list()` without pagination
 |---|---|---|---|---|
 | 1 | UI permission checks are decorative; backend is `allow.authenticated()` for every model | Very high | 12 models, 5 UI gates | [1.5](#15-authpermission-checks) |
 | 2 | Two unsynchronized notions of "admin" (`UserProfile.role` vs Cognito group) + self-selected role at onboarding | Very high | 2 authorities, 5 consumers | [1.5](#15-authpermission-checks) |
-| 3 | 15 of 18 registered ACORD forms have no field mapping but ship a live Generate button | High | 15 forms | [3.5](#35-registered-but-unmapped-acord-forms) |
-| 4 | `acord.ts` — 1,068 lines, 8 responsibilities | High | 1 file, all PDF output | [2](#2-file-size-offenders) |
-| 5 | Error handling: `friendlyError` bypassed at 15 of 22 sites | Medium-high | 22 sites | [1.4](#14-error-handling) |
-| 6 | 24 silent catches, 6 of which hide data loss | High | 24 sites | [1.4](#14-error-handling) |
-| 7 | Same entity re-fetched by up to 7 components independently | Medium | 7 models | [1.2](#12-state-management) |
-| 8 | Sorting: 15 hand-rolled sorts vs 6 using `useSort`; nulls-first bug in the hand-rolled ones | Medium | 21 tables | [1.3](#13-tablelist-rendering) |
-| 9 | Form state: 13 forms one-`useState`-per-field vs 5 object-based | Medium | 18 forms | [1.6](#16-form-handling--validation) |
-| 10 | `as never` ×4 and `as` ×40 papering over enum/list-type mismatches | Medium | 44 casts | [4](#4-type-drift) |
-| 11 | Date/money formatting bypassing the shared helpers | Medium | 24 sites | [1.7](#17-date--money--number-formatting) |
-| 12 | Timezone split: UTC in Lambda, local in browser, on the same fields | Medium | 5 sites | [1.7](#17-date--money--number-formatting) |
-| 13 | `QuoteApp.tsx` never calls `submitCrmLead` — longest form on the site creates no CRM record | High | 1 site | [5.10](#510-lead-submission--analytics-wrapper) |
-| 14 | Business rule "quote satisfies task" implemented twice with divergent null semantics | Medium | 2 impls | [5.12](#512-shared-business-rule-frontend--lambda) |
-| 15 | No toast system — 6 success-feedback variants, 8 mutations with no feedback | Low-medium | 14 sites | [1.8](#18-toastsnotifications) |
-| 16 | Confirm-destructive rebuilt 4× with 3 label sets; 2 destructive actions unguarded | Medium | 6 sites | [1.9](#19-modals--overlays) |
-| 17 | Dead schema fields and unused exports | Low | 21 symbols | [3](#3-dead-code) |
+| 3 | `acord.ts` — 1,092 lines, 8 responsibilities | High | 1 file, all PDF output | [2](#2-file-size-offenders) |
+| 4 | Error handling: `friendlyError` bypassed at 15 of 22 sites | Medium-high | 22 sites | [1.4](#14-error-handling) |
+| 5 | Same entity re-fetched by up to 7 components independently | Medium | 7 models | [1.2](#12-state-management) |
+| 6 | Sorting: 15 hand-rolled sorts vs 6 using `useSort` | Medium | 21 tables | [1.3](#13-tablelist-rendering) |
+| 7 | Form state: 13 forms one-`useState`-per-field vs 5 object-based | Medium | 18 forms | [1.6](#16-form-handling--validation) |
+| 8 | `as never` ×4 and `as` ×40 papering over enum/list-type mismatches | Medium | 44 casts | [4](#4-type-drift) |
+| 9 | Date/money formatting bypassing the shared helpers | Medium | 24 sites | [1.7](#17-date--money--number-formatting) |
+| 10 | Timezone split: UTC in Lambda, local in browser, on the same fields | Medium | 5 sites | [1.7](#17-date--money--number-formatting) |
+| 11 | 18 remaining silent catches (the 6 hiding data loss are fixed) | Medium | 18 sites | [1.4](#14-error-handling) |
+| 12 | Business rule "quote satisfies task" implemented twice (semantics now agree) | Medium | 2 impls | [5.12](#512-shared-business-rule-frontend--lambda) |
+| 13 | No toast system — 6 success-feedback variants, 8 mutations with no feedback | Low-medium | 14 sites | [1.8](#18-toastsnotifications) |
+| 14 | Confirm-destructive rebuilt 4× with 3 label sets; 2 destructive actions unguarded | Medium | 6 sites | [1.9](#19-modals--overlays) |
+| 15 | 15 of 18 registered ACORD forms still have no field mapping (Generate is now disabled for them) | Low-medium | 15 forms | [3.5](#35-registered-but-unmapped-acord-forms) |
+| 16 | Dead schema fields and unused exports | Low | 21 symbols | [3](#3-dead-code) |
 
 ---
 
@@ -106,8 +106,18 @@ Three Carrier fetches occur inside a single `AccountDetail` render (`QuotesPanel
 - No sort: `CarrierDetail.tsx:414`, `Carriers.tsx:232`, `Settings.tsx:143`, `ExtractionPanel.tsx:132`, `Licensing.tsx:371`, `NewLead.tsx:245`, `FormsTab.tsx:137`, `MarketingTasks.tsx:223`.
 
 - Most used: hand-rolled (15 sorts across ~17 non-`useSort` tables) vs 6 `useSort`.
-- Most correct: `useSort` (`crm/src/lib/useSort.tsx:10`) — the only one with nulls-always-last (`:35-39`) and locale-aware compare (`:41`). Every hand-rolled `localeCompare` on a `?? ""` fallback sorts missing dates **first** ascending — the exact bug `useSort` exists to prevent (`MarketingTasks.tsx:186`, `AccountDetail.tsx:442`).
+- Most correct: `useSort` (`crm/src/lib/useSort.tsx:10`) — the only one with nulls-always-last (`:35-39`) and locale-aware compare (`:41`).
 - **Canonical: `useSort` + `SortTh` for every `<table>` with a `<thead>`.**
+
+**Nulls-first ordering — resolved.** Every hand-rolled sort was walked. Only
+three were ascending on a `?? ""` fallback and therefore sorted missing values
+first: `MarketingTasks.tsx:204` (`submitBy`), `PropertyPanel.tsx:336` (building
+`label`), `Team.tsx:152` (`email`). All three now match `useSort`'s null-last
+semantics. The remaining hand-rolled sorts are `createdAt`-descending, where
+`?? ""` already lands nulls last — verified per site, left alone. See
+[PATTERNS.md §2](PATTERNS.md#2-null-ordering-in-hand-rolled-sorts). (The
+original audit cited `AccountDetail.tsx:442` as an ascending exemplar; it is
+descending and was always correct.)
 
 Direct conflict: `MarketingTask` is sorted by `useSort` at `MarketingTasks.tsx:287` and by inline `localeCompare` at `MarketingTasks.tsx:186` — same file.
 
@@ -147,18 +157,18 @@ Three shapes of `errors?.length` handling coexist: throw (`CoverageForm.tsx:153,
 - Most correct: `friendlyError` — only one translating AppSync `Variable 'x' has an invalid value` and `Not Authorized`, and accepts `unknown` so it can't itself throw.
 - **Canonical: `friendlyError` everywhere in `crm/src`; fold the template-missing regex into it.**
 
-**Silent catches hiding data loss (6 of 24)**
+**Silent catches hiding data loss — resolved (6 of 24).** All six now surface
+the failure through whatever channel their file already had. See
+[PATTERNS.md §3](PATTERNS.md#3-a-catch-block-may-not-render-the-success-or-empty-state).
 
-| Site | Hidden outcome |
-|---|---|
-| `crm/src/pages/NewLead.tsx:98` | Staged document uploads fail per-file; lead is created and user navigated away with no indication attachments were lost |
-| `web/src/components/CoverageCalculator.tsx:267` | Catch calls `setEmailSent(true)` — a failed lead submission renders the identical success state |
-| `crm/src/components/SignatureManager.tsx:37` | Signed-URL failure renders as "None on file" — looks like missing data |
-| `crm/src/lib/acord.ts:495`, `:506` | Signature fetch/download failure ⇒ forms generate **unsigned**, silently |
-| `crm/src/components/MarketingTasks.tsx:114` | Load failure renders as "no tasks" |
-| `crm/src/components/Licensing.tsx:280` | Failed `ProducerLicense.list()` indistinguishable from "nothing to migrate"; backfill card never appears |
+Remaining silent catches (18), none currently known to hide data loss: `MagicLinkSignIn.tsx:36`, `ExtractionPanel.tsx:142`, `DocumentsPanel.tsx:100,119,353`, `Licensing.tsx:325`, `SignatureManager.tsx:59,83`, `googlePlaces.tsx:84`, `Team.tsx:28`, `AccountDetail.tsx:378`, `PropertyPanel.tsx:480,491`, `acord.ts:423,452,565,578,602,605`, `QuoteApp.tsx:132,140,148,848,1182,1193`, `InstantAssessment.tsx:82`, `CoverageCalculator.tsx:182`, `crmLead.ts:62`. Line numbers predate the Wave 0 edits.
 
-Remaining silent catches: `MagicLinkSignIn.tsx:36`, `ExtractionPanel.tsx:142`, `DocumentsPanel.tsx:100,119,353`, `Licensing.tsx:325`, `SignatureManager.tsx:59,83`, `googlePlaces.tsx:84`, `Team.tsx:28`, `AccountDetail.tsx:378`, `PropertyPanel.tsx:480,491`, `acord.ts:423,452,565,578,602,605`, `QuoteApp.tsx:132,140,148,848,1182,1193`, `InstantAssessment.tsx:82`, `CoverageCalculator.tsx:182`, `crmLead.ts:62`.
+Two adjacent gaps found while fixing the six, deliberately left for a later
+wave because neither renders as absent data: `AllMarketingTasks`
+(`MarketingTasks.tsx:275-285`) has a `.then()` with no `.catch()`, so a failed
+load sits on "Loading…" forever with an unhandled rejection; `stampSignature`'s
+internal `catch { return false }` (`acord.ts:423`) is still silent, but its
+`false` now reaches the user via `FillResult.unsigned`.
 
 Unawaited CRM writes (`void submitCrmLead(...)`) — failures invisible: `AssociationLeadForm.tsx:45`, `InstantAssessment.tsx:99`, `ContactForm.tsx:17`, `CoverageCalculator.tsx:226`.
 
@@ -314,12 +324,12 @@ Files over 500 lines.
 
 | Lines | File | Distinct responsibilities |
 |---|---|---|
-| 1,578 | `web/src/components/QuoteApp.tsx` | Step-machine wizard engine; question schema; validation (`:324-326`); localStorage persistence (`:112-148`); theme mode (`:848`, `:1182-1193`); agent assignment; FormSubmit email post (`:535`, `:580`); Google Ads conversion (`:1372-1378`); confetti (`:1254`, `:1381`); results rendering. **Does not import `crmLead`** — see [5.10](#510-lead-submission--analytics-wrapper) |
-| 1,068 | `crm/src/lib/acord.ts` | Template registry (`:30-75`); ACORD 25 mapping (`:89`); shared eForm header (`:745-779`); ACORD 125 mapping (`:781`); ACORD 140 mapping (`:1016`); date helper `fmtUs` (`:85`); money helper `amt` (`:256`); operations-summary prose generator (`:670`); signature stamping (`:409-460`); signature lookup (`:487`); S3 template fetch (`:512`); field-fill engine + NeedAppearances fallback (`:537-610`) |
-| 1,034 | `crm/src/components/Licensing.tsx` | Data load (`:40`); text+attention filter (`:64-83`); summary stats (`:86-100`); legacy `ProducerLicense` backfill (`:263-347`); license table + grouping + collapse (`:428-700`); license create/edit form (`:695-930`); state-coverage matrix (`:935-1032`) |
-| 827 | `crm/src/pages/AccountDetail.tsx` | Tab routing (`:37-45`); celebration trigger (`:60-70`); Overview form (`:141-350`); `DeleteLeadZone` cascade delete (`:357-428`); PoliciesTab (`:430-540`); CertificatesTab incl. COI generation (`:545-825`) |
+| 1,634 | `web/src/components/QuoteApp.tsx` | Step-machine wizard engine; question schema; validation (`:324-326`); localStorage persistence (`:112-148`); theme mode; agent assignment; FormSubmit email post; CRM lead mapping (`:633-681`); Google Ads conversion; confetti; results rendering |
+| 1,092 | `crm/src/lib/acord.ts` | Template registry (`:30-75`); ACORD 25 mapping (`:89`); shared eForm header (`:745-779`); ACORD 125 mapping (`:781`); ACORD 140 mapping (`:1016`); date helper `fmtUs` (`:85`); money helper `amt` (`:256`); operations-summary prose generator (`:670`); signature stamping (`:409-460`); signature lookup (`:487`); S3 template fetch (`:512`); field-fill engine + NeedAppearances fallback (`:537-610`) |
+| 1,048 | `crm/src/components/Licensing.tsx` | Data load (`:40`); text+attention filter (`:64-83`); summary stats (`:86-100`); legacy `ProducerLicense` backfill (`:263-347`); license table + grouping + collapse (`:428-700`); license create/edit form (`:695-930`); state-coverage matrix (`:935-1032`) |
+| 850 | `crm/src/pages/AccountDetail.tsx` | Tab routing (`:37-45`); celebration trigger (`:60-70`); Overview form (`:141-350`); `DeleteLeadZone` cascade delete (`:357-428`); PoliciesTab (`:430-540`); CertificatesTab incl. COI generation (`:545-825`) |
 | 633 | `crm/src/pages/CarrierDetail.tsx` | Carrier detail form (`:45-330`); appetite guide list + delete confirm (`:308-470`); appetite guide create/edit form (`:475-630`) |
-| 593 | `crm/src/components/PropertyPanel.tsx` | Property form (`:40-300`); buildings CRUD (`:309-450`); photo upload/preview/delete ×3 (`:455-530`) |
+| 608 | `crm/src/components/PropertyPanel.tsx` | Property form (`:40-300`); buildings CRUD (`:309-450`); photo upload/preview/delete ×3 (`:455-530`) |
 | 505 | `crm/amplify/data/resource.ts` | 12 models + 15 enums + 6 custom operations + authorization |
 
 ---
@@ -379,9 +389,11 @@ No TODO/FIXME/XXX/HACK markers and no commented-out code blocks in scope.
 
 `buildAppFormValues` (`crm/src/lib/acord.ts:709`) has three `formKey` branches: `acord125` (`:781`), `acord126` (`:1011` — **empty, comment only**), `acord140` (`:1016`). `acord25` never reaches this function (excluded at `FormsTab.tsx:8`; served by `buildAcord25Values` at `:89`).
 
-**15 of 18 registry entries receive only the shared header, yet all ship a live Generate button (`FormsTab.tsx:137-152`):** `acord126` (`:46`), `acord131` (`:61`), `acord141` (`:62`), `acord159` (`:63`), `acord160` (`:64`), `acord810` (`:65`), `acord823` (`:66`), `acord45` (`:67`), `acord101` (`:68`), `acord24` (`:69`), `acord27` (`:70`), `acord28` (`:71`), `acord35` (`:72`), `acord36` (`:73`), `acord75` (`:74`).
+**15 of 18 registry entries receive only the shared header.** `acord126`, `acord131`, `acord141`, `acord159`, `acord160`, `acord810`, `acord823`, `acord45`, `acord101`, `acord24`, `acord27`, `acord28`, `acord35`, `acord36`, `acord75`.
 
-Mapped: `acord125` (`:41`→`:781`), `acord140` (`:52`→`:1016`).
+Mapped: `acord125`, `acord140` (both via `buildAppFormValues`), `acord25` (via `buildAcord25Values`).
+
+**Live Generate button — resolved.** `MAPPED_APP_FORM_KEYS` (`crm/src/lib/acord.ts:719`) is the single source of truth; `FormsTab.tsx` disables Generate for anything outside it and says why. See [PATTERNS.md §5](PATTERNS.md#5-a-generate-button-is-gated-on-a-mapping-existing). The 15 mappings themselves remain unwritten — a feature gap, no longer a way to emit a blank form.
 
 ### 3.6 Redundant code inside the one real mapping
 
@@ -443,7 +455,7 @@ Mapped: `acord125` (`:41`→`:781`), `acord140` (`:52`→`:1016`).
 - Lexicographic compare standing in for date compare (correct only because ISO-8601 sorts): `CoverageForm.tsx:114`, `Licensing.tsx:742`, `FormsTab.tsx:61`, `MarketingTasks.tsx:51`, `renewal-tasks/handler.ts:164`, `:173`
 - Type discriminated by string length: `client.ts:134` — `d.length === 10` decides date vs datetime
 - `.slice(0,10)` as a datetime→date downcast: `Team.tsx:192`, `AccountDetail.tsx:80`, `MarketingTasks.tsx:46`, `:51`, `renewal-tasks/handler.ts:164`, `:230`
-- **Divergent null-fallback for the same comparison:** `renewal-tasks/handler.ts:230` uses `?? today`; `MarketingTasks.tsx:46` uses `?? ""`, and `x >= ""` is always true — the client-side settle is unbounded where the nightly job is bounded
+- Divergent null-fallback for the same comparison — resolved; both sides now use `?? today` on the UTC calendar ([5.12](#512-shared-business-rule-frontend--lambda))
 
 **JSON-in-a-string.** `resource.ts:132`, `:237`, `:292`, and every custom op (`:442`, `:454`, `:459`, `:467`, `:476`). Consumers defend against single- *or* double-encoding — the encoding depth is itself unknown: `ExtractionPanel.tsx:140-141`, `DocumentsPanel.tsx:351-352` (both call `JSON.parse` twice), `Team.tsx:24-33`, `AccountDetail.tsx:587`.
 
@@ -557,7 +569,12 @@ Drift inside `web` itself: `QuoteApp.tsx:534-535` hardcodes `"insurance@protectm
 
 Identical seven-line Google Ads conversion block, same `send_to: "AW-18085022517/Csp3COKBgpscELWWzq9D"`: `AssociationLeadForm.tsx:87-93`, `InstantAssessment.tsx:131-137`, `CoverageCalculator.tsx:259-265`, `QuoteApp.tsx:1372-1378`. Each preceded by the same `fetch(FORMSUBMIT_URL, {… _captcha:"false" …})`: `AssociationLeadForm.tsx:63-69`, `InstantAssessment.tsx:112-118`, `ContactForm.tsx:27-33`, `CoverageCalculator.tsx:243-249`, `QuoteApp.tsx:535`+`:580`.
 
-**Consequence:** four of five forms pair the email post with `submitCrmLead` (`AssociationLeadForm.tsx:45`, `InstantAssessment.tsx:99`, `ContactForm.tsx:17`, `CoverageCalculator.tsx:226`) — **`QuoteApp.tsx` does not import `crmLead` at all** (verified: zero matches in the file), so the longest form on the site emails the lead but never creates the CRM record.
+**Lost quote-wizard leads — resolved.** All five forms now pair the email post
+with `submitCrmLead`; `QuoteApp.tsx:1419` fires it via `buildCrmLead`
+(`:633-681`), which maps the wizard's 16 answer fields onto `CrmLeadInput`. See
+[PATTERNS.md §4](PATTERNS.md#4-every-lead-capture-form-writes-to-the-crm). The
+wrapper consolidation itself (one shared submit-lead-plus-conversion helper) is
+still outstanding — that is the duplication above.
 
 ### 5.11 Error-normalizer used consistently — 15 bypasses vs 7 uses
 
@@ -565,8 +582,20 @@ See [1.4](#14-error-handling). Three sites wrap a GraphQL errors array back into
 
 ### 5.12 Shared business rule frontend ↔ Lambda
 
-"A quote satisfies an open marketing task" is implemented twice: `MarketingTasks.tsx:39-64` `settleSatisfiedTasks` and `renewal-tasks/handler.ts:159-165` + `:228-240`. Both compute `since = t.triggerDate ?? t.createdAt?.slice(0,10)`, match on `carrierId` + `accountId` + `createdAt.slice(0,10) >= since`, and write the same completion payload. Divergence: the null fallback is `""` client-side (`:46`) and `today` in the Lambda (`:230`), so a task with neither date auto-completes in the browser and does not in the nightly sweep.
+"A quote satisfies an open marketing task" is implemented twice: `MarketingTasks.tsx:39-64` `settleSatisfiedTasks` and `renewal-tasks/handler.ts:159-165` + `:228-240`. Both compute `since = t.triggerDate ?? t.createdAt?.slice(0,10)`, match on `carrierId` + `accountId` + `createdAt.slice(0,10) >= since`, and write the same completion payload.
+
+**Divergent null semantics — resolved.** The client used `?? ""`, and `x >= ""`
+is always true, so *any* quote for that carrier — including one from a prior
+term — silently completed an open task on every mount of the account Quotes
+tab. Both sides now use `?? today` on the UTC calendar (the right-hand operand
+is a server-assigned UTC `createdAt`, so UTC is correct on the merits, not only
+for parity). See [PATTERNS.md §6](PATTERNS.md#6-a-rule-shared-with-a-lambda-matches-the-lambda).
+
+**Open:** the rule is still written twice. Extracting it into a module both the
+browser and the handler import is later-wave work. Also worth a separate data
+check: `MarketingTask` rows with `completedBy: "system (quote created)"` may
+have been completed by the unbounded comparison and never actually marketed.
 
 ### 5.13 Sort-by-`createdAt`-descending — 4 occurrences
 
-`(b.createdAt ?? "").localeCompare(a.createdAt ?? "")` at `FormsTab.tsx:36`, `QuotesPanel.tsx:76`, `DocumentsPanel.tsx:62-64`, `DocumentSearch.tsx:40`. `crm/src/lib/useSort.tsx` already exists as the home for a newest-first default.
+`(b.createdAt ?? "").localeCompare(a.createdAt ?? "")` at `FormsTab.tsx:45`, `QuotesPanel.tsx:80`, `DocumentsPanel.tsx:62-64`, `DocumentSearch.tsx:37`. `crm/src/lib/useSort.tsx` already exists as the home for a newest-first default. All four are correct as written (descending puts the `""` fallback last) — this is duplication, not a bug.

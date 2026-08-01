@@ -149,7 +149,15 @@ export default function Team({ profile }: { profile: UserProfile }) {
               </thead>
               <tbody>
                 {[...users]
-                  .sort((a, b) => (a.email ?? "").localeCompare(b.email ?? ""))
+                  .sort((a, b) => {
+                    // A user with no email sorts last, not to the top of the list.
+                    const x = a.email ?? "";
+                    const y = b.email ?? "";
+                    if (!x && !y) return 0;
+                    if (!x) return 1;
+                    if (!y) return -1;
+                    return x.localeCompare(y);
+                  })
                   .map((u) => {
                     const p = profileFor(u);
                     return (

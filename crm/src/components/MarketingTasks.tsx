@@ -41,9 +41,13 @@ export async function settleSatisfiedTasks(
   quotes: Quote[]
 ): Promise<MarketingTask[]> {
   const settled: MarketingTask[] = [];
+  // Same UTC calendar the nightly sweep uses, so a task carrying neither
+  // date falls back to the same day here as it does there. "" would make
+  // every comparison below true and close tasks nothing had satisfied.
+  const today = new Date().toISOString().slice(0, 10);
   for (const t of tasks) {
     if (t.status !== "OPEN") continue;
-    const since = t.triggerDate ?? t.createdAt?.slice(0, 10) ?? "";
+    const since = t.triggerDate ?? t.createdAt?.slice(0, 10) ?? today;
     const hit = quotes.some(
       (q) =>
         q.carrierId === t.carrierId &&
@@ -75,6 +79,7 @@ export default function AccountMarketingTasks({
   const [loaded, setLoaded] = useState(false);
   const [showDone, setShowDone] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
   const settledOnce = useRef(false);
 
   async function load() {
@@ -111,7 +116,13 @@ export default function AccountMarketingTasks({
 
   useEffect(() => {
     settledOnce.current = false;
-    load().catch(() => setLoaded(true));
+    setError("");
+    load().catch((e) => {
+      // The card hides itself when there are no tasks, so a swallowed
+      // failure is indistinguishable from an account with none.
+      setError(e instanceof Error ? e.message : "Failed to load marketing tasks");
+      setLoaded(true);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
@@ -145,6 +156,13 @@ export default function AccountMarketingTasks({
   const done = tasks.filter((t) => t.status === "COMPLETE");
 
   if (!loaded) return null;
+  if (error)
+    return (
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>Marketing tasks</h2>
+        <p className="error-text">Couldn't load marketing tasks: {error}</p>
+      </div>
+    );
   if (tasks.length === 0) return null;
 
   return (
@@ -183,7 +201,15 @@ export default function AccountMarketingTasks({
             <tbody>
               {open
                 .slice()
-                .sort((a, b) => (a.submitBy ?? "").localeCompare(b.submitBy ?? ""))
+                .sort((a, b) => {
+                  // No submit-by date sorts last — it never beats a real deadline.
+                  const x = a.submitBy ?? "";
+                  const y = b.submitBy ?? "";
+                  if (!x && !y) return 0;
+                  if (!x) return 1;
+                  if (!y) return -1;
+                  return x.localeCompare(y);
+                })
                 .map((t) => {
                   const u = taskUrgency(t);
                   return (

@@ -80,6 +80,7 @@ export interface FillResult {
   bytes: Uint8Array;
   filled: string[]; // logical fields written
   missing: string[]; // logical fields with no matching PDF field
+  unsigned?: string; // why the signature isn't on the document, if it isn't
 }
 
 const fmtUs = (d: string | null | undefined) =>
@@ -468,10 +469,16 @@ const SIGNATURE_NAME_FIELDS = [
 ];
 
 export interface SignatureInfo {
-  /** S3 key under signatures/ */
+  /** S3 key under signatures/. Empty when `error` says why there isn't one. */
   key: string;
   /** Printed name that accompanies the mark. */
   name: string;
+  /**
+   * Set when the lookup failed, as opposed to the signer simply having no
+   * signature on file. The form still generates — unsigned — and this is
+   * reported back through FillResult.unsigned.
+   */
+  error?: string;
 }
 
 /**
@@ -492,20 +499,22 @@ export async function signatureFor(
       key: data.signatureKey,
       name: `${data.firstName} ${data.lastName}`.trim(),
     };
-  } catch {
-    return null;
+  } catch (err) {
+    // Not the same as "no signature on file" — say so, or the form comes
+    // out unsigned and nobody finds out until the carrier does.
+    return {
+      key: "",
+      name: "",
+      error: err instanceof Error ? err.message : "signature lookup failed",
+    };
   }
 }
 
-/** Fetch a stored signature PNG. Returns null when there isn't one. */
-async function loadSignature(key: string): Promise<Uint8Array | null> {
-  try {
-    const { body } = await downloadData({ path: key }).result;
-    const blob = await body.blob();
-    return new Uint8Array(await blob.arrayBuffer());
-  } catch {
-    return null;
-  }
+/** Fetch a stored signature PNG. Throws if the object can't be read. */
+async function loadSignature(key: string): Promise<Uint8Array> {
+  const { body } = await downloadData({ path: key }).result;
+  const blob = await body.blob();
+  return new Uint8Array(await blob.arrayBuffer());
 }
 
 async function fetchTemplate(path: string): Promise<ArrayBuffer> {
@@ -569,6 +578,9 @@ async function fillTemplate(
 
   // ── Signature ──
   // Stamped after the text fields so the printed name is already in place.
+  // An unsigned form is a document-integrity problem, so every way the mark
+  // can go missing is reported back instead of swallowed.
+  let unsigned = signature?.error;
   if (signature?.key) {
     for (const nameField of SIGNATURE_NAME_FIELDS) {
       if (!fieldNames.has(nameField)) continue;
@@ -580,14 +592,19 @@ async function fillTemplate(
       }
       break;
     }
-    const png = await loadSignature(signature.key);
-    if (png) {
+    try {
+      const png = await loadSignature(signature.key);
+      let stamped = false;
       for (const sigField of SIGNATURE_FIELDS) {
         if (!fieldNames.has(sigField)) continue;
-        const ok = await stampSignature(pdf, sigField, png);
-        if (ok) filled.push("signature");
+        stamped = await stampSignature(pdf, sigField, png);
         break;
       }
+      if (stamped) filled.push("signature");
+      else unsigned = "this template has no signature field the mapping knows";
+    } catch (err) {
+      unsigned =
+        err instanceof Error ? err.message : "the signature image wouldn't load";
     }
   }
 
@@ -607,7 +624,7 @@ async function fillTemplate(
     }
     bytes = await pdf.save({ updateFieldAppearances: false });
   }
-  return { bytes, filled, missing };
+  return { bytes, filled, missing, unsigned };
 }
 
 export async function fillAcord25(
@@ -698,6 +715,13 @@ export function operationsSummary(
   if (account.yearBuilt) bits.push(`constructed ${account.yearBuilt}`);
   return bits.join(" ") + ".";
 }
+
+/**
+ * Registry keys buildAppFormValues actually has a mapping branch for. Every
+ * other entry would generate with nothing but the shared header, so the UI
+ * keeps its Generate button off. Add a key here when you add its branch.
+ */
+export const MAPPED_APP_FORM_KEYS = new Set(["acord125", "acord140"]);
 
 /**
  * Shared applicant/producer values for the application-section forms.

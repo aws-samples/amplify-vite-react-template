@@ -10,6 +10,8 @@ export default function NewLead() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  // Set once the lead exists — pressing Create again would duplicate it.
+  const [createdId, setCreatedId] = useState<string | null>(null);
   const [form, setForm] = useState({
     type: "ASSOCIATION",
     name: "",
@@ -75,6 +77,7 @@ export default function NewLead() {
 
     // Upload any staged documents to the new account so OCR + AI extraction
     // are ready when they land on the Documents tab.
+    const failedUploads: string[] = [];
     for (const file of stagedFiles) {
       try {
         const { data: doc } = await client.models.Document.create({
@@ -87,7 +90,10 @@ export default function NewLead() {
           sizeBytes: file.size,
           ocrStatus: "PENDING",
         });
-        if (!doc) continue;
+        if (!doc) {
+          failedUploads.push(file.name);
+          continue;
+        }
         const path = `documents/ACCOUNT/${data.id}/${doc.id}/${file.name}`;
         await client.models.Document.update({ id: doc.id, s3Key: path });
         await uploadData({
@@ -96,11 +102,22 @@ export default function NewLead() {
           options: { contentType: file.type || undefined },
         }).result;
       } catch {
-        /* a failed upload shouldn't block lead creation */
+        // A failed upload shouldn't block lead creation, but navigating away
+        // without saying so loses the attachment silently.
+        failedUploads.push(file.name);
       }
     }
 
     setSaving(false);
+    if (failedUploads.length) {
+      const many = failedUploads.length > 1;
+      setCreatedId(data.id);
+      setError(
+        `The lead was created, but ${failedUploads.length} document${many ? "s" : ""} didn't upload: ` +
+          `${failedUploads.join(", ")}. Open the lead and add ${many ? "them" : "it"} from the Documents tab.`
+      );
+      return;
+    }
     // Land on Documents so OCR completes and AI extraction is the next step.
     navigate(`/accounts/${data.id}?tab=documents`);
   }
@@ -266,15 +283,24 @@ export default function NewLead() {
         )}
 
         <div className="form-actions">
-          <button className="primary" disabled={saving} onClick={save}>
-            {saving
-              ? stagedFiles.length
-                ? "Creating & uploading…"
-                : "Creating…"
-              : stagedFiles.length
-                ? `Create lead & upload ${stagedFiles.length} document${stagedFiles.length > 1 ? "s" : ""}`
-                : "Create lead"}
-          </button>
+          {createdId ? (
+            <button
+              className="primary"
+              onClick={() => navigate(`/accounts/${createdId}?tab=documents`)}
+            >
+              Go to the lead
+            </button>
+          ) : (
+            <button className="primary" disabled={saving} onClick={save}>
+              {saving
+                ? stagedFiles.length
+                  ? "Creating & uploading…"
+                  : "Creating…"
+                : stagedFiles.length
+                  ? `Create lead & upload ${stagedFiles.length} document${stagedFiles.length > 1 ? "s" : ""}`
+                  : "Create lead"}
+            </button>
+          )}
           {error && <span className="error-text">{error}</span>}
         </div>
       </div>

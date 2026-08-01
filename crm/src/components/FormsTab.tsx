@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { uploadData } from "aws-amplify/storage";
 import { client, listAllPages, type Account, type CrmDocument } from "../lib/client";
-import { ACORD_FORMS, fillAcordApp, signatureFor, type AcordFormDef } from "../lib/acord";
+import {
+  ACORD_FORMS,
+  MAPPED_APP_FORM_KEYS,
+  fillAcordApp,
+  signatureFor,
+  type AcordFormDef,
+} from "../lib/acord";
 import type { UserProfile } from "../lib/client";
 import FilePreviewModal from "./FilePreview";
 
@@ -87,7 +93,7 @@ export default function FormsTab({
         ] as string[];
       }
 
-      const { bytes, missing } = await fillAcordApp(
+      const { bytes, missing, unsigned } = await fillAcordApp(
         form,
         account,
         buildings,
@@ -118,9 +124,15 @@ export default function FormsTab({
       if (doc) setGenerated((ds) => [doc, ...ds]);
 
       setNote(
-        missing.length
-          ? `Generated. Unmatched fields (extend the mapping via Settings → Inspect fields): ${missing.join(", ")}`
-          : "Generated — every mapped field matched."
+        [
+          missing.length
+            ? `Generated. Unmatched fields (extend the mapping via Settings → Inspect fields): ${missing.join(", ")}`
+            : "Generated — every mapped field matched.",
+          unsigned &&
+            `The form went out UNSIGNED — ${unsigned}. Sign it by hand before submitting.`,
+        ]
+          .filter(Boolean)
+          .join(" ")
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
@@ -146,22 +158,33 @@ export default function FormsTab({
         <div className="table-wrap">
           <table>
             <tbody>
-              {APP_FORMS.map((f) => (
-                <tr key={f.key}>
-                  <td>
-                    <strong>{f.label}</strong>
-                  </td>
-                  <td style={{ width: 160 }}>
-                    <button
-                      className="secondary"
-                      disabled={busyKey !== null}
-                      onClick={() => generate(f)}
-                    >
-                      {busyKey === f.key ? "Generating…" : "Generate"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {APP_FORMS.map((f) => {
+                const mapped = MAPPED_APP_FORM_KEYS.has(f.key);
+                return (
+                  <tr key={f.key}>
+                    <td>
+                      <strong>{f.label}</strong>
+                    </td>
+                    <td style={{ width: 160 }}>
+                      <button
+                        className="secondary"
+                        disabled={!mapped || busyKey !== null}
+                        title={
+                          mapped
+                            ? undefined
+                            : "This form has no field mapping yet — it would come out with only the producer and insured header filled in."
+                        }
+                        onClick={() => generate(f)}
+                      >
+                        {busyKey === f.key ? "Generating…" : "Generate"}
+                      </button>
+                      {!mapped && (
+                        <div className="muted small">Mapping not built yet</div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -641,7 +641,7 @@ function CertificatesTab({
     setGenNote("");
     setError("");
     try {
-      const { bytes, missing } = await fillAcord25(
+      const { bytes, missing, unsigned } = await fillAcord25(
         account,
         cert,
         policies,
@@ -659,12 +659,19 @@ function CertificatesTab({
         s3Key: path,
       });
       if (data) setCerts((cs) => cs.map((c) => (c.id === cert.id ? data : c)));
+      const notes: string[] = [];
       if (missing.length) {
-        setGenNote(
+        notes.push(
           `Generated, but these fields had no match in the template: ${missing.join(", ")}. ` +
             "Use Settings → Inspect fields to extend the mapping."
         );
       }
+      if (unsigned) {
+        notes.push(
+          `The certificate went out UNSIGNED — ${unsigned}. Sign it by hand before sending it to the holder.`
+        );
+      }
+      if (notes.length) setGenNote(notes.join(" "));
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       setError(

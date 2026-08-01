@@ -131,6 +131,7 @@ export function CoverageCalculator() {
   const [unitInput, setUnitInput] = useState("");
   const [email, setEmail] = useState("");
   const [emailSent, setEmailSent] = useState(false);
+  const [emailError, setEmailError] = useState("");
   const [sending, setSending] = useState(false);
   const [unsupported, setUnsupported] = useState(false);
   // Places is an enhancement, not a requirement: if it never resolves a
@@ -223,6 +224,7 @@ export function CoverageCalculator() {
     e.preventDefault();
     if (!email.trim() || sending) return;
     setSending(true);
+    setEmailError("");
     void submitCrmLead({
       type: "ASSOCIATION",
       name: address || email.trim(),
@@ -240,7 +242,7 @@ export function CoverageCalculator() {
         .join("\n") || undefined,
     });
     try {
-      await fetch(FORMSUBMIT_URL, {
+      const res = await fetch(FORMSUBMIT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
@@ -256,6 +258,7 @@ export function CoverageCalculator() {
           Source: "Coverage Calculator",
         }),
       });
+      if (!res.ok) throw new Error("fail");
       if (typeof window !== "undefined" && (window as any).gtag) {
         (window as any).gtag("event", "conversion", {
           send_to: "AW-18085022517/Csp3COKBgpscELWWzq9D",
@@ -265,8 +268,7 @@ export function CoverageCalculator() {
       }
       setEmailSent(true);
     } catch {
-      /* silently fail — results still show */
-      setEmailSent(true);
+      setEmailError("Something went wrong. Please try again or call 508-233-2261.");
     } finally {
       setSending(false);
     }
@@ -280,6 +282,7 @@ export function CoverageCalculator() {
     setUnitInput("");
     setEmail("");
     setEmailSent(false);
+    setEmailError("");
     setUnsupported(false);
     setNeedsManualState(false);
     setManualState("");
@@ -422,6 +425,7 @@ export function CoverageCalculator() {
                   <button type="submit" className="btn btn-gold calc-email-btn" disabled={sending}>
                     {sending ? "Sending..." : "Show My Results"}
                   </button>
+                  {emailError && <p className="calc-unsupported">{emailError}</p>}
                   <p className="calc-email-note">We'll send a copy to your inbox. No spam, ever.</p>
                 </form>
               </div>
