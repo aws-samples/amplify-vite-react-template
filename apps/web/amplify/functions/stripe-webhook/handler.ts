@@ -313,6 +313,7 @@ async function settlePaymentIntent(
   status: "PAID" | "FAILED"
 ) {
   const client = await dataClient();
+  // Zero-page read is deliberate: one PaymentIntent stamps one invoice, so one page holds every match (audit 1.1.5).
   const { data: invoices } = await client.models.Invoice.listInvoiceByStripePaymentIntentId(
     { stripePaymentIntentId: intent.id }
   );
@@ -970,6 +971,7 @@ function idOf(
  */
 async function onDisputeCreated(dispute: Stripe.Dispute) {
   const client = await dataClient();
+  // Zero-page read is deliberate: one Stripe dispute id maps to one Dispute row, so one page holds every match (audit 1.1.5).
   const { data: dupes } =
     await client.models.Dispute.listDisputeByStripeDisputeId({
       stripeDisputeId: dispute.id,
@@ -981,6 +983,7 @@ async function onDisputeCreated(dispute: Stripe.Dispute) {
   let invoiceId: string | undefined;
   let groupId: string | null | undefined;
   if (piId) {
+    // Zero-page read is deliberate: one PaymentIntent stamps one invoice, so one page holds every match (audit 1.1.5).
     const { data: matches } =
       await client.models.Invoice.listInvoiceByStripePaymentIntentId({
         stripePaymentIntentId: piId,
@@ -1052,6 +1055,7 @@ async function onDisputeClosed(dispute: Stripe.Dispute) {
   const status: "WON" | "LOST" = dispute.status === "won" ? "WON" : "LOST";
   const closedAt = new Date().toISOString();
 
+  // Zero-page read is deliberate: one Stripe dispute id maps to one Dispute row, so one page holds every match (audit 1.1.5).
   const { data: rows } = await client.models.Dispute.listDisputeByStripeDisputeId(
     { stripeDisputeId: dispute.id }
   );

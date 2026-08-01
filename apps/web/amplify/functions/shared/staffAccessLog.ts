@@ -111,6 +111,7 @@ export async function findStaffAccessEventByKey(
   if (!key) return null;
   try {
     const client = await dataClient();
+    // Zero-page read is deliberate: idempotencyKey is unique by construction, so one page holds every match — limit 1 is the point (audit 1.1.5).
     const { data } = await client.models.StaffAccessEvent.listStaffAccessEventByIdempotencyKey(
       { idempotencyKey: key },
       { limit: 1 }

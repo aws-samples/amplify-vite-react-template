@@ -976,11 +976,15 @@ async function visitMoneySettled(
   jobId: string
 ): Promise<{ ok: true } | { ok: false; problem: string }> {
   const client = await dataClient();
-  const { data: invoices } = await client.models.Invoice.list({
-    filter: { jobId: { eq: jobId } },
-    limit: 200,
-  });
-  const list = invoices ?? [];
+  const list = await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { jobId: { eq: jobId } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
   if (list.some((i) => i.status === "OPEN" && Boolean(i.stripePaymentIntentId))) {
     return {
       ok: false,
@@ -1003,11 +1007,16 @@ async function visitMoneySettled(
     // retained-fee outcome is durably recorded on the change's audit ledger.
     let retainedRecorded = false;
     if ("VisitChangeEvent" in client.models) {
-      const { data: events } = await client.models.VisitChangeEvent.list({
-        filter: { jobId: { eq: jobId } },
-        limit: 200,
-      });
-      const rows = (events ?? [])
+      const events = await listAll(
+        (nextToken) =>
+          client.models.VisitChangeEvent.list({
+            filter: { jobId: { eq: jobId } },
+            limit: 200,
+            nextToken,
+          }),
+        { pageErrors: "ignore" }
+      );
+      const rows = events
         .slice()
         .sort((a, b) =>
           String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
@@ -1214,11 +1223,21 @@ async function runWorkVerifier(
       }
       let auditExists = false;
       if ("VisitChangeEvent" in client.models) {
-        const { data: events } = await client.models.VisitChangeEvent.list({
-          filter: { jobId: { eq: item.relatedId } },
-          limit: 200,
-        });
-        auditExists = (events ?? []).length > 0;
+        await forEachPage(
+          (nextToken) =>
+            client.models.VisitChangeEvent.list({
+              filter: { jobId: { eq: item.relatedId } },
+              limit: 200,
+              nextToken,
+            }),
+          (events) => {
+            if (events.length > 0) {
+              auditExists = true;
+              return false;
+            }
+          },
+          { pageErrors: "ignore" }
+        );
       }
       if (!auditExists) {
         return {
@@ -1229,15 +1248,22 @@ async function runWorkVerifier(
       }
       let noticeAccepted = false;
       if ("EmailLog" in client.models) {
-        const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
-          { relatedId: item.relatedId },
-          { limit: 50 }
-        );
-        noticeAccepted = (logs ?? []).some(
-          (l) =>
-            (l.template === "visit-canceled" ||
-              l.template === "visit-rescheduled") &&
-            (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+        await forEachPage(
+          (nextToken) =>
+            client.models.EmailLog.listEmailLogByRelatedId(
+              { relatedId: item.relatedId },
+              { limit: 50, nextToken }
+            ),
+          (logs) => {
+            noticeAccepted = logs.some(
+              (l) =>
+                (l.template === "visit-canceled" ||
+                  l.template === "visit-rescheduled") &&
+                (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+            );
+            if (noticeAccepted) return false;
+          },
+          { pageErrors: "ignore" }
         );
       }
       if (!noticeAccepted) {
@@ -3817,11 +3843,15 @@ async function priorAcceptedSend(
   try {
     const client = await dataClient();
     if (!("EmailLog" in client.models)) return null;
-    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
-      { relatedId },
-      { limit: 50 }
+    const data = await listAll(
+      (nextToken) =>
+        client.models.EmailLog.listEmailLogByRelatedId(
+          { relatedId },
+          { limit: 50, nextToken }
+        ),
+      { pageErrors: "ignore" }
     );
-    const hit = (data ?? []).find(
+    const hit = data.find(
       (l) =>
         l.template === template &&
         (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
@@ -4141,8 +4171,11 @@ async function depleteInventoryForReport(report: {
   const products = parseProducts(report.productsUsed);
   if (!products.length) return;
   const client = await dataClient();
-  const { data: catalog } = await client.models.Product.list({ limit: 1000 });
-  const { deplete, skips } = depletionsForReport(products, catalog ?? []);
+  const catalog = await listAll(
+    (nextToken) => client.models.Product.list({ limit: 1000, nextToken }),
+    { pageErrors: "ignore" }
+  );
+  const { deplete, skips } = depletionsForReport(products, catalog);
   if (skips.length) {
     console.warn("inventory: skipped report rows", report.id, skips);
   }
@@ -4156,11 +4189,17 @@ async function depleteInventoryForReport(report: {
     cur.notes.push(d.note);
     byProduct.set(d.productId, cur);
   }
-  const { data: existing } =
-    await client.models.ProductStockEntry.listProductStockEntryByServiceReportId(
-      { serviceReportId: report.id }
-    );
-  const already = new Set((existing ?? []).map((e) => e.productId));
+  // The `already` Set is the ONLY idempotency guard against double depletion
+  // on replay, so it must see every prior entry — paged to exhaustion.
+  const existing = await listAll(
+    (nextToken) =>
+      client.models.ProductStockEntry.listProductStockEntryByServiceReportId(
+        { serviceReportId: report.id },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
+  const already = new Set(existing.map((e) => e.productId));
   const at = new Date().toISOString();
   for (const [productId, agg] of byProduct) {
     if (already.has(productId)) continue;
@@ -4266,8 +4305,10 @@ async function finalizeServiceReport(reportId: string) {
     // on site. Inspection-only reports have no products, so this is a no-op.
     const productsUsed = parseProducts(report.productsUsed);
     if (productsUsed.length) {
-      const { data: catalog } = await client.models.Product.list({ limit: 1000 });
-      const approved = catalog ?? [];
+      const approved = await listAll(
+        (nextToken) => client.models.Product.list({ limit: 1000, nextToken }),
+        { pageErrors: "ignore" }
+      );
       assertProductsAreApproved(productsUsed, approved);
       assertProductsWithinLabelRules(productsUsed, approved, report, job);
     }
@@ -5880,11 +5921,15 @@ async function recordNoticeAlternateDelivery(
   if (!("EmailLog" in client.models)) {
     throw new Error("The email log is unavailable here.");
   }
-  const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
-    { relatedId: args.relatedId },
-    { limit: 50 }
+  const logs = await listAll(
+    (nextToken) =>
+      client.models.EmailLog.listEmailLogByRelatedId(
+        { relatedId: args.relatedId },
+        { limit: 50, nextToken }
+      ),
+    { pageErrors: "ignore" }
   );
-  const rows = (logs ?? [])
+  const rows = logs
     .filter((l) => l.template === args.template)
     .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
   const target = rows[0];

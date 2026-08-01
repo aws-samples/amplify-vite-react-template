@@ -4,7 +4,7 @@ import { assertTechnicianCompliance, hasCurrentLicense } from "./compliance";
 import { licenseFactsFor } from "./licenses";
 import { dataClient } from "./dataClient";
 import { openOwnedWork } from "./ownedWork";
-import { forEachPage } from "./pagination";
+import { forEachPage, listAll } from "./pagination";
 
 /**
  * GL-13 — technician least-privilege and assignment enforcement.
@@ -56,7 +56,14 @@ export async function technicianForCaller(
   const sub = callerSub(identity);
   if (!sub) return null;
   const client = await dataClient();
-  const { data } = await client.models.Technician.list({ limit: 200 });
+  // Paged to exhaustion: this resolver sits under every technician auth check,
+  // and a roster past one page must not silently deny technicians access.
+  // (A listTechnicianByUserSub index exists — crm-admin uses it — and would
+  // make this a point read; the roster is small enough that paging is fine.)
+  const data = await listAll(
+    (nextToken) => client.models.Technician.list({ limit: 200, nextToken }),
+    { pageErrors: "ignore" }
+  );
   return (data as LinkedTechnician[]).find((t) => t.userSub === sub) ?? null;
 }
 
@@ -303,9 +310,15 @@ export async function disposeStaleDrafts(
   }
   try {
     const client = await dataClient();
-    const { data: reports } =
-      await client.models.ServiceReport.listServiceReportByJobId({ jobId });
-    const drafts = (reports ?? []).filter(
+    const reports = await listAll(
+      (nextToken) =>
+        client.models.ServiceReport.listServiceReportByJobId(
+          { jobId },
+          { limit: 200, nextToken }
+        ),
+      { pageErrors: "ignore" }
+    );
+    const drafts = reports.filter(
       (r) => r.status === "DRAFT" && r.technicianId === priorTechnicianId
     );
     if (drafts.length === 0) {

@@ -10,6 +10,7 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
+import { listAll } from "../shared/pagination";
 import { opFieldName } from "../shared/opEvent";
 import { DEMAND_PRICING_MODEL } from "../shared/marketRate";
 import {
@@ -186,8 +187,14 @@ async function requestPricingResearch(
   }
 
   const client = await dataClient();
-  const { data: rows } =
-    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const rows = await listAll(
+    (nextToken) =>
+      client.models.MarketRate.listMarketRateByRateKey(
+        { rateKey },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
   const serving = pickServingRow(rows, rateKey, null);
   if (!serving) throw new Error("This rate is not currently serving");
   if (serving.pinned) {

@@ -499,18 +499,22 @@ export async function planCancellationSettled(
       id: plan.customerId,
     });
     if (cust?.email?.trim() && "EmailLog" in client.models) {
-      const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
-        { relatedId: servicePlanId },
-        { limit: 50 }
+      const logs = await listAll(
+        (nextToken) =>
+          client.models.EmailLog.listEmailLogByRelatedId(
+            { relatedId: servicePlanId },
+            { limit: 50, nextToken }
+          ),
+        { pageErrors: "ignore" }
       );
-      const delivered = (logs ?? []).some(
+      const delivered = logs.some(
         (l) =>
           l.template === "plan-canceled" &&
           (l.deliveryStatus === "DELIVERED" ||
             l.deliveryStatus === "ALTERNATE_DELIVERED")
       );
       if (!delivered) {
-        const accepted = (logs ?? []).some(
+        const accepted = logs.some(
           (l) => l.template === "plan-canceled" && l.deliveryStatus === "SENT"
         );
         return {
@@ -1210,11 +1214,15 @@ async function sendCancellationConfirmation(
   // promise — a resume/repair must not email the customer twice.
   try {
     if ("EmailLog" in client.models) {
-      const { data: prior } = await client.models.EmailLog.listEmailLogByRelatedId(
-        { relatedId: servicePlanId },
-        { limit: 50 }
+      const prior = await listAll(
+        (nextToken) =>
+          client.models.EmailLog.listEmailLogByRelatedId(
+            { relatedId: servicePlanId },
+            { limit: 50, nextToken }
+          ),
+        { pageErrors: "ignore" }
       );
-      const accepted = (prior ?? []).some(
+      const accepted = prior.some(
         (l) =>
           l.template === "plan-canceled" &&
           (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")

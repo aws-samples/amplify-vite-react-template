@@ -1073,11 +1073,15 @@ async function priorAcceptedVisitNotice(
   try {
     const client = await dataClient();
     if (!("EmailLog" in client.models)) return false;
-    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
-      { relatedId: jobId },
-      { limit: 50 }
+    const data = await listAll(
+      (nextToken) =>
+        client.models.EmailLog.listEmailLogByRelatedId(
+          { relatedId: jobId },
+          { limit: 50, nextToken }
+        ),
+      { pageErrors: "ignore" }
     );
-    return (data ?? []).some(
+    return data.some(
       (l) =>
         l.template === template &&
         (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
@@ -1196,11 +1200,16 @@ async function latestVisitChangeEvent(jobId: string): Promise<{
   outcome?: string | null;
 } | null> {
   const client = await dataClient();
-  const page = await client.models.VisitChangeEvent.list({
-    filter: { jobId: { eq: jobId } },
-    limit: 200,
-  }).catch(() => ({ data: [] as Record<string, unknown>[] }));
-  const rows = (page.data ?? []) as {
+  const data = await listAll(
+    (nextToken) =>
+      client.models.VisitChangeEvent.list({
+        filter: { jobId: { eq: jobId } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  ).catch(() => [] as Record<string, unknown>[]);
+  const rows = data as {
     occurredAt?: string | null;
     disposition?: string | null;
     amountCents?: number | null;

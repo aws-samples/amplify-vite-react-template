@@ -76,6 +76,7 @@ export async function resolvePromo(
   const code = normalizeCode(rawCode);
   if (!code) return { ok: false, message: "Enter a discount code." };
 
+  // Zero-page read is deliberate: one code maps to one PromoCode row, so one page holds every match (audit 1.1.5).
   const { data: rows } = await client.models.PromoCode.listPromoCodeByCode({
     code,
   });

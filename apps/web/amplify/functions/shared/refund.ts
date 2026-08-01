@@ -195,6 +195,7 @@ export async function applyRefundToInvoice(opts: {
   };
   let invoice: RefundTargetRow | null = null;
   if (opts.paymentIntentId) {
+    // Zero-page read is deliberate: one PaymentIntent stamps one invoice, so one page holds every match (audit 1.1.5).
     const { data: matches } =
       await client.models.Invoice.listInvoiceByStripePaymentIntentId({
         stripePaymentIntentId: opts.paymentIntentId,

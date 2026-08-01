@@ -38,6 +38,7 @@ export const handler: PostAuthenticationTriggerHandler = async (event) => {
     const sub = event.request.userAttributes?.sub;
     if (sub) {
       const client = await dataClient();
+      // Zero-page read is deliberate: one portal login sub maps to one customer, so one page holds every match (audit 1.1.5).
       const { data: customers } =
         await client.models.Customer.listCustomerByPortalUserSub({
           portalUserSub: sub,

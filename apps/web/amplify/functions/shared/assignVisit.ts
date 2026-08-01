@@ -118,6 +118,7 @@ async function ensureRouteAndOrder(
   ).Route;
   let routeId: string | null = null;
   try {
+    // limit 1 is deliberate: one route per tech-day by design. Duplicate routes are a known separate defect; the read-side union lives in technicianReads.
     const { data: routes } = await routeModel.listRouteByTechnicianIdAndDate(
       { technicianId, date },
       { limit: 1 }

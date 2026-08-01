@@ -8,7 +8,7 @@ Structural audit. Findings are removed from this document as they are fixed.
 |---|---|---|
 | #1, the migratable half | `4779b7e` | Seven of the thirteen hand-mirrored modules and constant blocks now have one copy, with the CRM re-exporting it. The rule is written up in [PATTERNS.md](PATTERNS.md). |
 | #1, the remaining six mirrors — **item closed** | `b2e8339` `810c485` `0c129ab` `03bb6fb` `d81922c` | Each impure server module had its pure half extracted into a new leaf (`adminJobTypes`, `leadReasons`, `marketRateKeys`, `agingMath`), the engine re-exports its old surface, and the CRM barrels over the leaf — pattern 2 in [PATTERNS.md](PATTERNS.md). The sixth "mirror" (`planCadence` ← `seasonalCadenceCopy`) was not one; the phantom zero-caller canonical was deleted. One related gap stays open in [5.1](#51-hand-mirrored-modules--closed-one-related-gap-remains). |
-| #2 Pagination — **item closed** | `cf61a27` `9992454` `63ecd75` | One loop: `shared/pagination.ts` (pure leaf; `listAll` + `forEachPage`), re-exported by the CRM's `api.ts` — pattern 3 in [PATTERNS.md](PATTERNS.md). The 11 hand-rolled implementations collapsed onto it; all 86 backend inline `do…while(nextToken)` loops migrated (side-effect order, early exits, and per-site error-swallowing preserved verbatim — the 80 error-ignoring sites carry a greppable `pageErrors: "ignore"` for the item-15 cleanup); the 24 truncating CRM/portal reads now page to exhaustion. Survey corrections vs. the original counts: 86 loops not 87 (per-file figures were double-counted), 25 truncating reads not 23, 11 implementations not 4. Two related gaps stay open in [1.1.5](#115-pagination-gaps-left-open-by-2). |
+| #2 Pagination — **item closed** | `cf61a27` `9992454` `63ecd75` | One loop: `shared/pagination.ts` (pure leaf; `listAll` + `forEachPage`), re-exported by the CRM's `api.ts` — pattern 3 in [PATTERNS.md](PATTERNS.md). The 11 hand-rolled implementations collapsed onto it; all 86 backend inline `do…while(nextToken)` loops migrated (side-effect order, early exits, and per-site error-swallowing preserved verbatim — the 80 error-ignoring sites carry a greppable `pageErrors: "ignore"` for the item-15 cleanup); the 24 truncating CRM/portal reads now page to exhaustion. Survey corrections vs. the original counts: 86 loops not 87 (per-file figures were double-counted), 25 truncating reads not 23, 11 implementations not 4. The zero-page follow-up sweep is also closed (51 more sites; see [1.1.5](#115-pagination-gaps-left-open-by-2--zero-page-sweep-closed-one-gap-remains)); only the More.tsx `sentAt`-index gap remains there. |
 
 **Scope:** `apps/web/src` (marketing + funnel), `apps/web/amplify` (backend), `apps/crm/src` (CRM + portal + tech). 360 non-test TS/TSX files.
 **Excluded:** `node_modules`, `dist`, `creative`, and `.claude/worktrees/**` — the latter are three stale full-tree copies of the repo that inflate every file-count metric; nothing in this document refers to them.
@@ -86,19 +86,32 @@ Divergences across the 34:
 | Google Places autocomplete | `apps/crm/src/lib/addressAutocomplete.tsx` and `apps/web/src/lib/addressAutocomplete.tsx` — **247 lines each, differing only in 3 comment lines** | Either; needs a shared package |
 | Lead-form submit machine | `Contact.tsx:25-66` vs `TalkToExpertModal.tsx:63-99` — same 30 lines, identical validation strings (`Contact.tsx:32` ≡ `TalkToExpertModal.tsx:70`) | One `useLeadForm` hook |
 
-### 1.1.5 Pagination gaps left open by #2
+### 1.1.5 Pagination gaps left open by #2 — zero-page sweep CLOSED, one gap remains
 
-Found while closing item #2; same bug class, out of that item's grep-able scope:
+The **~60 backend zero-page `list*()` reads are resolved**: a full-tree sweep
+found **51** Amplify Data sites (the estimate's other 9 were Stripe SDK cursor
+calls, a different contract left alone). 31 were made exhaustive via
+`listAll`/`forEachPage` (per-site error-swallowing preserved with
+`pageErrors: "ignore"`); 20 are deliberate point reads on unique-by-construction
+keys (payment-intent/dispute ids, portal subs, unguessable tokens, idempotency
+keys) and now carry a one-line comment saying so, so no future audit re-flags
+them. Two of the "known examples" (`shared/subscription.ts:71,94`) were Stripe
+SDK calls, not Amplify. Notable fixes:
 
-1. **~60 backend `list*()` calls that page zero times** — they pass a `limit`
-   but never loop at all, so no `nextToken` grep finds them. Load-bearing
-   examples: `daily-reminders/handler.ts:552` (obligation lookup inside the
-   seasonal sweep), `:866` (`limit: 1000`), `:959`; `shared/technicianReads.ts:320,324`;
-   `shared/jobAssignment.ts:58` (`Technician.list({limit:200})` under every
-   field-action auth check); `shared/visitChange.ts:1201`; `shared/subscription.ts:71,94`.
-   Each needs a judgment call (exhaustive vs. deliberately bounded) before
-   wrapping in `listAll`.
-2. **`More.tsx` email log** wants the newest 100, which needs a `sentAt`
+- `shared/jobAssignment.ts` `technicianForCaller` — the identity resolver under
+  every technician auth check no longer denies technicians past one roster page.
+- `crm-admin` `describeExistingLoginForEmail` — three `limit: 1` **filtered**
+  scans could not see past the first scanned row, so the portal-login collision
+  check essentially never fired; they now page the scan.
+- `crm-docs` inventory depletion — the per-report `already` Set (the only
+  idempotency guard against double depletion) is now paged to exhaustion.
+- The `visitMoneySettled` gate, the EmailLog outbox-adoption guards (duplicate
+  legal/customer notices), and the quote path's `MarketRate` serving-row reads
+  all page fully.
+
+Still open:
+
+1. **`More.tsx` email log** wants the newest 100, which needs a `sentAt`
    index (server-side sort), not whole-table paging — today it sorts an
    arbitrary unsorted page client-side. Commented at the site.
 

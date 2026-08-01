@@ -452,8 +452,14 @@ export async function getCachedRate(opts: {
   const rateKey = rateKeyFor(service, areaKey, bucket);
 
   const client = await dataClient();
-  const { data: existing } =
-    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const existing = await listAll(
+    (nextToken) =>
+      client.models.MarketRate.listMarketRateByRateKey(
+        { rateKey },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
   // GL-16: an active rollback serves the named immutable version everywhere.
   const rollback = await readPricingRollback();
   const live = pickServingRow(existing, rateKey, rollback?.manifest ?? null);
@@ -673,8 +679,14 @@ export async function researchAndCacheRate(opts: {
   const rateKey = rateKeyFor(service, areaKey, bucket);
 
   const client = await dataClient();
-  const { data: existing } =
-    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const existing = await listAll(
+    (nextToken) =>
+      client.models.MarketRate.listMarketRateByRateKey(
+        { rateKey },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
   const prev = pickLiveRow(existing);
   // The cron skips pinned combos before selection; this refusal is defense
   // in depth so nothing can ever research over an office edit.

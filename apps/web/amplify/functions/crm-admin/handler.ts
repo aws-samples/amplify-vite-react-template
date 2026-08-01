@@ -43,7 +43,7 @@ import {
   workItemId,
 } from "../shared/ownedWork";
 import { disposeStaleDrafts } from "../shared/jobAssignment";
-import { forEachPage } from "../shared/pagination";
+import { forEachPage, listAll } from "../shared/pagination";
 import { callerEmail, callerIsOwner, callerSub } from "../shared/authz";
 import {
   assignLeadOwner,
@@ -812,22 +812,41 @@ async function describeExistingLoginForEmail(
     throw err;
   }
   const client = await dataClient();
+  // These are filtered scans, and the old `limit: 1` could not see past the
+  // first scanned row (the filter applies AFTER the scan), so the collision
+  // check essentially never fired — page the whole scan instead.
   if (sub) {
-    const { data: bySub } = await client.models.Customer.list({
-      filter: { portalUserSub: { eq: sub } },
-      limit: 1,
-    });
+    const userSub = sub;
+    const bySub = await listAll(
+      (nextToken) =>
+        client.models.Customer.list({
+          filter: { portalUserSub: { eq: userSub } },
+          limit: 200,
+          nextToken,
+        }),
+      { pageErrors: "ignore" }
+    );
     if (bySub[0]) return `customer "${bySub[0].displayName}"`;
-    const { data: grpBySub } = await client.models.CustomerGroup.list({
-      filter: { portalUserSub: { eq: sub } },
-      limit: 1,
-    });
+    const grpBySub = await listAll(
+      (nextToken) =>
+        client.models.CustomerGroup.list({
+          filter: { portalUserSub: { eq: userSub } },
+          limit: 200,
+          nextToken,
+        }),
+      { pageErrors: "ignore" }
+    );
     if (grpBySub[0]) return `group "${grpBySub[0].name}"`;
   }
-  const { data: byEmail } = await client.models.Customer.list({
-    filter: { email: { eq: email } },
-    limit: 1,
-  });
+  const byEmail = await listAll(
+    (nextToken) =>
+      client.models.Customer.list({
+        filter: { email: { eq: email } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
   if (byEmail[0]) return `customer "${byEmail[0].displayName}"`;
   return "another BuzzKill login";
 }
@@ -2341,6 +2360,7 @@ async function changeStaffRoles(
 
     if (want.includes("TECH") && !have.includes("TECH")) {
       const client = await dataClient();
+      // Point read: userSub maps to at most one technician — one page cannot truncate.
       const { data: techs } =
         await client.models.Technician.listTechnicianByUserSub({
           userSub: target.sub,
@@ -2432,6 +2452,7 @@ async function changeStaffRoles(
     if (toRemove.includes("TECH")) {
       try {
         const client = await dataClient();
+        // Point read: userSub maps to at most one technician — one page cannot truncate.
         const { data: techs } =
           await client.models.Technician.listTechnicianByUserSub({
             userSub: target.sub,
@@ -2743,6 +2764,7 @@ async function offboardStaff(
   async function runOffboard() {
   const target = await loadStaffLogin(args.email);
   const client = await dataClient();
+  // Point read: userSub maps to at most one technician — one page cannot truncate.
   const { data: techs } =
     await client.models.Technician.listTechnicianByUserSub({
       userSub: target.sub,
@@ -3176,6 +3198,7 @@ async function staffRoster() {
       row.unlinkedTech = true;
       continue;
     }
+    // Point read: userSub maps to at most one technician — one page cannot truncate.
     const { data: techs } =
       await client.models.Technician.listTechnicianByUserSub({
         userSub: row.sub,

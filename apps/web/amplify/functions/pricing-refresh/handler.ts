@@ -1101,10 +1101,16 @@ async function runTargetedWakeup(
     id: rateKey,
   });
   const cov = (covData ?? null) as CoverageRow | null;
-  const { data: keyRows } =
-    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const keyRows = await listAll(
+    (nextToken) =>
+      client.models.MarketRate.listMarketRateByRateKey(
+        { rateKey },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
   const serving = pickServingRow(
-    (keyRows ?? []) as RateRow[],
+    keyRows as RateRow[],
     rateKey,
     null
   ) as RateRow | null;
@@ -1217,6 +1223,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
             list: (a: { limit: number }) => Promise<{ data: { id: string }[] }>;
           };
         };
+        // Deliberate single-row probe: any one row proves a snapshot exists.
         const any = versionModels.CatalogVersion
           ? await versionModels.CatalogVersion.list({ limit: 1 })
           : null;

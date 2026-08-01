@@ -555,12 +555,15 @@ export async function sweepSeasonalObligations() {
           if (created) ensured++;
         }
         // Past months that never reached SATISFIED become SKIPPED_MISSED.
-        const { data: obligations } =
-          await client.models.TreatmentObligation.listTreatmentObligationByServicePlanIdAndMonthKey(
-            { servicePlanId: plan.id },
-            { limit: 200 }
-          );
-        for (const ob of obligations ?? []) {
+        const obligations = await listAll(
+          (nextToken) =>
+            client.models.TreatmentObligation.listTreatmentObligationByServicePlanIdAndMonthKey(
+              { servicePlanId: plan.id },
+              { limit: 200, nextToken }
+            ),
+          { pageErrors: "ignore" }
+        );
+        for (const ob of obligations) {
           if (
             ob.monthKey < nowMonth &&
             (ob.status === "DUE" || ob.status === "SCHEDULED")
@@ -874,9 +877,12 @@ async function reportStaleLeads() {
  */
 async function reportLowStock() {
   const client = await dataClient();
-  const { data: products } = await client.models.Product.list({ limit: 1000 });
+  const products = await listAll(
+    (nextToken) => client.models.Product.list({ limit: 1000, nextToken }),
+    { pageErrors: "ignore" }
+  );
   // Only an active, tracked product with a reorder point can be "low".
-  const tracked = (products ?? []).filter(
+  const tracked = products.filter(
     (p) => p.active && p.trackInventory && typeof p.reorderPoint === "number"
   );
   if (tracked.length === 0) return { lowStock: 0, notified: false };
@@ -962,11 +968,22 @@ async function reportPlansNotBilling() {
   // train the office to ignore this email.
   const serviced: typeof unbilled = [];
   for (const plan of unbilled) {
-    const { data: jobs } = await client.models.Job.listJobByServicePlanId(
-      { servicePlanId: plan.id },
-      { limit: 50 }
+    let hasCompleted = false;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.listJobByServicePlanId(
+          { servicePlanId: plan.id },
+          { limit: 50, nextToken }
+        ),
+      (jobs) => {
+        if (jobs.some((j) => j.status === "COMPLETED")) {
+          hasCompleted = true;
+          return false;
+        }
+      },
+      { pageErrors: "ignore" }
     );
-    if (jobs.some((j) => j.status === "COMPLETED")) serviced.push(plan);
+    if (hasCompleted) serviced.push(plan);
   }
   if (serviced.length === 0) {
     console.log(

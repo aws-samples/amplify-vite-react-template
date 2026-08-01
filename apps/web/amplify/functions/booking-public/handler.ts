@@ -649,6 +649,7 @@ async function trackStatus(body: Record<string, unknown>) {
     typeof body.token === "string" ? body.token.trim() : "";
   if (!token) return { status: "UNKNOWN" as const };
   const client = await dataClient();
+  // Zero-page read is deliberate: trackToken is an unguessable unique token, so one page holds every match (audit 1.1.5).
   const { data } = await client.models.Job.listJobByTrackToken({
     trackToken: token,
   });
@@ -971,6 +972,8 @@ async function resolveLeadToken(
 ): Promise<string | null> {
   if (typeof raw !== "string" || !BOOKING_LINK_TOKEN_RE.test(raw)) return null;
   try {
+    // Zero-page read is deliberate: bookingLinkToken is unique by construction; limit 2 exists only to
+    // detect an ambiguous token (a second row), which is refused (audit 1.1.5).
     const { data } = (await client.models.Customer.listCustomerByBookingLinkToken(
       { bookingLinkToken: raw },
       { limit: 2 }
@@ -1000,6 +1003,8 @@ async function leadPrefill(body: Record<string, unknown>) {
     throw new HttpError(404, { error: "Lead details are unavailable." });
   }
   const client = await dataClient();
+  // Zero-page read is deliberate: bookingLinkToken is unique by construction; limit 2 exists only to
+  // detect an ambiguous token (a second row), which is refused (audit 1.1.5).
   const { data } = await client.models.Customer.listCustomerByBookingLinkToken(
     { bookingLinkToken: token },
     { limit: 2 }
@@ -3326,6 +3331,7 @@ async function cancel(body: Record<string, unknown>) {
   const token = String(body.token ?? "");
   if (!token) throw new HttpError(400, { error: "Missing token" });
   const client = await dataClient();
+  // Zero-page read is deliberate: cancelToken is an unguessable unique token, so one page holds every match (audit 1.1.5).
   const { data: matches } =
     await client.models.BookingRequest.listBookingRequestByCancelToken({
       cancelToken: token,

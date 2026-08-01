@@ -1,6 +1,7 @@
 import type { SNSEvent } from "aws-lambda";
 import { dataClient } from "../shared/dataClient";
 import { openOwnedWork } from "../shared/ownedWork";
+import { listAll } from "../shared/pagination";
 
 /**
  * GL-03 — turn an SES bounce/complaint/delivery notification into truthful
@@ -48,15 +49,21 @@ async function markLogDelivery(
   if (!("EmailLog" in client.models)) return null;
   // The messageId secondary index turns this into a point query, not a scan —
   // delivery events fire for every send, so this must stay cheap.
-  const { data: logs } = await client.models.EmailLog.listEmailLogByMessageId({
-    messageId,
-  });
+  const id = messageId;
+  const logs = await listAll(
+    (nextToken) =>
+      client.models.EmailLog.listEmailLogByMessageId(
+        { messageId: id },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
   let meta: {
     customerId?: string | null;
     template?: string | null;
     relatedId?: string | null;
   } | null = null;
-  for (const log of logs ?? []) {
+  for (const log of logs) {
     meta = {
       customerId: log.customerId,
       template: log.template,
