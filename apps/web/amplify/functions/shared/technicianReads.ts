@@ -5,6 +5,7 @@ import { dataClient } from "./dataClient";
 import { assertCanReadJob, technicianForCaller } from "./jobAssignment";
 import { openOwnedWork } from "./ownedWork";
 import { onsiteMinutesFor } from "./dispatchReadiness";
+import { listAll } from "./pagination";
 
 /**
  * GL-13 row-scoping — the technician read surface.
@@ -58,20 +59,6 @@ function pickJob(j: AnyRecord): AnyRecord {
   return out;
 }
 
-/** Page a dataClient list to exhaustion — a truck's stops, or the roster, must
- *  never silently truncate at one page. */
-async function listAll<T>(
-  fetchPage: (nextToken?: string) => Promise<{ data: T[]; nextToken?: string | null }>
-): Promise<T[]> {
-  const out: T[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await fetchPage(token ?? undefined);
-    out.push(...page.data);
-    token = page.nextToken;
-  } while (token);
-  return out;
-}
 
 export type TechnicianDayResult = {
   /** A TECH login nobody linked to a Technician record — the client shows the
@@ -115,8 +102,9 @@ export async function buildTechnicianDay(
   let technicians: { id: string; name: string }[] = [];
 
   if (office) {
-    const roster = await listAll((nextToken) =>
-      client.models.Technician.list({ limit: 200, nextToken })
+    const roster = await listAll(
+      (nextToken) => client.models.Technician.list({ limit: 200, nextToken }),
+      { pageErrors: "ignore" }
     );
     technicians = (roster as AnyRecord[])
       .filter((t) => t.active)
@@ -153,11 +141,13 @@ export async function buildTechnicianDay(
     return emptyDay({ technicianId, technicianName, canPick: office, technicians });
   }
 
-  const routeList = (await listAll((nextToken) =>
-    client.models.Route.listRouteByTechnicianIdAndDate(
-      { technicianId: technicianId!, date: { eq: args.date! } },
-      { nextToken }
-    )
+  const routeList = (await listAll(
+    (nextToken) =>
+      client.models.Route.listRouteByTechnicianIdAndDate(
+        { technicianId: technicianId!, date: { eq: args.date! } },
+        { nextToken }
+      ),
+    { pageErrors: "ignore" }
   )) as AnyRecord[];
   if (routeList.length === 0) {
     return emptyDay({ technicianId, technicianName, canPick: office, technicians });
@@ -184,15 +174,17 @@ export async function buildTechnicianDay(
 
   // routeId has no index, so the filter runs post-scan; page to exhaustion or
   // stops silently fall off the day. Union across every route id for the day.
-  const jobRows = await listAll((nextToken) =>
-    client.models.Job.list({
-      filter:
-        routeIds.length === 1
-          ? { routeId: { eq: routeIds[0] } }
-          : { or: routeIds.map((id) => ({ routeId: { eq: id } })) },
-      limit: 200,
-      nextToken,
-    })
+  const jobRows = await listAll(
+    (nextToken) =>
+      client.models.Job.list({
+        filter:
+          routeIds.length === 1
+            ? { routeId: { eq: routeIds[0] } }
+            : { or: routeIds.map((id) => ({ routeId: { eq: id } })) },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
   );
 
   // GL-13: the day is built from the route, but the route is not the authority

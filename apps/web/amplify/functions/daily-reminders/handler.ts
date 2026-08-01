@@ -1,6 +1,7 @@
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { oneBusinessDayDeadline } from "../shared/businessDays";
 import { dataClient } from "../shared/dataClient";
+import { listAll } from "../shared/pagination";
 import {
   emailShell,
   notifyOffice,
@@ -2134,21 +2135,15 @@ export async function reconcilePlansDaily() {
 export async function reconcileStateDaily() {
   const client = await dataClient();
   if (!("ReconRun" in client.models)) return { skipped: "no-model" };
-  const listAllRows = async <T>(model: {
+  const listAllRows = <T>(model: {
     list(o: {
       nextToken?: string | null;
       limit?: number;
     }): Promise<{ data: unknown[]; nextToken?: string | null }>;
-  }): Promise<T[]> => {
-    const out: unknown[] = [];
-    let token: string | null | undefined;
-    do {
-      const page = await model.list({ nextToken: token, limit: 200 });
-      out.push(...page.data);
-      token = page.nextToken;
-    } while (token);
-    return out as T[];
-  };
+  }): Promise<T[]> =>
+    listAll((nextToken) => model.list({ nextToken, limit: 200 }), {
+      pageErrors: "ignore",
+    }) as Promise<T[]>;
   const customers = await listAllRows<CustomerRow>(client.models.Customer);
   const jobs = await listAllRows<StateJobRow>(client.models.Job);
   const plans = await listAllRows<PlanRow>(client.models.ServicePlan);

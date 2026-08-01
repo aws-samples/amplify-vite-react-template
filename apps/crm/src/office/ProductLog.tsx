@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, opResult, unwrap, type Product } from "../lib/api";
+import { api, listAll, opResult, type Product } from "../lib/api";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import {
   Badge,
@@ -34,16 +34,9 @@ export default function ProductLog() {
 
   const load = useCallback(async () => {
     try {
-      const rows: Product[] = [];
-      let nextToken: string | null | undefined;
-      do {
-        const page = await api().models.Product.list({
-          limit: 500,
-          nextToken: nextToken ?? undefined,
-        });
-        rows.push(...unwrap(page));
-        nextToken = page.nextToken;
-      } while (nextToken);
+      const rows = await listAll((nextToken) =>
+        api().models.Product.list({ limit: 500, nextToken })
+      );
       setProducts(
         rows.sort(
           (a, b) =>

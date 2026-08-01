@@ -5,6 +5,10 @@ import {
   LEAD_LOST_REASON_LABEL,
 } from "../../../web/amplify/functions/shared/leadReasons";
 import type { InvoiceTerms } from "../../../web/amplify/functions/shared/agingMath";
+import {
+  forEachPage,
+  listAll,
+} from "../../../web/amplify/functions/shared/pagination";
 
 /**
  * Typed Amplify Data client against the shared backend schema (type-only
@@ -93,21 +97,9 @@ export async function collectLeadActivityPages(
     nextToken?: string | null;
   }) => Promise<LeadActivityPage>
 ): Promise<LeadActivity[]> {
-  const data: LeadActivity[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await listPage({
-      filter: { customerId: { eq: customerId } },
-      limit: 500,
-      nextToken,
-    });
-    if (page.errors?.length) {
-      throw new Error(page.errors.map((error) => error.message).join("; "));
-    }
-    data.push(...page.data);
-    nextToken = page.nextToken;
-  } while (nextToken);
-  return data;
+  return listAll((nextToken) =>
+    listPage({ filter: { customerId: { eq: customerId } }, limit: 500, nextToken })
+  );
 }
 
 export function clientActionId(prefix: string): string {
@@ -997,19 +989,22 @@ export async function listCustomerLifecycleEvents(customerId: string): Promise<{
     };
   };
   if (!models.CustomerLifecycleEvent) return { data: [], readFailed: false };
+  const events = models.CustomerLifecycleEvent;
+  // A page error surfaces as readFailed WITH the rows collected so far —
+  // never disguised as a complete (or empty) timeline.
   const out: CustomerLifecycleEvent[] = [];
   try {
-    let token: string | null | undefined;
-    do {
-      const page = await models.CustomerLifecycleEvent.list({
-        filter: { customerId: { eq: customerId } },
-        limit: 200,
-        nextToken: token ?? undefined,
-      });
-      if (page.errors?.length) return { data: out, readFailed: true };
-      out.push(...(page.data ?? []));
-      token = page.nextToken;
-    } while (token);
+    await forEachPage(
+      (nextToken) =>
+        events.list({
+          filter: { customerId: { eq: customerId } },
+          limit: 200,
+          nextToken,
+        }),
+      (items) => {
+        out.push(...items);
+      }
+    );
     return { data: out, readFailed: false };
   } catch {
     return { data: out, readFailed: true };
@@ -1041,22 +1036,18 @@ export async function listLifecycleCommands(customerId: string): Promise<
     };
   };
   if (!models.CustomerLifecycleCommand) return [];
+  const commands = models.CustomerLifecycleCommand;
   try {
     // Paginated to exhaustion: the resumable PARTIAL the banner exists to
     // surface is the NEWEST row — exactly the one a single page can hide.
-    const all: Record<string, unknown>[] = [];
-    let nextToken: string | null | undefined = undefined;
-    do {
-      const res: {
-        data: Record<string, unknown>[];
-        nextToken?: string | null;
-      } = await models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
-        { customerId },
-        { limit: 200, nextToken }
-      );
-      all.push(...(res.data ?? []));
-      nextToken = res.nextToken;
-    } while (nextToken);
+    const all = await listAll(
+      (nextToken) =>
+        commands.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
+          { customerId },
+          { limit: 200, nextToken }
+        ),
+      { pageErrors: "ignore" }
+    );
     return all as never[];
   } catch {
     return [];
@@ -1091,25 +1082,10 @@ export function jsonField<T>(raw: unknown): T | null {
 
 /**
  * Exhaustively page a .list() query. Dashboard totals and long lists must
- * never silently truncate at one page (DynamoDB may also return fewer items
- * than `limit` per page even when more exist).
+ * never silently truncate at one page. Re-exported from the shared pure leaf
+ * (docs/audit/PATTERNS.md pattern 3) — the backend runs the same loop.
  */
-export async function listAll<T>(
-  fetchPage: (nextToken?: string) => Promise<{
-    data: T[];
-    nextToken?: string | null;
-    errors?: { message: string }[];
-  }>
-): Promise<T[]> {
-  const out: T[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await fetchPage(token ?? undefined);
-    out.push(...unwrap(page));
-    token = page.nextToken;
-  } while (token);
-  return out;
-}
+export { listAll } from "../../../web/amplify/functions/shared/pagination";
 
 /** Unwrap an Amplify Data result, surfacing GraphQL errors as exceptions. */
 export function unwrap<T>(result: {

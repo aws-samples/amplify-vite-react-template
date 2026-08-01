@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, unwrap, type LeadPricingRun } from "../lib/api";
+import { api, listAll, type LeadPricingRun } from "../lib/api";
 import { fmtDate, money } from "../lib/format";
 import {
   Badge,
@@ -32,16 +32,9 @@ export default function PricingLog() {
 
   const load = useCallback(async () => {
     try {
-      const rows: LeadPricingRun[] = [];
-      let nextToken: string | null | undefined;
-      do {
-        const page = await api().models.LeadPricingRun.list({
-          limit: 500,
-          nextToken: nextToken ?? undefined,
-        });
-        rows.push(...unwrap(page));
-        nextToken = page.nextToken;
-      } while (nextToken);
+      const rows = await listAll((nextToken) =>
+        api().models.LeadPricingRun.list({ limit: 500, nextToken })
+      );
       setRuns(
         rows.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
       );

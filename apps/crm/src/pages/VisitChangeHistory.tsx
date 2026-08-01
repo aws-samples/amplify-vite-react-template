@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  listAll,
   listVisitChangeEvents,
   type VisitChangeEvent,
 } from "../lib/api";
@@ -41,13 +42,9 @@ export default function VisitChangeHistory() {
     setError(null);
     try {
       // Page the whole ledger, not just the first batch, so the export is complete.
-      const all: VisitChangeEvent[] = [];
-      let token: string | undefined;
-      do {
-        const res = await listVisitChangeEvents({ limit: 500, nextToken: token });
-        all.push(...(res.data ?? []));
-        token = res.nextToken ?? undefined;
-      } while (token);
+      const all = await listAll((nextToken) =>
+        listVisitChangeEvents({ limit: 500, nextToken })
+      );
       all.sort((a, b) =>
         String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
       );
