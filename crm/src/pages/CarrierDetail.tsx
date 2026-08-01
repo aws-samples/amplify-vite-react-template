@@ -10,6 +10,7 @@ import {
   type AppetiteGuide,
   type Carrier,
 } from "../lib/client";
+import ConfirmButton from "../components/ConfirmButton";
 import DocumentsPanel from "../components/DocumentsPanel";
 import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
 import { useFormState } from "../lib/useFormState";
@@ -306,7 +307,6 @@ function AppetiteGuides({ carrierId }: { carrierId: string }) {
   const [guides, setGuides] = useState<AppetiteGuide[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<AppetiteGuide | null>(null);
-  const [confirmId, setConfirmId] = useState<string | null>(null);
 
   function load() {
     listAllPages((nextToken) =>
@@ -323,7 +323,6 @@ function AppetiteGuides({ carrierId }: { carrierId: string }) {
   async function del(id: string) {
     await client.models.AppetiteGuide.delete({ id });
     setGuides((gs) => gs.filter((g) => g.id !== id));
-    setConfirmId(null);
   }
 
   return (
@@ -415,20 +414,10 @@ function AppetiteGuides({ carrierId }: { carrierId: string }) {
                     >
                       Edit
                     </button>
-                    {confirmId === g.id ? (
-                      <>
-                        <button className="danger" onClick={() => del(g.id)}>
-                          Confirm
-                        </button>
-                        <button className="link" onClick={() => setConfirmId(null)}>
-                          Cancel
-                        </button>
-                      </>
-                    ) : (
-                      <button className="link" onClick={() => setConfirmId(g.id)}>
-                        Delete
-                      </button>
-                    )}
+                    <ConfirmButton
+                      className="link"
+                      onConfirm={() => del(g.id)}
+                    />
                   </td>
                 </tr>
               ))}

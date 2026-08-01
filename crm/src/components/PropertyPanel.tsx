@@ -9,6 +9,7 @@ import {
   type Account,
   type Building,
 } from "../lib/client";
+import ConfirmButton from "./ConfirmButton";
 import FilePreviewModal from "./FilePreview";
 import { AddressAutocomplete } from "../lib/googlePlaces";
 import { useSort, SortTh } from "../lib/useSort";
@@ -462,9 +463,13 @@ function BuildingsCard({ accountId }: { accountId: string }) {
                   <td>{b.label}</td>
                   <td>{b.sqft?.toLocaleString() ?? "—"}</td>
                   <td>
-                    <button className="danger" onClick={() => del(b.id)}>
-                      Remove
-                    </button>
+                    {/* Was unguarded: one click deleted the building. */}
+                    <ConfirmButton
+                      label="Remove"
+                      busyLabel="Removing…"
+                      message={`Remove ${b.label ?? "this building"}?`}
+                      onConfirm={() => del(b.id)}
+                    />
                   </td>
                 </tr>
               ))}
@@ -543,6 +548,10 @@ function PhotosCard({
               setPreview({ s3Key, name: s3Key.split("/").pop() ?? slot.label })
             }
             onClear={() => clear(slot.key)}
+            // <ConfirmButton> catches the rejection either way; without this
+            // it would be dropped, and a confirm that silently does nothing
+            // is worse than the unguarded button it replaced.
+            onClearError={(err) => setError(friendlyError(err, "Remove failed"))}
           />
         ))}
       </div>
@@ -565,13 +574,16 @@ function PhotoSlot({
   onUpload,
   onView,
   onClear,
+  onClearError,
 }: {
   label: string;
   s3Key: string | null;
   busy: boolean;
   onUpload: (f?: File) => void;
   onView: (s3Key: string) => void;
-  onClear: () => void;
+  /** May be async — the confirm button stays busy until it settles. */
+  onClear: () => void | Promise<unknown>;
+  onClearError: (err: unknown) => void;
 }) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const isImage = s3Key
@@ -615,9 +627,15 @@ function PhotoSlot({
           />
         </label>
         {s3Key && (
-          <button className="danger" onClick={onClear}>
-            Remove
-          </button>
+          /* Was unguarded: one click deleted the S3 object and nulled the
+             field. */
+          <ConfirmButton
+            label="Remove"
+            busyLabel="Removing…"
+            message={`Remove the ${label.toLowerCase()}? The stored file is deleted.`}
+            onConfirm={onClear}
+            onError={onClearError}
+          />
         )}
       </div>
     </div>

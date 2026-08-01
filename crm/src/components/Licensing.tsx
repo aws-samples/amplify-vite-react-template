@@ -12,6 +12,7 @@ import {
   type ProducerLicense,
   type UserProfile,
 } from "../lib/client";
+import ConfirmButton from "./ConfirmButton";
 import DocumentsPanel from "./DocumentsPanel";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
 import { useAsyncResource } from "../lib/useAsyncResource";
@@ -480,11 +481,11 @@ function LicenseTable({
   groupByHolder?: boolean;
   onAdd: () => void;
   onEdit: (l: License) => void;
-  onDelete: (id: string) => void;
+  /** May be async — the row's confirm button stays busy until it settles. */
+  onDelete: (id: string) => void | Promise<unknown>;
   openDocsFor: string | null;
   setOpenDocsFor: (id: string | null) => void;
 }) {
-  const [confirmId, setConfirmId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   // Grouped tables carry the holder in the group header, so the per-row
@@ -542,13 +543,7 @@ function LicenseTable({
       isOpen={openDocsFor === l.id}
       onToggleDocs={() => setOpenDocsFor(openDocsFor === l.id ? null : l.id)}
       onEdit={() => onEdit(l)}
-      confirming={confirmId === l.id}
-      onAskDelete={() => setConfirmId(l.id)}
-      onCancelDelete={() => setConfirmId(null)}
-      onConfirmDelete={() => {
-        onDelete(l.id);
-        setConfirmId(null);
-      }}
+      onDelete={() => onDelete(l.id)}
     />
   );
 
@@ -650,10 +645,7 @@ function FragmentRow({
   isOpen,
   onToggleDocs,
   onEdit,
-  confirming,
-  onAskDelete,
-  onCancelDelete,
-  onConfirmDelete,
+  onDelete,
 }: {
   license: License;
   health: ReturnType<typeof licenseHealth>;
@@ -664,10 +656,7 @@ function FragmentRow({
   isOpen: boolean;
   onToggleDocs: () => void;
   onEdit: () => void;
-  confirming: boolean;
-  onAskDelete: () => void;
-  onCancelDelete: () => void;
-  onConfirmDelete: () => void;
+  onDelete: () => void | Promise<unknown>;
 }) {
   return (
     <>
@@ -704,20 +693,7 @@ function FragmentRow({
             <button className="link" onClick={onEdit}>
               Edit
             </button>
-            {confirming ? (
-              <>
-                <button className="danger" onClick={onConfirmDelete}>
-                  Confirm
-                </button>
-                <button className="link" onClick={onCancelDelete}>
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <button className="link" onClick={onAskDelete}>
-                Delete
-              </button>
-            )}
+            <ConfirmButton className="link" onConfirm={onDelete} />
           </td>
         )}
       </tr>

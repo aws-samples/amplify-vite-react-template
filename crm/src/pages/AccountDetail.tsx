@@ -19,6 +19,7 @@ import { fillAcord25, signatureFor } from "../lib/acord";
 import { useIsAdmin } from "../lib/auth";
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
+import ConfirmButton from "../components/ConfirmButton";
 import DocumentsPanel from "../components/DocumentsPanel";
 import QuotesPanel, { commissionCell, termsSummary } from "../components/QuotesPanel";
 import CoverageForm from "../components/CoverageForm";
@@ -361,45 +362,40 @@ function OverviewTab({
  */
 function DeleteLeadZone({ account }: { account: Account }) {
   const isAdmin = useIsAdmin();
-  const [confirming, setConfirming] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const navigate = useNavigate();
 
+  // Throws rather than swallowing: <ConfirmButton> keeps the pair armed on a
+  // rejection, so a failed cascade can be retried or backed out of, and the
+  // message lands in `error` via onError.
   async function deleteLead() {
-    setDeleting(true);
     setError("");
-    try {
-      const quotes = await listAllPages((nextToken) =>
-        client.models.Quote.list({
-          filter: { accountId: { eq: account.id } },
-          nextToken,
-        })
-      );
-      await Promise.all(quotes.map((q) => client.models.Quote.delete({ id: q.id })));
+    const quotes = await listAllPages((nextToken) =>
+      client.models.Quote.list({
+        filter: { accountId: { eq: account.id } },
+        nextToken,
+      })
+    );
+    await Promise.all(quotes.map((q) => client.models.Quote.delete({ id: q.id })));
 
-      const docs = await listAllPages((nextToken) =>
-        client.models.Document.list({
-          filter: { entityId: { eq: account.id } },
-          nextToken,
-        })
-      );
-      await Promise.all(
-        docs.map(async (d) => {
-          if (d.s3Key && d.s3Key !== "pending") {
-            await remove({ path: d.s3Key }).catch(() => {});
-          }
-          await client.models.Document.delete({ id: d.id });
-        })
-      );
+    const docs = await listAllPages((nextToken) =>
+      client.models.Document.list({
+        filter: { entityId: { eq: account.id } },
+        nextToken,
+      })
+    );
+    await Promise.all(
+      docs.map(async (d) => {
+        if (d.s3Key && d.s3Key !== "pending") {
+          await remove({ path: d.s3Key }).catch(() => {});
+        }
+        await client.models.Document.delete({ id: d.id });
+      })
+    );
 
-      const { errors } = await client.models.Account.delete({ id: account.id });
-      if (errors?.length) throw new Error(errors[0].message);
-      navigate("/leads");
-    } catch (err) {
-      setError(friendlyError(err, "Delete failed"));
-      setDeleting(false);
-    }
+    const { errors } = await client.models.Account.delete({ id: account.id });
+    if (errors?.length) throw new Error(errors[0].message);
+    navigate("/leads");
   }
 
   if (!isAdmin) return null;
@@ -407,36 +403,20 @@ function DeleteLeadZone({ account }: { account: Account }) {
   return (
     <div className="card" style={{ borderColor: "#eec8c4" }}>
       <h2 style={{ color: "var(--red)" }}>Danger zone</h2>
-      {confirming ? (
-        <>
-          <p className="small">
-            Permanently delete <strong>{account.name}</strong> and its quotes
-            and documents? This can't be undone.
-          </p>
-          <div className="form-actions" style={{ marginTop: 8 }}>
-            <button
-              className="primary"
-              style={{ background: "var(--red)" }}
-              disabled={deleting}
-              onClick={deleteLead}
-            >
-              {deleting ? "Deleting…" : "Yes, delete this lead"}
-            </button>
-            <button className="secondary" disabled={deleting} onClick={() => setConfirming(false)}>
-              Cancel
-            </button>
-          </div>
-        </>
-      ) : (
-        <div className="form-actions" style={{ marginTop: 0 }}>
-          <button className="secondary" onClick={() => setConfirming(true)}>
-            Delete this lead…
-          </button>
-          <span className="muted small">
-            Removes the lead, its quotes, and its documents.
-          </span>
-        </div>
-      )}
+      <div className="form-actions" style={{ marginTop: 0 }}>
+        <ConfirmButton
+          label="Delete this lead…"
+          className="secondary"
+          confirmLabel="Yes, delete this lead"
+          cancelClassName="secondary"
+          message={`Permanently delete ${account.name} and its quotes and documents? This can't be undone.`}
+          onConfirm={deleteLead}
+          onError={(err) => setError(friendlyError(err, "Delete failed"))}
+        />
+        <span className="muted small">
+          Removes the lead, its quotes, and its documents.
+        </span>
+      </div>
       {error && <p className="error-text">{error}</p>}
     </div>
   );

@@ -4,6 +4,7 @@ import { client, friendlyError, type CrmDocument } from "../lib/client";
 import type { Schema } from "../../amplify/data/resource";
 import FilePreviewModal, { canPreview } from "./FilePreview";
 import FileButton from "./FileButton";
+import ConfirmButton from "./ConfirmButton";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
 import { useSort, SortTh } from "../lib/useSort";
 
@@ -48,7 +49,6 @@ export default function DocumentsPanel({
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [openDocId, setOpenDocId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   // Auto-clearing: the row this confirmation names is gone from the table, so
   // nothing on screen would ever go dirty and retire the message.
   const delStatus = useSaveStatus({ autoClearMs: 4000 });
@@ -128,9 +128,9 @@ export default function DocumentsPanel({
         errorMessage: "Couldn't delete that document.",
       }
     );
-    // Unconditional, as before: the confirm/keep pair closes either way and
-    // the outcome is reported above.
-    setConfirmDeleteId(null);
+    // `run` never rejects, so <ConfirmButton> disarms either way — the same
+    // unconditional close the hand-rolled confirm/keep pair did. The outcome
+    // is reported by the panel's one SaveStatus line, not by the button.
   }
 
   function highlight(text: string, term: string) {
@@ -266,20 +266,11 @@ export default function DocumentsPanel({
                           {openDocId === d.id ? "Hide text" : "View text"}
                         </button>
                       )}
-                      {confirmDeleteId === d.id ? (
-                        <>
-                          <button className="danger" onClick={() => deleteDoc(d)}>
-                            Confirm delete
-                          </button>
-                          <button className="link" onClick={() => setConfirmDeleteId(null)}>
-                            Keep
-                          </button>
-                        </>
-                      ) : (
-                        <button className="danger" onClick={() => setConfirmDeleteId(d.id)}>
-                          Delete
-                        </button>
-                      )}
+                      <ConfirmButton
+                        confirmLabel="Confirm delete"
+                        cancelLabel="Keep"
+                        onConfirm={() => deleteDoc(d)}
+                      />
                     </td>
                   </tr>
                 );
