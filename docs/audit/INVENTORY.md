@@ -620,7 +620,6 @@ Safe but shim-induced: `portal/Requests.tsx:111,122`, `QuoteHistory.tsx:216`.
 
 | Missing abstraction | Evidence | Consumers |
 |---|---|---|
-| `listAll` on `dataClient` | 4 impls + 87 inline loops (§1.1.1) | ~91 |
 | `useAsyncData` hook | 34 hand-rolled triads; `kit.tsx` already owns the render halves (`Spinner:5`, `ErrorNote:424`, `SuccessNote:443`) | 34 |
 | `errMessage(err, fallback)` | 155 backend + ~102 frontend sites, zero helpers (§1.5) | ~200 |
 | CRM copy module | The 102 sites carry **83 distinct hand-written user-visible strings** as inline fallbacks ("Photo upload failed" appears ×4). The backend already has 4 copy modules (`bookingTerms.ts`, `consentText.ts`, `lifecycleReasons.ts`, `visitChangeReasons.ts`); the CRM has zero | ~83 strings |
