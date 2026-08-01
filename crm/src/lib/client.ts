@@ -282,3 +282,107 @@ export function validatePositiveInt(
   }
   return [];
 }
+
+// ── Calendar-day arithmetic and date+time rendering ──────────────────
+
+/**
+ * Midnight UTC for a civil (Y, M, D) triple, as epoch ms.
+ *
+ * Only ever used to subtract one of these from another, so the zone it pins
+ * them to is arbitrary — UTC is chosen because it has no DST, which makes the
+ * difference an exact multiple of 86_400_000. `Date.UTC` would do, except it
+ * remaps years 0-99 onto 1900-1999; `setUTCFullYear` does not.
+ */
+function utcDayMs(year: number, month: number, day: number): number {
+  const t = new Date(0);
+  t.setUTCFullYear(year, month - 1, day);
+  t.setUTCHours(0, 0, 0, 0);
+  return t.getTime();
+}
+
+/**
+ * Whole days from today until `d` — negative once it is past, `0` today.
+ * Null-safe; `null` for anything that isn't a real calendar day.
+ *
+ * ## Which calendar "today" comes from, and why it is the local one
+ *
+ * §1.7 of the audit lists three implementations of this, disagreeing about
+ * where "today" starts: `daysUntilDate` (local midnight via `toDateString()`),
+ * `Dashboard.tsx`'s `daysUntil` (local midnight via `setHours`), and the
+ * `isoDay`/`addDays` pair in `renewal-tasks/handler.ts` (UTC). This function
+ * takes the **local** calendar, for the three sites that render a number to a
+ * person.
+ *
+ * That is not a contradiction of PATTERNS §6 ("a rule shared with a Lambda
+ * matches the Lambda"). §6's justification is about the *operand*: UTC wins
+ * for the settle rule because the right-hand side is a server-assigned
+ * `createdAt` instant. Every operand here is the opposite kind of value — a
+ * bare `a.date()` day-string with no zone attached (`License.expirationDate`,
+ * `Policy.expirationDate`, `Account.currentPolicyExpiration`), or a
+ * `MarketingTask.submitBy` the Lambda derived from one by pure calendar
+ * arithmetic. And the Lambda never computes a days-until number at all: it
+ * builds day strings and compares them lexicographically, so there is no
+ * handler-side counterpart of this rule to mirror. The one thing left that
+ * could differ is whose midnight ends "today", and the answer for a badge
+ * reading "1d left" is the reader's. At 17:00 in Los Angeles, a licence
+ * expiring tomorrow must not already say `0d`.
+ *
+ * ## What the string is read as
+ *
+ * The leading `YYYY-MM-DD` is taken **literally** — the day as written, never
+ * parsed through `new Date`. A datetime string is therefore downcast to its
+ * nominal day, the same downcast the `.slice(0, 10)` sites already perform,
+ * and a UTC `createdAt` keeps its UTC day rather than sliding a day west of
+ * Greenwich. Anything after position 10 is ignored.
+ *
+ * Differences from `daysUntilDate`, which this replaces in Wave 4:
+ * - Malformed input returns `null`, not `NaN`. `NaN` slipped through
+ *   `licenseHealth`'s `days == null` guard and rendered "NaNd left" in a
+ *   green pill; `null` lands in the "No expiration on file" branch.
+ * - Exact civil-day subtraction rather than `Math.round` over a local-midnight
+ *   difference, so a span containing a DST transition cannot be off by one.
+ */
+export function daysUntil(d: string | null | undefined): number | null {
+  if (blank(d)) return null;
+  const day = String(d).trim().slice(0, 10);
+  if (!isIsoDay(day)) return null;
+  const [y, mo, dd] = day.split("-").map(Number);
+  const now = new Date();
+  const todayMs = utcDayMs(now.getFullYear(), now.getMonth() + 1, now.getDate());
+  return (utcDayMs(y, mo, dd) - todayMs) / 86_400_000;
+}
+
+/**
+ * A stored timestamp rendered as date + time, en-US. The counterpart of
+ * `fmtDate`, and the shared version of the lone `toLocaleString` at
+ * `FormsTab.tsx:214`. Same `"—"` for absent input.
+ *
+ * Two deliberate differences from that call site's current output:
+ *
+ * 1. **Seconds are dropped.** `7/31/2026, 3:04:05 PM` becomes
+ *    `7/31/2026, 3:04 PM`. The second an upload landed is noise in a table,
+ *    and the date half stays byte-identical to `fmtDate`'s, which the raw
+ *    `toLocaleString` default is not guaranteed to keep across ICU versions.
+ * 2. **An unparseable string renders `"—"`,** not the literal `Invalid Date`.
+ *
+ * A **date-only** string (`length === 10`, `fmtDate`'s own discriminator —
+ * see §4.3) is delegated to `fmtDate` rather than being shown as
+ * `12:00 AM`. There is no time in the data, so inventing midnight and
+ * printing it would be a fabricated fact — and which midnight it was would
+ * depend on the reader's zone. A 10-character string that is not a real
+ * calendar day is `"—"`; `fmtDate` is looser here and is left alone.
+ */
+export function fmtDateTime(d: string | null | undefined): string {
+  if (blank(d)) return "—";
+  const s = String(d).trim();
+  if (s.length === 10) return isIsoDay(s) ? fmtDate(s) : "—";
+  const parsed = new Date(s);
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return parsed.toLocaleString("en-US", {
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
