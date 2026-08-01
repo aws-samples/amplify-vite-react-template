@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, unwrap, type Customer, type Job, type ServicePlan } from "../lib/api";
+import { api, listAll, type Customer, type Job, type ServicePlan } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
 import { planCadence } from "../lib/planCadence";
@@ -31,13 +31,16 @@ export default function PortalHome() {
   const loadPlans = useCallback(async (mine: Customer[]) => {
     const planLists = await Promise.all(
       mine.map((c) =>
-        api().models.ServicePlan.list({
-          filter: { customerId: { eq: c.id } },
-          limit: 50,
-        })
+        listAll((t) =>
+          api().models.ServicePlan.list({
+            filter: { customerId: { eq: c.id } },
+            limit: 50,
+            nextToken: t,
+          })
+        )
       )
     );
-    setPlans(planLists.flatMap((r) => unwrap(r)));
+    setPlans(planLists.flat());
   }, []);
 
   useEffect(() => {
@@ -48,13 +51,16 @@ export default function PortalHome() {
         setCustomers(mine);
         const jobLists = await Promise.all(
           mine.map((c) =>
-            api().models.Job.list({
-              filter: { customerId: { eq: c.id } },
-              limit: 200,
-            })
+            listAll((t) =>
+              api().models.Job.list({
+                filter: { customerId: { eq: c.id } },
+                limit: 200,
+                nextToken: t,
+              })
+            )
           )
         );
-        setJobs(jobLists.flatMap((r) => unwrap(r)));
+        setJobs(jobLists.flat());
         await loadPlans(mine);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load");

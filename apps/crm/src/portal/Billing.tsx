@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   api,
+  listAll,
   opResult,
   payInvoice,
-  unwrap,
   type Customer,
   type Invoice,
 } from "../lib/api";
@@ -42,15 +42,18 @@ export default function PortalBilling() {
       setCustomers(mine);
       const invLists = await Promise.all(
         mine.map((c) =>
-          api().models.Invoice.list({
-            filter: { customerId: { eq: c.id } },
-            limit: 200,
-          })
+          listAll((t) =>
+            api().models.Invoice.list({
+              filter: { customerId: { eq: c.id } },
+              limit: 200,
+              nextToken: t,
+            })
+          )
         )
       );
       setInvoices(
         invLists
-          .flatMap((r) => unwrap(r))
+          .flat()
           .sort((a, b) => (b.issuedAt ?? "").localeCompare(a.issuedAt ?? ""))
       );
       const summaries = await Promise.all(

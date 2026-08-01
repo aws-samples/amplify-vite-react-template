@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api, unwrap, type Customer, type CustomerGroup } from "../lib/api";
+import { api, listAll, unwrap, type Customer, type CustomerGroup } from "../lib/api";
 import {
   Button,
   Card,
@@ -41,7 +41,9 @@ export default function GroupDetail() {
     try {
       const g = unwrap(await api().models.CustomerGroup.get({ id }));
       setGroup(g);
-      const all = unwrap(await api().models.Customer.list({ limit: 1000 }));
+      const all = await listAll((t) =>
+        api().models.Customer.list({ limit: 1000, nextToken: t })
+      );
       setMembers(all.filter((c) => c.groupId === id));
       setOthers(all.filter((c) => c.groupId !== id && c.status !== "INACTIVE"));
     } catch (err) {

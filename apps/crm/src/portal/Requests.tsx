@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   api,
+  listAll,
   opResult,
-  unwrap,
   type Customer,
   type Job,
 } from "../lib/api";
@@ -87,45 +87,61 @@ export default function PortalRequests() {
       if (mine.length && !customerId) setCustomerId(mine[0].id);
       const jobLists = await Promise.all(
         mine.map((c) =>
-          api().models.Job.list({ filter: { customerId: { eq: c.id } }, limit: 200 })
+          listAll((t) =>
+            api().models.Job.list({
+              filter: { customerId: { eq: c.id } },
+              limit: 200,
+              nextToken: t,
+            })
+          )
         )
       );
-      setJobs(jobLists.flatMap((r) => unwrap(r)));
+      setJobs(jobLists.flat());
       const models = api().models as unknown as {
         PortalRequest?: {
           listPortalRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: PortalRequestRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: PortalRequestRow[]; nextToken?: string | null }>;
         };
         CallbackRequest?: {
           listCallbackRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: CallbackRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: CallbackRow[]; nextToken?: string | null }>;
         };
       };
       if (models.PortalRequest) {
+        const portalRequests = models.PortalRequest;
         const lists = await Promise.all(
           mine.map((c) =>
-            models.PortalRequest!.listPortalRequestByCustomerId({
-              customerId: c.id,
-              limit: 50,
-            })
+            listAll((t) =>
+              portalRequests.listPortalRequestByCustomerId({
+                customerId: c.id,
+                limit: 50,
+                nextToken: t,
+              })
+            )
           )
         );
-        setRequests(lists.flatMap((l) => l.data ?? []));
+        setRequests(lists.flat());
       }
       if (models.CallbackRequest) {
+        const callbackRequests = models.CallbackRequest;
         const lists = await Promise.all(
           mine.map((c) =>
-            models.CallbackRequest!.listCallbackRequestByCustomerId({
-              customerId: c.id,
-              limit: 50,
-            })
+            listAll((t) =>
+              callbackRequests.listCallbackRequestByCustomerId({
+                customerId: c.id,
+                limit: 50,
+                nextToken: t,
+              })
+            )
           )
         );
-        setCallbacks(lists.flatMap((l) => l.data ?? []));
+        setCallbacks(lists.flat());
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load");

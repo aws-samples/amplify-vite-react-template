@@ -7,7 +7,6 @@ import {
   offboardStaff,
   opResult,
   staffRoster,
-  unwrap,
   STAFF_OFFBOARD_REASONS,
   STAFF_ROLE_CHANGE_REASONS,
   type StaffAccessEvent,
@@ -689,11 +688,8 @@ function InviteForm({ onDone }: { onDone: () => Promise<void> }) {
 
   useEffect(() => {
     if (!linksTechnician) return;
-    api()
-      .models.Technician.list({ limit: 200 })
-      .then((res) =>
-        setTechs(unwrap(res).filter((t) => t.active && !t.userSub))
-      )
+    listAll((t) => api().models.Technician.list({ limit: 200, nextToken: t }))
+      .then((rows) => setTechs(rows.filter((t) => t.active && !t.userSub)))
       .catch(() => undefined);
   }, [linksTechnician]);
 

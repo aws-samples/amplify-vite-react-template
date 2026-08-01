@@ -5,6 +5,7 @@ import {
   clientActionId,
   DEACTIVATION_REASONS,
   dueDateForTerms,
+  listAll,
   listCustomerLifecycleEvents,
   listLifecycleCommands,
   previewLifecycleTransition,
@@ -209,33 +210,33 @@ export default function CustomerDetail() {
       setCustomer(c);
       const filter = { customerId: { eq: id } };
       const [pl, jb, ag, rp, amd, inv, gr] = await Promise.all([
-        api().models.ServicePlan.list({ filter, limit: 200 }),
-        api().models.Job.list({ filter, limit: 500 }),
-        api().models.Agreement.list({ filter, limit: 200 }),
-        api().models.ServiceReport.list({ filter, limit: 500 }),
-        api().models.ServiceReportAmendment.list({ filter, limit: 500 }),
-        api().models.Invoice.list({ filter, limit: 500 }),
-        api().models.CustomerGroup.list({ limit: 500 }),
+        listAll((t) => api().models.ServicePlan.list({ filter, limit: 200, nextToken: t })),
+        listAll((t) => api().models.Job.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.Agreement.list({ filter, limit: 200, nextToken: t })),
+        listAll((t) => api().models.ServiceReport.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.ServiceReportAmendment.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.Invoice.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.CustomerGroup.list({ limit: 500, nextToken: t })),
       ]);
-      setPlans(unwrap(pl));
+      setPlans(pl);
       setJobs(
-        unwrap(jb).sort((a, b) =>
+        jb.sort((a, b) =>
           (b.scheduledDate ?? "9999").localeCompare(a.scheduledDate ?? "9999")
         )
       );
-      setAgreements(unwrap(ag));
-      setReports(unwrap(rp).filter((r) => r.status === "FINALIZED"));
+      setAgreements(ag);
+      setReports(rp.filter((r) => r.status === "FINALIZED"));
       setAmendments(
-        unwrap(amd).sort((a, b) =>
+        amd.sort((a, b) =>
           (a.issuedAt ?? "").localeCompare(b.issuedAt ?? "")
         )
       );
       setInvoices(
-        unwrap(inv).sort((a, b) =>
+        inv.sort((a, b) =>
           (b.issuedAt ?? "").localeCompare(a.issuedAt ?? "")
         )
       );
-      setGroups(unwrap(gr));
+      setGroups(gr);
       // The lifecycle ledger is OWNER/OFFICE/FINANCE-readable; load it for those
       // roles so the transition history refreshes after every deactivate/reactivate.
       if (roles.office || roles.finance) {
@@ -3206,17 +3207,24 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
           listPortalRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: PortalRequestRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: PortalRequestRow[]; nextToken?: string | null }>;
         };
       };
       if (!models.PortalRequest) {
         setRows([]);
         return;
       }
-      const { data } = await models.PortalRequest.listPortalRequestByCustomerId(
-        { customerId, limit: 100 }
+      const portalRequests = models.PortalRequest;
+      setRows(
+        await listAll((t) =>
+          portalRequests.listPortalRequestByCustomerId({
+            customerId,
+            limit: 100,
+            nextToken: t,
+          })
+        )
       );
-      setRows(data ?? []);
     } catch {
       setRows([]);
     }
@@ -3348,19 +3356,24 @@ function CallbacksSection({
           listCallbackRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: CallbackRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: CallbackRow[]; nextToken?: string | null }>;
         };
       };
       if (!models.CallbackRequest) {
         setRows([]);
         return;
       }
-      const { data } =
-        await models.CallbackRequest.listCallbackRequestByCustomerId({
-          customerId,
-          limit: 100,
-        });
-      setRows(data ?? []);
+      const callbackRequests = models.CallbackRequest;
+      setRows(
+        await listAll((t) =>
+          callbackRequests.listCallbackRequestByCustomerId({
+            customerId,
+            limit: 100,
+            nextToken: t,
+          })
+        )
+      );
     } catch {
       setRows([]);
     }
@@ -3374,9 +3387,11 @@ function CallbacksSection({
     if (!scheduling) return;
     void (async () => {
       try {
-        const { data } = await api().models.Technician.list({ limit: 200 });
+        const data = await listAll((t) =>
+          api().models.Technician.list({ limit: 200, nextToken: t })
+        );
         setTechs(
-          (data ?? [])
+          data
             .filter((t) => t.active !== false)
             .map((t) => ({ id: t.id, displayName: t.name }))
         );

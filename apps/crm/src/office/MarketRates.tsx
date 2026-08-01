@@ -269,13 +269,14 @@ export default function MarketRates() {
         setRollback(rb ?? null);
         const versionModels = api().models as unknown as {
           CatalogVersion?: {
-            list: (a: { limit: number }) => Promise<{
+            list: (a: { limit: number; nextToken?: string | null }) => Promise<{
               data: {
                 id: string;
                 keyCount?: number | null;
                 trigger?: string | null;
                 createdAt?: string;
               }[];
+              nextToken?: string | null;
             }>;
             get: (a: { id: string }) => Promise<{
               data: { manifestJson?: string | null } | null;
@@ -283,11 +284,12 @@ export default function MarketRates() {
           };
         };
         if (versionModels.CatalogVersion) {
-          const { data: vs } = await versionModels.CatalogVersion.list({
-            limit: 200,
-          });
+          const catalogVersions = versionModels.CatalogVersion;
+          const vs = await listAll((t) =>
+            catalogVersions.list({ limit: 200, nextToken: t })
+          );
           setVersions(
-            (vs ?? []).sort((a, b) =>
+            vs.sort((a, b) =>
               (b.createdAt ?? b.id).localeCompare(a.createdAt ?? a.id)
             )
           );

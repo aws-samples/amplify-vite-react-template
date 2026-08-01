@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, unwrap, type Agreement, type Customer, type ServiceReport } from "../lib/api";
+import { api, listAll, type Agreement, type Customer, type ServiceReport } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDate, fmtDateTime } from "../lib/format";
 import { Card, EmptyState, ErrorNote, ListRow, Page, Spinner } from "../ui/kit";
@@ -22,31 +22,35 @@ export default function PortalDocs() {
         const [reps, ags] = await Promise.all([
           Promise.all(
             mine.map((c) =>
-              api().models.ServiceReport.list({
-                filter: { customerId: { eq: c.id } },
-                limit: 200,
-              })
+              listAll((t) =>
+                api().models.ServiceReport.list({
+                  filter: { customerId: { eq: c.id } },
+                  limit: 200,
+                  nextToken: t,
+                })
+              )
             )
           ),
           Promise.all(
             mine.map((c) =>
-              api().models.Agreement.list({
-                filter: { customerId: { eq: c.id } },
-                limit: 100,
-              })
+              listAll((t) =>
+                api().models.Agreement.list({
+                  filter: { customerId: { eq: c.id } },
+                  limit: 100,
+                  nextToken: t,
+                })
+              )
             )
           ),
         ]);
         setReports(
           reps
-            .flatMap((r) => unwrap(r))
+            .flat()
             .filter((r) => r.status === "FINALIZED" && r.pdfKey)
             .sort((a, b) => b.serviceDate.localeCompare(a.serviceDate))
         );
         setAgreements(
-          ags
-            .flatMap((r) => unwrap(r))
-            .filter((a) => a.status === "SIGNED" && a.pdfKey)
+          ags.flat().filter((a) => a.status === "SIGNED" && a.pdfKey)
         );
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load documents");

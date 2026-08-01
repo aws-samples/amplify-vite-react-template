@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, unwrap, type Customer, type CustomerGroup, type Job } from "../lib/api";
+import { api, listAll, unwrap, type Customer, type CustomerGroup, type Job } from "../lib/api";
 import { myGroupIds, useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
 import { Card, EmptyState, ErrorNote, ListRow, Page, Sheet, Spinner, StatusBadge } from "../ui/kit";
@@ -31,13 +31,16 @@ export default function PortalGroup() {
         );
         const memberLists = await Promise.all(
           ids.map((id) =>
-            api().models.Customer.list({
-              filter: { groupId: { eq: id } },
-              limit: 500,
-            })
+            listAll((t) =>
+              api().models.Customer.list({
+                filter: { groupId: { eq: id } },
+                limit: 500,
+                nextToken: t,
+              })
+            )
           )
         );
-        setMembers(memberLists.flatMap((r) => unwrap(r)));
+        setMembers(memberLists.flat());
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load group");
       }
@@ -90,9 +93,14 @@ function MemberDetail({ customer }: { customer: Customer }) {
   const [jobs, setJobs] = useState<Job[] | null>(null);
 
   useEffect(() => {
-    api()
-      .models.Job.list({ filter: { customerId: { eq: customer.id } }, limit: 200 })
-      .then((res) => setJobs(unwrap(res)))
+    listAll((t) =>
+      api().models.Job.list({
+        filter: { customerId: { eq: customer.id } },
+        limit: 200,
+        nextToken: t,
+      })
+    )
+      .then(setJobs)
       .catch(() => setJobs([]));
   }, [customer.id]);
 

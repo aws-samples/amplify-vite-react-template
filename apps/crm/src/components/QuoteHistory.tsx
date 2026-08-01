@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   clientActionId,
+  listAll,
   setLeadDisposition,
   unwrap,
   type BookingRequest,
@@ -88,13 +89,16 @@ export default function QuoteHistory({
 
   const loadQuotes = useCallback(async () => {
     try {
-      const res = await api().models.BookingRequest.listBookingRequestByLeadCustomerId(
-        { leadCustomerId: customer.id }
+      const rows = await listAll((t) =>
+        api().models.BookingRequest.listBookingRequestByLeadCustomerId(
+          { leadCustomerId: customer.id },
+          { nextToken: t }
+        )
       );
       // Newest first. PENDING rows are skipped: their price never finished
       // computing, so there is nothing to show.
       setQuotes(
-        (res.data ?? [])
+        rows
           .filter((b) => b.status && b.status !== "PENDING")
           .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
       );

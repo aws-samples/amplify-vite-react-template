@@ -296,6 +296,10 @@ function EmailLogList() {
   >(null);
 
   useEffect(() => {
+    // Deliberately NOT listAll: this widget wants the newest 100, and paging
+    // the whole ever-growing EmailLog into the browser to show 100 rows is the
+    // wrong fix. The right fix is a sentAt index (server-side sort); until
+    // then this shows an arbitrary single page, sorted client-side.
     api()
       .models.EmailLog.list({ limit: 100 })
       .then((res) =>
