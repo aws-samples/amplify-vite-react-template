@@ -7,6 +7,7 @@ import Team from "./Team";
 import Licensing from "../components/Licensing";
 import SignatureManager from "../components/SignatureManager";
 import type { UserProfile } from "../lib/client";
+import { useIsAdmin } from "../lib/auth";
 
 type TemplateDef = AcordFormDef;
 type Tab = "templates" | "licensing" | "signature" | "team";
@@ -16,7 +17,7 @@ const TEMPLATES: TemplateDef[] = ACORD_FORMS;
 
 export default function Settings({ profile }: { profile: UserProfile }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const isAdmin = profile.role === "ADMIN";
+  const isAdmin = useIsAdmin();
 
   const TABS: [Tab, string][] = [
     ["templates", "Form templates"],
@@ -57,7 +58,7 @@ export default function Settings({ profile }: { profile: UserProfile }) {
       </div>
 
       {tab === "templates" && <TemplatesPanel />}
-      {tab === "licensing" && <Licensing profile={profile} />}
+      {tab === "licensing" && <Licensing />}
       {tab === "signature" && <MySignature profile={profile} />}
       {tab === "team" && isAdmin && <Team profile={profile} />}
     </>

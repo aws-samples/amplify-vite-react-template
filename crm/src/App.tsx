@@ -3,6 +3,12 @@ import { NavLink, Route, Routes } from "react-router-dom";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react";
 import type { AuthUser } from "aws-amplify/auth";
 import { client, listAllPages, type UserProfile } from "./lib/client";
+import {
+  AdminContext,
+  fetchUserGroups,
+  isAdminGroup,
+  roleFromGroups,
+} from "./lib/auth";
 import MagicLinkSignIn from "./components/MagicLinkSignIn";
 import Dashboard from "./pages/Dashboard";
 import AccountsList from "./pages/AccountsList";
@@ -60,16 +66,24 @@ function AuthGate() {
 
 function ProfileGate({ user, signOut }: { user: AuthUser; signOut: () => void }) {
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [groups, setGroups] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    listAllPages((nextToken) =>
-      client.models.UserProfile.list({
-        filter: { userId: { eq: user.userId } },
-        nextToken,
-      })
-    ).then((data) => {
+    // Profile and Cognito groups resolve behind ONE loading gate: settling
+    // admin status after first paint would flash the admin-only controls
+    // into (or out of) a page that's already on screen.
+    Promise.all([
+      listAllPages((nextToken) =>
+        client.models.UserProfile.list({
+          filter: { userId: { eq: user.userId } },
+          nextToken,
+        })
+      ),
+      fetchUserGroups(),
+    ]).then(([data, gs]) => {
       setProfile(data[0] ?? null);
+      setGroups(gs);
       setLoading(false);
     });
   }, [user.userId]);
@@ -81,12 +95,17 @@ function ProfileGate({ user, signOut }: { user: AuthUser; signOut: () => void })
       <Onboarding
         user={user}
         existing={profile}
+        role={roleFromGroups(groups)}
         onComplete={(p) => setProfile(p)}
       />
     );
   }
 
-  return <Shell profile={profile} signOut={signOut} />;
+  return (
+    <AdminContext.Provider value={isAdminGroup(groups)}>
+      <Shell profile={profile} signOut={signOut} />
+    </AdminContext.Provider>
+  );
 }
 
 function NotFound() {

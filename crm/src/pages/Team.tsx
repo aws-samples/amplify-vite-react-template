@@ -11,7 +11,11 @@ interface TeamUser {
   groups: string[];
 }
 
-/** ADMIN-only (enforced server-side by the group rule on the mutations). */
+/**
+ * ADMIN-only. Rendered only for the Cognito ADMIN group (Settings gates the
+ * tab on it), and enforced server-side by the group rule on the mutations —
+ * so there's no check of its own here.
+ */
 export default function Team({ profile }: { profile: UserProfile }) {
   const [users, setUsers] = useState<TeamUser[] | null>(null);
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
@@ -123,8 +127,9 @@ export default function Team({ profile }: { profile: UserProfile }) {
         </div>
         <p className="muted small" style={{ marginBottom: 0 }}>
           Producers complete their licensing details during first sign-in.
-          Role is recorded for the record — apart from admin-only screens,
-          it doesn't restrict access yet.
+          The role you pick here is the user's Cognito group, and it's what
+          admin-only screens and the team mutations check — so it does
+          restrict access.
         </p>
       </div>
 

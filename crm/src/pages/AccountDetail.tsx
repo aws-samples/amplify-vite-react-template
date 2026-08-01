@@ -15,6 +15,7 @@ import {
   type UserProfile,
 } from "../lib/client";
 import { fillAcord25, signatureFor } from "../lib/acord";
+import { useIsAdmin } from "../lib/auth";
 import DocumentsPanel from "../components/DocumentsPanel";
 import QuotesPanel, { commissionCell, termsSummary } from "../components/QuotesPanel";
 import CoverageForm from "../components/CoverageForm";
@@ -354,8 +355,13 @@ function OverviewTab({
 /**
  * Leads (and only leads — clients carry bound policies and stay for the
  * audit trail) can be deleted along with their quotes and documents.
+ *
+ * Admin-only: this cascades through the quotes, the documents and their S3
+ * objects, so it's gated here rather than at the call site — the zone can't
+ * be rendered without the check coming with it.
  */
 function DeleteLeadZone({ account }: { account: Account }) {
+  const isAdmin = useIsAdmin();
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
@@ -396,6 +402,8 @@ function DeleteLeadZone({ account }: { account: Account }) {
       setDeleting(false);
     }
   }
+
+  if (!isAdmin) return null;
 
   return (
     <div className="card" style={{ borderColor: "#eec8c4" }}>

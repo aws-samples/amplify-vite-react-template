@@ -1,8 +1,13 @@
 import { useState } from "react";
 import type { AuthUser } from "aws-amplify/auth";
 import { client, US_STATES, type UserProfile } from "../lib/client";
+import type { Role } from "../lib/auth";
 
-type Role = "ADMIN" | "STAFF" | "PRODUCER";
+const ROLE_LABELS: Record<Role, string> = {
+  ADMIN: "Admin",
+  PRODUCER: "Producer",
+  STAFF: "Staff",
+};
 
 interface LicenseDraft {
   state: string;
@@ -19,21 +24,26 @@ const emptyLicense = (): LicenseDraft => ({
 });
 
 /**
- * First-login onboarding. Staff onboard with just name + role; producers must
+ * First-login onboarding. Staff onboard with just their name; producers must
  * provide their NPN and at least one state license before entering the CRM.
+ *
+ * `role` comes from the Cognito group the inviting admin put the user in —
+ * it isn't the user's to choose, so what's written to UserProfile.role is a
+ * mirror of the real authority rather than a claim.
  */
 export default function Onboarding({
   user,
   existing,
+  role,
   onComplete,
 }: {
   user: AuthUser;
   existing: UserProfile | null;
+  role: Role;
   onComplete: (p: UserProfile) => void;
 }) {
   const [firstName, setFirstName] = useState(existing?.firstName ?? "");
   const [lastName, setLastName] = useState(existing?.lastName ?? "");
-  const [role, setRole] = useState<Role>(existing?.role ?? "STAFF");
   const [npn, setNpn] = useState(existing?.npn ?? "");
   const [licenses, setLicenses] = useState<LicenseDraft[]>([emptyLicense()]);
   const [saving, setSaving] = useState(false);
@@ -121,11 +131,10 @@ export default function Onboarding({
           </div>
           <div className="field">
             <label>Role</label>
-            <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
-              <option value="ADMIN">Admin</option>
-              <option value="PRODUCER">Producer</option>
-              <option value="STAFF">Staff</option>
-            </select>
+            <input value={ROLE_LABELS[role]} disabled />
+            <span className="muted small">
+              Set by whoever invited you — ask an admin to change it.
+            </span>
           </div>
           {isProducer && (
             <div className="field">

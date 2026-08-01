@@ -12,6 +12,7 @@ import {
   type UserProfile,
 } from "../lib/client";
 import DocumentsPanel from "./DocumentsPanel";
+import { useIsAdmin } from "../lib/auth";
 import { useSort, SortTh } from "../lib/useSort";
 
 type HolderType = "FIRM" | "PRODUCER";
@@ -24,7 +25,7 @@ type HolderType = "FIRM" | "PRODUCER";
  * once. Supporting files (the license PDF, renewal receipts, CE certificates)
  * attach per-license as Documents with entityType=LICENSE.
  */
-export default function Licensing({ profile }: { profile: UserProfile }) {
+export default function Licensing() {
   const [licenses, setLicenses] = useState<License[]>([]);
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,7 +36,7 @@ export default function Licensing({ profile }: { profile: UserProfile }) {
   const [query, setQuery] = useState("");
   const [attentionOnly, setAttentionOnly] = useState(false);
 
-  const isAdmin = profile.role === "ADMIN";
+  const isAdmin = useIsAdmin();
 
   async function load() {
     const [{ data: ls }, { data: ps }] = await Promise.all([
