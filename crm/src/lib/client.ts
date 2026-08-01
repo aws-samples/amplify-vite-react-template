@@ -164,3 +164,121 @@ export function friendlyError(err: unknown, fallback: string): string {
     return "Network problem — check your connection and try again.";
   return msg || fallback;
 }
+
+// ── Field-level validators ───────────────────────────────────────────
+// Same contract as validateAccountFields: return a list of human-readable
+// problems, empty = valid, so callers compose by concatenation:
+//
+//   const problems = [
+//     ...validateAccountFields(form),
+//     ...validateYear(form.roofUpdatedYear, "Roof updated year", { maxYearsAhead: 1 }),
+//   ];
+//
+// Absent values are always "not provided, skip" — every existing call site
+// guards with `if (field)` before checking, and required-ness is asserted
+// separately (e.g. NewLead's `if (!form.name.trim())`). Validators here must
+// never make an optional field fail just for being blank.
+
+/**
+ * Email shape check. Two variants existed: client.ts's `[^\s@]+` TLD and
+ * QuoteApp's `[^\s@]{2,}`. The `{2,}` form wins — the root zone has no
+ * single-character TLDs, so it rejects "a@b.c" typos without rejecting any
+ * real address. Exported so `web` can drop its private copy.
+ */
+export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/** "" / whitespace / null / undefined all mean "not provided". `0` does not. */
+function blank(v: string | number | null | undefined): boolean {
+  return v == null || String(v).trim() === "";
+}
+
+const ISO_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** Real calendar day, decided by arithmetic only — no `new Date()`, so no
+ *  timezone can shift it (see §1.7's UTC-vs-local split). */
+function isIsoDay(v: string): boolean {
+  const m = ISO_DAY_RE.exec(v);
+  if (!m) return false;
+  const [, y, mo, d] = m;
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= lengths[month - 1];
+}
+
+/**
+ * Start-before-end for a pair of ISO day strings. Compared with `<=` on the
+ * raw strings — correct for ISO-8601 and free of any timezone question.
+ * Equal dates are valid: a one-day term is legitimate, and both existing
+ * implementations (CoverageForm, Licensing) only reject `start > end`.
+ *
+ * Either side absent → no ordering problem. A present-but-malformed side is
+ * reported on its own; ordering is only checked once both parse.
+ */
+export function validateDateRange(
+  start: string | null | undefined,
+  end: string | null | undefined,
+  startLabel = "Effective date",
+  endLabel = "expiration date"
+): string[] {
+  const problems: string[] = [];
+  const s = blank(start) ? "" : String(start).trim();
+  const e = blank(end) ? "" : String(end).trim();
+  if (s && !isIsoDay(s)) problems.push(`${startLabel} isn't a valid date.`);
+  if (e && !isIsoDay(e)) problems.push(`${endLabel} isn't a valid date.`);
+  if (problems.length) return problems;
+  if (s && e && s > e) {
+    problems.push(`${startLabel} can't be after the ${endLabel}.`);
+  }
+  return problems;
+}
+
+/**
+ * Four-digit year within a plausible window. The two ranges in the codebase
+ * are not drift — `yearBuilt` allows +5 (construction can be scheduled ahead
+ * of today) while the roof/HVAC/electrical/plumbing "updated" years allow +1,
+ * because work already done can't be years in the future. So the upper bound
+ * is a parameter, not a constant.
+ */
+export function validateYear(
+  value: string | number | null | undefined,
+  label: string,
+  opts: { min?: number; maxYearsAhead?: number } = {}
+): string[] {
+  if (blank(value)) return [];
+  const min = opts.min ?? 1600;
+  const max = new Date().getFullYear() + (opts.maxYearsAhead ?? 5);
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    return [`${label} should be between ${min} and ${max}.`];
+  }
+  return [];
+}
+
+/**
+ * Whole number, `min` (default 0) and up. Named for the common case; the
+ * default bound is "not negative", matching validateAccountFields's unit
+ * count. Form state holds numerics as strings, so string input is expected —
+ * coercion is `Number()`, same as every existing check.
+ */
+export function validatePositiveInt(
+  value: string | number | null | undefined,
+  label: string,
+  opts: { min?: number; max?: number } = {}
+): string[] {
+  if (blank(value)) return [];
+  const min = opts.min ?? 0;
+  const { max } = opts;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || (max != null && n > max)) {
+    return [
+      max != null
+        ? `${label} should be a whole number between ${min} and ${max}.`
+        : `${label} should be a whole number of at least ${min}.`,
+    ];
+  }
+  return [];
+}
