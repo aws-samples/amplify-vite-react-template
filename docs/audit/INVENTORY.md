@@ -8,6 +8,7 @@ Structural audit. Findings are removed from this document as they are fixed.
 |---|---|---|
 | #1, the migratable half | `4779b7e` | Seven of the thirteen hand-mirrored modules and constant blocks now have one copy, with the CRM re-exporting it. The rule is written up in [PATTERNS.md](PATTERNS.md). |
 | #1, the remaining six mirrors — **item closed** | `b2e8339` `810c485` `0c129ab` `03bb6fb` `d81922c` | Each impure server module had its pure half extracted into a new leaf (`adminJobTypes`, `leadReasons`, `marketRateKeys`, `agingMath`), the engine re-exports its old surface, and the CRM barrels over the leaf — pattern 2 in [PATTERNS.md](PATTERNS.md). The sixth "mirror" (`planCadence` ← `seasonalCadenceCopy`) was not one; the phantom zero-caller canonical was deleted. One related gap stays open in [5.1](#51-hand-mirrored-modules--closed-one-related-gap-remains). |
+| #2 Pagination — **item closed** | `cf61a27` `9992454` `63ecd75` | One loop: `shared/pagination.ts` (pure leaf; `listAll` + `forEachPage`), re-exported by the CRM's `api.ts` — pattern 3 in [PATTERNS.md](PATTERNS.md). The 11 hand-rolled implementations collapsed onto it; all 86 backend inline `do…while(nextToken)` loops migrated (side-effect order, early exits, and per-site error-swallowing preserved verbatim — the 80 error-ignoring sites carry a greppable `pageErrors: "ignore"` for the item-15 cleanup); the 24 truncating CRM/portal reads now page to exhaustion. Survey corrections vs. the original counts: 86 loops not 87 (per-file figures were double-counted), 25 truncating reads not 23, 11 implementations not 4. Two related gaps stay open in [1.1.5](#115-pagination-gaps-left-open-by-2). |
 
 **Scope:** `apps/web/src` (marketing + funnel), `apps/web/amplify` (backend), `apps/crm/src` (CRM + portal + tech). 360 non-test TS/TSX files.
 **Excluded:** `node_modules`, `dist`, `creative`, and `.claude/worktrees/**` — the latter are three stale full-tree copies of the repo that inflate every file-count metric; nothing in this document refers to them.
@@ -22,7 +23,6 @@ Structural audit. Findings are removed from this document as they are fixed.
 
 | # | Finding | Section | Blast radius | Drifted today? |
 |---|---|---|---|---|
-| 2 | Pagination: 4 `listAll` impls, 23 truncating `.list()` calls, 87 inline loops | [1.1](#11-apidata-fetching) | ~114 sites | Yes — silent truncation |
 | 3 | `err instanceof Error ? …` — 155 backend + ~102 frontend sites, zero helpers | [1.5](#15-error-handling) | ~200 sites | N/A (uniform) |
 | 4 | Money formatting: 15 impls, 3 incompatible output shapes | [1.2](#12-money-formatting) | ~110 sites | Yes — customer-facing |
 | 5 | `productsUsed.amountValue` — `number` on the wire, `string` in the CRM **[V]** | [4.1](#41-a3-productsusedamountvalue--numberstring) | Tech report save path | Yes — throws |
@@ -50,30 +50,10 @@ Structural audit. Findings are removed from this document as they are fixed.
 
 ## 1.1 API/data fetching
 
-### 1.1.1 List-to-exhaustion — 4 implementations + 87 inline loops
-
-| Impl | Location | Notes |
-|---|---|---|
-| A | `apps/crm/src/lib/api.ts:1137` `listAll<T>` | Generic; raises page errors via `unwrap` |
-| B | `apps/web/amplify/functions/shared/technicianReads.ts:63` | Private, same generic |
-| C | `apps/web/amplify/functions/pricing-refresh/handler.ts:198` | Private, different signature |
-| D | `apps/web/amplify/functions/shared/lifecycleCommand.ts:77` | Specialized |
-| E | `apps/crm/src/lib/api.ts:86` `collectLeadActivityPages` | Hardcoded filter, own error join |
-| F | `apps/crm/src/lib/api.ts:1042-1052` | Converts errors to `readFailed: true` |
-| G | `apps/crm/src/lib/api.ts:1089-1099` | Swallows all errors → `[]` |
-| H–J | `apps/crm/src/office/PricingLog.tsx:35-44`, `apps/crm/src/office/ProductLog.tsx:37-46`, `apps/crm/src/pages/VisitChangeHistory.tsx:43-49` | In-component copies; H and I are the same shape |
-
-Plus **87 inline `do { … } while (nextToken)` sites** in 25 backend files — heaviest: `daily-reminders/handler.ts` (58), `crm-admin/handler.ts` (12), `shared/capacity.ts` (19), `shared/planCancellation.ts` (10), `shared/deactivation.ts` (10). Representative: `apps/web/amplify/functions/daily-reminders/handler.ts:94-102`, `apps/web/amplify/functions/stripe-webhook/handler.ts:221-236`.
-
-- **Most used:** A — 21 call sites (`Dashboard.tsx:121-129`, `Schedule.tsx:74-104`, `Customers.tsx:38,43`, `Work.tsx:60,61,769`, `Inventory.tsx:56,62`, `MarketRates.tsx:247,259`, `ProductUsage.tsx:87,88`, `Staff.tsx:234`, `Leads.tsx:64`, `PromoCodes.tsx:47`, `technicians.tsx:62`).
-- **Most correct:** A — the only one that pages to exhaustion *and* surfaces page-level `errors`.
-- **Canonical:** `listAll()` at `apps/crm/src/lib/api.ts:1137`; a backend twin belongs on `apps/web/amplify/functions/shared/dataClient.ts`, which today exports only `dataClient()`.
-
-### 1.1.2 Missing `nextToken` loop — 23 truncating reads
-
-Each issues one page with a `limit` and drops `nextToken`. `apps/crm/src/lib/api.ts:1132-1136` documents that DynamoDB may return fewer items than `limit` per page even when more exist, so these are wrong below their caps too.
-
-`apps/crm/src/office/CustomerDetail.tsx:212,213,214,215,216,217,218,3377` · `apps/crm/src/office/GroupDetail.tsx:44` (`Customer.list({limit:1000})` — whole table, filtered client-side) · `apps/crm/src/office/Staff.tsx:693` · `apps/crm/src/office/MarketRates.tsx:286` · `apps/crm/src/pages/More.tsx:300` · `apps/crm/src/components/QuoteHistory.tsx:90` (no limit *and* no token) · `apps/crm/src/portal/portalData.ts:28` · `apps/crm/src/portal/Group.tsx:34,94` · `apps/crm/src/portal/Home.tsx:34,51` · `apps/crm/src/portal/Docs.tsx:25,33` · `apps/crm/src/portal/Billing.tsx:45` · `apps/crm/src/portal/Requests.tsx:90,110,124`
+*Subsections 1.1.1 (list-to-exhaustion implementations) and 1.1.2 (truncating
+single-page reads) were item #2 — closed, see the resolved table. What remains
+below is items #9 (the missing `useAsyncData` hook) and #22 (fetch-adjacent
+duplicates), plus two gaps 1.1.5 records that the item-#2 survey surfaced.*
 
 ### 1.1.3 The `loading/error/useEffect` triad — 34 copies, no hook
 
@@ -105,6 +85,22 @@ Divergences across the 34:
 | Portal "customers I may act for" | `portalData.ts:21-48` (own + group, deduped, sorted; 4 callers) vs `Group.tsx:19-44` (group only, no dedupe) | `portalData.ts` |
 | Google Places autocomplete | `apps/crm/src/lib/addressAutocomplete.tsx` and `apps/web/src/lib/addressAutocomplete.tsx` — **247 lines each, differing only in 3 comment lines** | Either; needs a shared package |
 | Lead-form submit machine | `Contact.tsx:25-66` vs `TalkToExpertModal.tsx:63-99` — same 30 lines, identical validation strings (`Contact.tsx:32` ≡ `TalkToExpertModal.tsx:70`) | One `useLeadForm` hook |
+
+### 1.1.5 Pagination gaps left open by #2
+
+Found while closing item #2; same bug class, out of that item's grep-able scope:
+
+1. **~60 backend `list*()` calls that page zero times** — they pass a `limit`
+   but never loop at all, so no `nextToken` grep finds them. Load-bearing
+   examples: `daily-reminders/handler.ts:552` (obligation lookup inside the
+   seasonal sweep), `:866` (`limit: 1000`), `:959`; `shared/technicianReads.ts:320,324`;
+   `shared/jobAssignment.ts:58` (`Technician.list({limit:200})` under every
+   field-action auth check); `shared/visitChange.ts:1201`; `shared/subscription.ts:71,94`.
+   Each needs a judgment call (exhaustive vs. deliberately bounded) before
+   wrapping in `listAll`.
+2. **`More.tsx` email log** wants the newest 100, which needs a `sentAt`
+   index (server-side sort), not whole-table paging — today it sorts an
+   arbitrary unsorted page client-side. Commented at the site.
 
 ---
 

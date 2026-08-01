@@ -260,3 +260,99 @@ sixth listed mirror, which turned out not to be one; its phantom zero-caller
   did).
 - **Run the bundle guard from pattern 1 after every one of these** — each adds
   a new cross-app value import, which is exactly the silent-leak scenario.
+
+---
+
+## 3. Pagination has one loop
+
+*Established 2026-08-01 while closing INVENTORY.md item #2.*
+
+### The rule
+
+> Nobody hand-writes `do … while (nextToken)`. Every read of an Amplify Data
+> list goes through one of two primitives:
+>
+> - **`listAll(fetchPage, opts?)`** — accumulate every page and return the
+>   rows. For reads whose result is used as a whole.
+> - **`forEachPage(fetchPage, onPage, opts?)`** — stream one page at a time;
+>   `onPage` returns `false` to stop early. For per-item side effects
+>   (writes, `openOwnedWork`, per-row `get` fan-out), found-it scans, and
+>   counter/Set/Map accumulation over large scans.
+>
+> Both throw on a page carrying GraphQL `errors` (joined with `"; "`) — a
+> partial scan must never pass for a complete one. The escape hatch,
+> `{ pageErrors: "ignore" }`, exists ONLY to migrate legacy sites verbatim:
+> every occurrence is a greppable debt marker for the swallowed-errors
+> inventory item. Do not write it into new code.
+
+### Canonical location
+
+```
+apps/web/amplify/functions/shared/pagination.ts   <- the one loop (pure leaf, zero imports)
+apps/crm/src/lib/api.ts                           <- re-exports listAll for the CRM
+```
+
+Backend modules import `./pagination` (or `../shared/pagination`); CRM code
+imports `listAll` from `../lib/api` exactly as before — the 26 pre-existing
+CRM call sites and their tests did not change. The contract is pinned by
+`shared/pagination.test.ts`.
+
+### Example
+
+`apps/crm/src/lib/api.ts`'s `collectLeadActivityPages` was one of the eleven
+hand-rolled copies — its own `do…while`, its own error join. It kept its
+exported name and tests and became:
+
+```ts
+export async function collectLeadActivityPages(
+  customerId: string,
+  listPage: (args: { filter: unknown; limit: number; nextToken?: string | null }) => Promise<LeadActivityPage>
+): Promise<LeadActivity[]> {
+  return listAll((nextToken) =>
+    listPage({ filter: { customerId: { eq: customerId } }, limit: 500, nextToken })
+  );
+}
+```
+
+An early-exit scan keeps its short-circuit through the callback's return
+value, carrying the result in a closure (`shared/refund.ts`):
+
+```ts
+await forEachPage(
+  (nextToken) => client.models.Invoice.list({ filter, limit: 200, nextToken }),
+  (items) => {
+    invoice = (items[0] as RefundTargetRow | undefined) ?? null;
+    if (invoice) return false;
+  },
+  { pageErrors: "ignore" } // legacy site, migrated verbatim
+);
+```
+
+### What to watch
+
+- **The loop body moves verbatim.** For `forEachPage`, the old body becomes
+  the callback body unchanged — same side-effect order, same stop points, the
+  callback `async` only if the body awaits. A function-level `return X` inside
+  the old loop becomes closure capture + `return false` + return after the call.
+- **Closures lose TypeScript narrowing.** A guard like
+  `if (!job.servicePlanId) return;` does not narrow property access inside the
+  `fetchPage` closure — capture it first (`const servicePlanId = job.servicePlanId;`).
+  This bit three times during the migration.
+- **Hand-written index-query cast shapes hide `nextToken`.** Several CRM casts
+  typed `list*ByCustomerId` without `nextToken` in either the args or the
+  result; widening the cast is part of the migration, not an afterthought.
+- **Not everything with a cursor belongs here.** Cognito
+  `ListUsersInGroup` (`Users`/`NextToken`) and Stripe
+  (`starting_after`/`has_more`, deliberate page caps) have different contracts
+  and semantics; crm-admin's three Cognito loops and daily-reminders' Stripe
+  loops deliberately keep their own cursors.
+- **"Latest N" is not "all".** A single-page read that wants the newest N rows
+  (More.tsx's email log) needs a server-side sort index, not `listAll` — paging
+  an unbounded table into the browser to render 100 rows is the wrong fix.
+- **The one intended behavior change was the point.** Migrating the CRM/portal
+  single-page reads onto `listAll` makes them exhaustive (the item's headline
+  defect). Everything else — including the 80 backend loops that ignore page
+  errors — was preserved exactly, with the `"ignore"` marker naming the debt.
+
+Commits: `cf61a27` (leaf + the 11 implementations), `9992454` (75 backend
+loops), `63ecd75` (24 CRM/portal truncating reads).
