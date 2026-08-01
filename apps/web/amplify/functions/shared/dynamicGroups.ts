@@ -3,7 +3,10 @@
  *
  * Every customer-visible record carries `accessGroups` containing these
  * names; portal users are made members of the matching Cognito groups.
- * Keep in sync with apps/crm/src/lib/accessGroups.ts (frontend copy).
+ *
+ * This is the only copy. The CRM had a duplicate (lib/accessGroups.ts) that
+ * nothing imported; it was deleted. If the CRM ever needs these names, import
+ * them from here rather than restating the prefixes — see docs/audit/PATTERNS.md.
  */
 export const cusGroup = (customerId: string) => `cus-${customerId}`;
 export const grpGroup = (groupId: string) => `grp-${groupId}`;

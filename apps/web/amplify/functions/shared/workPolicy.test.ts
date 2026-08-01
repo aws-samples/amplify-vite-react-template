@@ -59,6 +59,9 @@ describe("GL-18 work policy registry", () => {
       expect(p, kind).toBeTruthy();
       expect(["CRITICAL", "HIGH", "ROUTINE"], kind).toContain(p.severity);
       expect(["OPS", "SALES", "FINANCE"], kind).toContain(p.ownerTeam);
+      // The CRM work queue titles each row with this, so an unlabelled kind
+      // would surface to the office as a raw enum name.
+      expect(p.label.length, kind).toBeGreaterThan(0);
       expect(p.customerImpact.length, kind).toBeGreaterThan(0);
       // Every kind must offer at least one controlled close: a verified action
       // (in-place or external) or, failing that, an owner override reason.

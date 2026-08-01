@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { COMMON_UNITS } from "../../../web/amplify/functions/shared/units";
 import { displayAddress, routingAddress } from "../lib/serviceAddress";
 import { useParams } from "react-router-dom";
 import {
@@ -105,8 +106,9 @@ function parseProducts(raw: unknown): ProductRow[] {
 }
 
 /** The units the amount dropdown offers — the set the inventory converter
- *  understands (kept in step with shared/units.ts COMMON_UNITS by hand). */
-const AMOUNT_UNITS = ["fl oz", "gal", "qt", "oz", "lb", "g", "mL", "L", "each"];
+ *  understands, taken from that converter rather than restated here. Widened to
+ *  readonly string[] so an unrecognized stored unit can still be compared. */
+const AMOUNT_UNITS: readonly string[] = COMMON_UNITS;
 
 /** Split a composed amount ("2 fl oz") into its value + unit for the inputs. */
 function splitAmount(raw: string | undefined): { value: string; unit: string } {

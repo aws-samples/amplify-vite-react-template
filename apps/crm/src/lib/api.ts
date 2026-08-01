@@ -556,26 +556,13 @@ export type VisitCancelOutcome = {
   message: string;
 };
 
-/** Controlled reason codes for a visit cancel/reschedule (GL-07) — mirrors the
- *  server's VISIT_CANCEL_REASONS / VISIT_RESCHEDULE_REASONS. OTHER needs a note. */
-export const VISIT_CANCEL_REASONS = [
-  "CUSTOMER_REQUEST",
-  "SCHEDULING_CONFLICT",
-  "WEATHER",
-  "TECH_UNAVAILABLE",
-  "ACCESS_ISSUE",
-  "DUPLICATE",
-  "SERVICE_NOT_NEEDED",
-  "OTHER",
-] as const;
-export const VISIT_RESCHEDULE_REASONS = [
-  "CUSTOMER_REQUEST",
-  "WEATHER",
-  "TECH_UNAVAILABLE",
-  "ROUTE_CHANGE",
-  "ACCESS_ISSUE",
-  "OTHER",
-] as const;
+/** Controlled reason codes for a visit cancel/reschedule (GL-07). Re-exported
+ *  from the server's vocabulary — the office must never be able to pick a code
+ *  the server will reject. OTHER needs a note. */
+export {
+  VISIT_CANCEL_REASONS,
+  VISIT_RESCHEDULE_REASONS,
+} from "../../../web/amplify/functions/shared/visitChangeReasons";
 
 /** The immutable visit-change ledger row (GL-07), read for the history screen. */
 export type VisitChangeEvent = Schema["VisitChangeEvent"]["type"];
@@ -869,23 +856,13 @@ export function staffRoster(): OpResult {
   ).staffRoster();
 }
 
-/** The controlled reason codes for a staff-access change (GL-14) — mirrors the
- *  server's STAFF_ROLE_CHANGE_REASONS / STAFF_OFFBOARD_REASONS. OTHER needs a
- *  note. */
-export const STAFF_ROLE_CHANGE_REASONS = [
-  "PROMOTION",
-  "REASSIGNMENT",
-  "REDUCE_ACCESS",
-  "CORRECTION",
-  "OTHER",
-] as const;
-export const STAFF_OFFBOARD_REASONS = [
-  "DEPARTURE_VOLUNTARY",
-  "DEPARTURE_INVOLUNTARY",
-  "ROLE_ENDED",
-  "SECURITY",
-  "OTHER",
-] as const;
+/** The controlled reason codes for a staff-access change (GL-14). Re-exported
+ *  from the server's vocabulary, which is what assertReasonCode validates
+ *  against. OTHER needs a note. */
+export {
+  STAFF_OFFBOARD_REASONS,
+  STAFF_ROLE_CHANGE_REASONS,
+} from "../../../web/amplify/functions/shared/staffRoles";
 
 /** GL-17 — licence records. Office adds/updates records; only an OWNER
  *  (Compliance seat) changes a record's status. */
@@ -994,23 +971,13 @@ export function listStaffAccessEvents(args?: {
   return models.StaffAccessEvent.list(args);
 }
 
-/** Controlled reason codes for a customer lifecycle transition (GL-09) — mirrors
- *  the server's DEACTIVATION_REASONS / REACTIVATION_REASONS. OTHER needs a note. */
-export const DEACTIVATION_REASONS = [
-  "CUSTOMER_REQUEST",
-  "NONPAYMENT",
-  "MOVED",
-  "PROPERTY_SOLD",
-  "SERVICE_ENDED",
-  "DUPLICATE",
-  "OTHER",
-] as const;
-export const REACTIVATION_REASONS = [
-  "CUSTOMER_RETURNED",
-  "PAYMENT_RESOLVED",
-  "DEACTIVATED_IN_ERROR",
-  "OTHER",
-] as const;
+/** Controlled reason codes for a customer lifecycle transition (GL-09).
+ *  Re-exported from the server's vocabulary, which is what the transition
+ *  refuses against. OTHER needs a note. */
+export {
+  DEACTIVATION_REASONS,
+  REACTIVATION_REASONS,
+} from "../../../web/amplify/functions/shared/lifecycleReasons";
 
 /** The immutable customer-lifecycle ledger row (GL-09), read directly from the
  *  model (OWNER/OFFICE/FINANCE-readable) for the customer's history card. */

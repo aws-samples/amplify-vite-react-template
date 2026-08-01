@@ -9,9 +9,11 @@
  * office user can no longer make the dashboard green by typing a note.
  *
  * This module is deliberately pure data + pure predicates — no dataClient, no
- * node built-ins — so it imports cleanly into the Lambda. The CRM keeps a small
- * mirror (apps/crm/src/lib/workPolicy.ts) of the UI-facing fields; the two are
- * kept in step by hand, like STAFF_*_REASONS. workPolicy.test.ts guards the
+ * node built-ins — so it imports cleanly into the Lambda AND value-imports into
+ * the CRM browser bundle. apps/crm/src/lib/workPolicy.ts re-exports this table
+ * rather than keeping a copy of it, so the office queue and the server can no
+ * longer disagree about a kind. Keep this file dependency-free: adding a
+ * runtime import here would break the CRM build. workPolicy.test.ts guards the
  * shape against the WorkKind list so a new kind can never ship un-triaged.
  *
  * The verifier NAMES live here; the verifier LOGIC (which reads jobs, invoices,
@@ -101,6 +103,8 @@ export type ExternalAction = {
 export type ManualReason = { code: string; label: string };
 
 export type WorkPolicy = {
+  /** Short human name for the kind — what the CRM work queue titles the row. */
+  label: string;
   severity: WorkSeverity;
   /** One plain sentence an office user reads to know who is affected and how. */
   customerImpact: string;
@@ -118,6 +122,7 @@ const OTHER: ManualReason = { code: "OTHER", label: "Other (explain in the note)
 
 export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
   NO_ACCESS: {
+    label: "No access",
     severity: "HIGH",
     customerImpact:
       "A paid visit couldn't be completed — no one could get in — and the plan is left without a next visit.",
@@ -133,6 +138,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   EMAIL_FAILURE: {
+    label: "Failed email",
     severity: "HIGH",
     customerImpact: "A message to a customer or the team didn't go out.",
     ownerTeam: "OPS",
@@ -146,6 +152,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   CALLBACK_PROMISE: {
+    label: "Callback",
     severity: "HIGH",
     customerImpact: "A customer was promised a specialist callback.",
     ownerTeam: "SALES",
@@ -160,6 +167,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   DUPLICATE_LEAD: {
+    label: "Duplicate lead",
     severity: "ROUTINE",
     customerImpact: "A possible duplicate customer record needs a decision.",
     ownerTeam: "SALES",
@@ -172,6 +180,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   UNSTAFFED_VISIT: {
+    label: "Unstaffed visit",
     severity: "CRITICAL",
     customerImpact: "A booked visit has no technician — it won't happen as sold.",
     ownerTeam: "OPS",
@@ -190,6 +199,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PAID_VISIT_CANCELLATION: {
+    label: "Paid cancellation",
     severity: "CRITICAL",
     customerImpact:
       "A paid, canceled visit still has an unresolved refund or invoice disposition.",
@@ -209,6 +219,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PORTAL_FAILURE: {
+    label: "Portal failure",
     severity: "HIGH",
     customerImpact: "The customer's online account couldn't be set up.",
     ownerTeam: "OPS",
@@ -221,6 +232,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PRICING_ESCALATION: {
+    label: "Pricing",
     severity: "HIGH",
     customerImpact: "A quote is waiting on a human price decision.",
     ownerTeam: "SALES",
@@ -233,6 +245,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   MISSING_CONTACT: {
+    label: "Missing contact",
     severity: "HIGH",
     customerImpact:
       "The customer has no email on file, so a promised message couldn't be delivered.",
@@ -252,6 +265,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PAID_NOT_FINALIZED: {
+    label: "Paid, not finalized",
     severity: "CRITICAL",
     customerImpact: "A customer paid, but the booking didn't finish recording.",
     ownerTeam: "FINANCE",
@@ -268,6 +282,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PAYMENT_INTENT_ORPHAN: {
+    label: "Unrecorded payment intent",
     severity: "CRITICAL",
     customerImpact:
       "A chargeable payment intent exists that the booking record does not reference — if the customer completes it, finalization will refuse the money as superseded.",
@@ -286,6 +301,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     // the full window and sells nothing. Left silent, the office only ever sees
     // "that day is now fully booked" on a day that is nearly empty, so this is
     // graded on the revenue it quietly blocks, not on the one bad record.
+    label: "Address can't be routed",
     severity: "HIGH",
     customerImpact:
       "A service address can't be found, so its technician's whole day can't be routed and stops can't be booked onto it.",
@@ -298,6 +314,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   LOCATION_REVIEW: {
+    label: "Location review",
     severity: "ROUTINE",
     customerImpact:
       "A finished report's captured location needs an after-the-fact presence check.",
@@ -311,6 +328,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   STAFF_OFFBOARD: {
+    label: "Staff offboard",
     severity: "HIGH",
     customerImpact:
       "An offboarded employee's future work or technician record still needs finishing.",
@@ -324,6 +342,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   STAFF_SECURITY: {
+    label: "Staff security",
     severity: "CRITICAL",
     customerImpact:
       "A staff access change may be incomplete — someone could still have live access.",
@@ -337,6 +356,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   LEAD_FOLLOWUP: {
+    label: "Lead follow-up",
     severity: "HIGH",
     customerImpact:
       "An open lead has no next step, or its next step is overdue — it's going cold.",
@@ -355,18 +375,20 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   LEAD_LIFECYCLE_RECOVERY: {
+    label: "Lead lifecycle recovery",
     severity: "HIGH",
     customerImpact:
-      "A lead intake, mutation, consent decision, conversion identity decision, or sweep stopped before every required fact was verified.",
+      "A lead intake, action, consent decision, conversion identity decision, or sweep did not finish safely.",
     ownerTeam: "SALES",
     verified: [],
     manualReasons: [
-      { code: "RERUN_COMPLETE", label: "Re-ran the safe action and verified it" },
-      { code: "IDENTITY_RESOLVED", label: "Resolved the lead/customer identity" },
+      { code: "RERUN_COMPLETE", label: "Re-ran and verified the safe action" },
+      { code: "IDENTITY_RESOLVED", label: "Resolved the identity decision" },
       OTHER,
     ],
   },
   LIFECYCLE_RECOVERY: {
+    label: "Lifecycle recovery",
     severity: "CRITICAL",
     // Money/access are in a mixed state and a status transition did not fully
     // complete or record: billing may be stopped while a portal login is still
@@ -390,6 +412,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PLAN_CANCELLATION_RECOVERY: {
+    label: "Plan cancellation recovery",
     severity: "CRITICAL",
     // Money is at risk: billing may still be live, a charge may have posted after
     // the customer cancelled, and the customer was told their cancellation is
@@ -421,6 +444,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   ROUTE_MISMATCH: {
+    label: "Route / assignment mismatch",
     severity: "CRITICAL",
     // A stop's route and its assigned technician disagree — the wrong
     // technician could be shown (or sent to) the job and its customer. The
@@ -443,13 +467,14 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   STALE_DRAFT: {
+    label: "Unsent draft report",
     severity: "ROUTINE",
     // A visit changed hands (reassignment, offboarding, cancel) while its
     // former technician had an unsent DRAFT report. The draft is a regulated
     // record in the making — the office decides its disposition rather than
     // letting it silently rot or be silently reused.
     customerImpact:
-      "A reassigned or canceled visit still has the former technician's unsent draft report — the office must decide what happens to it.",
+      "A reassigned or canceled visit still has the former technician's unsent draft report — decide what happens to it.",
     ownerTeam: "OPS",
     verified: [],
     manualReasons: [
@@ -460,6 +485,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   OFFICE_FIELD_REVIEW: {
+    label: "Office field-action review",
     severity: "ROUTINE",
     // An office/owner performed a technician's field action (start, end,
     // no-access) with a recorded reason. Reviewed after the fact so emergency
@@ -476,6 +502,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   SCOPE_MISMATCH: {
+    label: "Scope doesn't match",
     severity: "HIGH",
     customerImpact:
       "A technician arrived and the sold service doesn't match what the site needs — the customer is waiting on the corrected service.",
@@ -490,6 +517,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PREP_MISSING: {
+    label: "Required prep missing",
     severity: "HIGH",
     customerImpact:
       "A visit couldn't be performed because the customer's required preparation wasn't in place — they're waiting on a rebook.",
@@ -504,6 +532,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   DISPATCH_NOT_READY: {
+    label: "Not dispatch-ready",
     severity: "HIGH",
     customerImpact:
       "Tomorrow's visit is missing a dispatch fact (address, classification, or packet) — it can't safely go out as booked.",
@@ -522,6 +551,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   OBLIGATION_RECOVERY: {
+    label: "Seasonal ledger write failed",
     severity: "HIGH",
     // GL-17: a seasonal plan's monthly-treatment ledger could not be written
     // (an obligation row failed to create/advance). The promise ("one
@@ -539,6 +569,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PRICING_RESEARCH_EXHAUSTED: {
+    label: "Pricing research parked",
     severity: "HIGH",
     // GL-16: a service+area combo failed AI research MAX_RESEARCH_ATTEMPTS
     // times in a row and is parked — quotes for it fall to the honest
@@ -557,6 +588,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PRICING_CHANGE_REVIEW: {
+    label: "Daily price review",
     severity: "ROUTINE",
     // GL-16: the day's live rate changes (AI research + office pins), already
     // quoting — the CEO-accepted control is a recorded one-business-day
@@ -574,6 +606,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   SERVICE_CATALOG_DECISION: {
+    label: "Catalog decision",
     severity: "HIGH",
     // GL-01: someone asked for work the service catalog does not sell. The
     // customer is waiting on an answer, so the decision (add it to the
@@ -591,6 +624,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   CUSTOMER_REQUEST: {
+    label: "Portal request",
     severity: "HIGH",
     // GL-11: a customer asked for something through the portal (reschedule /
     // help) and is watching the case there — same one-business-day clock.
@@ -605,6 +639,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   INFRA_ALERT: {
+    label: "System alert",
     severity: "HIGH",
     // GL-22: a background system failure (Lambda errors, a scheduled job
     // that never ran, dead-lettered email events, an incomplete daily run).
@@ -622,6 +657,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   MONEY_MISMATCH: {
+    label: "Money mismatch",
     severity: "CRITICAL",
     // GL-19: the provider ledger and the CRM ledger disagree about money.
     customerImpact:
@@ -635,6 +671,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PLAN_MISMATCH: {
+    label: "Plan mismatch",
     severity: "CRITICAL",
     // GL-19: provider subscriptions and CRM plans disagree.
     customerImpact:
@@ -648,6 +685,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   STATE_MISMATCH: {
+    label: "State mismatch",
     severity: "HIGH",
     // GL-19: lifecycle/visit state disagrees with money or the schedule.
     customerImpact:
@@ -660,6 +698,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   BALANCE_COLLECTION: {
+    label: "Unpaid balance",
     severity: "CRITICAL",
     // GL-06: the work was performed; the bank debit then failed. The invoice
     // is the outstanding balance — the case turns green only when the money
@@ -680,6 +719,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   PAYMENT_PROCESSING_OVERDUE: {
+    label: "Payment overdue",
     severity: "HIGH",
     // GL-06: a pending bank debit passed its expected settlement date with no
     // provider result. The visit may be approaching (or done) on money that
@@ -700,6 +740,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   LICENSE_LAPSE: {
+    label: "Licence lapsing",
     severity: "HIGH",
     // A technician's applicator licence is expiring (advance warning) or has
     // expired/been revoked. Their future capacity is already removed by the
@@ -721,6 +762,7 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
     ],
   },
   VISIT_CHANGE_RECOVERY: {
+    label: "Visit change recovery",
     severity: "CRITICAL",
     // A visit cancel/reschedule left money, schedule, or the audit record in a
     // mixed state: a refund may have issued while the visit stayed scheduled, a
@@ -746,7 +788,13 @@ export const WORK_POLICY: Record<WorkKind, WorkPolicy> = {
   },
 };
 
-export function workPolicy(kind: string): WorkPolicy | null {
+/**
+ * Look up a kind's policy. Accepts a nullable kind because callers read it off
+ * a stored row, where the field is optional — an absent kind has no policy,
+ * which is the same answer as an unknown one.
+ */
+export function workPolicy(kind: string | null | undefined): WorkPolicy | null {
+  if (!kind) return null;
   return (WORK_POLICY as Record<string, WorkPolicy | undefined>)[kind] ?? null;
 }
 
@@ -755,7 +803,7 @@ export function workPolicy(kind: string): WorkPolicy | null {
  * verified close or a dedicated verified-action button. For a verifiable kind,
  * a free-text close is refused for routine staff (it must be an owner override).
  */
-export function isVerifiable(kind: string): boolean {
+export function isVerifiable(kind: string | null | undefined): boolean {
   const p = workPolicy(kind);
   return !!p && (p.verified.length > 0 || !!p.externalAction);
 }
