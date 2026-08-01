@@ -284,3 +284,37 @@ their own profile.
 profile with a filtered `list`, not a `get`. A rule that returns `[]` there
 produces `profile === null`, which renders Onboarding, which `create`s a
 **duplicate profile row** — a silent re-onboarding, not an error.
+
+---
+
+## 9. `export` means another file imports it
+
+**Rule.** The `export` keyword is a statement that something is part of a
+module's public surface. A symbol used only inside its own file is file-local,
+and marking it `export` is a false claim: it makes dead code look load-bearing,
+defeats `noUnusedLocals`, and invites the next person to import it rather than
+look for the canonical thing.
+
+**Canonical.** Demote, don't delete. Every symbol in this pass had same-file
+uses — dropping `export` is the whole fix, and deleting would have broken the
+file. Only delete when there are no uses at all.
+
+**Example** — `crm/src/lib/useSort.tsx`:
+
+```ts
+-export type SortDir = "asc" | "desc";
++type SortDir = "asc" | "desc";
+```
+
+16 symbols demoted across `acord.ts`, `useSort.tsx`, `CoverageForm.tsx`,
+`MarketingTasks.tsx`, `DocumentsPanel.tsx`, `googlePlaces.tsx` and the three
+`web/src/data` modules.
+
+**Re-verify before demoting.** `CrmLeadInput` was on the audit's list and is
+now genuinely imported — the audit predates the import. An audit row is a lead,
+not a fact.
+
+**A field a Lambda writes is not dead.** `Account.buildiumId` has no reader in
+the app, which reads as dead to a grep, but `lead-intake` sets it and it is the
+only link to the Buildium property record. Write-only ≠ unused: check the
+producers, not just the consumers, before deleting a schema field.

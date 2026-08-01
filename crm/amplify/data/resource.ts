@@ -146,11 +146,13 @@ const schema = a
         priorPremium: a.float(),
         priorTermEffective: a.date(),
         priorTermExpiration: a.date(),
+        // Write-only by design: set by lead-intake from the web lead forms and
+        // never read back in the app. Kept because it is the only link from an
+        // account to its Buildium property record.
         buildiumId: a.string(), // lineage from web lead forms / Buildium sync
         source: a.string(), // e.g. "website", "referral", "cold"
         notes: a.string(),
         convertedAt: a.datetime(), // set when first quote is bound
-        producerId: a.string(), // Cognito sub of owning producer
         quotes: a.hasMany("Quote", "accountId"),
         policies: a.hasMany("Policy", "accountId"),
         certificates: a.hasMany("Certificate", "accountId"),
@@ -199,7 +201,6 @@ const schema = a
       replacementCostType: a.ref("ReplacementCostType"),
       effectiveDate: a.date(),
       expirationDate: a.date(),
-      submittedAt: a.date(),
       notes: a.string(),
       policy: a.hasOne("Policy", "quoteId"),
     }),
@@ -207,8 +208,7 @@ const schema = a
     // ── Policies: created on bind; source data for COI generation ──────
     //
     // Authenticated read/write, ADMIN-only delete. There is no usable
-    // ownership anchor to scope on: Account.producerId is declared but never
-    // read or written anywhere, so it is null on every row.
+    // ownership anchor to scope on: no model carries an owning-producer id.
     //
     // The nightly renewal sweep lists Policy (renewal-tasks/handler.ts:59)
     // without an explicit authMode. It is NOT affected by this rule — see the
@@ -242,7 +242,6 @@ const schema = a
       replacementCostType: a.ref("ReplacementCostType"),
       effectiveDate: a.date(),
       expirationDate: a.date(),
-      limits: a.json(), // per-line limits/deductibles, shape evolves with ACORD needs
       notes: a.string(),
     })
       .authorization((allow) => [

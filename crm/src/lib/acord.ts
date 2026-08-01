@@ -18,7 +18,7 @@ import type { Account, Carrier, Certificate, Policy } from "./client";
  * Adding another ACORD form later = new template path + new mapping object.
  */
 
-export const ACORD25_TEMPLATE_PATH = "templates/acord25.pdf";
+const ACORD25_TEMPLATE_PATH = "templates/acord25.pdf";
 
 /** Registry of supported ACORD templates. Adding a form = one entry here
  * plus a mapping (see buildAppFormValues). */
@@ -76,7 +76,7 @@ export const ACORD_FORMS: AcordFormDef[] = [
 
 type FieldValues = Record<string, { candidates: string[]; value: string }>;
 
-export interface FillResult {
+interface FillResult {
   bytes: Uint8Array;
   filled: string[]; // logical fields written
   missing: string[]; // logical fields with no matching PDF field
@@ -130,7 +130,7 @@ function buildAcord25Values(
     },
     producerContact: {
       candidates: ["Producer_ContactPerson_FullName_A", "CONTACT NAME:"],
-      value: AGENCY.name,
+      value: AGENCY.contactName,
     },
     producerPhone: {
       candidates: [
@@ -468,7 +468,7 @@ const SIGNATURE_NAME_FIELDS = [
   "Producer_ContactPerson_FullName_A",
 ];
 
-export interface SignatureInfo {
+interface SignatureInfo {
   /** S3 key under signatures/. Empty when `error` says why there isn't one. */
   key: string;
   /** Printed name that accompanies the mark. */
@@ -652,7 +652,7 @@ const CONSTRUCTION_LABELS: Record<string, string> = {
   FIRE_RESISTIVE: "Fire Resistive",
 };
 
-export interface BuildingInfo {
+interface BuildingInfo {
   label?: string | null;
   sqft?: number | null;
   streetAddress?: string | null;
@@ -684,7 +684,7 @@ const STOREY_WORD: Record<number, string> = {
  * wood-frame buildings constructed 2016-2017" — rather than emitting a
  * generic label that tells them nothing.
  */
-export function operationsSummary(
+function operationsSummary(
   account: Account,
   buildingCount: number
 ): string {
@@ -814,25 +814,6 @@ function buildAppFormValues(
       : "";
 
     Object.assign(values, {
-      producerContact: {
-        candidates: ["Producer_ContactPerson_FullName_A"],
-        value: AGENCY.contactName,
-      },
-      producerAddr1: { candidates: ["Producer_MailingAddress_LineOne_A"], value: AGENCY.addressLine1 },
-      producerCity: { candidates: ["Producer_MailingAddress_CityName_A"], value: AGENCY.city },
-      producerState: { candidates: ["Producer_MailingAddress_StateOrProvinceCode_A"], value: AGENCY.state },
-      producerZip: { candidates: ["Producer_MailingAddress_PostalCode_A"], value: AGENCY.zip },
-      producerPhone: { candidates: ["Producer_ContactPerson_PhoneNumber_A"], value: AGENCY.phone },
-      producerEmail: { candidates: ["Producer_ContactPerson_EmailAddress_A"], value: AGENCY.email },
-
-      insuredAddr1: { candidates: ["NamedInsured_MailingAddress_LineOne_A"], value: addr },
-      insuredCity: { candidates: ["NamedInsured_MailingAddress_CityName_A"], value: city },
-      insuredState: { candidates: ["NamedInsured_MailingAddress_StateOrProvinceCode_A"], value: state },
-      insuredZip: { candidates: ["NamedInsured_MailingAddress_PostalCode_A"], value: zip },
-      insuredPhone: { candidates: ["NamedInsured_Primary_PhoneNumber_A"], value: account.contactPhone ?? "" },
-      insuredFein: { candidates: ["NamedInsured_TaxIdentifier_A"], value: account.fein ?? "" },
-      insuredSic: { candidates: ["NamedInsured_SICCode_A"], value: account.sicCode ?? "" },
-      insuredNaics: { candidates: ["NamedInsured_NAICSCode_A"], value: account.naicsCode ?? "" },
       notForProfit: {
         candidates: ["NamedInsured_LegalEntity_NotForProfitIndicator_A"],
         value: account.type === "ASSOCIATION" ? "x" : "",

@@ -1,4 +1,4 @@
-export interface StateData {
+interface StateData {
   name: string;
   abbr: string;
   slug: string;

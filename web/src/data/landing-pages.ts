@@ -1,4 +1,4 @@
-export interface LandingPageData {
+interface LandingPageData {
   slug: string;
   state?: string;
   stateAbbr?: string;

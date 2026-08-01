@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 
-export type SortDir = "asc" | "desc";
-export type SortAccessor<T> = (item: T) => string | number | null | undefined;
+type SortDir = "asc" | "desc";
+type SortAccessor<T> = (item: T) => string | number | null | undefined;
 
 /**
  * Column sorting for tables. Null/undefined values always sort last

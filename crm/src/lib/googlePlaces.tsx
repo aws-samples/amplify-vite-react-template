@@ -33,7 +33,7 @@ function loadGooglePlaces(): Promise<boolean> {
   return loadPromise;
 }
 
-export interface AddressParts {
+interface AddressParts {
   address: string;
   city: string;
   state: string;

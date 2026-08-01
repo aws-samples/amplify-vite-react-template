@@ -18,7 +18,7 @@ import {
  * clicked), or someone marks the carrier out of appetite.
  */
 
-export function taskUrgency(t: MarketingTask): {
+function taskUrgency(t: MarketingTask): {
   badge: string;
   label: string;
 } {
@@ -36,7 +36,7 @@ export function taskUrgency(t: MarketingTask): {
  * The nightly job does this too, but a quote created at 10am shouldn't leave
  * a stale task sitting there until tomorrow's run.
  */
-export async function settleSatisfiedTasks(
+async function settleSatisfiedTasks(
   tasks: MarketingTask[],
   quotes: Quote[]
 ): Promise<MarketingTask[]> {

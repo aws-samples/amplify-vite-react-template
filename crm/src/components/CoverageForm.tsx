@@ -16,7 +16,7 @@ import {
  * existence by binding a quote, so policy mode is edit-only.
  */
 
-export const QUOTE_STATUSES = [
+const QUOTE_STATUSES = [
   "DRAFT",
   "SUBMITTED",
   "QUOTED",
@@ -25,7 +25,7 @@ export const QUOTE_STATUSES = [
   "LOST",
 ] as const;
 
-export const POLICY_STATUSES = [
+const POLICY_STATUSES = [
   "ACTIVE",
   "CANCELLED",
   "EXPIRED",

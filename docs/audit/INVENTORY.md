@@ -355,48 +355,36 @@ Files over 500 lines.
 
 ## 3. DEAD CODE
 
-### 3.1 Exported symbols never imported elsewhere
+### 3.1 Exported symbols — resolved
 
-Verified by grepping each identifier across `crm/src`, `crm/amplify`, `web/src` including `.astro`; only the declaration and same-file uses appear.
+All 16 verified-unused exports were demoted to file-local (the `export` keyword
+dropped; every symbol has same-file uses, so none was deleted). `CrmLeadInput`
+was **not** demoted — the audit row was stale, `QuoteApp.tsx` imports it as of
+Wave 0. See [PATTERNS.md §9](PATTERNS.md#9-export-means-another-file-imports-it).
 
-| Symbol | Declared | Same-file uses |
-|---|---|---|
-| `ACORD25_TEMPLATE_PATH` | `crm/src/lib/acord.ts:21` | `:35`, `:621` |
-| `FillResult` | `crm/src/lib/acord.ts:79` | `:537`, `:619`, `:1062` |
-| `SignatureInfo` | `crm/src/lib/acord.ts:470` | `:487`, `:536`, `:618`, `:1059` |
-| `BuildingInfo` | `crm/src/lib/acord.ts:638` | `:712`, `:1058` |
-| `operationsSummary` | `crm/src/lib/acord.ts:670` | `:871` |
-| `SortDir` | `crm/src/lib/useSort.tsx:3` | `:14`, `:17`, `:59` |
-| `SortAccessor` | `crm/src/lib/useSort.tsx:4` | `:12` |
-| `QUOTE_STATUSES` | `crm/src/components/CoverageForm.tsx:19` | `:183` |
-| `POLICY_STATUSES` | `crm/src/components/CoverageForm.tsx:28` | `:180` |
-| `taskUrgency` | `crm/src/components/MarketingTasks.tsx:21` | `:188`, `:349` |
-| `settleSatisfiedTasks` | `crm/src/components/MarketingTasks.tsx:39` | `:102` |
-| `parseTables` | `crm/src/components/DocumentsPanel.tsx:348` | `:134` |
-| `AddressParts` | `crm/src/lib/googlePlaces.tsx:36` | `:51` |
-| `CrmLeadInput` | `web/src/lib/crmLead.ts:15` | `:48` |
-| `LandingPageData` | `web/src/data/landing-pages.ts:1` | `:14` |
-| `CityData` | `web/src/data/cities.ts:1` | `:14` |
-| `StateData` | `web/src/data/states.ts:1` | `:14` |
-
-Thinnest live export: `fmtNum` (`client.ts:122`), sole call site `AccountsList.tsx:140`.
+Thinnest live export: `fmtNum` (`client.ts`), sole call site `AccountsList.tsx`.
 
 ### 3.2 Orphaned components — none
 
-Every file in `crm/src/components` and `web/src/components` is imported. Specifically verified: `FormsTab.tsx` reachable via `AccountDetail.tsx:23`/`:128`; `Celebration.tsx` reachable via `AccountDetail.tsx:25`/`:70`.
+Every file in `crm/src/components` and `web/src/components` is imported. Specifically verified: `FormsTab.tsx` reachable via `AccountDetail.tsx`; `Celebration.tsx` reachable via `AccountDetail.tsx`.
 
-### 3.3 Dead schema fields
+### 3.3 Dead schema fields — resolved
 
-Zero references outside `resource.ts`:
+Removed from `crm/amplify/data/resource.ts`: `Account.producerId`,
+`Quote.submittedAt`, `Policy.limits`. Removed from `Team.tsx`'s `TeamUser`
+interface: `status`, `enabled` (the `teamAdmin` Lambda still returns both).
 
-- `crm/amplify/data/resource.ts:153` — `Account.producerId`
-- `crm/amplify/data/resource.ts:202` — `Quote.submittedAt`
-- `crm/amplify/data/resource.ts:237` — `Policy.limits` (`a.json()`)
-- `crm/amplify/data/resource.ts:149` — `Account.buildiumId`: write-only, set at `crm/amplify/functions/lead-intake/handler.ts:73`, never read
+**`Account.buildiumId` was kept deliberately.** It is write-only, not dead —
+`lead-intake/handler.ts:73` sets it and nothing reads it back — but it is the
+only link from an account to its Buildium property record, and removing it
+would change Lambda behavior. Documented at the field.
 
-Declared but never rendered: `crm/src/pages/Team.tsx:8` (`status`), `:9` (`enabled`).
+`ProducerLicense` was kept: read-only, but the read is live, feeding the
+one-way `LegacyBackfill` in `Licensing.tsx`.
 
-`ProducerLicense` (`resource.ts:374`) is read-only — the sole call site is `client.models.ProducerLicense.list()` at `Licensing.tsx:278` feeding the one-way `LegacyBackfill` (`:263-347`). No create/update/delete anywhere.
+Note this removes the last candidate ownership anchor from the data model —
+relevant if per-producer authorization scoping is ever revisited
+([1.5](#15-authpermission-checks)).
 
 ### 3.4 Routes
 
@@ -414,10 +402,18 @@ Mapped: `acord125`, `acord140` (both via `buildAppFormValues`), `acord25` (via `
 
 **Live Generate button — resolved.** `MAPPED_APP_FORM_KEYS` (`crm/src/lib/acord.ts:719`) is the single source of truth; `FormsTab.tsx` disables Generate for anything outside it and says why. See [PATTERNS.md §5](PATTERNS.md#5-a-generate-button-is-gated-on-a-mapping-existing). The 15 mappings themselves remain unwritten — a feature gap, no longer a way to emit a blank form.
 
-### 3.6 Redundant code inside the one real mapping
+### 3.6 Redundant code inside the one real mapping — resolved
 
-- `crm/src/lib/acord.ts:792-811` — the `acord125` branch re-assigns 15 keys to values byte-identical to the shared header at `:752-772`. Pure no-op overwrite.
-- `crm/src/lib/acord.ts:132` — ACORD 25 sets `producerContact` to `AGENCY.name` (the LLC) where `:754` sets the same logical field to `AGENCY.contactName` (the person); the 25 prints the company name in the human-contact slot.
+The 15-key no-op overwrite in the `acord125` branch is deleted (all 15 verified
+value-identical first; four were spelled as locals rather than inline
+expressions, so a textual diff would not have shown it). ACORD 25's
+`producerContact` now uses `AGENCY.contactName` like the shared header, so the
+COI prints the contact person and not the LLC in the CONTACT NAME slot.
+
+**Still open:** the `acord125` branch sets `proposedEffective` targeting the
+same PDF field (`Policy_EffectiveDate_A`) with the same value as the header's
+`policyEffective` — a duplicate write under a different logical key, not a
+re-assignment.
 
 ---
 

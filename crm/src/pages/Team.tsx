@@ -5,8 +5,6 @@ import SignatureManager from "../components/SignatureManager";
 interface TeamUser {
   userId: string;
   email: string;
-  status: string;
-  enabled: boolean;
   createdAt: string | null;
   groups: string[];
 }

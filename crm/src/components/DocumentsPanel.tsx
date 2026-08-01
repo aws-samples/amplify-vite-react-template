@@ -345,7 +345,7 @@ export default function DocumentsPanel({
  * ocrTables is an AWSJSON field written as a JSON string by the Lambda, so
  * it may come back single- or double-encoded depending on the write path.
  */
-export function parseTables(raw: unknown): string[][][] | null {
+function parseTables(raw: unknown): string[][][] | null {
   let v: unknown = raw;
   try {
     if (typeof v === "string") v = JSON.parse(v);
