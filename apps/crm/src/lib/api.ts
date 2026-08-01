@@ -1,5 +1,9 @@
 import { generateClient } from "aws-amplify/data";
 import type { Schema } from "../../../web/amplify/data/resource";
+import {
+  LEAD_LOST_REASONS as LEAD_LOST_REASON_CODES,
+  LEAD_LOST_REASON_LABEL,
+} from "../../../web/amplify/functions/shared/leadReasons";
 
 /**
  * Typed Amplify Data client against the shared backend schema (type-only
@@ -39,16 +43,13 @@ export type PricingControl = Schema["PricingControl"]["type"];
  *  Lambda reads them to discount checkout). */
 export type PromoCode = Schema["PromoCode"]["type"];
 
-/** GL-02 — controlled lead vocabularies (mirror the server validators). */
-export const LEAD_LOST_REASONS = [
-  { code: "PRICE", label: "Price" },
-  { code: "NO_RESPONSE", label: "No response" },
-  { code: "WENT_COMPETITOR", label: "Went with a competitor" },
-  { code: "NOT_QUALIFIED", label: "Not qualified / out of scope" },
-  { code: "OUT_OF_AREA", label: "Outside service area" },
-  { code: "DUPLICATE", label: "Duplicate record" },
-  { code: "OTHER", label: "Other" },
-] as const;
+/** GL-02 — controlled lead vocabularies. Lost reasons come from the ONE
+ * server-validated list (shared/leadReasons.ts, a pure leaf), shaped for a
+ * dropdown; the rest still mirror the server validators by hand. */
+export const LEAD_LOST_REASONS = LEAD_LOST_REASON_CODES.map((code) => ({
+  code,
+  label: LEAD_LOST_REASON_LABEL[code],
+}));
 export const LEAD_TOUCH_CHANNELS = [
   { code: "CALL", label: "Call" },
   { code: "TEXT", label: "Text" },

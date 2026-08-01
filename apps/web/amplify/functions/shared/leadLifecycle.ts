@@ -26,6 +26,7 @@ import {
 } from "./ownedWork";
 import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "./consentText";
 import { customerAccessGroups } from "./dynamicGroups";
+import { LEAD_LOST_REASONS } from "./leadReasons";
 
 export type LeadActor = {
   sub: string | null;
@@ -33,15 +34,10 @@ export type LeadActor = {
   isOwner?: boolean;
 };
 
-export const LEAD_LOST_REASONS = [
-  "PRICE",
-  "NO_RESPONSE",
-  "WENT_COMPETITOR",
-  "NOT_QUALIFIED",
-  "OUT_OF_AREA",
-  "DUPLICATE",
-  "OTHER",
-] as const;
+// The codes (and the CRM's dropdown labels) live in shared/leadReasons.ts —
+// one copy, read by this validator and by the office UI. Re-exported so
+// existing importers keep working.
+export { LEAD_LOST_REASONS };
 export const LEAD_TOUCH_CHANNELS = ["CALL", "TEXT", "EMAIL", "BOOKING_LINK", "THUMBTACK", "NOTE"] as const;
 export const LEAD_TOUCH_OUTCOMES = [
   "REACHED",
