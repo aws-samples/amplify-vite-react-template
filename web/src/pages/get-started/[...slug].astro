@@ -37,6 +37,7 @@ export function getStaticPaths() {
 }
 
 const { page } = Astro.props;
+import { ANALYTICS_DISABLED } from "../../constants";
 ---
 
 <html lang="en">
@@ -59,6 +60,9 @@ const { page } = Astro.props;
     <meta property="og:description" content={page.metaDescription} />
     <meta property="og:url" content={`https://www.protectmyhoa.com/get-started${page.slug ? `/${page.slug}` : ""}`} />
 
+    {/* Analytics — on unless PUBLIC_ANALYTICS_DISABLED=true (staging). */}
+    {!ANALYTICS_DISABLED && (
+      <Fragment>
     <!-- Google tag (gtag.js) -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18085022517"></script>
     <script>
@@ -76,6 +80,8 @@ const { page } = Astro.props;
         y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
       })(window, document, "clarity", "script", "wamnker55b");
     </script>
+      </Fragment>
+    )}
 
     <script type="application/ld+json" set:html={JSON.stringify({
       "@context": "https://schema.org",

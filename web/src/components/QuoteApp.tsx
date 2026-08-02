@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { fireConversion } from "../constants";
 import { submitCrmLead } from "../lib/crmLead";
 import { DARK, LIGHT, ThemeContext, isDaytime, useTheme, type ThemeMode } from "./quote/theme";
 import { Icon } from "./quote/icons";
@@ -225,14 +226,7 @@ function QuoteFlow({ isDay, onToggleTheme }: { isDay: boolean; onToggleTheme: ()
       setStepIndex(flow.length - 1);
       resetInput();
       clearState();
-      // Fire Google Ads conversion
-      if (typeof window !== "undefined" && (window as any).gtag) {
-        (window as any).gtag("event", "conversion", {
-          send_to: "AW-18085022517/Csp3COKBgpscELWWzq9D",
-          value: 1.0,
-          currency: "USD",
-        });
-      }
+      fireConversion();
       // Celebrate!
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 4000);

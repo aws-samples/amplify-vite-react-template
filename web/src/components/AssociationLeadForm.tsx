@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FORMSUBMIT_URL } from "../constants";
+import { FORMSUBMIT_URL, fireConversion } from "../constants";
 import { submitCrmLead } from "../lib/crmLead";
 import "./AssociationLeadForm.css";
 
@@ -83,14 +83,7 @@ export function AssociationLeadForm({ property }: Props) {
         }),
       });
       if (!res.ok) throw new Error("fail");
-      // Fire Google Ads conversion
-      if (typeof window !== "undefined" && (window as any).gtag) {
-        (window as any).gtag("event", "conversion", {
-          send_to: "AW-18085022517/Csp3COKBgpscELWWzq9D",
-          value: 1.0,
-          currency: "USD",
-        });
-      }
+      fireConversion();
       setSent(true);
     } catch {
       setError("Something went wrong. Please try again or call 508-233-2261.");

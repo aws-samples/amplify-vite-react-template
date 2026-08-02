@@ -1,6 +1,7 @@
 ---
 import QuoteApp from "../components/QuoteApp";
 import "../styles/quote.css";
+import { ANALYTICS_DISABLED } from "../constants";
 ---
 
 <html lang="en">
@@ -19,6 +20,9 @@ import "../styles/quote.css";
     <meta property="og:url" content="https://www.protectmyhoa.com/quote" />
     <link rel="canonical" href="https://www.protectmyhoa.com/quote" />
 
+    {/* Analytics — on unless PUBLIC_ANALYTICS_DISABLED=true (staging). */}
+    {!ANALYTICS_DISABLED && (
+      <Fragment>
     <!-- Google tag (gtag.js) -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18085022517"></script>
     <script>
@@ -36,6 +40,8 @@ import "../styles/quote.css";
         y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
       })(window, document, "clarity", "script", "wamnker55b");
     </script>
+      </Fragment>
+    )}
   </head>
   <body>
     <div id="quote-root">
