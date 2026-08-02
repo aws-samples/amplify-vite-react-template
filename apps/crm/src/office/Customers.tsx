@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, listAll, unwrap, type Customer, type CustomerGroup } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import {
   Badge,
   Button,
@@ -21,45 +22,29 @@ type Tab = "ACTIVE" | "INACTIVE" | "GROUPS";
 export default function Customers() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("ACTIVE");
-  const [customers, setCustomers] = useState<Customer[] | null>(null);
-  const [groups, setGroups] = useState<CustomerGroup[] | null>(null);
   const [query, setQuery] = useState("");
-  const [error, setError] = useState<string | null>(null);
   const [addingGroup, setAddingGroup] = useState(false);
 
-  // Monotonic request id: rapid tab switches must not let a slower older
-  // response overwrite the newer tab's data.
-  const reqRef = useRef(0);
-  const load = useCallback(async (which: Tab) => {
-    const req = ++reqRef.current;
-    setError(null);
-    try {
-      if (which === "GROUPS") {
-        const rows = await listAll((t) =>
-          api().models.CustomerGroup.list({ limit: 500, nextToken: t })
-        );
-        if (req === reqRef.current) setGroups(rows);
-      } else {
-        const rows = await listAll((t) =>
-          api().models.Customer.listCustomerByStatusAndDisplayName(
-            { status: which },
-            { limit: 500, nextToken: t }
-          )
-        );
-        if (req === reqRef.current) setCustomers(rows);
-      }
-    } catch (err) {
-      if (req === reqRef.current) {
-        setError(err instanceof Error ? err.message : "Could not load");
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    setCustomers(null);
-    setGroups(null);
-    void load(tab);
-  }, [tab, load]);
+  // The stale-response guard this screen used to hand-roll now lives in
+  // useAsync, so every list in the app has it.
+  const {
+    data: rows,
+    error,
+    reload,
+  } = useAsync<Customer[] | CustomerGroup[]>(
+    () =>
+      tab === "GROUPS"
+        ? listAll((t) => api().models.CustomerGroup.list({ limit: 500, nextToken: t }))
+        : listAll((t) =>
+            api().models.Customer.listCustomerByStatusAndDisplayName(
+              { status: tab },
+              { limit: 500, nextToken: t }
+            )
+          ),
+    [tab]
+  );
+  const customers = tab === "GROUPS" ? null : (rows as Customer[] | null);
+  const groups = tab === "GROUPS" ? (rows as CustomerGroup[] | null) : null;
 
   const q = query.trim().toLowerCase();
   const filtered = (customers ?? []).filter(
@@ -172,7 +157,7 @@ export default function Customers() {
         <GroupForm
           onDone={async () => {
             setAddingGroup(false);
-            await load("GROUPS");
+            reload();
           }}
         />
       </Sheet>
