@@ -72,11 +72,17 @@ export const STEPS: Record<string, Step> = {
     type: "select",
     question: "Which state is the property in?",
     field: "state",
+    // Must cover every state in `src/data/states.ts` — those states have landing
+    // pages, and `session.ts` prefills their abbr from the referrer slug. A state
+    // missing here cannot be represented: the visitor is forced onto "OTHER",
+    // which overwrites the prefill and is dropped by `buildCrmLead`.
     options: [
       { value: "MA", label: "Massachusetts" },
       { value: "RI", label: "Rhode Island" },
       { value: "CT", label: "Connecticut" },
       { value: "NH", label: "New Hampshire" },
+      { value: "NY", label: "New York" },
+      { value: "OK", label: "Oklahoma" },
       { value: "OTHER", label: "Other" },
     ],
   },
