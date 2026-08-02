@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { routingAddress, shortDisplayAddress } from "../lib/serviceAddress";
 import { useNavigate } from "react-router-dom";
 import { technicianDay, type Job, type TechnicianDay } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { clearAllDrafts } from "../lib/reportDraft";
 import { addDays, prettyWeekday, todayEastern } from "../lib/format";
 import {
@@ -47,22 +48,11 @@ export default function TechToday() {
   const [date, setDate] = useState(todayEastern());
   // Office override; null means "the caller's own day" (a TECH is always self).
   const [pickedTechId, setPickedTechId] = useState<string | null>(null);
-  const [day, setDay] = useState<TechnicianDay | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setDay(null);
-    setError(null);
-    try {
-      setDay(await technicianDay(date, pickedTechId ?? undefined));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load route");
-    }
-  }, [date, pickedTechId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { data: day, error } = useAsync<TechnicianDay>(
+    () => technicianDay(date, pickedTechId ?? undefined),
+    [date, pickedTechId],
+    "Could not load route"
+  );
 
   if (day?.unlinked) {
     return (

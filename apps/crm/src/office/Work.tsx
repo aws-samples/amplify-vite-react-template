@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
@@ -13,6 +13,7 @@ import {
   liftEmailSuppression,
   recordNoticeAlternateDelivery,
 } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime, money, todayUtc } from "../lib/format";
 import {
@@ -46,33 +47,35 @@ export default function WorkQueue() {
   const roles = useRoles();
   const [tab, setTab] = useState<Tab>("OPEN");
   const [overridesOnly, setOverridesOnly] = useState(false);
-  const [items, setItems] = useState<WorkItem[] | null>(null);
-  const [events, setEvents] = useState<WorkEvent[]>([]);
   // The owner-only "manager override" sheet — a close with no verified outcome.
   const [override, setOverride] = useState<WorkItem | null>(null);
   const [reasonCode, setReasonCode] = useState("");
   const [note, setNote] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Every action below still hand-rolls its error; the mutation pass takes
+  // them. This one slot shows whichever of the two spoke last.
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
+  const {
+    data,
+    error: loadError,
+    reload: load,
+  } = useAsync<{ items: WorkItem[]; events: WorkEvent[] }>(
+    async () => {
       const [work, history] = await Promise.all([
         listAll((t) => listWorkItems({ limit: 1000, nextToken: t })),
         listAll((t) => listWorkEvents({ limit: 1000, nextToken: t })),
       ]);
-      setItems(work);
-      setEvents(history);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load work queue");
-      setItems([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return { items: work, events: history };
+    },
+    [],
+    "Could not load work queue"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const items = data?.items ?? (loadError ? [] : null);
+  const events = data?.events ?? [];
+  const error = actionError ?? loadError;
 
   const shown = useMemo(() => {
     return (items ?? [])
@@ -104,15 +107,15 @@ export default function WorkQueue() {
   const claim = useCallback(
     async (item: WorkItem) => {
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({ workItemId: item.id, action: "CLAIM" })
         );
         if (!result) throw new Error("The work update did not complete");
-        await load();
+        load();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not claim work");
+        setActionError(err instanceof Error ? err.message : "Could not claim work");
       } finally {
         setBusyId(null);
       }
@@ -125,15 +128,15 @@ export default function WorkQueue() {
   const release = useCallback(
     async (item: WorkItem) => {
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({ workItemId: item.id, action: "RELEASE" })
         );
         if (!result) throw new Error("The work update did not complete");
-        await load();
+        load();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not release work");
+        setActionError(err instanceof Error ? err.message : "Could not release work");
       } finally {
         setBusyId(null);
       }
@@ -145,7 +148,7 @@ export default function WorkQueue() {
   // refuses unknown-outcome and attachment rows with the reason named.
   const resendExact = async (item: WorkItem) => {
     setBusyId(item.id);
-    setError(null);
+    setActionError(null);
     try {
       const result = opResult(
         await api().mutations.resendEmailLog({ emailLogId: item.relatedId! })
@@ -155,9 +158,9 @@ export default function WorkQueue() {
           "The resend did not go out — check the case detail and the email log."
         );
       }
-      await load();
+      load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not resend");
+      setActionError(err instanceof Error ? err.message : "Could not resend");
     } finally {
       setBusyId(null);
     }
@@ -184,16 +187,16 @@ export default function WorkQueue() {
       );
       if (!evidence) return;
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const result = opResult<{ lifted: boolean; message: string }>(
           await liftEmailSuppression({ email, reasonCode: reason, evidence })
         );
         if (!result) throw new Error("The suppression lift did not complete");
         window.alert(result.message);
-        await load();
+        load();
       } catch (err) {
-        setError(
+        setActionError(
           err instanceof Error ? err.message : "Could not lift the suppression"
         );
       } finally {
@@ -212,7 +215,7 @@ export default function WorkQueue() {
       );
       if (!note) return;
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const result = opResult<{ recorded: boolean; message: string }>(
           await recordNoticeAlternateDelivery({
@@ -223,9 +226,9 @@ export default function WorkQueue() {
         );
         if (!result) throw new Error("The alternate delivery did not record");
         window.alert(result.message);
-        await load();
+        load();
       } catch (err) {
-        setError(
+        setActionError(
           err instanceof Error ? err.message : "Could not record the delivery"
         );
       } finally {
@@ -247,7 +250,7 @@ export default function WorkQueue() {
         return;
       }
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({
@@ -257,9 +260,9 @@ export default function WorkQueue() {
           })
         );
         if (!result) throw new Error("The work update did not complete");
-        await load();
+        load();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not close this work");
+        setActionError(err instanceof Error ? err.message : "Could not close this work");
       } finally {
         setBusyId(null);
       }
@@ -270,7 +273,7 @@ export default function WorkQueue() {
   const saveOverride = useCallback(async () => {
     if (!override) return;
     setBusyId(override.id);
-    setError(null);
+    setActionError(null);
     try {
       const result = opResult<{ workItemId: string }>(
         await updateOwnedWork({
@@ -282,9 +285,9 @@ export default function WorkQueue() {
       );
       if (!result) throw new Error("The override did not complete");
       closeOverride();
-      await load();
+      load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not record the override");
+      setActionError(err instanceof Error ? err.message : "Could not record the override");
     } finally {
       setBusyId(null);
     }
@@ -302,15 +305,15 @@ export default function WorkQueue() {
         return;
       }
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const rebooked = opResult<{ jobId: string }>(
           await api().mutations.rebookJob({ jobId: item.relatedId })
         );
         if (!rebooked?.jobId) throw new Error("The visit was not rebooked");
-        await load();
+        load();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not rebook the visit");
+        setActionError(err instanceof Error ? err.message : "Could not rebook the visit");
       } finally {
         setBusyId(null);
       }
@@ -331,7 +334,7 @@ export default function WorkQueue() {
         return;
       }
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const res = opResult<{ status: string }>(
           await api().mutations.retryBookingFinalization({
@@ -339,9 +342,9 @@ export default function WorkQueue() {
           })
         );
         if (!res) throw new Error("The retry did not run");
-        await load();
+        load();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not finish the booking");
+        setActionError(err instanceof Error ? err.message : "Could not finish the booking");
       } finally {
         setBusyId(null);
       }
@@ -361,7 +364,7 @@ export default function WorkQueue() {
         return;
       }
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const res = opResult<{ status: string }>(
           await api().mutations.resumePlanCancellation({
@@ -369,9 +372,9 @@ export default function WorkQueue() {
           })
         );
         if (!res) throw new Error("The resume did not run");
-        await load();
+        load();
       } catch (err) {
-        setError(
+        setActionError(
           err instanceof Error ? err.message : "Could not resume the cancellation"
         );
       } finally {
@@ -393,15 +396,15 @@ export default function WorkQueue() {
         return;
       }
       setBusyId(item.id);
-      setError(null);
+      setActionError(null);
       try {
         const res = opResult<{ outcome?: string }>(
           await api().mutations.resumeVisitChange({ jobId: item.relatedId })
         );
         if (!res) throw new Error("The resume did not run");
-        await load();
+        load();
       } catch (err) {
-        setError(
+        setActionError(
           err instanceof Error ? err.message : "Could not resume the visit change"
         );
       } finally {
@@ -738,45 +741,41 @@ export default function WorkQueue() {
  */
 
 export function PaymentsInFlight() {
-  const [rows, setRows] = useState<BookingRequest[] | null>(null);
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        const data = await listAll((t) =>
-          api().models.BookingRequest.list({
-            filter: {
-              or: [
-                { status: { eq: "PROCESSING" } },
-                { status: { eq: "PAYMENT_FAILED" } },
-              ],
-            },
-            limit: 500,
-            nextToken: t,
-          })
+  // This tile has never surfaced a load failure — it simply renders nothing,
+  // which is what an unresolved `data` gives us too.
+  const { data: rows } = useAsync<BookingRequest[]>(
+    async () => {
+      const data = await listAll((t) =>
+        api().models.BookingRequest.list({
+          filter: {
+            or: [
+              { status: { eq: "PROCESSING" } },
+              { status: { eq: "PAYMENT_FAILED" } },
+            ],
+          },
+          limit: 500,
+          nextToken: t,
+        })
+      );
+      // Failed attempts age out of this operating view after two weeks —
+      // their money consequences live on as owned cases either way.
+      const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+      return data
+        .filter(
+          (b) =>
+            b.status === "PROCESSING" ||
+            !b.updatedAt ||
+            Date.parse(b.updatedAt) > cutoff
+        )
+        .sort((a, b) =>
+          (a.processingStartedAt ?? a.updatedAt ?? "").localeCompare(
+            b.processingStartedAt ?? b.updatedAt ?? ""
+          )
         );
-        // Failed attempts age out of this operating view after two weeks —
-        // their money consequences live on as owned cases either way.
-        const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
-        setRows(
-          data
-            .filter(
-              (b) =>
-                b.status === "PROCESSING" ||
-                !b.updatedAt ||
-                Date.parse(b.updatedAt) > cutoff
-            )
-            .sort((a, b) =>
-              (a.processingStartedAt ?? a.updatedAt ?? "").localeCompare(
-                b.processingStartedAt ?? b.updatedAt ?? ""
-              )
-            )
-        );
-      } catch {
-        setRows([]);
-      }
-    })();
-  }, []);
+    },
+    [],
+    "Could not load payments in flight"
+  );
 
   if (!rows || rows.length === 0) return null;
   const today = todayUtc();

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { api, listAll, unwrap, type PromoCode } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate } from "../lib/format";
 import {
@@ -37,35 +38,28 @@ function valueLabel(p: PromoCode): string {
 
 export default function PromoCodes() {
   const roles = useRoles();
-  const [codes, setCodes] = useState<PromoCode[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<PromoCode | null>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error, reload } = useAsync<PromoCode[]>(
+    async () => {
       const all = await listAll((t) =>
         api().models.PromoCode.list({ limit: 200, nextToken: t })
       );
       // Active first, then alphabetical — the codes staff hand out today sit at
       // the top, retired ones settle below.
-      setCodes(
-        [...all].sort(
-          (a, b) =>
-            Number(!!b.active) - Number(!!a.active) ||
-            (a.code ?? "").localeCompare(b.code ?? "")
-        )
+      return [...all].sort(
+        (a, b) =>
+          Number(!!b.active) - Number(!!a.active) ||
+          (a.code ?? "").localeCompare(b.code ?? "")
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load discount codes");
-      setCodes([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+    },
+    [],
+    "Could not load discount codes"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const codes = data ?? (error ? [] : null);
 
   if (!roles.owner) {
     return (
@@ -149,7 +143,7 @@ export default function PromoCodes() {
           <PromoForm
             onDone={async () => {
               setAdding(false);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -165,7 +159,7 @@ export default function PromoCodes() {
             existing={editing}
             onDone={async () => {
               setEditing(null);
-              await load();
+              reload();
             }}
           />
         ) : null}

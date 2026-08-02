@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { api, listAll, opResult, type Product } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import {
   Badge,
@@ -28,30 +29,25 @@ function productComplianceIssue(product: Product): string | null {
  * products applied on a service report; the office curates it here.
  */
 export default function ProductLog() {
-  const [products, setProducts] = useState<Product[] | null>(null);
   const [editing, setEditing] = useState<Product | "new" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
+  const {
+    data: products,
+    error,
+    reload,
+  } = useAsync<Product[]>(
+    async () => {
       const rows = await listAll((nextToken) =>
         api().models.Product.list({ limit: 500, nextToken })
       );
-      setProducts(
-        rows.sort(
-          (a, b) =>
-            (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
-            a.name.localeCompare(b.name)
-        )
+      return rows.sort(
+        (a, b) =>
+          (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
+          a.name.localeCompare(b.name)
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load products");
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+    },
+    [],
+    "Could not load products"
+  );
 
   return (
     <Page
@@ -114,7 +110,7 @@ export default function ProductLog() {
             existing={editing === "new" ? null : editing}
             onDone={async () => {
               setEditing(null);
-              await load();
+              reload();
             }}
           />
         ) : null}

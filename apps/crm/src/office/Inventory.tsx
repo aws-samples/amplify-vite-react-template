@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import {
   api,
   listAll,
@@ -6,6 +6,7 @@ import {
   type Product,
   type ProductStockEntry,
 } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate } from "../lib/format";
 import {
@@ -45,15 +46,12 @@ type Row = {
 
 export default function Inventory() {
   const roles = useRoles();
-  const [rows, setRows] = useState<Row[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [entryFor, setEntryFor] = useState<{ row: Row; mode: "PURCHASE" | "ADJUST" } | null>(
     null
   );
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error, reload } = useAsync<Row[]>(
+    async () => {
       const products = await listAll((t) =>
         api().models.Product.list({ limit: 500, nextToken: t })
       );
@@ -79,16 +77,14 @@ export default function Inventory() {
           Number(isLow(b)) - Number(isLow(a)) ||
           (a.product.name ?? "").localeCompare(b.product.name ?? "")
       );
-      setRows(built);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load inventory");
-      setRows([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return built;
+    },
+    [],
+    "Could not load inventory"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const rows = data ?? (error ? [] : null);
 
   if (!roles.owner) {
     return (
@@ -186,7 +182,7 @@ export default function Inventory() {
             enteredByEmail={roles.email}
             onDone={async () => {
               setEntryFor(null);
-              await load();
+              reload();
             }}
           />
         ) : null}

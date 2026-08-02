@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, listAll, type Customer, type Job, type ServicePlan } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
 import { planCadence } from "../lib/planCadence";
@@ -22,51 +23,63 @@ import { loadMyCustomers } from "./portalData";
 export default function PortalHome() {
   const roles = useRoles();
   const navigate = useNavigate();
-  const [customers, setCustomers] = useState<Customer[] | null>(null);
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [plans, setPlans] = useState<ServicePlan[]>([]);
   const [cancelPlanId, setCancelPlanId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
-  const loadPlans = useCallback(async (mine: Customer[]) => {
-    const planLists = await Promise.all(
-      mine.map((c) =>
-        listAll((t) =>
-          api().models.ServicePlan.list({
-            filter: { customerId: { eq: c.id } },
-            limit: 50,
-            nextToken: t,
-          })
-        )
-      )
-    );
-    setPlans(planLists.flat());
-  }, []);
-
-  useEffect(() => {
-    if (roles.loading) return;
-    (async () => {
-      try {
-        const mine = await loadMyCustomers(roles);
-        setCustomers(mine);
-        const jobLists = await Promise.all(
-          mine.map((c) =>
-            listAll((t) =>
-              api().models.Job.list({
-                filter: { customerId: { eq: c.id } },
-                limit: 200,
-                nextToken: t,
-              })
-            )
+  const { data: mine, error: mineError } = useAsync<{
+    customers: Customer[];
+    jobs: Job[];
+  } | null>(
+    async () => {
+      // Roles are still resolving — resolving to null keeps the spinner up,
+      // exactly as the old effect's early return did.
+      if (roles.loading) return null;
+      const customers = await loadMyCustomers(roles);
+      const jobLists = await Promise.all(
+        customers.map((c) =>
+          listAll((t) =>
+            api().models.Job.list({
+              filter: { customerId: { eq: c.id } },
+              limit: 200,
+              nextToken: t,
+            })
           )
-        );
-        setJobs(jobLists.flat());
-        await loadPlans(mine);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load");
-      }
-    })();
-  }, [roles, loadPlans]);
+        )
+      );
+      return { customers, jobs: jobLists.flat() };
+    },
+    [roles],
+    "Could not load"
+  );
+  const customers = mine?.customers ?? null;
+  const jobs = mine?.jobs ?? [];
+
+  // Plans load on their own so a plan cancellation can refresh JUST the plans,
+  // the way the old loadPlans callback did.
+  const {
+    data: planRows,
+    error: plansError,
+    reload: reloadPlans,
+  } = useAsync<ServicePlan[]>(
+    async () => {
+      if (!customers) return [];
+      const planLists = await Promise.all(
+        customers.map((c) =>
+          listAll((t) =>
+            api().models.ServicePlan.list({
+              filter: { customerId: { eq: c.id } },
+              limit: 50,
+              nextToken: t,
+            })
+          )
+        )
+      );
+      return planLists.flat();
+    },
+    [customers],
+    "Could not load"
+  );
+  const plans = planRows ?? [];
+  const error = mineError ?? plansError;
 
   if (!customers) {
     return (
@@ -196,9 +209,7 @@ export default function PortalHome() {
           servicePlanId={cancelPlanId}
           open
           onClose={() => setCancelPlanId(null)}
-          onCanceled={() => {
-            if (customers) void loadPlans(customers);
-          }}
+          onCanceled={() => reloadPlans()}
         />
       ) : null}
     </Page>

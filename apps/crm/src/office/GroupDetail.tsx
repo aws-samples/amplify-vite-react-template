@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, listAll, unwrap, type Customer, type CustomerGroup } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import {
   Button,
   Card,
@@ -16,9 +17,8 @@ import {
 export default function GroupDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [group, setGroup] = useState<CustomerGroup | null>(null);
-  const [members, setMembers] = useState<Customer[]>([]);
-  const [others, setOthers] = useState<Customer[]>([]);
+  // The mutations below still hand-roll their errors; the mutation pass takes
+  // them. This one slot shows whichever of the two spoke last.
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -36,29 +36,38 @@ export default function GroupDetail() {
   const [fPhone, setFPhone] = useState("");
   const [fNotes, setFNotes] = useState("");
 
-  const load = useCallback(async () => {
-    if (!id) return;
-    try {
+  const {
+    data,
+    error: loadError,
+    reload,
+  } = useAsync<{
+    group: CustomerGroup | null;
+    members: Customer[];
+    others: Customer[];
+  } | null>(
+    async () => {
+      if (!id) return null;
       const g = unwrap(await api().models.CustomerGroup.get({ id }));
-      setGroup(g);
       const all = await listAll((t) =>
         api().models.Customer.list({ limit: 1000, nextToken: t })
       );
-      setMembers(all.filter((c) => c.groupId === id));
-      setOthers(all.filter((c) => c.groupId !== id && c.status !== "INACTIVE"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load group");
-    }
-  }, [id]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return {
+        group: g,
+        members: all.filter((c) => c.groupId === id),
+        others: all.filter((c) => c.groupId !== id && c.status !== "INACTIVE"),
+      };
+    },
+    [id],
+    "Could not load group"
+  );
+  const group = data?.group ?? null;
+  const members = data?.members ?? [];
+  const others = data?.others ?? [];
 
   if (!group) {
     return (
       <Page title="Group" back="/customers">
-        <ErrorNote error={error} />
+        <ErrorNote error={error ?? loadError} />
         <Spinner />
       </Page>
     );
@@ -83,7 +92,7 @@ export default function GroupDetail() {
         })
       );
       setReusePrompt(null);
-      await load();
+      reload();
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Could not invite group login";
@@ -105,7 +114,7 @@ export default function GroupDetail() {
           groupId: groupId ?? undefined,
         })
       );
-      await load();
+      reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update member");
     } finally {
@@ -146,7 +155,7 @@ export default function GroupDetail() {
         })
       );
       setEditing(false);
-      await load();
+      reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save the group");
     } finally {
@@ -183,7 +192,7 @@ export default function GroupDetail() {
           status: "INACTIVE",
         })
       );
-      await load();
+      reload();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not inactivate the group"
@@ -204,7 +213,7 @@ export default function GroupDetail() {
           status: "ACTIVE",
         })
       );
-      await load();
+      reload();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not reactivate the group"
@@ -218,7 +227,7 @@ export default function GroupDetail() {
 
   return (
     <Page title={group.name} back="/customers">
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? loadError} />
       <Card
         title="Group details"
         actions={

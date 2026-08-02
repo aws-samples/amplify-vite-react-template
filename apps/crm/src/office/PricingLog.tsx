@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, listAll, type LeadPricingRun } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { fmtDate, money } from "../lib/format";
 import {
   Badge,
@@ -25,27 +26,26 @@ type Outcome = "PENDING" | "SENT" | "WON" | "LOST" | "PASSED";
  */
 export default function PricingLog() {
   const navigate = useNavigate();
-  const [runs, setRuns] = useState<LeadPricingRun[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<LeadPricingRun | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
+  const {
+    data: runs,
+    error: loadError,
+    reload,
+  } = useAsync<LeadPricingRun[]>(
+    async () => {
       const rows = await listAll((nextToken) =>
         api().models.LeadPricingRun.list({ limit: 500, nextToken })
       );
-      setRuns(
-        rows.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
+      return rows.sort((a, b) =>
+        (b.createdAt ?? "").localeCompare(a.createdAt ?? "")
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the log");
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+    },
+    [],
+    "Could not load the log"
+  );
+  const [editing, setEditing] = useState<LeadPricingRun | null>(null);
+  const [busy, setBusy] = useState(false);
+  // The save path still hand-rolls its error; the mutation pass takes it.
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const priceLabel = (r: LeadPricingRun) =>
     r.monthlyPriceCents != null
@@ -56,7 +56,7 @@ export default function PricingLog() {
 
   return (
     <Page title="Pricing log" back="/more">
-      <ErrorNote error={error} />
+      <ErrorNote error={saveError ?? loadError} />
       {runs === null ? (
         <Spinner />
       ) : runs.length === 0 ? (
@@ -151,10 +151,10 @@ export default function PricingLog() {
                     })
                     .then(() => {
                       setEditing(null);
-                      return load();
+                      reload();
                     })
                     .catch((err) =>
-                      setError(err instanceof Error ? err.message : "Save failed")
+                      setSaveError(err instanceof Error ? err.message : "Save failed")
                     )
                     .finally(() => setBusy(false));
                 }}

@@ -10,6 +10,7 @@ import {
   type Technician,
   type TechnicianLicenseRecord,
 } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
 import {
@@ -51,35 +52,28 @@ export function technicianComplianceIssue(
  * place.
  */
 export function TechnicianRoster() {
-  const [techs, setTechs] = useState<Technician[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<Technician | null>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error, reload } = useAsync<Technician[]>(
+    async () => {
       const all = await listAll((t) =>
         api().models.Technician.list({ limit: 200, nextToken: t })
       );
       // Active first, then by name — the same order the Schedule board reads
       // them in, so the two lists never feel like different rosters.
-      setTechs(
-        [...all].sort(
-          (a, b) =>
-            Number(!!b.active) - Number(!!a.active) ||
-            (a.name ?? "").localeCompare(b.name ?? "")
-        )
+      return [...all].sort(
+        (a, b) =>
+          Number(!!b.active) - Number(!!a.active) ||
+          (a.name ?? "").localeCompare(b.name ?? "")
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load technicians");
-      setTechs([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+    },
+    [],
+    "Could not load technicians"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const techs = data ?? (error ? [] : null);
 
   return (
     <Card
@@ -142,7 +136,7 @@ export function TechnicianRoster() {
           <TechForm
             onDone={async () => {
               setAdding(false);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -158,7 +152,7 @@ export function TechnicianRoster() {
             existing={editing}
             onDone={async () => {
               setEditing(null);
-              await load();
+              reload();
             }}
           />
         ) : null}

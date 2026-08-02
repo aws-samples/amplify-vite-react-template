@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   api,
   changeStaffRoles,
@@ -13,6 +13,7 @@ import {
   type StaffRosterRow,
   type Technician,
 } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { TechnicianRoster } from "./technicians";
 import { fmtDate, fmtDateTime, todayUtc } from "../lib/format";
@@ -91,26 +92,21 @@ function newIdempotencyKey(): string {
 
 export default function Staff() {
   const roles = useRoles();
-  const [rows, setRows] = useState<StaffRosterRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [inviting, setInviting] = useState(false);
   const [selected, setSelected] = useState<StaffRosterRow | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error, reload } = useAsync<StaffRosterRow[]>(
+    async () => {
       const res = opResult<{ staff: StaffRosterRow[] }>(await staffRoster());
-      setRows(res?.staff ?? []);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the staff roster");
-      setRows([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return res?.staff ?? [];
+    },
+    [],
+    "Could not load the staff roster"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const rows = data ?? (error ? [] : null);
 
   if (!roles.owner) {
     return (
@@ -181,7 +177,7 @@ export default function Staff() {
           <InviteForm
             onDone={async () => {
               setInviting(false);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -197,7 +193,7 @@ export default function Staff() {
             row={selected}
             onDone={async () => {
               setSelected(null);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -223,24 +219,22 @@ export default function Staff() {
  * edited or deleted.
  */
 function AccessHistory() {
-  const [events, setEvents] = useState<StaffAccessEvent[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
-  useEffect(() => {
-    // GL-14 R7: page the ENTIRE immutable ledger, not just the first 500 rows,
-    // so search and export cover the complete access history.
-    listAll((t) => listStaffAccessEvents({ limit: 1000, nextToken: t }))
-      .then((all) => {
-        const rows = [...all].sort((a, b) =>
-          String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
-        );
-        setEvents(rows);
-      })
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Could not load the history")
+  const { data: events, error } = useAsync<StaffAccessEvent[]>(
+    async () => {
+      // GL-14 R7: page the ENTIRE immutable ledger, not just the first 500
+      // rows, so search and export cover the complete access history.
+      const all = await listAll((t) =>
+        listStaffAccessEvents({ limit: 1000, nextToken: t })
       );
-  }, []);
+      return [...all].sort((a, b) =>
+        String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
+      );
+    },
+    [],
+    "Could not load the history"
+  );
 
   const q = query.trim().toLowerCase();
   const filtered = (events ?? []).filter((e) =>

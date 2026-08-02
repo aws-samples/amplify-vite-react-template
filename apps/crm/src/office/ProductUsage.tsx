@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { api, listAll, type Product } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import {
   aggregateProductUsage,
@@ -71,15 +72,11 @@ export default function ProductUsage() {
   }, []);
   const [from, setFrom] = useState(isoDate(ninetyAgo));
   const [to, setTo] = useState(isoDate(today));
-  const [products, setProducts] = useState<Product[] | null>(null);
-  const [reportRows, setReportRows] = useState<ReportProduct[][] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setError(null);
-    setProducts(null);
-    setReportRows(null);
-    try {
+  const { data, error } = useAsync<{
+    products: Product[];
+    reportRows: ReportProduct[][];
+  }>(
+    async () => {
       // Bound the scan to FINALIZED reports in the range. serviceDate is a
       // UTC-Z ISO string, so a lexical `between` on the day bounds is correct;
       // an exact client-side prefix filter belts-and-suspenders the edges.
@@ -97,30 +94,26 @@ export default function ProductUsage() {
           })
         ),
       ]);
-      setProducts(prods);
-      setReportRows(
-        reports
+      return {
+        products: prods,
+        reportRows: reports
           .filter((r) => {
             const day = (r.serviceDate ?? "").slice(0, 10);
             return day && day >= from && day <= to;
           })
-          .map((r) => toReportRows(r.productsUsed))
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load usage");
-      setProducts([]);
-      setReportRows([]);
-    }
-  }, [from, to]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+          .map((r) => toReportRows(r.productsUsed)),
+      };
+    },
+    [from, to],
+    "Could not load usage"
+  );
 
   const rows = useMemo(() => {
-    if (!products || !reportRows) return null;
-    return aggregateProductUsage(reportRows, products);
-  }, [products, reportRows]);
+    // A failed load used to aggregate two empty lists, landing on the empty
+    // state beside its error rather than spinning forever — keep that.
+    if (!data) return error ? [] : null;
+    return aggregateProductUsage(data.reportRows, data.products);
+  }, [data, error]);
 
   const totalCost = useMemo(
     () => (rows ?? []).reduce((s, r) => s + r.costCents, 0),

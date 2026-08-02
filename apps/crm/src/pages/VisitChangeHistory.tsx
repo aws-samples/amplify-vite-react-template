@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import {
   listAll,
   listVisitChangeEvents,
   type VisitChangeEvent,
 } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime, money, todayUtc } from "../lib/format";
 import {
@@ -34,13 +35,10 @@ function reasonLabel(code: string): string {
 
 export default function VisitChangeHistory() {
   const roles = useRoles();
-  const [events, setEvents] = useState<VisitChangeEvent[] | null>(null);
   const [query, setQuery] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error } = useAsync<VisitChangeEvent[]>(
+    async () => {
       // Page the whole ledger, not just the first batch, so the export is complete.
       const all = await listAll((nextToken) =>
         listVisitChangeEvents({ limit: 500, nextToken })
@@ -48,16 +46,14 @@ export default function VisitChangeHistory() {
       all.sort((a, b) =>
         String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
       );
-      setEvents(all);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the history");
-      setEvents([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return all;
+    },
+    [],
+    "Could not load the history"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const events = data ?? (error ? [] : null);
 
   if (!roles.office && !roles.finance) {
     return (
