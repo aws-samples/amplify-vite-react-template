@@ -42,6 +42,7 @@ import {
   buildTechnicianJob,
 } from "../shared/technicianReads";
 import { forEachPage, listAll } from "../shared/pagination";
+import { todayEastern, todayUtc } from "../shared/dates";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { drivingDistanceMetersFromPoint } from "../shared/driveTime";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
@@ -836,7 +837,7 @@ async function submitPortalRequest(opts: {
     opts.jobId ?? "",
     opts.preferredDate ?? "",
     opts.message?.trim() ?? "",
-    new Date().toISOString().slice(0, 10),
+    todayUtc(),
   ].join("|");
   const id = `pr-${createHash("sha256").update(requestFacts).digest("hex").slice(0, 24)}`;
   const { data: created } = await client.models.PortalRequest.create({
@@ -1357,7 +1358,7 @@ async function runWorkVerifier(
       const facts = await licenseFactsFor(tech);
       if (facts.current) return { ok: true, message: "" };
       if (!tech.active) {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = todayEastern();
         let hasFuture = false;
         await forEachPage(
           (nextToken) =>
@@ -2452,7 +2453,7 @@ async function assertOfficeFieldAccess(
   }
   await openOwnedWork({
     kind: "OFFICE_FIELD_REVIEW",
-    dedupeKey: `office-field:${jobId}:${new Date().toISOString().slice(0, 10)}`,
+    dedupeKey: `office-field:${jobId}:${todayUtc()}`,
     title: "Office field action needs review",
     detail: `${callerEmail(identity) ?? "An office member"} performed ${action} on visit ${jobId}: ${reason}`,
     relatedId: jobId,

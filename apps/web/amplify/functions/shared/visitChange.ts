@@ -13,6 +13,7 @@ import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
 import { listAll } from "./pagination";
 import { refundInvoice, refundableRemaining } from "./refund";
 import { assertTechnicianCompliance } from "./compliance";
+import { todayEastern } from "./dates";
 import { licenseFactsFor } from "./licenses";
 import { claimMonthForJob, releaseMonthForJob } from "./obligations";
 import { isServiceMonth } from "./season";
@@ -86,14 +87,6 @@ export type VisitChangeActor = {
  *  for launch: it promised a balance with no real credit ledger behind it. Cancel
  *  offers refund-to-card, an owner manager exception, or a policy fee-retained.) */
 export type CancelDecision = "CANCEL_REFUND";
-
-const todayEastern = (): string =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
 
 const usd = (cents: number): string =>
   `$${(cents / 100).toLocaleString("en-US", {

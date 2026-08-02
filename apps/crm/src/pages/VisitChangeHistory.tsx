@@ -5,7 +5,7 @@ import {
   type VisitChangeEvent,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { fmtDateTime, money } from "../lib/format";
+import { fmtDateTime, money, todayUtc } from "../lib/format";
 import {
   Badge,
   Button,
@@ -118,7 +118,7 @@ export default function VisitChangeHistory() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `visit-change-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `visit-change-history-${todayUtc()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };

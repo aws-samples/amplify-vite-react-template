@@ -13,7 +13,7 @@ import {
   recordNoticeAlternateDelivery,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
-import { fmtDateTime, money } from "../lib/format";
+import { fmtDateTime, money, todayUtc } from "../lib/format";
 import {
   isVerifiable,
   SEVERITY_LABEL,
@@ -806,7 +806,7 @@ export function PaymentsInFlight() {
   }, []);
 
   if (!rows || rows.length === 0) return null;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayUtc();
   const ageDays = (iso?: string | null) =>
     iso ? Math.floor((Date.now() - Date.parse(iso)) / (24 * 60 * 60 * 1000)) : null;
 

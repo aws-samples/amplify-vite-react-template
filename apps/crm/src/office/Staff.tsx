@@ -15,7 +15,7 @@ import {
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { TechnicianRoster } from "./technicians";
-import { fmtDate, fmtDateTime } from "../lib/format";
+import { fmtDate, fmtDateTime, todayUtc } from "../lib/format";
 import {
   Badge,
   Button,
@@ -282,7 +282,7 @@ function AccessHistory() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `staff-access-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `staff-access-history-${todayUtc()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };

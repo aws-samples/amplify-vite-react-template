@@ -29,7 +29,7 @@ import {
   pickServingRow,
   type CatalogManifest,
 } from "../../../web/amplify/functions/shared/rateServing";
-import { fmtDate, money } from "../lib/format";
+import { fmtDate, money, todayUtc } from "../lib/format";
 import { useRoles } from "../lib/auth";
 import {
   Badge,
@@ -260,7 +260,7 @@ export default function MarketRates() {
             api().models.RateCoverage.list({ limit: 500, nextToken: t })
           )
         );
-        const dayId = `day#${new Date().toISOString().slice(0, 10)}`;
+        const dayId = `day#${todayUtc()}`;
         const { data } = await api().models.PricingControl.get({ id: dayId });
         setControl(data ?? null);
         const { data: rb } = await api().models.PricingControl.get({

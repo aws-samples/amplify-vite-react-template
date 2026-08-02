@@ -1,5 +1,6 @@
 import { dataClient } from "./dataClient";
 import { addBusinessDays } from "./businessDays";
+import { todayEastern } from "./dates";
 import { customerAccessGroups } from "./dynamicGroups";
 import { emailShell, notifyOffice, sendEmail } from "./email";
 import { casGuardedUpdate } from "./atomicLock";
@@ -115,7 +116,7 @@ export async function requestCallback(
   }
 
   const id = callbackIdFor(opts.originalJobId);
-  const acceptedOn = new Date().toISOString().slice(0, 10);
+  const acceptedOn = todayEastern();
   const promisedBy = await addBusinessDays(
     acceptedOn,
     CALLBACK_RETURN_BUSINESS_DAYS

@@ -44,6 +44,7 @@ import {
 } from "../shared/ownedWork";
 import { disposeStaleDrafts } from "../shared/jobAssignment";
 import { forEachPage, listAll } from "../shared/pagination";
+import { todayEastern } from "../shared/dates";
 import { callerEmail, callerIsOwner, callerSub } from "../shared/authz";
 import {
   assignLeadOwner,
@@ -1712,7 +1713,7 @@ async function reassignFutureJobs(
   inProgress: { id: string; scheduledDate: string | null }[];
 }> {
   const client = await dataClient();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayEastern();
   const note = `Unassigned ${today}: ${techName} was offboarded. Returned to the scheduling pool for reassignment.`;
   let jobsUnassigned = 0;
   let jobsFailed = 0;
@@ -1791,7 +1792,7 @@ async function reassignFutureJobs(
 async function countAssignedFutureJobs(technicianId: string): Promise<number> {
   try {
     const client = await dataClient();
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayEastern();
     let count = 0;
     await forEachPage(
       (nextToken) =>

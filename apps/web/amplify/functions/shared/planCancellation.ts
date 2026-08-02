@@ -14,6 +14,7 @@ import {
   type QueuedVisitsResolution,
 } from "./subscription";
 import { computeVisitCancellationPolicy } from "./cancellationPolicy";
+import { todayEastern } from "./dates";
 import { listAll } from "./pagination";
 import {
   ALREADY_CANCELED_MESSAGE,
@@ -86,14 +87,6 @@ export type PlanCancellationPreview = {
    *  so it never shows a static "you won't be charged again" against live billing. */
   pendingMessage: string;
 };
-
-const todayEastern = (): string =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
 
 /** Money already billed on this plan and not yet paid (OPEN or FAILED). A
  *  cancel stops future billing but does not erase a debt already owed. */

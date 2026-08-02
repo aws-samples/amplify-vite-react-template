@@ -1,6 +1,7 @@
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
 import { forEachPage } from "./pagination";
+import { todayEastern } from "./dates";
 import { entryForLabel, SERVICE_CATALOG_VERSION } from "./serviceCatalog";
 import {
   claimMonthForJob,
@@ -120,7 +121,7 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     // Idempotency: don't double-queue if a future visit already exists.
     // Query the servicePlanId index and page fully — a filtered scan would
     // miss the sibling once the Job table grows past one page.
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayEastern();
     const servicePlanId = job.servicePlanId;
     let hasFuture = false;
     await forEachPage(

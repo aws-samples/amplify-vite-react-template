@@ -1,5 +1,6 @@
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { oneBusinessDayDeadline } from "../shared/businessDays";
+import { easternPlusDays, todayEastern, todayUtc } from "../shared/dates";
 import { dataClient } from "../shared/dataClient";
 import { forEachPage, listAll } from "../shared/pagination";
 import {
@@ -106,14 +107,6 @@ const DUE_SOON_LEAD_DAYS = 3;
 
 /** Days before evidenceDueBy a dispute-deadline alert fires. */
 const DISPUTE_ALERT_LEAD_DAYS = 4;
-
-/** Date N days from now (YYYY-MM-DD) in the shop's timezone. */
-function easternPlusDays(n: number): string {
-  return new Date(Date.now() + n * 24 * 60 * 60 * 1000).toLocaleDateString(
-    "en-CA",
-    { timeZone: "America/New_York" }
-  );
-}
 
 const prettyDate = (isoDate: string) =>
   new Date(`${isoDate}T12:00:00`).toLocaleDateString("en-US", {
@@ -270,7 +263,7 @@ export const handler = async () => {
   if (failures.length) {
     await openOwnedWork({
       kind: "INFRA_ALERT",
-      dedupeKey: `daily-reminders-incomplete:${new Date().toISOString().slice(0, 10)}`,
+      dedupeKey: `daily-reminders-incomplete:${todayUtc()}`,
       title: `Daily operations run incomplete — ${failures.length} subtask${failures.length === 1 ? "" : "s"} failed`,
       detail: `Today's scheduled operations run finished with failures. Obligations those subtasks watch (reminders, dunning, reconciliation, sweeps) may be unmet until they run clean:\n${failures
         .map((f) => `- ${f.task}: ${f.error}`)
@@ -426,10 +419,8 @@ export async function sweepLicenseLapses() {
   let lapsed = 0;
   let visitsFlagged = 0;
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const warnDate = new Date(Date.now() + LICENSE_WARN_DAYS * 86400_000)
-      .toISOString()
-      .slice(0, 10);
+    const today = todayEastern();
+    const warnDate = easternPlusDays(LICENSE_WARN_DAYS);
     await forEachPage(
       (nextToken) =>
         client.models.Technician.list({
@@ -1120,7 +1111,7 @@ async function reportUnchargedOneTimeJobs() {
  */
 async function reportPlansWithoutNextVisit() {
   const client = await dataClient();
-  const today = easternPlusDays(0);
+  const today = todayEastern();
 
   const plans: {
     id: string;
@@ -1962,7 +1953,7 @@ async function writeReconRun(
   try {
     const client = await dataClient();
     if (!("ReconRun" in client.models)) return;
-    const runDate = new Date().toISOString().slice(0, 10);
+    const runDate = todayEastern();
     const id = `${kind}#${runDate}`;
     const row = {
       id,
@@ -2130,7 +2121,7 @@ export async function reconcilePlansDaily() {
     subscriptions,
     plans,
     jobs,
-    todayIso: todayEasternDate(),
+    todayIso: todayEastern(),
   });
   await openReconMismatches("PLAN_MISMATCH", mismatches);
   await writeReconRun("PLANS", summary, mismatches.length);
@@ -2164,18 +2155,11 @@ export async function reconcileStateDaily() {
     jobs,
     plans,
     invoices,
-    todayIso: todayEasternDate(),
+    todayIso: todayEastern(),
   });
   await openReconMismatches("STATE_MISMATCH", mismatches);
   await writeReconRun("STATE", summary, mismatches.length);
   return { stateRecon: summary };
-}
-
-/** Today (YYYY-MM-DD) in the shop's timezone. */
-function todayEasternDate(): string {
-  return new Date().toLocaleDateString("en-CA", {
-    timeZone: "America/New_York",
-  });
 }
 
 /**

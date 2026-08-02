@@ -7,6 +7,7 @@ import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
 import { computeVisitCancellationPolicy } from "./cancellationPolicy";
 import { jobScheduleGuards, releaseJobCapacity } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
+import { todayEastern } from "./dates";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -269,7 +270,7 @@ export async function startPlanBilling(
       id: servicePlanId,
       stripeSubscriptionId: created.id,
       status: "ACTIVE",
-      startDate: new Date().toISOString().slice(0, 10),
+      startDate: todayEastern(),
     });
     return {
       started: true,
@@ -350,7 +351,7 @@ export async function cancelQueuedPlanVisits(
 ): Promise<QueuedVisitsResolution> {
   const client = await dataClient();
   const resolution = emptyResolution();
-  const today = todayEasternDate();
+  const today = todayEastern();
 
   await forEachPage(
     (nextToken) =>
@@ -405,7 +406,7 @@ export async function cancelQueuedPlanVisits(
           nowMs,
         });
 
-        const note = `Auto-canceled ${new Date().toISOString().slice(0, 10)}: ${cause}.${
+        const note = `Auto-canceled ${todayEastern()}: ${cause}.${
           paidCents > 0
             ? policy.withinFreeWindow
               ? ` Paid ${(paidCents / 100).toFixed(2)} — full refund owed (more than ${CANCEL_FULL_REFUND_DAYS * 24} hours out).`
@@ -521,16 +522,6 @@ export async function cancelQueuedPlanVisits(
   );
 
   return resolution;
-}
-
-/** Today's calendar date in Eastern time — the clock the 72-hour rule runs on. */
-function todayEasternDate(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
 }
 
 /** The money already attached to one visit: net paid cents (paid minus prior

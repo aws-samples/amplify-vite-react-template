@@ -14,6 +14,7 @@ import {
 } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
 import { forEachPage, listAll } from "./pagination";
+import { todayEastern } from "./dates";
 import { resequenceAndRebuildDay } from "./routeOptimizer";
 
 /** Give back minutes a finalize attempt reserved but could not stamp. */
@@ -1551,7 +1552,7 @@ async function finalizeClaimed(
           // A date-less off-season enrollment's plan starts TODAY — billing
           // began at checkout even though the first treatment is next season.
           startDate:
-            booking.selectedDate ?? new Date().toISOString().slice(0, 10),
+            booking.selectedDate ?? todayEastern(),
           // GL-17: seasonal facts are stamped at enrollment from the accepted
           // offer — mosquito / mosquito+tick bills monthly year-round and owes
           // one treatment per month April–October. Billing starts immediately

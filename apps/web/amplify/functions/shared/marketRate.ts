@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createHash } from "node:crypto";
 import { dataClient } from "./dataClient";
 import { listAll } from "./pagination";
+import { todayUtc } from "./dates";
 import { money, oneTimeGrossProfitCents } from "../crm-pricing/rateCards";
 import {
   areaKeyFor,
@@ -414,7 +415,7 @@ export async function writeCatalogSnapshot(
     console.error("writeCatalogSnapshot failed", err);
     await openWork?.({
       kind: "INFRA_ALERT",
-      dedupeKey: `catalog-snapshot:${new Date().toISOString().slice(0, 10)}`,
+      dedupeKey: `catalog-snapshot:${todayUtc()}`,
       relatedId: "catalog-snapshot",
       title: "Catalog snapshot failed — rollback coverage is aging",
       detail:
