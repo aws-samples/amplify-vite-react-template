@@ -41,6 +41,7 @@ import {
 } from "../lib/recovery";
 import { isLeadOpen } from "../lib/leadStage";
 import { useRoles } from "../lib/auth";
+import { useAction } from "../lib/useAsync";
 import {
   Badge,
   Button,
@@ -133,42 +134,47 @@ export default function Dashboard() {
   // Confirm a cash/cheque payment reached the bank. The server stamps the
   // actor and refuses Stripe-settled invoices; reload shows it gone from the
   // queue.
+  const depositAct = useAction(async (invoiceId: string) => {
+    setError(null);
+    unwrap(await settleInvoice({ invoiceId, method: "MARK_DEPOSITED" }));
+    await load();
+  }, "Could not mark the deposit");
+
+  // `depositingId` stays for the row's own spinner; useAction.busy is a
+  // single flag and could not say WHICH invoice is being confirmed.
   const markDeposited = useCallback(
     async (invoiceId: string) => {
       setDepositingId(invoiceId);
-      setError(null);
       try {
-        unwrap(
-          await settleInvoice({ invoiceId, method: "MARK_DEPOSITED" })
-        );
-        await load();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Could not mark the deposit"
-        );
+        await depositAct.run(invoiceId);
       } finally {
         setDepositingId(null);
       }
     },
-    [load]
+    [depositAct.run]
   );
 
   // Claim a recovery item ("Assign to me") — the server stamps the owner from
   // the caller's identity, so after it lands a reload shows this user's email.
+  const assignAct = useAction(
+    async (kind: "INVOICE" | "DISPUTE", id: string) => {
+      setError(null);
+      await assignRecoveryOwner({ kind, id });
+      await load();
+    },
+    "Could not assign owner"
+  );
+
   const assign = useCallback(
     async (kind: "INVOICE" | "DISPUTE", id: string) => {
       setAssigningId(id);
-      setError(null);
       try {
-        await assignRecoveryOwner({ kind, id });
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not assign owner");
+        await assignAct.run(kind, id);
       } finally {
         setAssigningId(null);
       }
     },
-    [load]
+    [assignAct.run]
   );
 
   if (!invoices) {
@@ -375,7 +381,7 @@ export default function Dashboard() {
           setDrill(null);
         }}
       />
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? depositAct.error ?? assignAct.error} />
 
       <div className="stat-grid">
         <Stat

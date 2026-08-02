@@ -107,3 +107,41 @@ export function createSingleFlight(): SingleFlight {
     },
   };
 }
+
+export type KeyedSingleFlight = {
+  /** True if this KEY may proceed; false if the same key is already running. */
+  tryEnter: (key: string) => boolean;
+  exit: (key: string) => void;
+  busyWith: (key: string) => boolean;
+  readonly busy: boolean;
+};
+
+/**
+ * One run at a time PER KEY.
+ *
+ * A screen that multiplexes many independent writes through one handler
+ * (`run("remind", …)`, `run("invite", …)`) needs the double-submit guard
+ * scoped to the button, not to the screen: a plain single-flight would let the
+ * first write silently swallow a press on a DIFFERENT button, which is the
+ * failure mode this whole migration exists to remove. Same key twice is still
+ * refused.
+ */
+export function createKeyedSingleFlight(): KeyedSingleFlight {
+  const inFlight = new Set<string>();
+  return {
+    tryEnter(key) {
+      if (inFlight.has(key)) return false;
+      inFlight.add(key);
+      return true;
+    },
+    exit(key) {
+      inFlight.delete(key);
+    },
+    busyWith(key) {
+      return inFlight.has(key);
+    },
+    get busy() {
+      return inFlight.size > 0;
+    },
+  };
+}

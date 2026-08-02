@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createRequestGuard,
   createSingleFlight,
+  createKeyedSingleFlight,
   runGuarded,
   toMessage,
   type AsyncSink,
@@ -199,5 +200,45 @@ describe("createSingleFlight", () => {
     const [first, second] = await Promise.all([submit(), submit()]);
     expect([first, second]).toEqual([true, false]);
     expect(action).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createKeyedSingleFlight", () => {
+  it("refuses the SAME key twice", () => {
+    const gate = createKeyedSingleFlight();
+    expect(gate.tryEnter("remind")).toBe(true);
+    expect(gate.tryEnter("remind")).toBe(false);
+    gate.exit("remind");
+    expect(gate.tryEnter("remind")).toBe(true);
+  });
+
+  // The reason this exists: a plain single-flight would swallow a press on an
+  // unrelated button while another write was in flight.
+  it("lets a DIFFERENT key through while one is in flight", () => {
+    const gate = createKeyedSingleFlight();
+    expect(gate.tryEnter("remind")).toBe(true);
+    expect(gate.tryEnter("invite")).toBe(true);
+    expect(gate.busyWith("remind")).toBe(true);
+    expect(gate.busyWith("invite")).toBe(true);
+    expect(gate.busyWith("void")).toBe(false);
+  });
+
+  it("reports busy until the last key leaves", () => {
+    const gate = createKeyedSingleFlight();
+    gate.tryEnter("a");
+    gate.tryEnter("b");
+    expect(gate.busy).toBe(true);
+    gate.exit("a");
+    expect(gate.busy).toBe(true);
+    gate.exit("b");
+    expect(gate.busy).toBe(false);
+  });
+
+  it("exiting an unknown key is harmless", () => {
+    const gate = createKeyedSingleFlight();
+    gate.tryEnter("a");
+    gate.exit("nope");
+    expect(gate.busy).toBe(true);
+    expect(gate.busyWith("a")).toBe(true);
   });
 });

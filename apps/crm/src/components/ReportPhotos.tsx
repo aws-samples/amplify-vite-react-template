@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, opResult, unwrap, type ServiceReport } from "../lib/api";
+import { useAction } from "../lib/useAsync";
 import { Button, ErrorNote } from "../ui/kit";
 
 /**
@@ -46,61 +47,56 @@ export default function ReportPhotos({
   );
   const urls = useSignedUrls(keys);
   const fileInput = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const upload = async (files: FileList) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const added: string[] = [];
-      for (const file of Array.from(files).slice(0, 10)) {
-        const res = await api().mutations.getReportPhotoUploadUrl({
-          reportId: report.id,
-          contentType: file.type || "image/jpeg",
-        });
-        const target = opResult<{ key: string; uploadUrl: string }>(res);
-        if (!target?.uploadUrl) throw new Error("Could not get an upload URL");
-        const put = await fetch(target.uploadUrl, {
-          method: "PUT",
-          body: file,
-          headers: { "Content-Type": file.type || "image/jpeg" },
-        });
-        if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-        added.push(target.key);
-      }
-      if (added.length) {
-        // Send only the delta — the server merges against the report's current
-        // keys, so a photo another device just added is never overwritten.
-        unwrap(
-          await api().mutations.setReportPhotos({
-            reportId: report.id,
-            addKeys: added,
-          })
-        );
-        await onChanged();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Photo upload failed");
-    } finally {
-      setBusy(false);
-      if (fileInput.current) fileInput.current.value = "";
+  const upload = useAction(async (files: FileList) => {
+    const added: string[] = [];
+    for (const file of Array.from(files).slice(0, 10)) {
+      const res = await api().mutations.getReportPhotoUploadUrl({
+        reportId: report.id,
+        contentType: file.type || "image/jpeg",
+      });
+      const target = opResult<{ key: string; uploadUrl: string }>(res);
+      if (!target?.uploadUrl) throw new Error("Could not get an upload URL");
+      const put = await fetch(target.uploadUrl, {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type || "image/jpeg" },
+      });
+      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+      added.push(target.key);
     }
-  };
-
-  const remove = async (key: string) => {
-    if (!window.confirm("Remove this photo from the report?")) return;
-    try {
+    if (added.length) {
+      // Send only the delta — the server merges against the report's current
+      // keys, so a photo another device just added is never overwritten.
       unwrap(
         await api().mutations.setReportPhotos({
           reportId: report.id,
-          removeKeys: [key],
+          addKeys: added,
         })
       );
       await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not remove photo");
     }
+  }, "Photo upload failed");
+
+  const pickFiles = async (files: FileList) => {
+    await upload.run(files);
+    // Cleared either way, so the same photos can be picked again after a failure.
+    if (fileInput.current) fileInput.current.value = "";
+  };
+
+  const removePhoto = useAction(async (key: string) => {
+    unwrap(
+      await api().mutations.setReportPhotos({
+        reportId: report.id,
+        removeKeys: [key],
+      })
+    );
+    await onChanged();
+  }, "Could not remove photo");
+
+  const remove = async (key: string) => {
+    if (!window.confirm("Remove this photo from the report?")) return;
+    await removePhoto.run(key);
   };
 
   if (readOnly && keys.length === 0) return null;
@@ -141,19 +137,21 @@ export default function ReportPhotos({
             capture="environment"
             multiple
             hidden
-            onChange={(e) => e.target.files?.length && void upload(e.target.files)}
+            onChange={(e) =>
+              e.target.files?.length && void pickFiles(e.target.files)
+            }
           />
           <Button
             small
             variant="subtle"
-            loading={busy}
+            loading={upload.busy}
             onClick={() => fileInput.current?.click()}
           >
             📷 Add photos
           </Button>
         </>
       ) : null}
-      <ErrorNote error={error} />
+      <ErrorNote error={upload.error ?? removePhoto.error} />
     </div>
   );
 }

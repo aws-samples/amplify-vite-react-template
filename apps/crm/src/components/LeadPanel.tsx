@@ -18,6 +18,7 @@ import {
   LEAD_STAGE_LABEL,
   LEAD_STAGE_TONE,
 } from "../lib/leadStage";
+import { useAction } from "../lib/useAsync";
 import { Badge, Button, Card, ErrorNote, Field } from "../ui/kit";
 
 /**
@@ -37,7 +38,6 @@ export default function LeadPanel({
   const roles = useRoles();
   const [activity, setActivity] = useState<LeadActivity[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [preparedUrl, setPreparedUrl] = useState<string | null>(null);
   const [lostReason, setLostReason] = useState("");
   const [timelineError, setTimelineError] = useState<string | null>(null);
@@ -73,16 +73,22 @@ export default function LeadPanel({
     void loadActivity();
   }, [loadActivity]);
 
+  // Every disposition mints its idempotency key with clientActionId at click
+  // time, so a second click carries a NEW key and the server collapses
+  // nothing — two "Add plan & convert" clicks wrote two plans. The gate is
+  // what stops the second write.
+  const disposition = useAction(async (fn: () => Promise<unknown>) => {
+    await fn();
+    await onChanged();
+    await loadActivity();
+  }, "That action did not complete");
+
+  // `busy` stays as the key of the button that is working: the gate is a single
+  // flag, and the key is what puts the spinner on the right button.
   const act = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
-    setError(null);
     try {
-      await fn();
-      await onChanged();
-      await loadActivity();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That action did not complete");
-      throw err;
+      return await disposition.run(fn);
     } finally {
       setBusy(null);
     }
@@ -93,18 +99,15 @@ export default function LeadPanel({
     // successful token mint into a button that appears to do nothing.
     const quoteTab = window.open("about:blank", "buzzkill-lead-quote");
     if (quoteTab) quoteTab.opener = null;
-    try {
-      await act("quote", async () => {
-        const prepared = opResult<{ url: string }>(
-          await api().mutations.prepareLeadQuote({ customerId: customer.id })
-        );
-        if (!prepared?.url) throw new Error("The quote form link was not returned.");
-        setPreparedUrl(prepared.url);
-        if (quoteTab) quoteTab.location.replace(prepared.url);
-      });
-    } catch {
-      quoteTab?.close();
-    }
+    const ok = await act("quote", async () => {
+      const prepared = opResult<{ url: string }>(
+        await api().mutations.prepareLeadQuote({ customerId: customer.id })
+      );
+      if (!prepared?.url) throw new Error("The quote form link was not returned.");
+      setPreparedUrl(prepared.url);
+      if (quoteTab) quoteTab.location.replace(prepared.url);
+    });
+    if (!ok) quoteTab?.close();
   };
 
   const due = leadNextActionAt(customer);
@@ -134,7 +137,7 @@ export default function LeadPanel({
         </span>
       }
     >
-      <ErrorNote error={error} />
+      <ErrorNote error={disposition.error} />
 
       {!terminal ? (
         <>
@@ -178,7 +181,7 @@ export default function LeadPanel({
                     })
                   );
                   if (!sent?.sent) throw new Error("The booking link was not sent.");
-                }).catch(() => undefined)
+                })
               }
             >
               Email the customer their link
@@ -301,7 +304,7 @@ export default function LeadPanel({
                         })
                       );
                       if (!result) throw new Error("The inquiry was not closed.");
-                    }).catch(() => undefined)
+                    })
                   }
                 >
                   Close inquiry
@@ -320,7 +323,7 @@ export default function LeadPanel({
                         })
                       );
                       if (!result) throw new Error("Do-not-contact was not saved.");
-                    }).catch(() => undefined)
+                    })
                   }
                 >
                   Do not contact
@@ -366,7 +369,7 @@ export default function LeadPanel({
                       })
                     );
                     if (!result) throw new Error("The suppression was not cleared.");
-                  }).catch(() => undefined)
+                  })
                 }
               >
                 Reopen inquiry
@@ -395,7 +398,7 @@ export default function LeadPanel({
                   })
                 );
                 if (!result) throw new Error("The inquiry was not reopened.");
-              }).catch(() => undefined)
+              })
             }
           >
             Reopen inquiry

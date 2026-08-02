@@ -10,6 +10,7 @@ import {
 } from "../lib/api";
 import { bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDateTime, money } from "../lib/format";
+import { useAction } from "../lib/useAsync";
 import { parseQuoteSnapshot } from "../../../web/amplify/functions/shared/quoteSnapshot";
 import DocButton from "./DocButton";
 import { Badge, Button, ErrorNote } from "../ui/kit";
@@ -78,7 +79,6 @@ export default function QuoteHistory({
 }) {
   const [quotes, setQuotes] = useState<BookingRequest[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const loadQuotes = useCallback(async () => {
     try {
@@ -106,6 +106,21 @@ export default function QuoteHistory({
 
   /** Remove one quote. Booked/processing quotes are refused server-side —
    *  money is attached to those. */
+  const removeQuote = useAction(async (q: BookingRequest) => {
+    unwrap(
+      await setLeadDisposition({
+        customerId: customer.id,
+        disposition: "DELETE_QUOTE",
+        bookingRequestId: q.id,
+        idempotencyKey: clientActionId(`quote-delete:${q.id}`),
+      })
+    );
+    await loadQuotes();
+    onChanged?.();
+  }, "Could not remove that quote");
+
+  // `busy` stays: the gate allows one delete at a time, but the row being
+  // deleted still needs its own spinner (and it doubles as the copy flag).
   const deleteQuote = async (q: BookingRequest) => {
     if (
       !window.confirm(
@@ -114,22 +129,8 @@ export default function QuoteHistory({
     )
       return;
     setBusy(`del:${q.id}`);
-    setError(null);
     try {
-      unwrap(
-        await setLeadDisposition({
-          customerId: customer.id,
-          disposition: "DELETE_QUOTE",
-          bookingRequestId: q.id,
-          idempotencyKey: clientActionId(`quote-delete:${q.id}`),
-        })
-      );
-      await loadQuotes();
-      onChanged?.();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Could not remove that quote"
-      );
+      await removeQuote.run(q);
     } finally {
       setBusy(null);
     }
@@ -147,7 +148,7 @@ export default function QuoteHistory({
 
   return (
     <div className="card">
-      <ErrorNote error={error} />
+      <ErrorNote error={removeQuote.error} />
   <div className="lead-quote">
     <strong className="small">
       {rows.length === 1 ? "Quote" : `Quotes (${rows.length})`}

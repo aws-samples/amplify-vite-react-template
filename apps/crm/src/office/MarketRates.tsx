@@ -31,6 +31,7 @@ import {
 } from "../../../web/amplify/functions/shared/rateServing";
 import { fmtDate, money, todayUtc } from "../lib/format";
 import { useRoles } from "../lib/auth";
+import { useAction } from "../lib/useAsync";
 import {
   Badge,
   Button,
@@ -109,7 +110,6 @@ function EnginePanel({
   onChanged: () => Promise<void>;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const now = Date.now();
 
   // Rollback-aware: a combo the restored version doesn't name is NOT
@@ -156,25 +156,28 @@ function EnginePanel({
   const demand = control?.demandAttempts ?? 0;
   const spend = (attempts * COST_PER_RESEARCH_USD).toFixed(2);
 
+  const retryAct = useAction(async (c: RateCoverage) => {
+    // Re-arm the combo: the next refresh run researches it again with a
+    // clean attempt count. The parked state (and its owned work item) is
+    // the office's to clear — this is that one safe action.
+    unwrap(
+      await api().models.RateCoverage.update({
+        id: c.id,
+        exhaustedAt: null,
+        nextEligibleAt: null,
+        failCount: 0,
+        researchRequestedAt: new Date().toISOString(),
+      })
+    );
+    await onChanged();
+  }, "Could not retry research");
+
+  // `busyId` stays for the parked row's own spinner; useAction.busy is a
+  // single flag and could not say which combo is being re-armed.
   const retry = async (c: RateCoverage) => {
     setBusyId(c.id);
-    setError(null);
     try {
-      // Re-arm the combo: the next refresh run researches it again with a
-      // clean attempt count. The parked state (and its owned work item) is
-      // the office's to clear — this is that one safe action.
-      unwrap(
-        await api().models.RateCoverage.update({
-          id: c.id,
-          exhaustedAt: null,
-          nextEligibleAt: null,
-          failCount: 0,
-          researchRequestedAt: new Date().toISOString(),
-        })
-      );
-      await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not retry research");
+      await retryAct.run(c);
     } finally {
       setBusyId(null);
     }
@@ -201,7 +204,7 @@ function EnginePanel({
         Queue: {waiting.length} requested · {backingOff.length} backing off
         after a failure. Towns and aging rates do not create research work.
       </p>
-      <ErrorNote error={error} />
+      <ErrorNote error={retryAct.error} />
       {exhausted.map((c) => (
         <ListRow
           key={c.id}
@@ -494,13 +497,87 @@ function RateForm({
   const [editNote, setEditNote] = useState("");
   const [researchReason, setResearchReason] = useState("");
   const [researchNote, setResearchNote] = useState("");
-  const [busy, setBusy] = useState<null | "save" | "unpin" | "research">(null);
+  // Kept for the field-validation messages below, which are raised before any
+  // mutation runs; each mutation carries its own error.
   const [error, setError] = useState<string | null>(null);
 
   // HOA sheets have no one-time card; everything else always has one.
   const isHoa = sheet.hoaPerUnitMonthly != null || rate.service === "HOA";
   const hasExtraNest = sheet.extraNestCents != null || rate.service === "WASP_NEST";
   const hasPlans = sheet.plans != null;
+
+  // An office edit CREATES a new pinned version, so a double-click published
+  // two of them for the same change and retired the AI row twice.
+  const saveAct = useAction(
+    async (
+      oneTimeCents: number | null,
+      extraNestCents: number | null,
+      planEdits: Partial<Record<PlanCadence, PlanRate>>,
+      hoaEdits: HoaPerUnitRates | undefined
+    ) => {
+      setError(null);
+      const merged = mergeSheetEdits(rate, {
+        oneTimeCents: oneTimeCents ?? undefined,
+        extraNestCents: hasExtraNest ? extraNestCents : undefined,
+        plans: hasPlans ? planEdits : undefined,
+        hoaPerUnitMonthly: hoaEdits,
+      });
+      if (active) {
+        // GL-16: an office edit is a NEW pinned VERSION with a controlled
+        // reason — it retires (never edits) the AI row, so the exact history
+        // behind every price stays intact and the change shares the same
+        // durable current-versus-prior record as AI research.
+        const reasonLabel =
+          EDIT_REASONS.find((r) => r.code === editReason)?.label ?? editReason;
+        unwrap(
+          await api().models.MarketRate.create({
+            rateKey: rate.rateKey,
+            service: rate.service,
+            areaKey: rate.areaKey,
+            priceCents: merged.priceCents,
+            ratesJson: merged.ratesJson,
+            basis: `Office edit — ${reasonLabel}${editNote.trim() ? `: ${editNote.trim()}` : ""}`,
+            active: true,
+            pinned: true,
+            prevPriceCents: rate.priceCents,
+            prevResearchedAt: rate.researchedAt ?? undefined,
+            editedBy: roles.email ?? undefined,
+            editReason,
+          } as Parameters<ReturnType<typeof api>["models"]["MarketRate"]["create"]>[0])
+        );
+        unwrap(
+          await updateMarketRate({ id: rate.id, active: false, pinned: false })
+        );
+      } else {
+        // Retiring ends this row's service — a state change, not a version.
+        unwrap(
+          await updateMarketRate({ id: rate.id, active: false, pinned: false })
+        );
+      }
+      await onDone();
+    },
+    "Could not save"
+  );
+
+  const unpinAct = useAction(async () => {
+    setError(null);
+    unwrap(await updateMarketRate({ id: rate.id, pinned: false }));
+    await onDone();
+  }, "Could not un-pin");
+
+  // Each request spends one targeted AI research attempt against the daily
+  // budget, so the second click must not buy a second one.
+  const researchAct = useAction(async () => {
+    setError(null);
+    opResult(
+      await api().mutations.requestPricingResearch({
+        rateKey: rate.rateKey,
+        reasonCode: researchReason,
+        note: researchNote.trim() || undefined,
+      })
+    );
+    await onDone();
+  }, "Could not request research");
 
   const save = async () => {
     let oneTimeCents: number | null = null;
@@ -562,64 +639,7 @@ function RateForm({
       setError("Explain the change in the note");
       return;
     }
-    setBusy("save");
-    setError(null);
-    try {
-      const merged = mergeSheetEdits(rate, {
-        oneTimeCents: oneTimeCents ?? undefined,
-        extraNestCents: hasExtraNest ? extraNestCents : undefined,
-        plans: hasPlans ? planEdits : undefined,
-        hoaPerUnitMonthly: hoaEdits,
-      });
-      if (active) {
-        // GL-16: an office edit is a NEW pinned VERSION with a controlled
-        // reason — it retires (never edits) the AI row, so the exact history
-        // behind every price stays intact and the change shares the same
-        // durable current-versus-prior record as AI research.
-        const reasonLabel =
-          EDIT_REASONS.find((r) => r.code === editReason)?.label ?? editReason;
-        unwrap(
-          await api().models.MarketRate.create({
-            rateKey: rate.rateKey,
-            service: rate.service,
-            areaKey: rate.areaKey,
-            priceCents: merged.priceCents,
-            ratesJson: merged.ratesJson,
-            basis: `Office edit — ${reasonLabel}${editNote.trim() ? `: ${editNote.trim()}` : ""}`,
-            active: true,
-            pinned: true,
-            prevPriceCents: rate.priceCents,
-            prevResearchedAt: rate.researchedAt ?? undefined,
-            editedBy: roles.email ?? undefined,
-            editReason,
-          } as Parameters<ReturnType<typeof api>["models"]["MarketRate"]["create"]>[0])
-        );
-        unwrap(
-          await updateMarketRate({ id: rate.id, active: false, pinned: false })
-        );
-      } else {
-        // Retiring ends this row's service — a state change, not a version.
-        unwrap(
-          await updateMarketRate({ id: rate.id, active: false, pinned: false })
-        );
-      }
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save");
-      setBusy(null);
-    }
-  };
-
-  const unpin = async () => {
-    setBusy("unpin");
-    setError(null);
-    try {
-      unwrap(await updateMarketRate({ id: rate.id, pinned: false }));
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not un-pin");
-      setBusy(null);
-    }
+    await saveAct.run(oneTimeCents, extraNestCents, planEdits, hoaEdits);
   };
 
   const requestResearch = async () => {
@@ -631,21 +651,7 @@ function RateForm({
       setError("Explain why this rate needs new research");
       return;
     }
-    setBusy("research");
-    setError(null);
-    try {
-      opResult(
-        await api().mutations.requestPricingResearch({
-          rateKey: rate.rateKey,
-          reasonCode: researchReason,
-          note: researchNote.trim() || undefined,
-        })
-      );
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not request research");
-      setBusy(null);
-    }
+    await researchAct.run();
   };
 
   return (
@@ -813,8 +819,10 @@ function RateForm({
           onChange={(v) => setActive(v === "yes")}
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button block loading={busy === "save"} onClick={() => void save()}>
+      <ErrorNote
+        error={error ?? saveAct.error ?? unpinAct.error ?? researchAct.error}
+      />
+      <Button block loading={saveAct.busy} onClick={() => void save()}>
         {active ? "Save & pin this rate" : "Save & retire this rate"}
       </Button>
       <p className="muted small">
@@ -826,8 +834,8 @@ function RateForm({
         <Button
           block
           variant="ghost"
-          loading={busy === "unpin"}
-          onClick={() => void unpin()}
+          loading={unpinAct.busy}
+          onClick={() => void unpinAct.run()}
         >
           Unpin this office rate
         </Button>
@@ -862,7 +870,7 @@ function RateForm({
           <Button
             block
             variant="subtle"
-            loading={busy === "research"}
+            loading={researchAct.busy}
             disabled={!researchReason || (researchReason === "OTHER" && !researchNote.trim())}
             onClick={() => void requestResearch()}
           >
@@ -909,8 +917,33 @@ function RollbackPanel({
   const [versionId, setVersionId] = useState("");
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState<null | "apply" | "clear">(null);
+  // Kept for the field-validation messages below, which are raised before the
+  // rollback runs; each mutation carries its own error.
   const [error, setError] = useState<string | null>(null);
+
+  // Every apply repoints the whole catalog, so a double-click used to send a
+  // second rollback while the first was still landing.
+  const applyAct = useAction(async () => {
+    setError(null);
+    unwrap(
+      await api().mutations.rollbackPricing({
+        versionId,
+        reasonCode: reason,
+        note: note.trim() || undefined,
+      })
+    );
+    setOpen(false);
+    setVersionId("");
+    setReason("");
+    setNote("");
+    await onChanged();
+  }, "Rollback failed — nothing changed");
+
+  const clearAct = useAction(async () => {
+    setError(null);
+    unwrap(await api().mutations.clearPricingRollback({}));
+    await onChanged();
+  }, "Could not clear the rollback");
 
   const activeVersionId = (
     rollback as { rollbackVersionId?: string | null } | null
@@ -931,26 +964,7 @@ function RollbackPanel({
       setError("Explain the rollback in the note");
       return;
     }
-    setBusy("apply");
-    setError(null);
-    try {
-      unwrap(
-        await api().mutations.rollbackPricing({
-          versionId,
-          reasonCode: reason,
-          note: note.trim() || undefined,
-        })
-      );
-      setOpen(false);
-      setVersionId("");
-      setReason("");
-      setNote("");
-      await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Rollback failed — nothing changed");
-    } finally {
-      setBusy(null);
-    }
+    await applyAct.run();
   };
 
   const clear = async () => {
@@ -961,16 +975,7 @@ function RollbackPanel({
     ) {
       return;
     }
-    setBusy("clear");
-    setError(null);
-    try {
-      unwrap(await api().mutations.clearPricingRollback({}));
-      await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not clear the rollback");
-    } finally {
-      setBusy(null);
-    }
+    await clearAct.run();
   };
 
   return (
@@ -994,7 +999,7 @@ function RollbackPanel({
           {roles.owner ? (
             <Button
               small
-              loading={busy === "clear"}
+              loading={clearAct.busy}
               onClick={() => void clear()}
             >
               Clear rollback — serve newest rates again
@@ -1040,7 +1045,7 @@ function RollbackPanel({
             <Button small variant="ghost" onClick={() => setOpen(false)}>
               Never mind
             </Button>
-            <Button small loading={busy === "apply"} onClick={() => void apply()}>
+            <Button small loading={applyAct.busy} onClick={() => void apply()}>
               Roll the catalog back
             </Button>
           </div>
@@ -1057,7 +1062,7 @@ function RollbackPanel({
           </Button>
         </>
       )}
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? applyAct.error ?? clearAct.error} />
     </Card>
   );
 }

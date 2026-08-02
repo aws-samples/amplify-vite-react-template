@@ -7,6 +7,7 @@ import {
   type PlanCancellationPreview,
 } from "../lib/api";
 import { fmtDate } from "../lib/format";
+import { useAction } from "../lib/useAsync";
 import { Button, ErrorNote, Field, Sheet, Spinner } from "../ui/kit";
 
 /**
@@ -35,10 +36,28 @@ export default function CancelPlanSheet({
   const [preview, setPreview] = useState<PlanCancellationPreview | null>(null);
   const [reason, setReason] = useState("");
   const [saveOfferDismissed, setSaveOfferDismissed] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<CustomerCancelOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // A confirmed cancel takes the final charge and the refund with it, so a
+  // held Enter or a double-click must not send a second one; the gate refuses
+  // it where the `disabled` button did not.
+  const cancel = useAction(async () => {
+    const res = opResult<CustomerCancelOutcome>(
+      await cancelPlanByCustomer({
+        servicePlanId,
+        reason: reason.trim() || undefined,
+      })
+    );
+    if (!res) throw new Error("Cancellation could not be completed");
+    setOutcome(res);
+    // A real cancel (or already-canceled) should refresh the plan list behind
+    // the sheet. A PENDING result also changed server state (pending flag), so
+    // refresh either way; the sheet stays open showing the outcome.
+    onCanceled();
+  }, "Cancellation could not be completed");
+
+  const { clearError } = cancel;
   useEffect(() => {
     if (!open) return;
     setPreview(null);
@@ -46,6 +65,7 @@ export default function CancelPlanSheet({
     setSaveOfferDismissed(false);
     setOutcome(null);
     setError(null);
+    clearError();
     previewPlanCancellation({ servicePlanId })
       .then((res) => {
         const data = opResult<PlanCancellationPreview>(res);
@@ -55,36 +75,11 @@ export default function CancelPlanSheet({
       .catch((err) =>
         setError(err instanceof Error ? err.message : "Could not load plan")
       );
-  }, [open, servicePlanId]);
-
-  const confirm = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<CustomerCancelOutcome>(
-        await cancelPlanByCustomer({
-          servicePlanId,
-          reason: reason.trim() || undefined,
-        })
-      );
-      if (!res) throw new Error("Cancellation could not be completed");
-      setOutcome(res);
-      // A real cancel (or already-canceled) should refresh the plan list behind
-      // the sheet. A PENDING result also changed server state (pending flag), so
-      // refresh either way; the sheet stays open showing the outcome.
-      onCanceled();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Cancellation could not be completed"
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
+  }, [open, servicePlanId, clearError]);
 
   return (
     <Sheet open={open} onClose={onClose} title="Cancel plan">
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? cancel.error} />
 
       {outcome ? (
         <div className="form-grid">
@@ -168,13 +163,13 @@ export default function CancelPlanSheet({
           <Button
             block
             variant="danger"
-            loading={busy}
-            disabled={busy}
-            onClick={() => void confirm()}
+            loading={cancel.busy}
+            disabled={cancel.busy}
+            onClick={() => void cancel.run()}
           >
             Cancel my plan
           </Button>
-          <Button block variant="subtle" disabled={busy} onClick={onClose}>
+          <Button block variant="subtle" disabled={cancel.busy} onClick={onClose}>
             Keep my plan
           </Button>
         </div>

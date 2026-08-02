@@ -33,7 +33,7 @@ import {
 } from "../lib/api";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
-import { useAction } from "../lib/useAsync";
+import { useAction, useKeyedAction } from "../lib/useAsync";
 import { daysPastDue } from "../lib/aging";
 import { isManualSettled } from "../lib/deposits";
 import { dunningStateLabel, isOverdue } from "../lib/recovery";
@@ -180,7 +180,6 @@ export default function CustomerDetail() {
     | "portal"
     | "group"
   >(null);
-  const [busyAction, setBusyAction] = useState<string | null>(null);
   // GL-09 — the lifecycle transition ledger (deactivate/reactivate history) and
   // the reason-picker sheets that gate each transition on a controlled reason.
   const [lifecycle, setLifecycle] = useState<CustomerLifecycleEvent[]>([]);
@@ -268,6 +267,12 @@ export default function CustomerDetail() {
     void load();
   }, [load]);
 
+  // Every button-level write on this page goes through `run` below, so the
+  // gate lives here once — keyed by button, because these ~17 writes are
+  // independent of each other and a plain single-flight would let one in
+  // flight silently swallow a press on an unrelated button.
+  const perform = useKeyedAction("Action failed");
+
   // GL-09: the employee confirmation renders the SERVER inventory, computed
   // fresh each time the deactivate sheet opens.
   useEffect(() => {
@@ -352,21 +357,19 @@ export default function CustomerDetail() {
     fn: () => Promise<unknown>,
     successMsg?: string
   ) => {
-    setBusyAction(name);
     setError(null);
-    setNotice(null);
-    try {
+    await perform.run(name, async () => {
+      setNotice(null);
       await fn();
       await load();
       if (successMsg) {
         setNotice(successMsg);
-        window.setTimeout(() => setNotice((n) => (n === successMsg ? null : n)), 6000);
+        window.setTimeout(
+          () => setNotice((n) => (n === successMsg ? null : n)),
+          6000
+        );
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed");
-    } finally {
-      setBusyAction(null);
-    }
+    });
   };
 
   const address = [
@@ -384,7 +387,7 @@ export default function CustomerDetail() {
         <Button
           small
           variant="danger"
-          loading={busyAction === "deactivate"}
+          loading={perform.busyKey === "deactivate"}
           onClick={() => {
             setReasonCode(DEACTIVATION_REASONS[0]);
             setReasonNote("");
@@ -397,7 +400,7 @@ export default function CustomerDetail() {
         <Button
           small
           variant="subtle"
-          loading={busyAction === "reactivate"}
+          loading={perform.busyKey === "reactivate"}
           onClick={() => {
             setReasonCode(REACTIVATION_REASONS[0]);
             setReasonNote("");
@@ -434,7 +437,7 @@ export default function CustomerDetail() {
         ) : undefined
       }
     >
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? perform.error} />
       <SuccessNote message={notice} />
 
       <Card className="customer-summary-card">
@@ -585,7 +588,7 @@ export default function CustomerDetail() {
             <Button
               small
               variant="ghost"
-              loading={busyAction === "payreq"}
+              loading={perform.busyKey === "payreq"}
               disabled={!customer.email}
               onClick={() =>
                 void run(
@@ -654,7 +657,7 @@ export default function CustomerDetail() {
                     small
                     variant="subtle"
                     disabled={!customer.email}
-                    loading={busyAction === "invite"}
+                    loading={perform.busyKey === "invite"}
                     onClick={() =>
                       void run(
                         "invite",
@@ -689,7 +692,7 @@ export default function CustomerDetail() {
                 <Button
                   small
                   variant="ghost"
-                  loading={busyAction === "remind"}
+                  loading={perform.busyKey === "remind"}
                   onClick={() =>
                     void run(
                       "remind",
@@ -742,7 +745,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="danger"
-                          loading={busyAction === `cancel-${p.id}`}
+                          loading={perform.busyKey === `cancel-${p.id}`}
                           onClick={() => {
                             if (!window.confirm("Cancel this plan's billing?")) return;
                             void run(`cancel-${p.id}`, async () =>
@@ -760,7 +763,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="subtle"
-                          loading={busyAction === `start-${p.id}`}
+                          loading={perform.busyKey === `start-${p.id}`}
                           onClick={() => {
                             // Begins charging a card every month, indefinitely.
                             // Completion starts billing on its own now, so
@@ -791,7 +794,7 @@ export default function CustomerDetail() {
                       <Button
                         small
                         variant="ghost"
-                        loading={busyAction === `pause-${p.id}`}
+                        loading={perform.busyKey === `pause-${p.id}`}
                         onClick={() => {
                           if (!window.confirm("Deactivate this plan? Billing pauses and no new visits are scheduled.")) return;
                           void run(`pause-${p.id}`, async () =>
@@ -811,7 +814,7 @@ export default function CustomerDetail() {
                     <Button
                       small
                       variant="subtle"
-                      loading={busyAction === `resume-${p.id}`}
+                      loading={perform.busyKey === `resume-${p.id}`}
                       onClick={() =>
                         void run(`resume-${p.id}`, async () =>
                           unwrap(
@@ -952,7 +955,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `complete-${j.id}`}
+                          loading={perform.busyKey === `complete-${j.id}`}
                           onClick={() => {
                             // Completing a recurring job may start the plan's
                             // monthly billing server-side. When it will, the
@@ -984,7 +987,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="subtle"
-                          loading={busyAction === `charge-${j.id}`}
+                          loading={perform.busyKey === `charge-${j.id}`}
                           onClick={() => {
                             // The amount is the job's own price, so there is no
                             // typo to catch here — but it is still a live card
@@ -1374,7 +1377,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `settle-${inv.id}`}
+                          loading={perform.busyKey === `settle-${inv.id}`}
                           onClick={() => {
                             if (
                               !window.confirm(
@@ -1416,7 +1419,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `link-${inv.id}`}
+                          loading={perform.busyKey === `link-${inv.id}`}
                           onClick={() =>
                             void run(
                               `link-${inv.id}`,
@@ -1447,7 +1450,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `void-${inv.id}`}
+                          loading={perform.busyKey === `void-${inv.id}`}
                           onClick={() => {
                             const reason = window.prompt(
                               `Void this ${money(inv.amountCents)} invoice? It stays on the record as voided, with your name and this reason.\n\nWhy is it being voided?`
@@ -1495,7 +1498,7 @@ export default function CustomerDetail() {
           </p>
           <Button
             block
-            loading={busyAction === "resume-lifecycle"}
+            loading={perform.busyKey === "resume-lifecycle"}
             onClick={() => {
               const cmd = openLifecycleCommand;
               void run("resume-lifecycle", async () => {
@@ -1629,7 +1632,7 @@ export default function CustomerDetail() {
           <Button
             block
             variant="danger"
-            loading={busyAction === "deactivate"}
+            loading={perform.busyKey === "deactivate"}
             disabled={reasonCode === "OTHER" && !reasonNote.trim()}
             onClick={() => {
               if (reasonCode === "OTHER" && !reasonNote.trim()) return;
@@ -1727,7 +1730,7 @@ export default function CustomerDetail() {
           <Button
             block
             variant="subtle"
-            loading={busyAction === "reactivate"}
+            loading={perform.busyKey === "reactivate"}
             disabled={reasonCode === "OTHER" && !reasonNote.trim()}
             onClick={() => {
               if (reasonCode === "OTHER" && !reasonNote.trim()) return;
@@ -2525,9 +2528,26 @@ function RescheduleForm({
     VISIT_RESCHEDULE_REASONS[0]
   );
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const dateChanged = date !== (job.scheduledDate ?? "");
+
+  const save = useAction(async () => {
+    const data = opResult<VisitRescheduleOutcome>(
+      await rescheduleVisit({
+        jobId: job.id,
+        scheduledDate: date || undefined,
+        reasonCode,
+        note: note.trim() || undefined,
+      })
+    );
+    // A rescheduled visit whose customer notice failed is owned, not a
+    // clean success — tell the office so they follow up.
+    if (data && data.outcome === "PARTIAL") {
+      throw new Error(
+        "Rescheduled, but we couldn't email the customer — an operations task was opened to reach them."
+      );
+    }
+    await onDone();
+  }, "Could not reschedule");
 
   return (
     <div className="form-grid">
@@ -2571,36 +2591,12 @@ function RescheduleForm({
       <Field label="Note" hint="Required when the reason is 'Other'.">
         <input value={note} onChange={(e) => setNote(e.target.value)} />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={save.error} />
       <Button
         block
-        loading={busy}
+        loading={save.busy}
         disabled={reasonCode === "OTHER" && !note.trim()}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          rescheduleVisit({
-            jobId: job.id,
-            scheduledDate: date || undefined,
-            reasonCode,
-            note: note.trim() || undefined,
-          })
-            .then((res) => {
-              const data = opResult<VisitRescheduleOutcome>(res);
-              // A rescheduled visit whose customer notice failed is owned, not a
-              // clean success — tell the office so they follow up.
-              if (data && data.outcome === "PARTIAL") {
-                throw new Error(
-                  "Rescheduled, but we couldn't email the customer — an operations task was opened to reach them."
-                );
-              }
-              return onDone();
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not reschedule");
-              setBusy(false);
-            });
-        }}
+        onClick={() => void save.run()}
       >
         {date ? "Save schedule" : "Mark unscheduled"}
       </Button>
@@ -2623,8 +2619,28 @@ function AmendReportForm({
   type Row = { label: string; from: string; to: string };
   const [reason, setReason] = useState("");
   const [rows, setRows] = useState<Row[]>([{ label: "", from: "", to: "" }]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  // An amendment is append-only: a second submit issues a SECOND correction
+  // and emails the customer another copy.
+  const issue = useAction(async () => {
+    const changes = rows
+      .filter((r) => r.label.trim() && r.to.trim())
+      .map((r) => ({
+        label: r.label.trim(),
+        from: r.from.trim(),
+        to: r.to.trim(),
+      }));
+    const data = opResult<{ deliveryStatus?: string | null }>(
+      await api().mutations.amendServiceReport({
+        reportId: report.id,
+        reason: reason.trim(),
+        changes: JSON.stringify(changes),
+      })
+    );
+    // The notice words come from the PERSISTED delivery state — an
+    // issued-but-undelivered amendment is never called "sent".
+    await onDone(data?.deliveryStatus ?? null);
+  }, "Could not issue the amendment");
 
   const setRow = (i: number, k: keyof Row, v: string) =>
     setRows((list) => list.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
@@ -2685,38 +2701,12 @@ function AmendReportForm({
       >
         + Add another correction
       </Button>
-      <ErrorNote error={error} />
+      <ErrorNote error={issue.error} />
       <Button
         block
-        loading={busy}
+        loading={issue.busy}
         disabled={!ready}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          const changes = rows
-            .filter((r) => r.label.trim() && r.to.trim())
-            .map((r) => ({
-              label: r.label.trim(),
-              from: r.from.trim(),
-              to: r.to.trim(),
-            }));
-          api()
-            .mutations.amendServiceReport({
-              reportId: report.id,
-              reason: reason.trim(),
-              changes: JSON.stringify(changes),
-            })
-            .then((res) => {
-              const data = opResult<{ deliveryStatus?: string | null }>(res);
-              // The notice words come from the PERSISTED delivery state — an
-              // issued-but-undelivered amendment is never called "sent".
-              return onDone(data?.deliveryStatus ?? null);
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not issue the amendment");
-              setBusy(false);
-            });
-        }}
+        onClick={() => void issue.run()}
       >
         Issue amendment &amp; send
       </Button>
@@ -2740,23 +2730,22 @@ function ReportDeliveryRecovery({
   const [mode, setMode] = useState<null | "alternate">(null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<null | "resend" | "alternate">(null);
-  const [error, setError] = useState<string | null>(null);
 
+  const record = useAction(async (action: "RESEND" | "ALTERNATE") => {
+    const res = await api().mutations.recordReportDelivery({
+      reportId,
+      action,
+      note: note.trim() || undefined,
+    });
+    if (res.errors?.length) throw new Error(res.errors[0].message);
+    await onDone();
+  }, "Could not record delivery");
+
+  // A re-send puts another copy of the report in the customer's inbox, so the
+  // second press has to be refused. `busy` stays to spin the pressed button.
   const run = async (action: "RESEND" | "ALTERNATE") => {
     setBusy(action === "RESEND" ? "resend" : "alternate");
-    setError(null);
-    try {
-      const res = await api().mutations.recordReportDelivery({
-        reportId,
-        action,
-        note: note.trim() || undefined,
-      });
-      if (res.errors?.length) throw new Error(res.errors[0].message);
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not record delivery");
-      setBusy(null);
-    }
+    if (!(await record.run(action))) setBusy(null);
   };
 
   return (
@@ -2788,7 +2777,7 @@ function ReportDeliveryRecovery({
           </Button>
         </>
       ) : null}
-      <ErrorNote error={error} />
+      <ErrorNote error={record.error} />
     </div>
   );
 }
@@ -2891,14 +2880,34 @@ function JobForm({
   const [scheduledDate, setScheduledDate] = useState("");
   const [planId, setPlanId] = useState("");
   const [packet, setPacket] = useState<PacketValues>(emptyPacket);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const activePlans = plans.filter((p) => p.status === "ACTIVE");
   const notInCatalog = serviceCode === "NOT_IN_CATALOG";
   const serviceType = notInCatalog
     ? otherText
     : (Object.values(SERVICE_CATALOG).find((e) => e.id === serviceCode)?.label ??
       serviceCode);
+
+  // A second press creates a SECOND job — a duplicate visit on the board that
+  // someone then has to find and cancel.
+  const create = useAction(async () => {
+    if (!serviceType.trim()) {
+      throw new Error(
+        notInCatalog ? "Describe what the customer asked for" : "Pick a service"
+      );
+    }
+    const cents = price ? Math.round(parseFloat(price) * 100) : null;
+    if (!planId && price && (!Number.isFinite(cents!) || cents! <= 0)) {
+      throw new Error("Price doesn't look valid");
+    }
+    await onSubmit({
+      serviceType: serviceType.trim(),
+      serviceCode,
+      priceCents: planId ? null : cents,
+      scheduledDate,
+      servicePlanId: planId,
+      packet,
+    });
+  }, "Could not create job");
 
   return (
     <div className="form-grid">
@@ -2949,38 +2958,8 @@ function JobForm({
         <DateField value={scheduledDate} onChange={setScheduledDate} allowClear />
       </Field>
       <PacketFields value={packet} onChange={setPacket} />
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          if (!serviceType.trim()) {
-            setError(
-              notInCatalog
-                ? "Describe what the customer asked for"
-                : "Pick a service"
-            );
-            return;
-          }
-          const cents = price ? Math.round(parseFloat(price) * 100) : null;
-          if (!planId && price && (!Number.isFinite(cents!) || cents! <= 0)) {
-            setError("Price doesn't look valid");
-            return;
-          }
-          setBusy(true);
-          onSubmit({
-            serviceType: serviceType.trim(),
-            serviceCode,
-            priceCents: planId ? null : cents,
-            scheduledDate,
-            servicePlanId: planId,
-            packet,
-          }).catch((err) => {
-            setError(err.message ?? "Could not create job");
-            setBusy(false);
-          });
-        }}
-      >
+      <ErrorNote error={create.error} />
+      <Button block loading={create.busy} onClick={() => void create.run()}>
         {notInCatalog ? "Send to catalog decision" : "Create job"}
       </Button>
     </div>
@@ -3014,8 +2993,24 @@ function JobPacketForm({
   // manager reason — the server refuses without it.
   const [managerReason, setManagerReason] = useState("");
   const started = Boolean(job.startedAt);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const save = useAction(async () => {
+    opResult(
+      await api().mutations.updateJobPacket({
+        jobId: job.id,
+        accessInstructions: packet.accessInstructions.trim() || undefined,
+        hazardNotes: packet.hazardNotes.trim() || undefined,
+        prepInstructions: packet.prepInstructions.trim() || undefined,
+        prepConfirmed: packet.prepInstructions.trim()
+          ? packet.prepConfirmed
+          : undefined,
+        paymentExpectation: packet.paymentExpectation || undefined,
+        propertyClass: propertyClass || undefined,
+        managerReason: managerReason.trim() || undefined,
+      })
+    );
+    await onDone();
+  }, "Could not save the packet");
 
   return (
     <div className="form-grid">
@@ -3046,37 +3041,8 @@ function JobPacketForm({
           />
         </Field>
       ) : null}
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          void (async () => {
-            try {
-              opResult(
-                await api().mutations.updateJobPacket({
-                  jobId: job.id,
-                  accessInstructions: packet.accessInstructions.trim() || undefined,
-                  hazardNotes: packet.hazardNotes.trim() || undefined,
-                  prepInstructions: packet.prepInstructions.trim() || undefined,
-                  prepConfirmed: packet.prepInstructions.trim()
-                    ? packet.prepConfirmed
-                    : undefined,
-                  paymentExpectation: packet.paymentExpectation || undefined,
-                  propertyClass: propertyClass || undefined,
-                  managerReason: managerReason.trim() || undefined,
-                })
-              );
-              await onDone();
-            } catch (err) {
-              setError(err instanceof Error ? err.message : "Could not save the packet");
-              setBusy(false);
-            }
-          })();
-        }}
-      >
+      <ErrorNote error={save.error} />
+      <Button block loading={save.busy} onClick={() => void save.run()}>
         Save packet
       </Button>
     </div>
@@ -3094,8 +3060,12 @@ function GroupPicker({
 }) {
   const [value, setValue] = useState(currentGroupId ?? "");
   const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const save = useAction(
+    async () => onPick(value || null, reason.trim()),
+    "Could not update group"
+  );
+
   return (
     <div className="form-grid">
       <Field
@@ -3125,18 +3095,8 @@ function GroupPicker({
           placeholder="e.g. new property manager for Maple Ridge"
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          setBusy(true);
-          onPick(value || null, reason.trim()).catch((err) => {
-            setError(err.message ?? "Could not update group");
-            setBusy(false);
-          });
-        }}
-      >
+      <ErrorNote error={save.error} />
+      <Button block loading={save.busy} onClick={() => void save.run()}>
         Save group
       </Button>
     </div>
@@ -3151,7 +3111,6 @@ function GroupPicker({
 function PortalRequestsSection({ customerId }: { customerId: string }) {
   const [rows, setRows] = useState<PortalRequest[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const loadRows = useCallback(async () => {
     try {
@@ -3186,22 +3145,25 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
     void loadRows();
   }, [loadRows]);
 
+  // Resolving emails the customer the answer, so a double-press must not send
+  // it twice. `busyId` stays for the pressed row's spinner.
+  const resolve = useAction(async (id: string, note: string) => {
+    opResult(
+      await api().mutations.resolvePortalRequest({ portalRequestId: id, note })
+    );
+    await loadRows();
+  }, "Could not resolve");
+
   if (!rows || rows.length === 0) return null;
 
-  const resolve = async (r: PortalRequest) => {
+  const resolveRequest = async (r: PortalRequest) => {
     const note = window.prompt(
       "The answer the customer will see in their portal and by email:"
     );
     if (!note?.trim()) return;
     setBusyId(r.id);
-    setError(null);
     try {
-      opResult(
-        await api().mutations.resolvePortalRequest({ portalRequestId: r.id, note: note.trim() })
-      );
-      await loadRows();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not resolve");
+      await resolve.run(r.id, note.trim());
     } finally {
       setBusyId(null);
     }
@@ -3209,7 +3171,7 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
 
   return (
     <Card title="Portal requests">
-      <ErrorNote error={error} />
+      <ErrorNote error={resolve.error} />
       {rows
         .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
         .map((r) => (
@@ -3239,7 +3201,7 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
                   <Button
                     small
                     loading={busyId === r.id}
-                    onClick={() => void resolve(r)}
+                    onClick={() => void resolveRequest(r)}
                   >
                     Resolve with an answer
                   </Button>
@@ -3279,8 +3241,6 @@ function CallbacksSection({
   const [technicianId, setTechnicianId] = useState("");
   const [techs, setTechs] = useState<{ id: string; displayName?: string | null }[]>([]);
   const [laterOk, setLaterOk] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const loadRows = useCallback(async () => {
     try {
@@ -3334,33 +3294,27 @@ function CallbacksSection({
     })();
   }, [scheduling]);
 
-  if (!rows || rows.length === 0) return null;
-
-  const schedule = async () => {
+  // Scheduling reserves the technician's minutes; a second press would book a
+  // second callback visit against the same request.
+  const schedule = useAction(async () => {
     if (!scheduling || !date || !technicianId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      opResult(
-        await api().mutations.scheduleCallback({
-          callbackRequestId: scheduling.id,
-          scheduledDate: date,
-          technicianId,
-          customerRequestedLater: laterOk || undefined,
-        })
-      );
-      setScheduling(null);
-      setDate("");
-      setTechnicianId("");
-      setLaterOk(false);
-      await loadRows();
-      await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not schedule");
-    } finally {
-      setBusy(false);
-    }
-  };
+    opResult(
+      await api().mutations.scheduleCallback({
+        callbackRequestId: scheduling.id,
+        scheduledDate: date,
+        technicianId,
+        customerRequestedLater: laterOk || undefined,
+      })
+    );
+    setScheduling(null);
+    setDate("");
+    setTechnicianId("");
+    setLaterOk(false);
+    await loadRows();
+    await onChanged();
+  }, "Could not schedule");
+
+  if (!rows || rows.length === 0) return null;
 
   return (
     <Card title="Guarantee callbacks">
@@ -3445,12 +3399,12 @@ function CallbacksSection({
                 The customer asked for this later date
               </label>
             ) : null}
-            <ErrorNote error={error} />
+            <ErrorNote error={schedule.error} />
             <Button
               block
-              loading={busy}
+              loading={schedule.busy}
               disabled={!date || !technicianId}
-              onClick={() => void schedule()}
+              onClick={() => void schedule.run()}
             >
               Schedule the callback visit
             </Button>

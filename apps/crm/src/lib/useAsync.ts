@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  createKeyedSingleFlight,
   createRequestGuard,
   createSingleFlight,
   runGuarded,
@@ -142,4 +143,60 @@ export function useAction<A extends unknown[]>(
   );
 
   return { run, busy, error, clearError: useCallback(() => setError(null), []) };
+}
+
+export type KeyedActionState = {
+  /** Runs `fn` under `key`. Resolves `true` on success, `false` if it threw or
+   *  the SAME key was already in flight. Never rejects. */
+  run: (key: string, fn: () => Promise<unknown>) => Promise<boolean>;
+  /** Which key is working — drives the pressed button's spinner. */
+  busyKey: string | null;
+  error: string | null;
+  clearError: () => void;
+};
+
+/**
+ * `useAction` for a screen that routes many independent writes through one
+ * handler, keyed by the button that was pressed.
+ *
+ * `useAction` is the wrong shape there: its gate is per-hook, so one write in
+ * flight would silently refuse a press on an unrelated button. Here the gate
+ * is per key, and `busyKey` replaces the `busyAction`/`busyId` useState that
+ * these screens were already keeping by hand.
+ */
+export function useKeyedAction(fallbackMessage = "Could not save"): KeyedActionState {
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const gateRef = useRef(createKeyedSingleFlight());
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  const run = useCallback(
+    async (key: string, fn: () => Promise<unknown>): Promise<boolean> => {
+      if (!gateRef.current.tryEnter(key)) return false;
+      setBusyKey(key);
+      setError(null);
+      try {
+        await fn();
+        return true;
+      } catch (err) {
+        if (aliveRef.current) setError(toMessage(err, fallbackMessage));
+        return false;
+      } finally {
+        gateRef.current.exit(key);
+        // Another key may still be running; only clear the spinner if this was
+        // the last one out.
+        if (aliveRef.current && !gateRef.current.busy) setBusyKey(null);
+      }
+    },
+    [fallbackMessage]
+  );
+
+  return { run, busyKey, error, clearError: useCallback(() => setError(null), []) };
 }
