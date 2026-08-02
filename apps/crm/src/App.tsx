@@ -9,6 +9,7 @@ import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react";
 import "@aws-amplify/ui-react/styles.css";
 import { useState, type ReactNode } from "react";
 import { myGroupIds, RolesProvider, useRoles } from "./lib/auth";
+import { useAction } from "./lib/useAsync";
 import { Button, EmptyState, Spinner } from "./ui/kit";
 import { Icon, type IconName } from "./ui/icons";
 import InstallBanner from "./components/InstallBanner";
@@ -81,12 +82,12 @@ function MagicLinkFooter() {
   const { toForgotPassword } = useAuthenticator();
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
-  const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
 
-  const request = async () => {
-    if (!email.trim()) return;
-    setBusy(true);
+  // Enter is the natural way to submit this one-field form, and holding it beat
+  // the disabled button — a second sign-in attempt, a second link email, and
+  // the first link dead by the time they opened it.
+  const send = useAction(async () => {
     try {
       const { nextStep } = await signIn({
         username: email.trim().toLowerCase(),
@@ -102,8 +103,12 @@ function MagicLinkFooter() {
     } catch {
       /* Never reveal whether the account exists. */
     }
-    setBusy(false);
     setSent(true);
+  });
+
+  const request = async () => {
+    if (!email.trim()) return;
+    await send.run();
   };
 
   return (
@@ -123,7 +128,7 @@ function MagicLinkFooter() {
             onChange={(e) => setEmail(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void request()}
           />
-          <Button small loading={busy} onClick={() => void request()}>
+          <Button small loading={send.busy} onClick={() => void request()}>
             Send link
           </Button>
         </div>

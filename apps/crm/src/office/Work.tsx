@@ -13,7 +13,7 @@ import {
   liftEmailSuppression,
   recordNoticeAlternateDelivery,
 } from "../lib/api";
-import { useAsync } from "../lib/useAsync";
+import { toMessage, useAsync, useKeyedAction } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime, money, todayUtc } from "../lib/format";
 import {
@@ -51,10 +51,23 @@ export default function WorkQueue() {
   const [override, setOverride] = useState<WorkItem | null>(null);
   const [reasonCode, setReasonCode] = useState("");
   const [note, setNote] = useState("");
-  const [busyId, setBusyId] = useState<string | null>(null);
-  // Every action below still hand-rolls its error; the mutation pass takes
-  // them. This one slot shows whichever of the two spoke last.
-  const [actionError, setActionError] = useState<string | null>(null);
+  // Every write below is keyed by the case it acts on, so the double-submit
+  // guard is too: a plain per-screen gate would let a claim on one row silently
+  // swallow the press on another, and the office would never know.
+  const perform = useKeyedAction();
+  const { run: runKeyed } = perform;
+  const runOn = useCallback(
+    (item: WorkItem, fallbackMessage: string, fn: () => Promise<unknown>) =>
+      runKeyed(item.id, async () => {
+        try {
+          await fn();
+        } catch (err) {
+          // Each action keeps its own wording for a failure that carries none.
+          throw new Error(toMessage(err, fallbackMessage));
+        }
+      }),
+    [runKeyed]
+  );
 
   const {
     data,
@@ -75,7 +88,7 @@ export default function WorkQueue() {
   // rather than spinning forever — keep that.
   const items = data?.items ?? (loadError ? [] : null);
   const events = data?.events ?? [];
-  const error = actionError ?? loadError;
+  const error = perform.error ?? loadError;
 
   const shown = useMemo(() => {
     return (items ?? [])
@@ -106,50 +119,37 @@ export default function WorkQueue() {
 
   const claim = useCallback(
     async (item: WorkItem) => {
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not claim work", async () => {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({ workItemId: item.id, action: "CLAIM" })
         );
         if (!result) throw new Error("The work update did not complete");
         load();
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : "Could not claim work");
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-18: hand a claimed case back to the shared queue (own claims; an owner
   // can release anyone's) — routine work never depends on one named person.
   const release = useCallback(
     async (item: WorkItem) => {
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not release work", async () => {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({ workItemId: item.id, action: "RELEASE" })
         );
         if (!result) throw new Error("The work update did not complete");
         load();
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : "Could not release work");
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-03: resend the EXACT stored message from its outbox row. The server
-  // refuses unknown-outcome and attachment rows with the reason named.
+  // refuses unknown-outcome and attachment rows with the reason named. Two
+  // presses used to mean the customer got the notice twice.
   const resendExact = async (item: WorkItem) => {
-    setBusyId(item.id);
-    setActionError(null);
-    try {
+    await runOn(item, "Could not resend", async () => {
       const result = opResult(
         await api().mutations.resendEmailLog({ emailLogId: item.relatedId! })
       ) as { resent?: boolean } | null;
@@ -159,11 +159,7 @@ export default function WorkQueue() {
         );
       }
       load();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Could not resend");
-    } finally {
-      setBusyId(null);
-    }
+    });
   };
 
   // GL-18 R2: the bounded suppression release for a bounced/complained
@@ -186,24 +182,16 @@ export default function WorkQueue() {
         "What retained evidence proves the address may be enabled? (required)"
       );
       if (!evidence) return;
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not lift the suppression", async () => {
         const result = opResult<{ lifted: boolean; message: string }>(
           await liftEmailSuppression({ email, reasonCode: reason, evidence })
         );
         if (!result) throw new Error("The suppression lift did not complete");
         window.alert(result.message);
         load();
-      } catch (err) {
-        setActionError(
-          err instanceof Error ? err.message : "Could not lift the suppression"
-        );
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-08/GL-18: the office reached the customer by phone/in person — record
@@ -214,9 +202,7 @@ export default function WorkQueue() {
         "How was the customer actually reached? (required — recorded on the notice)"
       );
       if (!note) return;
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not record the delivery", async () => {
         const result = opResult<{ recorded: boolean; message: string }>(
           await recordNoticeAlternateDelivery({
             relatedId: item.relatedId ?? "",
@@ -227,15 +213,9 @@ export default function WorkQueue() {
         if (!result) throw new Error("The alternate delivery did not record");
         window.alert(result.message);
         load();
-      } catch (err) {
-        setActionError(
-          err instanceof Error ? err.message : "Could not record the delivery"
-        );
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // A verified close: the server re-checks the real-world outcome (technician
@@ -249,9 +229,7 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not close this work", async () => {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({
             workItemId: item.id,
@@ -261,20 +239,14 @@ export default function WorkQueue() {
         );
         if (!result) throw new Error("The work update did not complete");
         load();
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : "Could not close this work");
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   const saveOverride = useCallback(async () => {
     if (!override) return;
-    setBusyId(override.id);
-    setActionError(null);
-    try {
+    await runOn(override, "Could not record the override", async () => {
       const result = opResult<{ workItemId: string }>(
         await updateOwnedWork({
           workItemId: override.id,
@@ -286,12 +258,8 @@ export default function WorkQueue() {
       if (!result) throw new Error("The override did not complete");
       closeOverride();
       load();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Could not record the override");
-    } finally {
-      setBusyId(null);
-    }
-  }, [override, reasonCode, note, closeOverride, load]);
+    });
+  }, [override, reasonCode, note, closeOverride, load, runOn]);
 
   // Rebook a no-access visit. The server resolves the exception from the rebook
   // itself (the verified event) — no separate close is needed here.
@@ -304,21 +272,17 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      // Rebooking is not idempotent — a second press books the customer a
+      // second visit, which someone then has to cancel.
+      await runOn(item, "Could not rebook the visit", async () => {
         const rebooked = opResult<{ jobId: string }>(
           await api().mutations.rebookJob({ jobId: item.relatedId })
         );
         if (!rebooked?.jobId) throw new Error("The visit was not rebooked");
         load();
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : "Could not rebook the visit");
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-05: finish a paid booking whose finalization got stuck. The mutation
@@ -333,9 +297,7 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not finish the booking", async () => {
         const res = opResult<{ status: string }>(
           await api().mutations.retryBookingFinalization({
             bookingRequestId: item.relatedId,
@@ -343,13 +305,9 @@ export default function WorkQueue() {
         );
         if (!res) throw new Error("The retry did not run");
         load();
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : "Could not finish the booking");
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-08: resume a stuck plan cancellation. Idempotent — re-runs the cancel,
@@ -363,9 +321,7 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not resume the cancellation", async () => {
         const res = opResult<{ status: string }>(
           await api().mutations.resumePlanCancellation({
             servicePlanId: item.relatedId,
@@ -373,15 +329,9 @@ export default function WorkQueue() {
         );
         if (!res) throw new Error("The resume did not run");
         load();
-      } catch (err) {
-        setActionError(
-          err instanceof Error ? err.message : "Could not resume the cancellation"
-        );
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-07: resume a stuck office visit cancel/reschedule. Idempotent — re-runs
@@ -395,23 +345,15 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setActionError(null);
-      try {
+      await runOn(item, "Could not resume the visit change", async () => {
         const res = opResult<{ outcome?: string }>(
           await api().mutations.resumeVisitChange({ jobId: item.relatedId })
         );
         if (!res) throw new Error("The resume did not run");
         load();
-      } catch (err) {
-        setActionError(
-          err instanceof Error ? err.message : "Could not resume the visit change"
-        );
-      } finally {
-        setBusyId(null);
-      }
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   if (!items) {
@@ -517,7 +459,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="ghost"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void claim(item)}
                   >
                     Assign to me
@@ -527,7 +469,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="ghost"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void release(item)}
                   >
                     Release to queue
@@ -539,7 +481,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void liftSuppression(item)}
                   >
                     Lift email suppression…
@@ -555,7 +497,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void resendExact(item)}
                   >
                     Resend exact message
@@ -567,7 +509,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void recordAlternate(item, "plan-canceled")}
                   >
                     Record alternate delivery…
@@ -582,7 +524,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void rebookNoAccess(item)}
                   >
                     {policy.externalAction.label}
@@ -600,7 +542,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void retryFinalization(item)}
                   >
                     {policy.externalAction.label}
@@ -612,7 +554,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void resumeCancellation(item)}
                   >
                     {policy.externalAction.label}
@@ -624,7 +566,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void resumeVisitChangeItem(item)}
                   >
                     {policy.externalAction.label}
@@ -636,7 +578,7 @@ export default function WorkQueue() {
                     <Button
                       key={action.id}
                       small
-                      loading={busyId === item.id}
+                      loading={perform.busyKey === item.id}
                       onClick={() => void confirmVerified(item, action.id, action.label)}
                     >
                       {action.label}
@@ -718,7 +660,7 @@ export default function WorkQueue() {
             <Button
               block
               variant="danger"
-              loading={busyId === override.id}
+              loading={perform.busyKey === override.id}
               disabled={!reasonCode || !note.trim()}
               onClick={() => void saveOverride()}
             >

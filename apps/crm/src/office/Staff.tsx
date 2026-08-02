@@ -13,7 +13,7 @@ import {
   type StaffRosterRow,
   type Technician,
 } from "../lib/api";
-import { useAsync } from "../lib/useAsync";
+import { useAction, useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { TechnicianRoster } from "./technicians";
 import { fmtDate, fmtDateTime, todayUtc } from "../lib/format";
@@ -385,8 +385,6 @@ function StaffActions({
     STAFF_OFFBOARD_REASONS[0]
   );
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState<null | "role" | "offboard">(null);
-  const [error, setError] = useState<string | null>(null);
   const [confirmOffboard, setConfirmOffboard] = useState(false);
   // One idempotency key per LOGICAL request, held stable across retries so the
   // server can dedupe/resume the same durable command — a retry after a
@@ -407,13 +405,10 @@ function StaffActions({
     setOpOutcome(null);
   };
 
-  const saveRole = async () => {
+  const saveRole = useAction(async () => {
     if (roleReason === "OTHER" && !note.trim()) {
-      setError("Choosing 'Other' needs a short note saying why.");
-      return;
+      throw new Error("Choosing 'Other' needs a short note saying why.");
     }
-    setBusy("role");
-    setError(null);
     try {
       const res = await changeStaffRoles({
         email: row.email,
@@ -426,14 +421,12 @@ function StaffActions({
       const data = opResult<StaffOpOutcome>(res);
       if (data?.inProgress) {
         setOpOutcome({ ...data, kind: "role" });
-        setBusy(null);
         return;
       }
       if (data && data.outcome !== "COMPLETE") {
         // The persisted PARTIAL outcome — shown as recorded, with its one next
         // step. The same key resumes it; nothing is invented client-side.
         setOpOutcome({ ...data, kind: "role" });
-        setBusy(null);
         return;
       }
       setRoleKey(newIdempotencyKey());
@@ -443,18 +436,14 @@ function StaffActions({
       // A refusal (validation, last-owner, in-flight owner change): nothing
       // changed. A fresh key lets the corrected request start clean.
       setRoleKey(newIdempotencyKey());
-      setError(err instanceof Error ? err.message : "Could not change the role");
-      setBusy(null);
+      throw err;
     }
-  };
+  }, "Could not change the role");
 
-  const doOffboard = async () => {
+  const doOffboard = useAction(async () => {
     if (offboardReason === "OTHER" && !note.trim()) {
-      setError("Choosing 'Other' needs a short note saying why.");
-      return;
+      throw new Error("Choosing 'Other' needs a short note saying why.");
     }
-    setBusy("offboard");
-    setError(null);
     try {
       const res = await offboardStaff({
         email: row.email,
@@ -466,12 +455,10 @@ function StaffActions({
       const data = opResult<StaffOpOutcome>(res);
       if (data?.inProgress) {
         setOpOutcome({ ...data, kind: "offboard" });
-        setBusy(null);
         return;
       }
       if (data && data.outcome !== "COMPLETE") {
         setOpOutcome({ ...data, kind: "offboard" });
-        setBusy(null);
         return;
       }
       setOffboardKey(newIdempotencyKey());
@@ -479,10 +466,11 @@ function StaffActions({
       await onDone();
     } catch (err) {
       setOffboardKey(newIdempotencyKey());
-      setError(err instanceof Error ? err.message : "Could not offboard this person");
-      setBusy(null);
+      throw err;
     }
-  };
+  }, "Could not offboard this person");
+
+  const busy = saveRole.busy || doOffboard.busy;
 
   return (
     <div className="form-grid">
@@ -566,9 +554,9 @@ function StaffActions({
       ) : null}
       <Button
         block
-        loading={busy === "role"}
-        disabled={busy !== null || choiceForRoles(row.roles) === choice}
-        onClick={() => void saveRole()}
+        loading={saveRole.busy}
+        disabled={busy || choiceForRoles(row.roles) === choice}
+        onClick={() => void saveRole.run()}
       >
         Save role
       </Button>
@@ -610,7 +598,11 @@ function StaffActions({
                 />
               </Field>
             ) : null}
-            <Button block loading={busy === "offboard"} onClick={() => void doOffboard()}>
+            <Button
+              block
+              loading={doOffboard.busy}
+              onClick={() => void doOffboard.run()}
+            >
               Yes, offboard now
             </Button>
             <Button block variant="ghost" onClick={() => setConfirmOffboard(false)}>
@@ -648,9 +640,11 @@ function StaffActions({
           {!opOutcome.inProgress && opOutcome.outcome !== "COMPLETE" ? (
             <Button
               block
-              loading={busy !== null}
+              loading={busy}
               onClick={() =>
-                void (opOutcome.kind === "role" ? saveRole() : doOffboard())
+                void (opOutcome.kind === "role"
+                  ? saveRole.run()
+                  : doOffboard.run())
               }
             >
               Resume {opOutcome.kind === "role" ? "role change" : "offboarding"}
@@ -658,7 +652,7 @@ function StaffActions({
           ) : null}
         </Card>
       ) : null}
-      <ErrorNote error={error} />
+      <ErrorNote error={saveRole.error ?? doOffboard.error} />
     </div>
   );
 }
@@ -674,8 +668,6 @@ function InviteForm({ onDone }: { onDone: () => Promise<void> }) {
   const [role, setRole] = useState<RoleChoice>("OWNER");
   const [techs, setTechs] = useState<Technician[]>([]);
   const [technicianId, setTechnicianId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
   const linksTechnician = ROLE_CHOICES[role].groups.includes("TECH");
@@ -686,6 +678,19 @@ function InviteForm({ onDone }: { onDone: () => Promise<void> }) {
       .then((rows) => setTechs(rows.filter((t) => t.active && !t.userSub)))
       .catch(() => undefined);
   }, [linksTechnician]);
+
+  // adminCreateUser carries no idempotency key, so a double-click used to send
+  // the same person two invite emails — and the second link kills the first.
+  const send = useAction(async () => {
+    const res = await api().mutations.adminCreateUser({
+      email: email.trim(),
+      name: name.trim(),
+      roles: [...ROLE_CHOICES[role].groups],
+      technicianId: technicianId || undefined,
+    });
+    if (res.errors?.length) throw new Error(res.errors[0].message);
+    setDone(true);
+  }, "Could not send the invite");
 
   if (done) {
     return (
@@ -744,30 +749,12 @@ function InviteForm({ onDone }: { onDone: () => Promise<void> }) {
           )}
         </Field>
       ) : null}
-      <ErrorNote error={error} />
+      <ErrorNote error={send.error} />
       <Button
         block
-        loading={busy}
+        loading={send.busy}
         disabled={!name.trim() || !validEmail || needsTech}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          api()
-            .mutations.adminCreateUser({
-              email: email.trim(),
-              name: name.trim(),
-              roles: [...ROLE_CHOICES[role].groups],
-              technicianId: technicianId || undefined,
-            })
-            .then((res) => {
-              if (res.errors?.length) throw new Error(res.errors[0].message);
-              setDone(true);
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not send the invite");
-              setBusy(false);
-            });
-        }}
+        onClick={() => void send.run()}
       >
         Send invite
       </Button>

@@ -6,7 +6,7 @@ import {
   type Product,
   type ProductStockEntry,
 } from "../lib/api";
-import { useAsync } from "../lib/useAsync";
+import { useAction, useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate } from "../lib/format";
 import {
@@ -218,58 +218,48 @@ function StockEntryForm({
       : ""
   );
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const counted = Number(amount);
   const delta =
     mode === "PURCHASE" ? counted : Number.isFinite(counted) ? counted - row.onHand : NaN;
 
-  async function save() {
-    setError(null);
+  // The ledger is append-only and on-hand is its running sum, so a double-click
+  // posts the delivery twice and the office is counting bottles to find out why.
+  const save = useAction(async () => {
     if (amount.trim() === "" || !Number.isFinite(counted)) {
-      setError(mode === "PURCHASE" ? "Enter how much you received." : "Enter the counted amount.");
-      return;
+      throw new Error(
+        mode === "PURCHASE" ? "Enter how much you received." : "Enter the counted amount."
+      );
     }
     if (mode === "PURCHASE" && counted <= 0) {
-      setError("A restock has to be a positive amount.");
-      return;
+      throw new Error("A restock has to be a positive amount.");
     }
     if (mode === "ADJUST" && counted < 0) {
-      setError("On-hand can't be negative.");
-      return;
+      throw new Error("On-hand can't be negative.");
     }
     if (mode === "ADJUST" && delta === 0) {
-      setError("That's already the on-hand count — nothing to adjust.");
-      return;
+      throw new Error("That's already the on-hand count — nothing to adjust.");
     }
     const parsedCost = unitCost.trim() !== "" ? Number(unitCost) : null;
     if (parsedCost != null && (!Number.isFinite(parsedCost) || parsedCost < 0)) {
-      setError("The unit cost must be zero or greater.");
-      return;
+      throw new Error("The unit cost must be zero or greater.");
     }
-    setBusy(true);
-    try {
-      unwrap(
-        await api().models.ProductStockEntry.create({
-          productId: row.product.id,
-          deltaBaseUnits: delta,
-          reason: mode,
-          unitCostCents:
-            mode === "PURCHASE" && parsedCost != null
-              ? Math.round(parsedCost * 100)
-              : null,
-          note: note.trim() || null,
-          enteredByEmail: enteredByEmail ?? "office",
-          at: new Date().toISOString(),
-        })
-      );
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save the entry");
-      setBusy(false);
-    }
-  }
+    unwrap(
+      await api().models.ProductStockEntry.create({
+        productId: row.product.id,
+        deltaBaseUnits: delta,
+        reason: mode,
+        unitCostCents:
+          mode === "PURCHASE" && parsedCost != null
+            ? Math.round(parsedCost * 100)
+            : null,
+        note: note.trim() || null,
+        enteredByEmail: enteredByEmail ?? "office",
+        at: new Date().toISOString(),
+      })
+    );
+    await onDone();
+  }, "Could not save the entry");
 
   return (
     <div className="form-grid">
@@ -312,8 +302,8 @@ function StockEntryForm({
           placeholder={mode === "PURCHASE" ? "PO #1234, ordered from Univar" : "Physical count 7/21"}
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button block loading={busy} onClick={() => void save()}>
+      <ErrorNote error={save.error} />
+      <Button block loading={save.busy} onClick={() => void save.run()}>
         {mode === "PURCHASE" ? "Add stock" : "Save adjustment"}
       </Button>
       {row.entries.length > 0 ? (

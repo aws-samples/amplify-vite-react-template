@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, listAll, unwrap, type Customer, type CustomerGroup } from "../lib/api";
-import { useAsync } from "../lib/useAsync";
+import { useAction, useAsync } from "../lib/useAsync";
 import {
   Badge,
   Button,
@@ -169,8 +169,23 @@ function GroupForm({ onDone }: { onDone: () => Promise<void> }) {
   const [name, setName] = useState("");
   const [contactName, setContactName] = useState("");
   const [contactEmail, setContactEmail] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  // Nothing here is idempotent — a double-click used to create two groups with
+  // the same name, and members can only belong to one of them.
+  const create = useAction(async () => {
+    if (!name.trim()) {
+      throw new Error("Group name is required");
+    }
+    unwrap(
+      await api().models.CustomerGroup.create({
+        name: name.trim(),
+        contactName: contactName.trim() || undefined,
+        contactEmail: contactEmail.trim() || undefined,
+        status: "ACTIVE",
+      })
+    );
+    await onDone();
+  }, "Could not create group");
 
   return (
     <div className="form-grid">
@@ -191,33 +206,8 @@ function GroupForm({ onDone }: { onDone: () => Promise<void> }) {
           onChange={(e) => setContactEmail(e.target.value)}
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          if (!name.trim()) {
-            setError("Group name is required");
-            return;
-          }
-          setBusy(true);
-          api()
-            .models.CustomerGroup.create({
-              name: name.trim(),
-              contactName: contactName.trim() || undefined,
-              contactEmail: contactEmail.trim() || undefined,
-              status: "ACTIVE",
-            })
-            .then((res) => {
-              unwrap(res);
-              return onDone();
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not create group");
-              setBusy(false);
-            });
-        }}
-      >
+      <ErrorNote error={create.error} />
+      <Button block loading={create.busy} onClick={() => void create.run()}>
         Create group
       </Button>
     </div>

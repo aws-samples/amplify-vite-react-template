@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, listAll, type LeadPricingRun } from "../lib/api";
-import { useAsync } from "../lib/useAsync";
+import { useAction, useAsync } from "../lib/useAsync";
 import { fmtDate, money } from "../lib/format";
 import {
   Badge,
@@ -43,9 +43,15 @@ export default function PricingLog() {
     "Could not load the log"
   );
   const [editing, setEditing] = useState<LeadPricingRun | null>(null);
-  const [busy, setBusy] = useState(false);
-  // The save path still hand-rolls its error; the mutation pass takes it.
-  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const saveOutcome = useAction(async (row: LeadPricingRun) => {
+    await api().models.LeadPricingRun.update({
+      id: row.id,
+      outcome: row.outcome ?? "PENDING",
+    });
+    setEditing(null);
+    reload();
+  }, "Save failed");
 
   const priceLabel = (r: LeadPricingRun) =>
     r.monthlyPriceCents != null
@@ -56,7 +62,7 @@ export default function PricingLog() {
 
   return (
     <Page title="Pricing log" back="/more">
-      <ErrorNote error={saveError ?? loadError} />
+      <ErrorNote error={saveOutcome.error ?? loadError} />
       {runs === null ? (
         <Spinner />
       ) : runs.length === 0 ? (
@@ -141,23 +147,8 @@ export default function PricingLog() {
                 <span />
               )}
               <Button
-                loading={busy}
-                onClick={() => {
-                  setBusy(true);
-                  api()
-                    .models.LeadPricingRun.update({
-                      id: editing.id,
-                      outcome: editing.outcome ?? "PENDING",
-                    })
-                    .then(() => {
-                      setEditing(null);
-                      reload();
-                    })
-                    .catch((err) =>
-                      setSaveError(err instanceof Error ? err.message : "Save failed")
-                    )
-                    .finally(() => setBusy(false));
-                }}
+                loading={saveOutcome.busy}
+                onClick={() => void saveOutcome.run(editing)}
               >
                 Save outcome
               </Button>
