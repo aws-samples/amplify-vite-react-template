@@ -23,9 +23,9 @@ not yet diverged.
 | # | Item | Sites | Blast radius | Diverges today? | § |
 |---|---|---|---|---|---|
 | 1 | `lead-intake` public endpoint has no server-side gate | 1 | Unauthenticated writes to `Customer`/`Lead` | **✗** wildcard CORS contradicts the CDK allowlist | 1.3 |
-| 2 | Money formatting — 9 helpers + 89 inline `toFixed(2)` | ~98 | Every customer-facing price surface | **✗** one price renders 4 ways | 1.4 |
-| 3 | `quoteJson` parsed unvalidated, then charged via `!` | 9 shapes | The card-charge amount | **✗** 2 of 9 readers drop `initialFeeCents` | 4.3–4.4 |
-| 4 | Async load/error state copy-pasted (no `useAsync`) | ~78 | Every CRM + portal screen | **✗** 1 of ~25 lists guards its race | 1.6 |
+| 2 | ~~Money formatting — 9 helpers + 89 inline `toFixed(2)`~~ | ~98 | Every customer-facing price surface | **FIXED** `9b8f66a` — one `shared/money.ts` | 1.4 |
+| 3 | ~~`quoteJson` parsed unvalidated~~ | 9 shapes | The card-charge amount | **FIXED** `60f3c52` — one validating `shared/quoteSnapshot.ts` | 4.3–4.4 |
+| 4 | Async load/error state copy-pasted (no `useAsync`) | ~78 | Every CRM + portal screen | **PARTLY FIXED** `b58b507`, `77a5ed2` — hooks + 16 screens; mutation sites remain | 1.6 |
 | 5 | `err instanceof Error ? …` inline | 144 | All error text, both apps | **✗** ~85 distinct fallback strings | 1.7 |
 | 6 | `pageErrors: "ignore"` swallowed pagination errors | 110 | Partial reads pass as complete | **✗** by construction | 1.8 |
 | 7 | `.catch(() => undefined)` in money/scheduling paths | 114 | Capacity + payment bookkeeping leaks | **✗** silent state drift | 1.8 |
@@ -52,6 +52,11 @@ not yet diverged.
 | 28 | `addressAutocomplete.tsx` forked across apps | 2 | Address entry in both apps | No — 3 comment lines only | 1.1 |
 
 ---
+
+> **Status, 2026-08-02.** Items 2, 3 and 4 have been worked. Sections below
+> are left as written at audit time so the findings stay readable against the
+> code they described; see the fix commits for what changed, and note the
+> correction to item 3 recorded in §4.3.
 
 ## 1. Duplicate implementations
 
@@ -1030,7 +1035,8 @@ root cause of the 33 `models as unknown as` sites.
 
 **Ranked by consequence:**
 
-1. **Money — the card is charged off an unvalidated parse chain.** [booking-public/handler.ts:2588](apps/web/amplify/functions/booking-public/handler.ts:2588) does `JSON.parse(String(booking.quoteJson ?? "{}")) as {…}` with no runtime validation, then charges via non-null assertions: [:2717](apps/web/amplify/functions/booking-public/handler.ts:2717) `stored.recurringOffer!.initialFeeCents`, [:2748](apps/web/amplify/functions/booking-public/handler.ts:2748), [:2767, :2869, :2905](apps/web/amplify/functions/booking-public/handler.ts:2767) `day!.priceCents`. A `quoteJson` written by an older path with no `recurringOffer` throws `TypeError` mid-checkout, *after* the capacity claim is taken.
+1. **Money — the card is charged off an unvalidated parse chain.** [booking-public/handler.ts:2588](apps/web/amplify/functions/booking-public/handler.ts:2588) does `JSON.parse(String(booking.quoteJson ?? "{}")) as {…}` with no runtime validation, then charges via non-null assertions.
+   **Correction (recorded while fixing this).** The `!` assertions were *not* the defect — they sit behind guards at `:2613-2627` that already throw, and the comment at `bookDatedAttempt` says exactly that; TS simply cannot narrow across the closure boundary. The real hole was that those guards test the recurring offer's **presence** while the parse was an unchecked cast, so a stored `recurringOffer: { frequency: "MONTHLY" }` satisfied `!stored.recurringOffer` and delivered `undefined` to `pricedWithPromo` — `NaN` as the amount charged. Fixed in `60f3c52` by making the parse all-or-nothing; the assertions went away as a consequence, not as the cure.
 2. **Money — one field, two shapes in one file.** [:2462](apps/web/amplify/functions/booking-public/handler.ts:2462) (`/promo`) declares `recurringOffer?: {initialFeeCents}`; [:2588](apps/web/amplify/functions/booking-public/handler.ts:2588) (`/book`) declares `{frequency, monthlyCents, initialFeeCents}`. Preview and charge read the same bytes through different types.
 3. **Money — field silently dropped on resume paths.** [bookingFinalize.ts:2218](apps/web/amplify/functions/shared/bookingFinalize.ts:2218) and [:2464](apps/web/amplify/functions/shared/bookingFinalize.ts:2464) omit `initialFeeCents` from `recurringOffer`; [:1238](apps/web/amplify/functions/shared/bookingFinalize.ts:1238) (main path) has all three.
 4. **Auth — the IAM-trust branch is entered on a cast.** [booking-public/handler.ts:357](apps/web/amplify/functions/booking-public/handler.ts:357) `(event as unknown as {internalOp?}).internalOp`; nothing type-checks the payload the trusting side receives (see also §1.3 gap 6).
