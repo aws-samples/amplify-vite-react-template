@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { uploadData, getUrl } from "aws-amplify/storage";
 import {
   client,
@@ -14,6 +14,7 @@ import {
 } from "../../lib/client";
 import { fillAcord25, signatureFor } from "../../lib/acord";
 import { useSort, SortTh } from "../../lib/useSort";
+import { useAsyncResource } from "../../lib/useAsyncResource";
 import FilePreviewModal from "../../components/FilePreview";
 import { SaveStatus, useSaveStatus } from "../../components/SaveStatus";
 import { useFormState } from "../../lib/useFormState";
@@ -25,9 +26,45 @@ export function CertificatesTab({
   account: Account;
   profile: UserProfile;
 }) {
-  const [certs, setCerts] = useState<Certificate[]>([]);
-  const [policies, setPolicies] = useState<Policy[]>([]);
-  const [carriers, setCarriers] = useState<Carrier[]>([]);
+  const certRes = useAsyncResource(
+    () =>
+      listAllPages((nextToken) =>
+        client.models.Certificate.list({
+          filter: { accountId: { eq: account.id } },
+          nextToken,
+        })
+      ),
+    [account.id],
+    { initialData: [] as Certificate[], errorMessage: "Failed to load certificates" }
+  );
+  const certs = certRes.data;
+  const setCerts = certRes.setData;
+
+  const policyRes = useAsyncResource(
+    () =>
+      listAllPages((nextToken) =>
+        client.models.Policy.list({
+          filter: { accountId: { eq: account.id } },
+          nextToken,
+        })
+      ),
+    [account.id],
+    { initialData: [] as Policy[], errorMessage: "Failed to load policies" }
+  );
+  const policies = policyRes.data;
+
+  /**
+   * Surfaced rather than ignored, and this one is not cosmetic: `carriers` is
+   * handed to `fillAcord25`, so a failed read produces a certificate PDF with
+   * the insurer block silently blank.
+   */
+  const carrierRes = useAsyncResource(
+    async () => (await client.models.Carrier.list()).data,
+    [],
+    { initialData: [] as Carrier[], errorMessage: "Failed to load carriers" }
+  );
+  const carriers = carrierRes.data;
+
   const [showForm, setShowForm] = useState(false);
   const { form, setF, reset } = useFormState({
     holderName: "",
@@ -45,22 +82,6 @@ export function CertificatesTab({
   const genStatus = useSaveStatus();
   const [error, setError] = useState("");
   const [previewCert, setPreviewCert] = useState<Certificate | null>(null);
-
-  useEffect(() => {
-    listAllPages((nextToken) =>
-      client.models.Certificate.list({
-        filter: { accountId: { eq: account.id } },
-        nextToken,
-      })
-    ).then((data) => setCerts(data));
-    listAllPages((nextToken) =>
-      client.models.Policy.list({
-        filter: { accountId: { eq: account.id } },
-        nextToken,
-      })
-    ).then((data) => setPolicies(data));
-    client.models.Carrier.list().then(({ data }) => setCarriers(data));
-  }, [account.id]);
 
   async function issue() {
     if (!form.holderName.trim()) return;
@@ -233,7 +254,9 @@ export function CertificatesTab({
                 </div>
                 <div className="field full">
                   <label>Policies on certificate</label>
-                  {policies.length === 0 ? (
+                  {!policyRes.loaded ? (
+                    <span className="muted small">Loading…</span>
+                  ) : policies.length === 0 ? (
                     <span className="muted small">No policies on this account.</span>
                   ) : (
                     policies.map((p) => (
@@ -277,9 +300,16 @@ export function CertificatesTab({
               <SaveStatus {...genStatus.status} />
             </p>
           )}
+          {/* `error` is the issue/generate failure; the reads have their own. */}
           {error && <p className="error-text">{error}</p>}
+          {carrierRes.error && <p className="error-text">{carrierRes.error}</p>}
+          {policyRes.error && <p className="error-text">{policyRes.error}</p>}
 
-          {certs.length === 0 ? (
+          {!certRes.loaded ? (
+            <p className="muted small">Loading…</p>
+          ) : certRes.error ? (
+            <p className="error-text">{certRes.error}</p>
+          ) : certs.length === 0 ? (
             <p className="muted small">No certificates issued.</p>
           ) : (
             <div className="table-wrap">

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
@@ -324,22 +324,31 @@ export default function AccountMarketingTasks({
 
 /** Agency-wide open tasks — the dashboard tile drills through to this. */
 export function AllMarketingTasks() {
-  const [tasks, setTasks] = useState<MarketingTask[]>([]);
-  const [loaded, setLoaded] = useState(false);
   const [query, setQuery] = useState("");
 
-  useEffect(() => {
-    listAllPages((nextToken) =>
-      client.models.MarketingTask.list({
-        filter: { status: { eq: "OPEN" } },
-        limit: 500,
-        nextToken,
-      })
-    ).then((data) => {
-      setTasks(data as MarketingTask[]);
-      setLoaded(true);
-    });
-  }, []);
+  /**
+   * `setLoaded(true)` used to be on the success path only, with no `.catch()`,
+   * so a failed read left this screen on "Loading…" permanently. The hook sets
+   * `loaded` in a `finally`, which is what makes the error branch below
+   * reachable at all.
+   */
+  const res = useAsyncResource(
+    async () =>
+      (await listAllPages((nextToken) =>
+        client.models.MarketingTask.list({
+          filter: { status: { eq: "OPEN" } },
+          limit: 500,
+          nextToken,
+        })
+      )) as MarketingTask[],
+    [],
+    {
+      initialData: [] as MarketingTask[],
+      errorMessage: "Failed to load marketing tasks",
+    }
+  );
+  const tasks = res.data;
+  const loaded = res.loaded;
 
   const q = query.trim().toLowerCase();
   const filtered = q
@@ -392,6 +401,8 @@ export function AllMarketingTasks() {
         </div>
         {!loaded ? (
           <p className="muted small">Loading…</p>
+        ) : res.error ? (
+          <p className="error-text">{res.error}</p>
         ) : sorted.length === 0 ? (
           <p className="muted small">
             {q

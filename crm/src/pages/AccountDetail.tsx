@@ -14,6 +14,7 @@ import PropertyPanel from "../components/PropertyPanel";
 import FormsTab from "../components/FormsTab";
 import ExtractionPanel from "../components/ExtractionPanel";
 import Celebration from "../components/Celebration";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import { OverviewTab } from "./account/OverviewTab";
 import { DeleteLeadZone } from "./account/DeleteLeadZone";
 import { PoliciesTab } from "./account/PoliciesTab";
@@ -33,29 +34,40 @@ export default function AccountDetail({ profile }: { profile: UserProfile }) {
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const initialTab = searchParams.get("tab") as Tab | null;
-  const [account, setAccount] = useState<Account | null>(null);
   const [tab, setTab] = useState<Tab>(
     initialTab && VALID_TABS.includes(initialTab) ? initialTab : "overview"
   );
-  const [notFound, setNotFound] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
   const prevStage = useRef<string | null>(null);
 
-  // Fire the celebration on a LEAD → CLIENT transition (quote bound).
+  const res = useAsyncResource(
+    async () => {
+      if (!id) return null;
+      return (await client.models.Account.get({ id })).data;
+    },
+    [id],
+    { initialData: null as Account | null, errorMessage: "Failed to load account" }
+  );
+  const account = res.data;
+  const setAccount = res.setData;
+
+  // Fire the celebration on a LEAD → CLIENT transition (quote bound). Runs off
+  // the locally-patched account QuotesPanel hands back, not a re-read.
   useEffect(() => {
     const stage = account?.stage ?? null;
     if (prevStage.current === "LEAD" && stage === "CLIENT") setCelebrate(true);
     prevStage.current = stage;
   }, [account?.stage]);
 
-  useEffect(() => {
-    if (!id) return;
-    client.models.Account.get({ id }).then(({ data }) => {
-      if (data) setAccount(data);
-      else setNotFound(true);
-    });
-  }, [id]);
+  /**
+   * Derived, not stored. As a `useState` flag this was set on a missing record
+   * and never cleared, so navigating from a bad id to a good one kept
+   * rendering "Account not found." over the account that had just loaded.
+   */
+  const notFound = res.loaded && !res.error && account === null;
 
+  if (!res.loaded) return <p className="muted">Loading…</p>;
+  if (res.error) return <p className="error-text">{res.error}</p>;
   if (notFound) return <p>Account not found.</p>;
   if (!account) return <p className="muted">Loading…</p>;
 

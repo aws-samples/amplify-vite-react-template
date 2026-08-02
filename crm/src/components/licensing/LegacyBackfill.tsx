@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   client,
   fmtDate,
-  friendlyError,
   type License,
   type ProducerLicense,
   type UserProfile,
 } from "../../lib/client";
+import { useAsyncResource } from "../../lib/useAsyncResource";
 import { SaveStatus, useSaveStatus } from "../SaveStatus";
 
 /**
@@ -27,25 +27,30 @@ export default function LegacyBackfill({
   profiles: UserProfile[];
   onMigrated: (created: License[]) => void;
 }) {
-  const [legacy, setLegacy] = useState<ProducerLicense[] | null>(null);
   // `result` was one severity-free string printed green in the all-done card
   // and red in the form actions, with each site guessing severity from
   // `pending.length` — so a clean import could render red and the failed half
   // of a partial one could render green. The state now carries its own
   // severity and both sites render the same value the same way.
   const importStatus = useSaveStatus();
-  const [error, setError] = useState("");
 
-  useEffect(() => {
-    client.models.ProducerLicense.list()
-      .then(({ data }) => setLegacy(data))
-      .catch((e) => {
-        // An empty list hides this card, so a failed read would look exactly
-        // like "nothing left to migrate" — and the import never gets offered.
-        setLegacy([]);
-        setError(friendlyError(e, "Failed to load legacy licenses"));
-      });
-  }, []);
+  /**
+   * `legacy: T[] | null` was the loaded flag — the third spelling the hook
+   * exists to retire. `[]` on failure stays load-bearing: an empty list hides
+   * this card, so without the error branch below a failed read would look
+   * exactly like "nothing left to migrate" and the import would never be
+   * offered.
+   */
+  const res = useAsyncResource(
+    async () => (await client.models.ProducerLicense.list()).data,
+    [],
+    {
+      initialData: [] as ProducerLicense[],
+      errorMessage: "Failed to load legacy licenses",
+    }
+  );
+  const legacy = res.data;
+  const error = res.error;
 
   const key = (userProfileId: unknown, state: unknown, num: unknown) =>
     `${userProfileId ?? ""}|${state ?? ""}|${String(num ?? "").trim().toUpperCase()}`;
@@ -65,7 +70,6 @@ export default function LegacyBackfill({
   const attempted = pending.length;
 
   async function run() {
-    setError("");
     await importStatus.run(
       async () => {
         const created: License[] = [];
@@ -112,7 +116,7 @@ export default function LegacyBackfill({
     );
   }
 
-  if (legacy === null) return null; // still loading
+  if (!res.loaded) return null; // still loading
   if (pending.length === 0) {
     if (error) {
       return (

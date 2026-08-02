@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { list, uploadData } from "aws-amplify/storage";
 import { ACORD_FORMS, listTemplateFields, type AcordFormDef } from "../lib/acord";
@@ -9,6 +9,7 @@ import SignatureManager from "../components/SignatureManager";
 import { friendlyError, type UserProfile } from "../lib/client";
 import { Badge, flagBadge } from "../lib/badges";
 import { useIsAdmin } from "../lib/auth";
+import { useAsyncResource } from "../lib/useAsyncResource";
 
 type TemplateDef = AcordFormDef;
 type Tab = "templates" | "licensing" | "signature" | "team";
@@ -67,18 +68,34 @@ export default function Settings({ profile }: { profile: UserProfile }) {
 }
 
 function TemplatesPanel() {
-  const [uploaded, setUploaded] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [fields, setFields] = useState<Record<string, string[]>>({});
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    list({ path: "templates/" }).then(({ items }) => {
+  /**
+   * Which templates are in S3. The transform lives in the fetcher so the
+   * resource holds the shape the panel reads.
+   *
+   * This read had no error state and no loading gate, and the panel renders an
+   * assertion off it — "N templates not uploaded yet — generating those forms
+   * will fail". Before the list returned, and forever after it failed, that
+   * claimed every ACORD template was missing. It is gated on `loaded` below.
+   */
+  const uploadedRes = useAsyncResource(
+    async () => {
+      const { items } = await list({ path: "templates/" });
       const present: Record<string, boolean> = {};
       for (const item of items) present[item.path] = true;
-      setUploaded(present);
-    });
-  }, []);
+      return present;
+    },
+    [],
+    {
+      initialData: {} as Record<string, boolean>,
+      errorMessage: "Couldn't check which templates are uploaded",
+    }
+  );
+  const uploaded = uploadedRes.data;
+  const setUploaded = uploadedRes.setData;
 
   async function upload(tpl: TemplateDef, file: File | undefined) {
     if (!file) return;
@@ -90,7 +107,7 @@ function TemplatesPanel() {
         data: file,
         options: { contentType: "application/pdf" },
       }).result;
-      setUploaded((u) => ({ ...u, [tpl.path]: true }));
+      setUploaded((u) => ({ ...(u ?? {}), [tpl.path]: true }));
       setFields((f) => ({ ...f, [tpl.path]: [] }));
     } catch (err) {
       setError(friendlyError(err, "Upload failed"));
@@ -124,7 +141,12 @@ function TemplatesPanel() {
         mapping needs updating.
       </p>
 
-      {missing > 0 && (
+      {/* Only claim a template is missing once we know. `uploaded` is `{}`
+          until the S3 list returns, which would otherwise flag every form. */}
+      {uploadedRes.error && (
+        <p className="error-text">{uploadedRes.error}</p>
+      )}
+      {uploadedRes.loaded && !uploadedRes.error && missing > 0 && (
         <p className="small" style={{ color: "var(--amber)" }}>
           {missing} template{missing === 1 ? "" : "s"} not uploaded yet —
           generating {missing === 1 ? "that form" : "those forms"} will fail
@@ -146,7 +168,9 @@ function TemplatesPanel() {
               <TemplateRow
                 key={tpl.path}
                 tpl={tpl}
-                isUploaded={!!uploaded[tpl.path]}
+                // `null` until the S3 listing settles — the badge would
+                // otherwise read "Missing" for every form on first paint.
+                isUploaded={uploadedRes.loaded ? !!uploaded[tpl.path] : null}
                 busy={busy === tpl.path}
                 fieldNames={fields[tpl.path]}
                 onUpload={(f) => upload(tpl, f)}
@@ -175,7 +199,8 @@ function TemplateRow({
   onCloseFields,
 }: {
   tpl: TemplateDef;
-  isUploaded: boolean;
+  /** `null` while the S3 listing is still in flight — presence is unknown. */
+  isUploaded: boolean | null;
   busy: boolean;
   fieldNames: string[] | undefined;
   onUpload: (file: File | undefined) => void;
@@ -198,12 +223,16 @@ function TemplateRow({
         <td>
           {/* One-off pair: this is the only place a template's presence is
               badged, so the wording stays at the call site. */}
-          <Badge
-            {...flagBadge(isUploaded, {
-              on: { cls: "green", label: "Uploaded" },
-              off: { cls: "amber", label: "Missing" },
-            })}
-          />
+          {isUploaded === null ? (
+            <span className="muted small">—</span>
+          ) : (
+            <Badge
+              {...flagBadge(isUploaded, {
+                on: { cls: "green", label: "Uploaded" },
+                off: { cls: "amber", label: "Missing" },
+              })}
+            />
+          )}
         </td>
         <td style={{ whiteSpace: "nowrap" }}>
           <div className="toolbar" style={{ margin: 0 }}>

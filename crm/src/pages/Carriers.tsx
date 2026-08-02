@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   client,
@@ -11,10 +11,9 @@ import { Badge, flagBadge, CARRIER_APPOINTMENT_BADGE } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
 import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
+import { useAsyncResource } from "../lib/useAsyncResource";
 
 export default function Carriers() {
-  const [carriers, setCarriers] = useState<Carrier[]>([]);
-  const [guides, setGuides] = useState<AppetiteGuide[]>([]);
   const [showForm, setShowForm] = useState(false);
   // Persistent: a successful create navigates away, so what this is really
   // for is the failure that used to be swallowed entirely.
@@ -25,10 +24,22 @@ export default function Carriers() {
   );
   const navigate = useNavigate();
 
-  useEffect(() => {
-    client.models.Carrier.list().then(({ data }) => setCarriers(data));
-    client.models.AppetiteGuide.list().then(({ data }) => setGuides(data));
-  }, []);
+  const carrierRes = useAsyncResource(
+    async () => (await client.models.Carrier.list()).data,
+    [],
+    { initialData: [] as Carrier[], errorMessage: "Failed to load carriers" }
+  );
+  const carriers = carrierRes.data;
+
+  // Surfaced, not ignored: the guides drive the appetite finder's verdict and
+  // the "Lines written" column. Without them the finder answers "no appetite"
+  // for every risk, which is a wrong answer rather than a missing one.
+  const guideRes = useAsyncResource(
+    async () => (await client.models.AppetiteGuide.list()).data,
+    [],
+    { initialData: [] as AppetiteGuide[], errorMessage: "Failed to load appetite guides" }
+  );
+  const guides = guideRes.data;
 
   const { sorted, sortKey, dir, toggle } = useSort(
     carriers,
@@ -64,7 +75,13 @@ export default function Carriers() {
       <h1>Carriers</h1>
       <p className="sub">Appointments, prospective appointments, and appetite guides</p>
 
-      <AppetiteFinder carriers={carriers} guides={guides} />
+      {/* Gated on `loaded`: the finder answers "no appointed carrier has
+          appetite for this risk", and before the reads land that is a false
+          negative rather than a placeholder. */}
+      {carrierRes.loaded && guideRes.loaded && (
+        <AppetiteFinder carriers={carriers} guides={guides} />
+      )}
+      {guideRes.error && <p className="error-text">{guideRes.error}</p>}
 
       <div className="toolbar">
         <div className="grow" />
@@ -105,7 +122,11 @@ export default function Carriers() {
       )}
 
       <div className="card">
-        {carriers.length === 0 ? (
+        {!carrierRes.loaded ? (
+          <p className="muted small">Loading…</p>
+        ) : carrierRes.error ? (
+          <p className="error-text">{carrierRes.error}</p>
+        ) : carriers.length === 0 ? (
           <p className="muted small">No carriers yet.</p>
         ) : (
           <div className="table-wrap">

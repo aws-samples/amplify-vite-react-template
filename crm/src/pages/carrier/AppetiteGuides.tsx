@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   client,
   fmtMoney,
@@ -9,24 +9,32 @@ import {
   type AppetiteGuide,
 } from "../../lib/client";
 import ConfirmButton from "../../components/ConfirmButton";
+import { useAsyncResource } from "../../lib/useAsyncResource";
 import { useFormState } from "../../lib/useFormState";
 
 export function AppetiteGuides({ carrierId }: { carrierId: string }) {
-  const [guides, setGuides] = useState<AppetiteGuide[]>([]);
+  const res = useAsyncResource(
+    async () =>
+      (await listAllPages((nextToken) =>
+        client.models.AppetiteGuide.list({
+          filter: { carrierId: { eq: carrierId } },
+          limit: 500,
+          nextToken,
+        })
+      )) as AppetiteGuide[],
+    [carrierId],
+    {
+      initialData: [] as AppetiteGuide[],
+      // A failed read said "No appetite guides recorded.", so the next step is
+      // adding a duplicate of a guide that already exists.
+      errorMessage: "Failed to load appetite guides",
+    }
+  );
+  const guides = res.data;
+  const setGuides = res.setData;
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<AppetiteGuide | null>(null);
 
-  function load() {
-    listAllPages((nextToken) =>
-      client.models.AppetiteGuide.list({
-        filter: { carrierId: { eq: carrierId } },
-        limit: 500,
-        nextToken,
-      })
-    ).then((data) => setGuides(data as AppetiteGuide[]));
-  }
-
-  useEffect(load, [carrierId]);
 
   async function del(id: string) {
     await client.models.AppetiteGuide.delete({ id });
@@ -75,7 +83,11 @@ export function AppetiteGuides({ carrierId }: { carrierId: string }) {
         />
       )}
 
-      {guides.length === 0 ? (
+      {!res.loaded ? (
+        <p className="muted small">Loading…</p>
+      ) : res.error ? (
+        <p className="error-text">{res.error}</p>
+      ) : guides.length === 0 ? (
         <p className="muted small">No appetite guides recorded.</p>
       ) : (
         <div className="table-wrap">

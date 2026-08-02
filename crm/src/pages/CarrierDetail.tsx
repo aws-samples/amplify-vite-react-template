@@ -1,21 +1,32 @@
-import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { client, type Carrier } from "../lib/client";
 import { Badge, flagBadge, CARRIER_APPOINTMENT_BADGE } from "../lib/badges";
 import DocumentsPanel from "../components/DocumentsPanel";
 import { CarrierForm } from "./carrier/CarrierForm";
 import { AppetiteGuides } from "./carrier/AppetiteGuides";
+import { useAsyncResource } from "../lib/useAsyncResource";
 
 export default function CarrierDetail() {
   const { id } = useParams<{ id: string }>();
-  const [carrier, setCarrier] = useState<Carrier | null>(null);
 
-  useEffect(() => {
-    if (!id) return;
-    client.models.Carrier.get({ id }).then(({ data }) => setCarrier(data));
-  }, [id]);
+  /**
+   * `!carrier` used to be the whole state machine: in-flight, failed,
+   * not-found and no-route-param all rendered "Loading…", the last three
+   * forever. Each now has its own answer.
+   */
+  const res = useAsyncResource(
+    async () => {
+      if (!id) return null;
+      return (await client.models.Carrier.get({ id })).data;
+    },
+    [id],
+    { initialData: null as Carrier | null, errorMessage: "Failed to load carrier" }
+  );
+  const carrier = res.data;
 
-  if (!carrier) return <p className="muted">Loading…</p>;
+  if (!res.loaded) return <p className="muted">Loading…</p>;
+  if (res.error) return <p className="error-text">{res.error}</p>;
+  if (!carrier) return <p>Carrier not found.</p>;
 
   return (
     <>
@@ -25,7 +36,7 @@ export default function CarrierDetail() {
       </h1>
       <p className="sub">Carrier appointment &amp; appetite</p>
 
-      <CarrierForm carrier={carrier} onChange={setCarrier} />
+      <CarrierForm carrier={carrier} onChange={res.setData} />
       <AppetiteGuides carrierId={carrier.id} />
 
       <div className="card">

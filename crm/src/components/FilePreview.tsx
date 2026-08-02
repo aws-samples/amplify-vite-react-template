@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
 import { getUrl } from "aws-amplify/storage";
-import { friendlyError } from "../lib/client";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import Modal from "./Modal";
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
@@ -29,14 +28,13 @@ export default function FilePreviewModal({
   name: string;
   onClose: () => void;
 }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    getUrl({ path: s3Key })
-      .then(({ url }) => setUrl(url.toString()))
-      .catch((err) => setError(friendlyError(err, "Could not load file")));
-  }, [s3Key]);
+  const res = useAsyncResource(
+    async () => (await getUrl({ path: s3Key })).url.toString(),
+    [s3Key],
+    { initialData: null as string | null, errorMessage: "Could not load file" }
+  );
+  const url = res.data;
+  const error = res.error;
 
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   const isImage = IMAGE_EXT.has(ext);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   client,
@@ -20,39 +20,106 @@ import {
 } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
 import { openQuoteStatusFilter } from "../lib/quoteStatus";
+import { useAsyncResource } from "../lib/useAsyncResource";
+
+/** Every slice the dashboard renders, read in one pass. */
+interface DashboardData {
+  leads: Account[];
+  clients: Account[];
+  openQuotes: Quote[];
+  policies: Policy[];
+  carriers: Carrier[];
+  openTasks: number;
+}
+
+const EMPTY: DashboardData = {
+  leads: [],
+  clients: [],
+  openQuotes: [],
+  policies: [],
+  carriers: [],
+  openTasks: 0,
+};
 
 export default function Dashboard() {
-  const [leads, setLeads] = useState<Account[]>([]);
-  const [clients, setClients] = useState<Account[]>([]);
-  const [openQuotes, setOpenQuotes] = useState<Quote[]>([]);
-  const [policies, setPolicies] = useState<Policy[]>([]);
-  const [carriers, setCarriers] = useState<Carrier[]>([]);
-  const [openTasks, setOpenTasks] = useState(0);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    listAllPages((nextToken) =>
-      client.models.Account.list({ filter: { stage: { eq: "LEAD" } }, nextToken })
-    ).then((data) => setLeads(data));
-    listAllPages((nextToken) =>
-      client.models.Account.list({ filter: { stage: { eq: "CLIENT" } }, nextToken })
-    ).then((data) => setClients(data));
-    listAllPages((nextToken) =>
-      client.models.Quote.list({
-        filter: openQuoteStatusFilter(),
-        nextToken,
-      })
-    ).then((data) => setOpenQuotes(data));
-    client.models.Policy.list().then(({ data }) => setPolicies(data));
-    client.models.Carrier.list().then(({ data }) => setCarriers(data));
-    listAllPages((nextToken) =>
-      client.models.MarketingTask.list({
-        filter: { status: { eq: "OPEN" } },
-        limit: 500,
-        nextToken,
-      })
-    ).then((data) => setOpenTasks(data.length));
-  }, []);
+  /**
+   * One resource, not six.
+   *
+   * These were six independent `.then(setX)` chains with no error state, so a
+   * failed read left its slice at zero and the page rendered a complete,
+   * plausible, all-zero dashboard — indistinguishable from a brand-new agency.
+   * Every tile and both cards read from this one machine, so there is now
+   * exactly one answer to "did the numbers arrive".
+   *
+   * `Promise.all` fails fast, so one bad query blanks the page rather than
+   * showing the slices that worked. That is the trade: a partial dashboard
+   * cannot say which half of itself is real.
+   */
+  const res = useAsyncResource<DashboardData>(
+    async () => {
+      const [leads, clients, openQuotes, policyRes, carrierRes, tasks] =
+        await Promise.all([
+          listAllPages((nextToken) =>
+            client.models.Account.list({
+              filter: { stage: { eq: "LEAD" } },
+              nextToken,
+            })
+          ),
+          listAllPages((nextToken) =>
+            client.models.Account.list({
+              filter: { stage: { eq: "CLIENT" } },
+              nextToken,
+            })
+          ),
+          listAllPages((nextToken) =>
+            client.models.Quote.list({
+              filter: openQuoteStatusFilter(),
+              nextToken,
+            })
+          ),
+          client.models.Policy.list(),
+          client.models.Carrier.list(),
+          listAllPages((nextToken) =>
+            client.models.MarketingTask.list({
+              filter: { status: { eq: "OPEN" } },
+              limit: 500,
+              nextToken,
+            })
+          ),
+        ]);
+      return {
+        leads,
+        clients,
+        openQuotes,
+        policies: policyRes.data,
+        carriers: carrierRes.data,
+        // Only the count is rendered; the rows are not worth holding.
+        openTasks: tasks.length,
+      };
+    },
+    [],
+    { initialData: EMPTY, errorMessage: "Failed to load the dashboard" }
+  );
+  const { leads, clients, openQuotes, policies, carriers, openTasks } = res.data;
+
+  // Heading first, then one gate over everything derived from the read — the
+  // tiles and both cards are all statements about the data, and none of them
+  // can be made until it has arrived.
+  if (!res.loaded || res.error) {
+    return (
+      <>
+        <h1>Dashboard</h1>
+        <p className="sub">Pipeline at a glance</p>
+        {res.error ? (
+          <p className="error-text">{res.error}</p>
+        ) : (
+          <p className="muted small">Loading…</p>
+        )}
+      </>
+    );
+  }
 
   return (
     <>

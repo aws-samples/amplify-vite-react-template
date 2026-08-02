@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { uploadData } from "aws-amplify/storage";
 import {
   client,
@@ -18,6 +18,7 @@ import {
 } from "../lib/acord";
 import type { UserProfile } from "../lib/client";
 import { useSort, SortTh } from "../lib/useSort";
+import { useAsyncResource } from "../lib/useAsyncResource";
 import FilePreviewModal from "./FilePreview";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
@@ -35,7 +36,28 @@ export default function FormsTab({
   account: Account;
   profile: UserProfile;
 }) {
-  const [generated, setGenerated] = useState<CrmDocument[]>([]);
+  const genRes = useAsyncResource(
+    () =>
+      listAllPages((nextToken) =>
+        client.models.Document.list({
+          filter: {
+            entityId: { eq: account.id },
+            category: { eq: "ACORD_FORM" },
+          },
+          nextToken,
+        })
+      ),
+    [account.id],
+    {
+      initialData: [] as CrmDocument[],
+      // A failed read renders "Nothing generated yet.", so the user
+      // regenerates a form that already exists and gets a duplicate row plus
+      // a duplicate S3 object.
+      errorMessage: "Failed to load generated forms",
+    }
+  );
+  const generated = genRes.data;
+  const setGenerated = genRes.setData;
   // Which row's button reads "Generating…" — per-row, so it stays. The
   // outcome is panel-level and belongs to the status machine.
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -44,17 +66,6 @@ export default function FormsTab({
   const genStatus = useSaveStatus();
   const [preview, setPreview] = useState<CrmDocument | null>(null);
 
-  useEffect(() => {
-    listAllPages((nextToken) =>
-      client.models.Document.list({
-        filter: {
-          entityId: { eq: account.id },
-          category: { eq: "ACORD_FORM" },
-        },
-        nextToken,
-      })
-    ).then((data) => setGenerated(data));
-  }, [account.id]);
 
   // Most recently generated first, as the fetch used to order them.
   const { sorted, sortKey, dir, toggle } = useSort(
@@ -234,7 +245,11 @@ export default function FormsTab({
 
       <div className="card">
         <h2>Generated forms</h2>
-        {generated.length === 0 ? (
+        {!genRes.loaded ? (
+          <p className="muted small">Loading…</p>
+        ) : genRes.error ? (
+          <p className="error-text">{genRes.error}</p>
+        ) : generated.length === 0 ? (
           <p className="muted small">Nothing generated yet.</p>
         ) : (
           <div className="table-wrap">

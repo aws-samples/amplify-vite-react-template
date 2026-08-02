@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   client,
@@ -10,18 +10,35 @@ import {
 } from "../lib/client";
 import { Badge, statusBadge, POLICY_STATUS_BADGE } from "../lib/badges";
 import { useSort, SortTh } from "../lib/useSort";
+import { useAsyncResource } from "../lib/useAsyncResource";
 
 export default function PoliciesList() {
-  const [policies, setPolicies] = useState<Policy[]>([]);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [carriers, setCarriers] = useState<Carrier[]>([]);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    client.models.Policy.list().then(({ data }) => setPolicies(data));
-    client.models.Account.list().then(({ data }) => setAccounts(data));
-    client.models.Carrier.list().then(({ data }) => setCarriers(data));
-  }, []);
+  const policyRes = useAsyncResource(
+    async () => (await client.models.Policy.list()).data,
+    [],
+    { initialData: [] as Policy[], errorMessage: "Failed to load policies" }
+  );
+  const policies = policyRes.data;
+
+  // Name lookups, separate hooks with [] deps so they are read once. Their
+  // errors are surfaced rather than ignored: without them every row's account
+  // and carrier cell falls back to "—", which reads as a policy with none set
+  // rather than as a failed read.
+  const accountRes = useAsyncResource(
+    async () => (await client.models.Account.list()).data,
+    [],
+    { initialData: [] as Account[], errorMessage: "Failed to load account names" }
+  );
+  const accounts = accountRes.data;
+
+  const carrierRes = useAsyncResource(
+    async () => (await client.models.Carrier.list()).data,
+    [],
+    { initialData: [] as Carrier[], errorMessage: "Failed to load carrier names" }
+  );
+  const carriers = carrierRes.data;
 
   const accountName = useMemo(
     () => new Map(accounts.map((a) => [a.id, a.name])),
@@ -52,8 +69,15 @@ export default function PoliciesList() {
       <h1>Policies</h1>
       <p className="sub">All bound policies — soonest expiration first</p>
 
+      {accountRes.error && <p className="error-text">{accountRes.error}</p>}
+      {carrierRes.error && <p className="error-text">{carrierRes.error}</p>}
+
       <div className="card">
-        {sorted.length === 0 ? (
+        {!policyRes.loaded ? (
+          <p className="muted small">Loading…</p>
+        ) : policyRes.error ? (
+          <p className="error-text">{policyRes.error}</p>
+        ) : sorted.length === 0 ? (
           <p className="muted small">No policies bound yet.</p>
         ) : (
           <div className="table-wrap">

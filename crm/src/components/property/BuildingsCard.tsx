@@ -1,17 +1,30 @@
-import { useEffect, useState } from "react";
 import {
   client,
   fmtNum,
   listAllPages,
   type Building,
 } from "../../lib/client";
+import { useAsyncResource } from "../../lib/useAsyncResource";
 import ConfirmButton from "../ConfirmButton";
 import { useSort, SortTh } from "../../lib/useSort";
 import { useFormState } from "../../lib/useFormState";
 import { SaveStatus, useSaveStatus } from "../SaveStatus";
 
 export default function BuildingsCard({ accountId }: { accountId: string }) {
-  const [buildings, setBuildings] = useState<Building[]>([]);
+  const res = useAsyncResource(
+    () =>
+      listAllPages((nextToken) =>
+        client.models.Building.list({
+          filter: { accountId: { eq: accountId } },
+          nextToken,
+        })
+      ),
+    [accountId],
+    { initialData: [] as Building[], errorMessage: "Failed to load buildings" }
+  );
+  const buildings = res.data;
+  const setBuildings = res.setData;
+
   // Persistent: the new row is on screen next to the confirmation, so the
   // message keeps describing something the user can still see.
   const addStatus = useSaveStatus();
@@ -27,15 +40,6 @@ export default function BuildingsCard({ accountId }: { accountId: string }) {
   // Auto-clearing: the row a delete confirmation refers to is gone, so
   // nothing here will ever go dirty and clear it.
   const delStatus = useSaveStatus({ autoClearMs: 4000 });
-
-  useEffect(() => {
-    listAllPages((nextToken) =>
-      client.models.Building.list({
-        filter: { accountId: { eq: accountId } },
-        nextToken,
-      })
-    ).then((data) => setBuildings(data));
-  }, [accountId]);
 
   async function add() {
     const n = Number(form.sqft);
@@ -97,11 +101,23 @@ export default function BuildingsCard({ accountId }: { accountId: string }) {
     <div className="card">
       <h2>
         Buildings{" "}
-        <span className="muted small" style={{ fontWeight: 400 }}>
-          — {buildings.length} total
-          {totalSqft ? ` · ${fmtNum(totalSqft)} sq ft` : ""}
-        </span>
+        {res.loaded && !res.error && (
+          <span className="muted small" style={{ fontWeight: 400 }}>
+            — {buildings.length} total
+            {totalSqft ? ` · ${fmtNum(totalSqft)} sq ft` : ""}
+          </span>
+        )}
       </h2>
+
+      {/* The add form defaults its label to `Building ${buildings.length + 1}`,
+          so offering it before the read lands would number a new building over
+          an existing one. Gating the body on `loaded` is what prevents that. */}
+      {!res.loaded ? (
+        <p className="muted small">Loading…</p>
+      ) : res.error ? (
+        <p className="error-text">{res.error}</p>
+      ) : (
+        <>
       <div className="toolbar">
         <div className="field">
           <label>Label</label>
@@ -173,6 +189,8 @@ export default function BuildingsCard({ accountId }: { accountId: string }) {
             </tbody>
           </table>
         </div>
+      )}
+        </>
       )}
     </div>
   );

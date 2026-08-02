@@ -134,3 +134,76 @@ when a deploy would happen, and blocks it.
 `astro check` script, and adding one needs `@astrojs/check` + `typescript` as devDependencies.
 Until that exists, nothing verifies `web/src` — including the four `(window as any).gtag` sites
 and the `CrmLeadInput` shape the CRM depends on.
+
+---
+
+## One async read, one `useAsyncResource`
+
+**Rule.** A component that reads data does it through `crm/src/lib/useAsyncResource.ts`. No
+`useState` + `useEffect` + `.then(setX)`. The hook owns `data` / `loading` / `loaded` / `error` /
+`refetch` / `setData`, and every one of those is something the hand-rolled version got wrong
+somewhere.
+
+**Why.** Thirteen files hand-rolled it, and **not one had a `.catch()` on the read, a
+cancellation, or a read-path error state.** Every one used "the array is still empty" as the
+loading gate, so in-flight, failed and genuinely-empty were the same pixels. Concretely, before
+this: Dashboard rendered a complete all-zero summary during a total outage; `CarrierDetail` and
+`AccountDetail` sat on `Loading…` forever on a failed read because `!data` *was* the gate;
+`AllMarketingTasks` set `loaded` on the success path only, so a throw wedged it; `Settings`
+asserted "N templates not uploaded yet" before the S3 listing returned.
+
+**The gate.** One ternary chain, in this order, and `!loaded` rather than `loading` wherever a
+refetch must not flash the placeholder:
+
+```tsx
+{!res.loaded ? (
+  <p className="muted small">Loading…</p>
+) : res.error ? (
+  <p className="error-text">{res.error}</p>
+) : rows.length === 0 ? (
+  <p className="muted small">No … .</p>
+) : (
+  <div className="table-wrap">
+```
+
+An optional card that hides when empty uses `if (!loaded) return null;` then an error card —
+`MarketingTasks.tsx` is the reference. Loading text is `Loading…` (U+2026) in `muted small`;
+errors are a bare `<p className="error-text">{error}</p>`.
+
+**Three rules that are easy to get wrong.**
+
+1. **Agency-wide lookup tables are a separate hook with `[]` deps**, never folded into the
+   entity's fetcher — otherwise switching account re-reads the carrier table and blanks every
+   carrier name mid-render.
+2. **Decide each secondary's error; never leave it dangling.** Ignore it where the table is worth
+   showing without it (`AccountsList`'s renewal dates). Surface it where its absence is
+   indistinguishable from real data — a missing carrier name renders `—`, which reads as "no
+   carrier set" rather than "the read failed". `CertificatesTab`'s carrier read is the sharp
+   case: it feeds `fillAcord25`, so a swallowed failure ships a certificate PDF with a blank
+   insurer block.
+3. **Never render an assertion about data you do not have yet.** A count, a verdict, or a
+   warning derived from an unsettled read is a wrong answer, not a placeholder. Gate it on
+   `loaded`.
+
+**Fuse or split?** Fuse related reads into one resource with `Promise.all` when they are one
+logical thing the screen cannot partially mean — `Dashboard`'s six queries, `App.tsx`'s profile +
+groups, `AccountMarketingTasks`' tasks + quotes. Split when one is an independent lookup table.
+Fusing costs fail-fast: one bad query blanks the screen instead of showing the parts that worked.
+For a summary screen that is the right trade, because a partial dashboard cannot say which half
+of itself is real.
+
+**What does not fit.** `ExtractionPanel`'s 4-second poll stays hand-rolled, for five reasons
+worth keeping written down: it is an interval rather than fetch-per-deps; it is conditional on
+`status`; its result is lifted to the parent via `onChange` instead of held locally; it
+deliberately drops most successful polls via a diff check so the user's checkbox selections are
+not stomped; and a poll failure must stay silent, which the hook's always-write-error invariant
+forbids. `SignatureManager` and `PhotosCard` also stay: the hook has **no skip/`enabled`
+option**, and both need a conditional fetch. `PhotosCard` still has no `.catch()` on its
+thumbnail read — a genuine unhandled rejection, still open.
+
+**Verifying a migration.** The CRM is behind Cognito magic-link auth, so these screens cannot be
+driven in a browser without a real sign-in. `MarketingTasks.test.tsx` is the substitute and the
+template: stub `generateClient` (per `client.test.ts`), then assert all four states — in-flight,
+error, empty, content — and specifically that the error state shows **neither** the empty message
+**nor** a stuck loader. Prove such a test has teeth by reverting the component to its
+hand-rolled shape and watching it fail.
