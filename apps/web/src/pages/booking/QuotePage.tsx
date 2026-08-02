@@ -1214,7 +1214,7 @@ export default function QuotePage() {
                     {fieldError("address.state")}
                   </div>
                   <div className="bk-field">
-                    <label htmlFor="bq-zip">Zip</label>
+                    <label htmlFor="bq-zip">Zip *</label>
                     <input
                       id="bq-zip"
                       type="text"

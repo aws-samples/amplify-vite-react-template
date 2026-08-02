@@ -133,13 +133,13 @@ export function assertOwner(
  * Only case (3) costs a read: owners and ordinary portal customers return on the
  * token alone, so the existing hot path is unchanged.
  */
-export async function assertCanActForCustomer(
+export async function canActForCustomer(
   identity: AppSyncIdentity | undefined | null,
   customerId: string
-): Promise<void> {
+): Promise<boolean> {
   const groups = callerGroups(identity);
   if (groups.includes("OWNER") || groups.includes(cusGroup(customerId))) {
-    return;
+    return true;
   }
   // Only a token that carries a group membership can possibly qualify — anything
   // else is refused without touching the database.
@@ -152,7 +152,21 @@ export async function assertCanActForCustomer(
     const stamped = (customer?.accessGroups ?? []).filter(
       (g): g is string => typeof g === "string"
     );
-    if (stamped.some((g) => callerGrpGroups.includes(g))) return;
+    if (stamped.some((g) => callerGrpGroups.includes(g))) return true;
   }
-  throw new Error("Not authorized for this customer");
+  return false;
+}
+
+/**
+ * The throwing form, for write paths. Read paths that fold this into a wider
+ * entitlement (a technician proven against a specific document, say) should
+ * call `canActForCustomer` and decide for themselves rather than catching.
+ */
+export async function assertCanActForCustomer(
+  identity: AppSyncIdentity | undefined | null,
+  customerId: string
+): Promise<void> {
+  if (!(await canActForCustomer(identity, customerId))) {
+    throw new Error("Not authorized for this customer");
+  }
 }

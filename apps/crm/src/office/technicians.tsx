@@ -10,6 +10,7 @@ import {
   type Technician,
   type TechnicianLicenseRecord,
 } from "../lib/api";
+import { useAction, useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
 import {
@@ -51,35 +52,28 @@ export function technicianComplianceIssue(
  * place.
  */
 export function TechnicianRoster() {
-  const [techs, setTechs] = useState<Technician[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<Technician | null>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error, reload } = useAsync<Technician[]>(
+    async () => {
       const all = await listAll((t) =>
         api().models.Technician.list({ limit: 200, nextToken: t })
       );
       // Active first, then by name — the same order the Schedule board reads
       // them in, so the two lists never feel like different rosters.
-      setTechs(
-        [...all].sort(
-          (a, b) =>
-            Number(!!b.active) - Number(!!a.active) ||
-            (a.name ?? "").localeCompare(b.name ?? "")
-        )
+      return [...all].sort(
+        (a, b) =>
+          Number(!!b.active) - Number(!!a.active) ||
+          (a.name ?? "").localeCompare(b.name ?? "")
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load technicians");
-      setTechs([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+    },
+    [],
+    "Could not load technicians"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const techs = data ?? (error ? [] : null);
 
   return (
     <Card
@@ -142,7 +136,7 @@ export function TechnicianRoster() {
           <TechForm
             onDone={async () => {
               setAdding(false);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -158,7 +152,7 @@ export function TechnicianRoster() {
             existing={editing}
             onDone={async () => {
               setEditing(null);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -183,7 +177,6 @@ function LicenseRecords({ technicianId }: { technicianId: string }) {
   const [expiresOn, setExpiresOn] = useState("");
   const [evidenceNote, setEvidenceNote] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -210,54 +203,53 @@ function LicenseRecords({ technicianId }: { technicianId: string }) {
     void load();
   }, [load]);
 
-  const addRecord = async () => {
+  // The licence history is append-only and every record is dispatch evidence —
+  // a double-click used to file the same renewal twice.
+  const addRecord = useAction(async () => {
     if (!number.trim()) {
-      setError("The licence number is required");
-      return;
+      throw new Error("The licence number is required");
     }
-    setBusy("add");
-    setError(null);
-    try {
-      const res = await saveTechnicianLicense({
-        technicianId,
-        number: number.trim(),
-        licenseType: licenseType.trim() || undefined,
-        issuer: issuer.trim() || undefined,
-        expiresOn: expiresOn || undefined,
-        evidenceNote: evidenceNote.trim() || undefined,
+    const res = await saveTechnicianLicense({
+      technicianId,
+      number: number.trim(),
+      licenseType: licenseType.trim() || undefined,
+      issuer: issuer.trim() || undefined,
+      expiresOn: expiresOn || undefined,
+      evidenceNote: evidenceNote.trim() || undefined,
+    });
+    if (res.errors?.length) throw new Error(res.errors[0].message);
+    setNumber("");
+    setLicenseType("");
+    setIssuer("");
+    setExpiresOn("");
+    setEvidenceNote("");
+    setAdding(false);
+    await load();
+  }, "Could not save the licence");
+
+  const applyStatus = useAction(
+    async (rec: TechnicianLicenseRecord, status: string, reason: string) => {
+      const res = await setLicenseStatus({
+        licenseId: rec.id,
+        status,
+        reason,
       });
       if (res.errors?.length) throw new Error(res.errors[0].message);
-      setNumber("");
-      setLicenseType("");
-      setIssuer("");
-      setExpiresOn("");
-      setEvidenceNote("");
-      setAdding(false);
       await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save the licence");
-    } finally {
-      setBusy(null);
-    }
-  };
+    },
+    "Could not change the status"
+  );
 
+  // `busy` stays: the gate allows one status change at a time, but the record
+  // being changed still needs its own spinner.
   const changeStatus = async (rec: TechnicianLicenseRecord, status: string) => {
     const reason = window.prompt(
       `Set licence ${rec.number} to ${status.toLowerCase()} — why? (recorded)`
     );
     if (!reason?.trim()) return;
     setBusy(rec.id);
-    setError(null);
     try {
-      const res = await setLicenseStatus({
-        licenseId: rec.id,
-        status,
-        reason: reason.trim(),
-      });
-      if (res.errors?.length) throw new Error(res.errors[0].message);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not change the status");
+      await applyStatus.run(rec, status, reason.trim());
     } finally {
       setBusy(null);
     }
@@ -355,12 +347,16 @@ function LicenseRecords({ technicianId }: { technicianId: string }) {
             onChange={(e) => setEvidenceNote(e.target.value)}
             placeholder="Evidence (document ref, where it's filed)"
           />
-          <Button small loading={busy === "add"} onClick={() => void addRecord()}>
+          <Button
+            small
+            loading={addRecord.busy}
+            onClick={() => void addRecord.run()}
+          >
             Save licence record
           </Button>
         </>
       )}
-      <ErrorNote error={error} />
+      <ErrorNote error={addRecord.error ?? applyStatus.error} />
     </Field>
   );
 }
@@ -400,8 +396,6 @@ function TechForm({
   // A technician saved on an earlier attempt whose invite then failed — reused
   // on retry so every attempt doesn't leave another Technician record behind.
   const [createdTechId, setCreatedTechId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   // GL-14: the Schedule entrance to offboarding carries the same controlled
   // reason and stable idempotency key the Staff entrance does, and shows the
   // PERSISTED outcome — never an assumed success.
@@ -424,14 +418,11 @@ function TechForm({
   // record saved, the invite errored, and the error taught them errors are normal.
   const sendInvite = !existing && roles.owner && invite;
 
-  const runOffboard = async () => {
+  const runOffboard = useAction(async () => {
     if (!existing) return;
     if (offboardReason === "OTHER" && !offboardNote.trim()) {
-      setError("Choosing 'Other' needs a short note saying why.");
-      return;
+      throw new Error("Choosing 'Other' needs a short note saying why.");
     }
-    setBusy(true);
-    setError(null);
     try {
       const res = await api().mutations.deactivateTechnician({
         technicianId: existing.id,
@@ -451,7 +442,6 @@ function TechForm({
         // The persisted partial/in-progress outcome, with its one next step —
         // the same key resumes it.
         setOffboardOutcome(data);
-        setBusy(false);
         return;
       }
       await onDone();
@@ -467,10 +457,103 @@ function TechForm({
       // A refusal changed nothing; a fresh key lets a corrected request start
       // clean.
       setOffboardKey(globalThis.crypto?.randomUUID?.() ?? `k-${Date.now()}`);
-      setError(err instanceof Error ? err.message : "Could not offboard technician");
-      setBusy(false);
+      throw err;
     }
-  };
+  }, "Could not offboard technician");
+
+  // Without the gate, a second press before the first save returned created a
+  // SECOND technician record — the same duplication `createdTechId` exists to
+  // stop on a retry.
+  const save = useAction(async () => {
+    if (!name.trim()) {
+      throw new Error("Name is required");
+    }
+    if (sendInvite && !email.trim()) {
+      throw new Error("Email is required to send a login invite");
+    }
+    if (!licenseNumber.trim() || !licenseExpiresOn) {
+      throw new Error(
+        "Applicator license number and expiration date are required before activation"
+      );
+    }
+    if (existing) {
+      opResult(
+        await api().mutations.saveTechnician({
+          technicianId: existing.id,
+          name: name.trim(),
+          email: email.trim() || undefined,
+          phone: phone.trim() || undefined,
+          active: true,
+          licenseNumber: licenseNumber.trim(),
+          licenseExpiresOn,
+          baseStreet: baseStreet.trim() || undefined,
+          baseCity: baseCity.trim() || undefined,
+          baseState: baseState.trim() || undefined,
+          baseZip: baseZip.trim() || undefined,
+        })
+      );
+      await onDone();
+      return;
+    }
+    // Retry after a failed invite updates the already-saved record
+    // instead of creating a duplicate technician per attempt.
+    let technicianId = createdTechId;
+    if (technicianId) {
+      opResult(
+        await api().mutations.saveTechnician({
+          technicianId,
+          name: name.trim(),
+          email: email.trim() || undefined,
+          phone: phone.trim() || undefined,
+          active: true,
+          licenseNumber: licenseNumber.trim(),
+          licenseExpiresOn,
+          baseStreet: baseStreet.trim() || undefined,
+          baseCity: baseCity.trim() || undefined,
+          baseState: baseState.trim() || undefined,
+          baseZip: baseZip.trim() || undefined,
+        })
+      );
+    } else {
+      const saved = opResult<{ technicianId?: string }>(
+        await api().mutations.saveTechnician({
+          name: name.trim(),
+          email: email.trim() || undefined,
+          phone: phone.trim() || undefined,
+          active: true,
+          licenseNumber: licenseNumber.trim(),
+          licenseExpiresOn,
+          baseStreet: baseStreet.trim() || undefined,
+          baseCity: baseCity.trim() || undefined,
+          baseState: baseState.trim() || undefined,
+          baseZip: baseZip.trim() || undefined,
+        })
+      );
+      technicianId = saved?.technicianId ?? null;
+      if (!technicianId) throw new Error("Could not save technician");
+      setCreatedTechId(technicianId);
+    }
+    if (sendInvite && technicianId) {
+      try {
+        unwrap(
+          await api().mutations.adminCreateUser({
+            email: email.trim(),
+            name: name.trim(),
+            roles: ["TECH"],
+            technicianId,
+          })
+        );
+      } catch (err) {
+        // The technician exists; only the login invite failed. Say
+        // exactly that, so retrying (which reuses the record) is the
+        // obvious move.
+        throw new Error(
+          `Technician saved, but the login invite failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+    await onDone();
+  }, "Could not save technician");
 
   return (
     <div className="form-grid">
@@ -549,110 +632,8 @@ function TechForm({
           </p>
         )
       ) : null}
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          if (!name.trim()) {
-            setError("Name is required");
-            return;
-          }
-          if (sendInvite && !email.trim()) {
-            setError("Email is required to send a login invite");
-            return;
-          }
-          if (!licenseNumber.trim() || !licenseExpiresOn) {
-            setError(
-              "Applicator license number and expiration date are required before activation"
-            );
-            return;
-          }
-          setBusy(true);
-          (async () => {
-            if (existing) {
-              opResult(
-                await api().mutations.saveTechnician({
-                  technicianId: existing.id,
-                  name: name.trim(),
-                  email: email.trim() || undefined,
-                  phone: phone.trim() || undefined,
-                  active: true,
-                  licenseNumber: licenseNumber.trim(),
-                  licenseExpiresOn,
-                  baseStreet: baseStreet.trim() || undefined,
-                  baseCity: baseCity.trim() || undefined,
-                  baseState: baseState.trim() || undefined,
-                  baseZip: baseZip.trim() || undefined,
-                })
-              );
-              await onDone();
-              return;
-            }
-            // Retry after a failed invite updates the already-saved record
-            // instead of creating a duplicate technician per attempt.
-            let technicianId = createdTechId;
-            if (technicianId) {
-              opResult(
-                await api().mutations.saveTechnician({
-                  technicianId,
-                  name: name.trim(),
-                  email: email.trim() || undefined,
-                  phone: phone.trim() || undefined,
-                  active: true,
-                  licenseNumber: licenseNumber.trim(),
-                  licenseExpiresOn,
-                  baseStreet: baseStreet.trim() || undefined,
-                  baseCity: baseCity.trim() || undefined,
-                  baseState: baseState.trim() || undefined,
-                  baseZip: baseZip.trim() || undefined,
-                })
-              );
-            } else {
-              const saved = opResult<{ technicianId?: string }>(
-                await api().mutations.saveTechnician({
-                  name: name.trim(),
-                  email: email.trim() || undefined,
-                  phone: phone.trim() || undefined,
-                  active: true,
-                  licenseNumber: licenseNumber.trim(),
-                  licenseExpiresOn,
-                  baseStreet: baseStreet.trim() || undefined,
-                  baseCity: baseCity.trim() || undefined,
-                  baseState: baseState.trim() || undefined,
-                  baseZip: baseZip.trim() || undefined,
-                })
-              );
-              technicianId = saved?.technicianId ?? null;
-              if (!technicianId) throw new Error("Could not save technician");
-              setCreatedTechId(technicianId);
-            }
-            if (sendInvite && technicianId) {
-              try {
-                unwrap(
-                  await api().mutations.adminCreateUser({
-                    email: email.trim(),
-                    name: name.trim(),
-                    roles: ["TECH"],
-                    technicianId,
-                  })
-                );
-              } catch (err) {
-                // The technician exists; only the login invite failed. Say
-                // exactly that, so retrying (which reuses the record) is the
-                // obvious move.
-                throw new Error(
-                  `Technician saved, but the login invite failed: ${err instanceof Error ? err.message : String(err)}`
-                );
-              }
-            }
-            await onDone();
-          })().catch((err) => {
-            setError(err.message ?? "Could not save technician");
-            setBusy(false);
-          });
-        }}
-      >
+      <ErrorNote error={save.error ?? runOffboard.error} />
+      <Button block loading={save.busy} onClick={() => void save.run()}>
         {existing ? "Save technician" : "Add technician"}
       </Button>
       {existing ? <LicenseRecords technicianId={existing.id} /> : null}
@@ -677,7 +658,11 @@ function TechForm({
                 </p>
               ) : null}
               {!offboardOutcome.inProgress ? (
-                <Button block loading={busy} onClick={() => void runOffboard()}>
+                <Button
+                  block
+                  loading={runOffboard.busy}
+                  onClick={() => void runOffboard.run()}
+                >
                   Resume offboarding
                 </Button>
               ) : null}
@@ -720,8 +705,8 @@ function TechForm({
               <Button
                 block
                 variant="danger"
-                loading={busy}
-                onClick={() => void runOffboard()}
+                loading={runOffboard.busy}
+                onClick={() => void runOffboard.run()}
               >
                 Yes, offboard now
               </Button>

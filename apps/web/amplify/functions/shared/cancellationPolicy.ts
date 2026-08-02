@@ -1,4 +1,5 @@
 import { CANCEL_FULL_REFUND_DAYS } from "./bookingTerms";
+import { formatMoney as usd } from "./money";
 
 /**
  * GL-07 — the one cancellation-money rule for a paid visit, in pure form.
@@ -48,11 +49,7 @@ export function addDays(iso: string, days: number): string {
   return new Date(dayEpoch(iso) + days * MS_PER_DAY).toISOString().slice(0, 10);
 }
 
-const usd = (cents: number): string =>
-  `$${(cents / 100).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+
 
 /** We schedule for the DAY, not a time-of-day window, so the 72-hour refund
  *  line is judged from the 8:00 AM Eastern workday open — the earliest a

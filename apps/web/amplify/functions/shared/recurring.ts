@@ -1,5 +1,7 @@
 import { dataClient } from "./dataClient";
 import { customerAccessGroups } from "./dynamicGroups";
+import { forEachPage } from "./pagination";
+import { todayEastern } from "./dates";
 import { entryForLabel, SERVICE_CATALOG_VERSION } from "./serviceCatalog";
 import {
   claimMonthForJob,
@@ -119,23 +121,28 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
     // Idempotency: don't double-queue if a future visit already exists.
     // Query the servicePlanId index and page fully — a filtered scan would
     // miss the sibling once the Job table grows past one page.
-    const today = new Date().toISOString().slice(0, 10);
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.listJobByServicePlanId(
-        { servicePlanId: job.servicePlanId },
-        { nextToken: token, limit: 200 }
-      );
-      const hasFuture = page.data.some(
-        (j) =>
-          j.id !== job.id &&
-          j.status !== "CANCELED" &&
-          j.status !== "COMPLETED" &&
-          (j.scheduledDate ?? "") >= today
-      );
-      if (hasFuture) return;
-      token = page.nextToken;
-    } while (token);
+    const today = todayEastern();
+    const servicePlanId = job.servicePlanId;
+    let hasFuture = false;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.listJobByServicePlanId(
+          { servicePlanId },
+          { nextToken, limit: 200 }
+        ),
+      (items) => {
+        hasFuture = items.some(
+          (j) =>
+            j.id !== job.id &&
+            j.status !== "CANCELED" &&
+            j.status !== "COMPLETED" &&
+            (j.scheduledDate ?? "") >= today
+        );
+        if (hasFuture) return false;
+      },
+      { pageErrors: "ignore" }
+    );
+    if (hasFuture) return;
 
     const base = (job.completedAt ?? new Date().toISOString()).slice(0, 10);
     let dueDate = toWeekday(addDays(base, interval || 30));

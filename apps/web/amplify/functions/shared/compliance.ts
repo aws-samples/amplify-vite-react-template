@@ -1,3 +1,5 @@
+import { todayEastern } from "./dates";
+
 /** A format-valid EPA registration number, e.g. 432-1234 or 432-1234-4321. */
 export const EPA_REGISTRATION_RE = /^\d{2,7}-\d{1,5}(-\d{1,7})?$/;
 
@@ -46,7 +48,7 @@ export function assertTechnicianCompliance(
   if (!expiresOn) {
     throw new Error(`${name} needs the applicator license expiration date`);
   }
-  const workDate = isoDate(opts.workDate) ?? new Date().toISOString().slice(0, 10);
+  const workDate = isoDate(opts.workDate) ?? todayEastern();
   if (expiresOn < workDate) {
     throw new Error(
       `${name}'s applicator license expired on ${expiresOn} and is not valid for work on ${workDate}`
@@ -76,7 +78,7 @@ export function hasCurrentLicense(
   if (!technician.licenseNumber?.trim()) return false;
   const expiresOn = isoDate(technician.licenseExpiresOn);
   if (!expiresOn) return false;
-  const date = isoDate(onDate) ?? new Date().toISOString().slice(0, 10);
+  const date = isoDate(onDate) ?? todayEastern();
   return expiresOn >= date;
 }
 

@@ -1,47 +1,39 @@
-/** CRM mirror of the server's controlled, fact-derived GL-02 stages. */
-export type LeadStage =
-  | "NEW"
-  | "ATTEMPTED"
-  | "REACHED"
-  | "QUALIFIED"
-  | "UNQUALIFIED"
-  | "BOOKING_SENT"
-  | "IDENTITY_REVIEW"
-  | "WON"
-  | "LOST"
-  | "DNC";
+/**
+ * GL-02 lead stages for the CRM.
+ *
+ * The stage derivation itself lives in amplify/functions/shared/leadStage.ts
+ * and is re-exported here — it used to be a hand-kept copy, so the office and
+ * the nightly sweep could disagree about what stage a lead was in.
+ *
+ * What stays local is the queue-ordering half, and it stays local DELIBERATELY:
+ *
+ *  - The server's `leadNextActionAt` treats a lead with no stored deadline as
+ *    due *now*, which is right for a sweep asking "is this overdue yet?".
+ *  - The office queue asks a different question — "what do I work first?" — and
+ *    a lead that has never been given a deadline is the oldest debt on the
+ *    board, so it sorts to the top (epoch). See Leads.tsx sorting.
+ *
+ * Both answer "overdue: yes"; they differ only in ordering, so keep them apart
+ * rather than collapsing one into the other.
+ */
 
-export type LeadFacts = {
-  status?: string | null;
-  convertedAt?: string | null;
-  doNotContact?: boolean | null;
-  lostReason?: string | null;
-  bookingLinkDeliveredAt?: string | null;
-  lastAttemptedAt?: string | null;
-  lastReachedAt?: string | null;
-  qualificationStatus?: string | null;
-  conversionReviewBookingId?: string | null;
-  nextActionAt?: string | null;
-  createdAt?: string | null;
-};
+export type {
+  LeadFacts,
+  LeadStage,
+} from "../../../web/amplify/functions/shared/leadStage";
+export {
+  deriveLeadStage,
+  isLeadOpen,
+} from "../../../web/amplify/functions/shared/leadStage";
 
-export function deriveLeadStage(c: LeadFacts): LeadStage {
-  if (c.status === "ACTIVE" || c.convertedAt) return "WON";
-  if (c.doNotContact) return "DNC";
-  if (c.lostReason) return "LOST";
-  if (c.conversionReviewBookingId) return "IDENTITY_REVIEW";
-  if (c.bookingLinkDeliveredAt) return "BOOKING_SENT";
-  if (c.qualificationStatus === "QUALIFIED") return "QUALIFIED";
-  if (c.qualificationStatus === "UNQUALIFIED") return "UNQUALIFIED";
-  if (c.lastReachedAt) return "REACHED";
-  if (c.lastAttemptedAt) return "ATTEMPTED";
-  return "NEW";
-}
+import type { LeadFacts, LeadStage } from "../../../web/amplify/functions/shared/leadStage";
+import { isLeadOpen } from "../../../web/amplify/functions/shared/leadStage";
 
-export function isLeadOpen(c: LeadFacts): boolean {
-  return !["WON", "LOST", "DNC"].includes(deriveLeadStage(c));
-}
-
+/**
+ * Queue ordering, not sweep timing: a lead with no stored deadline sorts to the
+ * top of the office queue rather than to "now". Intentionally NOT the server's
+ * `leadNextActionAt` — see the module note.
+ */
 export function leadNextActionAt(c: LeadFacts): Date | null {
   if (!isLeadOpen(c)) return null;
   return c.nextActionAt ? new Date(c.nextActionAt) : new Date(0);

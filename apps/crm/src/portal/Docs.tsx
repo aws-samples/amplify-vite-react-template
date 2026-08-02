@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, unwrap, type Agreement, type Customer, type ServiceReport } from "../lib/api";
+import { api, listAll, type Agreement, type Customer, type ServiceReport } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate, fmtDateTime } from "../lib/format";
 import { Card, EmptyState, ErrorNote, ListRow, Page, Spinner } from "../ui/kit";
@@ -8,51 +8,55 @@ import { loadMyCustomers } from "./portalData";
 
 export default function PortalDocs() {
   const roles = useRoles();
-  const [customers, setCustomers] = useState<Customer[] | null>(null);
-  const [reports, setReports] = useState<ServiceReport[]>([]);
-  const [agreements, setAgreements] = useState<Agreement[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (roles.loading) return;
-    (async () => {
-      try {
-        const mine = await loadMyCustomers(roles);
-        setCustomers(mine);
-        const [reps, ags] = await Promise.all([
-          Promise.all(
-            mine.map((c) =>
+  const { data, error } = useAsync<{
+    customers: Customer[];
+    reports: ServiceReport[];
+    agreements: Agreement[];
+  } | null>(
+    async () => {
+      // Roles are still resolving — resolving to null keeps the spinner up,
+      // exactly as the old effect's early return did.
+      if (roles.loading) return null;
+      const mine = await loadMyCustomers(roles);
+      const [reps, ags] = await Promise.all([
+        Promise.all(
+          mine.map((c) =>
+            listAll((t) =>
               api().models.ServiceReport.list({
                 filter: { customerId: { eq: c.id } },
                 limit: 200,
+                nextToken: t,
               })
             )
-          ),
-          Promise.all(
-            mine.map((c) =>
+          )
+        ),
+        Promise.all(
+          mine.map((c) =>
+            listAll((t) =>
               api().models.Agreement.list({
                 filter: { customerId: { eq: c.id } },
                 limit: 100,
+                nextToken: t,
               })
             )
-          ),
-        ]);
-        setReports(
-          reps
-            .flatMap((r) => unwrap(r))
-            .filter((r) => r.status === "FINALIZED" && r.pdfKey)
-            .sort((a, b) => b.serviceDate.localeCompare(a.serviceDate))
-        );
-        setAgreements(
-          ags
-            .flatMap((r) => unwrap(r))
-            .filter((a) => a.status === "SIGNED" && a.pdfKey)
-        );
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load documents");
-      }
-    })();
-  }, [roles]);
+          )
+        ),
+      ]);
+      return {
+        customers: mine,
+        reports: reps
+          .flat()
+          .filter((r) => r.status === "FINALIZED" && r.pdfKey)
+          .sort((a, b) => b.serviceDate.localeCompare(a.serviceDate)),
+        agreements: ags.flat().filter((a) => a.status === "SIGNED" && a.pdfKey),
+      };
+    },
+    [roles],
+    "Could not load documents"
+  );
+  const customers = data?.customers ?? null;
+  const reports = data?.reports ?? [];
+  const agreements = data?.agreements ?? [];
 
   if (!customers) {
     return (

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, opResult, unwrap, type Product } from "../lib/api";
+import { useState } from "react";
+import { api, listAll, opResult, type Product } from "../lib/api";
+import { useAction, useAsync } from "../lib/useAsync";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import {
   Badge,
@@ -28,37 +29,25 @@ function productComplianceIssue(product: Product): string | null {
  * products applied on a service report; the office curates it here.
  */
 export default function ProductLog() {
-  const [products, setProducts] = useState<Product[] | null>(null);
   const [editing, setEditing] = useState<Product | "new" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const rows: Product[] = [];
-      let nextToken: string | null | undefined;
-      do {
-        const page = await api().models.Product.list({
-          limit: 500,
-          nextToken: nextToken ?? undefined,
-        });
-        rows.push(...unwrap(page));
-        nextToken = page.nextToken;
-      } while (nextToken);
-      setProducts(
-        rows.sort(
-          (a, b) =>
-            (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
-            a.name.localeCompare(b.name)
-        )
+  const {
+    data: products,
+    error,
+    reload,
+  } = useAsync<Product[]>(
+    async () => {
+      const rows = await listAll((nextToken) =>
+        api().models.Product.list({ limit: 500, nextToken })
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load products");
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return rows.sort(
+        (a, b) =>
+          (a.sortOrder ?? 999) - (b.sortOrder ?? 999) ||
+          a.name.localeCompare(b.name)
+      );
+    },
+    [],
+    "Could not load products"
+  );
 
   return (
     <Page
@@ -121,7 +110,7 @@ export default function ProductLog() {
             existing={editing === "new" ? null : editing}
             onDone={async () => {
               setEditing(null);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -204,13 +193,11 @@ function ProductForm({
       ? (existing.unitCostCents / 100).toFixed(2)
       : ""
   );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const save = async () => {
+  // A new product has no natural key, so a double-click used to leave two
+  // identical rows in the catalog for technicians to choose between.
+  const save = useAction(async () => {
     if (!name.trim()) {
-      setError("Enter the product name");
-      return;
+      throw new Error("Enter the product name");
     }
     if (
       active &&
@@ -219,10 +206,9 @@ function ProductForm({
         !defaultRate.trim() ||
         reEntryHours.trim() === "")
     ) {
-      setError(
+      throw new Error(
         "Active products require approved label data, an EPA number, application rate, and re-entry rule"
       );
-      return;
     }
     const parsedReEntry =
       reEntryHours.trim() === "" ? undefined : Number(reEntryHours);
@@ -230,8 +216,7 @@ function ProductForm({
       parsedReEntry != null &&
       (!Number.isFinite(parsedReEntry) || parsedReEntry < 0)
     ) {
-      setError("Re-entry hours must be zero or greater");
-      return;
+      throw new Error("Re-entry hours must be zero or greater");
     }
     const list = (v: string) =>
       v
@@ -242,8 +227,7 @@ function ProductForm({
     const hasQty =
       ruleQtyMin.trim() !== "" || ruleQtyMax.trim() !== "" || ruleQtyUnit.trim() !== "";
     if (hasQty && (ruleQtyMin.trim() === "" || ruleQtyMax.trim() === "" || !ruleQtyUnit.trim())) {
-      setError("A quantity rule needs min, max, and a unit (e.g. oz)");
-      return;
+      throw new Error("A quantity rule needs min, max, and a unit (e.g. oz)");
     }
     const rules: Record<string, unknown> = {};
     if (list(ruleServiceTypes).length) rules.allowedServiceTypes = list(ruleServiceTypes);
@@ -253,30 +237,24 @@ function ProductForm({
       const min = Number(ruleQtyMin);
       const max = Number(ruleQtyMax);
       if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) {
-        setError("The quantity rule needs numeric min ≤ max");
-        return;
+        throw new Error("The quantity rule needs numeric min ≤ max");
       }
       rules.quantity = { min, max, unit: ruleQtyUnit.trim() };
     }
     if (Object.keys(rules).length) labelRulesJson = JSON.stringify(rules);
     // Inventory validation — only meaningful when tracking is on.
     if (trackInventory && !stockUnit.trim()) {
-      setError("A tracked product needs a stock unit (what on-hand is counted in).");
-      return;
+      throw new Error("A tracked product needs a stock unit (what on-hand is counted in).");
     }
     const parsedReorder =
       trackInventory && reorderPoint.trim() !== "" ? Number(reorderPoint) : null;
     if (parsedReorder != null && (!Number.isFinite(parsedReorder) || parsedReorder < 0)) {
-      setError("The reorder point must be zero or greater.");
-      return;
+      throw new Error("The reorder point must be zero or greater.");
     }
     const parsedCost = unitCost.trim() !== "" ? Number(unitCost) : null;
     if (parsedCost != null && (!Number.isFinite(parsedCost) || parsedCost < 0)) {
-      setError("The unit cost must be zero or greater.");
-      return;
+      throw new Error("The unit cost must be zero or greater.");
     }
-    setBusy(true);
-    setError(null);
     const fields = {
       name: name.trim(),
       epaNumber: epaNumber.trim() || null,
@@ -294,19 +272,14 @@ function ProductForm({
       unitCostCents:
         trackInventory && parsedCost != null ? Math.round(parsedCost * 100) : null,
     };
-    try {
-      opResult(
-        await api().mutations.saveProduct({
-          productId: existing?.id,
-          ...fields,
-        })
-      );
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save product");
-      setBusy(false);
-    }
-  };
+    opResult(
+      await api().mutations.saveProduct({
+        productId: existing?.id,
+        ...fields,
+      })
+    );
+    await onDone();
+  }, "Could not save product");
 
   return (
     <div className="form-grid">
@@ -494,8 +467,8 @@ function ProductForm({
       <Field label="Notes" hint="Mixing/application notes for techs">
         <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
       </Field>
-      <ErrorNote error={error} />
-      <Button block loading={busy} onClick={() => void save()}>
+      <ErrorNote error={save.error} />
+      <Button block loading={save.busy} onClick={() => void save.run()}>
         {existing ? "Save product" : "Add product"}
       </Button>
     </div>

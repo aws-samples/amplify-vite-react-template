@@ -1,3 +1,4 @@
+import { formatMoney } from "./money";
 /**
  * GL-05 reconciliation — pure predicates over booking + invoice rows, so
  * "every successful booking payment has exactly one complete booking, and every
@@ -309,7 +310,7 @@ export function mismatchedChildRelationships(
       rows.paidInvoice.amountCents !== booking.amountCents
     ) {
       bad.push(
-        `paid invoice is for $${((rows.paidInvoice.amountCents ?? 0) / 100).toFixed(2)}, booking committed $${((booking.amountCents ?? 0) / 100).toFixed(2)}`
+        `paid invoice is for ${formatMoney(rows.paidInvoice.amountCents ?? 0)}, booking committed ${formatMoney(booking.amountCents ?? 0)}`
       );
     }
   }

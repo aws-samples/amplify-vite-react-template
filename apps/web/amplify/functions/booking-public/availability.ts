@@ -10,6 +10,7 @@ import {
   type SlotFeasibility,
 } from "../shared/capacity";
 import { oneTimeGrossProfitCents, type Zone } from "../crm-pricing/rateCards";
+import { todayEastern } from "../shared/dates";
 
 /**
  * Schedule-aware availability + day pricing for the booking funnel.
@@ -36,12 +37,6 @@ export type DayQuote = {
   priceCents: number;
   factors: string[]; // audit trail persisted with the quote
 };
-
-function easternToday(): string {
-  return new Date().toLocaleDateString("en-CA", {
-    timeZone: "America/New_York",
-  });
-}
 
 export function addDays(iso: string, n: number): string {
   const d = new Date(`${iso}T12:00:00Z`);
@@ -105,7 +100,7 @@ export async function buildDayMatrix(opts: {
   const costCents = gp != null ? baseCents - gp : null;
 
   const client = await dataClient();
-  const today = easternToday();
+  const today = todayEastern();
   const days = Array.from({ length: 32 }, (_, i) => addDays(today, i + 1))
     .filter(isWeekday)
     .slice(0, 22) // ~a month of business days

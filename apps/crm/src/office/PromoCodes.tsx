@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { api, listAll, unwrap, type PromoCode } from "../lib/api";
+import { useAction, useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { fmtDate } from "../lib/format";
 import {
@@ -14,6 +15,7 @@ import {
   Sheet,
   Spinner,
 } from "../ui/kit";
+import { formatMoney } from "../../../web/amplify/functions/shared/money";
 
 /**
  * Owner-only discount codes for the public booking funnel. Staff create a code
@@ -30,41 +32,34 @@ import {
 /** "20% off" / "$25.00 off" — the value line shown in the list and summaries. */
 function valueLabel(p: PromoCode): string {
   if (p.kind === "PERCENT") return `${p.percentOff ?? 0}% off`;
-  if (p.kind === "FIXED") return `$${((p.amountOffCents ?? 0) / 100).toFixed(2)} off`;
+  if (p.kind === "FIXED") return `${formatMoney(p.amountOffCents ?? 0)} off`;
   return "—";
 }
 
 export default function PromoCodes() {
   const roles = useRoles();
-  const [codes, setCodes] = useState<PromoCode[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<PromoCode | null>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error, reload } = useAsync<PromoCode[]>(
+    async () => {
       const all = await listAll((t) =>
         api().models.PromoCode.list({ limit: 200, nextToken: t })
       );
       // Active first, then alphabetical — the codes staff hand out today sit at
       // the top, retired ones settle below.
-      setCodes(
-        [...all].sort(
-          (a, b) =>
-            Number(!!b.active) - Number(!!a.active) ||
-            (a.code ?? "").localeCompare(b.code ?? "")
-        )
+      return [...all].sort(
+        (a, b) =>
+          Number(!!b.active) - Number(!!a.active) ||
+          (a.code ?? "").localeCompare(b.code ?? "")
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load discount codes");
-      setCodes([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+    },
+    [],
+    "Could not load discount codes"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const codes = data ?? (error ? [] : null);
 
   if (!roles.owner) {
     return (
@@ -148,7 +143,7 @@ export default function PromoCodes() {
           <PromoForm
             onDone={async () => {
               setAdding(false);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -164,7 +159,7 @@ export default function PromoCodes() {
             existing={editing}
             onDone={async () => {
               setEditing(null);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -213,32 +208,28 @@ function PromoForm({
   const [maxRedemptions, setMaxRedemptions] = useState(
     existing?.maxRedemptions != null ? String(existing.maxRedemptions) : ""
   );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   const normalizedCode = code.trim().toUpperCase();
   const timesRedeemed = existing?.timesRedeemed ?? 0;
   const canDelete = Boolean(existing) && timesRedeemed === 0;
 
-  async function save() {
-    setError(null);
+  // The uniqueness check below is a read, not a constraint: two clicks in
+  // flight together both see no clash and both create the code, which is
+  // exactly the ambiguity that check exists to prevent.
+  const save = useAction(async () => {
     if (!normalizedCode) {
-      setError("Enter a code.");
-      return;
+      throw new Error("Enter a code.");
     }
     let percentValue: number | null = null;
     let amountValue: number | null = null;
     if (kind === "PERCENT") {
       percentValue = Math.round(Number(percentOff));
       if (!Number.isFinite(percentValue) || percentValue < 1 || percentValue > 100) {
-        setError("A percentage code needs a value between 1 and 100.");
-        return;
+        throw new Error("A percentage code needs a value between 1 and 100.");
       }
     } else {
       const dollars = Number(amountOff);
       if (!Number.isFinite(dollars) || dollars <= 0) {
-        setError("A dollar code needs an amount greater than $0.");
-        return;
+        throw new Error("A dollar code needs an amount greater than $0.");
       }
       amountValue = Math.round(dollars * 100);
     }
@@ -246,54 +237,50 @@ function PromoForm({
     if (maxRedemptions.trim()) {
       maxValue = Math.round(Number(maxRedemptions));
       if (!Number.isFinite(maxValue) || maxValue < 1) {
-        setError("A redemption limit must be a whole number of at least 1.");
-        return;
+        throw new Error("A redemption limit must be a whole number of at least 1.");
       }
     }
     if (startsOn && endsOn && endsOn < startsOn) {
-      setError("The end date can't be before the start date.");
-      return;
+      throw new Error("The end date can't be before the start date.");
     }
 
-    setBusy(true);
-    try {
-      // A new code must be unique — reuse would make the funnel's lookup
-      // ambiguous. Editing keeps its own code (skip the check when unchanged).
-      if (!existing || existing.code !== normalizedCode) {
-        const { data: clashes } =
-          await api().models.PromoCode.listPromoCodeByCode({
-            code: normalizedCode,
-          });
-        if (clashes && clashes.some((c) => c.id !== existing?.id)) {
-          setError("That code already exists — pick a different one.");
-          setBusy(false);
-          return;
-        }
+    // A new code must be unique — reuse would make the funnel's lookup
+    // ambiguous. Editing keeps its own code (skip the check when unchanged).
+    if (!existing || existing.code !== normalizedCode) {
+      const { data: clashes } =
+        await api().models.PromoCode.listPromoCodeByCode({
+          code: normalizedCode,
+        });
+      if (clashes && clashes.some((c) => c.id !== existing?.id)) {
+        throw new Error("That code already exists — pick a different one.");
       }
-      const fields = {
-        code: normalizedCode,
-        description: description.trim() || null,
-        kind,
-        percentOff: kind === "PERCENT" ? percentValue : null,
-        amountOffCents: kind === "FIXED" ? amountValue : null,
-        active,
-        startsAt: startsOn ? dateToStartIso(startsOn) : null,
-        endsAt: endsOn ? dateToEndIso(endsOn) : null,
-        maxRedemptions: maxValue,
-      };
-      if (existing) {
-        unwrap(await api().models.PromoCode.update({ id: existing.id, ...fields }));
-      } else {
-        unwrap(
-          await api().models.PromoCode.create({ ...fields, timesRedeemed: 0 })
-        );
-      }
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save the code");
-      setBusy(false);
     }
-  }
+    const fields = {
+      code: normalizedCode,
+      description: description.trim() || null,
+      kind,
+      percentOff: kind === "PERCENT" ? percentValue : null,
+      amountOffCents: kind === "FIXED" ? amountValue : null,
+      active,
+      startsAt: startsOn ? dateToStartIso(startsOn) : null,
+      endsAt: endsOn ? dateToEndIso(endsOn) : null,
+      maxRedemptions: maxValue,
+    };
+    if (existing) {
+      unwrap(await api().models.PromoCode.update({ id: existing.id, ...fields }));
+    } else {
+      unwrap(
+        await api().models.PromoCode.create({ ...fields, timesRedeemed: 0 })
+      );
+    }
+    await onDone();
+  }, "Could not save the code");
+
+  const removeCode = useAction(async () => {
+    if (!existing) return;
+    unwrap(await api().models.PromoCode.delete({ id: existing.id }));
+    await onDone();
+  }, "Could not delete the code");
 
   async function remove() {
     if (!existing) return;
@@ -304,15 +291,7 @@ function PromoForm({
     ) {
       return;
     }
-    setBusy(true);
-    setError(null);
-    try {
-      unwrap(await api().models.PromoCode.delete({ id: existing.id }));
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not delete the code");
-      setBusy(false);
-    }
+    await removeCode.run();
   }
 
   return (
@@ -428,13 +407,21 @@ function PromoForm({
         </label>
       </Field>
 
-      <ErrorNote error={error} />
+      <ErrorNote error={save.error ?? removeCode.error} />
       <div className="row-split">
-        <Button onClick={() => void save()} loading={busy} disabled={busy}>
+        <Button
+          onClick={() => void save.run()}
+          loading={save.busy}
+          disabled={save.busy || removeCode.busy}
+        >
           {existing ? "Save changes" : "Create code"}
         </Button>
         {canDelete ? (
-          <Button variant="danger" onClick={() => void remove()} disabled={busy}>
+          <Button
+            variant="danger"
+            onClick={() => void remove()}
+            disabled={save.busy || removeCode.busy}
+          >
             Delete
           </Button>
         ) : null}

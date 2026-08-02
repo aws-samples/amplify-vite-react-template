@@ -1,6 +1,8 @@
 import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
+import { forEachPage } from "./pagination";
 import { sendRefundNotice } from "./receipts";
+import { formatMoney } from "./money";
 
 /**
  * Refunds.
@@ -97,7 +99,7 @@ export async function refundInvoice(
   }
   if (requested > remaining) {
     throw new Error(
-      `That is more than is left to refund on this invoice ($${(remaining / 100).toFixed(2)})`
+      `That is more than is left to refund on this invoice (${formatMoney(remaining)})`
     );
   }
 
@@ -142,7 +144,7 @@ export async function refundInvoice(
     // The money is already back with the customer. This must be loud: the
     // ledger now overstates revenue and only a human can reconcile it.
     throw new Error(
-      `Refund of $${(requested / 100).toFixed(2)} was issued${
+      `Refund of ${formatMoney(requested)} was issued${
         stripeRefundId ? ` (Stripe ${stripeRefundId})` : ""
       } but the invoice could not be updated — tell the office to reconcile invoice ${invoice.id} by hand. ${
         errors?.map((e) => e.message).join("; ") ?? ""
@@ -194,6 +196,7 @@ export async function applyRefundToInvoice(opts: {
   };
   let invoice: RefundTargetRow | null = null;
   if (opts.paymentIntentId) {
+    // Zero-page read is deliberate: one PaymentIntent stamps one invoice, so one page holds every match (audit 1.1.5).
     const { data: matches } =
       await client.models.Invoice.listInvoiceByStripePaymentIntentId({
         stripePaymentIntentId: opts.paymentIntentId,
@@ -206,16 +209,20 @@ export async function applyRefundToInvoice(opts: {
     // after a REAL refund. The filter scan is PAGINATED to exhaustion: the
     // filter applies after each scanned page, so the matching row can sit
     // on any page.
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Invoice.list({
-        filter: { stripeInvoiceId: { eq: opts.stripeInvoiceId } },
-        limit: 200,
-        nextToken: token,
-      });
-      invoice = (page.data[0] as RefundTargetRow | undefined) ?? null;
-      token = invoice ? null : page.nextToken;
-    } while (token);
+    const stripeInvoiceId = opts.stripeInvoiceId;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Invoice.list({
+          filter: { stripeInvoiceId: { eq: stripeInvoiceId } },
+          limit: 200,
+          nextToken,
+        }),
+      (items) => {
+        invoice = (items[0] as RefundTargetRow | undefined) ?? null;
+        if (invoice) return false;
+      },
+      { pageErrors: "throw" }
+    );
   }
   if (!invoice) {
     console.warn(

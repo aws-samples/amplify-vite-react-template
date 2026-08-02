@@ -5,6 +5,7 @@ import { clearAllDrafts } from "../lib/reportDraft";
 import { api, unwrap } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDateTime } from "../lib/format";
+import { useAction } from "../lib/useAsync";
 import {
   Badge,
   Button,
@@ -178,8 +179,32 @@ function SetPassword({ email, onDone }: { email: string; onDone: () => void }) {
   const [step, setStep] = useState<"start" | "confirm" | "done">("start");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  // Each code Cognito emails invalidates the one before it, so a double-tap
+  // used to send a second code and leave the tech typing a dead one.
+  const sendCode = useAction(async () => {
+    await resetPassword({ username: email });
+  }, "Could not send the code");
+
+  const savePassword = useAction(async () => {
+    if (!code.trim() || password.length < 8) {
+      throw new Error("Enter the code and a password of at least 8 characters");
+    }
+    await confirmResetPassword({
+      username: email,
+      confirmationCode: code.trim(),
+      newPassword: password,
+    });
+  }, "Could not set the password");
+
+  // Only advance when the write landed — a step forward on a failed reset
+  // would ask for a code that was never sent.
+  const start = async () => {
+    if (await sendCode.run()) setStep("confirm");
+  };
+  const finish = async () => {
+    if (await savePassword.run()) setStep("done");
+  };
 
   if (step === "done") {
     return (
@@ -199,19 +224,8 @@ function SetPassword({ email, onDone }: { email: string; onDone: () => void }) {
           We'll email a 6-digit code to <strong>{email}</strong> to confirm
           it's you, then you pick your password.
         </p>
-        <ErrorNote error={error} />
-        <Button
-          block
-          loading={busy}
-          onClick={() => {
-            setBusy(true);
-            setError(null);
-            resetPassword({ username: email })
-              .then(() => setStep("confirm"))
-              .catch((err) => setError(err.message ?? "Could not send the code"))
-              .finally(() => setBusy(false));
-          }}
-        >
+        <ErrorNote error={sendCode.error} />
+        <Button block loading={sendCode.busy} onClick={() => void start()}>
           Email me the code
         </Button>
       </div>
@@ -236,27 +250,8 @@ function SetPassword({ email, onDone }: { email: string; onDone: () => void }) {
           onChange={(e) => setPassword(e.target.value)}
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          if (!code.trim() || password.length < 8) {
-            setError("Enter the code and a password of at least 8 characters");
-            return;
-          }
-          setBusy(true);
-          setError(null);
-          confirmResetPassword({
-            username: email,
-            confirmationCode: code.trim(),
-            newPassword: password,
-          })
-            .then(() => setStep("done"))
-            .catch((err) => setError(err.message ?? "Could not set the password"))
-            .finally(() => setBusy(false));
-        }}
-      >
+      <ErrorNote error={savePassword.error} />
+      <Button block loading={savePassword.busy} onClick={() => void finish()}>
         Set password
       </Button>
     </div>
@@ -296,6 +291,10 @@ function EmailLogList() {
   >(null);
 
   useEffect(() => {
+    // Deliberately NOT listAll: this widget wants the newest 100, and paging
+    // the whole ever-growing EmailLog into the browser to show 100 rows is the
+    // wrong fix. The right fix is a sentAt index (server-side sort); until
+    // then this shows an arbitrary single page, sorted client-side.
     api()
       .models.EmailLog.list({ limit: 100 })
       .then((res) =>

@@ -1,3 +1,4 @@
+import { formatMoney } from "../shared/money";
 /**
  * Staff-entered discount codes for the public funnel.
  *
@@ -76,6 +77,7 @@ export async function resolvePromo(
   const code = normalizeCode(rawCode);
   if (!code) return { ok: false, message: "Enter a discount code." };
 
+  // Zero-page read is deliberate: one code maps to one PromoCode row, so one page holds every match (audit 1.1.5).
   const { data: rows } = await client.models.PromoCode.listPromoCodeByCode({
     code,
   });
@@ -136,6 +138,6 @@ export function promoLabel(
   const detail =
     promo.kind === "PERCENT"
       ? `${promo.percentOff ?? 0}% off`
-      : `$${((promo.amountOffCents ?? 0) / 100).toFixed(2)} off`;
+      : `${formatMoney(promo.amountOffCents ?? 0)} off`;
   return `${normalizeCode(promo.code)} (${detail})`;
 }

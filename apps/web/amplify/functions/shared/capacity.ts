@@ -4,6 +4,7 @@ import { onsiteMinutesFor } from "./dispatchReadiness";
 import { driveMinutesBetween, HQ_ADDRESS } from "./driveTime";
 import { licenseFactsFromRecords, licenseRecordsFor } from "./licenses";
 import { openOwnedWork } from "./ownedWork";
+import { forEachPage, listAll } from "./pagination";
 import { routingAddress } from "./serviceAddress";
 
 /**
@@ -172,21 +173,16 @@ function configuredBaseOf(t: TechRow): string | null {
  */
 export async function activeTechBases(): Promise<string[] | null> {
   if (!(await capacityModelsReady())) return null;
-  const techs: TechRow[] = [];
+  let techs: TechRow[];
   // The client is created INSIDE the try and never annotated: naming
   // `Awaited<ReturnType<typeof dataClient>>` trips TS2321 (excessive stack
   // depth) — `tsc -p amplify` already sits at the depth ceiling.
   try {
     const client = await dataClient();
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Technician.list({
-        limit: 200,
-        nextToken: token,
-      });
-      techs.push(...((page.data ?? []) as TechRow[]));
-      token = page.nextToken;
-    } while (token);
+    techs = (await listAll(
+      (nextToken) => client.models.Technician.list({ limit: 200, nextToken }),
+      { pageErrors: "throw" }
+    )) as TechRow[];
   } catch (err) {
     console.error("activeTechBases: roster read failed", err);
     return null;
@@ -226,17 +222,12 @@ export async function dayEligibilityMap(
   }
   const client = await dataClient();
 
-  const techs: TechRow[] = [];
+  let techs: TechRow[];
   try {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Technician.list({
-        limit: 200,
-        nextToken: token,
-      });
-      techs.push(...((page.data ?? []) as TechRow[]));
-      token = page.nextToken;
-    } while (token);
+    techs = (await listAll(
+      (nextToken) => client.models.Technician.list({ limit: 200, nextToken }),
+      { pageErrors: "throw" }
+    )) as TechRow[];
   } catch (err) {
     console.error("dayEligibilityMap: roster read failed", err);
     return closedAll(
@@ -291,31 +282,30 @@ export async function dayEligibilityMap(
     const overrideByTech = new Map<string, string>();
     if ("TechnicianDayException" in client.models) {
       try {
-        let token: string | null | undefined;
-        do {
-          const page =
-            await client.models.TechnicianDayException.listTechnicianDayExceptionByDate(
+        const exceptions = await listAll(
+          (nextToken) =>
+            client.models.TechnicianDayException.listTechnicianDayExceptionByDate(
               { date },
-              { limit: 200, nextToken: token }
-            );
-          for (const ex of page.data ?? []) {
-            if (ex.kind === "PTO") onPto.add(ex.technicianId);
-            if (ex.kind === "BASE_OVERRIDE") {
-              const parts = [
-                ex.overrideStreet,
-                ex.overrideCity,
-                ex.overrideState,
-                ex.overrideZip,
-              ]
-                .map((p) => p?.trim())
-                .filter(Boolean);
-              if (parts.length >= 2) {
-                overrideByTech.set(ex.technicianId, parts.join(", "));
-              }
+              { limit: 200, nextToken }
+            ),
+          { pageErrors: "throw" }
+        );
+        for (const ex of exceptions) {
+          if (ex.kind === "PTO") onPto.add(ex.technicianId);
+          if (ex.kind === "BASE_OVERRIDE") {
+            const parts = [
+              ex.overrideStreet,
+              ex.overrideCity,
+              ex.overrideState,
+              ex.overrideZip,
+            ]
+              .map((p) => p?.trim())
+              .filter(Boolean);
+            if (parts.length >= 2) {
+              overrideByTech.set(ex.technicianId, parts.join(", "));
             }
           }
-          token = page.nextToken;
-        } while (token);
+        }
       } catch (err) {
         console.error("dayEligibilityMap: exception read failed", date, err);
         out.set(date, {
@@ -390,22 +380,22 @@ export async function slotStates(
   const out = new Map<string, SlotState>();
   const client = await dataClient();
   if (!("CapacityDay" in client.models)) return out;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.CapacityDay.listCapacityDayByDate(
-      { date },
-      { limit: 200, nextToken: token }
-    );
-    for (const row of page.data ?? []) {
-      if (!row.technicianId) continue;
-      out.set(row.id, {
-        technicianId: row.technicianId,
-        committedMinutes: row.committedMinutes ?? 0,
-        verified: row.verified !== false,
-      });
-    }
-    token = page.nextToken;
-  } while (token);
+  const rows = await listAll(
+    (nextToken) =>
+      client.models.CapacityDay.listCapacityDayByDate(
+        { date },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "throw" }
+  );
+  for (const row of rows) {
+    if (!row.technicianId) continue;
+    out.set(row.id, {
+      technicianId: row.technicianId,
+      committedMinutes: row.committedMinutes ?? 0,
+      verified: row.verified !== false,
+    });
+  }
   return out;
 }
 
@@ -421,30 +411,22 @@ export async function liveClaimsOn(date: string): Promise<
   const client = await dataClient();
   if (!("CapacityClaim" in client.models)) return [];
   const nowIso = new Date().toISOString();
-  const out: {
-    id: string;
-    technicianId: string;
-    minutes: number;
-    address: string | null;
-  }[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.CapacityClaim.listCapacityClaimByDate(
-      { date },
-      { limit: 200, nextToken: token }
-    );
-    for (const claim of page.data ?? []) {
-      if (String(claim.expiresAt) <= nowIso) continue;
-      out.push({
-        id: claim.id,
-        technicianId: claim.technicianId ?? POOL_TECH,
-        minutes: claim.minutes ?? 0,
-        address: claim.address ?? null,
-      });
-    }
-    token = page.nextToken;
-  } while (token);
-  return out;
+  const claims = await listAll(
+    (nextToken) =>
+      client.models.CapacityClaim.listCapacityClaimByDate(
+        { date },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "throw" }
+  );
+  return claims
+    .filter((claim) => String(claim.expiresAt) > nowIso)
+    .map((claim) => ({
+      id: claim.id,
+      technicianId: claim.technicianId ?? POOL_TECH,
+      minutes: claim.minutes ?? 0,
+      address: claim.address ?? null,
+    }));
 }
 
 async function ensureSlot(
@@ -1072,29 +1054,31 @@ export async function stopsBySlotOn(
     list.push({ address, routeOrder });
     ordered.set(key, list);
   };
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByScheduledDate(
-      { scheduledDate: date },
-      { limit: 200, nextToken: token }
-    );
-    for (const job of page.data ?? []) {
-      if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
-      const stopTechId =
-        job.technicianId ??
-        (job as { capacityTechnicianId?: string | null })
-          .capacityTechnicianId ??
-        null;
-      if (!stopTechId) continue;
-      const { data: customer } = await client.models.Customer.get({
-        id: job.customerId,
-      });
-      // ROUTING address — the unit is deliberately excluded (serviceAddress.ts).
-      const address = customer ? routingAddress(customer) || null : null;
-      push(slotId(date, stopTechId), address, job.routeOrder ?? 999);
-    }
-    token = page.nextToken;
-  } while (token);
+  await forEachPage(
+    (nextToken) =>
+      client.models.Job.listJobByScheduledDate(
+        { scheduledDate: date },
+        { limit: 200, nextToken }
+      ),
+    async (jobs) => {
+        for (const job of jobs) {
+          if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
+          const stopTechId =
+            job.technicianId ??
+            (job as { capacityTechnicianId?: string | null })
+              .capacityTechnicianId ??
+            null;
+          if (!stopTechId) continue;
+          const { data: customer } = await client.models.Customer.get({
+            id: job.customerId,
+          });
+          // ROUTING address — the unit is deliberately excluded (serviceAddress.ts).
+          const address = customer ? routingAddress(customer) || null : null;
+          push(slotId(date, stopTechId), address, job.routeOrder ?? 999);
+        }
+    },
+    { pageErrors: "throw" }
+  );
   for (const claim of await liveClaimsOn(date)) {
     if (claim.technicianId === POOL_TECH) continue;
     push(slotId(date, claim.technicianId), claim.address, 1_000_000);
@@ -1228,28 +1212,30 @@ export async function recomputeSlotMinutes(
 
     // This tech's counted stops for the date, in route order.
     const stops: (TourStop & { routeOrder: number })[] = [];
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.listJobByScheduledDate(
-        { scheduledDate: date },
-        { limit: 200, nextToken: token }
-      );
-      for (const job of page.data ?? []) {
-        if (job.technicianId !== technicianId) continue;
-        if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
-        const { data: customer } = await client.models.Customer.get({
-          id: job.customerId,
-        });
-        // ROUTING address — the unit is deliberately excluded.
-        const address = customer ? routingAddress(customer) : "";
-        stops.push({
-          address: address || null,
-          onsite: onsiteMinutes(job.propertyClass),
-          routeOrder: job.routeOrder ?? 999,
-        });
-      }
-      token = page.nextToken;
-    } while (token);
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.listJobByScheduledDate(
+          { scheduledDate: date },
+          { limit: 200, nextToken }
+        ),
+      async (jobs) => {
+        for (const job of jobs) {
+          if (job.technicianId !== technicianId) continue;
+          if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
+          const { data: customer } = await client.models.Customer.get({
+            id: job.customerId,
+          });
+          // ROUTING address — the unit is deliberately excluded.
+          const address = customer ? routingAddress(customer) : "";
+          stops.push({
+            address: address || null,
+            onsite: onsiteMinutes(job.propertyClass),
+            routeOrder: job.routeOrder ?? 999,
+          });
+        }
+      },
+      { pageErrors: "throw" }
+    );
     stops.sort((a, b) => a.routeOrder - b.routeOrder);
 
     const base = await techBaseFor(technicianId, date);
@@ -1309,20 +1295,22 @@ export async function reconcileCapacityDay(
   let expiredClaims = 0;
   {
     const nowIso = new Date().toISOString();
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.CapacityClaim.listCapacityClaimByDate(
-        { date },
-        { limit: 200, nextToken: token }
-      );
-      for (const claim of page.data ?? []) {
-        if (String(claim.expiresAt) <= nowIso) {
-          await releaseCapacityClaim(claim.id);
-          expiredClaims++;
+    await forEachPage(
+      (nextToken) =>
+        client.models.CapacityClaim.listCapacityClaimByDate(
+          { date },
+          { limit: 200, nextToken }
+        ),
+      async (claims) => {
+        for (const claim of claims) {
+          if (String(claim.expiresAt) <= nowIso) {
+            await releaseCapacityClaim(claim.id);
+            expiredClaims++;
+          }
         }
-      }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "throw" }
+    );
   }
 
   const eligibility = await dayEligibility(date);
@@ -1341,13 +1329,14 @@ export async function reconcileCapacityDay(
   };
   const jobsBySlot = new Map<string, StopJob[]>();
   const assignedStopsByTech = new Map<string, number>();
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByScheduledDate(
-      { scheduledDate: date },
-      { limit: 200, nextToken: token }
-    );
-    for (const job of page.data ?? []) {
+  await forEachPage(
+    (nextToken) =>
+      client.models.Job.listJobByScheduledDate(
+        { scheduledDate: date },
+        { limit: 200, nextToken }
+      ),
+    async (jobs) => {
+    for (const job of jobs) {
       // Pending-assignment visits (UNSCHEDULED with a target date — office
       // moves, auto-queued recurrences) stay on the POOL readout; the rebuild
       // must not wipe what the pool notes recorded.
@@ -1394,8 +1383,9 @@ export async function reconcileCapacityDay(
         );
       }
     }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "throw" }
+  );
 
   const assignedStopsByTechFinal = assignedStopsByTech;
   const liveClaims = await liveClaimsOn(date);
@@ -1499,25 +1489,23 @@ export async function reconcileCapacityDay(
         }
       | undefined;
     if (stopModel) {
-      let token2: string | null | undefined;
-      do {
-        const page = stopModel.listTechDayStopsByDate
-          ? await stopModel.listTechDayStopsByDate({
-              date,
-              limit: 500,
-              nextToken: token2,
-            })
-          : await stopModel.list({ limit: 500, nextToken: token2 });
-        for (const row of page.data ?? []) {
-          if (
-            row.technicianId &&
-            (stopModel.listTechDayStopsByDate || row.date === date)
-          ) {
-            stopRowTechs.add(row.technicianId);
+      await forEachPage(
+        (nextToken) =>
+          stopModel.listTechDayStopsByDate
+            ? stopModel.listTechDayStopsByDate({ date, limit: 500, nextToken })
+            : stopModel.list({ limit: 500, nextToken }),
+        (rows) => {
+          for (const row of rows) {
+            if (
+              row.technicianId &&
+              (stopModel.listTechDayStopsByDate || row.date === date)
+            ) {
+              stopRowTechs.add(row.technicianId);
+            }
           }
-        }
-        token2 = page.nextToken;
-      } while (token2);
+        },
+        { pageErrors: "throw" }
+      );
     }
   }
   for (const techId of stopRowTechs) {

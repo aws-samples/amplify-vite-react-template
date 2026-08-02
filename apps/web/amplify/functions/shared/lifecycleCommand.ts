@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { dataClient } from "./dataClient";
 import { casTakeover, casFencedUpdate } from "./atomicLock";
 import type { LifecycleActor } from "./lifecycleLog";
+import { listAll } from "./pagination";
 
 /**
  * GL-09 — the durable customer lifecycle command engine. The transposition of
@@ -92,24 +93,12 @@ export async function listAllLifecycleCommands(
       };
     }
   ).CustomerLifecycleCommand;
-  const all: LifecycleCommandRow[] = [];
-  let nextToken: string | null | undefined = undefined;
-  do {
-    const page: {
-      data: LifecycleCommandRow[] | null;
-      nextToken?: string | null;
-      errors?: { message: string }[];
-    } = await model.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
+  return listAll((nextToken) =>
+    model.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
       { customerId },
       { limit: 200, nextToken }
-    );
-    if (page.errors?.length) {
-      throw new Error(page.errors.map((e) => e.message).join("; "));
-    }
-    all.push(...(page.data ?? []));
-    nextToken = page.nextToken;
-  } while (nextToken);
-  return all;
+    )
+  );
 }
 
 /**

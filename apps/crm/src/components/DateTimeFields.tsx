@@ -1,14 +1,16 @@
 import { useMemo } from "react";
+import { addDays, todayEastern } from "../lib/format";
 
 /**
  * Slick date entry for office staff: a native date picker (great on mobile,
  * fine on desktop) fronted by one-tap quick choices for the common cases.
  */
 
+/** Quick-choice dates run on the shop's clock: a UTC-derived "Today" starts
+ *  offering tomorrow's date from early evening onward, which is exactly when
+ *  the office is booking next-day work. */
 function isoPlusDays(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return addDays(todayEastern(), days);
 }
 
 const WEEKDAY = new Intl.DateTimeFormat("en-US", { weekday: "short" });

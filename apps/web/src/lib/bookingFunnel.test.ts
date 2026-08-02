@@ -84,17 +84,34 @@ describe("validateQuoteForm", () => {
       street: "",
       city: "",
       state: "",
+      zip: "",
     });
     expect(Object.keys(errors).sort()).toEqual(
       [
         "address.city",
         "address.state",
         "address.street",
+        "address.zip",
         "email",
         "name",
         "service",
       ].sort()
     );
+  });
+
+  describe("zip", () => {
+    it("is required — a booking with no ZIP reaches dispatch as a readiness failure", () => {
+      expect(validateQuoteForm({ ...validFields, zip: "" })["address.zip"]).toBeTruthy();
+      expect(validateQuoteForm({ ...validFields, zip: "   " })["address.zip"]).toBeTruthy();
+    });
+
+    it("rejects a partial ZIP", () => {
+      expect(validateQuoteForm({ ...validFields, zip: "018" })["address.zip"]).toBeTruthy();
+    });
+
+    it("accepts an OUT-OF-TERRITORY ZIP — those are Zone C leads, not form errors", () => {
+      expect(validateQuoteForm({ ...validFields, zip: "90210" })).toEqual({});
+    });
   });
 
   it("accepts the emails the server accepts and rejects the ones it rejects", () => {
@@ -277,10 +294,10 @@ describe("normalizePhone", () => {
 // ── Formatting ──────────────────────────────────────────────────────
 
 describe("money", () => {
-  it("keeps whole dollars whole, like the server's money()", () => {
-    expect(money(24900)).toBe("$249");
+  it("renders whole dollars with cents, matching the agreement PDF and the CRM", () => {
+    expect(money(24900)).toBe("$249.00");
     expect(money(9950)).toBe("$99.50");
-    expect(money(0)).toBe("$0");
+    expect(money(0)).toBe("$0.00");
   });
 });
 
@@ -333,7 +350,7 @@ describe("hoaMoneyLine", () => {
         initialFeeCents: 16000,
       })
     ).toBe(
-      "Your first month ($160) is charged today to lock in your first visit, then $160/mo."
+      "Your first month ($160.00) is charged today to lock in your first visit, then $160.00/mo."
     );
   });
 });

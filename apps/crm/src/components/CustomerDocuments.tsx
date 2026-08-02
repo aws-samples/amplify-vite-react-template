@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { api, opResult, unwrap, type Customer } from "../lib/api";
+import { useAction } from "../lib/useAsync";
 import { Badge, Button, ErrorNote } from "../ui/kit";
 import DocButton from "./DocButton";
 
@@ -66,51 +67,46 @@ export default function CustomerDocuments({
   const fileInput = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState("");
   const [kind, setKind] = useState("AGREEMENT");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const upload = async (file: File) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const contentType = file.type || "application/pdf";
-      const urlRes = await api().mutations.getCustomerDocumentUploadUrl({
+  const upload = useAction(async (file: File) => {
+    const contentType = file.type || "application/pdf";
+    const urlRes = await api().mutations.getCustomerDocumentUploadUrl({
+      customerId: customer.id,
+      contentType,
+    });
+    const target = opResult<{ key: string; uploadUrl: string }>(urlRes);
+    if (!target?.uploadUrl) throw new Error("Could not get an upload URL");
+
+    const put = await fetch(target.uploadUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": contentType },
+    });
+    if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+
+    unwrap(
+      await api().mutations.recordCustomerDocument({
         customerId: customer.id,
+        key: target.key,
+        title: title.trim() || file.name,
+        kind,
         contentType,
-      });
-      const target = opResult<{ key: string; uploadUrl: string }>(urlRes);
-      if (!target?.uploadUrl) throw new Error("Could not get an upload URL");
+        sizeBytes: file.size,
+      })
+    );
+    setTitle("");
+    await onChanged();
+  }, "Document upload failed");
 
-      const put = await fetch(target.uploadUrl, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": contentType },
-      });
-      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-
-      unwrap(
-        await api().mutations.recordCustomerDocument({
-          customerId: customer.id,
-          key: target.key,
-          title: title.trim() || file.name,
-          kind,
-          contentType,
-          sizeBytes: file.size,
-        })
-      );
-      setTitle("");
-      await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Document upload failed");
-    } finally {
-      setBusy(false);
-      if (fileInput.current) fileInput.current.value = "";
-    }
+  const pickFile = async (file: File) => {
+    await upload.run(file);
+    // Cleared either way, so the same file can be picked again after a failure.
+    if (fileInput.current) fileInput.current.value = "";
   };
 
   return (
     <div className="customer-documents">
-      <ErrorNote error={error} />
+      <ErrorNote error={upload.error} />
 
       <div className="doc-upload-row">
         <input
@@ -118,13 +114,13 @@ export default function CustomerDocuments({
           placeholder="Document title (e.g. Signed agreement)"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          disabled={busy}
+          disabled={upload.busy}
           aria-label="Document title"
         />
         <select
           value={kind}
           onChange={(e) => setKind(e.target.value)}
-          disabled={busy}
+          disabled={upload.busy}
           aria-label="Document type"
         >
           {KINDS.map((k) => (
@@ -137,16 +133,16 @@ export default function CustomerDocuments({
           ref={fileInput}
           type="file"
           accept={ACCEPT}
-          disabled={busy}
+          disabled={upload.busy}
           onChange={(e) => {
             const f = e.target.files?.[0];
-            if (f) void upload(f);
+            if (f) void pickFile(f);
           }}
           style={{ display: "none" }}
         />
         <Button
           small
-          loading={busy}
+          loading={upload.busy}
           onClick={() => fileInput.current?.click()}
         >
           Upload document

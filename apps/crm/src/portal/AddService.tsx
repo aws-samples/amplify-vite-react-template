@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, opResult, type Customer } from "../lib/api";
 import { useRoles } from "../lib/auth";
+import { useAction } from "../lib/useAsync";
 import {
   Button,
   Card,
@@ -84,6 +85,22 @@ type RecurringOffer = {
   monthlyCents: number;
   initialFeeCents: number;
 };
+/**
+ * What /quote actually returns. Kept faithful to the wire even where this
+ * screen does not act on a field, so the next reader can see what the server
+ * said rather than rediscovering it:
+ *
+ *  - `offSeason` ships an EMPTY day board. Self-serve checkout is refused for
+ *    it on this path (booking-public `book`, trusted branch), so the screen
+ *    explains and stops instead of offering an unbookable day picker.
+ *  - `offSeasonMessage` is deliberately NOT rendered here: it is written for
+ *    the public funnel ("Enroll now and your plan starts today"), which is
+ *    true there and false here, where the office sets the plan up.
+ *  - `invoiceEligible` is never offered: net terms are refused on this path by
+ *    the same server branch.
+ *  - `statusToken` belongs to the funnel's /booking-status polling; a portal
+ *    booking charges the saved card and finalizes synchronously.
+ */
 type QuoteResult = {
   decision: string;
   bookingId?: string;
@@ -94,6 +111,11 @@ type QuoteResult = {
   requestedFrequency?: string | null;
   terms?: { version: string; text: string };
   message?: string;
+  offSeason?: boolean;
+  offSeasonMessage?: string;
+  invoiceEligible?: boolean;
+  expiresAt?: string;
+  statusToken?: string;
 };
 type BookResult = {
   booked?: boolean;
@@ -102,18 +124,10 @@ type BookResult = {
   summary?: string;
 };
 
-/** The createSetupIntent mutation carries the portal add-service actions too.
- *  Typed via a cast because the generated client types trail a schema deploy. */
+/** The createSetupIntent mutation carries the portal add-service actions too —
+ *  `action` folds them onto this op so no new AppSync resource is spent. */
 function addServiceMutation() {
-  return (
-    api().mutations as unknown as {
-      createSetupIntent: (a: {
-        customerId: string;
-        action: string;
-        payload: unknown;
-      }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-    }
-  ).createSetupIntent;
+  return api().mutations.createSetupIntent;
 }
 
 export default function PortalAddService() {
@@ -132,7 +146,6 @@ export default function PortalAddService() {
   const [selDate, setSelDate] = useState<string | null>(null);
   const [plan, setPlan] = useState<"ONE_TIME" | "PLAN">("ONE_TIME");
   const [accepted, setAccepted] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [booked, setBooked] = useState<string | null>(null);
 
@@ -165,99 +178,92 @@ export default function PortalAddService() {
     setBooked(null);
   };
 
-  const getPrice = async () => {
+  const getPrice = useAction(async () => {
     if (!customer) return;
-    setBusy(true);
     setError(null);
     resetQuote();
-    try {
-      const input: Record<string, unknown> = {
-        name: customer.contactName || customer.displayName,
-        email: customer.email,
-        service,
-        propertyKind,
-        address: {
-          street: customer.serviceStreet,
-          city: customer.serviceCity,
-          state: customer.serviceState,
-          zip: customer.serviceZip,
-        },
-        recurringPreference,
-      };
-      if (needs.sqft) input.sqft = parseInt(sqft, 10) || undefined;
-      if (needs.units) input.units = parseInt(units, 10) || undefined;
-      if (needs.lotHalfAcres) input.lotHalfAcres = parseInt(lotHalfAcres, 10) || 1;
-      if (needs.nestCount) input.nestCount = parseInt(nestCount, 10) || 1;
+    const input: Record<string, unknown> = {
+      name: customer.contactName || customer.displayName,
+      email: customer.email,
+      service,
+      propertyKind,
+      address: {
+        street: customer.serviceStreet,
+        city: customer.serviceCity,
+        state: customer.serviceState,
+        zip: customer.serviceZip,
+      },
+      recurringPreference,
+    };
+    if (needs.sqft) input.sqft = parseInt(sqft, 10) || undefined;
+    if (needs.units) input.units = parseInt(units, 10) || undefined;
+    if (needs.lotHalfAcres) input.lotHalfAcres = parseInt(lotHalfAcres, 10) || 1;
+    if (needs.nestCount) input.nestCount = parseInt(nestCount, 10) || 1;
 
-      const res = opResult<QuoteResult>(
-        await addServiceMutation()({
-          customerId: customer.id,
-          action: "ADD_SERVICE_QUOTE",
-          payload: input,
-        })
+    const res = opResult<QuoteResult>(
+      await addServiceMutation()({
+        customerId: customer.id,
+        action: "ADD_SERVICE_QUOTE",
+        payload: input,
+      })
+    );
+    // Not-priced comes back as a decision rather than a throw, so it is
+    // rethrown to reach the captured error.
+    if (!res || res.decision !== "PRICED" || !res.bookingId) {
+      throw new Error(
+        res?.message ||
+          "We couldn't price this one instantly — the office will follow up with a quote. Nothing was charged."
       );
-      if (!res || res.decision !== "PRICED" || !res.bookingId) {
-        setError(
-          res?.message ||
-            "We couldn't price this one instantly — the office will follow up with a quote. Nothing was charged."
-        );
-        return;
-      }
-      setQuote(res);
-      // Default the choice the way the funnel does: a requested plan leads.
-      const wantsPlan =
-        Boolean(res.recurringOffer) &&
-        (res.planOnly ||
-          (res.requestedFrequency &&
-            res.recurringOffer?.frequency === res.requestedFrequency));
-      setPlan(wantsPlan ? "PLAN" : "ONE_TIME");
-      if (res.days?.length) setSelDate(res.days[0].date);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not get a price");
-    } finally {
-      setBusy(false);
     }
-  };
+    setQuote(res);
+    // Default the choice the way the funnel does: a requested plan leads.
+    const wantsPlan =
+      Boolean(res.recurringOffer) &&
+      (res.planOnly ||
+        (res.requestedFrequency &&
+          res.recurringOffer?.frequency === res.requestedFrequency));
+    setPlan(wantsPlan ? "PLAN" : "ONE_TIME");
+    if (res.days?.length) setSelDate(res.days[0].date);
+  }, "Could not get a price");
 
-  const confirmBooking = async () => {
+  // This charges the card on file and finalizes synchronously: a held Enter or
+  // a double-tap that beats `disabled` books — and bills — the visit twice.
+  const confirmBooking = useAction(async () => {
     if (!customer || !quote?.bookingId || !selDate) return;
-    setBusy(true);
     setError(null);
-    try {
-      const res = opResult<BookResult>(
-        await addServiceMutation()({
-          customerId: customer.id,
-          action: "ADD_SERVICE_BOOK",
-          payload: {
-            bookingId: quote.bookingId,
-            date: selDate,
-            recurring: plan === "PLAN",
-            tcAccepted: true,
-            tcVersion: quote.terms?.version,
-          },
-        })
+    const res = opResult<BookResult>(
+      await addServiceMutation()({
+        customerId: customer.id,
+        action: "ADD_SERVICE_BOOK",
+        payload: {
+          bookingId: quote.bookingId,
+          date: selDate,
+          recurring: plan === "PLAN",
+          tcAccepted: true,
+          tcVersion: quote.terms?.version,
+        },
+      })
+    );
+    if (!res?.booked) {
+      throw new Error(
+        "The booking didn't complete — nothing was charged. Please try again."
       );
-      if (!res?.booked) {
-        setError("The booking didn't complete — nothing was charged. Please try again.");
-        return;
-      }
-      setBooked(
-        res.processing
-          ? "You're booked — your bank payment is clearing and we'll email your confirmation."
-          : `You're booked${res.summary ? ` — ${res.summary}` : ""}. A receipt is on its way to your email.`
-      );
-      setQuote(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The booking didn't go through");
-    } finally {
-      setBusy(false);
     }
-  };
+    setBooked(
+      res.processing
+        ? "You're booked — your bank payment is clearing and we'll email your confirmation."
+        : `You're booked${res.summary ? ` — ${res.summary}` : ""}. A receipt is on its way to your email.`
+    );
+    setQuote(null);
+  }, "The booking didn't go through");
+
+  // Whichever of the three failed — the account load, the price, the booking.
+  const shownError = error ?? getPrice.error ?? confirmBooking.error;
 
   if (!customers) {
     return (
       <Page title="Add a service" back="/portal">
-        <ErrorNote error={error} />
+        <ErrorNote error={shownError} />
         <Spinner />
       </Page>
     );
@@ -395,12 +401,33 @@ export default function PortalAddService() {
         <p className="muted small">
           We&rsquo;ll price this for {customer?.serviceStreet ?? "your address on file"}.
         </p>
-        <Button block loading={busy && !quote} onClick={() => void getPrice()}>
+        <Button block loading={getPrice.busy} onClick={() => void getPrice.run()}>
           Get my price
         </Button>
       </Card>
 
-      {quote ? (
+      {quote?.offSeason ? (
+        <Card title="Your price">
+          {/* GL-17: an off-season seasonal quote carries no bookable day, and
+              the server refuses date-less enrollment on the portal path — it
+              is office-assisted on purpose. Say so plainly here rather than
+              showing a price with a day picker that can never be filled and a
+              button that can never be pressed. */}
+          <p className="small">
+            Mosquito season runs April through October, so this one is set up by
+            the office rather than instantly here. We&rsquo;ll reach out to
+            start your plan and confirm your first treatment. Nothing has been
+            charged.
+          </p>
+          {offer ? (
+            <p className="small muted">
+              When it starts, it&rsquo;s {money(offer.monthlyCents)}/mo, billed
+              monthly year-round.
+            </p>
+          ) : null}
+          <ErrorNote error={shownError} />
+        </Card>
+      ) : quote ? (
         <Card title="Your price">
           {offer && (quote.planOnly || plan === "PLAN") ? (
             <p className="small">
@@ -463,18 +490,18 @@ export default function PortalAddService() {
             </label>
           ) : null}
 
-          <ErrorNote error={error} />
+          <ErrorNote error={shownError} />
           <Button
             block
-            loading={busy}
+            loading={confirmBooking.busy}
             disabled={!accepted || !selDate}
-            onClick={() => void confirmBooking()}
+            onClick={() => void confirmBooking.run()}
           >
             Add &amp; pay with card on file
           </Button>
         </Card>
       ) : (
-        <ErrorNote error={error} />
+        <ErrorNote error={shownError} />
       )}
     </Page>
   );

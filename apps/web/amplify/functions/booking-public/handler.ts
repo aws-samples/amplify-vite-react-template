@@ -2,13 +2,7 @@ import type {
   APIGatewayProxyEventV2,
   APIGatewayProxyResultV2,
 } from "aws-lambda";
-import Anthropic from "@anthropic-ai/sdk";
-import {
-  extractLead,
-  quoteInputFromExtraction,
-  type ExtractionMapping,
-} from "../shared/leadExtraction";
-import { DEMAND_PRICING_MODEL } from "../shared/marketRate";
+import { type ExtractionMapping } from "../shared/leadExtraction";
 import { randomUUID } from "node:crypto";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
@@ -82,11 +76,18 @@ import {
   type PlanCadence,
 } from "../shared/marketRate";
 import { serviceLabelFor } from "../shared/serviceCatalog";
+import { isValidZip } from "../shared/postalCode";
+import {
+  parseQuoteSnapshot,
+  serializeQuoteSnapshot,
+  type QuoteSnapshot,
+} from "../shared/quoteSnapshot";
 import {
   recordFunnelContactOutcome,
   recordWebsiteQuoteLead,
   recordWebsiteQuoteRequested,
 } from "../shared/leadLifecycle";
+import { formatMoney } from "../shared/money";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -491,24 +492,11 @@ type StoredQuoteBooking = {
   driveMinutes?: number | null;
 };
 
-function parseStoredQuote(raw: unknown): {
-  days?: DayQuote[];
-  serviceLabel?: string;
-  recurringOffer?: {
-    frequency: string;
-    monthlyCents: number;
-    initialFeeCents: number;
-  } | null;
-  planOnly?: boolean;
-  offSeason?: boolean;
-  contactMessage?: string;
-} {
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+/** Read a stored quote. Structural validation (a half-written recurring offer
+ *  comes back absent, not partial) lives in the shared leaf — see
+ *  `shared/quoteSnapshot.ts`. */
+function parseStoredQuote(raw: unknown): QuoteSnapshot {
+  return parseQuoteSnapshot(raw);
 }
 
 /**
@@ -655,6 +643,7 @@ async function trackStatus(body: Record<string, unknown>) {
     typeof body.token === "string" ? body.token.trim() : "";
   if (!token) return { status: "UNKNOWN" as const };
   const client = await dataClient();
+  // Zero-page read is deliberate: trackToken is an unguessable unique token, so one page holds every match (audit 1.1.5).
   const { data } = await client.models.Job.listJobByTrackToken({
     trackToken: token,
   });
@@ -977,6 +966,8 @@ async function resolveLeadToken(
 ): Promise<string | null> {
   if (typeof raw !== "string" || !BOOKING_LINK_TOKEN_RE.test(raw)) return null;
   try {
+    // Zero-page read is deliberate: bookingLinkToken is unique by construction; limit 2 exists only to
+    // detect an ambiguous token (a second row), which is refused (audit 1.1.5).
     const { data } = (await client.models.Customer.listCustomerByBookingLinkToken(
       { bookingLinkToken: raw },
       { limit: 2 }
@@ -1006,6 +997,8 @@ async function leadPrefill(body: Record<string, unknown>) {
     throw new HttpError(404, { error: "Lead details are unavailable." });
   }
   const client = await dataClient();
+  // Zero-page read is deliberate: bookingLinkToken is unique by construction; limit 2 exists only to
+  // detect an ambiguous token (a second row), which is refused (audit 1.1.5).
   const { data } = await client.models.Customer.listCustomerByBookingLinkToken(
     { bookingLinkToken: token },
     { limit: 2 }
@@ -1099,37 +1092,41 @@ function quoteLeadNotes(
 async function inputFromDescription(
   describe: string
 ): Promise<ExtractionMapping> {
-  // A cap, because this is an unauthenticated AI surface. Real descriptions are
-  // a sentence or two; anything longer is padding or an injection attempt, and
-  // truncating costs nothing a genuine customer needs.
-  const text = describe.trim().slice(0, 1000);
-  const apiKey = await getSecret("ANTHROPIC_API_KEY");
-  if (!apiKey) {
-    return {
-      ok: false,
-      eligibility: "unclear",
-      reason:
-        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
-    };
-  }
+  // Extraction runs on crm-pricing, NOT here. This function is a public,
+  // unauthenticated Function URL, and the research key has no business on it —
+  // so the text goes inward over an IAM invoke and only the structured answer
+  // comes back. Any failure is an honest ask-back rather than a guess: the
+  // customer is told to use the pickers, and nothing is priced on invented
+  // facts.
+  const fnName = process.env.CRM_PRICING_FUNCTION_NAME;
+  const unreadable: ExtractionMapping = {
+    ok: false,
+    eligibility: "unclear",
+    reason:
+      "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+  };
+  if (!fnName) return unreadable;
   try {
-    const extraction = await extractLead(
-      new Anthropic({ apiKey }),
-      text,
-      null,
-      // A closed schema needs no frontier model, and this runs on public
-      // traffic — the demand-pricing tier is the right cost/latency point.
-      DEMAND_PRICING_MODEL
+    const out = await lambda.send(
+      new InvokeCommand({
+        FunctionName: fnName,
+        InvocationType: "RequestResponse",
+        Payload: Buffer.from(
+          JSON.stringify({ internalOp: { op: "extractQuoteIntent", describe } })
+        ),
+      })
     );
-    return quoteInputFromExtraction(extraction);
+    if (out.FunctionError || !out.Payload) return unreadable;
+    const parsed = JSON.parse(Buffer.from(out.Payload).toString("utf8"));
+    // Trust only the shape we defined; anything else is treated as unreadable
+    // rather than fed into pricing.
+    if (parsed && typeof parsed === "object" && typeof parsed.ok === "boolean") {
+      return parsed as ExtractionMapping;
+    }
+    return unreadable;
   } catch (err) {
-    console.error("inputFromDescription: extraction failed", err);
-    return {
-      ok: false,
-      eligibility: "unclear",
-      reason:
-        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
-    };
+    console.error("inputFromDescription: extraction invoke failed", err);
+    return unreadable;
   }
 }
 
@@ -1149,6 +1146,23 @@ async function quote(
   // description we cannot read confidently becomes a callback, never a guess.
   let describeAssumptions: string[] = [];
   if (!resume && (input.describe ?? "").trim()) {
+    // The SAME gate the rest of this endpoint carries, run BEFORE the paid
+    // extraction rather than after it. The general check further down happens
+    // past validation, which is too late here: reading a description costs an
+    // AI call, so a bot could otherwise burn research spend without ever
+    // proving it is a browser or hitting the per-IP ceiling.
+    if (!(await verifyBotToken(input.botToken))) {
+      throw new HttpError(400, {
+        error:
+          "We couldn't verify that request came from a browser — please reload and try again.",
+      });
+    }
+    if (!(await throttleOk(sourceIp))) {
+      throw new HttpError(429, {
+        error:
+          "That's a lot of quotes from one place — give it an hour, or call us at the office and we'll sort it out directly.",
+      });
+    }
     const described = await inputFromDescription(input.describe!);
     if (!described.ok) {
       // Answer on the field they typed into, so they can add the one missing
@@ -1191,6 +1205,17 @@ async function quote(
   if (!addr.street?.trim()) errors["address.street"] = "Street address is required";
   if (!addr.city?.trim()) errors["address.city"] = "City is required";
   if (!addr.state?.trim()) errors["address.state"] = "State is required";
+  // Shape only, and only on the public path. An out-of-territory ZIP stays a
+  // priceable lead (Zone C, below); what is refused here is a booking with no
+  // usable ZIP at all, which reaches dispatch as a readiness failure the
+  // customer never sees and weakens the geocode `address` is built from.
+  // The trusted portal invoke passes the customer's address ON FILE, so a
+  // record missing a ZIP is an office data fix, not a mid-purchase hard stop.
+  if (!trusted) {
+    const zip = addr.zip?.trim() ?? "";
+    if (!zip) errors["address.zip"] = "ZIP code is required";
+    else if (!isValidZip(zip)) errors["address.zip"] = "Enter a 5-digit ZIP code";
+  }
   if (SEASONAL_SERVICES.has(service)) {
     // GL-17: mosquito plans price on yard size alone (half-acres), at any
     // property kind — no sqft, nest, or unit inputs.
@@ -1968,13 +1993,13 @@ async function quote(
     // so the booking-status re-check reprices with the same travel add-on.
     zone: priceZone,
     driveMinutes: minutes ?? undefined,
-    quoteJson: JSON.stringify({
+    quoteJson: serializeQuoteSnapshot({
       days,
       baseCents,
       serviceLabel,
       recurringOffer,
-      planOnly: planOnly || undefined,
-      offSeason: offSeason || undefined,
+      planOnly,
+      offSeason,
     }),
     monthlyCents: recurringOffer?.monthlyCents ?? undefined,
     expiresAt,
@@ -2075,7 +2100,7 @@ async function ownOrphanedIntent(
       kind: "PAYMENT_INTENT_ORPHAN",
       dedupeKey: `booking-payment-orphan:${booking.id}`,
       title: `A checkout's payment intent is unrecorded: ${booking.name ?? booking.id}`,
-      detail: `Stripe PaymentIntent ${intentId} ($${(amountCents / 100).toFixed(2)}) exists for booking ${booking.id}, but the booking record could not be updated to reference it AND the intent could not be canceled. If the customer completes this payment, finalization will refuse it as superseded — verify the intent in Stripe, cancel or refund it, and reconcile the booking.`,
+      detail: `Stripe PaymentIntent ${intentId} (${formatMoney(amountCents)}) exists for booking ${booking.id}, but the booking record could not be updated to reference it AND the intent could not be canceled. If the customer completes this payment, finalization will refuse it as superseded — verify the intent in Stripe, cancel or refund it, and reconcile the booking.`,
       relatedId: booking.id,
       sourceUrl: `/work`,
       resolutionAction:
@@ -2439,12 +2464,7 @@ async function promoPreview(body: Record<string, unknown>) {
   if (!booking) {
     throw new HttpError(404, { error: "Quote not found — request a new one." });
   }
-  const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-    days?: DayQuote[];
-    recurringOffer?: { initialFeeCents: number } | null;
-    planOnly?: boolean;
-    offSeason?: boolean;
-  };
+  const stored = parseStoredQuote(booking.quoteJson);
   // Mirror /book's base-amount rule: recurring/plan/off-season discount off the
   // first-month fee, a one-time booking off the chosen day's price.
   const recurring = body.recurring === true || stored.planOnly === true;
@@ -2565,13 +2585,7 @@ async function book(
   if (booking.expiresAt && new Date(booking.expiresAt).getTime() < Date.now()) {
     throw new HttpError(410, { error: "This quote expired — request a fresh one." });
   }
-  const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-    days?: DayQuote[];
-    serviceLabel?: string;
-    recurringOffer?: { frequency: string; monthlyCents: number; initialFeeCents: number } | null;
-    planOnly?: boolean;
-    offSeason?: boolean;
-  };
+  const stored = parseStoredQuote(booking.quoteJson);
   // Invoice-me (net terms): allowed ONLY for HOA/community + commercial, and
   // re-checked SERVER-SIDE from the booking's stored property kind — a client
   // that flips `invoice:true` on a residential quote is refused here.
@@ -2605,6 +2619,34 @@ async function book(
       error: "No recurring plan was offered on this quote.",
     });
   }
+  // The checkout branches below are closures, and TS narrowing does not cross
+  // a closure boundary — that is what the `!` assertions here used to be for.
+  // Bind the proven values ONCE instead, so the amount charged to a card is a
+  // `number` the compiler has actually checked rather than one an assertion
+  // promised. `parseStoredQuote` guarantees a present offer carries all three
+  // of its fields, so `recurringOffer` is whole wherever it is non-null.
+  const provenOffer = stored.recurringOffer;
+  const provenDay = day ?? null;
+  const requireRecurringOffer = () => {
+    if (!provenOffer) {
+      // Unreachable via the guards; a refusal beats an invented amount.
+      throw new HttpError(400, {
+        error: "No recurring plan was offered on this quote.",
+      });
+    }
+    return provenOffer;
+  };
+  /** The first-month fee, for the branches the guards above proved reach it. */
+  const recurringFeeCents = (): number => requireRecurringOffer().initialFeeCents;
+  /** The chosen day's price, for the dated branches. */
+  const datedPriceCents = (): number => {
+    if (!provenDay) {
+      throw new HttpError(409, {
+        error: "That day is no longer available — request a fresh quote.",
+      });
+    }
+    return provenDay.priceCents;
+  };
 
   // A staff-entered discount code (optional). Resolve it ONCE here so every
   // /book branch — dated card, invoice, off-season — discounts from the same
@@ -2694,12 +2736,14 @@ async function book(
       // The off-season enrollment charges the first month by card — apply the
       // code to that charge here (same card floor as every other checkout).
       const { amountCents: offSeasonAmountCents, promoSets: offSeasonPromoSets } =
-        pricedWithPromo(stored.recurringOffer!.initialFeeCents, { card: true });
+        pricedWithPromo(recurringFeeCents(), { card: true });
       return await offSeasonEnrollmentAttempt({
         booking,
-        stored: stored as {
-          serviceLabel?: string;
-          recurringOffer: { frequency: string; monthlyCents: number; initialFeeCents: number };
+        // No cast: the guards above proved the offer is present, and
+        // `parseStoredQuote` proved it is whole.
+        stored: {
+          serviceLabel: stored.serviceLabel,
+          recurringOffer: requireRecurringOffer(),
         },
         req,
         tcVersion,
@@ -2725,8 +2769,8 @@ async function book(
     // minimum applies — nothing is charged to a card).
     const { amountCents, promoSets } = pricedWithPromo(
       recurring || offSeason
-        ? stored.recurringOffer!.initialFeeCents
-        : day!.priceCents
+        ? recurringFeeCents()
+        : datedPriceCents()
     );
     // Default net-30 terms; the due date is stamped on the OPEN invoice and
     // drives AR aging / dunning exactly like any other net-terms bill.
@@ -2744,7 +2788,7 @@ async function book(
         routesKey: await getSecret("GOOGLE_ROUTES_API_KEY"),
         candidateAddress: addr,
         service: String(booking.service),
-        baseCents: day!.priceCents,
+        baseCents: datedPriceCents(),
         zone:
           booking.zone === "A" ||
           booking.zone === "B" ||
@@ -2846,7 +2890,7 @@ async function book(
   // initial fee now and the subscription starts after the first visit. A
   // staff discount code (if any) comes off this card charge.
   const { amountCents, promoSets } = pricedWithPromo(
-    recurring ? stored.recurringOffer!.initialFeeCents : day!.priceCents,
+    recurring ? recurringFeeCents() : datedPriceCents(),
     { card: true }
   );
 
@@ -2882,7 +2926,7 @@ async function book(
     routesKey: await getSecret("GOOGLE_ROUTES_API_KEY"),
     candidateAddress: address,
     service: String(booking.service),
-    baseCents: day!.priceCents, // availability only — the quoted price stands
+    baseCents: datedPriceCents(), // availability only — the quoted price stands
     zone:
       booking.zone === "A" || booking.zone === "B" ? booking.zone : undefined,
     onlyDate: date,
@@ -3311,6 +3355,7 @@ async function cancel(body: Record<string, unknown>) {
   const token = String(body.token ?? "");
   if (!token) throw new HttpError(400, { error: "Missing token" });
   const client = await dataClient();
+  // Zero-page read is deliberate: cancelToken is an unguessable unique token, so one page holds every match (audit 1.1.5).
   const { data: matches } =
     await client.models.BookingRequest.listBookingRequestByCancelToken({
       cancelToken: token,

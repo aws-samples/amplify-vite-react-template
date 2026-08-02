@@ -5,6 +5,7 @@ import {
   clientActionId,
   DEACTIVATION_REASONS,
   dueDateForTerms,
+  listAll,
   listCustomerLifecycleEvents,
   listLifecycleCommands,
   previewLifecycleTransition,
@@ -19,9 +20,11 @@ import {
   type CustomerLifecycleEvent,
   type VisitRescheduleOutcome,
   type Agreement,
+  type CallbackRequest,
   type Customer,
   type CustomerGroup,
   type Invoice,
+  type PortalRequest,
   type InvoiceTerms,
   type Job,
   type ServicePlan,
@@ -30,6 +33,7 @@ import {
 } from "../lib/api";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
+import { useAction, useKeyedAction } from "../lib/useAsync";
 import { daysPastDue } from "../lib/aging";
 import { isManualSettled } from "../lib/deposits";
 import { dunningStateLabel, isOverdue } from "../lib/recovery";
@@ -57,6 +61,7 @@ import {
 } from "../ui/kit";
 import CustomerForm, { customerToForm } from "../components/CustomerForm";
 import LeadPanel from "../components/LeadPanel";
+import QuoteHistory from "../components/QuoteHistory";
 import CollectPaymentSheet from "../components/CollectPaymentSheet";
 import VisitCancelSheet from "../components/VisitCancelSheet";
 import DocButton from "../components/DocButton";
@@ -175,7 +180,6 @@ export default function CustomerDetail() {
     | "portal"
     | "group"
   >(null);
-  const [busyAction, setBusyAction] = useState<string | null>(null);
   // GL-09 — the lifecycle transition ledger (deactivate/reactivate history) and
   // the reason-picker sheets that gate each transition on a controlled reason.
   const [lifecycle, setLifecycle] = useState<CustomerLifecycleEvent[]>([]);
@@ -208,33 +212,33 @@ export default function CustomerDetail() {
       setCustomer(c);
       const filter = { customerId: { eq: id } };
       const [pl, jb, ag, rp, amd, inv, gr] = await Promise.all([
-        api().models.ServicePlan.list({ filter, limit: 200 }),
-        api().models.Job.list({ filter, limit: 500 }),
-        api().models.Agreement.list({ filter, limit: 200 }),
-        api().models.ServiceReport.list({ filter, limit: 500 }),
-        api().models.ServiceReportAmendment.list({ filter, limit: 500 }),
-        api().models.Invoice.list({ filter, limit: 500 }),
-        api().models.CustomerGroup.list({ limit: 500 }),
+        listAll((t) => api().models.ServicePlan.list({ filter, limit: 200, nextToken: t })),
+        listAll((t) => api().models.Job.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.Agreement.list({ filter, limit: 200, nextToken: t })),
+        listAll((t) => api().models.ServiceReport.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.ServiceReportAmendment.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.Invoice.list({ filter, limit: 500, nextToken: t })),
+        listAll((t) => api().models.CustomerGroup.list({ limit: 500, nextToken: t })),
       ]);
-      setPlans(unwrap(pl));
+      setPlans(pl);
       setJobs(
-        unwrap(jb).sort((a, b) =>
+        jb.sort((a, b) =>
           (b.scheduledDate ?? "9999").localeCompare(a.scheduledDate ?? "9999")
         )
       );
-      setAgreements(unwrap(ag));
-      setReports(unwrap(rp).filter((r) => r.status === "FINALIZED"));
+      setAgreements(ag);
+      setReports(rp.filter((r) => r.status === "FINALIZED"));
       setAmendments(
-        unwrap(amd).sort((a, b) =>
+        amd.sort((a, b) =>
           (a.issuedAt ?? "").localeCompare(b.issuedAt ?? "")
         )
       );
       setInvoices(
-        unwrap(inv).sort((a, b) =>
+        inv.sort((a, b) =>
           (b.issuedAt ?? "").localeCompare(a.issuedAt ?? "")
         )
       );
-      setGroups(unwrap(gr));
+      setGroups(gr);
       // The lifecycle ledger is OWNER/OFFICE/FINANCE-readable; load it for those
       // roles so the transition history refreshes after every deactivate/reactivate.
       if (roles.office || roles.finance) {
@@ -262,6 +266,12 @@ export default function CustomerDetail() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Every button-level write on this page goes through `run` below, so the
+  // gate lives here once — keyed by button, because these ~17 writes are
+  // independent of each other and a plain single-flight would let one in
+  // flight silently swallow a press on an unrelated button.
+  const perform = useKeyedAction("Action failed");
 
   // GL-09: the employee confirmation renders the SERVER inventory, computed
   // fresh each time the deactivate sheet opens.
@@ -347,21 +357,19 @@ export default function CustomerDetail() {
     fn: () => Promise<unknown>,
     successMsg?: string
   ) => {
-    setBusyAction(name);
     setError(null);
-    setNotice(null);
-    try {
+    await perform.run(name, async () => {
+      setNotice(null);
       await fn();
       await load();
       if (successMsg) {
         setNotice(successMsg);
-        window.setTimeout(() => setNotice((n) => (n === successMsg ? null : n)), 6000);
+        window.setTimeout(
+          () => setNotice((n) => (n === successMsg ? null : n)),
+          6000
+        );
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed");
-    } finally {
-      setBusyAction(null);
-    }
+    });
   };
 
   const address = [
@@ -379,7 +387,7 @@ export default function CustomerDetail() {
         <Button
           small
           variant="danger"
-          loading={busyAction === "deactivate"}
+          loading={perform.busyKey === "deactivate"}
           onClick={() => {
             setReasonCode(DEACTIVATION_REASONS[0]);
             setReasonNote("");
@@ -392,7 +400,7 @@ export default function CustomerDetail() {
         <Button
           small
           variant="subtle"
-          loading={busyAction === "reactivate"}
+          loading={perform.busyKey === "reactivate"}
           onClick={() => {
             setReasonCode(REACTIVATION_REASONS[0]);
             setReasonNote("");
@@ -429,7 +437,7 @@ export default function CustomerDetail() {
         ) : undefined
       }
     >
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? perform.error} />
       <SuccessNote message={notice} />
 
       <Card className="customer-summary-card">
@@ -537,6 +545,13 @@ export default function CustomerDetail() {
         <LeadPanel customer={customer} onChanged={() => void load()} />
       ) : null}
 
+      {/* Every quote this customer was given, for the whole life of the record.
+          It used to live inside LeadPanel, which is gated on status === LEAD —
+          so the history disappeared the moment a lead converted, even though
+          the quotes still existed. "What did we quote them?" is asked most
+          often after they become a customer. */}
+      {roles.office ? <QuoteHistory customer={customer} /> : null}
+
       {roles.office && !isLead ? (
         <Card
           title="Payment method"
@@ -573,7 +588,7 @@ export default function CustomerDetail() {
             <Button
               small
               variant="ghost"
-              loading={busyAction === "payreq"}
+              loading={perform.busyKey === "payreq"}
               disabled={!customer.email}
               onClick={() =>
                 void run(
@@ -642,7 +657,7 @@ export default function CustomerDetail() {
                     small
                     variant="subtle"
                     disabled={!customer.email}
-                    loading={busyAction === "invite"}
+                    loading={perform.busyKey === "invite"}
                     onClick={() =>
                       void run(
                         "invite",
@@ -677,7 +692,7 @@ export default function CustomerDetail() {
                 <Button
                   small
                   variant="ghost"
-                  loading={busyAction === "remind"}
+                  loading={perform.busyKey === "remind"}
                   onClick={() =>
                     void run(
                       "remind",
@@ -730,7 +745,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="danger"
-                          loading={busyAction === `cancel-${p.id}`}
+                          loading={perform.busyKey === `cancel-${p.id}`}
                           onClick={() => {
                             if (!window.confirm("Cancel this plan's billing?")) return;
                             void run(`cancel-${p.id}`, async () =>
@@ -748,7 +763,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="subtle"
-                          loading={busyAction === `start-${p.id}`}
+                          loading={perform.busyKey === `start-${p.id}`}
                           onClick={() => {
                             // Begins charging a card every month, indefinitely.
                             // Completion starts billing on its own now, so
@@ -779,7 +794,7 @@ export default function CustomerDetail() {
                       <Button
                         small
                         variant="ghost"
-                        loading={busyAction === `pause-${p.id}`}
+                        loading={perform.busyKey === `pause-${p.id}`}
                         onClick={() => {
                           if (!window.confirm("Deactivate this plan? Billing pauses and no new visits are scheduled.")) return;
                           void run(`pause-${p.id}`, async () =>
@@ -799,7 +814,7 @@ export default function CustomerDetail() {
                     <Button
                       small
                       variant="subtle"
-                      loading={busyAction === `resume-${p.id}`}
+                      loading={perform.busyKey === `resume-${p.id}`}
                       onClick={() =>
                         void run(`resume-${p.id}`, async () =>
                           unwrap(
@@ -940,7 +955,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `complete-${j.id}`}
+                          loading={perform.busyKey === `complete-${j.id}`}
                           onClick={() => {
                             // Completing a recurring job may start the plan's
                             // monthly billing server-side. When it will, the
@@ -972,7 +987,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="subtle"
-                          loading={busyAction === `charge-${j.id}`}
+                          loading={perform.busyKey === `charge-${j.id}`}
                           onClick={() => {
                             // The amount is the job's own price, so there is no
                             // typo to catch here — but it is still a live card
@@ -1362,7 +1377,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `settle-${inv.id}`}
+                          loading={perform.busyKey === `settle-${inv.id}`}
                           onClick={() => {
                             if (
                               !window.confirm(
@@ -1404,7 +1419,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `link-${inv.id}`}
+                          loading={perform.busyKey === `link-${inv.id}`}
                           onClick={() =>
                             void run(
                               `link-${inv.id}`,
@@ -1435,7 +1450,7 @@ export default function CustomerDetail() {
                         <Button
                           small
                           variant="ghost"
-                          loading={busyAction === `void-${inv.id}`}
+                          loading={perform.busyKey === `void-${inv.id}`}
                           onClick={() => {
                             const reason = window.prompt(
                               `Void this ${money(inv.amountCents)} invoice? It stays on the record as voided, with your name and this reason.\n\nWhy is it being voided?`
@@ -1483,7 +1498,7 @@ export default function CustomerDetail() {
           </p>
           <Button
             block
-            loading={busyAction === "resume-lifecycle"}
+            loading={perform.busyKey === "resume-lifecycle"}
             onClick={() => {
               const cmd = openLifecycleCommand;
               void run("resume-lifecycle", async () => {
@@ -1617,7 +1632,7 @@ export default function CustomerDetail() {
           <Button
             block
             variant="danger"
-            loading={busyAction === "deactivate"}
+            loading={perform.busyKey === "deactivate"}
             disabled={reasonCode === "OTHER" && !reasonNote.trim()}
             onClick={() => {
               if (reasonCode === "OTHER" && !reasonNote.trim()) return;
@@ -1715,7 +1730,7 @@ export default function CustomerDetail() {
           <Button
             block
             variant="subtle"
-            loading={busyAction === "reactivate"}
+            loading={perform.busyKey === "reactivate"}
             disabled={reasonCode === "OTHER" && !reasonNote.trim()}
             onClick={() => {
               if (reasonCode === "OTHER" && !reasonNote.trim()) return;
@@ -2040,34 +2055,28 @@ function RefundSheet({
   const [amount, setAmount] = useState((remaining / 100).toFixed(2));
   const [reason, setReason] = useState("");
   const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const cents = Math.round(parseFloat(amount) * 100);
   const validAmount = Number.isFinite(cents) && cents > 0 && cents <= remaining;
 
+  const refund = useAction(async () => {
+    const res = opResult<{ refundedNowCents?: number; sentToStripe?: boolean }>(
+      await api().mutations.refundInvoice({
+        invoiceId: invoice.id,
+        amountCents: cents,
+        reason: reason.trim(),
+      })
+    );
+    await onDone(
+      res?.sentToStripe === false
+        ? `Recorded a ${money(cents)} refund — no card was charged for this invoice, so nothing was sent to Stripe.`
+        : `Refunded ${money(cents)} to ${customer.displayName}. It reaches their account in 5–10 days.`
+    );
+  }, "Could not refund this invoice");
+
+  // A refund cannot be undone, so a second click must not send a second one.
   const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<{ refundedNowCents?: number; sentToStripe?: boolean }>(
-        await api().mutations.refundInvoice({
-          invoiceId: invoice.id,
-          amountCents: cents,
-          reason: reason.trim(),
-        })
-      );
-      await onDone(
-        res?.sentToStripe === false
-          ? `Recorded a ${money(cents)} refund — no card was charged for this invoice, so nothing was sent to Stripe.`
-          : `Refunded ${money(cents)} to ${customer.displayName}. It reaches their account in 5–10 days.`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not refund this invoice");
-      setConfirming(false);
-    } finally {
-      setBusy(false);
-    }
+    if (!(await refund.run())) setConfirming(false);
   };
 
   if (confirming) {
@@ -2089,8 +2098,8 @@ function RefundSheet({
         <p className="muted small" style={{ margin: 0 }}>
           Reason: {reason.trim()}
         </p>
-        <ErrorNote error={error} />
-        <Button block variant="danger" loading={busy} onClick={() => void submit()}>
+        <ErrorNote error={refund.error} />
+        <Button block variant="danger" loading={refund.busy} onClick={() => void submit()}>
           Yes, refund {money(cents)}
         </Button>
         <Button block variant="subtle" onClick={() => setConfirming(false)}>
@@ -2125,7 +2134,7 @@ function RefundSheet({
           placeholder="Tech couldn't access the property"
         />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={refund.error} />
       <Button
         block
         disabled={!validAmount || !reason.trim()}
@@ -2165,8 +2174,6 @@ function ChargeCardSheet({
   const [description, setDescription] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [retyped, setRetyped] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   // One idempotency token per sheet open: accidental retries/double-taps
   // collapse to a single charge; a fresh sheet open charges again.
   const [idemToken] = useState(() => crypto.randomUUID());
@@ -2177,28 +2184,26 @@ function ChargeCardSheet({
   const retypeOk =
     !needsRetype || Math.round(parseFloat(retyped) * 100) === cents;
 
+  // The idempotency token already collapses a duplicate that REACHES Stripe;
+  // the gate stops the second request being made at all.
+  const charge = useAction(async () => {
+    const res = opResult<{ status?: string }>(
+      await api().mutations.chargeManualAmount({
+        customerId: customer.id,
+        amountCents: cents,
+        description: description.trim(),
+        idempotencyKey: idemToken,
+      })
+    );
+    await onDone(
+      res?.status === "succeeded"
+        ? `Charged ${money(cents)} to ${cardLabel ?? "the card on file"}`
+        : `Charge submitted for ${money(cents)} — the status updates when it settles`
+    );
+  }, "Could not charge the card");
+
   const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<{ status?: string }>(
-        await api().mutations.chargeManualAmount({
-          customerId: customer.id,
-          amountCents: cents,
-          description: description.trim(),
-          idempotencyKey: idemToken,
-        })
-      );
-      await onDone(
-        res?.status === "succeeded"
-          ? `Charged ${money(cents)} to ${cardLabel ?? "the card on file"}`
-          : `Charge submitted for ${money(cents)} — the status updates when it settles`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not charge the card");
-      setConfirming(false);
-      setBusy(false);
-    }
+    if (!(await charge.run())) setConfirming(false);
   };
 
   if (!hasPaymentMethod) {
@@ -2247,11 +2252,11 @@ function ChargeCardSheet({
             />
           </Field>
         ) : null}
-        <ErrorNote error={error} />
+        <ErrorNote error={charge.error} />
         <Button
           block
           variant="danger"
-          loading={busy}
+          loading={charge.busy}
           disabled={!retypeOk}
           onClick={() => void submit()}
         >
@@ -2287,7 +2292,7 @@ function ChargeCardSheet({
           placeholder="Extra visit — wasp nest follow-up"
         />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={charge.error} />
       <Button
         block
         disabled={!validAmount || !description.trim()}
@@ -2327,8 +2332,6 @@ function RecordPaymentSheet({
   const [status, setStatus] = useState<"PAID" | "OPEN">("PAID");
   const [terms, setTerms] = useState<InvoiceTerms>("DUE_ON_RECEIPT");
   const [poNumber, setPoNumber] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const cents = Math.round(parseFloat(amount) * 100);
   const validAmount = Number.isFinite(cents) && cents > 0;
@@ -2336,32 +2339,27 @@ function RecordPaymentSheet({
   // sees, before saving, exactly when the customer's clock runs out.
   const dueDate = dueDateForTerms(terms, todayEastern());
 
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      unwrap(
-        await recordOfflinePayment({
-          customerId: customer.id,
-          amountCents: cents,
-          description: description.trim(),
-          status,
-          method: status === "PAID" ? method : undefined,
-          terms: status === "OPEN" ? terms : undefined,
-          poNumber:
-            status === "OPEN" && poNumber.trim() ? poNumber.trim() : undefined,
-        })
-      );
-      await onDone(
-        status === "PAID"
-          ? `Recorded ${money(cents)} received by ${method.toLowerCase()}`
-          : `Raised a ${money(cents)} invoice — due ${fmtDate(dueDate, true)}`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not record the payment");
-      setBusy(false);
-    }
-  };
+  // Without the gate a double-click recorded the same cheque twice, which the
+  // books then had to be corrected for by hand.
+  const record = useAction(async () => {
+    unwrap(
+      await recordOfflinePayment({
+        customerId: customer.id,
+        amountCents: cents,
+        description: description.trim(),
+        status,
+        method: status === "PAID" ? method : undefined,
+        terms: status === "OPEN" ? terms : undefined,
+        poNumber:
+          status === "OPEN" && poNumber.trim() ? poNumber.trim() : undefined,
+      })
+    );
+    await onDone(
+      status === "PAID"
+        ? `Recorded ${money(cents)} received by ${method.toLowerCase()}`
+        : `Raised a ${money(cents)} invoice — due ${fmtDate(dueDate, true)}`
+    );
+  }, "Could not record the payment");
 
   return (
     <div className="form-grid">
@@ -2429,12 +2427,12 @@ function RecordPaymentSheet({
           placeholder="Extra visit — wasp nest follow-up"
         />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={record.error} />
       <Button
         block
-        loading={busy}
+        loading={record.busy}
         disabled={!validAmount || !description.trim()}
-        onClick={() => void submit()}
+        onClick={() => void record.run()}
       >
         {status === "PAID" ? `Record ${validAmount ? money(cents) : "payment"} received` : "Raise invoice"}
       </Button>
@@ -2463,36 +2461,22 @@ function SettleInvoiceSheet({
     "CHEQUE"
   );
   const [reference, setReference] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const note = [
-        `Received by ${method.toLowerCase()}`,
-        reference.trim(),
-      ]
-        .filter(Boolean)
-        .join(" — ");
-      unwrap(
-        await settleInvoice({
-          invoiceId: invoice.id,
-          method: "OFFLINE",
-          note,
-        })
-      );
-      await onDone(
-        `Marked ${money(invoice.amountCents)} paid — received by ${method.toLowerCase()}`
-      );
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Could not settle this invoice"
-      );
-      setBusy(false);
-    }
-  };
+  const settle = useAction(async () => {
+    const note = [`Received by ${method.toLowerCase()}`, reference.trim()]
+      .filter(Boolean)
+      .join(" — ");
+    unwrap(
+      await settleInvoice({
+        invoiceId: invoice.id,
+        method: "OFFLINE",
+        note,
+      })
+    );
+    await onDone(
+      `Marked ${money(invoice.amountCents)} paid — received by ${method.toLowerCase()}`
+    );
+  }, "Could not settle this invoice");
 
   return (
     <div className="form-grid">
@@ -2522,8 +2506,8 @@ function SettleInvoiceSheet({
           placeholder="Cheque #1042"
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button block loading={busy} onClick={() => void submit()}>
+      <ErrorNote error={settle.error} />
+      <Button block loading={settle.busy} onClick={() => void settle.run()}>
         Mark {money(invoice.amountCents)} paid
       </Button>
     </div>
@@ -2544,9 +2528,26 @@ function RescheduleForm({
     VISIT_RESCHEDULE_REASONS[0]
   );
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const dateChanged = date !== (job.scheduledDate ?? "");
+
+  const save = useAction(async () => {
+    const data = opResult<VisitRescheduleOutcome>(
+      await rescheduleVisit({
+        jobId: job.id,
+        scheduledDate: date || undefined,
+        reasonCode,
+        note: note.trim() || undefined,
+      })
+    );
+    // A rescheduled visit whose customer notice failed is owned, not a
+    // clean success — tell the office so they follow up.
+    if (data && data.outcome === "PARTIAL") {
+      throw new Error(
+        "Rescheduled, but we couldn't email the customer — an operations task was opened to reach them."
+      );
+    }
+    await onDone();
+  }, "Could not reschedule");
 
   return (
     <div className="form-grid">
@@ -2590,36 +2591,12 @@ function RescheduleForm({
       <Field label="Note" hint="Required when the reason is 'Other'.">
         <input value={note} onChange={(e) => setNote(e.target.value)} />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={save.error} />
       <Button
         block
-        loading={busy}
+        loading={save.busy}
         disabled={reasonCode === "OTHER" && !note.trim()}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          rescheduleVisit({
-            jobId: job.id,
-            scheduledDate: date || undefined,
-            reasonCode,
-            note: note.trim() || undefined,
-          })
-            .then((res) => {
-              const data = opResult<VisitRescheduleOutcome>(res);
-              // A rescheduled visit whose customer notice failed is owned, not a
-              // clean success — tell the office so they follow up.
-              if (data && data.outcome === "PARTIAL") {
-                throw new Error(
-                  "Rescheduled, but we couldn't email the customer — an operations task was opened to reach them."
-                );
-              }
-              return onDone();
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not reschedule");
-              setBusy(false);
-            });
-        }}
+        onClick={() => void save.run()}
       >
         {date ? "Save schedule" : "Mark unscheduled"}
       </Button>
@@ -2642,8 +2619,28 @@ function AmendReportForm({
   type Row = { label: string; from: string; to: string };
   const [reason, setReason] = useState("");
   const [rows, setRows] = useState<Row[]>([{ label: "", from: "", to: "" }]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  // An amendment is append-only: a second submit issues a SECOND correction
+  // and emails the customer another copy.
+  const issue = useAction(async () => {
+    const changes = rows
+      .filter((r) => r.label.trim() && r.to.trim())
+      .map((r) => ({
+        label: r.label.trim(),
+        from: r.from.trim(),
+        to: r.to.trim(),
+      }));
+    const data = opResult<{ deliveryStatus?: string | null }>(
+      await api().mutations.amendServiceReport({
+        reportId: report.id,
+        reason: reason.trim(),
+        changes: JSON.stringify(changes),
+      })
+    );
+    // The notice words come from the PERSISTED delivery state — an
+    // issued-but-undelivered amendment is never called "sent".
+    await onDone(data?.deliveryStatus ?? null);
+  }, "Could not issue the amendment");
 
   const setRow = (i: number, k: keyof Row, v: string) =>
     setRows((list) => list.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
@@ -2704,38 +2701,12 @@ function AmendReportForm({
       >
         + Add another correction
       </Button>
-      <ErrorNote error={error} />
+      <ErrorNote error={issue.error} />
       <Button
         block
-        loading={busy}
+        loading={issue.busy}
         disabled={!ready}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          const changes = rows
-            .filter((r) => r.label.trim() && r.to.trim())
-            .map((r) => ({
-              label: r.label.trim(),
-              from: r.from.trim(),
-              to: r.to.trim(),
-            }));
-          api()
-            .mutations.amendServiceReport({
-              reportId: report.id,
-              reason: reason.trim(),
-              changes: JSON.stringify(changes),
-            })
-            .then((res) => {
-              const data = opResult<{ deliveryStatus?: string | null }>(res);
-              // The notice words come from the PERSISTED delivery state — an
-              // issued-but-undelivered amendment is never called "sent".
-              return onDone(data?.deliveryStatus ?? null);
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not issue the amendment");
-              setBusy(false);
-            });
-        }}
+        onClick={() => void issue.run()}
       >
         Issue amendment &amp; send
       </Button>
@@ -2759,31 +2730,22 @@ function ReportDeliveryRecovery({
   const [mode, setMode] = useState<null | "alternate">(null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState<null | "resend" | "alternate">(null);
-  const [error, setError] = useState<string | null>(null);
 
+  const record = useAction(async (action: "RESEND" | "ALTERNATE") => {
+    const res = await api().mutations.recordReportDelivery({
+      reportId,
+      action,
+      note: note.trim() || undefined,
+    });
+    if (res.errors?.length) throw new Error(res.errors[0].message);
+    await onDone();
+  }, "Could not record delivery");
+
+  // A re-send puts another copy of the report in the customer's inbox, so the
+  // second press has to be refused. `busy` stays to spin the pressed button.
   const run = async (action: "RESEND" | "ALTERNATE") => {
     setBusy(action === "RESEND" ? "resend" : "alternate");
-    setError(null);
-    try {
-      const res = await (
-        api().mutations as unknown as {
-          recordReportDelivery: (i: {
-            reportId: string;
-            action: string;
-            note?: string;
-          }) => Promise<{ errors?: { message: string }[] }>;
-        }
-      ).recordReportDelivery({
-        reportId,
-        action,
-        note: note.trim() || undefined,
-      });
-      if (res.errors?.length) throw new Error(res.errors[0].message);
-      await onDone();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not record delivery");
-      setBusy(null);
-    }
+    if (!(await record.run(action))) setBusy(null);
   };
 
   return (
@@ -2815,7 +2777,7 @@ function ReportDeliveryRecovery({
           </Button>
         </>
       ) : null}
-      <ErrorNote error={error} />
+      <ErrorNote error={record.error} />
     </div>
   );
 }
@@ -2918,14 +2880,34 @@ function JobForm({
   const [scheduledDate, setScheduledDate] = useState("");
   const [planId, setPlanId] = useState("");
   const [packet, setPacket] = useState<PacketValues>(emptyPacket);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const activePlans = plans.filter((p) => p.status === "ACTIVE");
   const notInCatalog = serviceCode === "NOT_IN_CATALOG";
   const serviceType = notInCatalog
     ? otherText
     : (Object.values(SERVICE_CATALOG).find((e) => e.id === serviceCode)?.label ??
       serviceCode);
+
+  // A second press creates a SECOND job — a duplicate visit on the board that
+  // someone then has to find and cancel.
+  const create = useAction(async () => {
+    if (!serviceType.trim()) {
+      throw new Error(
+        notInCatalog ? "Describe what the customer asked for" : "Pick a service"
+      );
+    }
+    const cents = price ? Math.round(parseFloat(price) * 100) : null;
+    if (!planId && price && (!Number.isFinite(cents!) || cents! <= 0)) {
+      throw new Error("Price doesn't look valid");
+    }
+    await onSubmit({
+      serviceType: serviceType.trim(),
+      serviceCode,
+      priceCents: planId ? null : cents,
+      scheduledDate,
+      servicePlanId: planId,
+      packet,
+    });
+  }, "Could not create job");
 
   return (
     <div className="form-grid">
@@ -2976,38 +2958,8 @@ function JobForm({
         <DateField value={scheduledDate} onChange={setScheduledDate} allowClear />
       </Field>
       <PacketFields value={packet} onChange={setPacket} />
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          if (!serviceType.trim()) {
-            setError(
-              notInCatalog
-                ? "Describe what the customer asked for"
-                : "Pick a service"
-            );
-            return;
-          }
-          const cents = price ? Math.round(parseFloat(price) * 100) : null;
-          if (!planId && price && (!Number.isFinite(cents!) || cents! <= 0)) {
-            setError("Price doesn't look valid");
-            return;
-          }
-          setBusy(true);
-          onSubmit({
-            serviceType: serviceType.trim(),
-            serviceCode,
-            priceCents: planId ? null : cents,
-            scheduledDate,
-            servicePlanId: planId,
-            packet,
-          }).catch((err) => {
-            setError(err.message ?? "Could not create job");
-            setBusy(false);
-          });
-        }}
-      >
+      <ErrorNote error={create.error} />
+      <Button block loading={create.busy} onClick={() => void create.run()}>
         {notInCatalog ? "Send to catalog decision" : "Create job"}
       </Button>
     </div>
@@ -3041,8 +2993,24 @@ function JobPacketForm({
   // manager reason — the server refuses without it.
   const [managerReason, setManagerReason] = useState("");
   const started = Boolean(job.startedAt);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const save = useAction(async () => {
+    opResult(
+      await api().mutations.updateJobPacket({
+        jobId: job.id,
+        accessInstructions: packet.accessInstructions.trim() || undefined,
+        hazardNotes: packet.hazardNotes.trim() || undefined,
+        prepInstructions: packet.prepInstructions.trim() || undefined,
+        prepConfirmed: packet.prepInstructions.trim()
+          ? packet.prepConfirmed
+          : undefined,
+        paymentExpectation: packet.paymentExpectation || undefined,
+        propertyClass: propertyClass || undefined,
+        managerReason: managerReason.trim() || undefined,
+      })
+    );
+    await onDone();
+  }, "Could not save the packet");
 
   return (
     <div className="form-grid">
@@ -3073,37 +3041,8 @@ function JobPacketForm({
           />
         </Field>
       ) : null}
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          void (async () => {
-            try {
-              opResult(
-                await api().mutations.updateJobPacket({
-                  jobId: job.id,
-                  accessInstructions: packet.accessInstructions.trim() || undefined,
-                  hazardNotes: packet.hazardNotes.trim() || undefined,
-                  prepInstructions: packet.prepInstructions.trim() || undefined,
-                  prepConfirmed: packet.prepInstructions.trim()
-                    ? packet.prepConfirmed
-                    : undefined,
-                  paymentExpectation: packet.paymentExpectation || undefined,
-                  propertyClass: propertyClass || undefined,
-                  managerReason: managerReason.trim() || undefined,
-                })
-              );
-              await onDone();
-            } catch (err) {
-              setError(err instanceof Error ? err.message : "Could not save the packet");
-              setBusy(false);
-            }
-          })();
-        }}
-      >
+      <ErrorNote error={save.error} />
+      <Button block loading={save.busy} onClick={() => void save.run()}>
         Save packet
       </Button>
     </div>
@@ -3121,8 +3060,12 @@ function GroupPicker({
 }) {
   const [value, setValue] = useState(currentGroupId ?? "");
   const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const save = useAction(
+    async () => onPick(value || null, reason.trim()),
+    "Could not update group"
+  );
+
   return (
     <div className="form-grid">
       <Field
@@ -3152,18 +3095,8 @@ function GroupPicker({
           placeholder="e.g. new property manager for Maple Ridge"
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button
-        block
-        loading={busy}
-        onClick={() => {
-          setBusy(true);
-          onPick(value || null, reason.trim()).catch((err) => {
-            setError(err.message ?? "Could not update group");
-            setBusy(false);
-          });
-        }}
-      >
+      <ErrorNote error={save.error} />
+      <Button block loading={save.busy} onClick={() => void save.run()}>
         Save group
       </Button>
     </div>
@@ -3175,21 +3108,9 @@ function GroupPicker({
  * office action: resolve WITH AN ANSWER the customer sees in their portal
  * (and by email). Resolving here also closes the shared-queue item.
  */
-type PortalRequestRow = {
-  id: string;
-  kind: string;
-  jobId?: string | null;
-  preferredDate?: string | null;
-  message?: string | null;
-  status: string;
-  resolutionNote?: string | null;
-  createdAt?: string | null;
-};
-
 function PortalRequestsSection({ customerId }: { customerId: string }) {
-  const [rows, setRows] = useState<PortalRequestRow[] | null>(null);
+  const [rows, setRows] = useState<PortalRequest[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const loadRows = useCallback(async () => {
     try {
@@ -3198,17 +3119,24 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
           listPortalRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: PortalRequestRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: PortalRequest[]; nextToken?: string | null }>;
         };
       };
       if (!models.PortalRequest) {
         setRows([]);
         return;
       }
-      const { data } = await models.PortalRequest.listPortalRequestByCustomerId(
-        { customerId, limit: 100 }
+      const portalRequests = models.PortalRequest;
+      setRows(
+        await listAll((t) =>
+          portalRequests.listPortalRequestByCustomerId({
+            customerId,
+            limit: 100,
+            nextToken: t,
+          })
+        )
       );
-      setRows(data ?? []);
     } catch {
       setRows([]);
     }
@@ -3217,29 +3145,25 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
     void loadRows();
   }, [loadRows]);
 
+  // Resolving emails the customer the answer, so a double-press must not send
+  // it twice. `busyId` stays for the pressed row's spinner.
+  const resolve = useAction(async (id: string, note: string) => {
+    opResult(
+      await api().mutations.resolvePortalRequest({ portalRequestId: id, note })
+    );
+    await loadRows();
+  }, "Could not resolve");
+
   if (!rows || rows.length === 0) return null;
 
-  const resolve = async (r: PortalRequestRow) => {
+  const resolveRequest = async (r: PortalRequest) => {
     const note = window.prompt(
       "The answer the customer will see in their portal and by email:"
     );
     if (!note?.trim()) return;
     setBusyId(r.id);
-    setError(null);
     try {
-      opResult(
-        await (
-          api().mutations as unknown as {
-            resolvePortalRequest: (a: {
-              portalRequestId: string;
-              note: string;
-            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-          }
-        ).resolvePortalRequest({ portalRequestId: r.id, note: note.trim() })
-      );
-      await loadRows();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not resolve");
+      await resolve.run(r.id, note.trim());
     } finally {
       setBusyId(null);
     }
@@ -3247,7 +3171,7 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
 
   return (
     <Card title="Portal requests">
-      <ErrorNote error={error} />
+      <ErrorNote error={resolve.error} />
       {rows
         .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
         .map((r) => (
@@ -3277,7 +3201,7 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
                   <Button
                     small
                     loading={busyId === r.id}
-                    onClick={() => void resolve(r)}
+                    onClick={() => void resolveRequest(r)}
                   >
                     Resolve with an answer
                   </Button>
@@ -3297,19 +3221,6 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
  * once recorded. Money never appears — a callback visit is $0 by
  * construction.
  */
-type CallbackRow = {
-  id: string;
-  originalJobId: string;
-  status: string;
-  photoKey?: string | null;
-  note?: string | null;
-  promisedBy?: string | null;
-  scheduledDate?: string | null;
-  callbackJobId?: string | null;
-  finding?: string | null;
-  findingNote?: string | null;
-};
-
 const CALLBACK_STATUS_LABEL: Record<string, string> = {
   REQUESTED: "needs scheduling",
   SCHEDULED: "scheduled",
@@ -3324,14 +3235,12 @@ function CallbacksSection({
   customerId: string;
   onChanged: () => Promise<void>;
 }) {
-  const [rows, setRows] = useState<CallbackRow[] | null>(null);
-  const [scheduling, setScheduling] = useState<CallbackRow | null>(null);
+  const [rows, setRows] = useState<CallbackRequest[] | null>(null);
+  const [scheduling, setScheduling] = useState<CallbackRequest | null>(null);
   const [date, setDate] = useState("");
   const [technicianId, setTechnicianId] = useState("");
   const [techs, setTechs] = useState<{ id: string; displayName?: string | null }[]>([]);
   const [laterOk, setLaterOk] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const loadRows = useCallback(async () => {
     try {
@@ -3340,19 +3249,24 @@ function CallbacksSection({
           listCallbackRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: CallbackRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: CallbackRequest[]; nextToken?: string | null }>;
         };
       };
       if (!models.CallbackRequest) {
         setRows([]);
         return;
       }
-      const { data } =
-        await models.CallbackRequest.listCallbackRequestByCustomerId({
-          customerId,
-          limit: 100,
-        });
-      setRows(data ?? []);
+      const callbackRequests = models.CallbackRequest;
+      setRows(
+        await listAll((t) =>
+          callbackRequests.listCallbackRequestByCustomerId({
+            customerId,
+            limit: 100,
+            nextToken: t,
+          })
+        )
+      );
     } catch {
       setRows([]);
     }
@@ -3366,9 +3280,11 @@ function CallbacksSection({
     if (!scheduling) return;
     void (async () => {
       try {
-        const { data } = await api().models.Technician.list({ limit: 200 });
+        const data = await listAll((t) =>
+          api().models.Technician.list({ limit: 200, nextToken: t })
+        );
         setTechs(
-          (data ?? [])
+          data
             .filter((t) => t.active !== false)
             .map((t) => ({ id: t.id, displayName: t.name }))
         );
@@ -3378,42 +3294,27 @@ function CallbacksSection({
     })();
   }, [scheduling]);
 
-  if (!rows || rows.length === 0) return null;
-
-  const schedule = async () => {
+  // Scheduling reserves the technician's minutes; a second press would book a
+  // second callback visit against the same request.
+  const schedule = useAction(async () => {
     if (!scheduling || !date || !technicianId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      opResult(
-        await (
-          api().mutations as unknown as {
-            scheduleCallback: (a: {
-              callbackRequestId: string;
-              scheduledDate: string;
-              technicianId: string;
-              customerRequestedLater?: boolean;
-            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-          }
-        ).scheduleCallback({
-          callbackRequestId: scheduling.id,
-          scheduledDate: date,
-          technicianId,
-          customerRequestedLater: laterOk || undefined,
-        })
-      );
-      setScheduling(null);
-      setDate("");
-      setTechnicianId("");
-      setLaterOk(false);
-      await loadRows();
-      await onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not schedule");
-    } finally {
-      setBusy(false);
-    }
-  };
+    opResult(
+      await api().mutations.scheduleCallback({
+        callbackRequestId: scheduling.id,
+        scheduledDate: date,
+        technicianId,
+        customerRequestedLater: laterOk || undefined,
+      })
+    );
+    setScheduling(null);
+    setDate("");
+    setTechnicianId("");
+    setLaterOk(false);
+    await loadRows();
+    await onChanged();
+  }, "Could not schedule");
+
+  if (!rows || rows.length === 0) return null;
 
   return (
     <Card title="Guarantee callbacks">
@@ -3498,12 +3399,12 @@ function CallbacksSection({
                 The customer asked for this later date
               </label>
             ) : null}
-            <ErrorNote error={error} />
+            <ErrorNote error={schedule.error} />
             <Button
               block
-              loading={busy}
+              loading={schedule.busy}
               disabled={!date || !technicianId}
-              onClick={() => void schedule()}
+              onClick={() => void schedule.run()}
             >
               Schedule the callback visit
             </Button>

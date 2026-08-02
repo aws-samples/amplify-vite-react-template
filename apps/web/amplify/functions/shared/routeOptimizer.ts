@@ -1,6 +1,7 @@
 import { dataClient } from "./dataClient";
 import { POOL_TECH, recomputeSlotMinutes, techBaseFor } from "./capacity";
 import { driveMatrixFrom } from "./driveTime";
+import { forEachPage } from "./pagination";
 import { routingAddress } from "./serviceAddress";
 
 /**
@@ -55,29 +56,39 @@ export async function optimizeTechDay(opts: {
 
     // The technician's active stops for the date, in current order.
     const stops: TechStop[] = [];
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.listJobByScheduledDate(
-        { scheduledDate: date },
-        { limit: 200, nextToken: token }
-      );
-      for (const job of page.data ?? []) {
-        if (job.technicianId !== technicianId) continue;
-        if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
-        // The tech is already driving a day in progress — re-sequencing it
-        // would move a stop out from under them. Leave it exactly as routed.
-        if (job.status === "IN_PROGRESS") return { optimized: false };
-        const { data: customer } = await client.models.Customer.get({
-          id: job.customerId,
-        });
-        // ROUTING address — the unit is deliberately excluded (serviceAddress.ts).
-        const address = customer ? routingAddress(customer) : "";
-        // A stop with no address cannot be routed — fail closed, don't guess.
-        if (!address) return { optimized: false };
-        stops.push({ id: job.id, address, routeOrder: job.routeOrder ?? 999 });
-      }
-      token = page.nextToken;
-    } while (token);
+    let unroutable = false;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.listJobByScheduledDate(
+          { scheduledDate: date },
+          { limit: 200, nextToken }
+        ),
+      async (items) => {
+        for (const job of items) {
+          if (job.technicianId !== technicianId) continue;
+          if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
+          // The tech is already driving a day in progress — re-sequencing it
+          // would move a stop out from under them. Leave it exactly as routed.
+          if (job.status === "IN_PROGRESS") {
+            unroutable = true;
+            return false;
+          }
+          const { data: customer } = await client.models.Customer.get({
+            id: job.customerId,
+          });
+          // ROUTING address — the unit is deliberately excluded (serviceAddress.ts).
+          const address = customer ? routingAddress(customer) : "";
+          // A stop with no address cannot be routed — fail closed, don't guess.
+          if (!address) {
+            unroutable = true;
+            return false;
+          }
+          stops.push({ id: job.id, address, routeOrder: job.routeOrder ?? 999 });
+        }
+      },
+      { pageErrors: "ignore" }
+    );
+    if (unroutable) return { optimized: false };
 
     // Zero or one stop has nothing to sequence.
     if (stops.length <= 1) return { optimized: false };

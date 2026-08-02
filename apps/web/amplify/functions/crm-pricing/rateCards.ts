@@ -194,10 +194,9 @@ export function freqLabel(f: Frequency): string {
         : "one-time";
 }
 
-export function money(cents: number): string {
-  const d = cents / 100;
-  return Number.isInteger(d) ? `$${d}` : `$${d.toFixed(2)}`;
-}
+/** Re-exported so the many `rateCards`-importing modules keep one import
+ *  site; the implementation is the shared one. */
+export { formatMoney as money } from "../shared/money";
 
 /** Zone from drive minutes. Origin-agnostic by design: the minutes must be
  *  measured from the CLOSEST technician's home base (there is no company HQ),

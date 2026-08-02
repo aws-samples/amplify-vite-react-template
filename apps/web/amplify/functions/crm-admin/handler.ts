@@ -43,6 +43,8 @@ import {
   workItemId,
 } from "../shared/ownedWork";
 import { disposeStaleDrafts } from "../shared/jobAssignment";
+import { forEachPage, listAll } from "../shared/pagination";
+import { todayEastern } from "../shared/dates";
 import { callerEmail, callerIsOwner, callerSub } from "../shared/authz";
 import {
   assignLeadOwner,
@@ -718,14 +720,46 @@ async function killLogin(
   caseContext?: { subjectLabel: string; relatedId: string }
 ): Promise<string[]> {
   try {
-    // 1. Disable first — stop any new sign-in.
-    await cognito.send(
-      new AdminDisableUserCommand({
+    // Read the role set FIRST, because it decides whether disabling the account
+    // is even the right act.
+    //
+    // Cognito has ONE account per email address, so a person can be a customer
+    // AND staff on the same login. Revoking PORTAL access used to disable that
+    // whole account: deactivating a customer whose email matched a staff member
+    // locked that person out of the CRM, still holding their staff role — a
+    // real incident (a test customer on an owner's address disabled the owner).
+    //
+    // So a revoke that is not itself removing staff roles must not disable an
+    // account that keeps one. Their portal groups still go, and they are still
+    // globally signed out — an access token carries its groups until it is
+    // reissued, so the sign-out is what makes the portal loss immediate. They
+    // simply sign back in to the CRM with the staff role they never lost.
+    const { Groups } = await cognito.send(
+      new AdminListGroupsForUserCommand({
         UserPoolId: USER_POOL_ID,
         Username: username,
       })
     );
-    // 2. Then kill live sessions — revoke tokens already issued.
+    const current = (Groups ?? []).map((g) => g.GroupName!);
+    const toRemove = current.filter((g) =>
+      removePrefixes.some((p) => g === p || g.startsWith(p))
+    );
+    const keepsStaffRole = current.some(
+      (g) => isStaffRole(g) && !toRemove.includes(g)
+    );
+
+    // 1. Disable first — stop any new sign-in. Skipped only when this revoke
+    //    leaves a staff role standing (see above).
+    if (!keepsStaffRole) {
+      await cognito.send(
+        new AdminDisableUserCommand({
+          UserPoolId: USER_POOL_ID,
+          Username: username,
+        })
+      );
+    }
+    // 2. Then kill live sessions — revoke tokens already issued. This runs
+    //    either way: it is what ends the access the groups below describe.
     await cognito.send(
       new AdminUserGlobalSignOutCommand({
         UserPoolId: USER_POOL_ID,
@@ -733,16 +767,7 @@ async function killLogin(
       })
     );
     // 3. Only now strip the groups. Access is already gone; this tidies the
-    //    role set. A failure here still leaves a disabled, signed-out login.
-    const { Groups } = await cognito.send(
-      new AdminListGroupsForUserCommand({
-        UserPoolId: USER_POOL_ID,
-        Username: username,
-      })
-    );
-    const toRemove = (Groups ?? [])
-      .map((g) => g.GroupName!)
-      .filter((g) => removePrefixes.some((p) => g === p || g.startsWith(p)));
+    //    role set. A failure here still leaves a signed-out login.
     for (const g of toRemove) {
       await removeFromGroup(username, g);
     }
@@ -788,22 +813,41 @@ async function describeExistingLoginForEmail(
     throw err;
   }
   const client = await dataClient();
+  // These are filtered scans, and the old `limit: 1` could not see past the
+  // first scanned row (the filter applies AFTER the scan), so the collision
+  // check essentially never fired — page the whole scan instead.
   if (sub) {
-    const { data: bySub } = await client.models.Customer.list({
-      filter: { portalUserSub: { eq: sub } },
-      limit: 1,
-    });
+    const userSub = sub;
+    const bySub = await listAll(
+      (nextToken) =>
+        client.models.Customer.list({
+          filter: { portalUserSub: { eq: userSub } },
+          limit: 200,
+          nextToken,
+        }),
+      { pageErrors: "ignore" }
+    );
     if (bySub[0]) return `customer "${bySub[0].displayName}"`;
-    const { data: grpBySub } = await client.models.CustomerGroup.list({
-      filter: { portalUserSub: { eq: sub } },
-      limit: 1,
-    });
+    const grpBySub = await listAll(
+      (nextToken) =>
+        client.models.CustomerGroup.list({
+          filter: { portalUserSub: { eq: userSub } },
+          limit: 200,
+          nextToken,
+        }),
+      { pageErrors: "ignore" }
+    );
     if (grpBySub[0]) return `group "${grpBySub[0].name}"`;
   }
-  const { data: byEmail } = await client.models.Customer.list({
-    filter: { email: { eq: email } },
-    limit: 1,
-  });
+  const byEmail = await listAll(
+    (nextToken) =>
+      client.models.Customer.list({
+        filter: { email: { eq: email } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
   if (byEmail[0]) return `customer "${byEmail[0].displayName}"`;
   return "another BuzzKill login";
 }
@@ -1669,70 +1713,72 @@ async function reassignFutureJobs(
   inProgress: { id: string; scheduledDate: string | null }[];
 }> {
   const client = await dataClient();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayEastern();
   const note = `Unassigned ${today}: ${techName} was offboarded. Returned to the scheduling pool for reassignment.`;
   let jobsUnassigned = 0;
   let jobsFailed = 0;
   const inProgress: { id: string; scheduledDate: string | null }[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.list({
-      filter: { technicianId: { eq: technicianId } },
-      nextToken: token,
-      limit: 200,
-    });
-    for (const job of page.data) {
-      if (job.status === "IN_PROGRESS") {
-        inProgress.push({ id: job.id, scheduledDate: job.scheduledDate ?? null });
-        continue;
-      }
-      if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
-        try {
-          // Re-read right before writing: if the office already moved this job
-          // to ANOTHER technician mid-offboard, that newer assignment stands —
-          // this handoff must never overwrite it back to UNSCHEDULED.
-          const { data: fresh } = await client.models.Job.get({ id: job.id });
-          if (
-            !fresh ||
-            fresh.technicianId !== technicianId ||
-            fresh.status !== "SCHEDULED"
-          ) {
-            continue;
-          }
-          // GUARDED on the re-read snapshot: an office ASSIGN to another
-          // technician that lands between this read and write makes the sweep
-          // LOSE — the newer assignment stands instead of being knocked back
-          // to UNSCHEDULED, and the read-back counts the job honestly.
-          const swept = await casGuardedUpdate(
-            "Job",
-            job.id,
-            {
-              status: "UNSCHEDULED",
-              routeId: null,
-              routeOrder: null,
-              technicianId: null,
-              notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
-            },
-            jobScheduleGuards(fresh)
-          );
-          if (swept.ok) {
-            jobsUnassigned++;
-            // GL-13: an unsent draft on a swept job gets a recorded office
-            // disposition; a failed case write keeps the offboard PARTIAL.
-            const { caseConfirmed } = await disposeStaleDrafts(
+  await forEachPage(
+    (nextToken) =>
+      client.models.Job.list({
+        filter: { technicianId: { eq: technicianId } },
+        nextToken,
+        limit: 200,
+      }),
+    async (jobs) => {
+      for (const job of jobs) {
+        if (job.status === "IN_PROGRESS") {
+          inProgress.push({ id: job.id, scheduledDate: job.scheduledDate ?? null });
+          continue;
+        }
+        if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
+          try {
+            // Re-read right before writing: if the office already moved this job
+            // to ANOTHER technician mid-offboard, that newer assignment stands —
+            // this handoff must never overwrite it back to UNSCHEDULED.
+            const { data: fresh } = await client.models.Job.get({ id: job.id });
+            if (
+              !fresh ||
+              fresh.technicianId !== technicianId ||
+              fresh.status !== "SCHEDULED"
+            ) {
+              continue;
+            }
+            // GUARDED on the re-read snapshot: an office ASSIGN to another
+            // technician that lands between this read and write makes the sweep
+            // LOSE — the newer assignment stands instead of being knocked back
+            // to UNSCHEDULED, and the read-back counts the job honestly.
+            const swept = await casGuardedUpdate(
+              "Job",
               job.id,
-              technicianId,
-              null
+              {
+                status: "UNSCHEDULED",
+                routeId: null,
+                routeOrder: null,
+                technicianId: null,
+                notes: fresh.notes ? `${fresh.notes}\n${note}` : note,
+              },
+              jobScheduleGuards(fresh)
             );
-            if (!caseConfirmed) jobsFailed++;
-          } else jobsFailed++;
-        } catch {
-          jobsFailed++;
+            if (swept.ok) {
+              jobsUnassigned++;
+              // GL-13: an unsent draft on a swept job gets a recorded office
+              // disposition; a failed case write keeps the offboard PARTIAL.
+              const { caseConfirmed } = await disposeStaleDrafts(
+                job.id,
+                technicianId,
+                null
+              );
+              if (!caseConfirmed) jobsFailed++;
+            } else jobsFailed++;
+          } catch {
+            jobsFailed++;
+          }
         }
       }
-    }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "ignore" }
+  );
   return { jobsUnassigned, jobsFailed, inProgress };
 }
 
@@ -1746,22 +1792,24 @@ async function reassignFutureJobs(
 async function countAssignedFutureJobs(technicianId: string): Promise<number> {
   try {
     const client = await dataClient();
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayEastern();
     let count = 0;
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.list({
-        filter: { technicianId: { eq: technicianId } },
-        nextToken: token,
-        limit: 200,
-      });
-      for (const job of page.data) {
-        if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
-          count++;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.list({
+          filter: { technicianId: { eq: technicianId } },
+          nextToken,
+          limit: 200,
+        }),
+      (jobs) => {
+        for (const job of jobs) {
+          if (job.status === "SCHEDULED" && (job.scheduledDate ?? "") >= today) {
+            count++;
+          }
         }
-      }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
     return count;
   } catch (err) {
     console.error("countAssignedFutureJobs failed", technicianId, err);
@@ -2313,6 +2361,7 @@ async function changeStaffRoles(
 
     if (want.includes("TECH") && !have.includes("TECH")) {
       const client = await dataClient();
+      // Point read: userSub maps to at most one technician — one page cannot truncate.
       const { data: techs } =
         await client.models.Technician.listTechnicianByUserSub({
           userSub: target.sub,
@@ -2404,6 +2453,7 @@ async function changeStaffRoles(
     if (toRemove.includes("TECH")) {
       try {
         const client = await dataClient();
+        // Point read: userSub maps to at most one technician — one page cannot truncate.
         const { data: techs } =
           await client.models.Technician.listTechnicianByUserSub({
             userSub: target.sub,
@@ -2715,6 +2765,7 @@ async function offboardStaff(
   async function runOffboard() {
   const target = await loadStaffLogin(args.email);
   const client = await dataClient();
+  // Point read: userSub maps to at most one technician — one page cannot truncate.
   const { data: techs } =
     await client.models.Technician.listTechnicianByUserSub({
       userSub: target.sub,
@@ -3148,6 +3199,7 @@ async function staffRoster() {
       row.unlinkedTech = true;
       continue;
     }
+    // Point read: userSub maps to at most one technician — one page cannot truncate.
     const { data: techs } =
       await client.models.Technician.listTechnicianByUserSub({
         userSub: row.sub,
@@ -3274,24 +3326,26 @@ async function reportSuspectAddresses() {
     city: string | null;
   }[] = [];
   let scanned = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Customer.list({
-      limit: 500,
-      nextToken: token,
-    });
-    for (const c of page.data ?? []) {
-      scanned++;
-      if (!streetLooksLikeItHidesAUnit(c.serviceStreet)) continue;
-      suspects.push({
-        customerId: c.id,
-        displayName: c.displayName ?? null,
-        serviceStreet: c.serviceStreet ?? null,
-        serviceUnit: (c as { serviceUnit?: string | null }).serviceUnit ?? null,
-        city: c.serviceCity ?? null,
-      });
-    }
-    token = page.nextToken;
-  } while (token);
+  await forEachPage(
+    (nextToken) =>
+      client.models.Customer.list({
+        limit: 500,
+        nextToken,
+      }),
+    (customers) => {
+      for (const c of customers) {
+        scanned++;
+        if (!streetLooksLikeItHidesAUnit(c.serviceStreet)) continue;
+        suspects.push({
+          customerId: c.id,
+          displayName: c.displayName ?? null,
+          serviceStreet: c.serviceStreet ?? null,
+          serviceUnit: (c as { serviceUnit?: string | null }).serviceUnit ?? null,
+          city: c.serviceCity ?? null,
+        });
+      }
+    },
+    { pageErrors: "ignore" }
+  );
   return { scanned, suspectCount: suspects.length, suspects };
 }

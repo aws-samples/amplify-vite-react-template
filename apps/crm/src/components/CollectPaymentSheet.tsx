@@ -7,6 +7,7 @@ import {
   useStripe,
 } from "@stripe/react-stripe-js";
 import { api, opResult } from "../lib/api";
+import { useAction } from "../lib/useAsync";
 import { Button, ErrorNote, Sheet, Spinner } from "../ui/kit";
 
 const publishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as
@@ -74,30 +75,31 @@ export default function CollectPaymentSheet({
 function SetupForm({ onSaved }: { onSaved: () => void }) {
   const stripe = useStripe();
   const elements = useElements();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const submit = async () => {
-    if (!stripe || !elements) return;
-    setBusy(true);
-    setError(null);
+  // A held Enter or a double-click used to beat the `disabled` button and fire
+  // a second confirmSetup; the single-flight gate refuses the second call.
+  const save = useAction(async () => {
+    if (!stripe || !elements) throw new Error("Stripe is still loading");
     const result = await stripe.confirmSetup({
       elements,
       redirect: "if_required",
     });
-    setBusy(false);
+    // Stripe reports failure in the payload rather than by throwing — rethrow
+    // so the gate and the captured error see it like any other failure.
     if (result.error) {
-      setError(result.error.message ?? "Could not save payment method");
-      return;
+      throw new Error(result.error.message ?? "Could not save payment method");
     }
-    onSaved();
+  }, "Could not save payment method");
+
+  const submit = async () => {
+    if (await save.run()) onSaved();
   };
 
   return (
     <div className="form-grid">
       <PaymentElement />
-      <ErrorNote error={error} />
-      <Button block loading={busy} onClick={() => void submit()}>
+      <ErrorNote error={save.error} />
+      <Button block loading={save.busy} onClick={() => void submit()}>
         Save payment method
       </Button>
       <p className="muted small">

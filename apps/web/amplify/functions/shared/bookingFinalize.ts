@@ -13,6 +13,9 @@ import {
   reserveSlot,
 } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
+import { forEachPage, listAll } from "./pagination";
+import { todayEastern } from "./dates";
+import { parseQuoteSnapshot } from "./quoteSnapshot";
 import { resequenceAndRebuildDay } from "./routeOptimizer";
 
 /** Give back minutes a finalize attempt reserved but could not stamp. */
@@ -53,6 +56,7 @@ async function ensureRouteAndOrder(
   ).Route;
   let routeId: string | null = null;
   try {
+    // limit 1 is deliberate: one route per tech-day by design. Duplicate routes are a known separate defect; the read-side union lives in technicianReads.
     const { data: routes } = await routeModel.listRouteByTechnicianIdAndDate(
       { technicianId, date },
       { limit: 1 }
@@ -71,19 +75,21 @@ async function ensureRouteAndOrder(
   // Append after the route's last stop. There is no by-route Job index, so
   // scan the date and take the max order already on this route.
   let maxOrder = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByScheduledDate(
-      { scheduledDate: date },
-      { limit: 200, nextToken: token }
-    );
-    for (const j of page.data ?? []) {
-      if (j.routeId === routeId && typeof j.routeOrder === "number") {
-        maxOrder = Math.max(maxOrder, j.routeOrder);
+  await forEachPage(
+    (nextToken) =>
+      client.models.Job.listJobByScheduledDate(
+        { scheduledDate: date },
+        { limit: 200, nextToken }
+      ),
+    (items) => {
+      for (const j of items) {
+        if (j.routeId === routeId && typeof j.routeOrder === "number") {
+          maxOrder = Math.max(maxOrder, j.routeOrder);
+        }
       }
-    }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "ignore" }
+  );
   return { routeId, routeOrder: maxOrder + 1 };
 }
 import {
@@ -110,6 +116,7 @@ import {
   planNameFor,
   SERVICE_CATALOG_VERSION,
 } from "./serviceCatalog";
+import { formatMoney, formatMonthly } from "./money";
 const s3 = new S3Client();
 
 // Derived from the single shared constant (R17) — the policy in the signed
@@ -212,7 +219,7 @@ export async function finalizeBooking(opts: {
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: `missing-booking:${opts.paymentIntentId}`,
       title: "Succeeded payment has no booking record",
-      detail: `Stripe reported PaymentIntent ${opts.paymentIntentId} succeeded for $${((opts.amountReceived ?? 0) / 100).toFixed(2)}, but booking ${opts.bookingRequestId} does not exist. The money is captured with nothing to deliver.`,
+      detail: `Stripe reported PaymentIntent ${opts.paymentIntentId} succeeded for ${formatMoney(opts.amountReceived ?? 0)}, but booking ${opts.bookingRequestId} does not exist. The money is captured with nothing to deliver.`,
       relatedId: opts.bookingRequestId,
       resolutionAction:
         "Find this PaymentIntent in Stripe. If it is a real customer payment, recreate the booking from the receipt and finalize it, or refund the charge and tell the customer.",
@@ -319,7 +326,7 @@ export async function finalizeBooking(opts: {
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: booking.id,
       title: `Paid booking is ${String(booking.status).toLowerCase()}, never finalized: ${booking.name ?? "customer"}`,
-      detail: `A booking-funnel payment of $${((opts.amountReceived ?? 0) / 100).toFixed(2)} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), but booking ${booking.id} is ${booking.status} and was never finalized. The money is in Stripe with no service commitment behind it.`,
+      detail: `A booking-funnel payment of ${formatMoney(opts.amountReceived ?? 0)} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), but booking ${booking.id} is ${booking.status} and was never finalized. The money is in Stripe with no service commitment behind it.`,
       customerId: booking.customerId ?? undefined,
       relatedId: booking.id,
       sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
@@ -355,7 +362,7 @@ export async function finalizeBooking(opts: {
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: `stray-pi:${opts.paymentIntentId}`,
       title: `Stray captured payment not attached to a booking: ${booking.name ?? "customer"}`,
-      detail: `Stripe captured $${((opts.amountReceived ?? 0) / 100).toFixed(2)} on PaymentIntent ${opts.paymentIntentId}, but booking ${booking.id} now points at a different PaymentIntent (${booking.stripePaymentIntentId}). The customer may have been charged twice, or paid on a PaymentIntent the booking abandoned. Verify in Stripe and refund the stray charge, or re-point and finalize the booking.`,
+      detail: `Stripe captured ${formatMoney(opts.amountReceived ?? 0)} on PaymentIntent ${opts.paymentIntentId}, but booking ${booking.id} now points at a different PaymentIntent (${booking.stripePaymentIntentId}). The customer may have been charged twice, or paid on a PaymentIntent the booking abandoned. Verify in Stripe and refund the stray charge, or re-point and finalize the booking.`,
       customerId: booking.customerId ?? undefined,
       relatedId: booking.id,
       sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
@@ -375,7 +382,7 @@ export async function finalizeBooking(opts: {
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: booking.id,
       title: `Pending bank debit does not match the quote: ${booking.name ?? "customer"}`,
-      detail: `A bank debit of $${((opts.amountReceived ?? 0) / 100).toFixed(2)} is processing on PaymentIntent ${opts.paymentIntentId} for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), but the booking was quoted $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)}. No visit was scheduled on the wrong amount. When the debit settles, reconcile or refund it and contact the customer.`,
+      detail: `A bank debit of ${formatMoney(opts.amountReceived ?? 0)} is processing on PaymentIntent ${opts.paymentIntentId} for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), but the booking was quoted ${formatMoney(((booking.amountCents ?? 0) as number))}. No visit was scheduled on the wrong amount. When the debit settles, reconcile or refund it and contact the customer.`,
       customerId: booking.customerId ?? undefined,
       relatedId: booking.id,
       resolutionAction:
@@ -396,7 +403,7 @@ export async function finalizeBooking(opts: {
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: booking.id,
       title: `Paid amount does not match the quote: ${booking.name ?? "customer"}`,
-      detail: `A booking-funnel payment succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}) on PaymentIntent ${opts.paymentIntentId}, but Stripe captured $${((opts.amountReceived ?? 0) / 100).toFixed(2)} while the booking was quoted $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)}. Finalization was refused so no records were created at the wrong price.`,
+      detail: `A booking-funnel payment succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}) on PaymentIntent ${opts.paymentIntentId}, but Stripe captured ${formatMoney(opts.amountReceived ?? 0)} while the booking was quoted ${formatMoney(((booking.amountCents ?? 0) as number))}. Finalization was refused so no records were created at the wrong price.`,
       customerId: booking.customerId ?? undefined,
       relatedId: booking.id,
       sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
@@ -606,8 +613,8 @@ export async function finalizeBooking(opts: {
         ? `Pending-payment booking not completed: ${booking.name ?? "customer"}`
         : `Paid booking not finalized: ${booking.name ?? "customer"}`,
       detail: opts.pending
-        ? `A bank debit of $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} is processing for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but the scheduled-visit commitment could not be completed: ${step}. The debit is in flight; the CRM records are incomplete.`
-        : `A booking-funnel payment of $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but finalization could not complete: ${step}. The money is in Stripe; the CRM records are incomplete.`,
+        ? `A bank debit of ${formatMoney(((booking.amountCents ?? 0) as number))} is processing for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but the scheduled-visit commitment could not be completed: ${step}. The debit is in flight; the CRM records are incomplete.`
+        : `A booking-funnel payment of ${formatMoney(((booking.amountCents ?? 0) as number))} succeeded for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}), selected date ${booking.selectedDate ?? "unknown"}, but finalization could not complete: ${step}. The money is in Stripe; the CRM records are incomplete.`,
       customerId: booking.customerId ?? undefined,
       relatedId: booking.id,
       sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
@@ -972,9 +979,7 @@ async function findCustomersByContact(
   const target = email.trim().toLowerCase();
   const targetPhone = normalizePhone(phone);
   if (!target && !targetPhone) return [];
-  const hits: ExistingCustomer[] = [];
-  let nextToken: string | null | undefined;
-  do {
+  const rows = await listAll(async (nextToken) => {
     const page = await client.models.Customer.list({ nextToken, limit: 200 });
     if (page.errors?.length) {
       throw new Error(
@@ -983,17 +988,13 @@ async function findCustomersByContact(
           .join("; ")}`
       );
     }
-    hits.push(
-      ...page.data.filter(
-        (c) =>
-          (Boolean(target) &&
-            (c.email ?? "").trim().toLowerCase() === target) ||
-          (Boolean(targetPhone) && normalizePhone(c.phone) === targetPhone)
-      )
-    );
-    nextToken = page.nextToken;
-  } while (nextToken);
-  return hits;
+    return page;
+  });
+  return rows.filter(
+    (c) =>
+      (Boolean(target) && (c.email ?? "").trim().toLowerCase() === target) ||
+      (Boolean(targetPhone) && normalizePhone(c.phone) === targetPhone)
+  );
 }
 
 /**
@@ -1179,23 +1180,25 @@ async function markPricingRunsWon(
   customerId: string
 ): Promise<void> {
   try {
-    let nextToken: string | null | undefined;
-    do {
-      const page = await client.models.LeadPricingRun.list({
-        filter: { customerId: { eq: customerId } },
-        nextToken,
-        limit: 200,
-      });
-      for (const run of page.data) {
-        if (run.outcome === "PENDING") {
-          await client.models.LeadPricingRun.update({
-            id: run.id,
-            outcome: "WON",
-          });
+    await forEachPage(
+      (nextToken) =>
+        client.models.LeadPricingRun.list({
+          filter: { customerId: { eq: customerId } },
+          nextToken,
+          limit: 200,
+        }),
+      async (items) => {
+        for (const run of items) {
+          if (run.outcome === "PENDING") {
+            await client.models.LeadPricingRun.update({
+              id: run.id,
+              outcome: "WON",
+            });
+          }
         }
-      }
-      nextToken = page.nextToken;
-    } while (nextToken);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error(
       `finalizeBooking: could not flip pricing runs to WON for customer ${customerId}`,
@@ -1232,14 +1235,7 @@ async function finalizeClaimed(
     }
   }
 
-  const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-    serviceLabel?: string;
-    recurringOffer?: {
-      frequency: string;
-      monthlyCents: number;
-      initialFeeCents: number;
-    } | null;
-  };
+  const stored = parseQuoteSnapshot(booking.quoteJson);
   const serviceLabel = stored.serviceLabel ?? "Pest control service";
   // GL-01: the catalog entry this sale means — recorded immutably (id +
   // catalog version) on the plan and job so later catalog edits never
@@ -1551,7 +1547,7 @@ async function finalizeClaimed(
           // A date-less off-season enrollment's plan starts TODAY — billing
           // began at checkout even though the first treatment is next season.
           startDate:
-            booking.selectedDate ?? new Date().toISOString().slice(0, 10),
+            booking.selectedDate ?? todayEastern(),
           // GL-17: seasonal facts are stamped at enrollment from the accepted
           // offer — mosquito / mosquito+tick bills monthly year-round and owes
           // one treatment per month April–October. Billing starts immediately
@@ -1814,14 +1810,14 @@ async function finalizeClaimed(
     `SERVICE AGREEMENT. BuzzKill Pest Control will provide: ${serviceLabel} at ${[booking.street, booking.city, booking.state, booking.zip].filter(Boolean).join(", ")} ${booking.selectedDate ? `on ${booking.selectedDate}` : `with the first treatment in ${firstTreatmentMonthLabel()}; BuzzKill will contact the customer to agree the exact day`}.`,
     booking.recurring && stored.recurringOffer
       ? booking.selectedDate
-        ? `RECURRING PLAN. After the initial visit, service continues ${stored.recurringOffer.frequency.toLowerCase()} at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed automatically. Cancel anytime.`
-        : `RECURRING PLAN. Billing starts today at $${(stored.recurringOffer.monthlyCents / 100).toFixed(2)}/month, billed monthly year-round. Treatments run April through October (one per month); the first treatment will be scheduled for ${firstTreatmentMonthLabel()}. Cancel anytime.`
+        ? `RECURRING PLAN. After the initial visit, service continues ${stored.recurringOffer.frequency.toLowerCase()} at ${formatMonthly(stored.recurringOffer.monthlyCents)}nth, billed automatically. Cancel anytime.`
+        : `RECURRING PLAN. Billing starts today at ${formatMonthly(stored.recurringOffer.monthlyCents)}nth, billed monthly year-round. Treatments run April through October (one per month); the first treatment will be scheduled for ${firstTreatmentMonthLabel()}. Cancel anytime.`
       : null,
     invoiceMode
-      ? `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} invoiced at booking on ${invoiceMode.terms.replace(/_/g, " ").toLowerCase()} terms, due ${invoiceMode.dueDate}. An invoice with payment instructions is emailed separately.`
+      ? `PAYMENT. ${formatMoney(booking.amountCents ?? 0)} invoiced at booking on ${invoiceMode.terms.replace(/_/g, " ").toLowerCase()} terms, due ${invoiceMode.dueDate}. An invoice with payment instructions is emailed separately.`
       : pending
-        ? `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} authorized by bank debit (ACH) at booking; the debit may take several business days to settle. If it does not settle before the visit, the visit is canceled and the customer notified; if it fails after service, the amount is an outstanding balance.`
-        : `PAYMENT. $${((booking.amountCents ?? 0) / 100).toFixed(2)} paid online at booking.`,
+        ? `PAYMENT. ${formatMoney(booking.amountCents ?? 0)} authorized by bank debit (ACH) at booking; the debit may take several business days to settle. If it does not settle before the visit, the visit is canceled and the customer notified; if it fails after service, the amount is an outstanding balance.`
+        : `PAYMENT. ${formatMoney(booking.amountCents ?? 0)} paid online at booking.`,
     CANCEL_POLICY_TEXT,
     "ACCEPTANCE. The customer accepted these terms and the cancellation policy via checkbox at online checkout; that acceptance is recorded as the electronic signature below.",
   ]
@@ -1857,11 +1853,11 @@ async function finalizeClaimed(
 
   const paymentAuthText = invoiceMode
     ? offer
-      ? `BuzzKill Pest Control will invoice me $${(amountToday / 100).toFixed(2)} at booking (${invoiceMode.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiceMode.dueDate}), and bill $${(offer.monthlyCents / 100).toFixed(2)} per month for my recurring plan and any additional services I approve. This authorization stays in effect until I cancel my plan or revoke it in writing. Please retain a copy for your records.`
-      : `BuzzKill Pest Control will invoice me $${(amountToday / 100).toFixed(2)} for the service booked (${invoiceMode.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiceMode.dueDate}). Please retain a copy for your records.`
+      ? `BuzzKill Pest Control will invoice me ${formatMoney(amountToday)} at booking (${invoiceMode.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiceMode.dueDate}), and bill ${formatMoney(offer.monthlyCents)} per month for my recurring plan and any additional services I approve. This authorization stays in effect until I cancel my plan or revoke it in writing. Please retain a copy for your records.`
+      : `BuzzKill Pest Control will invoice me ${formatMoney(amountToday)} for the service booked (${invoiceMode.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiceMode.dueDate}). Please retain a copy for your records.`
     : offer
-      ? `I authorize BuzzKill Pest Control to charge the payment method on file $${(amountToday / 100).toFixed(2)} today at booking${pending ? " by bank debit (ACH)" : ""}, and to automatically charge $${(offer.monthlyCents / 100).toFixed(2)} per month for my recurring plan and any additional services I approve. This authorization stays in effect until I cancel my plan or revoke it in writing. Please retain a copy for your records.`
-      : `I authorize BuzzKill Pest Control to charge the payment method on file $${(amountToday / 100).toFixed(2)} for the service booked${pending ? " by bank debit (ACH)" : ""}. Please retain a copy for your records.`;
+      ? `I authorize BuzzKill Pest Control to charge the payment method on file ${formatMoney(amountToday)} today at booking${pending ? " by bank debit (ACH)" : ""}, and to automatically charge ${formatMoney(offer.monthlyCents)} per month for my recurring plan and any additional services I approve. This authorization stays in effect until I cancel my plan or revoke it in writing. Please retain a copy for your records.`
+      : `I authorize BuzzKill Pest Control to charge the payment method on file ${formatMoney(amountToday)} for the service booked${pending ? " by bank debit (ACH)" : ""}. Please retain a copy for your records.`;
 
   const pdf = await renderAgreementPdf({
     agreementId: booking.id,
@@ -2155,11 +2151,15 @@ async function priorAcceptedBookingSend(
   try {
     const client = await dataClient();
     if (!("EmailLog" in client.models)) return false;
-    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
-      { relatedId: bookingId },
-      { limit: 50 }
+    const data = await listAll(
+      (nextToken) =>
+        client.models.EmailLog.listEmailLogByRelatedId(
+          { relatedId: bookingId },
+          { limit: 50, nextToken }
+        ),
+      { pageErrors: "ignore" }
     );
-    return (data ?? []).some(
+    return data.some(
       (l) =>
         l.template === template &&
         (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
@@ -2208,10 +2208,9 @@ async function deliverBookingComms(
     // whether the invite went out or whether matching fell back, so it makes no
     // portal promise and adds no fallback note — both concerns already have
     // their own durable owned-work items from the original pass.
-    const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-      serviceLabel?: string;
-      recurringOffer?: { frequency: string; monthlyCents: number } | null;
-    };
+    // The shared parser hands back the WHOLE offer; the resume paths used to
+    // declare it without `initialFeeCents`, so the stored fee was invisible here.
+    const stored = parseQuoteSnapshot(booking.quoteJson);
     serviceLabel = stored.serviceLabel ?? "Pest control service";
     recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
     portalInvited = false;
@@ -2270,18 +2269,18 @@ async function deliverBookingComms(
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
        <p>${
          invoiced
-           ? `An invoice for <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> is on its way (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate})${
+           ? `An invoice for <strong>${formatMoney(booking.amountCents ?? 0)}</strong> is on its way (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate})${
                booking.recurring && recurringOffer
                  ? booking.selectedDate
-                   ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
-                   : ` — that's your first month. Your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round, with treatments April through October`
+                   ? `, and your ${recurringOffer.frequency.toLowerCase()} plan (${formatMonthly(recurringOffer.monthlyCents)}) starts after this first visit`
+                   : ` — that's your first month. Your plan bills ${formatMonthly(recurringOffer.monthlyCents)} year-round, with treatments April through October`
                  : ""
              }`
-           : `Payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> is confirmed${
+           : `Payment of <strong>${formatMoney(booking.amountCents ?? 0)}</strong> is confirmed${
                booking.recurring && recurringOffer
                  ? booking.selectedDate
-                   ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
-                   : ` — that's your first month. Your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round, with treatments April through October`
+                   ? `, and your ${recurringOffer.frequency.toLowerCase()} plan (${formatMonthly(recurringOffer.monthlyCents)}) starts after this first visit`
+                   : ` — that's your first month. Your plan bills ${formatMonthly(recurringOffer.monthlyCents)} year-round, with treatments April through October`
                  : ""
              }`
        }.${pdfKey && pdf ? " Your service agreement is attached." : ""}</p>
@@ -2330,7 +2329,7 @@ async function deliverBookingComms(
         heading: invoiced ? "New invoiced website booking" : "New paid website booking",
         customerId,
         relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate}` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} ${invoiced ? `<strong>invoiced</strong> (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate}) — an OPEN invoice is on the customer's account to collect` : "paid"}.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing started at checkout; agree the first treatment date with the customer.") : ""}</p>
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate}` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — ${formatMoney(booking.amountCents ?? 0)} ${invoiced ? `<strong>invoiced</strong> (${invoiced.terms.replace(/_/g, " ").toLowerCase()}, due ${invoiced.dueDate}) — an OPEN invoice is on the customer's account to collect` : "paid"}.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing started at checkout; agree the first treatment date with the customer.") : ""}</p>
          <p>${booking.selectedDate ? "The job is on the Needs-scheduling board for route assignment." : "The first visit is UNSCHEDULED with an owned action to confirm the date — do not leave it unassigned."}</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
@@ -2454,10 +2453,9 @@ async function deliverPendingComms(
   if (ctx) {
     ({ serviceLabel, recurringOffer, methodLabel, matchFallbackReason, pdf, pdfKey } = ctx);
   } else {
-    const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-      serviceLabel?: string;
-      recurringOffer?: { frequency: string; monthlyCents: number } | null;
-    };
+    // The shared parser hands back the WHOLE offer; the resume paths used to
+    // declare it without `initialFeeCents`, so the stored fee was invisible here.
+    const stored = parseQuoteSnapshot(booking.quoteJson);
     serviceLabel = stored.serviceLabel ?? "Pest control service";
     recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
     methodLabel = booking.processingMethodLabel ?? null;
@@ -2506,12 +2504,12 @@ async function deliverPendingComms(
        <p><strong>${serviceLabel}</strong><br/>
        ${booking.selectedDate ? `${booking.selectedDate}` : `First treatment in ${firstTreatmentMonthLabel()} — we'll contact you to confirm the exact day`}<br/>
        ${[booking.street, booking.city, booking.state].filter(Boolean).join(", ")}</p>
-       <p>Your payment of <strong>$${((booking.amountCents ?? 0) / 100).toFixed(2)}</strong> by ${methodLabel ?? "bank transfer"} is <strong>still processing</strong> — a bank debit can take a few business days${booking.processingExpectedBy ? ` (expected by ${booking.processingExpectedBy})` : ""}. ${booking.selectedDate ? "Your visit is scheduled" : "Your enrollment is locked in"} and <strong>you don't need to do anything</strong>. Please don't pay again.</p>
+       <p>Your payment of <strong>${formatMoney(booking.amountCents ?? 0)}</strong> by ${methodLabel ?? "bank transfer"} is <strong>still processing</strong> — a bank debit can take a few business days${booking.processingExpectedBy ? ` (expected by ${booking.processingExpectedBy})` : ""}. ${booking.selectedDate ? "Your visit is scheduled" : "Your enrollment is locked in"} and <strong>you don't need to do anything</strong>. Please don't pay again.</p>
        <p>We'll email you the moment the payment clears${
          booking.recurring && recurringOffer
            ? booking.selectedDate
-             ? `, and your ${recurringOffer.frequency.toLowerCase()} plan ($${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo) starts after this first visit`
-             : `, and your plan bills $${(recurringOffer.monthlyCents / 100).toFixed(2)}/mo year-round with treatments April through October`
+             ? `, and your ${recurringOffer.frequency.toLowerCase()} plan (${formatMonthly(recurringOffer.monthlyCents)}) starts after this first visit`
+             : `, and your plan bills ${formatMonthly(recurringOffer.monthlyCents)} year-round with treatments April through October`
            : ""
        }. If the payment doesn't go through, we'll let you know right away with what to do next.${pdfKey && pdf ? " Your service agreement is attached." : ""}</p>
        <p style="color:#666;font-size:13px;">Need to cancel? Use this link: ${marketingUrl}/cancel?token=${booking.cancelToken} — more than ${CANCEL_FULL_REFUND_DAYS} days out is a full refund; ${CANCEL_FULL_REFUND_DAYS} days or less is non-refundable.</p>`
@@ -2549,7 +2547,7 @@ async function deliverPendingComms(
         heading: "New website booking — payment pending",
         customerId,
         relatedId: booking.id,
-        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate}` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — $${((booking.amountCents ?? 0) / 100).toFixed(2)} by bank debit, <strong>payment pending</strong> (not settled yet). ${booking.selectedDate ? "The visit is real and dispatchable; every" : "Every"} screen shows "Payment pending" until the debit clears.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing starts when the debit settles; agree the first treatment date with the customer.") : ""}</p>
+        bodyHtml: `<p><strong>${booking.name}</strong> booked <strong>${serviceLabel}</strong> ${booking.selectedDate ? `for ${booking.selectedDate}` : `OFF-SEASON (no date picked — first treatment targets ${firstTreatmentMonthLabel()})`} at ${[booking.street, booking.city].filter(Boolean).join(", ")} — ${formatMoney(booking.amountCents ?? 0)} by bank debit, <strong>payment pending</strong> (not settled yet). ${booking.selectedDate ? "The visit is real and dispatchable; every" : "Every"} screen shows "Payment pending" until the debit clears.${booking.recurring ? (booking.selectedDate ? " Recurring plan starts after the first visit." : " Monthly billing starts when the debit settles; agree the first treatment date with the customer.") : ""}</p>
          <p>${booking.selectedDate ? "The job is on the Needs-scheduling board for route assignment." : "The first visit is UNSCHEDULED with an owned action to confirm the date — do not leave it unassigned."}</p>${
            matchFallbackReason
              ? `<p><strong>Heads up:</strong> matching this booking to an existing CRM lead failed, so a fresh customer record was created instead. If a lead with the email ${booking.email} already exists, merge the two by hand.</p>
@@ -2640,7 +2638,7 @@ export async function settlePendingFailure(opts: {
       kind: "BALANCE_COLLECTION",
       dedupeKey: `balance:${booking.id}`,
       title: `Bank payment failed after service: ${booking.name ?? "customer"}`,
-      detail: `The ${booking.selectedDate ?? ""} visit for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}) was performed, but the $${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)} bank debit failed afterward. Invoice ${invoiceId} is the outstanding balance. The customer has been sent a payment-retry notice; this case closes only when the money is verifiably settled.`,
+      detail: `The ${booking.selectedDate ?? ""} visit for ${booking.name ?? "this customer"} (${booking.email ?? "no email"}) was performed, but the ${formatMoney(((booking.amountCents ?? 0) as number))} bank debit failed afterward. Invoice ${invoiceId} is the outstanding balance. The customer has been sent a payment-retry notice; this case closes only when the money is verifiably settled.`,
       customerId: booking.customerId ?? undefined,
       relatedId: invoiceId,
       sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,
@@ -2755,7 +2753,7 @@ async function applyLateSuccess(
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: `late-success:${booking.id}`,
       title: `Bank debit settled AFTER its booking was canceled: ${booking.name ?? "customer"}`,
-      detail: `The $${((amountReceived ?? 0) / 100).toFixed(2)} bank debit on PaymentIntent ${paymentIntentId} settled, but its booking ${booking.id} was already canceled when the debit was reported failed. The customer's money is captured with no scheduled service behind it. Decide with the customer: refund the payment, or rebook the visit and apply this payment to it.`,
+      detail: `The ${formatMoney(amountReceived ?? 0)} bank debit on PaymentIntent ${paymentIntentId} settled, but its booking ${booking.id} was already canceled when the debit was reported failed. The customer's money is captured with no scheduled service behind it. Decide with the customer: refund the payment, or rebook the visit and apply this payment to it.`,
       customerId: booking.customerId ?? undefined,
       relatedId: booking.id,
       sourceUrl: booking.customerId ? `/customers/${booking.customerId}` : undefined,

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { COMMON_UNITS } from "../../../web/amplify/functions/shared/units";
 import { displayAddress, routingAddress } from "../lib/serviceAddress";
 import { useParams } from "react-router-dom";
 import {
@@ -14,6 +15,7 @@ import {
   type TechnicianJobDetail,
 } from "../lib/api";
 import { fmtDate } from "../lib/format";
+import { toAmountText, splitAmount, composeAmount } from "../lib/productAmount";
 import {
   clearDraft,
   isConnectivityError,
@@ -23,6 +25,7 @@ import {
   saveDraft,
   syncBadge,
 } from "../lib/reportDraft";
+import { useAction } from "../lib/useAsync";
 import {
   Badge,
   Button,
@@ -94,33 +97,37 @@ function useOnline(): boolean {
   return online;
 }
 
-/** productsUsed is an AWSJSON field — arrives as a JSON string or value. */
+/**
+ * Honest failure words (R12): a dropped connection is not the same as the
+ * server saying no, and the technician needs to know which happened. Rethrown
+ * from inside an action so `useAction` captures this sentence rather than the
+ * transport's own.
+ */
+function asOfflineError(err: unknown, offline: string): unknown {
+  return isConnectivityError(err) ? new Error(offline) : err;
+}
+
+/** productsUsed is an AWSJSON field — arrives as a JSON string or value.
+ *  The stored rows carry `amountValue` as a NUMBER while this editor keeps it
+ *  as input text, so every row is coerced on the way in (`toAmountText`); a
+ *  restored localStorage draft gets the same treatment in `normalizeRow`. */
 function parseProducts(raw: unknown): ProductRow[] {
   try {
     const v = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return Array.isArray(v) ? (v as ProductRow[]) : [];
+    if (!Array.isArray(v)) return [];
+    return (v as ProductRow[]).map((row) => ({
+      ...row,
+      amountValue: toAmountText((row as { amountValue?: unknown }).amountValue),
+    }));
   } catch {
     return [];
   }
 }
 
 /** The units the amount dropdown offers — the set the inventory converter
- *  understands (kept in step with shared/units.ts COMMON_UNITS by hand). */
-const AMOUNT_UNITS = ["fl oz", "gal", "qt", "oz", "lb", "g", "mL", "L", "each"];
-
-/** Split a composed amount ("2 fl oz") into its value + unit for the inputs. */
-function splitAmount(raw: string | undefined): { value: string; unit: string } {
-  const m = (raw ?? "").trim().match(/^([0-9]*\.?[0-9]+)\s*(.*)$/);
-  if (!m) return { value: "", unit: "" };
-  return { value: m[1], unit: m[2].trim() };
-}
-
-/** Compose the amount string the PDF and legacy readers use. */
-function composeAmount(value: string | undefined, unit: string | undefined): string {
-  const v = (value ?? "").trim();
-  if (!v) return "";
-  return unit ? `${v} ${unit}` : v;
-}
+ *  understands, taken from that converter rather than restated here. Widened to
+ *  readonly string[] so an unrecognized stored unit can still be compared. */
+const AMOUNT_UNITS: readonly string[] = COMMON_UNITS;
 
 /** Give a parsed/restored row its structured fields (productId, amountValue,
  *  amountUnit) from the catalog + composed quantity, so the editor renders them
@@ -130,10 +137,12 @@ function normalizeRow(row: ProductRow, catalog: CatalogProduct[]): ProductRow {
     ? catalog.find((c) => c.id === row.productId)
     : catalog.find((c) => c.name === row.name);
   const split = splitAmount(row.quantity);
+  // A restored draft bypasses parseProducts, so coerce here too.
+  const stored = toAmountText(row.amountValue);
   return {
     ...row,
     productId: row.productId ?? match?.id,
-    amountValue: row.amountValue ?? split.value,
+    amountValue: stored ?? split.value,
     amountUnit: row.amountUnit ?? split.unit,
   };
 }
@@ -322,6 +331,21 @@ export default function TechJob() {
     }
   }, [job, omwSharing, stopOmwWatch]);
 
+  // START emails the customer their live map, so two taps racing the
+  // geolocation prompt used to email them twice; the gate refuses the second.
+  const shareArrival = useAction(async (j: Job, lat: number, lng: number) => {
+    // Only START (which emails the customer) on the first tap; if this
+    // visit is already en route, resume streaming without a second email.
+    opResult(
+      await api().mutations.enRoute({
+        jobId: j.id,
+        action: j.enRouteAt ? "PING" : "START",
+        lat,
+        lng,
+      })
+    );
+  }, "Could not start On My Way");
+
   const beginOnMyWay = () => {
     if (!job) return;
     if (!navigator.geolocation) {
@@ -334,55 +358,33 @@ export default function TechJob() {
       async (pos) => {
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
-        try {
-          // Only START (which emails the customer) on the first tap; if this
-          // visit is already en route, resume streaming without a second email.
-          if (!job.enRouteAt) {
-            opResult(
-              await api().mutations.enRoute({
-                jobId: job.id,
-                action: "START",
-                lat,
-                lng,
-              })
-            );
-          } else {
-            opResult(
-              await api().mutations.enRoute({
-                jobId: job.id,
-                action: "PING",
-                lat,
-                lng,
-              })
-            );
-          }
-          omwLastPing.current = Date.now();
-          setOmwSharing(true);
+        // `omwBusy` covers the location prompt as well as the write, so it
+        // stays alongside the action's own flag.
+        if (!(await shareArrival.run(job, lat, lng))) {
           setOmwBusy(false);
-          // Stream position; throttle writes to ~1 / 15s to spare battery/data.
-          omwWatchId.current = navigator.geolocation.watchPosition(
-            (p) => {
-              const now = Date.now();
-              if (now - omwLastPing.current < 15000) return;
-              omwLastPing.current = now;
-              void api().mutations.enRoute({
-                jobId: job.id,
-                action: "PING",
-                lat: p.coords.latitude,
-                lng: p.coords.longitude,
-              });
-            },
-            () => {
-              /* a dropped sample is fine — the next one updates the map */
-            },
-            { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
-          );
-        } catch (err) {
-          setOmwBusy(false);
-          setError(
-            err instanceof Error ? err.message : "Could not start On My Way"
-          );
+          return;
         }
+        omwLastPing.current = Date.now();
+        setOmwSharing(true);
+        setOmwBusy(false);
+        // Stream position; throttle writes to ~1 / 15s to spare battery/data.
+        omwWatchId.current = navigator.geolocation.watchPosition(
+          (p) => {
+            const now = Date.now();
+            if (now - omwLastPing.current < 15000) return;
+            omwLastPing.current = now;
+            void api().mutations.enRoute({
+              jobId: job.id,
+              action: "PING",
+              lat: p.coords.latitude,
+              lng: p.coords.longitude,
+            });
+          },
+          () => {
+            /* a dropped sample is fine — the next one updates the map */
+          },
+          { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
+        );
       },
       (err) => {
         setOmwBusy(false);
@@ -401,6 +403,31 @@ export default function TechJob() {
     setOmwSharing(false);
   };
 
+  const acknowledge = useAction(async (j: Job) => {
+    const res = await api().mutations.acknowledgePacket({
+      jobId: j.id,
+      version: j.packetVersion ?? 1,
+    });
+    if (res.errors?.length) throw new Error(res.errors[0].message);
+    await load();
+  }, "Could not acknowledge");
+
+  const startJob = useAction(async (j: Job) => {
+    try {
+      // The application's start time on the pesticide record — stamped
+      // by the server's clock. The Job model is read-only for techs, so
+      // there is no browser-supplied timestamp to rewrite.
+      const res = await api().mutations.startJob({ jobId: j.id });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      await load();
+    } catch (err) {
+      throw asOfflineError(
+        err,
+        "No connection — the job didn't start. The start time is stamped by the office clock, so try again when you have signal."
+      );
+    }
+  }, "Could not start the job");
+
   const online = useOnline();
   const offlineBanner = !online ? (
     <Card>
@@ -412,12 +439,17 @@ export default function TechJob() {
     </Card>
   ) : null;
 
+  // Every failure this screen can show, in one note — the load's and each
+  // mutation's, so none of them goes unseen.
+  const pageError =
+    error ?? shareArrival.error ?? acknowledge.error ?? startJob.error;
+
   if (!job || !customer) {
     return (
       <Page title="Job" back="/tech">
         {offlineBanner}
-        <ErrorNote error={error} />
-        {!error ? <Spinner /> : null}
+        <ErrorNote error={pageError} />
+        {!pageError ? <Spinner /> : null}
       </Page>
     );
   }
@@ -431,7 +463,7 @@ export default function TechJob() {
   return (
     <Page title={customer.displayName} back="/tech">
       {offlineBanner}
-      <ErrorNote error={error} />
+      <ErrorNote error={pageError} />
       {/* GL-12 dispatch packet: everything needed to arrive safely, do the
           right service, and say the right thing about money — in one place. */}
       <Card>
@@ -624,22 +656,8 @@ export default function TechJob() {
           </p>
           <Button
             block
-            onClick={() =>
-              api()
-                .mutations.acknowledgePacket({
-                  jobId: job.id,
-                  version: job.packetVersion ?? 1,
-                })
-                .then((res) => {
-                  if (res.errors?.length) throw new Error(res.errors[0].message);
-                  return load();
-                })
-                .catch((err) =>
-                  setError(
-                    err instanceof Error ? err.message : "Could not acknowledge"
-                  )
-                )
-            }
+            loading={acknowledge.busy}
+            onClick={() => void acknowledge.run(job)}
           >
             I've read the change — acknowledge
           </Button>
@@ -673,29 +691,8 @@ export default function TechJob() {
       {job.status === "SCHEDULED" ? (
         <Button
           block
-          onClick={() =>
-            // The application's start time on the pesticide record — stamped
-            // by the server's clock. The Job model is read-only for techs, so
-            // there is no browser-supplied timestamp to rewrite.
-            api()
-              .mutations.startJob({ jobId: job.id })
-              .then((res) => {
-                if (res.errors?.length) throw new Error(res.errors[0].message);
-                return load();
-              })
-              .catch((err) =>
-                // Honest failure words (R12): a dropped connection is not the
-                // same as the server saying no, and the tech needs to know
-                // the start time was NOT stamped.
-                setError(
-                  isConnectivityError(err)
-                    ? "No connection — the job didn't start. The start time is stamped by the office clock, so try again when you have signal."
-                    : err instanceof Error
-                      ? err.message
-                      : "Could not start the job"
-                )
-              )
-          }
+          loading={startJob.busy}
+          onClick={() => void startJob.run(job)}
         >
           Start job
         </Button>
@@ -800,26 +797,13 @@ function ScopePrepExits({ job, onDone }: { job: Job; onDone: () => Promise<void>
   const [mode, setMode] = useState<null | "scope" | "prep">(null);
   const [reason, setReason] = useState<string | null>(null);
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const submit = async () => {
+  // Each tap tells the office and puts the visit on their desk — a second one
+  // raises a duplicate follow-up for the same job.
+  const submit = useAction(async () => {
     if (!reason || !mode) return;
-    setBusy(true);
-    setError(null);
     try {
-      const mutations = api().mutations as unknown as {
-        reportScopeMismatch: (i: {
-          jobId: string;
-          reason: string;
-          note?: string;
-        }) => Promise<{ errors?: { message: string }[] }>;
-        reportPrepMissing: (i: {
-          jobId: string;
-          reason: string;
-          note?: string;
-        }) => Promise<{ errors?: { message: string }[] }>;
-      };
+      const mutations = api().mutations;
       const res =
         mode === "scope"
           ? await mutations.reportScopeMismatch({
@@ -835,16 +819,12 @@ function ScopePrepExits({ job, onDone }: { job: Job; onDone: () => Promise<void>
       if (res.errors?.length) throw new Error(res.errors[0].message);
       await onDone();
     } catch (err) {
-      setError(
-        isConnectivityError(err)
-          ? "No connection — nothing was recorded. Try again with signal."
-          : err instanceof Error
-            ? err.message
-            : "Could not record the outcome"
+      throw asOfflineError(
+        err,
+        "No connection — nothing was recorded. Try again with signal."
       );
-      setBusy(false);
     }
-  };
+  }, "Could not record the outcome");
 
   const options = mode === "scope" ? SCOPE_EXIT_OPTIONS : PREP_EXIT_OPTIONS;
 
@@ -881,7 +861,12 @@ function ScopePrepExits({ job, onDone }: { job: Job; onDone: () => Promise<void>
             onChange={(e) => setNote(e.target.value)}
             placeholder="Anything the office should know (optional)"
           />
-          <Button block loading={busy} disabled={!reason} onClick={() => void submit()}>
+          <Button
+            block
+            loading={submit.busy}
+            disabled={!reason}
+            onClick={() => void submit.run()}
+          >
             Record it — the office takes it from here
           </Button>
           <Button block variant="ghost" onClick={() => { setMode(null); setReason(null); }}>
@@ -889,7 +874,7 @@ function ScopePrepExits({ job, onDone }: { job: Job; onDone: () => Promise<void>
           </Button>
         </div>
       )}
-      <ErrorNote error={error} />
+      <ErrorNote error={submit.error} />
     </Card>
   );
 }
@@ -929,42 +914,36 @@ function CallbackFindingCard({
   const [finding, setFinding] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [photoKey, setPhotoKey] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const photoInput = useRef<HTMLInputElement>(null);
   const callbackRequestId = job.id.replace(/^cbjob-/, "");
 
+  const upload = useAction(async (file: File) => {
+    const res = opResult<{ uploadUrl: string; key: string }>(
+      await api().mutations.getNoAccessPhotoUploadUrl({
+        jobId: job.id,
+        contentType: file.type,
+      })
+    );
+    if (!res?.uploadUrl) throw new Error("Could not start the upload");
+    const put = await fetch(res.uploadUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": file.type },
+    });
+    if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+    setPhotoKey(res.key);
+  }, "Photo upload failed");
+
   const uploadPhoto = async (file: File) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<{ uploadUrl: string; key: string }>(
-        await api().mutations.getNoAccessPhotoUploadUrl({
-          jobId: job.id,
-          contentType: file.type,
-        })
-      );
-      if (!res?.uploadUrl) throw new Error("Could not start the upload");
-      const put = await fetch(res.uploadUrl, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type },
-      });
-      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-      setPhotoKey(res.key);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Photo upload failed");
-    } finally {
-      setBusy(false);
-      if (photoInput.current) photoInput.current.value = "";
-    }
+    await upload.run(file);
+    if (photoInput.current) photoInput.current.value = "";
   };
 
-  const submit = async () => {
+  // A finding that ends the guarantee sends the customer their final notice —
+  // a second tap would send a second one.
+  const submit = useAction(async () => {
     if (!finding || !note.trim()) return;
-    setBusy(true);
-    setError(null);
     try {
       const res = opResult<{ status: string }>(
         await api().mutations.recordCallbackFinding({
@@ -977,17 +956,12 @@ function CallbackFindingCard({
       setDone(res?.status ?? "recorded");
       await onDone();
     } catch (err) {
-      setError(
-        isConnectivityError(err)
-          ? "No connection — nothing was recorded. Try again with signal."
-          : err instanceof Error
-            ? err.message
-            : "Could not record the finding"
+      throw asOfflineError(
+        err,
+        "No connection — nothing was recorded. Try again with signal."
       );
-    } finally {
-      setBusy(false);
     }
-  };
+  }, "Could not record the finding");
 
   if (done) {
     return (
@@ -1040,13 +1014,13 @@ function CallbackFindingCard({
         {photoKey ? <Badge tone="ok">photo attached</Badge> : null}
         <Button
           block
-          loading={busy}
+          loading={submit.busy || upload.busy}
           disabled={!finding || !note.trim()}
-          onClick={() => void submit()}
+          onClick={() => void submit.run()}
         >
           Record the finding
         </Button>
-        <ErrorNote error={error} />
+        <ErrorNote error={submit.error ?? upload.error} />
       </div>
     </Card>
   );
@@ -1065,40 +1039,32 @@ function NoAccessCard({
   const [reason, setReason] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [photoKey, setPhotoKey] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const photoInput = useRef<HTMLInputElement>(null);
 
+  const upload = useAction(async (file: File) => {
+    const res = opResult<{ uploadUrl: string; key: string }>(
+      await api().mutations.getNoAccessPhotoUploadUrl({
+        jobId: job.id,
+        contentType: file.type,
+      })
+    );
+    if (!res?.uploadUrl) throw new Error("Could not start the upload");
+    const put = await fetch(res.uploadUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": file.type },
+    });
+    if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+    setPhotoKey(res.key);
+  }, "Photo upload failed");
+
   const uploadPhoto = async (file: File) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<{ uploadUrl: string; key: string }>(
-        await api().mutations.getNoAccessPhotoUploadUrl({
-          jobId: job.id,
-          contentType: file.type,
-        })
-      );
-      if (!res?.uploadUrl) throw new Error("Could not start the upload");
-      const put = await fetch(res.uploadUrl, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type },
-      });
-      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-      setPhotoKey(res.key);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Photo upload failed");
-    } finally {
-      setBusy(false);
-      if (photoInput.current) photoInput.current.value = "";
-    }
+    await upload.run(file);
+    if (photoInput.current) photoInput.current.value = "";
   };
 
-  const submit = async () => {
+  const submit = useAction(async () => {
     if (!reason) return;
-    setBusy(true);
-    setError(null);
     try {
       unwrap(
         await api().mutations.reportNoAccess({
@@ -1113,16 +1079,12 @@ function NoAccessCard({
       clearDraft(job.id, localStorage, ownerSub);
       await onDone();
     } catch (err) {
-      setError(
-        isConnectivityError(err)
-          ? "No connection — this didn't go through. Tap Send it again when you have signal."
-          : err instanceof Error
-            ? err.message
-            : "Could not report it"
+      throw asOfflineError(
+        err,
+        "No connection — this didn't go through. Tap Send it again when you have signal."
       );
-      setBusy(false);
     }
-  };
+  }, "Could not report it");
 
   if (!open) {
     return (
@@ -1168,17 +1130,24 @@ function NoAccessCard({
         <Button
           small
           variant="ghost"
-          loading={busy}
+          loading={upload.busy}
           onClick={() => photoInput.current?.click()}
         >
           {photoKey ? "✓ Photo attached — retake" : "Take a photo (optional)"}
         </Button>
-        <ErrorNote error={error} />
+        <ErrorNote error={submit.error ?? upload.error} />
         <p className="muted small" style={{ margin: 0 }}>
           This ends the job for today and tells the office. Nothing is charged
           and no service report is filed.
         </p>
-        <Button block disabled={!reason} loading={busy} onClick={() => void submit()}>
+        {/* Still cross-disabled while a photo uploads: sending first would file
+            the no-access without the evidence the tech just took. */}
+        <Button
+          block
+          disabled={!reason || upload.busy}
+          loading={submit.busy}
+          onClick={() => void submit.run()}
+        >
           Send it
         </Button>
         <Button block variant="ghost" onClick={() => setOpen(false)}>
@@ -1308,7 +1277,8 @@ function ReportForm({
         : null)
   );
   const [geoBusy, setGeoBusy] = useState(false);
-  const [busy, setBusy] = useState<null | "save" | "finalize">(null);
+  // Still here for the location capture and the pre-send checks below, which
+  // are not writes.
   const [error, setError] = useState<string | null>(null);
   const [reportId, setReportId] = useState(existing?.id ?? null);
 
@@ -1494,28 +1464,62 @@ function ReportForm({
     }
   };
 
-  const runSave = () => {
-    setBusy("save");
-    setError(null);
+  // A report with no id yet mints one on its first save, so two saves racing
+  // each other created two draft reports for the same visit.
+  const saveAction = useAction(async () => {
     const gen = editGen.current;
-    save()
-      .then(() => {
-        markDelivered(gen);
-        return onChanged();
-      })
-      .catch((err) => {
-        if (isConnectivityError(err)) {
-          // The draft is already on this phone (mirrored on every edit) —
-          // nothing is lost, and it re-sends by itself when signal returns.
-          setSendFailed(true);
-          setError(
-            "Couldn't reach the office — your report is saved on this phone and will send when you're back online."
-          );
-        } else {
-          setError(err.message);
-        }
-      })
-      .finally(() => setBusy(null));
+    try {
+      await save();
+      markDelivered(gen);
+      await onChanged();
+    } catch (err) {
+      if (isConnectivityError(err)) {
+        // The draft is already on this phone (mirrored on every edit) —
+        // nothing is lost, and it re-sends by itself when signal returns.
+        setSendFailed(true);
+      }
+      throw asOfflineError(
+        err,
+        "Couldn't reach the office — your report is saved on this phone and will send when you're back online."
+      );
+    }
+  });
+
+  // Finalizing emails the customer their pesticide record; a second one is a
+  // duplicate record they cannot tell from the first.
+  const finalizeAction = useAction(async () => {
+    const gen = editGen.current;
+    try {
+      const id = await save();
+      // Stop the application clock first, server-stamped. The
+      // first stamp wins, so if finalize fails here and is
+      // retried tomorrow morning, the record's end time is still
+      // now — while the tech is on site — not whenever the retry
+      // lands.
+      const ended = await api().mutations.endApplication({
+        jobId: job.id,
+      });
+      if (ended.errors?.length) {
+        throw new Error(ended.errors[0].message);
+      }
+      const res = await api().mutations.finalizeServiceReport({ reportId: id });
+      if (res.errors?.length) throw new Error(res.errors[0].message);
+      markDelivered(gen);
+      await onChanged();
+    } catch (err) {
+      if (isConnectivityError(err)) setSendFailed(true);
+      throw asOfflineError(
+        err,
+        "Couldn't reach the office — the report is saved on this phone. Tap Complete & send again when you have signal."
+      );
+    }
+  });
+
+  const sending = saveAction.busy || finalizeAction.busy;
+
+  const runSave = () => {
+    setError(null);
+    void saveAction.run();
   };
 
   const runFinalize = () => {
@@ -1527,40 +1531,8 @@ function ReportForm({
       setError("Describe the services performed");
       return;
     }
-    setBusy("finalize");
     setError(null);
-    const gen = editGen.current;
-    save()
-      .then(async (id) => {
-        // Stop the application clock first, server-stamped. The
-        // first stamp wins, so if finalize fails here and is
-        // retried tomorrow morning, the record's end time is still
-        // now — while the tech is on site — not whenever the retry
-        // lands.
-        const ended = await api().mutations.endApplication({
-          jobId: job.id,
-        });
-        if (ended.errors?.length) {
-          throw new Error(ended.errors[0].message);
-        }
-        return api().mutations.finalizeServiceReport({ reportId: id });
-      })
-      .then((res) => {
-        if (res.errors?.length) throw new Error(res.errors[0].message);
-        markDelivered(gen);
-        return onChanged();
-      })
-      .catch((err) => {
-        if (isConnectivityError(err)) {
-          setSendFailed(true);
-          setError(
-            "Couldn't reach the office — the report is saved on this phone. Tap Complete & send again when you have signal."
-          );
-        } else {
-          setError(err.message);
-        }
-      })
-      .finally(() => setBusy(null));
+    void finalizeAction.run();
   };
 
   // The auto-retry reads through a ref so the 'online' listener always sees
@@ -1568,7 +1540,7 @@ function ReportForm({
   // Any unsent words qualify, not just a failed send — the offline badge
   // promises "will send when signal returns", so signal returning must send.
   useEffect(() => {
-    retryRef.current = dirty && busy === null ? runSave : null;
+    retryRef.current = dirty && !sending ? runSave : null;
   });
 
   const setProduct = (
@@ -1623,7 +1595,7 @@ function ReportForm({
 
   const syncState = syncBadge({
     online,
-    sending: busy !== null,
+    sending,
     dirty,
     persisted,
     sendFailed,
@@ -1810,8 +1782,8 @@ function ReportForm({
               <Button
                 small
                 variant="subtle"
-                loading={busy === "save"}
-                disabled={busy !== null}
+                loading={saveAction.busy}
+                disabled={sending}
                 onClick={runSave}
               >
                 Add job-site photos
@@ -1850,23 +1822,24 @@ function ReportForm({
             <Badge tone={syncState.tone}>{syncState.label}</Badge>
           </p>
         ) : null}
-        <ErrorNote error={error} />
+        <ErrorNote error={error ?? saveAction.error ?? finalizeAction.error} />
         <div className="form-row-2">
           {/* Cross-disabled: while either a save or a finalize is in flight, the
               other is blocked too — a "Save draft" then instant "Complete & send"
               on a report with no id yet used to fire two concurrent draft writes
-              and race the record. */}
+              and race the record. Each action's gate only guards its own path,
+              so this cross-disable still carries the save-vs-finalize case. */}
           <Button
             variant="ghost"
-            loading={busy === "save"}
-            disabled={busy !== null}
+            loading={saveAction.busy}
+            disabled={sending}
             onClick={runSave}
           >
             Save draft
           </Button>
           <Button
-            loading={busy === "finalize"}
-            disabled={busy !== null}
+            loading={finalizeAction.busy}
+            disabled={sending}
             onClick={runFinalize}
           >
             Complete &amp; send

@@ -13,6 +13,7 @@ import type {
   ServiceCode,
 } from "./bookingApi";
 import { funnelCatalog } from "../../amplify/functions/shared/serviceCatalog";
+import { isValidZip } from "../../amplify/functions/shared/postalCode";
 
 // ── Service catalog ─────────────────────────────────────────────────
 
@@ -138,11 +139,11 @@ export const FREQUENCY_LABELS: Record<RecurringFrequency, string> = {
 
 // ── Formatting ──────────────────────────────────────────────────────
 
-/** Same shape as the server's `money()`: whole dollars stay whole. */
-export function money(cents: number): string {
-  const d = cents / 100;
-  return Number.isInteger(d) ? `$${d}` : `$${d.toFixed(2)}`;
-}
+/** The shared formatter — the funnel prints the same string the agreement
+ *  PDF and the receipt email do. Imported as well as re-exported: this module
+ *  formats prices itself, a few lines down. */
+export { formatMoney as money } from "../../amplify/functions/shared/money";
+import { formatMoney as money } from "../../amplify/functions/shared/money";
 
 /**
  * "2026-07-21" → "Tue, Jul 21". Parsed as LOCAL date parts — `new
@@ -252,6 +253,11 @@ export function validateQuoteForm(f: QuoteFormFields): Record<string, string> {
   if (!f.street.trim()) errors["address.street"] = "Street address is required";
   if (!f.city.trim()) errors["address.city"] = "City is required";
   if (!f.state.trim()) errors["address.state"] = "State is required";
+  // Shape only — an out-of-territory ZIP is a lead we price through Zone C,
+  // not a form error. The field feeds geocoding, so a blank one degrades the
+  // drive-time proof capacity depends on.
+  if (!f.zip.trim()) errors["address.zip"] = "ZIP code is required";
+  else if (!isValidZip(f.zip)) errors["address.zip"] = "Enter a 5-digit ZIP code";
   if (needs.sqft) {
     const sqft = parseInt(f.sqft, 10);
     if (!sqft || sqft < SQFT_MIN || sqft > SQFT_MAX) {

@@ -1,11 +1,15 @@
-import type {
-  HoaBand,
-  HoaPerUnitRates,
-  MarketRateService,
-  PlanCadence,
-  PlanRate,
-  RateSheet,
-} from "../../../web/amplify/functions/shared/marketRate";
+import {
+  hoaBandFor,
+  mirrorCents,
+  parseSheet,
+  PLAN_CADENCES,
+  type HoaBand,
+  type HoaPerUnitRates,
+  type MarketRateService,
+  type PlanCadence,
+  type PlanRate,
+  type RateSheet,
+} from "../../../web/amplify/functions/shared/marketRateKeys";
 import type { MarketRate } from "./api";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 
@@ -13,10 +17,11 @@ import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCa
  * Client-side view of the AI market-rate engine
  * (apps/web/amplify/functions/shared/marketRate.ts). The CRM reads the same
  * cached MarketRate rows the public funnel quotes from, so the office screen
- * and the engine can never disagree about a number. Types come straight from
- * the engine (type-only import — nothing from apps/web ships in the bundle);
- * the key building, band brackets, parse tolerance, and priceCents mirror
- * are replicated here and must move with the engine's.
+ * and the engine can never disagree about a number. The key building, band
+ * brackets, parse tolerance, and priceCents mirror come from
+ * shared/marketRateKeys.ts — the engine's pure leaf, value-imported so both
+ * sides run the ONE copy (the engine module itself is impure and must never
+ * reach the browser).
  *
  * Pinned semantics (this wave): an office-edited row is saved with
  * pinned=true and is served until the office changes it. Unpinning permits
@@ -29,14 +34,9 @@ import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCa
  */
 
 export type { HoaBand, HoaPerUnitRates, PlanCadence, PlanRate, RateSheet };
+export { hoaBandFor, mirrorCents, parseSheet, PLAN_CADENCES };
 
 export type EngineService = MarketRateService;
-
-export const PLAN_CADENCES: PlanCadence[] = [
-  "MONTHLY",
-  "BIMONTHLY",
-  "QUARTERLY",
-];
 
 // GL-01: engine-service labels derive from the ONE service catalog (a pure
 // data module — the only VALUE import this file takes from apps/web, by
@@ -54,13 +54,7 @@ export const CADENCE_LABEL: Record<PlanCadence, string> = {
   QUARTERLY: "quarterly",
 };
 
-export const HOA_BANDS: HoaBand[] = [
-  "UNITS_1_10",
-  "UNITS_11_25",
-  "UNITS_26_50",
-  "UNITS_51_100",
-  "UNITS_101_PLUS",
-];
+export { HOA_BANDS } from "../../../web/amplify/functions/shared/marketRateKeys";
 
 export const HOA_BAND_LABEL: Record<HoaBand, string> = {
   UNITS_1_10: "up to 10 units",
@@ -70,26 +64,12 @@ export const HOA_BAND_LABEL: Record<HoaBand, string> = {
   UNITS_101_PLUS: "101+ units",
 };
 
-/** Mirrors the engine's hoaBandFor exactly. */
-export function hoaBandFor(units: number): HoaBand {
-  if (units <= 10) return "UNITS_1_10";
-  if (units <= 25) return "UNITS_11_25";
-  if (units <= 50) return "UNITS_26_50";
-  if (units <= 100) return "UNITS_51_100";
-  return "UNITS_101_PLUS";
-}
-
 // ------------------------------------------------------------ keys & bands
 
-/** Mirrors the engine's areaKeyFor exactly. */
-export function areaKeyFor(city: string, state: string): string {
-  return `${city.trim().toLowerCase().replace(/\s+/g, "-")}-${state.trim().toLowerCase()}`;
-}
-
-/** Mirrors the engine's sqftBucket exactly (500 sqft bands). */
-export function sqftBucket(sqft: number): number {
-  return Math.max(500, Math.ceil(sqft / 500) * 500);
-}
+export {
+  areaKeyFor,
+  sqftBucket,
+} from "../../../web/amplify/functions/shared/marketRateKeys";
 
 /** The numeric sqft band on a rateKey (`SERVICE#area#band`), if any. */
 export function bandOfKey(rateKey: string | null | undefined): number | null {
@@ -126,25 +106,6 @@ export function isServable(
 
 // ------------------------------------------------------------------- sheet
 
-/** Tolerant ratesJson parse, mirroring the engine's. */
-export function parseSheet(raw: unknown): RateSheet | null {
-  if (raw == null) return null;
-  try {
-    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      (typeof (value as RateSheet).oneTimeCents === "number" ||
-        typeof (value as RateSheet).hoaPerUnitMonthly === "object")
-    ) {
-      return value as RateSheet;
-    }
-  } catch {
-    /* corrupt ratesJson — treat as sheet-less row */
-  }
-  return null;
-}
-
 /**
  * The sheet as the engine would serve it. For one-time sheets priceCents is
  * the mirror of the sheet's one-time and wins over a stale stored value;
@@ -156,16 +117,6 @@ export function sheetOf(
   const stored = parseSheet(rate.ratesJson);
   if (stored?.hoaPerUnitMonthly) return stored;
   return { ...(stored ?? {}), oneTimeCents: rate.priceCents };
-}
-
-/**
- * What the row's required priceCents column mirrors for a given sheet —
- * replicates the engine's mirrorCents.
- */
-export function mirrorCents(sheet: RateSheet): number {
-  return (
-    sheet.oneTimeCents ?? sheet.hoaPerUnitMonthly?.UNITS_1_10.MONTHLY ?? 0
-  );
 }
 
 export type SheetEdits = {

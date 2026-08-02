@@ -1,4 +1,4 @@
-import { api, unwrap, type Customer } from "../lib/api";
+import { api, listAll, unwrap, type Customer } from "../lib/api";
 import { myCustomerIds, myGroupIds, type Roles } from "../lib/auth";
 
 /**
@@ -25,10 +25,13 @@ export async function loadMyCustomers(roles: Roles): Promise<Customer[]> {
     Promise.all(ids.map((id) => api().models.Customer.get({ id }))),
     Promise.all(
       groupIds.map((gid) =>
-        api().models.Customer.list({
-          filter: { groupId: { eq: gid } },
-          limit: 500,
-        })
+        listAll((t) =>
+          api().models.Customer.list({
+            filter: { groupId: { eq: gid } },
+            limit: 500,
+            nextToken: t,
+          })
+        )
       )
     ),
   ]);
@@ -37,7 +40,7 @@ export async function loadMyCustomers(roles: Roles): Promise<Customer[]> {
   const mine = own
     .map((r) => unwrap(r) as unknown as Customer | null)
     .filter((c): c is Customer => Boolean(c));
-  const members = memberLists.flatMap((r) => unwrap(r));
+  const members = memberLists.flat();
   // A login can be both an individual customer and a group contact — dedupe,
   // and order by name so a 29-property portfolio reads predictably.
   const byId = new Map<string, Customer>();

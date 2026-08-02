@@ -7,6 +7,7 @@ import {
   listDisputes,
   settleInvoice,
   unwrap,
+  type BookingRequest,
   type Customer,
   type Dispute,
   type Invoice,
@@ -40,6 +41,7 @@ import {
 } from "../lib/recovery";
 import { isLeadOpen } from "../lib/leadStage";
 import { useRoles } from "../lib/auth";
+import { useAction } from "../lib/useAsync";
 import {
   Badge,
   Button,
@@ -73,22 +75,6 @@ type DrillKey =
 /** One line of a tile's breakdown: an invoice and the amount it contributes. */
 type DrillRow = { invoice: Invoice; amountCents: number };
 
-/**
- * The slice of a BookingRequest the discount figure needs. Typed by hand the
- * same way Work.tsx does, so the dashboard still builds while the generated
- * Schema lags a backend wave.
- */
-type DiscountBooking = {
-  id: string;
-  status?: string | null;
-  name?: string | null;
-  promoCode?: string | null;
-  promoDiscountCents?: number | null;
-  customerId?: string | null;
-  tcAcceptedAt?: string | null;
-  createdAt?: string | null;
-};
-
 function inPeriod(iso: string | null | undefined, period: Period): boolean {
   if (period === "ALL") return true;
   if (!iso) return false;
@@ -109,7 +95,7 @@ export default function Dashboard() {
   const [plans, setPlans] = useState<ServicePlan[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [disputes, setDisputes] = useState<Dispute[]>([]);
-  const [bookings, setBookings] = useState<DiscountBooking[]>([]);
+  const [bookings, setBookings] = useState<BookingRequest[]>([]);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [depositingId, setDepositingId] = useState<string | null>(null);
   const [showDiscounts, setShowDiscounts] = useState(false);
@@ -126,16 +112,9 @@ export default function Dashboard() {
         // Discounts live on BookingRequest (promoDiscountCents snapshot), not
         // on invoices. Tolerate this list failing — a dashboard that can't say
         // "discounts" should still say everything else.
-        listAll<DiscountBooking>((t) =>
-          api().models.BookingRequest.list({
-            limit: 1000,
-            nextToken: t,
-          } as Parameters<ReturnType<typeof api>["models"]["BookingRequest"]["list"]>[0]) as Promise<{
-            data: DiscountBooking[];
-            nextToken?: string | null;
-            errors?: { message: string }[];
-          }>
-        ).catch(() => [] as DiscountBooking[]),
+        listAll((t) =>
+          api().models.BookingRequest.list({ limit: 1000, nextToken: t })
+        ).catch(() => [] as BookingRequest[]),
       ]);
       setInvoices(inv);
       setCustomers(cus);
@@ -155,42 +134,47 @@ export default function Dashboard() {
   // Confirm a cash/cheque payment reached the bank. The server stamps the
   // actor and refuses Stripe-settled invoices; reload shows it gone from the
   // queue.
+  const depositAct = useAction(async (invoiceId: string) => {
+    setError(null);
+    unwrap(await settleInvoice({ invoiceId, method: "MARK_DEPOSITED" }));
+    await load();
+  }, "Could not mark the deposit");
+
+  // `depositingId` stays for the row's own spinner; useAction.busy is a
+  // single flag and could not say WHICH invoice is being confirmed.
   const markDeposited = useCallback(
     async (invoiceId: string) => {
       setDepositingId(invoiceId);
-      setError(null);
       try {
-        unwrap(
-          await settleInvoice({ invoiceId, method: "MARK_DEPOSITED" })
-        );
-        await load();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Could not mark the deposit"
-        );
+        await depositAct.run(invoiceId);
       } finally {
         setDepositingId(null);
       }
     },
-    [load]
+    [depositAct.run]
   );
 
   // Claim a recovery item ("Assign to me") — the server stamps the owner from
   // the caller's identity, so after it lands a reload shows this user's email.
+  const assignAct = useAction(
+    async (kind: "INVOICE" | "DISPUTE", id: string) => {
+      setError(null);
+      await assignRecoveryOwner({ kind, id });
+      await load();
+    },
+    "Could not assign owner"
+  );
+
   const assign = useCallback(
     async (kind: "INVOICE" | "DISPUTE", id: string) => {
       setAssigningId(id);
-      setError(null);
       try {
-        await assignRecoveryOwner({ kind, id });
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not assign owner");
+        await assignAct.run(kind, id);
       } finally {
         setAssigningId(null);
       }
     },
-    [load]
+    [assignAct.run]
   );
 
   if (!invoices) {
@@ -397,7 +381,7 @@ export default function Dashboard() {
           setDrill(null);
         }}
       />
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? depositAct.error ?? assignAct.error} />
 
       <div className="stat-grid">
         <Stat
@@ -547,7 +531,7 @@ export default function Dashboard() {
                 }`}
                 value={money(aging.buckets[b].totalCents)}
                 tone={
-                  aging.buckets[b].totalCents > 0 && b !== "current"
+                  aging.buckets[b].totalCents > 0 && b !== "CURRENT"
                     ? bucketTone(b)
                     : undefined
                 }
@@ -620,7 +604,11 @@ export default function Dashboard() {
           {recoveryQueue.slice(0, 15).map((item) => (
             <ListRow
               key={`${item.refType}-${item.id}`}
-              title={customerById.get(item.customerId)?.displayName ?? "Unknown"}
+              title={
+                (item.customerId
+                  ? customerById.get(item.customerId)?.displayName
+                  : undefined) ?? "Unknown"
+              }
               subtitle={
                 <>
                   {`${RECOVERY_KIND_LABEL[item.kind]} · ${item.slaLabel}`}
@@ -645,7 +633,11 @@ export default function Dashboard() {
                   />
                 </>
               }
-              onClick={() => navigate(`/customers/${item.customerId}`)}
+              onClick={
+                item.customerId
+                  ? () => navigate(`/customers/${item.customerId}`)
+                  : undefined
+              }
             />
           ))}
         </Card>
@@ -867,11 +859,11 @@ function DrillPanel({
 /** Older receivable is louder: the money least likely to ever arrive. */
 function bucketTone(b: AgingBucket): BadgeTone {
   switch (b) {
-    case "61-90":
-    case "90+":
+    case "D61_90":
+    case "D90_PLUS":
       return "danger";
-    case "31-60":
-    case "1-30":
+    case "D31_60":
+    case "D1_30":
       return "warn";
     default:
       return "info";

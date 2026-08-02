@@ -3,6 +3,7 @@ import { dataClient } from "./dataClient";
 import { casFencedUpdate, casTakeover } from "./atomicLock";
 import { customerAccessGroups } from "./dynamicGroups";
 import { openOwnedWork } from "./ownedWork";
+import { forEachPage, listAll } from "./pagination";
 
 /**
  * GL-11 — group membership as a durable, resumable, VERIFIED command.
@@ -92,19 +93,12 @@ async function listOpenCommands(
       };
     }
   ).GroupChangeCommand;
-  const all: GroupChangeCommandRow[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await model.listGroupChangeCommandByCustomerIdAndRequestedAt(
+  const all = await listAll((nextToken) =>
+    model.listGroupChangeCommandByCustomerIdAndRequestedAt(
       { customerId },
-      { limit: 200, nextToken: token }
-    );
-    if (page.errors?.length) {
-      throw new Error(page.errors.map((e) => e.message).join("; "));
-    }
-    all.push(...(page.data ?? []));
-    token = page.nextToken;
-  } while (token);
+      { limit: 200, nextToken }
+    )
+  );
   return all.filter((c) => !SETTLED.includes(c.stage as GroupChangeStage));
 }
 
@@ -363,19 +357,21 @@ export async function executeGroupChange(
         }
       | undefined;
     if (!model) continue;
-    let token: string | null | undefined;
-    do {
-      const page = await model.list({
-        filter: { customerId: { eq: row.customerId } },
-        limit: 200,
-        nextToken: token,
-      });
-      for (const record of page.data ?? []) {
-        await model.update({ id: record.id, accessGroups });
-        childrenUpdated++;
-      }
-      token = page.nextToken;
-    } while (token);
+    await forEachPage(
+      (nextToken) =>
+        model.list({
+          filter: { customerId: { eq: row.customerId } },
+          limit: 200,
+          nextToken,
+        }),
+      async (records) => {
+        for (const record of records) {
+          await model.update({ id: record.id, accessGroups });
+          childrenUpdated++;
+        }
+      },
+      { pageErrors: "ignore" }
+    );
   }
   if (!(await recordStage(cmd.commandId, cmd.nonce, "CHILDREN_DONE"))) {
     return partial("lost the command lease after the children stage");
@@ -410,22 +406,22 @@ export async function executeGroupChange(
         }
       | undefined;
     if (!model) continue;
-    let token: string | null | undefined;
-    do {
-      const page = await model.list({
-        filter: { customerId: { eq: row.customerId } },
-        limit: 200,
-        nextToken: token,
-      });
-      for (const record of page.data ?? []) {
-        const got = [...(record.accessGroups ?? [])].filter(Boolean).sort();
-        const want = [...accessGroups].sort();
-        if (got.join(",") !== want.join(",")) {
-          problems.push(`${modelName} ${record.id} carries stale access groups`);
-        }
+    const records = await listAll(
+      (nextToken) =>
+        model.list({
+          filter: { customerId: { eq: row.customerId } },
+          limit: 200,
+          nextToken,
+        }),
+      { pageErrors: "ignore" }
+    );
+    for (const record of records) {
+      const got = [...(record.accessGroups ?? [])].filter(Boolean).sort();
+      const want = [...accessGroups].sort();
+      if (got.join(",") !== want.join(",")) {
+        problems.push(`${modelName} ${record.id} carries stale access groups`);
       }
-      token = page.nextToken;
-    } while (token);
+    }
   }
   try {
     if (!(await cognito.verify(customer, toGroupId))) {

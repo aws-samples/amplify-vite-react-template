@@ -12,6 +12,11 @@ import { money } from "./format";
  * Plans are priced per month whatever the visit cadence (rateCards returns
  * `monthlyCents`), so the two halves have to be spelled out separately: what is
  * charged, how often, and — distinctly — how often somebody turns up.
+ *
+ * CRM-only, not a mirror: the server has no counterpart to share. Each
+ * customer-facing surface (funnel terms, availability factors, this module)
+ * composes its own seasonal-cadence sentence around the same approved facts,
+ * which live in shared/season.ts.
  */
 
 const VISIT_INTERVAL: Record<string, string> = {

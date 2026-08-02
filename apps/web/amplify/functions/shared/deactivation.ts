@@ -2,6 +2,7 @@ import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
 import { notifyOffice } from "./email";
 import { openMissingContactWork, openOwnedWork } from "./ownedWork";
+import { forEachPage, listAll } from "./pagination";
 import { cancelPlanBilling } from "./subscription";
 import { jobScheduleGuards, releaseJobCapacity } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
@@ -21,6 +22,7 @@ import {
 } from "./lifecycleCommand";
 import { reasonPolicy, LIFECYCLE_POLICY_VERSION } from "./lifecycleReasons";
 import { emailShell, sendEmail } from "./email";
+import { formatMoney as formatCents } from "./money";
 
 
 /**
@@ -646,35 +648,25 @@ export async function deactivateCustomer(
   }
 }
 
-/** Cents → a plain dollar string for the audit summary. */
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
+
 
 /** Every ACTIVE ServicePlan for a customer, paged fully. */
 async function listActivePlans(
   customerId: string
 ): Promise<{ id: string; planName: string }[]> {
   const client = await dataClient();
-  const out: { id: string; planName: string }[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.ServicePlan.list({
-      filter: { customerId: { eq: customerId } },
-      nextToken: token,
-      limit: 200,
-    });
-    for (const plan of page.data) {
-      if (plan.status === "ACTIVE") {
-        out.push({ id: plan.id, planName: plan.planName });
-      }
-    }
-    token = page.nextToken;
-  } while (token);
-  return out;
+  const plans = await listAll(
+    (nextToken) =>
+      client.models.ServicePlan.list({
+        filter: { customerId: { eq: customerId } },
+        nextToken,
+        limit: 200,
+      }),
+    { pageErrors: "throw" }
+  );
+  return plans
+    .filter((plan) => plan.status === "ACTIVE")
+    .map((plan) => ({ id: plan.id, planName: plan.planName }));
 }
 
 export type LifecycleSweepResult = {
@@ -715,95 +707,97 @@ async function sweepRemainingFutureJobs(
     .toISOString()
     .slice(0, 10)}: customer deactivated. Taken off the schedule so nothing dispatches.`;
   try {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.list({
-        filter: { customerId: { eq: customerId } },
-        nextToken: token,
-        limit: 200,
-      });
-      for (const job of page.data) {
-        if (job.status === "IN_PROGRESS") {
-          // Work underway right now — an owned finish/disposition decision.
-          const opened = await openOwnedWork({
-            kind: "LIFECYCLE_RECOVERY",
-            dedupeKey: `deactivate-inprogress:${job.id}`,
-            title: `Deactivation: a visit is IN PROGRESS — decide it: ${displayName}`,
-            detail: `${displayName} is being deactivated while visit ${job.id}${job.scheduledDate ? ` (${job.scheduledDate})` : ""} is in progress. It was left in place; decide whether it finishes, is cut short, or is rescheduled — and what the customer is told.`,
-            customerId,
-            relatedId: job.id,
-            sourceUrl: `/customers/${customerId}`,
-            resolutionAction:
-              "Decide the in-progress visit (finish / stop / disposition), record the outcome, and confirm the customer knows.",
-            ownerTeam: "OPS",
-          });
-          if (opened) out.inProgressDecisions++;
-          else out.caseWriteFailed++;
-          continue;
+    await forEachPage(
+      (nextToken) =>
+        client.models.Job.list({
+          filter: { customerId: { eq: customerId } },
+          nextToken,
+          limit: 200,
+        }),
+      async (jobs) => {
+        for (const job of jobs) {
+          if (job.status === "IN_PROGRESS") {
+            // Work underway right now — an owned finish/disposition decision.
+            const opened = await openOwnedWork({
+              kind: "LIFECYCLE_RECOVERY",
+              dedupeKey: `deactivate-inprogress:${job.id}`,
+              title: `Deactivation: a visit is IN PROGRESS — decide it: ${displayName}`,
+              detail: `${displayName} is being deactivated while visit ${job.id}${job.scheduledDate ? ` (${job.scheduledDate})` : ""} is in progress. It was left in place; decide whether it finishes, is cut short, or is rescheduled — and what the customer is told.`,
+              customerId,
+              relatedId: job.id,
+              sourceUrl: `/customers/${customerId}`,
+              resolutionAction:
+                "Decide the in-progress visit (finish / stop / disposition), record the outcome, and confirm the customer knows.",
+              ownerTeam: "OPS",
+            });
+            if (opened) out.inProgressDecisions++;
+            else out.caseWriteFailed++;
+            continue;
+          }
+          if (job.status !== "SCHEDULED" && job.status !== "UNSCHEDULED") continue;
+          if (job.paidAt) {
+            // Money already collected — an owned honor/refund/cancel decision,
+            // never a silent skip.
+            const opened = await openOwnedWork({
+              kind: "LIFECYCLE_RECOVERY",
+              dedupeKey: `deactivate-paid:${job.id}`,
+              title: `Deactivation: a PAID visit needs a decision: ${displayName}`,
+              detail: `${displayName} is being deactivated but visit ${job.id}${job.scheduledDate ? ` (${job.scheduledDate})` : ""} was already paid up front. Decide: honor it, refund it per the 72-hour policy, or reschedule it — the money is real either way.`,
+              customerId,
+              relatedId: job.id,
+              sourceUrl: `/customers/${customerId}`,
+              resolutionAction:
+                "Choose honor / refund / cancel for this paid visit through the visit tools, and confirm the customer knows.",
+              ownerTeam: "FINANCE",
+            });
+            if (opened) out.paidDecisions++;
+            else out.caseWriteFailed++;
+            continue;
+          }
+          try {
+            // GUARDED on the snapshot this sweep read — a concurrent schedule
+            // mutation makes this cancel lose into out.failed (the deactivation
+            // stays PARTIAL and re-runs against fresh state) instead of
+            // double-releasing a hold another mutation already moved.
+            const published = await casGuardedUpdate(
+              "Job",
+              job.id,
+              {
+                status: "CANCELED",
+                routeId: null,
+                routeOrder: null,
+                technicianId: null,
+                // Stamps end WITH the hold: the release below reads the
+                // pre-update row, so a resumed sweep cannot release twice.
+                capacityMinutes: null,
+                capacityTechnicianId: null,
+                notes: job.notes ? `${job.notes}\n${note}` : note,
+              },
+              jobScheduleGuards(job)
+            );
+            if (published.ok) {
+              out.canceled++;
+              // GL-04: a swept visit's technician-day (or pool) minutes go
+              // back — a deactivation must not strand sold capacity.
+              await releaseJobCapacity(job);
+              // GL-17: a swept seasonal visit gives its month back too.
+              if (job.servicePlanId && job.scheduledDate) {
+                await releaseMonthForJob({
+                  servicePlanId: job.servicePlanId,
+                  monthKey: job.scheduledDate.slice(0, 7),
+                  jobId: job.id,
+                  note: "Visit canceled by deactivation — the month is owed again.",
+                }).catch(() => undefined);
+              }
+            } else out.failed++;
+          } catch (err) {
+            console.error("sweepRemainingFutureJobs: job failed", job.id, err);
+            out.failed++;
+          }
         }
-        if (job.status !== "SCHEDULED" && job.status !== "UNSCHEDULED") continue;
-        if (job.paidAt) {
-          // Money already collected — an owned honor/refund/cancel decision,
-          // never a silent skip.
-          const opened = await openOwnedWork({
-            kind: "LIFECYCLE_RECOVERY",
-            dedupeKey: `deactivate-paid:${job.id}`,
-            title: `Deactivation: a PAID visit needs a decision: ${displayName}`,
-            detail: `${displayName} is being deactivated but visit ${job.id}${job.scheduledDate ? ` (${job.scheduledDate})` : ""} was already paid up front. Decide: honor it, refund it per the 72-hour policy, or reschedule it — the money is real either way.`,
-            customerId,
-            relatedId: job.id,
-            sourceUrl: `/customers/${customerId}`,
-            resolutionAction:
-              "Choose honor / refund / cancel for this paid visit through the visit tools, and confirm the customer knows.",
-            ownerTeam: "FINANCE",
-          });
-          if (opened) out.paidDecisions++;
-          else out.caseWriteFailed++;
-          continue;
-        }
-        try {
-          // GUARDED on the snapshot this sweep read — a concurrent schedule
-          // mutation makes this cancel lose into out.failed (the deactivation
-          // stays PARTIAL and re-runs against fresh state) instead of
-          // double-releasing a hold another mutation already moved.
-          const published = await casGuardedUpdate(
-            "Job",
-            job.id,
-            {
-              status: "CANCELED",
-              routeId: null,
-              routeOrder: null,
-              technicianId: null,
-              // Stamps end WITH the hold: the release below reads the
-              // pre-update row, so a resumed sweep cannot release twice.
-              capacityMinutes: null,
-              capacityTechnicianId: null,
-              notes: job.notes ? `${job.notes}\n${note}` : note,
-            },
-            jobScheduleGuards(job)
-          );
-          if (published.ok) {
-            out.canceled++;
-            // GL-04: a swept visit's technician-day (or pool) minutes go
-            // back — a deactivation must not strand sold capacity.
-            await releaseJobCapacity(job);
-            // GL-17: a swept seasonal visit gives its month back too.
-            if (job.servicePlanId && job.scheduledDate) {
-              await releaseMonthForJob({
-                servicePlanId: job.servicePlanId,
-                monthKey: job.scheduledDate.slice(0, 7),
-                jobId: job.id,
-                note: "Visit canceled by deactivation — the month is owed again.",
-              }).catch(() => undefined);
-            }
-          } else out.failed++;
-        } catch (err) {
-          console.error("sweepRemainingFutureJobs: job failed", job.id, err);
-          out.failed++;
-        }
-      }
-      token = page.nextToken;
-    } while (token);
+      },
+      { pageErrors: "throw" }
+    );
   } catch (err) {
     // A failed schedule READ cannot be skipped or hidden by the final status.
     console.error("sweepRemainingFutureJobs: list failed", customerId, err);
@@ -858,53 +852,53 @@ export async function buildLifecycleInventory(customerId: string): Promise<{
     inv.readFailures.push("customer");
   }
   try {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.ServicePlan.list({
-        filter: { customerId: { eq: customerId } },
-        nextToken: token,
-        limit: 200,
-      });
-      for (const plan of page.data) {
-        if (plan.status === "ACTIVE") {
-          inv.activePlans.push({
-            id: plan.id,
-            planName: plan.planName,
-            stripeSubscriptionId: plan.stripeSubscriptionId ?? null,
-            priceCents: plan.priceCents ?? null,
-          });
-        }
+    const plans = await listAll(
+      (nextToken) =>
+        client.models.ServicePlan.list({
+          filter: { customerId: { eq: customerId } },
+          nextToken,
+          limit: 200,
+        }),
+      { pageErrors: "throw" }
+    );
+    for (const plan of plans) {
+      if (plan.status === "ACTIVE") {
+        inv.activePlans.push({
+          id: plan.id,
+          planName: plan.planName,
+          stripeSubscriptionId: plan.stripeSubscriptionId ?? null,
+          priceCents: plan.priceCents ?? null,
+        });
       }
-      token = page.nextToken;
-    } while (token);
+    }
   } catch {
     inv.readFailures.push("plans");
   }
   try {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Job.list({
-        filter: { customerId: { eq: customerId } },
-        nextToken: token,
-        limit: 200,
-      });
-      for (const job of page.data) {
-        const summary = {
-          id: job.id,
-          scheduledDate: job.scheduledDate ?? null,
-          serviceType: job.serviceType,
-        };
-        if (job.status === "IN_PROGRESS") inv.inProgressJobs.push(summary);
-        else if (
-          (job.status === "SCHEDULED" || job.status === "UNSCHEDULED") &&
-          job.paidAt
-        )
-          inv.paidJobs.push(summary);
-        else if (job.status === "SCHEDULED" || job.status === "UNSCHEDULED")
-          inv.futureUnpaidJobs.push(summary);
-      }
-      token = page.nextToken;
-    } while (token);
+    const jobs = await listAll(
+      (nextToken) =>
+        client.models.Job.list({
+          filter: { customerId: { eq: customerId } },
+          nextToken,
+          limit: 200,
+        }),
+      { pageErrors: "throw" }
+    );
+    for (const job of jobs) {
+      const summary = {
+        id: job.id,
+        scheduledDate: job.scheduledDate ?? null,
+        serviceType: job.serviceType,
+      };
+      if (job.status === "IN_PROGRESS") inv.inProgressJobs.push(summary);
+      else if (
+        (job.status === "SCHEDULED" || job.status === "UNSCHEDULED") &&
+        job.paidAt
+      )
+        inv.paidJobs.push(summary);
+      else if (job.status === "SCHEDULED" || job.status === "UNSCHEDULED")
+        inv.futureUnpaidJobs.push(summary);
+    }
   } catch {
     inv.readFailures.push("jobs");
   }
@@ -988,20 +982,20 @@ export async function sendLifecycleNotice(input: {
  */
 async function outstandingBalance(customerId: string): Promise<number> {
   const client = await dataClient();
+  const invoices = await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { customerId: { eq: customerId } },
+        nextToken,
+        limit: 200,
+      }),
+    { pageErrors: "throw" }
+  );
   let total = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({
-      filter: { customerId: { eq: customerId } },
-      nextToken: token,
-      limit: 200,
-    });
-    for (const inv of page.data) {
-      if (inv.status === "OPEN" || inv.status === "FAILED") {
-        total += (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0);
-      }
+  for (const inv of invoices) {
+    if (inv.status === "OPEN" || inv.status === "FAILED") {
+      total += (inv.amountCents ?? 0) - (inv.refundedAmountCents ?? 0);
     }
-    token = page.nextToken;
-  } while (token);
+  }
   return total;
 }

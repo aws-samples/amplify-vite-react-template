@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   api,
+  listAll,
   opResult,
-  unwrap,
+  type CallbackRequest,
   type Customer,
   type Job,
+  type PortalRequest,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
+import { useAction } from "../lib/useAsync";
 import { fmtDate, todayEastern } from "../lib/format";
 import {
   Badge,
@@ -37,45 +40,20 @@ import { loadMyCustomers } from "./portalData";
  * retry; nothing falls back to an untracked phone call.
  */
 
-type PortalRequestRow = {
-  id: string;
-  customerId: string;
-  kind: string;
-  jobId?: string | null;
-  preferredDate?: string | null;
-  message?: string | null;
-  status: string;
-  resolutionNote?: string | null;
-  resolvedAt?: string | null;
-  createdAt?: string | null;
-};
-
-type CallbackRow = {
-  id: string;
-  customerId: string;
-  originalJobId: string;
-  status: string;
-  promisedBy?: string | null;
-  scheduledDate?: string | null;
-  finding?: string | null;
-  findingNote?: string | null;
-};
-
 type Mode = "RESCHEDULE" | "CALLBACK" | "HELP";
 
 export default function PortalRequests() {
   const roles = useRoles();
   const [customers, setCustomers] = useState<Customer[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [requests, setRequests] = useState<PortalRequestRow[]>([]);
-  const [callbacks, setCallbacks] = useState<CallbackRow[]>([]);
+  const [requests, setRequests] = useState<PortalRequest[]>([]);
+  const [callbacks, setCallbacks] = useState<CallbackRequest[]>([]);
   const [mode, setMode] = useState<Mode>("RESCHEDULE");
   const [customerId, setCustomerId] = useState("");
   const [jobId, setJobId] = useState("");
   const [preferredDate, setPreferredDate] = useState("");
   const [message, setMessage] = useState("");
   const [photoKey, setPhotoKey] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [confirmation, setConfirmation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -87,45 +65,61 @@ export default function PortalRequests() {
       if (mine.length && !customerId) setCustomerId(mine[0].id);
       const jobLists = await Promise.all(
         mine.map((c) =>
-          api().models.Job.list({ filter: { customerId: { eq: c.id } }, limit: 200 })
+          listAll((t) =>
+            api().models.Job.list({
+              filter: { customerId: { eq: c.id } },
+              limit: 200,
+              nextToken: t,
+            })
+          )
         )
       );
-      setJobs(jobLists.flatMap((r) => unwrap(r)));
+      setJobs(jobLists.flat());
       const models = api().models as unknown as {
         PortalRequest?: {
           listPortalRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: PortalRequestRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: PortalRequest[]; nextToken?: string | null }>;
         };
         CallbackRequest?: {
           listCallbackRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
-          }) => Promise<{ data: CallbackRow[] }>;
+            nextToken?: string | null;
+          }) => Promise<{ data: CallbackRequest[]; nextToken?: string | null }>;
         };
       };
       if (models.PortalRequest) {
+        const portalRequests = models.PortalRequest;
         const lists = await Promise.all(
           mine.map((c) =>
-            models.PortalRequest!.listPortalRequestByCustomerId({
-              customerId: c.id,
-              limit: 50,
-            })
+            listAll((t) =>
+              portalRequests.listPortalRequestByCustomerId({
+                customerId: c.id,
+                limit: 50,
+                nextToken: t,
+              })
+            )
           )
         );
-        setRequests(lists.flatMap((l) => l.data ?? []));
+        setRequests(lists.flat());
       }
       if (models.CallbackRequest) {
+        const callbackRequests = models.CallbackRequest;
         const lists = await Promise.all(
           mine.map((c) =>
-            models.CallbackRequest!.listCallbackRequestByCustomerId({
-              customerId: c.id,
-              limit: 50,
-            })
+            listAll((t) =>
+              callbackRequests.listCallbackRequestByCustomerId({
+                customerId: c.id,
+                limit: 50,
+                nextToken: t,
+              })
+            )
           )
         );
-        setCallbacks(lists.flatMap((l) => l.data ?? []));
+        setCallbacks(lists.flat());
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load");
@@ -135,6 +129,75 @@ export default function PortalRequests() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const uploadPhoto = useAction(async (file: File) => {
+    setError(null);
+    const res = opResult<{ uploadUrl: string; key: string }>(
+      await api().mutations.getCallbackPhotoUploadUrl({
+        customerId,
+        contentType: file.type,
+      })
+    );
+    if (!res?.uploadUrl) throw new Error("Could not start the upload");
+    const put = await fetch(res.uploadUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": file.type },
+    });
+    if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+    setPhotoKey(res.key);
+  }, "Photo upload failed");
+
+  // A second submit opens a SECOND case for the same problem — a duplicate the
+  // office then has to answer and close by hand.
+  const submit = useAction(async () => {
+    setError(null);
+    setConfirmation(null);
+    if (mode === "CALLBACK") {
+      if (!jobId) throw new Error("Pick the visit the problem relates to");
+      if (!photoKey) {
+        throw new Error(
+          "A photo of what you're seeing is required for a callback"
+        );
+      }
+      const res = opResult<{
+        reference: string;
+        promisedBy: string;
+        status: string;
+      }>(
+        await api().mutations.requestCallback({
+          customerId,
+          originalJobId: jobId,
+          photoKey,
+          note: message.trim() || undefined,
+        })
+      );
+      setConfirmation(
+        res?.status === "ALREADY_REQUESTED"
+          ? `That visit already has a callback (${res.reference}) — we'll return by ${res.promisedBy}.`
+          : `Callback received — reference ${res?.reference}. We'll respond within one business day and return no later than ${res?.promisedBy}.`
+      );
+    } else {
+      const res = opResult<{ reference: string }>(
+        await api().mutations.submitPortalRequest({
+          customerId,
+          kind: mode,
+          jobId: mode === "RESCHEDULE" ? jobId : undefined,
+          preferredDate:
+            mode === "RESCHEDULE" && preferredDate ? preferredDate : undefined,
+          message: message.trim() || undefined,
+        })
+      );
+      setConfirmation(
+        `Request received — reference ${res?.reference}. We'll respond within one business day; you can watch it below.`
+      );
+    }
+    setJobId("");
+    setPreferredDate("");
+    setMessage("");
+    setPhotoKey(null);
+    await load();
+  }, "The request didn't go through — nothing was saved. Please try again.");
 
   if (!customers) {
     return (
@@ -159,117 +222,6 @@ export default function PortalRequests() {
       j.servicePlanId &&
       !callbacks.some((cb) => cb.originalJobId === j.id)
   );
-
-  const uploadPhoto = async (file: File) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<{ uploadUrl: string; key: string }>(
-        await (
-          api().mutations as unknown as {
-            getCallbackPhotoUploadUrl: (a: {
-              customerId: string;
-              contentType: string;
-            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-          }
-        ).getCallbackPhotoUploadUrl({
-          customerId,
-          contentType: file.type,
-        })
-      );
-      if (!res?.uploadUrl) throw new Error("Could not start the upload");
-      const put = await fetch(res.uploadUrl, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type },
-      });
-      if (!put.ok) throw new Error(`Upload failed (${put.status})`);
-      setPhotoKey(res.key);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Photo upload failed");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    setConfirmation(null);
-    try {
-      if (mode === "CALLBACK") {
-        if (!jobId) throw new Error("Pick the visit the problem relates to");
-        if (!photoKey) {
-          throw new Error(
-            "A photo of what you're seeing is required for a callback"
-          );
-        }
-        const res = opResult<{
-          reference: string;
-          promisedBy: string;
-          status: string;
-        }>(
-          await (
-            api().mutations as unknown as {
-              requestCallback: (a: {
-                customerId: string;
-                originalJobId: string;
-                photoKey: string;
-                note?: string;
-              }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-            }
-          ).requestCallback({
-            customerId,
-            originalJobId: jobId,
-            photoKey,
-            note: message.trim() || undefined,
-          })
-        );
-        setConfirmation(
-          res?.status === "ALREADY_REQUESTED"
-            ? `That visit already has a callback (${res.reference}) — we'll return by ${res.promisedBy}.`
-            : `Callback received — reference ${res?.reference}. We'll respond within one business day and return no later than ${res?.promisedBy}.`
-        );
-      } else {
-        const res = opResult<{ reference: string }>(
-          await (
-            api().mutations as unknown as {
-              submitPortalRequest: (a: {
-                customerId: string;
-                kind: string;
-                jobId?: string;
-                preferredDate?: string;
-                message?: string;
-              }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-            }
-          ).submitPortalRequest({
-            customerId,
-            kind: mode,
-            jobId: mode === "RESCHEDULE" ? jobId : undefined,
-            preferredDate:
-              mode === "RESCHEDULE" && preferredDate ? preferredDate : undefined,
-            message: message.trim() || undefined,
-          })
-        );
-        setConfirmation(
-          `Request received — reference ${res?.reference}. We'll respond within one business day; you can watch it below.`
-        );
-      }
-      setJobId("");
-      setPreferredDate("");
-      setMessage("");
-      setPhotoKey(null);
-      await load();
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "The request didn't go through — nothing was saved. Please try again."
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <Page title="Requests" back="/portal">
@@ -304,6 +256,8 @@ export default function PortalRequests() {
             setPhotoKey(null);
             setConfirmation(null);
             setError(null);
+            uploadPhoto.clearError();
+            submit.clearError();
           }}
         />
         {mode === "RESCHEDULE" ? (
@@ -349,7 +303,7 @@ export default function PortalRequests() {
                 accept="image/*"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) void uploadPhoto(f);
+                  if (f) void uploadPhoto.run(f);
                 }}
               />
             </Field>
@@ -376,8 +330,13 @@ export default function PortalRequests() {
             {confirmation}
           </p>
         ) : null}
-        <ErrorNote error={error} />
-        <Button block loading={busy} onClick={() => void submit()}>
+        <ErrorNote error={error ?? uploadPhoto.error ?? submit.error} />
+        {/* The upload has no spinner of its own — this button carried it. */}
+        <Button
+          block
+          loading={submit.busy || uploadPhoto.busy}
+          onClick={() => void submit.run()}
+        >
           {mode === "RESCHEDULE"
             ? "Request the reschedule"
             : mode === "CALLBACK"

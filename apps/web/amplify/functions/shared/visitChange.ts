@@ -10,8 +10,10 @@ import {
 } from "./atomicLock";
 import { emailShell, sendEmail } from "./email";
 import { openOwnedWork, resolveOwnedWork } from "./ownedWork";
+import { listAll } from "./pagination";
 import { refundInvoice, refundableRemaining } from "./refund";
 import { assertTechnicianCompliance } from "./compliance";
+import { todayEastern } from "./dates";
 import { licenseFactsFor } from "./licenses";
 import { claimMonthForJob, releaseMonthForJob } from "./obligations";
 import { isServiceMonth } from "./season";
@@ -33,6 +35,7 @@ import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
 } from "./cancellationPolicy";
+import { formatMoney as usd } from "./money";
 
 /** A visit-change command older than this, with its next-attempt time passed (or
  *  never set), belongs to a dead attempt the reconcile sweep or a retry may
@@ -86,19 +89,7 @@ export type VisitChangeActor = {
  *  offers refund-to-card, an owner manager exception, or a policy fee-retained.) */
 export type CancelDecision = "CANCEL_REFUND";
 
-const todayEastern = (): string =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
 
-const usd = (cents: number): string =>
-  `$${(cents / 100).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
 
 type JobRow = {
   id: string;
@@ -127,18 +118,15 @@ type InvoiceRow = {
  *  against rows scanned, so it must be paged to be sure the paid one is seen. */
 async function invoicesForJob(jobId: string): Promise<InvoiceRow[]> {
   const client = await dataClient();
-  const rows: InvoiceRow[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Invoice.list({
-      filter: { jobId: { eq: jobId } },
-      nextToken: token,
-      limit: 200,
-    });
-    rows.push(...(page.data as InvoiceRow[]));
-    token = page.nextToken;
-  } while (token);
-  return rows;
+  return (await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { jobId: { eq: jobId } },
+        nextToken,
+        limit: 200,
+      }),
+    { pageErrors: "throw" }
+  )) as InvoiceRow[];
 }
 
 /** GL-07 R2: EVERY refundable paid invoice and EVERY open/unpaid invoice on
@@ -1075,11 +1063,15 @@ async function priorAcceptedVisitNotice(
   try {
     const client = await dataClient();
     if (!("EmailLog" in client.models)) return false;
-    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
-      { relatedId: jobId },
-      { limit: 50 }
+    const data = await listAll(
+      (nextToken) =>
+        client.models.EmailLog.listEmailLogByRelatedId(
+          { relatedId: jobId },
+          { limit: 50, nextToken }
+        ),
+      { pageErrors: "throw" }
     );
-    return (data ?? []).some(
+    return data.some(
       (l) =>
         l.template === template &&
         (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
@@ -1198,11 +1190,16 @@ async function latestVisitChangeEvent(jobId: string): Promise<{
   outcome?: string | null;
 } | null> {
   const client = await dataClient();
-  const page = await client.models.VisitChangeEvent.list({
-    filter: { jobId: { eq: jobId } },
-    limit: 200,
-  }).catch(() => ({ data: [] as Record<string, unknown>[] }));
-  const rows = (page.data ?? []) as {
+  const data = await listAll(
+    (nextToken) =>
+      client.models.VisitChangeEvent.list({
+        filter: { jobId: { eq: jobId } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "throw" }
+  ).catch(() => [] as Record<string, unknown>[]);
+  const rows = data as {
     occurredAt?: string | null;
     disposition?: string | null;
     amountCents?: number | null;

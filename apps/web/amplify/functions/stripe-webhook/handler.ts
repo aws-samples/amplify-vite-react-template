@@ -29,11 +29,13 @@ import {
 } from "../shared/recovery";
 import { openOwnedWork } from "../shared/ownedWork";
 import { casGuardedUpdate } from "../shared/atomicLock";
+import { forEachPage, listAll } from "../shared/pagination";
 import {
   cancelQueuedPlanVisits,
   startPlanBilling,
   type QueuedVisitsResolution,
 } from "../shared/subscription";
+import { formatMoney, formatMonthly, formatYearly } from "../shared/money";
 
 export const handler = async (
   event: APIGatewayProxyEventV2
@@ -218,22 +220,21 @@ async function onSetupIntentSucceeded(intent: Stripe.SetupIntent) {
   // plan: a failure is logged and the plan can still be started by hand from
   // the customer page. startPlanBilling is idempotent (a plan already billing
   // is a no-op) and anchors migrated plans to their stored bill day.
-  let nextToken: string | null | undefined;
-  const toStart: string[] = [];
-  do {
-    const page = await client.models.ServicePlan.list({
-      filter: {
-        customerId: { eq: crmCustomerId },
-        status: { eq: "ACTIVE" },
-      },
-      limit: 200,
-      nextToken,
-    });
-    for (const plan of page.data) {
-      if (!plan.stripeSubscriptionId) toStart.push(plan.id);
-    }
-    nextToken = page.nextToken;
-  } while (nextToken);
+  const plans = await listAll(
+    (nextToken) =>
+      client.models.ServicePlan.list({
+        filter: {
+          customerId: { eq: crmCustomerId },
+          status: { eq: "ACTIVE" },
+        },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
+  const toStart: string[] = plans
+    .filter((plan) => !plan.stripeSubscriptionId)
+    .map((plan) => plan.id);
   for (const planId of toStart) {
     try {
       const outcome = await startPlanBilling(stripe, planId);
@@ -313,6 +314,7 @@ async function settlePaymentIntent(
   status: "PAID" | "FAILED"
 ) {
   const client = await dataClient();
+  // Zero-page read is deliberate: one PaymentIntent stamps one invoice, so one page holds every match (audit 1.1.5).
   const { data: invoices } = await client.models.Invoice.listInvoiceByStripePaymentIntentId(
     { stripePaymentIntentId: intent.id }
   );
@@ -377,20 +379,21 @@ async function onSubscriptionInvoice(
   // FAILED→PAID transition path — a row hiding past the first filter-scan
   // page would otherwise be duplicated on the smart-retry success.
   const existing: { id: string; amountCents: number; description?: string | null; status?: string | null }[] = [];
-  {
-    let token: string | null | undefined;
-    do {
-      const page = await client.models.Invoice.list({
+  await forEachPage(
+    (nextToken) =>
+      client.models.Invoice.list({
         filter: { stripeInvoiceId: { eq: stripeInvoice.id } },
         limit: 200,
-        nextToken: token,
-      });
+        nextToken,
+      }),
+    (invoices) => {
       existing.push(
-        ...((page.data ?? []) as unknown as typeof existing)
+        ...(invoices as unknown as typeof existing)
       );
-      token = existing.length ? null : page.nextToken;
-    } while (token);
-  }
+      if (existing.length) return false;
+    },
+    { pageErrors: "ignore" }
+  );
   const paidAt =
     status === "PAID"
       ? new Date(
@@ -620,7 +623,7 @@ async function stagePostCancellationCharge(opts: {
   amountCents: number;
   requestedAt: string;
 }) {
-  const amountUsd = `$${(opts.amountCents / 100).toFixed(2)}`;
+  const amountUsd = formatMoney(opts.amountCents);
   const caseId = await openOwnedWork({
     kind: "PLAN_CANCELLATION_RECOVERY",
     dedupeKey: opts.servicePlanId,
@@ -719,12 +722,12 @@ async function onSubscriptionInvoiceFailed(opts: {
   });
   const name = customer?.displayName ?? opts.customerId;
   await notifyOffice({
-    subject: `Payment failed — ${name}: $${(opts.amountCents / 100).toFixed(2)}`,
+    subject: `Payment failed — ${name}: ${formatMoney(opts.amountCents)}`,
     heading: "A subscription payment failed",
     template: "ops-invoice-payment-failed",
     customerId: opts.customerId,
     relatedId: opts.invoiceId,
-    bodyHtml: `<p><strong>${escapeHtml(name)}</strong>'s payment of <strong>$${(opts.amountCents / 100).toFixed(2)}</strong> for ${escapeHtml(opts.description)} failed.</p>
+    bodyHtml: `<p><strong>${escapeHtml(name)}</strong>'s payment of <strong>${formatMoney(opts.amountCents)}</strong> for ${escapeHtml(opts.description)} failed.</p>
        <p><strong>Reason:</strong> ${escapeHtml(opts.reason)}</p>
        <p>${
          customerReached
@@ -824,32 +827,34 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
   // invoice.paid is never redelivered, so this rescan is the only path that
   // catches them.
   try {
-    let invToken: string | null | undefined;
-    do {
-      const page = await client.models.Invoice.list({
-        filter: { servicePlanId: { eq: crmServicePlanId } },
-        limit: 200,
-        nextToken: invToken,
-      });
-      for (const inv of page.data ?? []) {
-        const paidAt = inv.paidAt ?? inv.issuedAt ?? "";
-        if (
-          inv.status === "PAID" &&
-          paidAt >= canceledAtIso &&
-          (inv.refundedAmountCents ?? 0) < (inv.amountCents ?? 0)
-        ) {
-          await stagePostCancellationCharge({
-            servicePlanId: crmServicePlanId,
-            planName: sub.planName ?? null,
-            customerId: sub.customerId,
-            invoiceId: inv.id,
-            amountCents: inv.amountCents ?? 0,
-            requestedAt: canceledAtIso,
-          });
+    await forEachPage(
+      (nextToken) =>
+        client.models.Invoice.list({
+          filter: { servicePlanId: { eq: crmServicePlanId } },
+          limit: 200,
+          nextToken,
+        }),
+      async (invoices) => {
+        for (const inv of invoices) {
+          const paidAt = inv.paidAt ?? inv.issuedAt ?? "";
+          if (
+            inv.status === "PAID" &&
+            paidAt >= canceledAtIso &&
+            (inv.refundedAmountCents ?? 0) < (inv.amountCents ?? 0)
+          ) {
+            await stagePostCancellationCharge({
+              servicePlanId: crmServicePlanId,
+              planName: sub.planName ?? null,
+              customerId: sub.customerId,
+              invoiceId: inv.id,
+              amountCents: inv.amountCents ?? 0,
+              requestedAt: canceledAtIso,
+            });
+          }
         }
-      }
-      invToken = page.nextToken;
-    } while (invToken);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     // The settlement gate (full-refund-required) still blocks the close;
     // this rescan failing only delays the staged case, never the truth.
@@ -886,8 +891,8 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     console.error("onSubscriptionDeleted: customer lookup failed", err);
   }
 
-  const monthly = `$${(sub.priceCents / 100).toFixed(2)}/mo`;
-  const perYear = `$${((sub.priceCents * 12) / 100).toFixed(2)}/yr`;
+  const monthly = formatMonthly(sub.priceCents);
+  const perYear = formatYearly((sub.priceCents * 12));
   const visitLines: string[] = [];
   if (!queued) {
     visitLines.push(
@@ -910,14 +915,14 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
       visitLines.push(
         `<p><strong>Refunds owed in full (the visit was more than 72 hours out — the Finance case prescribes the exact amount):</strong></p>
          <ul>${(queued.refundsOwed ?? [])
-           .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — $${(v.amountCents / 100).toFixed(2)}</li>`)
+           .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — ${formatMoney(v.amountCents)}</li>`)
            .join("")}</ul>`
       );
     }
     if ((queued.retained ?? []).length > 0) {
       visitLines.push(
         `<p>Payment retained per the 72-hour policy (visit within 72 hours): ${(queued.retained ?? [])
-          .map((v) => `${v.scheduledDate ?? "unscheduled"} — $${(v.amountCents / 100).toFixed(2)}`)
+          .map((v) => `${v.scheduledDate ?? "unscheduled"} — ${formatMoney(v.amountCents)}`)
           .join(", ")}.</p>`
       );
     }
@@ -967,6 +972,7 @@ function idOf(
  */
 async function onDisputeCreated(dispute: Stripe.Dispute) {
   const client = await dataClient();
+  // Zero-page read is deliberate: one Stripe dispute id maps to one Dispute row, so one page holds every match (audit 1.1.5).
   const { data: dupes } =
     await client.models.Dispute.listDisputeByStripeDisputeId({
       stripeDisputeId: dispute.id,
@@ -978,6 +984,7 @@ async function onDisputeCreated(dispute: Stripe.Dispute) {
   let invoiceId: string | undefined;
   let groupId: string | null | undefined;
   if (piId) {
+    // Zero-page read is deliberate: one PaymentIntent stamps one invoice, so one page holds every match (audit 1.1.5).
     const { data: matches } =
       await client.models.Invoice.listInvoiceByStripePaymentIntentId({
         stripePaymentIntentId: piId,
@@ -1027,12 +1034,12 @@ async function onDisputeCreated(dispute: Stripe.Dispute) {
       })
     : "unknown — check Stripe";
   await notifyOffice({
-    subject: `ACTION REQUIRED — card dispute opened: ${name} ($${(dispute.amount / 100).toFixed(2)})`,
+    subject: `ACTION REQUIRED — card dispute opened: ${name} (${formatMoney(dispute.amount)})`,
     heading: "A card dispute was opened",
     template: "ops-dispute-opened",
     customerId,
     relatedId: dispute.id,
-    bodyHtml: `<p>A customer (<strong>${escapeHtml(name)}</strong>) has disputed a charge of <strong>$${(dispute.amount / 100).toFixed(2)}</strong>${dispute.reason ? ` — reason given: <em>${escapeHtml(dispute.reason)}</em>` : ""}.</p>
+    bodyHtml: `<p>A customer (<strong>${escapeHtml(name)}</strong>) has disputed a charge of <strong>${formatMoney(dispute.amount)}</strong>${dispute.reason ? ` — reason given: <em>${escapeHtml(dispute.reason)}</em>` : ""}.</p>
        <p><strong>Evidence is due by ${escapeHtml(deadline)}.</strong> Miss that deadline and the dispute is lost by default and the money is gone.</p>
        <p>Respond in the Stripe dashboard — BuzzKill does not build an evidence editor:</p>
        <p style="margin:20px 0;"><a href="${disputeDashboardUrl(dispute.id)}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open the dispute in Stripe</a></p>`,
@@ -1049,6 +1056,7 @@ async function onDisputeClosed(dispute: Stripe.Dispute) {
   const status: "WON" | "LOST" = dispute.status === "won" ? "WON" : "LOST";
   const closedAt = new Date().toISOString();
 
+  // Zero-page read is deliberate: one Stripe dispute id maps to one Dispute row, so one page holds every match (audit 1.1.5).
   const { data: rows } = await client.models.Dispute.listDisputeByStripeDisputeId(
     { stripeDisputeId: dispute.id }
   );
@@ -1072,11 +1080,11 @@ async function onDisputeClosed(dispute: Stripe.Dispute) {
   }
 
   await notifyOffice({
-    subject: `Card dispute ${status === "WON" ? "won" : "lost"} ($${(dispute.amount / 100).toFixed(2)})`,
+    subject: `Card dispute ${status === "WON" ? "won" : "lost"} (${formatMoney(dispute.amount)})`,
     heading: `A card dispute was ${status === "WON" ? "won" : "lost"}`,
     template: "ops-dispute-closed",
     relatedId: dispute.id,
-    bodyHtml: `<p>The <strong>$${(dispute.amount / 100).toFixed(2)}</strong> dispute has closed: <strong>${status === "WON" ? "won — the funds stay with BuzzKill" : "lost — the funds have gone back to the customer"}</strong>.</p>
+    bodyHtml: `<p>The <strong>${formatMoney(dispute.amount)}</strong> dispute has closed: <strong>${status === "WON" ? "won — the funds stay with BuzzKill" : "lost — the funds have gone back to the customer"}</strong>.</p>
        <p><a href="${disputeDashboardUrl(dispute.id)}">View it in Stripe</a></p>`,
   });
 }

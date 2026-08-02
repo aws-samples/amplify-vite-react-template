@@ -1,5 +1,7 @@
 import { dataClient } from "./dataClient";
 import { hasCurrentLicense } from "./compliance";
+import { listAll } from "./pagination";
+import { todayEastern } from "./dates";
 
 /**
  * GL-17 — one-to-many licence records, and THE single answer to "is this
@@ -47,17 +49,13 @@ type TechnicianLike = {
   licenseExpiresOn?: string | null;
 };
 
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 /** Pure record-set evaluation, unit-testable without a client. */
 export function licenseFactsFromRecords(
   records: LicenseRecordLike[],
   technician: TechnicianLike,
   onDate?: string
 ): LicenseFacts {
-  const date = onDate ?? today();
+  const date = onDate ?? todayEastern();
   if (records.length === 0) {
     // Migration fallback: zero records — the legacy single fields decide.
     return {
@@ -112,18 +110,14 @@ export async function licenseRecordsFor(
   try {
     const client = await dataClient();
     if (!("TechnicianLicense" in client.models)) return [];
-    const out: LicenseRecordLike[] = [];
-    let token: string | null | undefined;
-    do {
-      const page =
-        await client.models.TechnicianLicense.listTechnicianLicenseByTechnicianId(
+    return (await listAll(
+      (nextToken) =>
+        client.models.TechnicianLicense.listTechnicianLicenseByTechnicianId(
           { technicianId },
-          { limit: 100, nextToken: token }
-        );
-      out.push(...((page.data ?? []) as LicenseRecordLike[]));
-      token = page.nextToken;
-    } while (token);
-    return out;
+          { limit: 100, nextToken }
+        ),
+      { pageErrors: "ignore" }
+    )) as LicenseRecordLike[];
   } catch (err) {
     console.error("licenseRecordsFor failed", technicianId, err);
     return null;

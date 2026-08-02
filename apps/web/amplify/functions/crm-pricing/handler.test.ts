@@ -417,8 +417,8 @@ describe("no phantom dollar amounts in replies (R58)", () => {
     const run = await priceLead({ inputText: "lead", leadFeeCents: 0 });
 
     expect(run.decision).toBe("QUOTE");
-    expect(String(run.replyText)).toContain("$75/mo");
-    expect(String(run.replyText)).toContain("$99 initial service");
+    expect(String(run.replyText)).toContain("$75.00/mo");
+    expect(String(run.replyText)).toContain("$99.00 initial service");
   });
 
   it("keeps a composed reply whose every amount was computed", async () => {
@@ -443,6 +443,26 @@ describe("replyUsesOnlyAllowedAmounts", () => {
 
   it("normalizes thousands separators before comparing", () => {
     expect(replyUsesOnlyAllowedAmounts("A $1,299 job", ["$1299"])).toBe(true);
+  });
+
+  // The guard compares VALUES. The allowed amounts are formatted by money()
+  // ("$199.00"), but the reply is written by the model and may drop the
+  // trailing cents or add its own grouping — the same price either way.
+  it("treats $199 and $199.00 as the same amount, in either position", () => {
+    expect(replyUsesOnlyAllowedAmounts("It's $199", ["$199.00"])).toBe(true);
+    expect(replyUsesOnlyAllowedAmounts("It's $199.00", ["$199"])).toBe(true);
+  });
+
+  it("accepts a four-figure formatted price on both sides", () => {
+    // A separator-blind pattern read "$1,200.00" as "$1" and refused every
+    // reply quoting a four-figure price.
+    expect(replyUsesOnlyAllowedAmounts("A $1,200.00 job", ["$1,200.00"])).toBe(true);
+    expect(replyUsesOnlyAllowedAmounts("A $1,200 job", ["$1,200.00"])).toBe(true);
+  });
+
+  it("still catches a wrong amount that merely looks well-formatted", () => {
+    expect(replyUsesOnlyAllowedAmounts("A $1,300.00 job", ["$1,200.00"])).toBe(false);
+    expect(replyUsesOnlyAllowedAmounts("It's $199.99", ["$199.00"])).toBe(false);
   });
 });
 

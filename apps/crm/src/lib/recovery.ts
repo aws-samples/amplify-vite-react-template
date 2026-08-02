@@ -30,7 +30,9 @@ export type RecoveryInvoice = AgingInvoice & {
 
 export type RecoveryDispute = {
   id: string;
-  customerId: string;
+  /** Nullable: the dispute-closed webhook path records a chargeback even when
+   *  the created event never landed, so there is no matched customer. */
+  customerId?: string | null;
   amountCents: number;
   reason?: string | null;
   status?: string | null;
@@ -94,7 +96,8 @@ export type RecoveryItem = {
   /** "invoice" or "dispute" — which model `id` points at (drives assign + links). */
   refType: "invoice" | "dispute";
   id: string;
-  customerId: string;
+  /** Null only for an unmatched dispute (see RecoveryDispute.customerId). */
+  customerId: string | null;
   amountCents: number;
   /** The SLA, said plainly: "12 days overdue", "Retry 2 · next in 3d", "2 days to respond". */
   slaLabel: string;
@@ -170,7 +173,7 @@ function disputeItem(d: RecoveryDispute, today: string): RecoveryItem {
     kind: "DISPUTE",
     refType: "dispute",
     id: d.id,
-    customerId: d.customerId,
+    customerId: d.customerId ?? null,
     amountCents: d.amountCents,
     slaLabel,
     urgent: days === null || days <= DISPUTE_URGENT_DAYS,

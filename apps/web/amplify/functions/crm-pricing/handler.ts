@@ -10,12 +10,15 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import Anthropic from "@anthropic-ai/sdk";
 import { dataClient } from "../shared/dataClient";
+import { listAll } from "../shared/pagination";
 import { opFieldName } from "../shared/opEvent";
+import { DEMAND_PRICING_MODEL } from "../shared/marketRate";
 import {
   extractLead,
+  quoteInputFromExtraction,
   type Extraction,
 } from "../shared/leadExtraction";
-import { callerEmail, callerIsOffice, callerIsOwner } from "../shared/authz";
+import { assertOffice, assertOwner, callerEmail } from "../shared/authz";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { activeTechBases } from "../shared/capacity";
 import { driveMinutesFromNearestBase } from "../shared/driveTime";
@@ -80,7 +83,24 @@ type Args = {
 };
 
 export const handler = async (event: AppSyncResolverEvent<Args>) => {
-  if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+  // TRUSTED INTERNAL INVOKE. booking-public asks us to read a customer's
+  // freeform "tell us what you need" into structured quote inputs.
+  //
+  // This lives here, and not on booking-public, on purpose: booking-public is a
+  // PUBLIC unauthenticated Function URL, and the research key has no business
+  // on it. Routing the extraction inward keeps the key on an IAM-only function
+  // while the funnel still gets the answer.
+  //
+  // It arrives by direct Lambda invoke, so it carries no AppSync identity and
+  // could never satisfy the office check below. Only IAM principals we grant
+  // can reach it — the same shape booking-public's own internalOp uses.
+  const internal = (
+    event as unknown as { internalOp?: { op?: string; describe?: string } }
+  ).internalOp;
+  if (internal?.op === "extractQuoteIntent") {
+    return await extractQuoteIntent(internal.describe ?? "");
+  }
+  assertOffice(event.identity);
   switch (opFieldName(event)) {
     case "priceLead":
       return priceLead(event.arguments);
@@ -91,10 +111,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "rollbackPricing":
       // GL-16: price authority stays role-controlled — OWNER only, checked
       // server-side on top of the schema's group rule.
-      if (!callerIsOwner(event.identity)) throw new Error("Owner role required");
+      assertOwner(event.identity);
       return rollbackPricing(event.arguments, callerEmail(event.identity));
     case "clearPricingRollback":
-      if (!callerIsOwner(event.identity)) throw new Error("Owner role required");
+      assertOwner(event.identity);
       return clearPricingRollback(event.arguments, callerEmail(event.identity));
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);
@@ -167,8 +187,14 @@ async function requestPricingResearch(
   }
 
   const client = await dataClient();
-  const { data: rows } =
-    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const rows = await listAll(
+    (nextToken) =>
+      client.models.MarketRate.listMarketRateByRateKey(
+        { rateKey },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
   const serving = pickServingRow(rows, rateKey, null);
   if (!serving) throw new Error("This rate is not currently serving");
   if (serving.pinned) {
@@ -526,9 +552,12 @@ async function composeReply(
     funnelUrl: string;
   }
 ): Promise<string | null> {
+  // Comma-aware on purpose: the formatter groups thousands, and a pattern that
+  // stopped at the separator would read "$1,200.00" as "$1" and then refuse
+  // every reply quoting a four-figure price.
   const allowedAmounts = [facts.monthly, facts.initial, facts.oneTime, facts.fallbackPlan, facts.pivotedFromOneTime]
     .filter(Boolean)
-    .flatMap((s) => (s as string).match(/\$\d+(?:\.\d{2})?/g) ?? []);
+    .flatMap((s) => (s as string).match(/\$[\d,]+(?:\.\d{2})?/g) ?? []);
 
   const prompt = `Write the paste-ready Thumbtack reply (2–4 sentences) for this quoted lead. Use ONLY these exact prices — never invent, change, or round any dollar amount:
 - Service: ${facts.service}
@@ -564,16 +593,31 @@ Tone: warm, direct, no fluff. Output ONLY the reply text.`;
  * Consistency guard: every dollar amount in a composed reply must be one the
  * rate card computed. Nothing is whitelisted by literal — a hardcoded "$15"
  * or "$99" is exactly the class of amount this guard exists to catch (R58).
- * Thousands separators are normalized on both sides first.
+ *
+ * Compares VALUES, not strings. The allowed amounts are formatted by
+ * `money()`, but the reply is written by the model, which may render the same
+ * price with or without trailing cents ("$199" for a "$199.00" fact) or with
+ * its own grouping. Those are the same amount, and refusing to auto-send over
+ * a formatting difference is a false positive — while "$15" against an allowed
+ * "$199" is still caught, which is the point.
  */
 export function replyUsesOnlyAllowedAmounts(
   reply: string,
   allowedAmounts: string[]
 ): boolean {
-  const normalize = (v: string) => v.replace(/,(?=\d{3})/g, "");
-  const used = (reply.match(/\$[\d,]+(?:\.\d{2})?/g) ?? []).map(normalize);
-  const allowed = new Set(allowedAmounts.map(normalize));
-  return used.every((m) => allowed.has(m));
+  const toCents = (v: string): number | null => {
+    const digits = v.replace(/[$,]/g, "");
+    if (!/^\d+(?:\.\d{2})?$/.test(digits)) return null;
+    return Math.round(Number(digits) * 100);
+  };
+  const allowed = new Set(
+    allowedAmounts.map(toCents).filter((c): c is number => c !== null)
+  );
+  const used = reply.match(/\$[\d,]+(?:\.\d{2})?/g) ?? [];
+  return used.every((m) => {
+    const cents = toCents(m);
+    return cents !== null && allowed.has(cents);
+  });
 }
 
 export function templateReply(facts: {
@@ -1435,4 +1479,54 @@ async function priceLead(args: Args) {
     researchRateKey: null,
   });
   return run;
+}
+
+
+/**
+ * Read freeform quote text into the structured inputs the public form collects.
+ *
+ * Returns the mapping verbatim — including its refusals — so booking-public
+ * renders one answer whether the text was readable or not, and never has to
+ * decide anything about pricing itself.
+ */
+async function extractQuoteIntent(describe: string) {
+  // Capped because the caller is public traffic. A real description is a
+  // sentence or two; anything longer is padding or an injection attempt, and
+  // truncating costs nothing a genuine customer needs.
+  const text = describe.trim().slice(0, 1000);
+  if (!text) {
+    return {
+      ok: false as const,
+      eligibility: "unclear" as const,
+      reason: "Tell us what you need and we'll price it.",
+    };
+  }
+  const apiKey = await getSecret("ANTHROPIC_API_KEY");
+  if (!apiKey) {
+    return {
+      ok: false as const,
+      eligibility: "unclear" as const,
+      reason:
+        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+    };
+  }
+  try {
+    const extraction = await extractLead(
+      new Anthropic({ apiKey }),
+      text,
+      null,
+      // A closed schema needs no frontier model, and this runs on public
+      // traffic — the demand-pricing tier is the right cost/latency point.
+      DEMAND_PRICING_MODEL
+    );
+    return quoteInputFromExtraction(extraction);
+  } catch (err) {
+    console.error("extractQuoteIntent failed", err);
+    return {
+      ok: false as const,
+      eligibility: "unclear" as const,
+      reason:
+        "We couldn't read that just now — pick your service and property type instead and we'll price it right away.",
+    };
+  }
 }

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Customer } from "../lib/api";
 import { AddressAutocompleteInput } from "../lib/addressAutocomplete";
+import { useAction } from "../lib/useAsync";
 import { Button, ErrorNote, Field } from "../ui/kit";
 
 export type CustomerFormValues = {
@@ -56,38 +57,28 @@ export default function CustomerForm({
   onSubmit: (values: CustomerFormValues) => Promise<void>;
 }) {
   const [values, setValues] = useState(initial);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const set = (k: keyof CustomerFormValues) => (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
   ) => setValues((v) => ({ ...v, [k]: e.target.value }));
 
-  const submit = async () => {
+  // This form creates a lead or a customer; a double-submit used to leave two
+  // records for the same person for the office to merge by hand.
+  const submit = useAction(async () => {
     if (!values.displayName.trim()) {
-      setError("Name is required");
-      return;
+      throw new Error("Name is required");
     }
     if (values.email && !/^\S+@\S+\.\S+$/.test(values.email)) {
-      setError("Email doesn't look valid");
-      return;
+      throw new Error("Email doesn't look valid");
     }
     if (
       showLeadConsent &&
       (values.emailPermission || values.callPermission) &&
       !values.consentEvidence.trim()
     ) {
-      setError("Record the exact evidence authorizing each selected contact channel. Contact details alone are not permission.");
-      return;
+      throw new Error("Record the exact evidence authorizing each selected contact channel. Contact details alone are not permission.");
     }
-    setBusy(true);
-    setError(null);
-    try {
-      await onSubmit(values);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save");
-      setBusy(false);
-    }
-  };
+    await onSubmit(values);
+  }, "Could not save");
 
   return (
     <div className="form-grid">
@@ -209,8 +200,8 @@ export default function CustomerForm({
       <Field label="Notes">
         <textarea value={values.notes} onChange={set("notes")} />
       </Field>
-      <ErrorNote error={error} />
-      <Button block loading={busy} onClick={() => void submit()}>
+      <ErrorNote error={submit.error} />
+      <Button block loading={submit.busy} onClick={() => void submit.run()}>
         {submitLabel}
       </Button>
     </div>

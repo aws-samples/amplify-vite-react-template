@@ -1,5 +1,6 @@
 import { dataClient } from "./dataClient";
 import { casGuardedUpdate } from "./atomicLock";
+import { forEachPage } from "./pagination";
 import {
   bestSlotFor,
   dayEligibility,
@@ -117,6 +118,7 @@ async function ensureRouteAndOrder(
   ).Route;
   let routeId: string | null = null;
   try {
+    // limit 1 is deliberate: one route per tech-day by design. Duplicate routes are a known separate defect; the read-side union lives in technicianReads.
     const { data: routes } = await routeModel.listRouteByTechnicianIdAndDate(
       { technicianId, date },
       { limit: 1 }
@@ -135,19 +137,21 @@ async function ensureRouteAndOrder(
   // Append after the route's last stop. There is no by-route Job index, so
   // scan the date and take the max order already on this route.
   let maxOrder = 0;
-  let token: string | null | undefined;
-  do {
-    const page = await client.models.Job.listJobByScheduledDate(
-      { scheduledDate: date },
-      { limit: 200, nextToken: token }
-    );
-    for (const j of page.data ?? []) {
-      if (j.routeId === routeId && typeof j.routeOrder === "number") {
-        maxOrder = Math.max(maxOrder, j.routeOrder);
+  await forEachPage(
+    (nextToken) =>
+      client.models.Job.listJobByScheduledDate(
+        { scheduledDate: date },
+        { limit: 200, nextToken }
+      ),
+    (items) => {
+      for (const j of items) {
+        if (j.routeId === routeId && typeof j.routeOrder === "number") {
+          maxOrder = Math.max(maxOrder, j.routeOrder);
+        }
       }
-    }
-    token = page.nextToken;
-  } while (token);
+    },
+    { pageErrors: "ignore" }
+  );
   return { routeId, routeOrder: maxOrder + 1 };
 }
 

@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { api, unwrap, type Customer, type CustomerGroup, type Job } from "../lib/api";
+import { useState } from "react";
+import { api, listAll, unwrap, type Customer, type CustomerGroup, type Job } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { myGroupIds, useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
 import { Card, EmptyState, ErrorNote, ListRow, Page, Sheet, Spinner, StatusBadge } from "../ui/kit";
@@ -11,38 +12,43 @@ import { Card, EmptyState, ErrorNote, ListRow, Page, Sheet, Spinner, StatusBadge
  */
 export default function PortalGroup() {
   const roles = useRoles();
-  const [groups, setGroups] = useState<CustomerGroup[] | null>(null);
-  const [members, setMembers] = useState<Customer[]>([]);
   const [viewing, setViewing] = useState<Customer | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (roles.loading) return;
-    (async () => {
-      try {
-        const ids = myGroupIds(roles);
-        const loaded = await Promise.all(
-          ids.map((id) => api().models.CustomerGroup.get({ id }))
-        );
-        setGroups(
-          loaded
-            .map((r) => unwrap(r) as unknown as CustomerGroup | null)
-            .filter((g): g is CustomerGroup => Boolean(g))
-        );
-        const memberLists = await Promise.all(
-          ids.map((id) =>
+  const { data, error } = useAsync<{
+    groups: CustomerGroup[];
+    members: Customer[];
+  } | null>(
+    async () => {
+      // Roles are still resolving — resolving to null keeps the spinner up,
+      // exactly as the old effect's early return did.
+      if (roles.loading) return null;
+      const ids = myGroupIds(roles);
+      const loaded = await Promise.all(
+        ids.map((id) => api().models.CustomerGroup.get({ id }))
+      );
+      const memberLists = await Promise.all(
+        ids.map((id) =>
+          listAll((t) =>
             api().models.Customer.list({
               filter: { groupId: { eq: id } },
               limit: 500,
+              nextToken: t,
             })
           )
-        );
-        setMembers(memberLists.flatMap((r) => unwrap(r)));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load group");
-      }
-    })();
-  }, [roles]);
+        )
+      );
+      return {
+        groups: loaded
+          .map((r) => unwrap(r) as unknown as CustomerGroup | null)
+          .filter((g): g is CustomerGroup => Boolean(g)),
+        members: memberLists.flat(),
+      };
+    },
+    [roles],
+    "Could not load group"
+  );
+  const groups = data?.groups ?? null;
+  const members = data?.members ?? [];
 
   if (!groups) {
     return (
@@ -87,14 +93,21 @@ export default function PortalGroup() {
 }
 
 function MemberDetail({ customer }: { customer: Customer }) {
-  const [jobs, setJobs] = useState<Job[] | null>(null);
-
-  useEffect(() => {
-    api()
-      .models.Job.list({ filter: { customerId: { eq: customer.id } }, limit: 200 })
-      .then((res) => setJobs(unwrap(res)))
-      .catch(() => setJobs([]));
-  }, [customer.id]);
+  const { data, error } = useAsync<Job[]>(
+    () =>
+      listAll((t) =>
+        api().models.Job.list({
+          filter: { customerId: { eq: customer.id } },
+          limit: 200,
+          nextToken: t,
+        })
+      ),
+    [customer.id],
+    "Could not load visits"
+  );
+  // This panel has never shown a load failure — a failed load falls through to
+  // the "Nothing scheduled" / "None yet" copy rather than spinning forever.
+  const jobs = data ?? (error ? [] : null);
 
   const today = todayEastern();
   const upcoming = (jobs ?? []).filter(

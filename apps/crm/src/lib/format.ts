@@ -1,10 +1,7 @@
-export const money = (cents?: number | null) =>
-  cents == null
-    ? "—"
-    : (cents / 100).toLocaleString("en-US", {
-        style: "currency",
-        currency: "USD",
-      });
+/** The CRM's `money` was the most correct of the nine formatters — locale-aware
+ *  and null-safe — so it became the shared one. Re-exported here so the ~89
+ *  call sites keep their existing import. */
+export { formatMoney as money } from "../../../web/amplify/functions/shared/money";
 
 /** "Jul 14" / "Jul 14, 2026" from an ISO date (YYYY-MM-DD) or datetime. */
 export const fmtDate = (iso?: string | null, withYear = false) => {
@@ -27,9 +24,16 @@ export const fmtDateTime = (iso?: string | null) =>
       })
     : "—";
 
-/** Today's date (YYYY-MM-DD) in the shop's timezone. */
+/** Today's date (YYYY-MM-DD) in the shop's timezone. Use this for anything a
+ *  customer, invoice, or schedule can observe — a UTC-derived date reads as
+ *  tomorrow for the last few hours of every Eastern working day. */
 export const todayEastern = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+
+/** Today's UTC date (YYYY-MM-DD). Only for day-bucket ids and export
+ *  filenames, and for comparing against fields the backend itself writes in
+ *  UTC (`processingExpectedBy`) — never for a business rule. */
+export const todayUtc = () => new Date().toISOString().slice(0, 10);
 
 export const addDays = (isoDate: string, days: number) => {
   const d = new Date(`${isoDate}T12:00:00`);

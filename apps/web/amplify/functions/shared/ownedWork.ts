@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { dataClient } from "./dataClient";
 import { casGuardedUpdate } from "./atomicLock";
+import { forEachPage } from "./pagination";
 import type { WorkKind } from "./workPolicy";
 
 // WorkKind is owned by workPolicy.ts (the GL-18 registry) — re-exported here so
@@ -373,76 +374,78 @@ export async function releaseOwnedWorkForSub(input: {
     if (!("WorkItem" in client.models) || !("WorkEvent" in client.models)) {
       return { released, failed };
     }
-    let token: string | undefined;
-    do {
-      const page = await client.models.WorkItem.list({
-        filter: {
-          status: { eq: "OPEN" },
-          ownerSub: { eq: input.sub },
-        },
-        limit: 200,
-        nextToken: token,
-      });
-      for (const item of page.data ?? []) {
-        // Per-item isolation (GL-14): one failed item may not abandon the rest
-        // of the sweep — each is counted individually and stays resumable.
-        try {
-          // Re-read right before moving: a claim made after this sweep began
-          // (a newer, active owner) stands — never overwritten back to the
-          // team inbox.
-          const { data: fresh } = await client.models.WorkItem.get({
-            id: item.id,
-          });
-          if (!fresh || fresh.status !== "OPEN" || fresh.ownerSub !== input.sub) {
-            continue;
-          }
-          const team = (fresh.ownerTeam as WorkOwnerTeam) ?? "OPS";
-          // History BEFORE the ownership move, and CHECKED: if the move then
-          // fails, a re-run still finds the item owned by the departing person
-          // and repairs it. The reverse order loses the trail the moment
-          // ownership moves.
-          const { data: event } = await client.models.WorkEvent.create({
-            workItemId: item.id,
-            eventType: "RELEASED",
-            actorEmail: input.actorEmail ?? "system@pestbuzzkill.com",
-            note: `Returned to the ${team} team inbox — the previous owner was offboarded. ${input.reason}`,
-            occurredAt: new Date().toISOString(),
-          });
-          if (!event) {
-            failed++;
-            continue;
-          }
-          // ONE guarded write conditioned on the departing person still being
-          // the owner — a claim landing between the re-read and this move
-          // stands; offboarding can never overwrite a newer claim (GL-18 R11).
-          const moved = await casGuardedUpdate(
-            "WorkItem",
-            item.id,
-            { ownerSub: null, ownerEmail: defaultWorkOwner(team) },
-            [{ kind: "fieldEquals", field: "ownerSub", value: input.sub }]
-          );
-          if (!moved.ok && moved.reason === "UNSUPPORTED") {
-            const { data: updated } = await client.models.WorkItem.update({
+    await forEachPage(
+      (nextToken) =>
+        client.models.WorkItem.list({
+          filter: {
+            status: { eq: "OPEN" },
+            ownerSub: { eq: input.sub },
+          },
+          limit: 200,
+          nextToken,
+        }),
+      async (items) => {
+        for (const item of items) {
+          // Per-item isolation (GL-14): one failed item may not abandon the rest
+          // of the sweep — each is counted individually and stays resumable.
+          try {
+            // Re-read right before moving: a claim made after this sweep began
+            // (a newer, active owner) stands — never overwritten back to the
+            // team inbox.
+            const { data: fresh } = await client.models.WorkItem.get({
               id: item.id,
-              ownerSub: null,
-              ownerEmail: defaultWorkOwner(team),
             });
-            if (!updated) {
+            if (!fresh || fresh.status !== "OPEN" || fresh.ownerSub !== input.sub) {
+              continue;
+            }
+            const team = (fresh.ownerTeam as WorkOwnerTeam) ?? "OPS";
+            // History BEFORE the ownership move, and CHECKED: if the move then
+            // fails, a re-run still finds the item owned by the departing person
+            // and repairs it. The reverse order loses the trail the moment
+            // ownership moves.
+            const { data: event } = await client.models.WorkEvent.create({
+              workItemId: item.id,
+              eventType: "RELEASED",
+              actorEmail: input.actorEmail ?? "system@pestbuzzkill.com",
+              note: `Returned to the ${team} team inbox — the previous owner was offboarded. ${input.reason}`,
+              occurredAt: new Date().toISOString(),
+            });
+            if (!event) {
               failed++;
               continue;
             }
-          } else if (!moved.ok) {
-            // A newer claim won — that owner keeps it; not a failure.
-            continue;
+            // ONE guarded write conditioned on the departing person still being
+            // the owner — a claim landing between the re-read and this move
+            // stands; offboarding can never overwrite a newer claim (GL-18 R11).
+            const moved = await casGuardedUpdate(
+              "WorkItem",
+              item.id,
+              { ownerSub: null, ownerEmail: defaultWorkOwner(team) },
+              [{ kind: "fieldEquals", field: "ownerSub", value: input.sub }]
+            );
+            if (!moved.ok && moved.reason === "UNSUPPORTED") {
+              const { data: updated } = await client.models.WorkItem.update({
+                id: item.id,
+                ownerSub: null,
+                ownerEmail: defaultWorkOwner(team),
+              });
+              if (!updated) {
+                failed++;
+                continue;
+              }
+            } else if (!moved.ok) {
+              // A newer claim won — that owner keeps it; not a failure.
+              continue;
+            }
+            released++;
+          } catch (err) {
+            console.error("releaseOwnedWorkForSub: item failed", item.id, err);
+            failed++;
           }
-          released++;
-        } catch (err) {
-          console.error("releaseOwnedWorkForSub: item failed", item.id, err);
-          failed++;
         }
-      }
-      token = page.nextToken ?? undefined;
-    } while (token);
+      },
+      { pageErrors: "ignore" }
+    );
   } catch (err) {
     console.error("releaseOwnedWorkForSub failed", input.sub, err);
     failed++;

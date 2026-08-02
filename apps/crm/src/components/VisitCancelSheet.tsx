@@ -9,6 +9,7 @@ import {
   type VisitChangePreview,
 } from "../lib/api";
 import { money } from "../lib/format";
+import { useAction } from "../lib/useAsync";
 import { Button, ErrorNote, Field, Sheet, Spinner } from "../ui/kit";
 
 /** CUSTOMER_REQUEST → "Customer request". */
@@ -46,10 +47,27 @@ export default function VisitCancelSheet({
   const [decision, setDecision] = useState<CancelDecision>("CANCEL_REFUND");
   const [reasonCode, setReasonCode] = useState<string>(VISIT_CANCEL_REASONS[0]);
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<VisitCancelOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // The confirmed cancel carries the policy refund with it; a double-click must
+  // not send a second cancel-and-refund for the same visit.
+  const cancel = useAction(async () => {
+    if (!jobId) return;
+    const res = opResult<VisitCancelOutcome>(
+      await cancelVisit({
+        jobId,
+        decision,
+        reasonCode,
+        note: note.trim() || undefined,
+      })
+    );
+    if (!res) throw new Error("The cancellation could not be completed");
+    setOutcome(res);
+    onDone();
+  }, "The cancellation could not be completed");
+
+  const { clearError } = cancel;
   useEffect(() => {
     if (!open || !jobId) return;
     setPreview(null);
@@ -58,6 +76,7 @@ export default function VisitCancelSheet({
     setNote("");
     setOutcome(null);
     setError(null);
+    clearError();
     previewVisitChange({ jobId })
       .then((res) => {
         const data = opResult<VisitChangePreview>(res);
@@ -67,36 +86,11 @@ export default function VisitCancelSheet({
       .catch((err) =>
         setError(err instanceof Error ? err.message : "Could not load this visit")
       );
-  }, [open, jobId]);
-
-  const confirm = async () => {
-    if (!jobId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<VisitCancelOutcome>(
-        await cancelVisit({
-          jobId,
-          decision,
-          reasonCode,
-          note: note.trim() || undefined,
-        })
-      );
-      if (!res) throw new Error("The cancellation could not be completed");
-      setOutcome(res);
-      onDone();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "The cancellation could not be completed"
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
+  }, [open, jobId, clearError]);
 
   return (
     <Sheet open={open} onClose={onClose} title="Cancel visit">
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? cancel.error} />
 
       {outcome ? (
         <div className="form-grid">
@@ -200,13 +194,13 @@ export default function VisitCancelSheet({
           <Button
             block
             variant="danger"
-            loading={busy}
-            disabled={busy || (reasonCode === "OTHER" && !note.trim())}
-            onClick={() => void confirm()}
+            loading={cancel.busy}
+            disabled={cancel.busy || (reasonCode === "OTHER" && !note.trim())}
+            onClick={() => void cancel.run()}
           >
             Cancel this visit
           </Button>
-          <Button block variant="subtle" disabled={busy} onClick={onClose}>
+          <Button block variant="subtle" disabled={cancel.busy} onClick={onClose}>
             Keep the visit
           </Button>
         </div>

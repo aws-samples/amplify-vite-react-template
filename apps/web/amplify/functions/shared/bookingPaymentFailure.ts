@@ -5,6 +5,7 @@ import {
   claimPaymentFailedNotice,
 } from "./bookingPayment";
 import { settlePendingFailure } from "./bookingFinalize";
+import { formatMoney } from "./money";
 
 /**
  * GL-06 — the ONE failure path for a funnel payment, shared by the Stripe
@@ -91,7 +92,7 @@ export async function recordFunnelPaymentFailure(opts: {
     const body =
       outcome === "POST_SERVICE"
         ? `<p>Hi ${esc(booking.name ?? "there")},</p>
-         <p>Your ${dateLine}pest control visit was completed, but your bank payment of <strong>$${(((booking.amountCents ?? 0) as number) / 100).toFixed(2)}</strong> didn't go through afterward (${esc(opts.reason)}).</p>
+         <p>Your ${dateLine}pest control visit was completed, but your bank payment of <strong>${formatMoney(((booking.amountCents ?? 0) as number))}</strong> didn't go through afterward (${esc(opts.reason)}).</p>
          <p><strong>The amount is now an outstanding balance on your account.</strong> To settle it, reply to this email or call the office and we'll retry your bank payment or take a card over the phone — it takes about a minute. Our team will also reach out within one business day.</p>`
         : outcome === "PRE_SERVICE"
           ? `<p>Hi ${esc(booking.name ?? "there")},</p>

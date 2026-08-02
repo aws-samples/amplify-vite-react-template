@@ -1,5 +1,6 @@
 import { assertDeliverableAddress } from "./compliance";
 import { driveMinutesBetween } from "./driveTime";
+import { MA_RI_ZIP_RE } from "./postalCode";
 
 /**
  * GL-12 — the real dispatch gate. "Non-blank" was the whole readiness check;
@@ -63,7 +64,6 @@ function isPlaceholder(value: string): boolean {
 }
 
 const MA_RI_STATE_RE = /^(ma|massachusetts|ri|rhode\s*island)$/i;
-const MA_RI_ZIP_RE = /^0[12]\d{3}(-\d{4})?$/;
 
 /**
  * The pure (no-network) half of the gate: address shape, launch territory,

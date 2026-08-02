@@ -6,80 +6,33 @@ import {
   ensureStripeCustomer,
   getDefaultPaymentMethod,
 } from "./subscription";
+import {
+  agingBucketForDays,
+  utcDayNumber,
+  type AgingBucket,
+} from "./agingMath";
 
 /**
  * The money-out recovery lifecycle's shared spine: aging maths, payment terms,
  * the dunning retry cadence, and the one place that charges a saved card to
  * settle an existing invoice.
  *
- * Pure functions here (aging buckets, due-date-from-terms, the dunning
- * schedule) are mirrored on the frontend — keep the boundaries identical or the
- * two sides disagree about how overdue a customer is.
+ * The pure aging/terms arithmetic lives in shared/agingMath.ts — a leaf the
+ * CRM value-imports, so the two sides can no longer disagree about how
+ * overdue a customer is. Re-exported here so this module's importers keep
+ * one import site.
  */
 
-// ── Payment terms → due date ─────────────────────────────────────────────
-
-export type InvoiceTerms = "DUE_ON_RECEIPT" | "NET_15" | "NET_30";
-
-/** Days each term adds to the issue date. */
-const TERMS_DAYS: Record<InvoiceTerms, number> = {
-  DUE_ON_RECEIPT: 0,
-  NET_15: 15,
-  NET_30: 30,
-};
-
-/** Coerce a client-supplied terms string to a known term (default receipt). */
-export function normalizeTerms(raw?: string | null): InvoiceTerms {
-  const t = (raw ?? "").trim().toUpperCase();
-  return t === "NET_15" || t === "NET_30" ? t : "DUE_ON_RECEIPT";
-}
-
-/** Add whole days to a YYYY-MM-DD date (UTC-noon anchored, like recurring.ts). */
-function addDaysToDate(isoDate: string, days: number): string {
-  const d = new Date(`${isoDate}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-/** The date an invoice is due, given its terms and when it was issued. */
-export function dueDateForTerms(
-  terms: string | null | undefined,
-  issuedIso: string
-): string {
-  return addDaysToDate(issuedIso.slice(0, 10), TERMS_DAYS[normalizeTerms(terms)]);
-}
+export {
+  AGING_BUCKET_LABEL,
+  AGING_BUCKET_ORDER,
+  dueDateForTerms,
+  normalizeTerms,
+  agingBucketForDays as agingBucket,
+} from "./agingMath";
+export type { AgingBucket, InvoiceTerms } from "./agingMath";
 
 // ── Aging ────────────────────────────────────────────────────────────────
-
-export type AgingBucket =
-  | "CURRENT"
-  | "D1_30"
-  | "D31_60"
-  | "D61_90"
-  | "D90_PLUS";
-
-/** Buckets in report order, oldest money last. */
-export const AGING_BUCKET_ORDER: AgingBucket[] = [
-  "CURRENT",
-  "D1_30",
-  "D31_60",
-  "D61_90",
-  "D90_PLUS",
-];
-
-export const AGING_BUCKET_LABEL: Record<AgingBucket, string> = {
-  CURRENT: "Current",
-  D1_30: "1–30 days",
-  D31_60: "31–60 days",
-  D61_90: "61–90 days",
-  D90_PLUS: "90+ days",
-};
-
-/** Whole-day number (UTC) for a date-only or datetime ISO string. */
-function dayNumber(iso: string): number {
-  const d = new Date(iso.length <= 10 ? `${iso}T00:00:00Z` : iso);
-  return Math.floor(d.getTime() / 86_400_000);
-}
 
 /**
  * How many days past due an invoice is. Aging is measured from dueDate,
@@ -94,16 +47,7 @@ export function daysPastDue(opts: {
   const ref = opts.dueDate ?? opts.issuedAt;
   if (!ref) return 0;
   const today = Math.floor((opts.now ?? new Date()).getTime() / 86_400_000);
-  return today - dayNumber(ref);
-}
-
-/** Bucket for a given days-past-due count. Boundaries: 1-30, 31-60, 61-90, 90+. */
-export function agingBucket(days: number): AgingBucket {
-  if (days <= 0) return "CURRENT";
-  if (days <= 30) return "D1_30";
-  if (days <= 60) return "D31_60";
-  if (days <= 90) return "D61_90";
-  return "D90_PLUS";
+  return today - utcDayNumber(ref);
 }
 
 /** Convenience: bucket an invoice straight from its dates. */
@@ -111,7 +55,7 @@ export function invoiceAgingBucket(
   invoice: { dueDate?: string | null; issuedAt?: string | null },
   now?: Date
 ): AgingBucket {
-  return agingBucket(daysPastDue({ ...invoice, now }));
+  return agingBucketForDays(daysPastDue({ ...invoice, now }));
 }
 
 // ── Dunning retry cadence ─────────────────────────────────────────────────

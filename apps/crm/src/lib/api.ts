@@ -1,5 +1,14 @@
 import { generateClient } from "aws-amplify/data";
 import type { Schema } from "../../../web/amplify/data/resource";
+import {
+  LEAD_LOST_REASONS as LEAD_LOST_REASON_CODES,
+  LEAD_LOST_REASON_LABEL,
+} from "../../../web/amplify/functions/shared/leadReasons";
+import type { InvoiceTerms } from "../../../web/amplify/functions/shared/agingMath";
+import {
+  forEachPage,
+  listAll,
+} from "../../../web/amplify/functions/shared/pagination";
 
 /**
  * Typed Amplify Data client against the shared backend schema (type-only
@@ -38,17 +47,21 @@ export type PricingControl = Schema["PricingControl"]["type"];
 /** Staff-managed funnel discount codes (owner-only CRUD; the public booking
  *  Lambda reads them to discount checkout). */
 export type PromoCode = Schema["PromoCode"]["type"];
+/** Portal-submitted reschedule/help requests and guarantee callbacks — read by
+ *  both the portal Requests screen and the office customer record. */
+export type PortalRequest = Schema["PortalRequest"]["type"];
+export type CallbackRequest = Schema["CallbackRequest"]["type"];
+/** GL-09 durable lifecycle transitions (deactivate/reactivate sagas). */
+export type CustomerLifecycleCommand =
+  Schema["CustomerLifecycleCommand"]["type"];
 
-/** GL-02 — controlled lead vocabularies (mirror the server validators). */
-export const LEAD_LOST_REASONS = [
-  { code: "PRICE", label: "Price" },
-  { code: "NO_RESPONSE", label: "No response" },
-  { code: "WENT_COMPETITOR", label: "Went with a competitor" },
-  { code: "NOT_QUALIFIED", label: "Not qualified / out of scope" },
-  { code: "OUT_OF_AREA", label: "Outside service area" },
-  { code: "DUPLICATE", label: "Duplicate record" },
-  { code: "OTHER", label: "Other" },
-] as const;
+/** GL-02 — controlled lead vocabularies. Lost reasons come from the ONE
+ * server-validated list (shared/leadReasons.ts, a pure leaf), shaped for a
+ * dropdown; the rest still mirror the server validators by hand. */
+export const LEAD_LOST_REASONS = LEAD_LOST_REASON_CODES.map((code) => ({
+  code,
+  label: LEAD_LOST_REASON_LABEL[code],
+}));
 export const LEAD_TOUCH_CHANNELS = [
   { code: "CALL", label: "Call" },
   { code: "TEXT", label: "Text" },
@@ -91,21 +104,9 @@ export async function collectLeadActivityPages(
     nextToken?: string | null;
   }) => Promise<LeadActivityPage>
 ): Promise<LeadActivity[]> {
-  const data: LeadActivity[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await listPage({
-      filter: { customerId: { eq: customerId } },
-      limit: 500,
-      nextToken,
-    });
-    if (page.errors?.length) {
-      throw new Error(page.errors.map((error) => error.message).join("; "));
-    }
-    data.push(...page.data);
-    nextToken = page.nextToken;
-  } while (nextToken);
-  return data;
+  return listAll((nextToken) =>
+    listPage({ filter: { customerId: { eq: customerId } }, limit: 500, nextToken })
+  );
 }
 
 export function clientActionId(prefix: string): string {
@@ -133,9 +134,7 @@ export function createLead(input: {
   contactConsentText?: string;
   contactConsentPolicyVersion?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as { createLead: (i: typeof input) => OpResult }
-  ).createLead(input);
+  return api().mutations.createLead(input);
 }
 
 export function logLeadTouch(input: {
@@ -148,9 +147,7 @@ export function logLeadTouch(input: {
   nextActionAt?: string;
   idempotencyKey: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as { logLeadTouch: (i: typeof input) => OpResult }
-  ).logLeadTouch(input);
+  return api().mutations.logLeadTouch(input);
 }
 
 export function setLeadDisposition(input: {
@@ -166,11 +163,7 @@ export function setLeadDisposition(input: {
   bookingRequestId?: string;
   idempotencyKey: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      setLeadDisposition: (i: typeof input) => OpResult;
-    }
-  ).setLeadDisposition(input);
+  return api().mutations.setLeadDisposition(input);
 }
 
 export function assignLeadOwner(input: {
@@ -179,11 +172,7 @@ export function assignLeadOwner(input: {
   toEmail?: string;
   idempotencyKey: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      assignLeadOwner: (i: typeof input) => OpResult;
-    }
-  ).assignLeadOwner(input);
+  return api().mutations.assignLeadOwner(input);
 }
 
 /** Page the complete immutable timeline. A missing model or failed page is an
@@ -342,59 +331,22 @@ export function recordNoticeAlternateDelivery(input: {
 }
 
 /**
- * Recovery-lifecycle contract boundary (R02/R31/R52/R78), same shape as the
- * MarketRate boundary below: the backend wave landing alongside this one adds
- * the recovery fields to Invoice, a Dispute model, and the settle/pay/assign
- * mutations. These type augmentations + the thin wrappers further down let the
- * CRM compile against the contract before the generated schema catches up; once
- * the schema lands the extra members are redundant and harmless.
- *
- * Invoice gains: a due date + payment terms + PO number (for the check-paying
- * HOA/commercial segment), the dunning cadence fields the webhook stamps as it
- * retries a failed charge, and a single recovery owner.
+ * The recovery lifecycle (R02/R31/R52/R78): an invoice's due date, payment
+ * terms and PO number for the check-paying HOA/commercial segment, the dunning
+ * cadence the webhook stamps as it retries a failed charge, and a single
+ * recovery owner. All of it lives in the schema, so these read straight off it.
  */
-export type InvoiceTerms = "DUE_ON_RECEIPT" | "NET_15" | "NET_30";
+export type { InvoiceTerms } from "../../../web/amplify/functions/shared/agingMath";
 
-export type Invoice = Schema["Invoice"]["type"] & {
-  dueDate?: string | null;
-  terms?: string | null;
-  poNumber?: string | null;
-  dunningAttempts?: number | null;
-  nextDunningAt?: string | null;
-  lastDunningAt?: string | null;
-  ownerSub?: string | null;
-  ownerEmail?: string | null;
-};
+export type Invoice = Schema["Invoice"]["type"];
 
 /**
- * The Dispute model (chargebacks). Not derived from Schema because the model
- * does not exist in the generated types until the backend wave lands; declared
- * here to the contract's shape. Browser-read-only like Invoice — the only
- * writers are the Stripe webhook and assignRecoveryOwner.
+ * Chargebacks. Browser-read-only — the only writers are the Stripe webhook and
+ * assignRecoveryOwner.
  */
-export type DisputeStatus =
-  | "NEEDS_RESPONSE"
-  | "UNDER_REVIEW"
-  | "WON"
-  | "LOST";
+export type DisputeStatus = Schema["DisputeStatus"]["type"];
 
-export type Dispute = {
-  id: string;
-  stripeDisputeId?: string | null;
-  customerId: string;
-  invoiceId?: string | null;
-  amountCents: number;
-  reason?: string | null;
-  status?: DisputeStatus | string | null;
-  evidenceDueBy?: string | null;
-  openedAt?: string | null;
-  closedAt?: string | null;
-  ownerSub?: string | null;
-  ownerEmail?: string | null;
-  accessGroups?: (string | null)[] | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
-};
+export type Dispute = Schema["Dispute"]["type"];
 
 type OpResult = Promise<{ data: unknown; errors?: { message: string }[] }>;
 
@@ -419,11 +371,7 @@ export function settleInvoice(input: {
   method: "OFFLINE" | "CARD" | "MARK_DEPOSITED" | "UNMARK_DEPOSITED";
   note?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      settleInvoice: (i: typeof input) => OpResult;
-    }
-  ).settleInvoice(input);
+  return api().mutations.settleInvoice(input);
 }
 
 /**
@@ -432,11 +380,7 @@ export function settleInvoice(input: {
  * invoice's customer; OWNER/FINANCE may also call it.
  */
 export function payInvoice(input: { invoiceId: string }): OpResult {
-  return (
-    api().mutations as unknown as {
-      payInvoice: (i: typeof input) => OpResult;
-    }
-  ).payInvoice(input);
+  return api().mutations.payInvoice(input);
 }
 
 /** GL-08 — the honest consequences of canceling a plan, computed server-side
@@ -469,11 +413,7 @@ export type PlanCancellationPreview = {
 export function previewPlanCancellation(input: {
   servicePlanId: string;
 }): OpResult {
-  return (
-    api().queries as unknown as {
-      previewPlanCancellation: (i: typeof input) => OpResult;
-    }
-  ).previewPlanCancellation(input);
+  return api().queries.previewPlanCancellation(input);
 }
 
 /** GL-08 — the customer's own confirmed cancel. The reason is optional and
@@ -494,11 +434,7 @@ export function cancelPlanByCustomer(input: {
   servicePlanId: string;
   reason?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      cancelPlanByCustomer: (i: typeof input) => OpResult;
-    }
-  ).cancelPlanByCustomer(input);
+  return api().mutations.cancelPlanByCustomer(input);
 }
 
 /**
@@ -556,26 +492,13 @@ export type VisitCancelOutcome = {
   message: string;
 };
 
-/** Controlled reason codes for a visit cancel/reschedule (GL-07) — mirrors the
- *  server's VISIT_CANCEL_REASONS / VISIT_RESCHEDULE_REASONS. OTHER needs a note. */
-export const VISIT_CANCEL_REASONS = [
-  "CUSTOMER_REQUEST",
-  "SCHEDULING_CONFLICT",
-  "WEATHER",
-  "TECH_UNAVAILABLE",
-  "ACCESS_ISSUE",
-  "DUPLICATE",
-  "SERVICE_NOT_NEEDED",
-  "OTHER",
-] as const;
-export const VISIT_RESCHEDULE_REASONS = [
-  "CUSTOMER_REQUEST",
-  "WEATHER",
-  "TECH_UNAVAILABLE",
-  "ROUTE_CHANGE",
-  "ACCESS_ISSUE",
-  "OTHER",
-] as const;
+/** Controlled reason codes for a visit cancel/reschedule (GL-07). Re-exported
+ *  from the server's vocabulary — the office must never be able to pick a code
+ *  the server will reject. OTHER needs a note. */
+export {
+  VISIT_CANCEL_REASONS,
+  VISIT_RESCHEDULE_REASONS,
+} from "../../../web/amplify/functions/shared/visitChangeReasons";
 
 /** The immutable visit-change ledger row (GL-07), read for the history screen. */
 export type VisitChangeEvent = Schema["VisitChangeEvent"]["type"];
@@ -617,11 +540,7 @@ export type VisitRescheduleOutcome = {
 };
 
 export function previewVisitChange(input: { jobId: string }): OpResult {
-  return (
-    api().queries as unknown as {
-      previewVisitChange: (i: typeof input) => OpResult;
-    }
-  ).previewVisitChange(input);
+  return api().queries.previewVisitChange(input);
 }
 
 /** Cancel one visit as a single guided action — the server performs the refund/
@@ -633,11 +552,7 @@ export function cancelVisit(input: {
   reasonCode: string;
   note?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      cancelVisit: (i: typeof input) => OpResult;
-    }
-  ).cancelVisit(input);
+  return api().mutations.cancelVisit(input);
 }
 
 /** Reschedule one visit — revalidates capacity + technician license, moves the
@@ -651,11 +566,7 @@ export function rescheduleVisit(input: {
   reasonCode: string;
   note?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      rescheduleVisit: (i: typeof input) => OpResult;
-    }
-  ).rescheduleVisit(input);
+  return api().mutations.rescheduleVisit(input);
 }
 
 /**
@@ -667,11 +578,7 @@ export function assignRecoveryOwner(input: {
   kind: "INVOICE" | "DISPUTE";
   id: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      assignRecoveryOwner: (i: typeof input) => OpResult;
-    }
-  ).assignRecoveryOwner(input);
+  return api().mutations.assignRecoveryOwner(input);
 }
 
 /**
@@ -690,26 +597,13 @@ export function recordOfflinePayment(input: {
   terms?: InvoiceTerms;
   poNumber?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      recordOfflinePayment: (i: typeof input) => OpResult;
-    }
-  ).recordOfflinePayment(input);
+  return api().mutations.recordOfflinePayment(input);
 }
 
-/** Compute the due date a set of terms produces from an issue date (client
- * mirror of the backend's dueDateForTerms — for display only; the server is
- * authoritative). YYYY-MM-DD in, YYYY-MM-DD out. */
-export function dueDateForTerms(terms: InvoiceTerms, issuedYmd: string): string {
-  const days = terms === "NET_15" ? 15 : terms === "NET_30" ? 30 : 0;
-  return addDaysUTC(issuedYmd, days);
-}
-
-function addDaysUTC(ymd: string, days: number): string {
-  const d = new Date(`${ymd}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
+/** The due date a set of terms produces from an issue date — the backend's
+ * own rule (shared/agingMath.ts, a pure leaf), so the date shown before
+ * saving is the date the server will stamp. YYYY-MM-DD in, YYYY-MM-DD out. */
+export { dueDateForTerms } from "../../../web/amplify/functions/shared/agingMath";
 
 /**
  * Email the customer a link to pay their outstanding balance (R52). Uses the
@@ -817,15 +711,10 @@ export function listWorkEvents(args?: {
 }
 
 /**
- * Contract boundary with the backend wave landing alongside this one:
- * MarketRate gains `pinned` (an office-edited row cannot be replaced by AI
- * until the office unpins it and explicitly requests research). Intersected here so the CRM
- * compiles against the contract before the generated schema catches up; once
- * the schema lands the extra member is redundant and harmless.
+ * `pinned` means an office-edited row cannot be replaced by AI until the office
+ * unpins it and explicitly requests research.
  */
-export type MarketRate = Schema["MarketRate"]["type"] & {
-  pinned?: boolean | null;
-};
+export type MarketRate = Schema["MarketRate"]["type"];
 
 /** MarketRate.update, accepting the contract's `pinned` field (see above). */
 export function updateMarketRate(fields: {
@@ -864,28 +753,16 @@ export type StaffRosterRow = {
 };
 
 export function staffRoster(): OpResult {
-  return (
-    api().queries as unknown as { staffRoster: () => OpResult }
-  ).staffRoster();
+  return api().queries.staffRoster();
 }
 
-/** The controlled reason codes for a staff-access change (GL-14) — mirrors the
- *  server's STAFF_ROLE_CHANGE_REASONS / STAFF_OFFBOARD_REASONS. OTHER needs a
- *  note. */
-export const STAFF_ROLE_CHANGE_REASONS = [
-  "PROMOTION",
-  "REASSIGNMENT",
-  "REDUCE_ACCESS",
-  "CORRECTION",
-  "OTHER",
-] as const;
-export const STAFF_OFFBOARD_REASONS = [
-  "DEPARTURE_VOLUNTARY",
-  "DEPARTURE_INVOLUNTARY",
-  "ROLE_ENDED",
-  "SECURITY",
-  "OTHER",
-] as const;
+/** The controlled reason codes for a staff-access change (GL-14). Re-exported
+ *  from the server's vocabulary, which is what assertReasonCode validates
+ *  against. OTHER needs a note. */
+export {
+  STAFF_OFFBOARD_REASONS,
+  STAFF_ROLE_CHANGE_REASONS,
+} from "../../../web/amplify/functions/shared/staffRoles";
 
 /** GL-17 — licence records. Office adds/updates records; only an OWNER
  *  (Compliance seat) changes a record's status. */
@@ -912,11 +789,7 @@ export function saveTechnicianLicense(input: {
   expiresOn?: string;
   evidenceNote?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      saveTechnicianLicense: (i: typeof input) => OpResult;
-    }
-  ).saveTechnicianLicense(input);
+  return api().mutations.saveTechnicianLicense(input);
 }
 
 export function setLicenseStatus(input: {
@@ -924,11 +797,7 @@ export function setLicenseStatus(input: {
   status: string;
   reason: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      setLicenseStatus: (i: typeof input) => OpResult;
-    }
-  ).setLicenseStatus(input);
+  return api().mutations.setLicenseStatus(input);
 }
 
 /** Set a staff login's role set to exactly `roles`. A controlled reasonCode is
@@ -941,11 +810,7 @@ export function changeStaffRoles(input: {
   reason?: string;
   idempotencyKey?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      changeStaffRoles: (i: typeof input) => OpResult;
-    }
-  ).changeStaffRoles(input);
+  return api().mutations.changeStaffRoles(input);
 }
 
 /** Offboard a staff member: disable + sign out first, remove groups, reassign a
@@ -959,11 +824,7 @@ export function offboardStaff(input: {
   reason?: string;
   idempotencyKey?: string;
 }): OpResult {
-  return (
-    api().mutations as unknown as {
-      offboardStaff: (i: typeof input) => OpResult;
-    }
-  ).offboardStaff(input);
+  return api().mutations.offboardStaff(input);
 }
 
 /** The immutable staff-access ledger row (GL-14), read directly from the model
@@ -994,23 +855,13 @@ export function listStaffAccessEvents(args?: {
   return models.StaffAccessEvent.list(args);
 }
 
-/** Controlled reason codes for a customer lifecycle transition (GL-09) — mirrors
- *  the server's DEACTIVATION_REASONS / REACTIVATION_REASONS. OTHER needs a note. */
-export const DEACTIVATION_REASONS = [
-  "CUSTOMER_REQUEST",
-  "NONPAYMENT",
-  "MOVED",
-  "PROPERTY_SOLD",
-  "SERVICE_ENDED",
-  "DUPLICATE",
-  "OTHER",
-] as const;
-export const REACTIVATION_REASONS = [
-  "CUSTOMER_RETURNED",
-  "PAYMENT_RESOLVED",
-  "DEACTIVATED_IN_ERROR",
-  "OTHER",
-] as const;
+/** Controlled reason codes for a customer lifecycle transition (GL-09).
+ *  Re-exported from the server's vocabulary, which is what the transition
+ *  refuses against. OTHER needs a note. */
+export {
+  DEACTIVATION_REASONS,
+  REACTIVATION_REASONS,
+} from "../../../web/amplify/functions/shared/lifecycleReasons";
 
 /** The immutable customer-lifecycle ledger row (GL-09), read directly from the
  *  model (OWNER/OFFICE/FINANCE-readable) for the customer's history card. */
@@ -1037,19 +888,22 @@ export async function listCustomerLifecycleEvents(customerId: string): Promise<{
     };
   };
   if (!models.CustomerLifecycleEvent) return { data: [], readFailed: false };
+  const events = models.CustomerLifecycleEvent;
+  // A page error surfaces as readFailed WITH the rows collected so far —
+  // never disguised as a complete (or empty) timeline.
   const out: CustomerLifecycleEvent[] = [];
   try {
-    let token: string | null | undefined;
-    do {
-      const page = await models.CustomerLifecycleEvent.list({
-        filter: { customerId: { eq: customerId } },
-        limit: 200,
-        nextToken: token ?? undefined,
-      });
-      if (page.errors?.length) return { data: out, readFailed: true };
-      out.push(...(page.data ?? []));
-      token = page.nextToken;
-    } while (token);
+    await forEachPage(
+      (nextToken) =>
+        events.list({
+          filter: { customerId: { eq: customerId } },
+          limit: 200,
+          nextToken,
+        }),
+      (items) => {
+        out.push(...items);
+      }
+    );
     return { data: out, readFailed: false };
   } catch {
     return { data: out, readFailed: true };
@@ -1058,46 +912,34 @@ export async function listCustomerLifecycleEvents(customerId: string): Promise<{
 
 /** GL-09 — the customer's lifecycle commands (durable transitions). A
  *  non-terminal command is a "Transition needs recovery" banner + resume. */
-export async function listLifecycleCommands(customerId: string): Promise<
-  {
-    id: string;
-    action: string;
-    stage: string;
-    outcome?: string | null;
-    effects?: string | null;
-    lastError?: string | null;
-    requestedAt?: string | null;
-  }[]
-> {
+export async function listLifecycleCommands(
+  customerId: string
+): Promise<CustomerLifecycleCommand[]> {
   const models = api().models as unknown as {
     CustomerLifecycleCommand?: {
       listCustomerLifecycleCommandByCustomerIdAndRequestedAt: (
         q: { customerId: string },
         o: { limit: number; nextToken?: string | null }
       ) => Promise<{
-        data: Record<string, unknown>[];
+        data: CustomerLifecycleCommand[];
         nextToken?: string | null;
       }>;
     };
   };
   if (!models.CustomerLifecycleCommand) return [];
+  const commands = models.CustomerLifecycleCommand;
   try {
     // Paginated to exhaustion: the resumable PARTIAL the banner exists to
     // surface is the NEWEST row — exactly the one a single page can hide.
-    const all: Record<string, unknown>[] = [];
-    let nextToken: string | null | undefined = undefined;
-    do {
-      const res: {
-        data: Record<string, unknown>[];
-        nextToken?: string | null;
-      } = await models.CustomerLifecycleCommand.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
-        { customerId },
-        { limit: 200, nextToken }
-      );
-      all.push(...(res.data ?? []));
-      nextToken = res.nextToken;
-    } while (nextToken);
-    return all as never[];
+    const all = await listAll(
+      (nextToken) =>
+        commands.listCustomerLifecycleCommandByCustomerIdAndRequestedAt(
+          { customerId },
+          { limit: 200, nextToken }
+        ),
+      { pageErrors: "ignore" }
+    );
+    return all;
   } catch {
     return [];
   }
@@ -1109,11 +951,7 @@ export function previewLifecycleTransition(input: {
   action: string;
   reasonCode?: string;
 }): OpResult {
-  return (
-    api().queries as unknown as {
-      previewLifecycleTransition: (i: typeof input) => OpResult;
-    }
-  ).previewLifecycleTransition(input);
+  return api().queries.previewLifecycleTransition(input);
 }
 
 /** Parse an AWSJSON field that may arrive as a string. */
@@ -1131,25 +969,10 @@ export function jsonField<T>(raw: unknown): T | null {
 
 /**
  * Exhaustively page a .list() query. Dashboard totals and long lists must
- * never silently truncate at one page (DynamoDB may also return fewer items
- * than `limit` per page even when more exist).
+ * never silently truncate at one page. Re-exported from the shared pure leaf
+ * (docs/audit/PATTERNS.md pattern 3) — the backend runs the same loop.
  */
-export async function listAll<T>(
-  fetchPage: (nextToken?: string) => Promise<{
-    data: T[];
-    nextToken?: string | null;
-    errors?: { message: string }[];
-  }>
-): Promise<T[]> {
-  const out: T[] = [];
-  let token: string | null | undefined;
-  do {
-    const page = await fetchPage(token ?? undefined);
-    out.push(...unwrap(page));
-    token = page.nextToken;
-  } while (token);
-  return out;
-}
+export { listAll } from "../../../web/amplify/functions/shared/pagination";
 
 /** Unwrap an Amplify Data result, surfacing GraphQL errors as exceptions. */
 export function unwrap<T>(result: {

@@ -18,6 +18,7 @@ import {
   todayEastern,
 } from "../lib/format";
 import { assignBlockedNote, unassignBlockedNote } from "../lib/unassignStop";
+import { useAction } from "../lib/useAsync";
 import { technicianComplianceIssue } from "./technicians";
 import {
   Badge,
@@ -167,6 +168,38 @@ export default function Schedule() {
     return created;
   };
 
+  // Two clicks on two technicians used to both go through — the second one
+  // creating a route and moving the stop onto it while the first was still in
+  // flight. The gate lets one assignment at a time reach the server.
+  const assignAct = useAction(async (job: Job, technicianId: string) => {
+    setError(null);
+    // Pool assignment lands on the focused day.
+    const route = await ensureRoute(technicianId, selDate);
+    const order =
+      Math.max(
+        0,
+        ...weekJobs
+          .filter((j) => j.routeId === route.id)
+          .map((j) => j.routeOrder ?? 0)
+      ) + 1;
+    opResult(
+      await api().mutations.updateJobSchedule({
+        jobId: job.id,
+        operation: "ASSIGN",
+        routeId: route.id,
+        technicianId,
+        routeOrder: order,
+        scheduledDate: selDate,
+        // The board is the routing surface — its controlled reason IS routing.
+        reasonCode: "ROUTING",
+      })
+    );
+    setAssigning(null);
+    await load();
+  }, "Could not assign job");
+
+  // `busy` stays: it is the per-row spinner (a job id), and useAction.busy is
+  // a single flag that could not say which stop is moving.
   const assign = async (job: Job, technicianId: string) => {
     // Guarded like unassign: the board schedules, it never rewrites history.
     // Terminal visits (completed / canceled / no-access) are blocked here —
@@ -177,33 +210,8 @@ export default function Schedule() {
       return;
     }
     setBusy(job.id);
-    setError(null);
     try {
-      // Pool assignment lands on the focused day.
-      const route = await ensureRoute(technicianId, selDate);
-      const order =
-        Math.max(
-          0,
-          ...weekJobs
-            .filter((j) => j.routeId === route.id)
-            .map((j) => j.routeOrder ?? 0)
-        ) + 1;
-      opResult(
-        await api().mutations.updateJobSchedule({
-          jobId: job.id,
-          operation: "ASSIGN",
-          routeId: route.id,
-          technicianId,
-          routeOrder: order,
-          scheduledDate: selDate,
-          // The board is the routing surface — its controlled reason IS routing.
-          reasonCode: "ROUTING",
-        })
-      );
-      setAssigning(null);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not assign job");
+      await assignAct.run(job, technicianId);
     } finally {
       setBusy(null);
     }
@@ -212,6 +220,14 @@ export default function Schedule() {
   // Rebook a no-access visit as a NEW linked stop. The terminal visit — its
   // reason, time, note, and door photo — stays untouched; the server creates
   // a fresh UNSCHEDULED job pointing back at it.
+  // Each call creates a stop, so a second one left the customer with two
+  // visits to schedule for the same no-access record.
+  const rebookAct = useAction(async (job: Job) => {
+    setError(null);
+    opResult(await api().mutations.rebookJob({ jobId: job.id }));
+    await load();
+  }, "Could not rebook");
+
   const rebook = async (job: Job) => {
     if (
       !window.confirm(
@@ -220,16 +236,23 @@ export default function Schedule() {
     )
       return;
     setBusy(job.id);
-    setError(null);
     try {
-      opResult(await api().mutations.rebookJob({ jobId: job.id }));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not rebook");
+      await rebookAct.run(job);
     } finally {
       setBusy(null);
     }
   };
+
+  const unassignAct = useAction(async (job: Job) => {
+    opResult(
+      await api().mutations.updateJobSchedule({
+        jobId: job.id,
+        operation: "UNASSIGN",
+        reasonCode: "ROUTING",
+      })
+    );
+    await load();
+  }, "Could not unassign");
 
   const unassign = async (job: Job) => {
     // The board schedules; it never rewrites history. Guarded here as well as
@@ -244,20 +267,26 @@ export default function Schedule() {
     }
     setBusy(job.id);
     try {
-      opResult(
-        await api().mutations.updateJobSchedule({
-          jobId: job.id,
-          operation: "UNASSIGN",
-          reasonCode: "ROUTING",
-        })
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not unassign");
+      await unassignAct.run(job);
     } finally {
       setBusy(null);
     }
   };
+
+  // A reorder swaps two stops' positions; firing the second swap off the same
+  // pre-swap ordering wrote a sequence neither click asked for.
+  const bumpAct = useAction(async (job: Job, swap: Job) => {
+    opResult(
+      await api().mutations.updateJobSchedule({
+        jobId: job.id,
+        operation: "REORDER",
+        routeOrder: swap.routeOrder ?? 0,
+        otherJobId: swap.id,
+        otherRouteOrder: job.routeOrder ?? 0,
+      })
+    );
+    await load();
+  }, "Could not reorder the stops");
 
   const bump = async (job: Job, dir: -1 | 1, routeJobs: Job[]) => {
     const idx = routeJobs.findIndex((j) => j.id === job.id);
@@ -265,16 +294,7 @@ export default function Schedule() {
     if (!swap) return;
     setBusy(job.id);
     try {
-      opResult(
-        await api().mutations.updateJobSchedule({
-          jobId: job.id,
-          operation: "REORDER",
-          routeOrder: swap.routeOrder ?? 0,
-          otherJobId: swap.id,
-          otherRouteOrder: job.routeOrder ?? 0,
-        })
-      );
-      await load();
+      await bumpAct.run(job, swap);
     } finally {
       setBusy(null);
     }
@@ -388,7 +408,15 @@ export default function Schedule() {
         </div>
       </Card>
 
-      <ErrorNote error={error} />
+      <ErrorNote
+        error={
+          error ??
+          assignAct.error ??
+          rebookAct.error ??
+          unassignAct.error ??
+          bumpAct.error
+        }
+      />
       {!techs ? (
         <Spinner />
       ) : (
@@ -667,7 +695,6 @@ function AvailabilityPanel({
   const [exceptions, setExceptions] = useState<ExceptionRow[]>([]);
   const [closureReason, setClosureReason] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [ptoTech, setPtoTech] = useState("");
   const [ptoReason, setPtoReason] = useState("");
   const [newClosure, setNewClosure] = useState("");
@@ -694,9 +721,7 @@ function AvailabilityPanel({
     setErr(null);
     try {
       const [factsRes, exRes, closureRes] = await Promise.all([
-        (api().queries as unknown as {
-          capacityDayFacts: (input: { date: string }) => Promise<{ data: unknown }>;
-        }).capacityDayFacts({ date }),
+        api().queries.capacityDayFacts({ date }),
         models.TechnicianDayException.listTechnicianDayExceptionByDate(
           { date },
           { limit: 200 }
@@ -729,22 +754,48 @@ function AvailabilityPanel({
     void refresh();
   }, [refresh]);
 
-  const act = async (
-    fn: () => Promise<unknown>,
-    onSaved?: () => void
-  ) => {
-    setBusy(true);
-    setErr(null);
-    try {
-      await fn();
-      await refresh();
-      onSaved?.();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "The change did not save");
-    } finally {
-      setBusy(false);
-    }
-  };
+  // The four levers below shared one busy flag and one error through a single
+  // `act()` helper; each is its own action so a PTO save that fails cannot be
+  // erased by a closure that succeeds.
+  const closeDay = useAction(async () => {
+    await models.CompanyClosure.create({
+      id: date,
+      date,
+      reason: newClosure.trim(),
+    });
+    await refresh();
+    setNewClosure("");
+    setShowClosureForm(false);
+  }, "The change did not save");
+
+  const reopenDay = useAction(async () => {
+    await models.CompanyClosure.delete({ id: date });
+    await refresh();
+  }, "The change did not save");
+
+  const addPto = useAction(async () => {
+    await models.TechnicianDayException.create({
+      technicianId: ptoTech,
+      date,
+      kind: "PTO",
+      reason: ptoReason.trim(),
+    });
+    await refresh();
+    setPtoTech("");
+    setPtoReason("");
+    setShowPtoForm(false);
+  }, "The change did not save");
+
+  // Two clicks on Remove used to send two deletes for the same PTO row.
+  const removePto = useAction(async (id: string) => {
+    await models.TechnicianDayException.delete({ id });
+    await refresh();
+  }, "The change did not save");
+
+  // The controls disable together while any one of them is writing, exactly
+  // as they did off the single flag.
+  const busy =
+    closeDay.busy || reopenDay.busy || addPto.busy || removePto.busy;
 
   const pto = exceptions.filter((e) => e.kind === "PTO");
   const readableDate = prettyWeekday(date);
@@ -770,7 +821,15 @@ function AvailabilityPanel({
         }
         className="availability-card"
       >
-        <ErrorNote error={err} />
+        <ErrorNote
+          error={
+            err ??
+            closeDay.error ??
+            reopenDay.error ??
+            addPto.error ??
+            removePto.error
+          }
+        />
         {facts ? (
           <>
             <div className="availability-summary" aria-label="Day capacity summary">
@@ -876,10 +935,8 @@ function AvailabilityPanel({
                   <Button
                     small
                     variant="ghost"
-                    loading={busy}
-                    onClick={() =>
-                      void act(() => models.CompanyClosure.delete({ id: date }))
-                    }
+                    loading={reopenDay.busy}
+                    onClick={() => void reopenDay.run()}
                   >
                     Reopen this day
                   </Button>
@@ -912,22 +969,9 @@ function AvailabilityPanel({
                     <Button
                       small
                       variant="danger"
-                      loading={busy}
+                      loading={closeDay.busy}
                       disabled={!newClosure.trim()}
-                      onClick={() =>
-                        void act(
-                          () =>
-                            models.CompanyClosure.create({
-                              id: date,
-                              date,
-                              reason: newClosure.trim(),
-                            }),
-                          () => {
-                            setNewClosure("");
-                            setShowClosureForm(false);
-                          }
-                        )
-                      }
+                      onClick={() => void closeDay.run()}
                     >
                       Confirm company closure
                     </Button>
@@ -973,14 +1017,8 @@ function AvailabilityPanel({
                       <Button
                         small
                         variant="danger"
-                        loading={busy}
-                        onClick={() =>
-                          void act(() =>
-                            models.TechnicianDayException.delete({
-                              id: exception.id,
-                            })
-                          )
-                        }
+                        loading={removePto.busy}
+                        onClick={() => void removePto.run(exception.id)}
                       >
                         Remove
                       </Button>
@@ -1031,24 +1069,9 @@ function AvailabilityPanel({
                     </Button>
                     <Button
                       small
-                      loading={busy}
+                      loading={addPto.busy}
                       disabled={!ptoTech || !ptoReason.trim()}
-                      onClick={() =>
-                        void act(
-                          () =>
-                            models.TechnicianDayException.create({
-                              technicianId: ptoTech,
-                              date,
-                              kind: "PTO",
-                              reason: ptoReason.trim(),
-                            }),
-                          () => {
-                            setPtoTech("");
-                            setPtoReason("");
-                            setShowPtoForm(false);
-                          }
-                        )
-                      }
+                      onClick={() => void addPto.run()}
                     >
                       Save PTO
                     </Button>

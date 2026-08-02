@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api, unwrap, type Customer, type CustomerGroup } from "../lib/api";
+import { api, listAll, unwrap, type Customer, type CustomerGroup } from "../lib/api";
+import { useAsync, useKeyedAction } from "../lib/useAsync";
+import { toMessage } from "../lib/asyncCore";
 import {
   Button,
   Card,
@@ -16,19 +18,11 @@ import {
 export default function GroupDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [group, setGroup] = useState<CustomerGroup | null>(null);
-  const [members, setMembers] = useState<Customer[]>([]);
-  const [others, setOthers] = useState<Customer[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [inviting, setInviting] = useState(false);
   // When set, the group's email already signs in — hold the server's message
   // and let the office choose to reuse that login or cancel.
   const [reusePrompt, setReusePrompt] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [statusBusy, setStatusBusy] = useState(false);
   // Draft edit fields (seeded when the edit sheet opens).
   const [fName, setFName] = useState("");
   const [fContact, setFContact] = useState("");
@@ -36,80 +30,105 @@ export default function GroupDetail() {
   const [fPhone, setFPhone] = useState("");
   const [fNotes, setFNotes] = useState("");
 
-  const load = useCallback(async () => {
-    if (!id) return;
-    try {
+  const {
+    data,
+    error: loadError,
+    reload,
+  } = useAsync<{
+    group: CustomerGroup | null;
+    members: Customer[];
+    others: Customer[];
+  } | null>(
+    async () => {
+      if (!id) return null;
       const g = unwrap(await api().models.CustomerGroup.get({ id }));
-      setGroup(g);
-      const all = unwrap(await api().models.Customer.list({ limit: 1000 }));
-      setMembers(all.filter((c) => c.groupId === id));
-      setOthers(all.filter((c) => c.groupId !== id && c.status !== "INACTIVE"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load group");
-    }
-  }, [id]);
+      const all = await listAll((t) =>
+        api().models.Customer.list({ limit: 1000, nextToken: t })
+      );
+      return {
+        group: g,
+        members: all.filter((c) => c.groupId === id),
+        others: all.filter((c) => c.groupId !== id && c.status !== "INACTIVE"),
+      };
+    },
+    [id],
+    "Could not load group"
+  );
+  const group = data?.group ?? null;
+  const members = data?.members ?? [];
+  const others = data?.others ?? [];
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // Five independent writes behind one error slot. The gate is keyed by button
+  // (and by member id for a move) so one write in flight cannot swallow the
+  // press on another — and an invite is worth gating: a double-click used to
+  // send the management contact two sign-in links, only the last of which works.
+  // Declared above the early return below so the hooks stay unconditional.
+  const perform = useKeyedAction();
+  const { run: runKeyed, error, clearError } = perform;
+  const runOn = useCallback(
+    (key: string, fallbackMessage: string, fn: () => Promise<unknown>) =>
+      runKeyed(key, async () => {
+        try {
+          await fn();
+        } catch (err) {
+          // Each action keeps its own wording for a failure that carries none.
+          throw new Error(toMessage(err, fallbackMessage));
+        }
+      }),
+    [runKeyed]
+  );
 
   if (!group) {
     return (
       <Page title="Group" back="/customers">
-        <ErrorNote error={error} />
+        <ErrorNote error={error ?? loadError} />
         <Spinner />
       </Page>
     );
   }
 
-  const invite = async (confirmReuse = false) => {
-    if (!group) return;
-    if (!group.contactEmail) {
-      setError("Add a contact email to the group before inviting a login.");
-      return;
-    }
-    setInviting(true);
-    setError(null);
-    try {
-      unwrap(
-        await api().mutations.adminCreateUser({
-          email: group.contactEmail,
-          name: group.contactName ?? group.name,
-          roles: ["CUSTOMER"],
-          groupId: group.id,
-          confirmReuse,
-        })
-      );
+  const invite = (confirmReuse = false) =>
+    runOn("invite", "Could not invite group login", async () => {
+      if (!group) return;
+      if (!group.contactEmail) {
+        throw new Error(
+          "Add a contact email to the group before inviting a login."
+        );
+      }
+      try {
+        unwrap(
+          await api().mutations.adminCreateUser({
+            email: group.contactEmail,
+            name: group.contactName ?? group.name,
+            roles: ["CUSTOMER"],
+            groupId: group.id,
+            confirmReuse,
+          })
+        );
+      } catch (err) {
+        // The collision guard is recoverable — offer reuse instead of failing.
+        const msg =
+          err instanceof Error ? err.message : "Could not invite group login";
+        if (msg.includes("already signs in as")) {
+          setReusePrompt(msg);
+          return;
+        }
+        throw err;
+      }
       setReusePrompt(null);
-      await load();
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "Could not invite group login";
-      // The collision guard is recoverable — offer reuse instead of failing.
-      if (msg.includes("already signs in as")) setReusePrompt(msg);
-      else setError(msg);
-    } finally {
-      setInviting(false);
-    }
-  };
+      reload();
+    });
 
-  const move = async (customerId: string, groupId: string | null) => {
-    setBusyId(customerId);
-    setError(null);
-    try {
+  const move = (customerId: string, groupId: string | null) =>
+    runOn(customerId, "Could not update member", async () => {
       unwrap(
         await api().mutations.setCustomerGroup({
           customerId,
           groupId: groupId ?? undefined,
         })
       );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not update member");
-    } finally {
-      setBusyId(null);
-    }
-  };
+      reload();
+    });
 
   const openEdit = () => {
     if (!group) return;
@@ -118,19 +137,16 @@ export default function GroupDetail() {
     setFEmail(group.contactEmail ?? "");
     setFPhone(group.contactPhone ?? "");
     setFNotes(group.notes ?? "");
-    setError(null);
+    clearError();
     setEditing(true);
   };
 
-  const saveEdit = async () => {
-    if (!group) return;
-    if (!fName.trim()) {
-      setError("Group name is required");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
+  const saveEdit = () =>
+    runOn("save", "Could not save the group", async () => {
+      if (!group) return;
+      if (!fName.trim()) {
+        throw new Error("Group name is required");
+      }
       // OWNER writes the group model directly (same path new groups are created
       // on) — no dedicated mutation. Empty fields clear to null.
       unwrap(
@@ -144,33 +160,25 @@ export default function GroupDetail() {
         })
       );
       setEditing(false);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save the group");
-    } finally {
-      setSaving(false);
-    }
-  };
+      reload();
+    });
 
-  const inactivate = async () => {
-    if (!group) return;
-    // Block while properties still point at the group — remove/reassign first so
-    // no member is left owned by a retired management company.
-    if (members.length > 0) {
-      setError(
-        `Remove or reassign all ${members.length} member${members.length === 1 ? "" : "s"} before inactivating this group.`
-      );
-      return;
-    }
-    if (
-      !window.confirm(
-        "Inactivate this group? Its portal login (if any) is disabled and it drops out of the group pickers. You can reactivate it later.",
+  const inactivate = () =>
+    runOn("status", "Could not inactivate the group", async () => {
+      if (!group) return;
+      // Block while properties still point at the group — remove/reassign first so
+      // no member is left owned by a retired management company.
+      if (members.length > 0) {
+        throw new Error(
+          `Remove or reassign all ${members.length} member${members.length === 1 ? "" : "s"} before inactivating this group.`
+        );
+      }
+      if (
+        !window.confirm(
+          "Inactivate this group? Its portal login (if any) is disabled and it drops out of the group pickers. You can reactivate it later."
+        )
       )
-    )
-      return;
-    setStatusBusy(true);
-    setError(null);
-    try {
+        return;
       // Access half first — disable the group login before the group reads
       // INACTIVE, so an inactive group never implies a live login. No-op when
       // there is no login.
@@ -181,42 +189,26 @@ export default function GroupDetail() {
           status: "INACTIVE",
         })
       );
-      await load();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Could not inactivate the group"
-      );
-    } finally {
-      setStatusBusy(false);
-    }
-  };
+      reload();
+    });
 
-  const reactivate = async () => {
-    if (!group) return;
-    setStatusBusy(true);
-    setError(null);
-    try {
+  const reactivate = () =>
+    runOn("status", "Could not reactivate the group", async () => {
+      if (!group) return;
       unwrap(
         await api().models.CustomerGroup.update({
           id: group.id,
           status: "ACTIVE",
         })
       );
-      await load();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Could not reactivate the group"
-      );
-    } finally {
-      setStatusBusy(false);
-    }
-  };
+      reload();
+    });
 
   const isInactive = group.status === "INACTIVE";
 
   return (
     <Page title={group.name} back="/customers">
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? loadError} />
       <Card
         title="Group details"
         actions={
@@ -261,7 +253,7 @@ export default function GroupDetail() {
                 small
                 variant="subtle"
                 disabled={!group.contactEmail}
-                loading={inviting}
+                loading={perform.busyKey === "invite"}
                 onClick={() => void invite(false)}
               >
                 {group.portalUserSub ? "Resend group login" : "Invite group login"}
@@ -282,7 +274,7 @@ export default function GroupDetail() {
             <Button
               small
               variant="subtle"
-              loading={statusBusy}
+              loading={perform.busyKey === "status"}
               onClick={() => void reactivate()}
             >
               Reactivate group
@@ -291,7 +283,7 @@ export default function GroupDetail() {
             <Button
               small
               variant="danger"
-              loading={statusBusy}
+              loading={perform.busyKey === "status"}
               onClick={() => void inactivate()}
             >
               Inactivate group
@@ -322,7 +314,7 @@ export default function GroupDetail() {
                   <Button
                     small
                     variant="ghost"
-                    loading={busyId === c.id}
+                    loading={perform.busyKey === c.id}
                     onClick={() => void move(c.id, null)}
                   >
                     Remove
@@ -364,7 +356,7 @@ export default function GroupDetail() {
           />
         </Field>
         <div className="inline-actions" style={{ marginTop: 16 }}>
-          <Button loading={saving} onClick={() => void saveEdit()}>
+          <Button loading={perform.busyKey === "save"} onClick={() => void saveEdit()}>
             Save changes
           </Button>
           <Button variant="ghost" onClick={() => setEditing(false)}>
@@ -405,7 +397,7 @@ export default function GroupDetail() {
         <div className="inline-actions" style={{ marginTop: 16 }}>
           <Button
             variant="subtle"
-            loading={inviting}
+            loading={perform.busyKey === "invite"}
             onClick={() => void invite(true)}
           >
             Reuse that login for this group

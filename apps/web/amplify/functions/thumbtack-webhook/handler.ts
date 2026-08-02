@@ -193,6 +193,7 @@ async function customerForLead(leadID: string): Promise<{ id: string; displayNam
     }) => Promise<{ data?: { id: string; displayName?: string }[] }>;
   };
   if (typeof model?.listCustomerByExternalRef !== "function") return null;
+  // Zero-page read is deliberate: one marketplace thread ref maps to one customer, so one page holds every match (audit 1.1.5).
   const page = await model.listCustomerByExternalRef({
     externalRef: externalRefFor(leadID),
   });

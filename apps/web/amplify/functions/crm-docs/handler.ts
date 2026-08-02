@@ -21,6 +21,7 @@ import { retryBookingFinalization } from "../shared/bookingFinalize";
 import { depletionsForReport } from "../shared/inventory";
 import { opFieldName } from "../shared/opEvent";
 import {
+  assertOffice,
   callerEmail,
   callerGroups,
   callerIsFinance,
@@ -28,8 +29,9 @@ import {
   callerIsOwner,
   callerName,
   callerSub,
+  canActForCustomer,
 } from "../shared/authz";
-import { cusGroup, customerAccessGroups, grpGroup } from "../shared/dynamicGroups";
+import { customerAccessGroups } from "../shared/dynamicGroups";
 import {
   assertCanActOnJobId,
   assertCanActOnReportId,
@@ -41,6 +43,8 @@ import {
   buildTechnicianDay,
   buildTechnicianJob,
 } from "../shared/technicianReads";
+import { forEachPage, listAll } from "../shared/pagination";
+import { todayEastern, todayUtc } from "../shared/dates";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { drivingDistanceMetersFromPoint } from "../shared/driveTime";
 import { emailShell, notifyOffice, sendEmail } from "../shared/email";
@@ -90,6 +94,10 @@ import {
 import { OFF_SEASON_MESSAGE } from "../shared/bookingTerms";
 import { routingAddress } from "../shared/serviceAddress";
 import { queuePresenceReview } from "../shared/recovery";
+import {
+  ADMIN_JOB_SERVICE_TYPES,
+  isOfficeCompletableServiceType,
+} from "../shared/adminJobTypes";
 import { licenseFactsFor, licenseRecordsFor, licenseValidOnDate } from "../shared/licenses";
 import { isServiceMonth } from "../shared/season";
 import {
@@ -133,6 +141,7 @@ import {
   logLeadTouch,
 } from "../shared/leadLifecycle";
 import { assertScheduleReason } from "../shared/visitChangeReasons";
+import { formatMoney, formatMonthly } from "../shared/money";
 
 const s3 = new S3Client();
 const BUCKET = () => {
@@ -401,8 +410,9 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return completeJob(event.arguments.jobId!);
     }
     case "requestCallback": {
-      // GL-10: a portal customer may request only for their OWN account (the
-      // dynamic cus-<id> group proves it); the office may act for anyone.
+      // GL-10: a portal customer may request only for an account they may act
+      // for — their own, or a member property of their management-company
+      // group login. The office may act for anyone.
       const cbArgs = event.arguments as unknown as {
         customerId?: string;
         originalJobId?: string;
@@ -411,11 +421,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       };
       const cbCustomerId = String(cbArgs.customerId ?? "");
       const office = callerIsOffice(event.identity);
-      if (
-        !office &&
-        !callerGroups(event.identity).includes(cusGroup(cbCustomerId))
-      ) {
-        throw new Error("You can only request a callback for your own account");
+      if (!(await canActForCustomer(event.identity, cbCustomerId))) {
+        throw new Error(
+          "You can only request a callback for an account you manage"
+        );
       }
       return requestCallback(
         {
@@ -433,11 +442,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         contentType?: string;
       };
       const upCustomerId = String(upArgs.customerId ?? "");
-      if (
-        !callerIsOffice(event.identity) &&
-        !callerGroups(event.identity).includes(cusGroup(upCustomerId))
-      ) {
-        throw new Error("You can only upload a photo for your own account");
+      if (!(await canActForCustomer(event.identity, upCustomerId))) {
+        throw new Error(
+          "You can only upload a photo for an account you manage"
+        );
       }
       return getCallbackPhotoUploadUrl(
         upCustomerId,
@@ -445,8 +453,9 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "submitPortalRequest": {
-      // GL-11: a portal customer may submit only for their OWN account; the
-      // office may act for anyone.
+      // GL-11: a portal customer may submit only for an account they may act
+      // for — their own, or a member property of their group login; the office
+      // may act for anyone.
       const prArgs = event.arguments as unknown as {
         customerId?: string;
         kind?: string;
@@ -455,11 +464,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         message?: string | null;
       };
       const prCustomerId = String(prArgs.customerId ?? "");
-      if (
-        !callerIsOffice(event.identity) &&
-        !callerGroups(event.identity).includes(cusGroup(prCustomerId))
-      ) {
-        throw new Error("You can only submit a request for your own account");
+      if (!(await canActForCustomer(event.identity, prCustomerId))) {
+        throw new Error(
+          "You can only submit a request for an account you manage"
+        );
       }
       return submitPortalRequest({
         customerId: prCustomerId,
@@ -470,7 +478,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "resolvePortalRequest": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       const rpArgs = event.arguments as unknown as {
         portalRequestId?: string;
         note?: string;
@@ -482,12 +490,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "resendEmailLog": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       const reArgs = event.arguments as unknown as { emailLogId?: string };
       return resendEmailLogExact(String(reArgs.emailLogId ?? ""));
     }
     case "scheduleCallback": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       const scArgs = event.arguments as unknown as {
         callbackRequestId?: string;
         scheduledDate?: string;
@@ -534,7 +542,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "amendServiceReport": {
       // The office issues amendments; a technician asks the office. No role
       // overwrites the issued record, so this only ever appends a new one.
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return amendServiceReport(event.arguments.reportId!, {
         reason: event.arguments.reason,
         changes: event.arguments.changes,
@@ -544,7 +552,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "recordReportDelivery": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return recordReportDelivery({
         reportId: event.arguments.reportId,
         amendmentId: event.arguments.amendmentId,
@@ -554,25 +562,25 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "saveProduct": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return saveProduct(event.arguments);
     }
     case "createOfficeJob": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return createOfficeJob(event.arguments);
     }
     case "updateJobSchedule": {
       // GL-13: the actor and controlled reason travel with the change into the
       // immutable assignment audit.
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return updateJobSchedule(event.identity, event.arguments);
     }
     case "updateJobPacket": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return updateJobPacket(event.identity, event.arguments);
     }
     case "rebookJob": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return rebookJob(
         event.arguments.jobId!,
         callerSub(event.identity),
@@ -582,18 +590,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "retryBookingFinalization": {
       // Finance owns the PAID_NOT_FINALIZED exception this recovers, so finance
       // (as well as office) must be able to run it.
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return retryBookingFinalization(event.arguments.bookingRequestId!);
     }
     case "resumePlanCancellation": {
       // GL-08: the safe re-run the PLAN_CANCELLATION_RECOVERY case prescribes.
       // Finance owns cancellation recovery; office may also run it. auto:false —
       // a person pressing the button drives immediately (no attempt-cap pacing).
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return resumePlanCancellation(
         stripeClient(),
         event.arguments.servicePlanId!,
@@ -602,17 +606,13 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "resumeVisitChange": {
       // GL-07: the safe re-run the VISIT_CHANGE_RECOVERY case prescribes.
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return resumeVisitChange(stripeClient(), event.arguments.jobId!, {
         auto: false,
       });
     }
     case "recordNoticeAlternateDelivery": {
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Owner role required");
-      }
+      assertOffice(event.identity);
       const altArgs = event.arguments as unknown as {
         relatedId?: string;
         template?: string;
@@ -628,9 +628,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "capacityDayFacts": {
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Owner role required");
-      }
+      assertOffice(event.identity);
       const date = String(event.arguments.date ?? "");
       const [eligibility, slots, claims] = await Promise.all([
         dayEligibility(date),
@@ -663,9 +661,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       };
     }
     case "updateOwnedWork": {
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return updateOwnedWork({
         workItemId: event.arguments.workItemId!,
         action: event.arguments.action!,
@@ -705,14 +701,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "getCustomerDocumentUploadUrl": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return getCustomerDocumentUploadUrl(
         event.arguments.customerId!,
         event.arguments.contentType!
       );
     }
     case "recordCustomerDocument": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return recordCustomerDocument(
         {
           customerId: event.arguments.customerId!,
@@ -726,7 +722,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "sendCustomerEmail": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return sendCustomerEmail(
         event.arguments.customerId!,
         event.arguments.kind!,
@@ -736,7 +732,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "prepareLeadQuote": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return prepareLeadQuote(event.arguments.customerId!);
     }
     default:
@@ -831,7 +827,7 @@ async function submitPortalRequest(opts: {
     opts.jobId ?? "",
     opts.preferredDate ?? "",
     opts.message?.trim() ?? "",
-    new Date().toISOString().slice(0, 10),
+    todayUtc(),
   ].join("|");
   const id = `pr-${createHash("sha256").update(requestFacts).digest("hex").slice(0, 24)}`;
   const { data: created } = await client.models.PortalRequest.create({
@@ -971,11 +967,15 @@ async function visitMoneySettled(
   jobId: string
 ): Promise<{ ok: true } | { ok: false; problem: string }> {
   const client = await dataClient();
-  const { data: invoices } = await client.models.Invoice.list({
-    filter: { jobId: { eq: jobId } },
-    limit: 200,
-  });
-  const list = invoices ?? [];
+  const list = await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { jobId: { eq: jobId } },
+        limit: 200,
+        nextToken,
+      }),
+    { pageErrors: "ignore" }
+  );
   if (list.some((i) => i.status === "OPEN" && Boolean(i.stripePaymentIntentId))) {
     return {
       ok: false,
@@ -998,11 +998,16 @@ async function visitMoneySettled(
     // retained-fee outcome is durably recorded on the change's audit ledger.
     let retainedRecorded = false;
     if ("VisitChangeEvent" in client.models) {
-      const { data: events } = await client.models.VisitChangeEvent.list({
-        filter: { jobId: { eq: jobId } },
-        limit: 200,
-      });
-      const rows = (events ?? [])
+      const events = await listAll(
+        (nextToken) =>
+          client.models.VisitChangeEvent.list({
+            filter: { jobId: { eq: jobId } },
+            limit: 200,
+            nextToken,
+          }),
+        { pageErrors: "ignore" }
+      );
+      const rows = events
         .slice()
         .sort((a, b) =>
           String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
@@ -1012,13 +1017,12 @@ async function visitMoneySettled(
     if (!retainedRecorded) {
       return {
         ok: false,
-        problem: `A paid invoice still holds $${(
+        problem: `A paid invoice still holds ${formatMoney(
           unsettledPaid.reduce(
             (t, i) =>
               t + Math.max(0, (i.amountCents ?? 0) - (i.refundedAmountCents ?? 0)),
             0
-          ) / 100
-        ).toFixed(2)} with no full refund and no recorded retained-fee outcome.`,
+          ))} with no full refund and no recorded retained-fee outcome.`,
       };
     }
   }
@@ -1064,22 +1068,25 @@ async function runWorkVerifier(
       if ("EmailLog" in client.models) {
         const since = item.createdAt ?? "";
         let sentSince = false;
-        let token: string | null | undefined;
         let scanned = 0;
-        do {
-          const page = await client.models.EmailLog.list({
-            filter: { customerId: { eq: id } },
-            limit: 200,
-            nextToken: token,
-          });
-          sentSince = (page.data ?? []).some(
-            (l) =>
-              (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
-              String(l.createdAt ?? "") >= since
-          );
-          scanned += (page.data ?? []).length;
-          token = sentSince ? null : page.nextToken;
-        } while (token && scanned < 1000);
+        await forEachPage(
+          (nextToken) =>
+            client.models.EmailLog.list({
+              filter: { customerId: { eq: id } },
+              limit: 200,
+              nextToken,
+            }),
+          (logs) => {
+            sentSince = logs.some(
+              (l) =>
+                (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED") &&
+                String(l.createdAt ?? "") >= since
+            );
+            scanned += logs.length;
+            if (sentSince || scanned >= 1000) return false;
+          },
+          { pageErrors: "ignore" }
+        );
         if (!sentSince) {
           return {
             ok: false,
@@ -1148,18 +1155,21 @@ async function runWorkVerifier(
         }
         // Route capacity: the day must actually hold this stop.
         let stops = 0;
-        let token: string | null | undefined;
-        do {
-          const page = await client.models.Job.list({
-            filter: { routeId: { eq: job.routeId } },
-            limit: 200,
-            nextToken: token,
-          });
-          stops += (page.data ?? []).filter(
-            (j) => j.status !== "CANCELED"
-          ).length;
-          token = page.nextToken;
-        } while (token);
+        const routeId = job.routeId;
+        await forEachPage(
+          (nextToken) =>
+            client.models.Job.list({
+              filter: { routeId: { eq: routeId } },
+              limit: 200,
+              nextToken,
+            }),
+          (jobs) => {
+            stops += jobs.filter(
+              (j) => j.status !== "CANCELED"
+            ).length;
+          },
+          { pageErrors: "ignore" }
+        );
         if (stops > STOPS_PER_TECH) {
           return {
             ok: false,
@@ -1203,11 +1213,21 @@ async function runWorkVerifier(
       }
       let auditExists = false;
       if ("VisitChangeEvent" in client.models) {
-        const { data: events } = await client.models.VisitChangeEvent.list({
-          filter: { jobId: { eq: item.relatedId } },
-          limit: 200,
-        });
-        auditExists = (events ?? []).length > 0;
+        await forEachPage(
+          (nextToken) =>
+            client.models.VisitChangeEvent.list({
+              filter: { jobId: { eq: item.relatedId } },
+              limit: 200,
+              nextToken,
+            }),
+          (events) => {
+            if (events.length > 0) {
+              auditExists = true;
+              return false;
+            }
+          },
+          { pageErrors: "ignore" }
+        );
       }
       if (!auditExists) {
         return {
@@ -1218,15 +1238,22 @@ async function runWorkVerifier(
       }
       let noticeAccepted = false;
       if ("EmailLog" in client.models) {
-        const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
-          { relatedId: item.relatedId },
-          { limit: 50 }
-        );
-        noticeAccepted = (logs ?? []).some(
-          (l) =>
-            (l.template === "visit-canceled" ||
-              l.template === "visit-rescheduled") &&
-            (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+        await forEachPage(
+          (nextToken) =>
+            client.models.EmailLog.listEmailLogByRelatedId(
+              { relatedId: item.relatedId },
+              { limit: 50, nextToken }
+            ),
+          (logs) => {
+            noticeAccepted = logs.some(
+              (l) =>
+                (l.template === "visit-canceled" ||
+                  l.template === "visit-rescheduled") &&
+                (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
+            );
+            if (noticeAccepted) return false;
+          },
+          { pageErrors: "ignore" }
         );
       }
       if (!noticeAccepted) {
@@ -1254,35 +1281,35 @@ async function runWorkVerifier(
       });
       if (!cust) return { ok: false, message: "The customer could not be read." };
       const problems: string[] = [];
-      let planToken: string | null | undefined;
-      do {
-        const page = await client.models.ServicePlan.list({
-          filter: { customerId: { eq: cust.id } },
-          limit: 200,
-          nextToken: planToken,
-        });
-        for (const plan of page.data ?? []) {
-          if (cust.status === "INACTIVE" && plan.status === "ACTIVE") {
-            problems.push(`plan ${plan.planName} is still ACTIVE`);
-          }
-        }
-        planToken = page.nextToken;
-      } while (planToken);
-      if (cust.status === "INACTIVE") {
-        let jobToken: string | null | undefined;
-        do {
-          const page = await client.models.Job.list({
+      const plans = await listAll(
+        (nextToken) =>
+          client.models.ServicePlan.list({
             filter: { customerId: { eq: cust.id } },
             limit: 200,
-            nextToken: jobToken,
-          });
-          for (const job of page.data ?? []) {
-            if (job.status === "SCHEDULED" && !job.paidAt) {
-              problems.push(`visit ${job.id} is still scheduled`);
-            }
+            nextToken,
+          }),
+        { pageErrors: "ignore" }
+      );
+      for (const plan of plans) {
+        if (cust.status === "INACTIVE" && plan.status === "ACTIVE") {
+          problems.push(`plan ${plan.planName} is still ACTIVE`);
+        }
+      }
+      if (cust.status === "INACTIVE") {
+        const jobs = await listAll(
+          (nextToken) =>
+            client.models.Job.list({
+              filter: { customerId: { eq: cust.id } },
+              limit: 200,
+              nextToken,
+            }),
+          { pageErrors: "ignore" }
+        );
+        for (const job of jobs) {
+          if (job.status === "SCHEDULED" && !job.paidAt) {
+            problems.push(`visit ${job.id} is still scheduled`);
           }
-          jobToken = page.nextToken;
-        } while (jobToken);
+        }
       }
       if ("CustomerLifecycleCommand" in client.models) {
         // Paginated to exhaustion — a settled verdict computed over one page
@@ -1320,20 +1347,23 @@ async function runWorkVerifier(
       const facts = await licenseFactsFor(tech);
       if (facts.current) return { ok: true, message: "" };
       if (!tech.active) {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = todayEastern();
         let hasFuture = false;
-        let token: string | null | undefined;
-        do {
-          const page = await client.models.Job.list({
-            filter: { technicianId: { eq: tech.id } },
-            limit: 200,
-            nextToken: token,
-          });
-          hasFuture = (page.data ?? []).some(
-            (j) => j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= today
-          );
-          token = hasFuture ? null : page.nextToken;
-        } while (token);
+        await forEachPage(
+          (nextToken) =>
+            client.models.Job.list({
+              filter: { technicianId: { eq: tech.id } },
+              limit: 200,
+              nextToken,
+            }),
+          (jobs) => {
+            hasFuture = jobs.some(
+              (j) => j.status === "SCHEDULED" && (j.scheduledDate ?? "") >= today
+            );
+            if (hasFuture) return false;
+          },
+          { pageErrors: "ignore" }
+        );
         if (!hasFuture) return { ok: true, message: "" };
         return {
           ok: false,
@@ -2412,7 +2442,7 @@ async function assertOfficeFieldAccess(
   }
   await openOwnedWork({
     kind: "OFFICE_FIELD_REVIEW",
-    dedupeKey: `office-field:${jobId}:${new Date().toISOString().slice(0, 10)}`,
+    dedupeKey: `office-field:${jobId}:${todayUtc()}`,
     title: "Office field action needs review",
     detail: `${callerEmail(identity) ?? "An office member"} performed ${action} on visit ${jobId}: ${reason}`,
     relatedId: jobId,
@@ -3803,11 +3833,15 @@ async function priorAcceptedSend(
   try {
     const client = await dataClient();
     if (!("EmailLog" in client.models)) return null;
-    const { data } = await client.models.EmailLog.listEmailLogByRelatedId(
-      { relatedId },
-      { limit: 50 }
+    const data = await listAll(
+      (nextToken) =>
+        client.models.EmailLog.listEmailLogByRelatedId(
+          { relatedId },
+          { limit: 50, nextToken }
+        ),
+      { pageErrors: "ignore" }
     );
-    const hit = (data ?? []).find(
+    const hit = data.find(
       (l) =>
         l.template === template &&
         (l.deliveryStatus === "SENT" || l.deliveryStatus === "DELIVERED")
@@ -4127,8 +4161,11 @@ async function depleteInventoryForReport(report: {
   const products = parseProducts(report.productsUsed);
   if (!products.length) return;
   const client = await dataClient();
-  const { data: catalog } = await client.models.Product.list({ limit: 1000 });
-  const { deplete, skips } = depletionsForReport(products, catalog ?? []);
+  const catalog = await listAll(
+    (nextToken) => client.models.Product.list({ limit: 1000, nextToken }),
+    { pageErrors: "ignore" }
+  );
+  const { deplete, skips } = depletionsForReport(products, catalog);
   if (skips.length) {
     console.warn("inventory: skipped report rows", report.id, skips);
   }
@@ -4142,11 +4179,17 @@ async function depleteInventoryForReport(report: {
     cur.notes.push(d.note);
     byProduct.set(d.productId, cur);
   }
-  const { data: existing } =
-    await client.models.ProductStockEntry.listProductStockEntryByServiceReportId(
-      { serviceReportId: report.id }
-    );
-  const already = new Set((existing ?? []).map((e) => e.productId));
+  // The `already` Set is the ONLY idempotency guard against double depletion
+  // on replay, so it must see every prior entry — paged to exhaustion.
+  const existing = await listAll(
+    (nextToken) =>
+      client.models.ProductStockEntry.listProductStockEntryByServiceReportId(
+        { serviceReportId: report.id },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
+  const already = new Set(existing.map((e) => e.productId));
   const at = new Date().toISOString();
   for (const [productId, agg] of byProduct) {
     if (already.has(productId)) continue;
@@ -4252,8 +4295,10 @@ async function finalizeServiceReport(reportId: string) {
     // on site. Inspection-only reports have no products, so this is a no-op.
     const productsUsed = parseProducts(report.productsUsed);
     if (productsUsed.length) {
-      const { data: catalog } = await client.models.Product.list({ limit: 1000 });
-      const approved = catalog ?? [];
+      const approved = await listAll(
+        (nextToken) => client.models.Product.list({ limit: 1000, nextToken }),
+        { pageErrors: "ignore" }
+      );
       assertProductsAreApproved(productsUsed, approved);
       assertProductsWithinLabelRules(productsUsed, approved, report, job);
     }
@@ -4862,7 +4907,7 @@ async function startBillingForPlan(job: {
     client.models.Customer.get({ id: job.customerId }),
     client.models.ServicePlan.get({ id: job.servicePlanId }),
   ]);
-  const price = plan?.priceCents ? `$${(plan.priceCents / 100).toFixed(2)}/mo` : "";
+  const price = plan?.priceCents ? formatMonthly(plan.priceCents) : "";
   await notifyOffice({
     subject: `ACTION REQUIRED — plan serviced but not billing: ${customer?.displayName ?? job.customerId}`,
     heading: "A plan was serviced but billing did not start",
@@ -4881,27 +4926,10 @@ async function startBillingForPlan(job: {
  * Marks the job COMPLETED, starts plan billing, and queues the next recurring
  * visit, mirroring what finalizeServiceReport does after a report.
  */
-/**
- * The defined set of administrative job types the office may complete
- * WITHOUT a technician's finalized report — stored lowercased for a
- * case-insensitive match. Field and pesticide work is never here: its
- * completion IS the tech's finalized service report, which is the legal
- * pesticide application record. Office-completing such a job would mark it
- * done with no record behind it — the exact editable-regulatory-gap the
- * report immutability work closed, reopened from the office side.
- *
- * Empty today: no administrative job type is defined, so every job
- * completes via a finalized report. Add an exact (lowercased) serviceType
- * here to make that one type office-completable. KEEP IN SYNC with
- * apps/crm/src/lib/jobTypes.ts (the UI hides the button for the same set).
- */
-export const ADMIN_JOB_SERVICE_TYPES = new Set<string>([]);
-
-export function isOfficeCompletableServiceType(
-  serviceType: string | null | undefined
-): boolean {
-  return ADMIN_JOB_SERVICE_TYPES.has((serviceType ?? "").trim().toLowerCase());
-}
+// The set and the match rule live in shared/adminJobTypes.ts — one copy, read
+// by this gate and by the CRM's "✓ Complete" button. Re-exported here so
+// anything already importing them from this handler keeps working.
+export { ADMIN_JOB_SERVICE_TYPES, isOfficeCompletableServiceType };
 
 async function completeJob(jobId: string) {
   const client = await dataClient();
@@ -5789,16 +5817,12 @@ async function getDocumentUrl(
   // technician to other workers' reports or every future document. The
   // customer's own portal access is unchanged.
   if (!callerIsOffice(identity)) {
-    let allowed = groups.includes(cusGroup(customerId));
-    if (!allowed) {
-      const client = await dataClient();
-      const { data: customer } = await client.models.Customer.get({
-        id: customerId,
-      });
-      allowed = Boolean(
-        customer?.groupId && groups.includes(grpGroup(customer.groupId))
-      );
-    }
+    // The customer-side half of this is the shared rule (own cus- group, or a
+    // group login whose grp- appears in the customer's LIVE accessGroups
+    // stamp). Reading the stamp rather than re-deriving from customer.groupId
+    // means a property removed from a management company loses access to its
+    // documents immediately, without a re-issued token.
+    let allowed = await canActForCustomer(identity, customerId);
     if (!allowed && groups.includes("TECH")) {
       allowed = await technicianDocumentAllowed(identity, key);
     }
@@ -5883,11 +5907,15 @@ async function recordNoticeAlternateDelivery(
   if (!("EmailLog" in client.models)) {
     throw new Error("The email log is unavailable here.");
   }
-  const { data: logs } = await client.models.EmailLog.listEmailLogByRelatedId(
-    { relatedId: args.relatedId },
-    { limit: 50 }
+  const logs = await listAll(
+    (nextToken) =>
+      client.models.EmailLog.listEmailLogByRelatedId(
+        { relatedId: args.relatedId },
+        { limit: 50, nextToken }
+      ),
+    { pageErrors: "ignore" }
   );
-  const rows = (logs ?? [])
+  const rows = logs
     .filter((l) => l.template === args.template)
     .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
   const target = rows[0];

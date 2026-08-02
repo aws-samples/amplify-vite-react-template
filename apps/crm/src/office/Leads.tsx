@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
@@ -7,6 +7,7 @@ import {
   opResult,
   type Customer,
 } from "../lib/api";
+import { useAsync } from "../lib/useAsync";
 import { fmtDateTime } from "../lib/format";
 import { useRoles } from "../lib/auth";
 import {
@@ -45,8 +46,24 @@ type DupeCandidate = {
 export default function Leads() {
   const navigate = useNavigate();
   const roles = useRoles();
-  const [leads, setLeads] = useState<Customer[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    data: leads,
+    error: loadError,
+    reload,
+  } = useAsync<Customer[]>(
+    () =>
+      listAll((t) =>
+        api().models.Customer.listCustomerByStatusAndDisplayName(
+          { status: "LEAD" },
+          { limit: 500, nextToken: t }
+        )
+      ),
+    [],
+    "Could not load leads"
+  );
+  // The duplicate-decision submit still hand-rolls its error; the mutation
+  // pass takes it.
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [mineOnly, setMineOnly] = useState(false);
   // Narrow the inbox to one derived stage. The stage is computed from facts
@@ -57,25 +74,6 @@ export default function Leads() {
     candidates: DupeCandidate[];
     values: Parameters<typeof createLead>[0];
   } | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setLeads(
-        await listAll((t) =>
-          api().models.Customer.listCustomerByStatusAndDisplayName(
-            { status: "LEAD" },
-            { limit: 500, nextToken: t }
-          )
-        )
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load leads");
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   // The inbox is not a sales pipeline. It contains only inquiries that still
   // need a human outcome, ordered by business risk: overdue first, then due.
@@ -128,7 +126,7 @@ export default function Leads() {
       return;
     }
     setAdding(false);
-    await load();
+    reload();
     navigate(`/customers/${res.id}`);
   };
 
@@ -220,7 +218,7 @@ export default function Leads() {
         </Button>
       }
     >
-      <ErrorNote error={error} />
+      <ErrorNote error={submitError ?? loadError} />
       <label className="inline-check small" style={{ margin: "8px 0 12px" }}>
         <input
           type="checkbox"
@@ -319,7 +317,7 @@ export default function Leads() {
                   await submitLead({ ...dupe.values, force: true });
                   setDupe(null);
                 } catch (err) {
-                  setError(
+                  setSubmitError(
                     err instanceof Error ? err.message : "Could not create the lead"
                   );
                 }

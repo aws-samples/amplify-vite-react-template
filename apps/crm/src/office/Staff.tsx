@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   api,
   changeStaffRoles,
@@ -7,16 +7,16 @@ import {
   offboardStaff,
   opResult,
   staffRoster,
-  unwrap,
   STAFF_OFFBOARD_REASONS,
   STAFF_ROLE_CHANGE_REASONS,
   type StaffAccessEvent,
   type StaffRosterRow,
   type Technician,
 } from "../lib/api";
+import { useAction, useAsync } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
 import { TechnicianRoster } from "./technicians";
-import { fmtDate, fmtDateTime } from "../lib/format";
+import { fmtDate, fmtDateTime, todayUtc } from "../lib/format";
 import {
   Badge,
   Button,
@@ -92,26 +92,21 @@ function newIdempotencyKey(): string {
 
 export default function Staff() {
   const roles = useRoles();
-  const [rows, setRows] = useState<StaffRosterRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [inviting, setInviting] = useState(false);
   const [selected, setSelected] = useState<StaffRosterRow | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
+  const { data, error, reload } = useAsync<StaffRosterRow[]>(
+    async () => {
       const res = opResult<{ staff: StaffRosterRow[] }>(await staffRoster());
-      setRows(res?.staff ?? []);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the staff roster");
-      setRows([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return res?.staff ?? [];
+    },
+    [],
+    "Could not load the staff roster"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const rows = data ?? (error ? [] : null);
 
   if (!roles.owner) {
     return (
@@ -182,7 +177,7 @@ export default function Staff() {
           <InviteForm
             onDone={async () => {
               setInviting(false);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -198,7 +193,7 @@ export default function Staff() {
             row={selected}
             onDone={async () => {
               setSelected(null);
-              await load();
+              reload();
             }}
           />
         ) : null}
@@ -224,24 +219,22 @@ export default function Staff() {
  * edited or deleted.
  */
 function AccessHistory() {
-  const [events, setEvents] = useState<StaffAccessEvent[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
-  useEffect(() => {
-    // GL-14 R7: page the ENTIRE immutable ledger, not just the first 500 rows,
-    // so search and export cover the complete access history.
-    listAll((t) => listStaffAccessEvents({ limit: 1000, nextToken: t }))
-      .then((all) => {
-        const rows = [...all].sort((a, b) =>
-          String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
-        );
-        setEvents(rows);
-      })
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Could not load the history")
+  const { data: events, error } = useAsync<StaffAccessEvent[]>(
+    async () => {
+      // GL-14 R7: page the ENTIRE immutable ledger, not just the first 500
+      // rows, so search and export cover the complete access history.
+      const all = await listAll((t) =>
+        listStaffAccessEvents({ limit: 1000, nextToken: t })
       );
-  }, []);
+      return [...all].sort((a, b) =>
+        String(b.occurredAt ?? "").localeCompare(String(a.occurredAt ?? ""))
+      );
+    },
+    [],
+    "Could not load the history"
+  );
 
   const q = query.trim().toLowerCase();
   const filtered = (events ?? []).filter((e) =>
@@ -283,7 +276,7 @@ function AccessHistory() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `staff-access-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `staff-access-history-${todayUtc()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -392,8 +385,6 @@ function StaffActions({
     STAFF_OFFBOARD_REASONS[0]
   );
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState<null | "role" | "offboard">(null);
-  const [error, setError] = useState<string | null>(null);
   const [confirmOffboard, setConfirmOffboard] = useState(false);
   // One idempotency key per LOGICAL request, held stable across retries so the
   // server can dedupe/resume the same durable command — a retry after a
@@ -414,13 +405,10 @@ function StaffActions({
     setOpOutcome(null);
   };
 
-  const saveRole = async () => {
+  const saveRole = useAction(async () => {
     if (roleReason === "OTHER" && !note.trim()) {
-      setError("Choosing 'Other' needs a short note saying why.");
-      return;
+      throw new Error("Choosing 'Other' needs a short note saying why.");
     }
-    setBusy("role");
-    setError(null);
     try {
       const res = await changeStaffRoles({
         email: row.email,
@@ -433,14 +421,12 @@ function StaffActions({
       const data = opResult<StaffOpOutcome>(res);
       if (data?.inProgress) {
         setOpOutcome({ ...data, kind: "role" });
-        setBusy(null);
         return;
       }
       if (data && data.outcome !== "COMPLETE") {
         // The persisted PARTIAL outcome — shown as recorded, with its one next
         // step. The same key resumes it; nothing is invented client-side.
         setOpOutcome({ ...data, kind: "role" });
-        setBusy(null);
         return;
       }
       setRoleKey(newIdempotencyKey());
@@ -450,18 +436,14 @@ function StaffActions({
       // A refusal (validation, last-owner, in-flight owner change): nothing
       // changed. A fresh key lets the corrected request start clean.
       setRoleKey(newIdempotencyKey());
-      setError(err instanceof Error ? err.message : "Could not change the role");
-      setBusy(null);
+      throw err;
     }
-  };
+  }, "Could not change the role");
 
-  const doOffboard = async () => {
+  const doOffboard = useAction(async () => {
     if (offboardReason === "OTHER" && !note.trim()) {
-      setError("Choosing 'Other' needs a short note saying why.");
-      return;
+      throw new Error("Choosing 'Other' needs a short note saying why.");
     }
-    setBusy("offboard");
-    setError(null);
     try {
       const res = await offboardStaff({
         email: row.email,
@@ -473,12 +455,10 @@ function StaffActions({
       const data = opResult<StaffOpOutcome>(res);
       if (data?.inProgress) {
         setOpOutcome({ ...data, kind: "offboard" });
-        setBusy(null);
         return;
       }
       if (data && data.outcome !== "COMPLETE") {
         setOpOutcome({ ...data, kind: "offboard" });
-        setBusy(null);
         return;
       }
       setOffboardKey(newIdempotencyKey());
@@ -486,10 +466,11 @@ function StaffActions({
       await onDone();
     } catch (err) {
       setOffboardKey(newIdempotencyKey());
-      setError(err instanceof Error ? err.message : "Could not offboard this person");
-      setBusy(null);
+      throw err;
     }
-  };
+  }, "Could not offboard this person");
+
+  const busy = saveRole.busy || doOffboard.busy;
 
   return (
     <div className="form-grid">
@@ -573,9 +554,9 @@ function StaffActions({
       ) : null}
       <Button
         block
-        loading={busy === "role"}
-        disabled={busy !== null || choiceForRoles(row.roles) === choice}
-        onClick={() => void saveRole()}
+        loading={saveRole.busy}
+        disabled={busy || choiceForRoles(row.roles) === choice}
+        onClick={() => void saveRole.run()}
       >
         Save role
       </Button>
@@ -617,7 +598,11 @@ function StaffActions({
                 />
               </Field>
             ) : null}
-            <Button block loading={busy === "offboard"} onClick={() => void doOffboard()}>
+            <Button
+              block
+              loading={doOffboard.busy}
+              onClick={() => void doOffboard.run()}
+            >
               Yes, offboard now
             </Button>
             <Button block variant="ghost" onClick={() => setConfirmOffboard(false)}>
@@ -655,9 +640,11 @@ function StaffActions({
           {!opOutcome.inProgress && opOutcome.outcome !== "COMPLETE" ? (
             <Button
               block
-              loading={busy !== null}
+              loading={busy}
               onClick={() =>
-                void (opOutcome.kind === "role" ? saveRole() : doOffboard())
+                void (opOutcome.kind === "role"
+                  ? saveRole.run()
+                  : doOffboard.run())
               }
             >
               Resume {opOutcome.kind === "role" ? "role change" : "offboarding"}
@@ -665,7 +652,7 @@ function StaffActions({
           ) : null}
         </Card>
       ) : null}
-      <ErrorNote error={error} />
+      <ErrorNote error={saveRole.error ?? doOffboard.error} />
     </div>
   );
 }
@@ -681,21 +668,29 @@ function InviteForm({ onDone }: { onDone: () => Promise<void> }) {
   const [role, setRole] = useState<RoleChoice>("OWNER");
   const [techs, setTechs] = useState<Technician[]>([]);
   const [technicianId, setTechnicianId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
   const linksTechnician = ROLE_CHOICES[role].groups.includes("TECH");
 
   useEffect(() => {
     if (!linksTechnician) return;
-    api()
-      .models.Technician.list({ limit: 200 })
-      .then((res) =>
-        setTechs(unwrap(res).filter((t) => t.active && !t.userSub))
-      )
+    listAll((t) => api().models.Technician.list({ limit: 200, nextToken: t }))
+      .then((rows) => setTechs(rows.filter((t) => t.active && !t.userSub)))
       .catch(() => undefined);
   }, [linksTechnician]);
+
+  // adminCreateUser carries no idempotency key, so a double-click used to send
+  // the same person two invite emails — and the second link kills the first.
+  const send = useAction(async () => {
+    const res = await api().mutations.adminCreateUser({
+      email: email.trim(),
+      name: name.trim(),
+      roles: [...ROLE_CHOICES[role].groups],
+      technicianId: technicianId || undefined,
+    });
+    if (res.errors?.length) throw new Error(res.errors[0].message);
+    setDone(true);
+  }, "Could not send the invite");
 
   if (done) {
     return (
@@ -754,30 +749,12 @@ function InviteForm({ onDone }: { onDone: () => Promise<void> }) {
           )}
         </Field>
       ) : null}
-      <ErrorNote error={error} />
+      <ErrorNote error={send.error} />
       <Button
         block
-        loading={busy}
+        loading={send.busy}
         disabled={!name.trim() || !validEmail || needsTech}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          api()
-            .mutations.adminCreateUser({
-              email: email.trim(),
-              name: name.trim(),
-              roles: [...ROLE_CHOICES[role].groups],
-              technicianId: technicianId || undefined,
-            })
-            .then((res) => {
-              if (res.errors?.length) throw new Error(res.errors[0].message);
-              setDone(true);
-            })
-            .catch((err) => {
-              setError(err.message ?? "Could not send the invite");
-              setBusy(false);
-            });
-        }}
+        onClick={() => void send.run()}
       >
         Send invite
       </Button>

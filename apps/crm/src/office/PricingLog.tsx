@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, unwrap, type LeadPricingRun } from "../lib/api";
+import { api, listAll, type LeadPricingRun } from "../lib/api";
+import { useAction, useAsync } from "../lib/useAsync";
 import { fmtDate, money } from "../lib/format";
 import {
   Badge,
@@ -25,34 +26,32 @@ type Outcome = "PENDING" | "SENT" | "WON" | "LOST" | "PASSED";
  */
 export default function PricingLog() {
   const navigate = useNavigate();
-  const [runs, setRuns] = useState<LeadPricingRun[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<LeadPricingRun | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      const rows: LeadPricingRun[] = [];
-      let nextToken: string | null | undefined;
-      do {
-        const page = await api().models.LeadPricingRun.list({
-          limit: 500,
-          nextToken: nextToken ?? undefined,
-        });
-        rows.push(...unwrap(page));
-        nextToken = page.nextToken;
-      } while (nextToken);
-      setRuns(
-        rows.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
+  const {
+    data: runs,
+    error: loadError,
+    reload,
+  } = useAsync<LeadPricingRun[]>(
+    async () => {
+      const rows = await listAll((nextToken) =>
+        api().models.LeadPricingRun.list({ limit: 500, nextToken })
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the log");
-    }
-  }, []);
+      return rows.sort((a, b) =>
+        (b.createdAt ?? "").localeCompare(a.createdAt ?? "")
+      );
+    },
+    [],
+    "Could not load the log"
+  );
+  const [editing, setEditing] = useState<LeadPricingRun | null>(null);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const saveOutcome = useAction(async (row: LeadPricingRun) => {
+    await api().models.LeadPricingRun.update({
+      id: row.id,
+      outcome: row.outcome ?? "PENDING",
+    });
+    setEditing(null);
+    reload();
+  }, "Save failed");
 
   const priceLabel = (r: LeadPricingRun) =>
     r.monthlyPriceCents != null
@@ -63,7 +62,7 @@ export default function PricingLog() {
 
   return (
     <Page title="Pricing log" back="/more">
-      <ErrorNote error={error} />
+      <ErrorNote error={saveOutcome.error ?? loadError} />
       {runs === null ? (
         <Spinner />
       ) : runs.length === 0 ? (
@@ -148,23 +147,8 @@ export default function PricingLog() {
                 <span />
               )}
               <Button
-                loading={busy}
-                onClick={() => {
-                  setBusy(true);
-                  api()
-                    .models.LeadPricingRun.update({
-                      id: editing.id,
-                      outcome: editing.outcome ?? "PENDING",
-                    })
-                    .then(() => {
-                      setEditing(null);
-                      return load();
-                    })
-                    .catch((err) =>
-                      setError(err instanceof Error ? err.message : "Save failed")
-                    )
-                    .finally(() => setBusy(false));
-                }}
+                loading={saveOutcome.busy}
+                onClick={() => void saveOutcome.run(editing)}
               >
                 Save outcome
               </Button>

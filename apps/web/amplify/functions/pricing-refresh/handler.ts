@@ -1,6 +1,7 @@
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { dataClient } from "../shared/dataClient";
+import { listAll } from "../shared/pagination";
 import {
   emailShell,
   notifyOffice,
@@ -10,6 +11,7 @@ import {
 import { openOwnedWork } from "../shared/ownedWork";
 import { renderQuotePdf } from "../shared/pdf";
 import { OFF_SEASON_MESSAGE } from "../shared/bookingTerms";
+import { parseQuoteSnapshot } from "../shared/quoteSnapshot";
 import { money } from "../crm-pricing/rateCards";
 import {
   acquireDrain,
@@ -195,15 +197,11 @@ type Lister = {
   }): Promise<{ data: unknown[]; nextToken?: string | null }>;
 };
 
-async function listAll<T>(model: Lister): Promise<T[]> {
-  const out: unknown[] = [];
-  let nextToken: string | null | undefined;
-  do {
-    const page = await model.list({ nextToken, limit: 200 });
-    out.push(...page.data);
-    nextToken = page.nextToken;
-  } while (nextToken);
-  return out as T[];
+function listAllRows<T>(model: Lister): Promise<T[]> {
+  return listAll(
+    (nextToken) => model.list({ nextToken, limit: 200 }),
+    { pageErrors: "ignore" }
+  ) as Promise<T[]>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -290,30 +288,10 @@ function selectWork(
 
 // ------------------------------------------------------ self-heal email
 
-/** The subset of a stored quoteJson the emailed PDF prints. The bookable day
- *  board is deliberately ignored here — days are live and perishable, so the
- *  PDF is a stable pricing summary, not a schedule. */
-type QuoteSnapshot = {
-  days?: unknown[];
-  baseCents?: number;
-  serviceLabel?: string;
-  recurringOffer?: {
-    frequency: string;
-    monthlyCents: number;
-    initialFeeCents: number;
-  } | null;
-  planOnly?: boolean;
-  offSeason?: boolean;
-};
-
-function parseQuoteSnapshot(raw: unknown): QuoteSnapshot {
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return parsed && typeof parsed === "object" ? (parsed as QuoteSnapshot) : {};
-  } catch {
-    return {};
-  }
-}
+/** The stored quoteJson is read through the shared parser — one shape, one
+ *  validation. The bookable day board is deliberately ignored on this path:
+ *  days are live and perishable, so the emailed PDF is a stable pricing
+ *  summary, not a schedule. */
 
 /** The minimal BookingRequest shape the PDF path reads. */
 type ReadyBooking = {
@@ -655,8 +633,8 @@ async function readDayCounters(now: Date): Promise<DayCounters> {
  */
 async function sendDailyDigest(now: Date): Promise<boolean> {
   const client = await dataClient();
-  const coverage = await listAll<CoverageRow>(client.models.RateCoverage);
-  const rates = await listAll<RateRow>(client.models.MarketRate);
+  const coverage = await listAllRows<CoverageRow>(client.models.RateCoverage);
+  const rates = await listAllRows<RateRow>(client.models.MarketRate);
   const counters = await readDayCounters(now);
   const day = now.toISOString().slice(0, 10);
   const nowMs = now.getTime();
@@ -768,8 +746,8 @@ async function sendDailyDigest(now: Date): Promise<boolean> {
  */
 async function sendWeeklyReport(): Promise<boolean> {
   const client = await dataClient();
-  const coverage = await listAll<CoverageRow>(client.models.RateCoverage);
-  const rates = await listAll<RateRow>(client.models.MarketRate);
+  const coverage = await listAllRows<CoverageRow>(client.models.RateCoverage);
+  const rates = await listAllRows<RateRow>(client.models.MarketRate);
   const now = Date.now();
   const weekAgo = now - 7 * DAY_MS;
   const activeCov = coverage.filter((c) => c.active);
@@ -1104,10 +1082,16 @@ async function runTargetedWakeup(
     id: rateKey,
   });
   const cov = (covData ?? null) as CoverageRow | null;
-  const { data: keyRows } =
-    await client.models.MarketRate.listMarketRateByRateKey({ rateKey });
+  const keyRows = await listAll(
+    (nextToken) =>
+      client.models.MarketRate.listMarketRateByRateKey(
+        { rateKey },
+        { limit: 200, nextToken }
+      ),
+    { pageErrors: "ignore" }
+  );
   const serving = pickServingRow(
-    (keyRows ?? []) as RateRow[],
+    keyRows as RateRow[],
     rateKey,
     null
   ) as RateRow | null;
@@ -1197,7 +1181,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
   try {
     const seeded = 0; // retained in the operational summary for compatibility
     const client = await dataClient();
-    const coverage = await listAll<CoverageRow>(client.models.RateCoverage);
+    const coverage = await listAllRows<CoverageRow>(client.models.RateCoverage);
     // GL-16 rollback: read the rollback state FIRST — the live map must
     // match what quoting serves. During a rollback, a combo whose only
     // sheet is post-cutoff is NOT ready: emailing "your exact prices are
@@ -1205,7 +1189,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
     // catalog (the lead clicks through to no price at all).
     const rollback = await readPricingRollback();
     const live = liveRowsByKey(
-      await listAll<RateRow>(client.models.MarketRate),
+      await listAllRows<RateRow>(client.models.MarketRate),
       rollback?.manifest ?? null
     );
     let notified = 0;
@@ -1220,6 +1204,7 @@ export const handler = async (event: PricingRefreshEvent = {}) => {
             list: (a: { limit: number }) => Promise<{ data: { id: string }[] }>;
           };
         };
+        // Deliberate single-row probe: any one row proves a snapshot exists.
         const any = versionModels.CatalogVersion
           ? await versionModels.CatalogVersion.list({ limit: 1 })
           : null;

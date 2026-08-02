@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
@@ -7,13 +7,15 @@ import {
   listWorkItems,
   opResult,
   updateOwnedWork,
+  type BookingRequest,
   type WorkEvent,
   type WorkItem,
   liftEmailSuppression,
   recordNoticeAlternateDelivery,
 } from "../lib/api";
+import { toMessage, useAsync, useKeyedAction } from "../lib/useAsync";
 import { useRoles } from "../lib/auth";
-import { fmtDateTime, money } from "../lib/format";
+import { fmtDateTime, money, todayUtc } from "../lib/format";
 import {
   isVerifiable,
   SEVERITY_LABEL,
@@ -45,33 +47,48 @@ export default function WorkQueue() {
   const roles = useRoles();
   const [tab, setTab] = useState<Tab>("OPEN");
   const [overridesOnly, setOverridesOnly] = useState(false);
-  const [items, setItems] = useState<WorkItem[] | null>(null);
-  const [events, setEvents] = useState<WorkEvent[]>([]);
   // The owner-only "manager override" sheet — a close with no verified outcome.
   const [override, setOverride] = useState<WorkItem | null>(null);
   const [reasonCode, setReasonCode] = useState("");
   const [note, setNote] = useState("");
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Every write below is keyed by the case it acts on, so the double-submit
+  // guard is too: a plain per-screen gate would let a claim on one row silently
+  // swallow the press on another, and the office would never know.
+  const perform = useKeyedAction();
+  const { run: runKeyed } = perform;
+  const runOn = useCallback(
+    (item: WorkItem, fallbackMessage: string, fn: () => Promise<unknown>) =>
+      runKeyed(item.id, async () => {
+        try {
+          await fn();
+        } catch (err) {
+          // Each action keeps its own wording for a failure that carries none.
+          throw new Error(toMessage(err, fallbackMessage));
+        }
+      }),
+    [runKeyed]
+  );
 
-  const load = useCallback(async () => {
-    try {
+  const {
+    data,
+    error: loadError,
+    reload: load,
+  } = useAsync<{ items: WorkItem[]; events: WorkEvent[] }>(
+    async () => {
       const [work, history] = await Promise.all([
         listAll((t) => listWorkItems({ limit: 1000, nextToken: t })),
         listAll((t) => listWorkEvents({ limit: 1000, nextToken: t })),
       ]);
-      setItems(work);
-      setEvents(history);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load work queue");
-      setItems([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+      return { items: work, events: history };
+    },
+    [],
+    "Could not load work queue"
+  );
+  // A failed load used to fall through to the empty state beside its error,
+  // rather than spinning forever — keep that.
+  const items = data?.items ?? (loadError ? [] : null);
+  const events = data?.events ?? [];
+  const error = perform.error ?? loadError;
 
   const shown = useMemo(() => {
     return (items ?? [])
@@ -102,71 +119,47 @@ export default function WorkQueue() {
 
   const claim = useCallback(
     async (item: WorkItem) => {
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not claim work", async () => {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({ workItemId: item.id, action: "CLAIM" })
         );
         if (!result) throw new Error("The work update did not complete");
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not claim work");
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-18: hand a claimed case back to the shared queue (own claims; an owner
   // can release anyone's) — routine work never depends on one named person.
   const release = useCallback(
     async (item: WorkItem) => {
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not release work", async () => {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({ workItemId: item.id, action: "RELEASE" })
         );
         if (!result) throw new Error("The work update did not complete");
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not release work");
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-03: resend the EXACT stored message from its outbox row. The server
-  // refuses unknown-outcome and attachment rows with the reason named.
+  // refuses unknown-outcome and attachment rows with the reason named. Two
+  // presses used to mean the customer got the notice twice.
   const resendExact = async (item: WorkItem) => {
-    setBusyId(item.id);
-    setError(null);
-    try {
+    await runOn(item, "Could not resend", async () => {
       const result = opResult(
-        await (
-          api().mutations as unknown as {
-            resendEmailLog: (a: { emailLogId: string }) => Promise<{
-              data: unknown;
-              errors?: { message: string }[];
-            }>;
-          }
-        ).resendEmailLog({ emailLogId: item.relatedId! })
+        await api().mutations.resendEmailLog({ emailLogId: item.relatedId! })
       ) as { resent?: boolean } | null;
       if (!result?.resent) {
         throw new Error(
           "The resend did not go out — check the case detail and the email log."
         );
       }
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not resend");
-    } finally {
-      setBusyId(null);
-    }
+      load();
+    });
   };
 
   // GL-18 R2: the bounded suppression release for a bounced/complained
@@ -189,24 +182,16 @@ export default function WorkQueue() {
         "What retained evidence proves the address may be enabled? (required)"
       );
       if (!evidence) return;
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not lift the suppression", async () => {
         const result = opResult<{ lifted: boolean; message: string }>(
           await liftEmailSuppression({ email, reasonCode: reason, evidence })
         );
         if (!result) throw new Error("The suppression lift did not complete");
         window.alert(result.message);
-        await load();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Could not lift the suppression"
-        );
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-08/GL-18: the office reached the customer by phone/in person — record
@@ -217,9 +202,7 @@ export default function WorkQueue() {
         "How was the customer actually reached? (required — recorded on the notice)"
       );
       if (!note) return;
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not record the delivery", async () => {
         const result = opResult<{ recorded: boolean; message: string }>(
           await recordNoticeAlternateDelivery({
             relatedId: item.relatedId ?? "",
@@ -229,16 +212,10 @@ export default function WorkQueue() {
         );
         if (!result) throw new Error("The alternate delivery did not record");
         window.alert(result.message);
-        await load();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Could not record the delivery"
-        );
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // A verified close: the server re-checks the real-world outcome (technician
@@ -252,9 +229,7 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not close this work", async () => {
         const result = opResult<{ workItemId: string }>(
           await updateOwnedWork({
             workItemId: item.id,
@@ -263,21 +238,15 @@ export default function WorkQueue() {
           })
         );
         if (!result) throw new Error("The work update did not complete");
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not close this work");
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   const saveOverride = useCallback(async () => {
     if (!override) return;
-    setBusyId(override.id);
-    setError(null);
-    try {
+    await runOn(override, "Could not record the override", async () => {
       const result = opResult<{ workItemId: string }>(
         await updateOwnedWork({
           workItemId: override.id,
@@ -288,13 +257,9 @@ export default function WorkQueue() {
       );
       if (!result) throw new Error("The override did not complete");
       closeOverride();
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not record the override");
-    } finally {
-      setBusyId(null);
-    }
-  }, [override, reasonCode, note, closeOverride, load]);
+      load();
+    });
+  }, [override, reasonCode, note, closeOverride, load, runOn]);
 
   // Rebook a no-access visit. The server resolves the exception from the rebook
   // itself (the verified event) — no separate close is needed here.
@@ -307,21 +272,17 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setError(null);
-      try {
+      // Rebooking is not idempotent — a second press books the customer a
+      // second visit, which someone then has to cancel.
+      await runOn(item, "Could not rebook the visit", async () => {
         const rebooked = opResult<{ jobId: string }>(
           await api().mutations.rebookJob({ jobId: item.relatedId })
         );
         if (!rebooked?.jobId) throw new Error("The visit was not rebooked");
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not rebook the visit");
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-05: finish a paid booking whose finalization got stuck. The mutation
@@ -336,23 +297,17 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not finish the booking", async () => {
         const res = opResult<{ status: string }>(
           await api().mutations.retryBookingFinalization({
             bookingRequestId: item.relatedId,
           })
         );
         if (!res) throw new Error("The retry did not run");
-        await load();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not finish the booking");
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-08: resume a stuck plan cancellation. Idempotent — re-runs the cancel,
@@ -366,25 +321,17 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not resume the cancellation", async () => {
         const res = opResult<{ status: string }>(
           await api().mutations.resumePlanCancellation({
             servicePlanId: item.relatedId,
           })
         );
         if (!res) throw new Error("The resume did not run");
-        await load();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Could not resume the cancellation"
-        );
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   // GL-07: resume a stuck office visit cancel/reschedule. Idempotent — re-runs
@@ -398,23 +345,15 @@ export default function WorkQueue() {
       ) {
         return;
       }
-      setBusyId(item.id);
-      setError(null);
-      try {
+      await runOn(item, "Could not resume the visit change", async () => {
         const res = opResult<{ outcome?: string }>(
           await api().mutations.resumeVisitChange({ jobId: item.relatedId })
         );
         if (!res) throw new Error("The resume did not run");
-        await load();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Could not resume the visit change"
-        );
-      } finally {
-        setBusyId(null);
-      }
+        load();
+      });
     },
-    [load]
+    [load, runOn]
   );
 
   if (!items) {
@@ -520,7 +459,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="ghost"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void claim(item)}
                   >
                     Assign to me
@@ -530,7 +469,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="ghost"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void release(item)}
                   >
                     Release to queue
@@ -542,7 +481,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void liftSuppression(item)}
                   >
                     Lift email suppression…
@@ -558,7 +497,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void resendExact(item)}
                   >
                     Resend exact message
@@ -570,7 +509,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void recordAlternate(item, "plan-canceled")}
                   >
                     Record alternate delivery…
@@ -585,7 +524,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void rebookNoAccess(item)}
                   >
                     {policy.externalAction.label}
@@ -603,7 +542,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void retryFinalization(item)}
                   >
                     {policy.externalAction.label}
@@ -615,7 +554,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void resumeCancellation(item)}
                   >
                     {policy.externalAction.label}
@@ -627,7 +566,7 @@ export default function WorkQueue() {
                   <Button
                     small
                     variant="subtle"
-                    loading={busyId === item.id}
+                    loading={perform.busyKey === item.id}
                     onClick={() => void resumeVisitChangeItem(item)}
                   >
                     {policy.externalAction.label}
@@ -639,7 +578,7 @@ export default function WorkQueue() {
                     <Button
                       key={action.id}
                       small
-                      loading={busyId === item.id}
+                      loading={perform.busyKey === item.id}
                       onClick={() => void confirmVerified(item, action.id, action.label)}
                     >
                       {action.label}
@@ -721,7 +660,7 @@ export default function WorkQueue() {
             <Button
               block
               variant="danger"
-              loading={busyId === override.id}
+              loading={perform.busyKey === override.id}
               disabled={!reasonCode || !note.trim()}
               onClick={() => void saveOverride()}
             >
@@ -742,71 +681,46 @@ export default function WorkQueue() {
  * mental math and no way to bypass policy (collection and recovery happen
  * only through the owned cases below).
  */
-type InFlightBooking = {
-  id: string;
-  status?: string | null;
-  name?: string | null;
-  email?: string | null;
-  amountCents?: number | null;
-  selectedDate?: string | null;
-  jobId?: string | null;
-  customerId?: string | null;
-  processingStartedAt?: string | null;
-  processingMethodLabel?: string | null;
-  processingExpectedBy?: string | null;
-  paymentFailedReason?: string | null;
-  paymentFailedNoticeSentAt?: string | null;
-  pendingConfirmationSentAt?: string | null;
-  updatedAt?: string | null;
-};
 
 export function PaymentsInFlight() {
-  const [rows, setRows] = useState<InFlightBooking[] | null>(null);
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        const data = await listAll<InFlightBooking>((t) =>
-          api().models.BookingRequest.list({
-            filter: {
-              or: [
-                { status: { eq: "PROCESSING" } },
-                { status: { eq: "PAYMENT_FAILED" } },
-              ],
-            },
-            limit: 500,
-            nextToken: t,
-          } as Parameters<ReturnType<typeof api>["models"]["BookingRequest"]["list"]>[0]) as Promise<{
-            data: InFlightBooking[];
-            nextToken?: string | null;
-            errors?: { message: string }[];
-          }>
+  // This tile has never surfaced a load failure — it simply renders nothing,
+  // which is what an unresolved `data` gives us too.
+  const { data: rows } = useAsync<BookingRequest[]>(
+    async () => {
+      const data = await listAll((t) =>
+        api().models.BookingRequest.list({
+          filter: {
+            or: [
+              { status: { eq: "PROCESSING" } },
+              { status: { eq: "PAYMENT_FAILED" } },
+            ],
+          },
+          limit: 500,
+          nextToken: t,
+        })
+      );
+      // Failed attempts age out of this operating view after two weeks —
+      // their money consequences live on as owned cases either way.
+      const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+      return data
+        .filter(
+          (b) =>
+            b.status === "PROCESSING" ||
+            !b.updatedAt ||
+            Date.parse(b.updatedAt) > cutoff
+        )
+        .sort((a, b) =>
+          (a.processingStartedAt ?? a.updatedAt ?? "").localeCompare(
+            b.processingStartedAt ?? b.updatedAt ?? ""
+          )
         );
-        // Failed attempts age out of this operating view after two weeks —
-        // their money consequences live on as owned cases either way.
-        const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
-        setRows(
-          data
-            .filter(
-              (b) =>
-                b.status === "PROCESSING" ||
-                !b.updatedAt ||
-                Date.parse(b.updatedAt) > cutoff
-            )
-            .sort((a, b) =>
-              (a.processingStartedAt ?? a.updatedAt ?? "").localeCompare(
-                b.processingStartedAt ?? b.updatedAt ?? ""
-              )
-            )
-        );
-      } catch {
-        setRows([]);
-      }
-    })();
-  }, []);
+    },
+    [],
+    "Could not load payments in flight"
+  );
 
   if (!rows || rows.length === 0) return null;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayUtc();
   const ageDays = (iso?: string | null) =>
     iso ? Math.floor((Date.now() - Date.parse(iso)) / (24 * 60 * 60 * 1000)) : null;
 

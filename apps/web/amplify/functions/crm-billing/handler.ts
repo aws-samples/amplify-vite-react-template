@@ -42,6 +42,7 @@ import {
   visitChangeReasonSummary,
 } from "../shared/visitChangeReasons";
 import { customerAccessGroups } from "../shared/dynamicGroups";
+import { listAll } from "../shared/pagination";
 
 type Args = {
   customerId?: string;
@@ -567,16 +568,14 @@ async function chargeOneTimeJob(actor: Actor, jobId: string) {
   // Paged to exhaustion: a filtered scan counts its limit against rows
   // scanned, not rows matched, so a single page could miss the covering
   // invoice and wave a second charge through.
-  const existingInvoices: { status: string | null }[] = [];
-  let invoiceToken: string | null | undefined;
-  do {
-    const { data: page, nextToken } = await client.models.Invoice.list({
-      filter: { jobId: { eq: jobId } },
-      nextToken: invoiceToken,
-    });
-    existingInvoices.push(...page);
-    invoiceToken = nextToken;
-  } while (invoiceToken);
+  const existingInvoices: { status: string | null }[] = await listAll(
+    (nextToken) =>
+      client.models.Invoice.list({
+        filter: { jobId: { eq: jobId } },
+        nextToken,
+      }),
+    { pageErrors: "throw" }
+  );
   // FAILED may be retried, and VOID was withdrawn as wrong — neither speaks
   // for the job any more. Anything else (OPEN, PAID, REFUNDED) means the money
   // question was already answered; answering it twice is a double charge, and
