@@ -35,6 +35,7 @@ import {
   startPlanBilling,
   type QueuedVisitsResolution,
 } from "../shared/subscription";
+import { formatMoney, formatMonthly, formatYearly } from "../shared/money";
 
 export const handler = async (
   event: APIGatewayProxyEventV2
@@ -622,7 +623,7 @@ async function stagePostCancellationCharge(opts: {
   amountCents: number;
   requestedAt: string;
 }) {
-  const amountUsd = `$${(opts.amountCents / 100).toFixed(2)}`;
+  const amountUsd = formatMoney(opts.amountCents);
   const caseId = await openOwnedWork({
     kind: "PLAN_CANCELLATION_RECOVERY",
     dedupeKey: opts.servicePlanId,
@@ -721,12 +722,12 @@ async function onSubscriptionInvoiceFailed(opts: {
   });
   const name = customer?.displayName ?? opts.customerId;
   await notifyOffice({
-    subject: `Payment failed — ${name}: $${(opts.amountCents / 100).toFixed(2)}`,
+    subject: `Payment failed — ${name}: ${formatMoney(opts.amountCents)}`,
     heading: "A subscription payment failed",
     template: "ops-invoice-payment-failed",
     customerId: opts.customerId,
     relatedId: opts.invoiceId,
-    bodyHtml: `<p><strong>${escapeHtml(name)}</strong>'s payment of <strong>$${(opts.amountCents / 100).toFixed(2)}</strong> for ${escapeHtml(opts.description)} failed.</p>
+    bodyHtml: `<p><strong>${escapeHtml(name)}</strong>'s payment of <strong>${formatMoney(opts.amountCents)}</strong> for ${escapeHtml(opts.description)} failed.</p>
        <p><strong>Reason:</strong> ${escapeHtml(opts.reason)}</p>
        <p>${
          customerReached
@@ -890,8 +891,8 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
     console.error("onSubscriptionDeleted: customer lookup failed", err);
   }
 
-  const monthly = `$${(sub.priceCents / 100).toFixed(2)}/mo`;
-  const perYear = `$${((sub.priceCents * 12) / 100).toFixed(2)}/yr`;
+  const monthly = formatMonthly(sub.priceCents);
+  const perYear = formatYearly((sub.priceCents * 12));
   const visitLines: string[] = [];
   if (!queued) {
     visitLines.push(
@@ -914,14 +915,14 @@ async function onSubscriptionDeleted(stripeSub: Stripe.Subscription) {
       visitLines.push(
         `<p><strong>Refunds owed in full (the visit was more than 72 hours out — the Finance case prescribes the exact amount):</strong></p>
          <ul>${(queued.refundsOwed ?? [])
-           .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — $${(v.amountCents / 100).toFixed(2)}</li>`)
+           .map((v) => `<li>${v.scheduledDate ?? "unscheduled"} — ${formatMoney(v.amountCents)}</li>`)
            .join("")}</ul>`
       );
     }
     if ((queued.retained ?? []).length > 0) {
       visitLines.push(
         `<p>Payment retained per the 72-hour policy (visit within 72 hours): ${(queued.retained ?? [])
-          .map((v) => `${v.scheduledDate ?? "unscheduled"} — $${(v.amountCents / 100).toFixed(2)}`)
+          .map((v) => `${v.scheduledDate ?? "unscheduled"} — ${formatMoney(v.amountCents)}`)
           .join(", ")}.</p>`
       );
     }
@@ -1033,12 +1034,12 @@ async function onDisputeCreated(dispute: Stripe.Dispute) {
       })
     : "unknown — check Stripe";
   await notifyOffice({
-    subject: `ACTION REQUIRED — card dispute opened: ${name} ($${(dispute.amount / 100).toFixed(2)})`,
+    subject: `ACTION REQUIRED — card dispute opened: ${name} (${formatMoney(dispute.amount)})`,
     heading: "A card dispute was opened",
     template: "ops-dispute-opened",
     customerId,
     relatedId: dispute.id,
-    bodyHtml: `<p>A customer (<strong>${escapeHtml(name)}</strong>) has disputed a charge of <strong>$${(dispute.amount / 100).toFixed(2)}</strong>${dispute.reason ? ` — reason given: <em>${escapeHtml(dispute.reason)}</em>` : ""}.</p>
+    bodyHtml: `<p>A customer (<strong>${escapeHtml(name)}</strong>) has disputed a charge of <strong>${formatMoney(dispute.amount)}</strong>${dispute.reason ? ` — reason given: <em>${escapeHtml(dispute.reason)}</em>` : ""}.</p>
        <p><strong>Evidence is due by ${escapeHtml(deadline)}.</strong> Miss that deadline and the dispute is lost by default and the money is gone.</p>
        <p>Respond in the Stripe dashboard — BuzzKill does not build an evidence editor:</p>
        <p style="margin:20px 0;"><a href="${disputeDashboardUrl(dispute.id)}" style="background:#176b2c;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Open the dispute in Stripe</a></p>`,
@@ -1079,11 +1080,11 @@ async function onDisputeClosed(dispute: Stripe.Dispute) {
   }
 
   await notifyOffice({
-    subject: `Card dispute ${status === "WON" ? "won" : "lost"} ($${(dispute.amount / 100).toFixed(2)})`,
+    subject: `Card dispute ${status === "WON" ? "won" : "lost"} (${formatMoney(dispute.amount)})`,
     heading: `A card dispute was ${status === "WON" ? "won" : "lost"}`,
     template: "ops-dispute-closed",
     relatedId: dispute.id,
-    bodyHtml: `<p>The <strong>$${(dispute.amount / 100).toFixed(2)}</strong> dispute has closed: <strong>${status === "WON" ? "won — the funds stay with BuzzKill" : "lost — the funds have gone back to the customer"}</strong>.</p>
+    bodyHtml: `<p>The <strong>${formatMoney(dispute.amount)}</strong> dispute has closed: <strong>${status === "WON" ? "won — the funds stay with BuzzKill" : "lost — the funds have gone back to the customer"}</strong>.</p>
        <p><a href="${disputeDashboardUrl(dispute.id)}">View it in Stripe</a></p>`,
   });
 }

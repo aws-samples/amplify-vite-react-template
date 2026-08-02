@@ -1,3 +1,4 @@
+import { formatMoney } from "./money";
 /**
  * GL-19 — pure mismatch logic for the daily leadership reconciliations.
  * Money (provider payments/refunds vs the CRM ledger), plans (provider
@@ -90,7 +91,7 @@ export function computeMoneyMismatches(input: {
       out.push({
         key: `money-unmatched-payment:${p.id}`,
         title: "Provider payment has no CRM paid invoice",
-        detail: `Stripe holds a succeeded payment of $${(p.amountCents / 100).toFixed(2)} (${p.id}${p.stripeInvoiceId ? `, invoice ${p.stripeInvoiceId}` : ""}) that no CRM invoice records as PAID. The books understate revenue, or a customer paid for something the CRM doesn't know about.`,
+        detail: `Stripe holds a succeeded payment of ${formatMoney(p.amountCents)} (${p.id}${p.stripeInvoiceId ? `, invoice ${p.stripeInvoiceId}` : ""}) that no CRM invoice records as PAID. The books understate revenue, or a customer paid for something the CRM doesn't know about.`,
         team: "FINANCE",
         relatedId: p.id,
       });
@@ -111,7 +112,7 @@ export function computeMoneyMismatches(input: {
       out.push({
         key: `money-unbacked-invoice:${inv.id}`,
         title: "CRM invoice says PAID; the provider has no succeeded payment",
-        detail: `Invoice ${inv.id} records $${((inv.amountCents ?? 0) / 100).toFixed(2)} PAID against PaymentIntent ${pi}, but Stripe's succeeded payments in the reconcile window do not include it. The books may overstate cash.`,
+        detail: `Invoice ${inv.id} records ${formatMoney(inv.amountCents ?? 0)} PAID against PaymentIntent ${pi}, but Stripe's succeeded payments in the reconcile window do not include it. The books may overstate cash.`,
         team: "FINANCE",
         customerId: inv.customerId,
         relatedId: inv.id,
@@ -141,7 +142,7 @@ export function computeMoneyMismatches(input: {
       out.push({
         key: `money-unrecorded-refund:${pi}`,
         title: "Provider refund not recorded on the invoice",
-        detail: `Stripe refunded $${(refunded / 100).toFixed(2)} on ${pi}, but the CRM invoice(s) record only $${(recorded / 100).toFixed(2)} refunded. The books overstate net cash.`,
+        detail: `Stripe refunded ${formatMoney(refunded)} on ${pi}, but the CRM invoice(s) record only ${formatMoney(recorded)} refunded. The books overstate net cash.`,
         team: "FINANCE",
         customerId: matches[0]?.customerId,
         relatedId: pi,
@@ -380,7 +381,7 @@ export function computeStateMismatches(input: {
     out.push({
       key: `state-canceled-open-money:${inv.id}`,
       title: "Canceled visit still has an open invoice",
-      detail: `Invoice ${inv.id} ($${((inv.amountCents ?? 0) / 100).toFixed(2)}) is OPEN against canceled visit ${inv.jobId}. Decide the money: void it (nothing owed) or collect it as a real balance — it must not sit unowned.`,
+      detail: `Invoice ${inv.id} (${formatMoney(inv.amountCents ?? 0)}) is OPEN against canceled visit ${inv.jobId}. Decide the money: void it (nothing owed) or collect it as a real balance — it must not sit unowned.`,
       team: "FINANCE",
       customerId: inv.customerId,
       relatedId: inv.id,

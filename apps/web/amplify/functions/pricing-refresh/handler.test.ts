@@ -1352,7 +1352,7 @@ describe("the weekly report — Monday 10:00 UTC, visibility not a gate", () => 
     // Ranked by |%|: the +50.0% GENERAL_PEST move appears before -10.0%.
     expect(body.indexOf("+50.0%")).toBeGreaterThan(-1);
     expect(body.indexOf("+50.0%")).toBeLessThan(body.indexOf("-10.0%"));
-    expect(body).toContain("$200 → <strong>$300</strong>");
+    expect(body).toContain("$200.00 → <strong>$300.00</strong>");
     // Floors that bound.
     expect(body).toContain("shipped at the Zone-A floor");
     expect(body).toContain("ROACH · ware-ma");
@@ -1451,7 +1451,7 @@ describe("GL-16 — rollback pause and the daily change review", () => {
     expect(String(review.title)).toContain("2 live rate changes");
     expect(String(review.detail)).toContain("TERMITE · springfield-ma");
     expect(String(review.detail)).toContain("office pin by jake@getgim.com");
-    expect(String(review.detail)).toContain("$399 → $459");
+    expect(String(review.detail)).toContain("$399.00 → $459.00");
     // Review, never a gate: the sheets cached and served without waiting.
     expect(createdRates.length).toBeGreaterThan(0);
   });

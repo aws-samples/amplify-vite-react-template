@@ -1,10 +1,7 @@
-export const money = (cents?: number | null) =>
-  cents == null
-    ? "—"
-    : (cents / 100).toLocaleString("en-US", {
-        style: "currency",
-        currency: "USD",
-      });
+/** The CRM's `money` was the most correct of the nine formatters — locale-aware
+ *  and null-safe — so it became the shared one. Re-exported here so the ~89
+ *  call sites keep their existing import. */
+export { formatMoney as money } from "../../../web/amplify/functions/shared/money";
 
 /** "Jul 14" / "Jul 14, 2026" from an ISO date (YYYY-MM-DD) or datetime. */
 export const fmtDate = (iso?: string | null, withYear = false) => {

@@ -277,10 +277,10 @@ describe("normalizePhone", () => {
 // ── Formatting ──────────────────────────────────────────────────────
 
 describe("money", () => {
-  it("keeps whole dollars whole, like the server's money()", () => {
-    expect(money(24900)).toBe("$249");
+  it("renders whole dollars with cents, matching the agreement PDF and the CRM", () => {
+    expect(money(24900)).toBe("$249.00");
     expect(money(9950)).toBe("$99.50");
-    expect(money(0)).toBe("$0");
+    expect(money(0)).toBe("$0.00");
   });
 });
 
@@ -333,7 +333,7 @@ describe("hoaMoneyLine", () => {
         initialFeeCents: 16000,
       })
     ).toBe(
-      "Your first month ($160) is charged today to lock in your first visit, then $160/mo."
+      "Your first month ($160.00) is charged today to lock in your first visit, then $160.00/mo."
     );
   });
 });

@@ -1,3 +1,4 @@
+import { formatMoney } from "../shared/money";
 /**
  * Staff-entered discount codes for the public funnel.
  *
@@ -137,6 +138,6 @@ export function promoLabel(
   const detail =
     promo.kind === "PERCENT"
       ? `${promo.percentOff ?? 0}% off`
-      : `$${((promo.amountOffCents ?? 0) / 100).toFixed(2)} off`;
+      : `${formatMoney(promo.amountOffCents ?? 0)} off`;
   return `${normalizeCode(promo.code)} (${detail})`;
 }

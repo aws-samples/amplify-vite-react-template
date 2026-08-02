@@ -138,11 +138,11 @@ export const FREQUENCY_LABELS: Record<RecurringFrequency, string> = {
 
 // ── Formatting ──────────────────────────────────────────────────────
 
-/** Same shape as the server's `money()`: whole dollars stay whole. */
-export function money(cents: number): string {
-  const d = cents / 100;
-  return Number.isInteger(d) ? `$${d}` : `$${d.toFixed(2)}`;
-}
+/** The shared formatter — the funnel prints the same string the agreement
+ *  PDF and the receipt email do. Imported as well as re-exported: this module
+ *  formats prices itself, a few lines down. */
+export { formatMoney as money } from "../../amplify/functions/shared/money";
+import { formatMoney as money } from "../../amplify/functions/shared/money";
 
 /**
  * "2026-07-21" → "Tue, Jul 21". Parsed as LOCAL date parts — `new

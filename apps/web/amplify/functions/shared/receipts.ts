@@ -1,6 +1,7 @@
 import { dataClient } from "./dataClient";
 import { emailShell, notifyOffice, sendEmail } from "./email";
 import { openMissingContactWork } from "./ownedWork";
+import { formatMoney as money } from "./money";
 
 /**
  * Customer notices for money movement — the receipt after a charge, the notice
@@ -17,7 +18,7 @@ import { openMissingContactWork } from "./ownedWork";
  * — a charge that nobody was told about is something somebody should know.
  */
 
-const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+
 
 /** The portal billing page a customer pays / updates their card on. */
 export const portalBillingUrl = () =>

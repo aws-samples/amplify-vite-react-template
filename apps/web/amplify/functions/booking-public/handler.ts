@@ -86,6 +86,7 @@ import {
   recordWebsiteQuoteLead,
   recordWebsiteQuoteRequested,
 } from "../shared/leadLifecycle";
+import { formatMoney } from "../shared/money";
 
 /**
  * Public booking funnel API (Function URL, CORS-locked to the marketing
@@ -2087,7 +2088,7 @@ async function ownOrphanedIntent(
       kind: "PAYMENT_INTENT_ORPHAN",
       dedupeKey: `booking-payment-orphan:${booking.id}`,
       title: `A checkout's payment intent is unrecorded: ${booking.name ?? booking.id}`,
-      detail: `Stripe PaymentIntent ${intentId} ($${(amountCents / 100).toFixed(2)}) exists for booking ${booking.id}, but the booking record could not be updated to reference it AND the intent could not be canceled. If the customer completes this payment, finalization will refuse it as superseded — verify the intent in Stripe, cancel or refund it, and reconcile the booking.`,
+      detail: `Stripe PaymentIntent ${intentId} (${formatMoney(amountCents)}) exists for booking ${booking.id}, but the booking record could not be updated to reference it AND the intent could not be canceled. If the customer completes this payment, finalization will refuse it as superseded — verify the intent in Stripe, cancel or refund it, and reconcile the booking.`,
       relatedId: booking.id,
       sourceUrl: `/work`,
       resolutionAction:

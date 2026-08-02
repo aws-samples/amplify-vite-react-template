@@ -195,6 +195,6 @@ describe("auto-send gate", () => {
     const res = await autoQuoteLead({ ...base, leadPrice: "0" }, "Sam");
 
     const amounts = (res.replyText ?? "").match(/\$[\d,]+(?:\.\d{2})?/g) ?? [];
-    expect(amounts).toEqual(["$199"]);
+    expect(amounts).toEqual(["$199.00"]);
   });
 });

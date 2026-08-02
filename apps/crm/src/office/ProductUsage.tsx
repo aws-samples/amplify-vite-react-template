@@ -17,6 +17,7 @@ import {
   Page,
   Spinner,
 } from "../ui/kit";
+import { formatMoney } from "../../../web/amplify/functions/shared/money";
 
 /**
  * Product usage across a custom date range: the total amount of every chemical
@@ -31,7 +32,7 @@ function fmtQty(n: number): string {
   return (Math.round(n * 100) / 100).toString();
 }
 function money(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  return formatMoney(cents);
 }
 /** YYYY-MM-DD in local time, for the default range and the date inputs. */
 function isoDate(d: Date): string {

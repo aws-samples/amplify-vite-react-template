@@ -70,6 +70,7 @@ import {
   type StateInvoiceRow,
   type StateJobRow,
 } from "../shared/leadershipRecon";
+import { formatMoney, formatMonthly, formatYearly } from "../shared/money";
 
 type OwedInvoice = {
   id: string;
@@ -988,7 +989,7 @@ async function reportPlansNotBilling() {
       const { data: customer } = await client.models.Customer.get({
         id: p.customerId,
       });
-      return `<li><strong>${customer?.displayName ?? p.customerId}</strong> — ${p.planName}, $${(p.priceCents / 100).toFixed(2)}/mo</li>`;
+      return `<li><strong>${customer?.displayName ?? p.customerId}</strong> — ${p.planName}, ${formatMonthly(p.priceCents)}</li>`;
     })
   );
   const annual = serviced.reduce((s, p) => s + p.priceCents * 12, 0);
@@ -997,7 +998,7 @@ async function reportPlansNotBilling() {
     subject: `${serviced.length} plan${serviced.length === 1 ? " is" : "s are"} being serviced without billing`,
     heading: "Serviced but not billing",
     template: "ops-not-billing-digest",
-    bodyHtml: `<p>These plans have had their first visit but no subscription is running, so they are being serviced for free. Together that is about <strong>$${(annual / 100).toFixed(2)}/yr</strong>.</p>
+    bodyHtml: `<p>These plans have had their first visit but no subscription is running, so they are being serviced for free. Together that is about <strong>${formatYearly(annual)}</strong>.</p>
        <ul>${rows.join("")}</ul>
        <p>Usually this means no payment method on file. Collect one on the customer record, then use <strong>Start billing</strong> on the plan.</p>`,
   });
@@ -1080,7 +1081,7 @@ async function reportUnchargedOneTimeJobs() {
         id: j.customerId,
       });
       const when = (j.completedAt ?? j.scheduledDate ?? "").slice(0, 10);
-      return `<li><strong>${customer?.displayName ?? j.customerId}</strong> — ${j.serviceType}${when ? `, completed ${when}` : ""}: $${((j.priceCents ?? 0) / 100).toFixed(2)}</li>`;
+      return `<li><strong>${customer?.displayName ?? j.customerId}</strong> — ${j.serviceType}${when ? `, completed ${when}` : ""}: ${formatMoney(j.priceCents ?? 0)}</li>`;
     })
   );
   const total = uncharged.reduce((s, j) => s + (j.priceCents ?? 0), 0);
@@ -1089,7 +1090,7 @@ async function reportUnchargedOneTimeJobs() {
     subject: `${uncharged.length} completed job${uncharged.length === 1 ? " has" : "s have"} never been charged`,
     heading: "Completed but never charged",
     template: "ops-uncharged-jobs-digest",
-    bodyHtml: `<p>The work is done and no charge or invoice exists for ${uncharged.length === 1 ? "this job" : "these jobs"} — together <strong>$${(total / 100).toFixed(2)}</strong> nobody is collecting.</p>
+    bodyHtml: `<p>The work is done and no charge or invoice exists for ${uncharged.length === 1 ? "this job" : "these jobs"} — together <strong>${formatMoney(total)}</strong> nobody is collecting.</p>
        <ul>${rows.join("")}</ul>
        <p>Open each customer and use <strong>Charge</strong> on the job, or record an offline payment if the money arrived another way. They also appear under <strong>Completed but never charged</strong> on the Dashboard until cleared.</p>`,
   });
@@ -1167,7 +1168,7 @@ async function reportPlansWithoutNextVisit() {
       const { data: customer } = await client.models.Customer.get({
         id: p.customerId,
       });
-      return `<li><strong>${customer?.displayName ?? p.customerId}</strong> — ${p.planName}, $${(p.priceCents / 100).toFixed(2)}/mo${p.stripeSubscriptionId ? " — <strong>billing is running</strong>" : ""}</li>`;
+      return `<li><strong>${customer?.displayName ?? p.customerId}</strong> — ${p.planName}, ${formatMonthly(p.priceCents)}${p.stripeSubscriptionId ? " — <strong>billing is running</strong>" : ""}</li>`;
     })
   );
 
@@ -1513,7 +1514,7 @@ async function suspendPlanForDelinquency(inv: OwedInvoice): Promise<boolean> {
     id: inv.customerId,
   });
   const name = customer?.displayName ?? inv.customerId;
-  const amount = `$${(inv.amountCents / 100).toFixed(2)}`;
+  const amount = formatMoney(inv.amountCents);
 
   let suspended = false;
   if (inv.servicePlanId) {
@@ -1649,20 +1650,20 @@ async function reportArAging() {
 
   const rows = AGING_BUCKET_ORDER.map((b) => {
     const t = totals.get(b)!;
-    return `<tr><td style="padding:4px 12px 4px 0;">${AGING_BUCKET_LABEL[b]}</td><td style="padding:4px 0;text-align:right;">$${(t.cents / 100).toFixed(2)}</td><td style="padding:4px 0 4px 12px;text-align:right;color:#888;">${t.count}</td></tr>`;
+    return `<tr><td style="padding:4px 12px 4px 0;">${AGING_BUCKET_LABEL[b]}</td><td style="padding:4px 0;text-align:right;">${formatMoney(t.cents)}</td><td style="padding:4px 0 4px 12px;text-align:right;color:#888;">${t.count}</td></tr>`;
   }).join("");
 
   const notified = await notifyOffice({
-    subject: `AR aging: $${(grand / 100).toFixed(2)} outstanding across ${outstanding.length} invoice${outstanding.length === 1 ? "" : "s"}`,
+    subject: `AR aging: ${formatMoney(grand)} outstanding across ${outstanding.length} invoice${outstanding.length === 1 ? "" : "s"}`,
     heading: "Accounts receivable — aging",
     template: "ops-ar-aging",
     bodyHtml: `<p>Money owed to BuzzKill right now, by how overdue it is:</p>
        <table style="border-collapse:collapse;font-size:14px;"><tbody>${rows}</tbody></table>
-       <p style="margin-top:12px;"><strong>Total outstanding: $${(grand / 100).toFixed(2)}</strong></p>
+       <p style="margin-top:12px;"><strong>Total outstanding: ${formatMoney(grand)}</strong></p>
        <p style="color:#666;font-size:13px;">The oldest buckets are the ones to work first — the longer money sits, the less of it comes back.</p>`,
   });
   console.log(
-    `AR aging: ${outstanding.length} invoices, $${(grand / 100).toFixed(2)} outstanding, notified=${notified}`
+    `AR aging: ${outstanding.length} invoices, ${formatMoney(grand)} outstanding, notified=${notified}`
   );
   return { arOutstanding: outstanding.length, arTotalCents: grand, notified };
 }
@@ -1715,7 +1716,7 @@ async function reportDisputeDeadlines() {
             timeZone: "UTC",
           })
         : "unknown";
-      return `<li><strong>${escapeHtmlLite(String(name))}</strong> — $${(d.amountCents / 100).toFixed(2)}, evidence due <strong>${due}</strong>. Owner: ${d.ownerEmail ? escapeHtmlLite(d.ownerEmail) : "<strong>unassigned</strong>"}</li>`;
+      return `<li><strong>${escapeHtmlLite(String(name))}</strong> — ${formatMoney(d.amountCents)}, evidence due <strong>${due}</strong>. Owner: ${d.ownerEmail ? escapeHtmlLite(d.ownerEmail) : "<strong>unassigned</strong>"}</li>`;
     })
   );
 
@@ -1900,7 +1901,7 @@ export async function reconcileProcessingPayments() {
             kind: "PAYMENT_PROCESSING_OVERDUE",
             dedupeKey: b.id,
             title: `Bank payment overdue: ${b.name ?? b.id}`,
-            detail: `The $${(((b.amountCents ?? 0) as number) / 100).toFixed(2)} bank debit for booking ${b.id} (${b.email ?? "no email"}, visit ${b.selectedDate ?? "unscheduled"}) was expected to settle by ${b.processingExpectedBy} and Stripe still reports it processing. The scheduled visit is riding on money that hasn't arrived.`,
+            detail: `The ${formatMoney(((b.amountCents ?? 0) as number))} bank debit for booking ${b.id} (${b.email ?? "no email"}, visit ${b.selectedDate ?? "unscheduled"}) was expected to settle by ${b.processingExpectedBy} and Stripe still reports it processing. The scheduled visit is riding on money that hasn't arrived.`,
             customerId: b.customerId ?? undefined,
             relatedId: b.id,
             sourceUrl: b.customerId ? `/customers/${b.customerId}` : undefined,
@@ -2588,7 +2589,7 @@ export async function reconcilePaidBookings() {
   for (const m of recon.amountMismatches) {
     addIssue(
       m.bookingId,
-      `Stripe captured $${(m.paidCents / 100).toFixed(2)} but the booking committed to $${(m.bookedCents / 100).toFixed(2)}`
+      `Stripe captured ${formatMoney(m.paidCents)} but the booking committed to ${formatMoney(m.bookedCents)}`
     );
   }
 
@@ -2655,7 +2656,7 @@ export async function reconcilePaidBookings() {
       kind: "PAID_NOT_FINALIZED",
       dedupeKey: `recon-missing-pi:${pi}`,
       title: "Succeeded booking payment has no booking",
-      detail: `Stripe PaymentIntent ${pi} (tagged as a booking payment) succeeded for $${((succeeded.paidCentsByPi[pi] ?? 0) / 100).toFixed(2)}, but no BookingRequest references it. Money is captured with nothing behind it.`,
+      detail: `Stripe PaymentIntent ${pi} (tagged as a booking payment) succeeded for ${formatMoney(succeeded.paidCentsByPi[pi] ?? 0)}, but no BookingRequest references it. Money is captured with nothing behind it.`,
       relatedId: pi,
       resolutionAction:
         "Find this PaymentIntent in Stripe; recreate and finalize the booking from the receipt, or refund the charge and tell the customer.",

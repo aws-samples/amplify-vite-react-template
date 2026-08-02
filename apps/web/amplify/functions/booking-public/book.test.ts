@@ -470,7 +470,7 @@ describe("plan-only quotes always book the plan", () => {
       recurring: true,
       amountCents: 28800,
     });
-    expect(res.body.summary).toContain("$288/mo");
+    expect(res.body.summary).toContain("$288.00/mo");
   });
 });
 

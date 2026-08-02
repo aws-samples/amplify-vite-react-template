@@ -141,6 +141,7 @@ import {
   logLeadTouch,
 } from "../shared/leadLifecycle";
 import { assertScheduleReason } from "../shared/visitChangeReasons";
+import { formatMoney, formatMonthly } from "../shared/money";
 
 const s3 = new S3Client();
 const BUCKET = () => {
@@ -1016,13 +1017,12 @@ async function visitMoneySettled(
     if (!retainedRecorded) {
       return {
         ok: false,
-        problem: `A paid invoice still holds $${(
+        problem: `A paid invoice still holds ${formatMoney(
           unsettledPaid.reduce(
             (t, i) =>
               t + Math.max(0, (i.amountCents ?? 0) - (i.refundedAmountCents ?? 0)),
             0
-          ) / 100
-        ).toFixed(2)} with no full refund and no recorded retained-fee outcome.`,
+          ))} with no full refund and no recorded retained-fee outcome.`,
       };
     }
   }
@@ -4907,7 +4907,7 @@ async function startBillingForPlan(job: {
     client.models.Customer.get({ id: job.customerId }),
     client.models.ServicePlan.get({ id: job.servicePlanId }),
   ]);
-  const price = plan?.priceCents ? `$${(plan.priceCents / 100).toFixed(2)}/mo` : "";
+  const price = plan?.priceCents ? formatMonthly(plan.priceCents) : "";
   await notifyOffice({
     subject: `ACTION REQUIRED — plan serviced but not billing: ${customer?.displayName ?? job.customerId}`,
     heading: "A plan was serviced but billing did not start",

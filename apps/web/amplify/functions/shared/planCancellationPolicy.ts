@@ -1,3 +1,4 @@
+import { formatMoney as usd } from "./money";
 /**
  * GL-08 — the one plan-cancellation policy, in pure form.
  *
@@ -40,11 +41,7 @@ export const PLAN_CANCELLATION_POLICY = {
   saveOffer: { enabled: true as const, kind: "PAUSE" as const },
 } as const;
 
-const usd = (cents: number): string =>
-  `$${(cents / 100).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+
 
 /**
  * The actual resolution of a plan's queued visits, from cancelPlanBilling.

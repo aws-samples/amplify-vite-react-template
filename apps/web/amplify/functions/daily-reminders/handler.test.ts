@@ -241,7 +241,7 @@ describe("serviced-but-not-billing digest", () => {
 
     // (99.00 + 45.00) * 12
     expect(alertsAbout("serviced without billing")[0].bodyHtml).toContain(
-      "$1728.00/yr"
+      "$1,728.00/yr"
     );
   });
 });

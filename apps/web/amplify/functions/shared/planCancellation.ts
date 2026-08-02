@@ -26,6 +26,7 @@ import {
   refundOutcomeDescription,
   type VisitResolutionSummary,
 } from "./planCancellationPolicy";
+import { formatMoney } from "./money";
 
 /**
  * GL-08 — customer self-service plan cancellation.
@@ -168,8 +169,8 @@ async function listQueuedVisits(
         scheduledDate: job.scheduledDate ?? null,
         disposition: "STOPS",
         reason: policy.withinFreeWindow
-          ? `paid — the $${(paidCents / 100).toFixed(2)} you paid will be refunded in full (it's more than 72 hours away)`
-          : `paid — it's within 72 hours, so per our cancellation policy the $${(paidCents / 100).toFixed(2)} paid isn't refunded`,
+          ? `paid — the ${formatMoney(paidCents)} you paid will be refunded in full (it's more than 72 hours away)`
+          : `paid — it's within 72 hours, so per our cancellation policy the ${formatMoney(paidCents)} paid isn't refunded`,
       });
       continue;
     }
@@ -439,7 +440,7 @@ export async function planCancellationSettled(
         // recorded retained outcome exists).
         return {
           settled: false,
-          reason: `Canceled visit ${job.id} still holds $${(facts.paidRemainingCents / 100).toFixed(2)} with no full refund and no recorded retained-fee outcome.`,
+          reason: `Canceled visit ${job.id} still holds ${formatMoney(facts.paidRemainingCents)} with no full refund and no recorded retained-fee outcome.`,
         };
       }
     }

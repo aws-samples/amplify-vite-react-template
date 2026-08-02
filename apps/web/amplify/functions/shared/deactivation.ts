@@ -22,6 +22,7 @@ import {
 } from "./lifecycleCommand";
 import { reasonPolicy, LIFECYCLE_POLICY_VERSION } from "./lifecycleReasons";
 import { emailShell, sendEmail } from "./email";
+import { formatMoney as formatCents } from "./money";
 
 
 /**
@@ -647,13 +648,7 @@ export async function deactivateCustomer(
   }
 }
 
-/** Cents → a plain dollar string for the audit summary. */
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
+
 
 /** Every ACTIVE ServicePlan for a customer, paged fully. */
 async function listActivePlans(

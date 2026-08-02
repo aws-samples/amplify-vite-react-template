@@ -20,6 +20,7 @@ import {
   Sheet,
   Spinner,
 } from "../ui/kit";
+import { formatMoney } from "../../../web/amplify/functions/shared/money";
 
 /**
  * Light inventory: current on-hand for every tracked product, restock, and
@@ -33,7 +34,7 @@ function fmtQty(n: number): string {
   return (Math.round(n * 100) / 100).toString();
 }
 function money(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  return formatMoney(cents);
 }
 
 type Row = {

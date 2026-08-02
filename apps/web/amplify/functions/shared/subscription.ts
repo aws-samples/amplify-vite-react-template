@@ -8,6 +8,7 @@ import { computeVisitCancellationPolicy } from "./cancellationPolicy";
 import { jobScheduleGuards, releaseJobCapacity } from "./capacity";
 import { casGuardedUpdate } from "./atomicLock";
 import { todayEastern } from "./dates";
+import { formatMoney } from "./money";
 
 /**
  * Plan billing lifecycle — the single owner of "start billing" and "stop
@@ -409,8 +410,8 @@ export async function cancelQueuedPlanVisits(
         const note = `Auto-canceled ${todayEastern()}: ${cause}.${
           paidCents > 0
             ? policy.withinFreeWindow
-              ? ` Paid ${(paidCents / 100).toFixed(2)} — full refund owed (more than ${CANCEL_FULL_REFUND_DAYS * 24} hours out).`
-              : ` Paid ${(paidCents / 100).toFixed(2)} — retained per the ${CANCEL_FULL_REFUND_DAYS * 24}-hour policy.`
+              ? ` Paid ${formatMoney(paidCents)} — full refund owed (more than ${CANCEL_FULL_REFUND_DAYS * 24} hours out).`
+              : ` Paid ${formatMoney(paidCents)} — retained per the ${CANCEL_FULL_REFUND_DAYS * 24}-hour policy.`
             : " Taken off the schedule so it cannot dispatch unbilled."
         }`;
         // The MACHINE-READABLE disposition rides the cancel write itself, so
@@ -476,8 +477,8 @@ export async function cancelQueuedPlanVisits(
           await openOwnedWork({
             kind: "PAID_VISIT_CANCELLATION",
             dedupeKey: job.id,
-            title: `Refund a canceled plan visit in full: $${(paidCents / 100).toFixed(2)}`,
-            detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was paid ($${(paidCents / 100).toFixed(2)} net of prior refunds) and canceled with plan ${servicePlanId} strictly more than 72 hours before its start. Per the approved policy the ONLY outcome is a full refund of that amount to the original payment method${money.paidInvoiceId ? ` (invoice ${money.paidInvoiceId})` : " (no paid invoice row was found — locate the payment in Stripe)"}. The visit is already off the schedule.`,
+            title: `Refund a canceled plan visit in full: ${formatMoney(paidCents)}`,
+            detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was paid (${formatMoney(paidCents)} net of prior refunds) and canceled with plan ${servicePlanId} strictly more than 72 hours before its start. Per the approved policy the ONLY outcome is a full refund of that amount to the original payment method${money.paidInvoiceId ? ` (invoice ${money.paidInvoiceId})` : " (no paid invoice row was found — locate the payment in Stripe)"}. The visit is already off the schedule.`,
             customerId: job.customerId,
             relatedId: job.id,
             sourceUrl: `/customers/${job.customerId}`,
@@ -503,7 +504,7 @@ export async function cancelQueuedPlanVisits(
             kind: "PAID_VISIT_CANCELLATION",
             dedupeKey: `pending-payment:${job.id}`,
             title: "A payment is still in motion on a canceled plan visit",
-            detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was canceled with plan ${servicePlanId} while $${(money.inFlightCents / 100).toFixed(2)} is still processing${money.inFlightInvoiceId ? ` (invoice ${money.inFlightInvoiceId})` : ""}. When it settles: ${
+            detail: `Job ${job.id}${job.scheduledDate ? ` on ${job.scheduledDate}` : ""} was canceled with plan ${servicePlanId} while ${formatMoney(money.inFlightCents)} is still processing${money.inFlightInvoiceId ? ` (invoice ${money.inFlightInvoiceId})` : ""}. When it settles: ${
               policy.withinFreeWindow
                 ? "refund it in full — the visit was strictly more than 72 hours away at cancellation"
                 : "it is retained per the 72-hour policy (the visit was 72 hours or less away)"

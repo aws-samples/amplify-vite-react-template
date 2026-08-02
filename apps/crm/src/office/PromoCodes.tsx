@@ -14,6 +14,7 @@ import {
   Sheet,
   Spinner,
 } from "../ui/kit";
+import { formatMoney } from "../../../web/amplify/functions/shared/money";
 
 /**
  * Owner-only discount codes for the public booking funnel. Staff create a code
@@ -30,7 +31,7 @@ import {
 /** "20% off" / "$25.00 off" — the value line shown in the list and summaries. */
 function valueLabel(p: PromoCode): string {
   if (p.kind === "PERCENT") return `${p.percentOff ?? 0}% off`;
-  if (p.kind === "FIXED") return `$${((p.amountOffCents ?? 0) / 100).toFixed(2)} off`;
+  if (p.kind === "FIXED") return `${formatMoney(p.amountOffCents ?? 0)} off`;
   return "—";
 }
 

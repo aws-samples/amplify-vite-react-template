@@ -552,9 +552,12 @@ async function composeReply(
     funnelUrl: string;
   }
 ): Promise<string | null> {
+  // Comma-aware on purpose: the formatter groups thousands, and a pattern that
+  // stopped at the separator would read "$1,200.00" as "$1" and then refuse
+  // every reply quoting a four-figure price.
   const allowedAmounts = [facts.monthly, facts.initial, facts.oneTime, facts.fallbackPlan, facts.pivotedFromOneTime]
     .filter(Boolean)
-    .flatMap((s) => (s as string).match(/\$\d+(?:\.\d{2})?/g) ?? []);
+    .flatMap((s) => (s as string).match(/\$[\d,]+(?:\.\d{2})?/g) ?? []);
 
   const prompt = `Write the paste-ready Thumbtack reply (2–4 sentences) for this quoted lead. Use ONLY these exact prices — never invent, change, or round any dollar amount:
 - Service: ${facts.service}
@@ -590,16 +593,31 @@ Tone: warm, direct, no fluff. Output ONLY the reply text.`;
  * Consistency guard: every dollar amount in a composed reply must be one the
  * rate card computed. Nothing is whitelisted by literal — a hardcoded "$15"
  * or "$99" is exactly the class of amount this guard exists to catch (R58).
- * Thousands separators are normalized on both sides first.
+ *
+ * Compares VALUES, not strings. The allowed amounts are formatted by
+ * `money()`, but the reply is written by the model, which may render the same
+ * price with or without trailing cents ("$199" for a "$199.00" fact) or with
+ * its own grouping. Those are the same amount, and refusing to auto-send over
+ * a formatting difference is a false positive — while "$15" against an allowed
+ * "$199" is still caught, which is the point.
  */
 export function replyUsesOnlyAllowedAmounts(
   reply: string,
   allowedAmounts: string[]
 ): boolean {
-  const normalize = (v: string) => v.replace(/,(?=\d{3})/g, "");
-  const used = (reply.match(/\$[\d,]+(?:\.\d{2})?/g) ?? []).map(normalize);
-  const allowed = new Set(allowedAmounts.map(normalize));
-  return used.every((m) => allowed.has(m));
+  const toCents = (v: string): number | null => {
+    const digits = v.replace(/[$,]/g, "");
+    if (!/^\d+(?:\.\d{2})?$/.test(digits)) return null;
+    return Math.round(Number(digits) * 100);
+  };
+  const allowed = new Set(
+    allowedAmounts.map(toCents).filter((c): c is number => c !== null)
+  );
+  const used = reply.match(/\$[\d,]+(?:\.\d{2})?/g) ?? [];
+  return used.every((m) => {
+    const cents = toCents(m);
+    return cents !== null && allowed.has(cents);
+  });
 }
 
 export function templateReply(facts: {

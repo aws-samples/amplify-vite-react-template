@@ -2,6 +2,7 @@ import type Stripe from "stripe";
 import { dataClient } from "./dataClient";
 import { forEachPage } from "./pagination";
 import { sendRefundNotice } from "./receipts";
+import { formatMoney } from "./money";
 
 /**
  * Refunds.
@@ -98,7 +99,7 @@ export async function refundInvoice(
   }
   if (requested > remaining) {
     throw new Error(
-      `That is more than is left to refund on this invoice ($${(remaining / 100).toFixed(2)})`
+      `That is more than is left to refund on this invoice (${formatMoney(remaining)})`
     );
   }
 
@@ -143,7 +144,7 @@ export async function refundInvoice(
     // The money is already back with the customer. This must be loud: the
     // ledger now overstates revenue and only a human can reconcile it.
     throw new Error(
-      `Refund of $${(requested / 100).toFixed(2)} was issued${
+      `Refund of ${formatMoney(requested)} was issued${
         stripeRefundId ? ` (Stripe ${stripeRefundId})` : ""
       } but the invoice could not be updated — tell the office to reconcile invoice ${invoice.id} by hand. ${
         errors?.map((e) => e.message).join("; ") ?? ""

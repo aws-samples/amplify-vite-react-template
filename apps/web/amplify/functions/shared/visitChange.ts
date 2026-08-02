@@ -35,6 +35,7 @@ import {
   computeVisitCancellationPolicy,
   type VisitCancellationPolicy,
 } from "./cancellationPolicy";
+import { formatMoney as usd } from "./money";
 
 /** A visit-change command older than this, with its next-attempt time passed (or
  *  never set), belongs to a dead attempt the reconcile sweep or a retry may
@@ -88,11 +89,7 @@ export type VisitChangeActor = {
  *  offers refund-to-card, an owner manager exception, or a policy fee-retained.) */
 export type CancelDecision = "CANCEL_REFUND";
 
-const usd = (cents: number): string =>
-  `$${(cents / 100).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+
 
 type JobRow = {
   id: string;

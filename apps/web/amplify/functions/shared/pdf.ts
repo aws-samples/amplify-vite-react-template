@@ -1,3 +1,4 @@
+import { formatMoney as fmtMoney } from "./money";
 import {
   PDFDocument,
   PDFFont,
@@ -188,11 +189,7 @@ const A_COLW = (A_CW - A_GUTTER) / 2;
 const BAR_H = 16; // section band height
 const A_BOTTOM = 44; // bottom margin
 
-const fmtMoney = (cents: number) =>
-  `$${(cents / 100).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+
 
 const fmtSignedDate = (iso: string) =>
   new Date(iso).toLocaleDateString("en-US", {

@@ -28,6 +28,7 @@ import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "./consentText";
 import { customerAccessGroups } from "./dynamicGroups";
 import { LEAD_LOST_REASONS } from "./leadReasons";
 import { forEachPage } from "./pagination";
+import { formatMoney } from "./money";
 
 export type LeadActor = {
   sub: string | null;
@@ -818,7 +819,7 @@ export async function setLeadDisposition(
         customerId: args.customerId,
         channel: "LIFECYCLE",
         outcome: "NOTE",
-        note: `Converted to client — added plan "${planName}" ($${(priceCents / 100).toFixed(2)} ${freq.toLowerCase()}), ACTIVE-not-billing.${args.note ? ` ${args.note}` : ""}`,
+        note: `Converted to client — added plan "${planName}" (${formatMoney(priceCents)} ${freq.toLowerCase()}), ACTIVE-not-billing.${args.note ? ` ${args.note}` : ""}`,
         actor,
         mutationId,
       });
