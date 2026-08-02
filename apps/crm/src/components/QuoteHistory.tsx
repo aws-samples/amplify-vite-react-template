@@ -10,6 +10,7 @@ import {
 } from "../lib/api";
 import { bookingFunnelUrl } from "../lib/bookingLink";
 import { fmtDateTime, money } from "../lib/format";
+import { parseQuoteSnapshot } from "../../../web/amplify/functions/shared/quoteSnapshot";
 import DocButton from "./DocButton";
 import { Badge, Button, ErrorNote } from "../ui/kit";
 
@@ -24,17 +25,9 @@ function summarizeQuote(q: BookingRequest): {
 } | null {
   const priced = ["QUOTED", "PROCESSING", "BOOKED"].includes(q.status ?? "");
   if (!priced) return null; // a CONTACT/callback carries no price to show
-  let parsed: {
-    serviceLabel?: string;
-    baseCents?: number;
-    recurringOffer?: { monthlyCents?: number } | null;
-    planOnly?: boolean;
-  } = {};
-  try {
-    parsed = q.quoteJson ? JSON.parse(String(q.quoteJson)) : {};
-  } catch {
-    /* fall back to the row fields below */
-  }
+  // One shape, one parser — malformed JSON and a half-written offer both come
+  // back absent, and the row fields below are the fallback either way.
+  const parsed = parseQuoteSnapshot(q.quoteJson);
   const monthly = parsed.recurringOffer?.monthlyCents ?? q.monthlyCents ?? null;
   const price =
     monthly != null

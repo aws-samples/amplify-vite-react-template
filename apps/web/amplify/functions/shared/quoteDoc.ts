@@ -10,18 +10,10 @@ import { renderQuotePdf } from "./pdf";
  * re-poll, and therefore no way for opening a PDF to change a stored quote.
  */
 
-export type QuoteSnapshot = {
-  serviceLabel?: string;
-  baseCents?: number | null;
-  planOnly?: boolean;
-  offSeason?: boolean;
-  recurringOffer?: {
-    frequency: string;
-    monthlyCents: number;
-    initialFeeCents: number;
-  } | null;
-  days?: { date: string; priceCents: number }[];
-};
+/** Re-exported so existing importers keep working; `quoteJson` has exactly one
+ *  shape and one parser, both in `./quoteSnapshot`. */
+import { parseQuoteSnapshot } from "./quoteSnapshot";
+export { parseQuoteSnapshot, type QuoteSnapshot } from "./quoteSnapshot";
 
 export type QuotableBooking = {
   id: string;
@@ -37,16 +29,6 @@ export type QuotableBooking = {
   createdAt?: string | null;
   quoteJson?: unknown;
 };
-
-export function parseQuoteSnapshot(raw: unknown): QuoteSnapshot {
-  if (!raw) return {};
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return parsed && typeof parsed === "object" ? (parsed as QuoteSnapshot) : {};
-  } catch {
-    return {};
-  }
-}
 
 /** Statuses that carry a real price worth printing. */
 const PRINTABLE = new Set(["QUOTED", "PROCESSING", "BOOKED"]);

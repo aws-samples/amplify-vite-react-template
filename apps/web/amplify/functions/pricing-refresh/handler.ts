@@ -11,6 +11,7 @@ import {
 import { openOwnedWork } from "../shared/ownedWork";
 import { renderQuotePdf } from "../shared/pdf";
 import { OFF_SEASON_MESSAGE } from "../shared/bookingTerms";
+import { parseQuoteSnapshot } from "../shared/quoteSnapshot";
 import { money } from "../crm-pricing/rateCards";
 import {
   acquireDrain,
@@ -287,30 +288,10 @@ function selectWork(
 
 // ------------------------------------------------------ self-heal email
 
-/** The subset of a stored quoteJson the emailed PDF prints. The bookable day
- *  board is deliberately ignored here — days are live and perishable, so the
- *  PDF is a stable pricing summary, not a schedule. */
-type QuoteSnapshot = {
-  days?: unknown[];
-  baseCents?: number;
-  serviceLabel?: string;
-  recurringOffer?: {
-    frequency: string;
-    monthlyCents: number;
-    initialFeeCents: number;
-  } | null;
-  planOnly?: boolean;
-  offSeason?: boolean;
-};
-
-function parseQuoteSnapshot(raw: unknown): QuoteSnapshot {
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return parsed && typeof parsed === "object" ? (parsed as QuoteSnapshot) : {};
-  } catch {
-    return {};
-  }
-}
+/** The stored quoteJson is read through the shared parser — one shape, one
+ *  validation. The bookable day board is deliberately ignored on this path:
+ *  days are live and perishable, so the emailed PDF is a stable pricing
+ *  summary, not a schedule. */
 
 /** The minimal BookingRequest shape the PDF path reads. */
 type ReadyBooking = {

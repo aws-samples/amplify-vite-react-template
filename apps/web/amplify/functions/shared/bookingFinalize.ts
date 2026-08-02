@@ -15,6 +15,7 @@ import {
 import { casGuardedUpdate } from "./atomicLock";
 import { forEachPage, listAll } from "./pagination";
 import { todayEastern } from "./dates";
+import { parseQuoteSnapshot } from "./quoteSnapshot";
 import { resequenceAndRebuildDay } from "./routeOptimizer";
 
 /** Give back minutes a finalize attempt reserved but could not stamp. */
@@ -1233,14 +1234,7 @@ async function finalizeClaimed(
     }
   }
 
-  const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-    serviceLabel?: string;
-    recurringOffer?: {
-      frequency: string;
-      monthlyCents: number;
-      initialFeeCents: number;
-    } | null;
-  };
+  const stored = parseQuoteSnapshot(booking.quoteJson);
   const serviceLabel = stored.serviceLabel ?? "Pest control service";
   // GL-01: the catalog entry this sale means — recorded immutably (id +
   // catalog version) on the plan and job so later catalog edits never
@@ -2213,10 +2207,9 @@ async function deliverBookingComms(
     // whether the invite went out or whether matching fell back, so it makes no
     // portal promise and adds no fallback note — both concerns already have
     // their own durable owned-work items from the original pass.
-    const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-      serviceLabel?: string;
-      recurringOffer?: { frequency: string; monthlyCents: number } | null;
-    };
+    // The shared parser hands back the WHOLE offer; the resume paths used to
+    // declare it without `initialFeeCents`, so the stored fee was invisible here.
+    const stored = parseQuoteSnapshot(booking.quoteJson);
     serviceLabel = stored.serviceLabel ?? "Pest control service";
     recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
     portalInvited = false;
@@ -2459,10 +2452,9 @@ async function deliverPendingComms(
   if (ctx) {
     ({ serviceLabel, recurringOffer, methodLabel, matchFallbackReason, pdf, pdfKey } = ctx);
   } else {
-    const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-      serviceLabel?: string;
-      recurringOffer?: { frequency: string; monthlyCents: number } | null;
-    };
+    // The shared parser hands back the WHOLE offer; the resume paths used to
+    // declare it without `initialFeeCents`, so the stored fee was invisible here.
+    const stored = parseQuoteSnapshot(booking.quoteJson);
     serviceLabel = stored.serviceLabel ?? "Pest control service";
     recurringOffer = booking.recurring ? stored.recurringOffer ?? null : null;
     methodLabel = booking.processingMethodLabel ?? null;

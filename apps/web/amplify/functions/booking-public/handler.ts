@@ -77,6 +77,11 @@ import {
 } from "../shared/marketRate";
 import { serviceLabelFor } from "../shared/serviceCatalog";
 import {
+  parseQuoteSnapshot,
+  serializeQuoteSnapshot,
+  type QuoteSnapshot,
+} from "../shared/quoteSnapshot";
+import {
   recordFunnelContactOutcome,
   recordWebsiteQuoteLead,
   recordWebsiteQuoteRequested,
@@ -485,24 +490,11 @@ type StoredQuoteBooking = {
   driveMinutes?: number | null;
 };
 
-function parseStoredQuote(raw: unknown): {
-  days?: DayQuote[];
-  serviceLabel?: string;
-  recurringOffer?: {
-    frequency: string;
-    monthlyCents: number;
-    initialFeeCents: number;
-  } | null;
-  planOnly?: boolean;
-  offSeason?: boolean;
-  contactMessage?: string;
-} {
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+/** Read a stored quote. Structural validation (a half-written recurring offer
+ *  comes back absent, not partial) lives in the shared leaf — see
+ *  `shared/quoteSnapshot.ts`. */
+function parseStoredQuote(raw: unknown): QuoteSnapshot {
+  return parseQuoteSnapshot(raw);
 }
 
 /**
@@ -1988,13 +1980,13 @@ async function quote(
     // so the booking-status re-check reprices with the same travel add-on.
     zone: priceZone,
     driveMinutes: minutes ?? undefined,
-    quoteJson: JSON.stringify({
+    quoteJson: serializeQuoteSnapshot({
       days,
       baseCents,
       serviceLabel,
       recurringOffer,
-      planOnly: planOnly || undefined,
-      offSeason: offSeason || undefined,
+      planOnly,
+      offSeason,
     }),
     monthlyCents: recurringOffer?.monthlyCents ?? undefined,
     expiresAt,
@@ -2459,12 +2451,7 @@ async function promoPreview(body: Record<string, unknown>) {
   if (!booking) {
     throw new HttpError(404, { error: "Quote not found — request a new one." });
   }
-  const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-    days?: DayQuote[];
-    recurringOffer?: { initialFeeCents: number } | null;
-    planOnly?: boolean;
-    offSeason?: boolean;
-  };
+  const stored = parseStoredQuote(booking.quoteJson);
   // Mirror /book's base-amount rule: recurring/plan/off-season discount off the
   // first-month fee, a one-time booking off the chosen day's price.
   const recurring = body.recurring === true || stored.planOnly === true;
@@ -2585,13 +2572,7 @@ async function book(
   if (booking.expiresAt && new Date(booking.expiresAt).getTime() < Date.now()) {
     throw new HttpError(410, { error: "This quote expired — request a fresh one." });
   }
-  const stored = JSON.parse(String(booking.quoteJson ?? "{}")) as {
-    days?: DayQuote[];
-    serviceLabel?: string;
-    recurringOffer?: { frequency: string; monthlyCents: number; initialFeeCents: number } | null;
-    planOnly?: boolean;
-    offSeason?: boolean;
-  };
+  const stored = parseStoredQuote(booking.quoteJson);
   // Invoice-me (net terms): allowed ONLY for HOA/community + commercial, and
   // re-checked SERVER-SIDE from the booking's stored property kind — a client
   // that flips `invoice:true` on a residential quote is refused here.
@@ -2625,6 +2606,34 @@ async function book(
       error: "No recurring plan was offered on this quote.",
     });
   }
+  // The checkout branches below are closures, and TS narrowing does not cross
+  // a closure boundary — that is what the `!` assertions here used to be for.
+  // Bind the proven values ONCE instead, so the amount charged to a card is a
+  // `number` the compiler has actually checked rather than one an assertion
+  // promised. `parseStoredQuote` guarantees a present offer carries all three
+  // of its fields, so `recurringOffer` is whole wherever it is non-null.
+  const provenOffer = stored.recurringOffer;
+  const provenDay = day ?? null;
+  const requireRecurringOffer = () => {
+    if (!provenOffer) {
+      // Unreachable via the guards; a refusal beats an invented amount.
+      throw new HttpError(400, {
+        error: "No recurring plan was offered on this quote.",
+      });
+    }
+    return provenOffer;
+  };
+  /** The first-month fee, for the branches the guards above proved reach it. */
+  const recurringFeeCents = (): number => requireRecurringOffer().initialFeeCents;
+  /** The chosen day's price, for the dated branches. */
+  const datedPriceCents = (): number => {
+    if (!provenDay) {
+      throw new HttpError(409, {
+        error: "That day is no longer available — request a fresh quote.",
+      });
+    }
+    return provenDay.priceCents;
+  };
 
   // A staff-entered discount code (optional). Resolve it ONCE here so every
   // /book branch — dated card, invoice, off-season — discounts from the same
@@ -2714,12 +2723,14 @@ async function book(
       // The off-season enrollment charges the first month by card — apply the
       // code to that charge here (same card floor as every other checkout).
       const { amountCents: offSeasonAmountCents, promoSets: offSeasonPromoSets } =
-        pricedWithPromo(stored.recurringOffer!.initialFeeCents, { card: true });
+        pricedWithPromo(recurringFeeCents(), { card: true });
       return await offSeasonEnrollmentAttempt({
         booking,
-        stored: stored as {
-          serviceLabel?: string;
-          recurringOffer: { frequency: string; monthlyCents: number; initialFeeCents: number };
+        // No cast: the guards above proved the offer is present, and
+        // `parseStoredQuote` proved it is whole.
+        stored: {
+          serviceLabel: stored.serviceLabel,
+          recurringOffer: requireRecurringOffer(),
         },
         req,
         tcVersion,
@@ -2745,8 +2756,8 @@ async function book(
     // minimum applies — nothing is charged to a card).
     const { amountCents, promoSets } = pricedWithPromo(
       recurring || offSeason
-        ? stored.recurringOffer!.initialFeeCents
-        : day!.priceCents
+        ? recurringFeeCents()
+        : datedPriceCents()
     );
     // Default net-30 terms; the due date is stamped on the OPEN invoice and
     // drives AR aging / dunning exactly like any other net-terms bill.
@@ -2764,7 +2775,7 @@ async function book(
         routesKey: await getSecret("GOOGLE_ROUTES_API_KEY"),
         candidateAddress: addr,
         service: String(booking.service),
-        baseCents: day!.priceCents,
+        baseCents: datedPriceCents(),
         zone:
           booking.zone === "A" ||
           booking.zone === "B" ||
@@ -2866,7 +2877,7 @@ async function book(
   // initial fee now and the subscription starts after the first visit. A
   // staff discount code (if any) comes off this card charge.
   const { amountCents, promoSets } = pricedWithPromo(
-    recurring ? stored.recurringOffer!.initialFeeCents : day!.priceCents,
+    recurring ? recurringFeeCents() : datedPriceCents(),
     { card: true }
   );
 
@@ -2902,7 +2913,7 @@ async function book(
     routesKey: await getSecret("GOOGLE_ROUTES_API_KEY"),
     candidateAddress: address,
     service: String(booking.service),
-    baseCents: day!.priceCents, // availability only — the quoted price stands
+    baseCents: datedPriceCents(), // availability only — the quoted price stands
     zone:
       booking.zone === "A" || booking.zone === "B" ? booking.zone : undefined,
     onlyDate: date,
