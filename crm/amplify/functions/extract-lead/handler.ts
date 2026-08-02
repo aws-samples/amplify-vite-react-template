@@ -5,6 +5,11 @@ import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Schema } from "../../data/resource";
 import { listAllPages } from "../../../src/lib/pagination";
+import {
+  CONSTRUCTION_TYPES,
+  DEFAULT_DOCUMENT_CATEGORY,
+  DOCUMENT_CATEGORY_EXTRACTION_PRIORITY,
+} from "../../../src/lib/enums";
 
 /**
  * Two invocation modes:
@@ -89,14 +94,7 @@ const EXTRACTION_SCHEMA = {
     unitCount: field("integer"),
     yearBuilt: field("integer"),
     totalInsuredValue: field("number"),
-    constructionType: enumField([
-      "FRAME",
-      "JOISTED_MASONRY",
-      "NON_COMBUSTIBLE",
-      "MASONRY_NON_COMBUSTIBLE",
-      "MODIFIED_FIRE_RESISTIVE",
-      "FIRE_RESISTIVE",
-    ]),
+    constructionType: enumField([...CONSTRUCTION_TYPES]),
     stories: field("integer"),
     coastal: field("boolean"),
     milesToCoast: field("number"),
@@ -164,6 +162,10 @@ const EXTRACTION_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+// The lower-case "ISO classes" list inside this prompt is a prose paraphrase,
+// not a value list, so it is deliberately NOT generated from
+// `CONSTRUCTION_TYPES` — deriving it would reword the prompt. The exact tokens
+// the model must return are interpolated into `shapeInstruction` below.
 const SYSTEM_PROMPT = `You are a commercial insurance data-extraction assistant for an agency that writes condominium/HOA association master policies. You are given the OCR'd contents of documents attached to a lead (prior policy packets, association budgets, dues schedules, condo documents, loss runs).
 
 Extract every requested datapoint you can find. Rules:
@@ -176,18 +178,11 @@ Extract every requested datapoint you can find. Rules:
 - If documents conflict, prefer the most recent/most authoritative (declarations page over marketing text) and note the conflict in the evidence.`;
 
 // Category priority — most data-dense documents first, so caps trim the tail.
-const CATEGORY_PRIORITY: Record<string, number> = {
-  PRIOR_POLICY: 0,
-  BUDGET: 1,
-  DUES_SCHEDULE: 2,
-  LOSS_RUNS: 3,
-  OTHER: 4,
-  QUOTE_DOC: 5,
-  POLICY_DOC: 6,
-  CONDO_DOCS: 7, // huge and low-density — last
-  ACORD_FORM: 8,
-  LICENSE: 9,
-};
+// The ranks live beside the category labels in lib/enums.ts so the table
+// cannot cover a different set of categories than the schema declares.
+const CATEGORY_PRIORITY = DOCUMENT_CATEGORY_EXTRACTION_PRIORITY;
+/** Where an uncategorised document sorts — the same rank as OTHER. */
+const DEFAULT_PRIORITY = CATEGORY_PRIORITY[DEFAULT_DOCUMENT_CATEGORY];
 
 const TOTAL_CHAR_BUDGET = 400_000; // ~100K tokens of document text
 
@@ -225,8 +220,10 @@ async function runExtraction(accountId: string) {
 
     const sorted = [...docs].sort(
       (a, b) =>
-        (CATEGORY_PRIORITY[a.category ?? "OTHER"] ?? 4) -
-        (CATEGORY_PRIORITY[b.category ?? "OTHER"] ?? 4)
+        (CATEGORY_PRIORITY[a.category ?? DEFAULT_DOCUMENT_CATEGORY] ??
+          DEFAULT_PRIORITY) -
+        (CATEGORY_PRIORITY[b.category ?? DEFAULT_DOCUMENT_CATEGORY] ??
+          DEFAULT_PRIORITY)
     );
 
     let budget = TOTAL_CHAR_BUDGET;
@@ -257,7 +254,7 @@ Each of those keys maps to: { "value": <string>, "confidence": "high"|"medium"|"
 Also include:
   "buildings": array of { "label": <string>, "sqft": <string, digits only> } — [] if none documented,
   "summary": <string, 2-3 sentence underwriting summary>.
-For "constructionType".value use exactly one of: FRAME, JOISTED_MASONRY, NON_COMBUSTIBLE, MASONRY_NON_COMBUSTIBLE, MODIFIED_FIRE_RESISTIVE, FIRE_RESISTIVE, or "".`;
+For "constructionType".value use exactly one of: ${CONSTRUCTION_TYPES.join(", ")}, or "".`;
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({

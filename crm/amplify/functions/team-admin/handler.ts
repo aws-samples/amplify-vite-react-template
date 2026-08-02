@@ -8,6 +8,10 @@ import {
   UsernameExistsException,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
+// Role names are the schema's `UserRole` and the Cognito group names both —
+// see the note on `isUserRole`. enums.ts pulls in no runtime dependency, the
+// way pagination.ts does not.
+import { DEFAULT_USER_ROLE, isUserRole } from "../../../src/lib/enums";
 
 /**
  * Team administration behind ADMIN-group-only mutations.
@@ -24,8 +28,6 @@ const POOL_ID = process.env.USER_POOL_ID!;
 const PORTAL_URL = process.env.PORTAL_URL ?? "";
 const INVITE_FROM = process.env.INVITE_FROM ?? "";
 
-const ROLES = new Set(["ADMIN", "STAFF", "PRODUCER"]);
-
 type InviteArgs = { email?: string | null; role?: string | null };
 
 async function inviteUser(args: InviteArgs, invitedBy: string) {
@@ -33,7 +35,7 @@ async function inviteUser(args: InviteArgs, invitedBy: string) {
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { ok: false, error: "A valid email is required." };
   }
-  const role = args.role && ROLES.has(args.role) ? args.role : "STAFF";
+  const role = isUserRole(args.role) ? args.role : DEFAULT_USER_ROLE;
 
   try {
     await cognito.send(

@@ -1,4 +1,11 @@
 import type { CSSProperties } from "react";
+import type { QuoteStatus } from "./quoteStatus";
+import type {
+  AccountStage,
+  MarketingTaskResolution,
+  OcrStatus,
+  PolicyStatus,
+} from "./enums";
 
 /**
  * Status badges — one place for "what colour and what words does this state
@@ -15,10 +22,17 @@ import type { CSSProperties } from "react";
  * They share the `BadgeSpec` return shape and the `<Badge>` renderer, which
  * is the part that was actually duplicated.
  *
- * Deliberately importing nothing but a React type: `client.ts` calls
+ * Deliberately importing nothing but types: `client.ts` calls
  * `generateClient()` at module scope, so a colour table must not live behind
  * it. Callers pass `daysUntil(...)`'s result in; this module never reads
  * a clock, which is also why every test below is deterministic.
+ *
+ * Each table that mirrors a schema enum is pinned with
+ * `satisfies Record<TheEnum, BadgeSpec>`, so a status added to the schema
+ * fails compilation here until it is given a colour. `BadgeMap` itself stays
+ * `Record<string, …>` on purpose — `statusBadge` must keep rendering
+ * *something* for a value no table knows, which is the one behaviour a
+ * stricter key type would take away.
  */
 
 /**
@@ -67,7 +81,7 @@ export function statusBadge(
 // token itself, so adopting these tables changes no visible words.
 
 /** `QuoteStatus`. The one table `QuotesPanel` and `QuotesList` must share. */
-export const QUOTE_STATUS_BADGE: BadgeMap = {
+export const QUOTE_STATUS_BADGE = {
   DRAFT: { cls: "gray", label: "DRAFT" },
   SUBMITTED: { cls: "blue", label: "SUBMITTED" },
   QUOTED: { cls: "amber", label: "QUOTED" },
@@ -75,24 +89,24 @@ export const QUOTE_STATUS_BADGE: BadgeMap = {
   BOUND: { cls: "green", label: "BOUND" },
   DECLINED: { cls: "red", label: "DECLINED" },
   LOST: { cls: "red", label: "LOST" },
-};
+} satisfies Record<QuoteStatus, BadgeSpec>;
 
 /** `PolicyStatus`. Only ACTIVE is a live policy; the three dead ends are grey. */
-export const POLICY_STATUS_BADGE: BadgeMap = {
+export const POLICY_STATUS_BADGE = {
   ACTIVE: { cls: "green", label: "ACTIVE" },
   EXPIRED: { cls: "gray", label: "EXPIRED" },
   CANCELLED: { cls: "gray", label: "CANCELLED" },
   NON_RENEWED: { cls: "gray", label: "NON_RENEWED" },
-};
+} satisfies Record<PolicyStatus, BadgeSpec>;
 
 /** `OcrStatus`. Labels say "OCR" because the column header does not. */
-export const OCR_STATUS_BADGE: BadgeMap = {
+export const OCR_STATUS_BADGE = {
   PENDING: { cls: "gray", label: "OCR queued" },
   PROCESSING: { cls: "amber", label: "OCR running" },
   COMPLETE: { cls: "green", label: "OCR done" },
   FAILED: { cls: "red", label: "OCR failed" },
   SKIPPED: { cls: "gray", label: "No OCR" },
-};
+} satisfies Record<OcrStatus, BadgeSpec>;
 
 /** AI extraction per-field confidence. Lower-case: these come from the model. */
 export const CONFIDENCE_BADGE: BadgeMap = {
@@ -106,16 +120,16 @@ export const CONFIDENCE_BADGE: BadgeMap = {
  * token, the dashboard renders "Client"/"Lead" — for the same two colours.
  * One spelling wins, and it is the sentence-case one.
  */
-export const ACCOUNT_STAGE_BADGE: BadgeMap = {
+export const ACCOUNT_STAGE_BADGE = {
   LEAD: { cls: "blue", label: "Lead" },
   CLIENT: { cls: "green", label: "Client" },
-};
+} satisfies Record<AccountStage, BadgeSpec>;
 
 /** `MarketingTaskResolution` — how a closed marketing task was satisfied. */
-export const MARKETING_RESOLUTION_BADGE: BadgeMap = {
+export const MARKETING_RESOLUTION_BADGE = {
   QUOTED: { cls: "green", label: "Quoted" },
   OUT_OF_APPETITE: { cls: "gray", label: "Out of appetite" },
-};
+} satisfies Record<MarketingTaskResolution, BadgeSpec>;
 
 // ── Two-state flags ──────────────────────────────────────────────────
 

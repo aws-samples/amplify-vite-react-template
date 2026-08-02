@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { client, fmtMoney, fmtNum, friendlyError, type Account } from "../lib/client";
 import { Badge, statusBadge, CONFIDENCE_BADGE } from "../lib/badges";
+import { CONSTRUCTION_LABELS } from "../lib/enums";
 import { SaveStatus, useSaveStatus } from "./SaveStatus";
 
 /**
@@ -24,15 +25,6 @@ interface ExtractionResult {
   extractedAt?: string;
   documentCount?: number;
 }
-
-const CONSTRUCTION_LABELS: Record<string, string> = {
-  FRAME: "Frame",
-  JOISTED_MASONRY: "Joisted Masonry",
-  NON_COMBUSTIBLE: "Non-Combustible",
-  MASONRY_NON_COMBUSTIBLE: "Masonry Non-Combustible",
-  MODIFIED_FIRE_RESISTIVE: "Modified Fire Resistive",
-  FIRE_RESISTIVE: "Fire Resistive",
-};
 
 // Field definitions: extraction key → label, current-value accessor, and
 // how the value lands on the Account record ("patch") or in notes ("note").

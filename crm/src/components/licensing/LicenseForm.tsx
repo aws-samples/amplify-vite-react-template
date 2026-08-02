@@ -2,13 +2,16 @@ import { useState } from "react";
 import {
   client,
   friendlyError,
-  LICENSE_CLASS_LABELS,
-  LICENSE_STATUS_LABELS,
   LINES_OF_AUTHORITY,
   US_STATES,
   type License,
   type UserProfile,
 } from "../../lib/client";
+import {
+  LICENSE_CLASS_LABELS,
+  LICENSE_RESIDENCY_OPTIONS,
+  LICENSE_STATUS_LABELS,
+} from "../../lib/enums";
 import { useFormState } from "../../lib/useFormState";
 import type { HolderType } from "./holder";
 
@@ -158,8 +161,11 @@ export default function LicenseForm({
         <div className="field">
           <label>Residency</label>
           <select value={form.residency} onChange={(e) => setF("residency", e.target.value)}>
-            <option value="NON_RESIDENT">Non-resident</option>
-            <option value="RESIDENT">Resident</option>
+            {LICENSE_RESIDENCY_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
         </div>
         <div className="field">

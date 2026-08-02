@@ -5,6 +5,11 @@ import { client, friendlyError, US_STATES, validateAccountFields } from "../lib/
 import { AddressAutocomplete } from "../lib/googlePlaces";
 import FileButton from "../components/FileButton";
 import { useFormState } from "../lib/useFormState";
+import {
+  ACCOUNT_TYPE_OPTIONS,
+  DEFAULT_ACCOUNT_TYPE,
+  type AccountType,
+} from "../lib/enums";
 
 export default function NewLead() {
   const navigate = useNavigate();
@@ -14,7 +19,7 @@ export default function NewLead() {
   // Set once the lead exists — pressing Create again would duplicate it.
   const [createdId, setCreatedId] = useState<string | null>(null);
   const { form, setF, patch } = useFormState({
-    type: "ASSOCIATION",
+    type: DEFAULT_ACCOUNT_TYPE as string,
     name: "",
     contactFirstName: "",
     contactLastName: "",
@@ -47,7 +52,7 @@ export default function NewLead() {
     setError("");
     const { data, errors } = await client.models.Account.create({
       stage: "LEAD",
-      type: form.type as "ASSOCIATION" | "PERSONAL" | "COMMERCIAL_OTHER",
+      type: form.type as AccountType,
       name: form.name.trim(),
       contactFirstName: form.contactFirstName.trim() || undefined,
       contactLastName: form.contactLastName.trim() || undefined,
@@ -132,9 +137,11 @@ export default function NewLead() {
           <div className="field">
             <label>Type</label>
             <select value={form.type} onChange={(e) => setF("type", e.target.value)}>
-              <option value="ASSOCIATION">Association / HOA</option>
-              <option value="COMMERCIAL_OTHER">Commercial — other</option>
-              <option value="PERSONAL">Personal (HO-6)</option>
+              {ACCOUNT_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
             </select>
           </div>
           <div className="field">

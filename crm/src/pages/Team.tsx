@@ -5,6 +5,7 @@ import { SaveStatus, useSaveStatus } from "../components/SaveStatus";
 import { useAsyncResource } from "../lib/useAsyncResource";
 import { useSort, SortTh } from "../lib/useSort";
 import { useFormState } from "../lib/useFormState";
+import { DEFAULT_USER_ROLE, USER_ROLE_OPTIONS } from "../lib/enums";
 
 interface TeamUser {
   userId: string;
@@ -28,7 +29,7 @@ export default function Team({ profile }: { profile: UserProfile }) {
   // address. `markDirty` in `onEdit` is what retires it now.
   const inviteStatus = useSaveStatus();
   const { form, setF } = useFormState(
-    { email: "", role: "STAFF" },
+    { email: "", role: DEFAULT_USER_ROLE as string },
     { onEdit: inviteStatus.markDirty }
   );
 
@@ -143,9 +144,11 @@ export default function Team({ profile }: { profile: UserProfile }) {
           <div className="field">
             <label>Role</label>
             <select value={form.role} onChange={(e) => setF("role", e.target.value)}>
-              <option value="ADMIN">Admin</option>
-              <option value="PRODUCER">Producer</option>
-              <option value="STAFF">Staff</option>
+              {USER_ROLE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
             </select>
           </div>
         </div>

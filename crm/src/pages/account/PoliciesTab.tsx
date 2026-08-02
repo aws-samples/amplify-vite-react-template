@@ -8,6 +8,7 @@ import {
   type Policy,
 } from "../../lib/client";
 import { useAsyncResource } from "../../lib/useAsyncResource";
+import { POLICY_STATUSES } from "../../lib/enums";
 import { useSort, SortTh } from "../../lib/useSort";
 import { commissionCell, termsSummary } from "../../components/QuotesPanel";
 import CoverageForm from "../../components/CoverageForm";
@@ -151,7 +152,7 @@ export function PoliciesTab({ accountId }: { accountId: string }) {
                         updatePolicy(p.id, { status: e.target.value as Policy["status"] })
                       }
                     >
-                      {["ACTIVE", "CANCELLED", "EXPIRED", "NON_RENEWED"].map((s) => (
+                      {POLICY_STATUSES.map((s) => (
                         <option key={s}>{s}</option>
                       ))}
                     </select>

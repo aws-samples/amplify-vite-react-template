@@ -1,6 +1,8 @@
 import type { License, UserProfile } from "../../lib/client";
+import type { LicenseHolderType } from "../../lib/enums";
 
-export type HolderType = "FIRM" | "PRODUCER";
+/** The schema's `LicenseHolderType`, under the name licensing code uses. */
+export type HolderType = LicenseHolderType;
 
 export function holderLabel(l: License, profiles: UserProfile[]): string {
   if (l.holderType === "FIRM") return "(firm)";

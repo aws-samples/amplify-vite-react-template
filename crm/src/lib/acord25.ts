@@ -6,6 +6,10 @@ import type { Account, Carrier, Certificate, Policy } from "./client";
 import { ACORD25_TEMPLATE_PATH } from "./acordRegistry";
 import { amt, fmtUs, todayUs } from "./acordFormat";
 import {
+  ACORD25_AGGREGATE_FIELDS,
+  DEFAULT_AGGREGATE_APPLIES_TO,
+} from "./enums";
+import {
   fillTemplate,
   type FieldValues,
   type FillResult,
@@ -215,13 +219,10 @@ function buildAcord25Values(
       value: gl.glClaimsMade ? "x" : "",
     };
 
-    const aggMap: Record<string, string> = {
-      POLICY: "GeneralLiability_GeneralAggregate_LimitAppliesPerPolicyIndicator_A",
-      PROJECT: "GeneralLiability_GeneralAggregate_LimitAppliesPerProjectIndicator_A",
-      LOCATION: "GeneralLiability_GeneralAggregate_LimitAppliesPerLocationIndicator_A",
-      OTHER: "GeneralLiability_GeneralAggregate_LimitAppliesToOtherIndicator_A",
-    };
-    const aggField = aggMap[gl.glAggregateAppliesTo ?? "POLICY"];
+    const aggField =
+      ACORD25_AGGREGATE_FIELDS[
+        gl.glAggregateAppliesTo ?? DEFAULT_AGGREGATE_APPLIES_TO
+      ];
     if (aggField) {
       values.glAggregateApplies = { candidates: [aggField], value: "x" };
     }

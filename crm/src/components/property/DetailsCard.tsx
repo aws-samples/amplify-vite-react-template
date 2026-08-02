@@ -7,16 +7,7 @@ import {
 import { AddressAutocomplete } from "../../lib/googlePlaces";
 import { useFormState } from "../../lib/useFormState";
 import { SaveStatus, useSaveStatus } from "../SaveStatus";
-
-// Alphabetical by label.
-const CONSTRUCTION_TYPES = [
-  ["FIRE_RESISTIVE", "Fire Resistive"],
-  ["FRAME", "Frame"],
-  ["JOISTED_MASONRY", "Joisted Masonry"],
-  ["MASONRY_NON_COMBUSTIBLE", "Masonry Non-Combustible"],
-  ["MODIFIED_FIRE_RESISTIVE", "Modified Fire Resistive"],
-  ["NON_COMBUSTIBLE", "Non-Combustible"],
-] as const;
+import { CONSTRUCTION_OPTIONS } from "../../lib/enums";
 
 export default function DetailsCard({
   account,
@@ -180,9 +171,9 @@ export default function DetailsCard({
             onChange={(e) => setF("constructionType", e.target.value)}
           >
             <option value="">—</option>
-            {CONSTRUCTION_TYPES.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
+            {CONSTRUCTION_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
               </option>
             ))}
           </select>

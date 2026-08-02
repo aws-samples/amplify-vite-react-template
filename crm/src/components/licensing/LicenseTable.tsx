@@ -2,10 +2,10 @@ import { Fragment, useMemo, useState } from "react";
 import {
   fmtDate,
   licenseHealth,
-  LICENSE_CLASS_LABELS,
   type License,
   type UserProfile,
 } from "../../lib/client";
+import { LICENSE_CLASS_LABELS } from "../../lib/enums";
 import { Badge } from "../../lib/badges";
 import ConfirmButton from "../ConfirmButton";
 import DocumentsPanel from "../DocumentsPanel";

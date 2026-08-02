@@ -9,6 +9,11 @@ import {
 } from "../lib/client";
 import { useFormState } from "../lib/useFormState";
 import { SELECTABLE_QUOTE_STATUSES } from "../lib/quoteStatus";
+import {
+  AGGREGATE_APPLIES_TO_OPTIONS,
+  POLICY_STATUSES,
+  REPLACEMENT_COST_OPTIONS,
+} from "../lib/enums";
 
 /**
  * Shared create/edit form for quotes and policies.
@@ -18,20 +23,6 @@ import { SELECTABLE_QUOTE_STATUSES } from "../lib/quoteStatus";
  * term is added. Quotes can be created here; policies only ever come into
  * existence by binding a quote, so policy mode is edit-only.
  */
-
-const POLICY_STATUSES = [
-  "ACTIVE",
-  "CANCELLED",
-  "EXPIRED",
-  "NON_RENEWED",
-] as const;
-
-// Alphabetical by label.
-const RC_TYPES = [
-  ["ERC", "ERC — Extended Replacement Cost"],
-  ["GRC", "GRC — Guaranteed Replacement Cost"],
-  ["RC", "RC — Replacement Cost"],
-] as const;
 
 const num = (v: string) => (v.trim() === "" ? null : Number(v));
 // Read side: column value → input string, seeding the form below. This runs
@@ -298,9 +289,9 @@ export default function CoverageForm({
           <label>Replacement cost</label>
           <select value={form.rcType} onChange={(e) => setF("rcType", e.target.value)}>
             <option value="">—</option>
-            {RC_TYPES.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
+            {REPLACEMENT_COST_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
               </option>
             ))}
           </select>
@@ -339,10 +330,11 @@ export default function CoverageForm({
         <div className="field">
           <label>Aggregate applies per</label>
           <select value={form.glAggApplies} onChange={(e) => setF("glAggApplies", e.target.value as typeof form.glAggApplies)}>
-            <option value="LOCATION">Location</option>
-            <option value="OTHER">Other</option>
-            <option value="POLICY">Policy</option>
-            <option value="PROJECT">Project</option>
+            {AGGREGATE_APPLIES_TO_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
         </div>
         <div className="field">

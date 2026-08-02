@@ -2,6 +2,10 @@ import { Amplify } from "aws-amplify";
 import { generateClient } from "aws-amplify/data";
 import { getAmplifyDataClientConfig } from "@aws-amplify/backend/function/runtime";
 import type { Schema } from "../../data/resource";
+// Shares crm/src the way this handler already shares nothing else — see
+// pagination.ts: enums.ts imports no runtime value beyond `shared/`, so it
+// carries no browser data client into the bundle.
+import { DEFAULT_ACCOUNT_TYPE, isAccountType } from "../../../src/lib/enums";
 
 /**
  * Public website → CRM lead intake.
@@ -30,8 +34,6 @@ const clean = (v: string | null | undefined, max = 500): string | undefined => {
   return t ? t.slice(0, max) : undefined;
 };
 
-const VALID_TYPES = new Set(["ASSOCIATION", "PERSONAL", "COMMERCIAL_OTHER"]);
-
 export const handler: Schema["submitWebLead"]["functionHandler"] = async (
   event
 ) => {
@@ -41,8 +43,7 @@ export const handler: Schema["submitWebLead"]["functionHandler"] = async (
   const name = clean(args.name, 200);
   if (!name) return { ok: false, error: "name is required" };
 
-  const type =
-    args.type && VALID_TYPES.has(args.type) ? args.type : "ASSOCIATION";
+  const type = isAccountType(args.type) ? args.type : DEFAULT_ACCOUNT_TYPE;
 
   const email = clean(args.contactEmail, 320);
   // a.email() on Account rejects malformed addresses outright; drop instead
@@ -60,7 +61,7 @@ export const handler: Schema["submitWebLead"]["functionHandler"] = async (
 
   const { data, errors } = await client.models.Account.create({
     stage: "LEAD",
-    type: type as "ASSOCIATION" | "PERSONAL" | "COMMERCIAL_OTHER",
+    type,
     name,
     contactFirstName: clean(args.contactFirstName, 100),
     contactLastName: clean(args.contactLastName, 100),

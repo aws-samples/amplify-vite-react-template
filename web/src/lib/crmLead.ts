@@ -12,8 +12,12 @@
  * Unset (e.g. local dev) → intake is skipped silently.
  */
 
+import type { AccountType } from "../../../shared/accountType";
+
 export interface CrmLeadInput {
-  type?: "ASSOCIATION" | "PERSONAL" | "COMMERCIAL_OTHER";
+  /** The CRM's `AccountType`. Named in `shared/` because it is the one schema
+   *  enum both apps use, and `web` cannot import the CRM's Amplify schema. */
+  type?: AccountType;
   name: string;
   contactFirstName?: string;
   contactLastName?: string;

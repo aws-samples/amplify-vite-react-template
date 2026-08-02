@@ -3,6 +3,7 @@ import { generateClient } from "aws-amplify/data";
 import { getAmplifyDataClientConfig } from "@aws-amplify/backend/function/runtime";
 import type { Schema } from "../../data/resource";
 import { listAllPages } from "../../../src/lib/pagination";
+import type { MarketingTaskSource } from "../../../src/lib/enums";
 
 /**
  * Daily renewal-marketing sweep. See resource.ts for the why.
@@ -40,7 +41,7 @@ const order = (a: number | null | undefined, b: number | null | undefined) =>
   a != null && b != null && a > b ? [b, a] : [a, b];
 
 interface Risk {
-  sourceType: "POLICY" | "LEAD";
+  sourceType: MarketingTaskSource;
   sourceId: string;
   accountId: string;
   accountName: string;

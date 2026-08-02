@@ -1,6 +1,7 @@
 import { generateClient } from "aws-amplify/data";
 import type { Schema } from "../../amplify/data/resource";
 import { urgencyBadge, LICENSE_EXPIRY_SCALE, type BadgeClass } from "./badges";
+import { LICENSE_STATUS_LABELS } from "./enums";
 
 export const client = generateClient<Schema>();
 
@@ -33,22 +34,6 @@ export const LINES_OF_AUTHORITY = [
   "Surplus Lines",
   "Variable Products",
 ];
-
-export const LICENSE_CLASS_LABELS: Record<string, string> = {
-  AGENCY: "Agency / business entity",
-  ADJUSTER: "Adjuster",
-  CONSULTANT: "Consultant",
-  PRODUCER: "Producer",
-  SURPLUS_LINES: "Surplus lines",
-};
-
-export const LICENSE_STATUS_LABELS: Record<string, string> = {
-  ACTIVE: "Active",
-  EXPIRED: "Expired",
-  INACTIVE: "Inactive",
-  LAPSED: "Lapsed",
-  PENDING: "Pending",
-};
 
 /**
  * Licensing's own vocabulary for where a licence sits.

@@ -5,6 +5,7 @@ import { AGENCY } from "./agency";
 import type { Account } from "./client";
 import type { AcordFormDef } from "./acordRegistry";
 import { fmtUs, todayUs } from "./acordFormat";
+import { CONSTRUCTION_LABELS, CONSTRUCTION_PHRASES } from "./enums";
 import {
   fillTemplate,
   type FieldValues,
@@ -13,15 +14,6 @@ import {
 } from "./acordPdf";
 
 // ── Carrier-submission application forms (125 / 126 / 140 / 151) ──────
-
-const CONSTRUCTION_LABELS: Record<string, string> = {
-  FRAME: "Frame",
-  JOISTED_MASONRY: "Joisted Masonry",
-  NON_COMBUSTIBLE: "Non-Combustible",
-  MASONRY_NON_COMBUSTIBLE: "Masonry Non-Combustible",
-  MODIFIED_FIRE_RESISTIVE: "Modified Fire Resistive",
-  FIRE_RESISTIVE: "Fire Resistive",
-};
 
 interface BuildingInfo {
   label?: string | null;
@@ -32,15 +24,6 @@ interface BuildingInfo {
 
 /** ACORD 125 has four premises rows on the form; the rest go on a schedule. */
 const PREMISES_ROWS = ["A", "B", "C", "D"] as const;
-
-const CONSTRUCTION_PHRASE: Record<string, string> = {
-  FRAME: "wood-frame",
-  JOISTED_MASONRY: "joisted masonry",
-  NON_COMBUSTIBLE: "non-combustible",
-  MASONRY_NON_COMBUSTIBLE: "masonry non-combustible",
-  MODIFIED_FIRE_RESISTIVE: "modified fire-resistive",
-  FIRE_RESISTIVE: "fire-resistive",
-};
 
 const STOREY_WORD: Record<number, string> = {
   1: "one-story",
@@ -69,7 +52,7 @@ function operationsSummary(
   const shape = [
     account.stories ? STOREY_WORD[account.stories] ?? `${account.stories}-story` : "",
     account.constructionType
-      ? CONSTRUCTION_PHRASE[account.constructionType] ?? ""
+      ? CONSTRUCTION_PHRASES[account.constructionType] ?? ""
       : "",
   ]
     .filter(Boolean)

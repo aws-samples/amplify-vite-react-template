@@ -3,18 +3,17 @@ import type { AuthUser } from "aws-amplify/auth";
 import { client, friendlyError, US_STATES, type UserProfile } from "../lib/client";
 import type { Role } from "../lib/auth";
 import { useFormState } from "../lib/useFormState";
-
-const ROLE_LABELS: Record<Role, string> = {
-  ADMIN: "Admin",
-  PRODUCER: "Producer",
-  STAFF: "Staff",
-};
+import {
+  LICENSE_RESIDENCY_OPTIONS,
+  USER_ROLE_LABELS,
+  type LicenseResidency,
+} from "../lib/enums";
 
 interface LicenseDraft {
   state: string;
   licenseNumber: string;
   expirationDate: string;
-  residency: "RESIDENT" | "NON_RESIDENT";
+  residency: LicenseResidency;
 }
 
 const emptyLicense = (): LicenseDraft => ({
@@ -134,7 +133,7 @@ export default function Onboarding({
           </div>
           <div className="field">
             <label>Role</label>
-            <input value={ROLE_LABELS[role]} disabled />
+            <input value={USER_ROLE_LABELS[role]} disabled />
             <span className="muted small">
               Set by whoever invited you — ask an admin to change it.
             </span>
@@ -181,8 +180,11 @@ export default function Onboarding({
                       })
                     }
                   >
-                    <option value="NON_RESIDENT">Non-resident</option>
-                    <option value="RESIDENT">Resident</option>
+                    {LICENSE_RESIDENCY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div className="field">
