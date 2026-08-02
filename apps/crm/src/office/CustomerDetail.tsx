@@ -20,9 +20,11 @@ import {
   type CustomerLifecycleEvent,
   type VisitRescheduleOutcome,
   type Agreement,
+  type CallbackRequest,
   type Customer,
   type CustomerGroup,
   type Invoice,
+  type PortalRequest,
   type InvoiceTerms,
   type Job,
   type ServicePlan,
@@ -2774,15 +2776,7 @@ function ReportDeliveryRecovery({
     setBusy(action === "RESEND" ? "resend" : "alternate");
     setError(null);
     try {
-      const res = await (
-        api().mutations as unknown as {
-          recordReportDelivery: (i: {
-            reportId: string;
-            action: string;
-            note?: string;
-          }) => Promise<{ errors?: { message: string }[] }>;
-        }
-      ).recordReportDelivery({
+      const res = await api().mutations.recordReportDelivery({
         reportId,
         action,
         note: note.trim() || undefined,
@@ -3184,19 +3178,8 @@ function GroupPicker({
  * office action: resolve WITH AN ANSWER the customer sees in their portal
  * (and by email). Resolving here also closes the shared-queue item.
  */
-type PortalRequestRow = {
-  id: string;
-  kind: string;
-  jobId?: string | null;
-  preferredDate?: string | null;
-  message?: string | null;
-  status: string;
-  resolutionNote?: string | null;
-  createdAt?: string | null;
-};
-
 function PortalRequestsSection({ customerId }: { customerId: string }) {
-  const [rows, setRows] = useState<PortalRequestRow[] | null>(null);
+  const [rows, setRows] = useState<PortalRequest[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -3208,7 +3191,7 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
             customerId: string;
             limit?: number;
             nextToken?: string | null;
-          }) => Promise<{ data: PortalRequestRow[]; nextToken?: string | null }>;
+          }) => Promise<{ data: PortalRequest[]; nextToken?: string | null }>;
         };
       };
       if (!models.PortalRequest) {
@@ -3235,7 +3218,7 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
 
   if (!rows || rows.length === 0) return null;
 
-  const resolve = async (r: PortalRequestRow) => {
+  const resolve = async (r: PortalRequest) => {
     const note = window.prompt(
       "The answer the customer will see in their portal and by email:"
     );
@@ -3244,14 +3227,7 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
     setError(null);
     try {
       opResult(
-        await (
-          api().mutations as unknown as {
-            resolvePortalRequest: (a: {
-              portalRequestId: string;
-              note: string;
-            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-          }
-        ).resolvePortalRequest({ portalRequestId: r.id, note: note.trim() })
+        await api().mutations.resolvePortalRequest({ portalRequestId: r.id, note: note.trim() })
       );
       await loadRows();
     } catch (err) {
@@ -3313,19 +3289,6 @@ function PortalRequestsSection({ customerId }: { customerId: string }) {
  * once recorded. Money never appears — a callback visit is $0 by
  * construction.
  */
-type CallbackRow = {
-  id: string;
-  originalJobId: string;
-  status: string;
-  photoKey?: string | null;
-  note?: string | null;
-  promisedBy?: string | null;
-  scheduledDate?: string | null;
-  callbackJobId?: string | null;
-  finding?: string | null;
-  findingNote?: string | null;
-};
-
 const CALLBACK_STATUS_LABEL: Record<string, string> = {
   REQUESTED: "needs scheduling",
   SCHEDULED: "scheduled",
@@ -3340,8 +3303,8 @@ function CallbacksSection({
   customerId: string;
   onChanged: () => Promise<void>;
 }) {
-  const [rows, setRows] = useState<CallbackRow[] | null>(null);
-  const [scheduling, setScheduling] = useState<CallbackRow | null>(null);
+  const [rows, setRows] = useState<CallbackRequest[] | null>(null);
+  const [scheduling, setScheduling] = useState<CallbackRequest | null>(null);
   const [date, setDate] = useState("");
   const [technicianId, setTechnicianId] = useState("");
   const [techs, setTechs] = useState<{ id: string; displayName?: string | null }[]>([]);
@@ -3357,7 +3320,7 @@ function CallbacksSection({
             customerId: string;
             limit?: number;
             nextToken?: string | null;
-          }) => Promise<{ data: CallbackRow[]; nextToken?: string | null }>;
+          }) => Promise<{ data: CallbackRequest[]; nextToken?: string | null }>;
         };
       };
       if (!models.CallbackRequest) {
@@ -3409,16 +3372,7 @@ function CallbacksSection({
     setError(null);
     try {
       opResult(
-        await (
-          api().mutations as unknown as {
-            scheduleCallback: (a: {
-              callbackRequestId: string;
-              scheduledDate: string;
-              technicianId: string;
-              customerRequestedLater?: boolean;
-            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-          }
-        ).scheduleCallback({
+        await api().mutations.scheduleCallback({
           callbackRequestId: scheduling.id,
           scheduledDate: date,
           technicianId,

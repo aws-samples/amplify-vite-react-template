@@ -102,18 +102,10 @@ type BookResult = {
   summary?: string;
 };
 
-/** The createSetupIntent mutation carries the portal add-service actions too.
- *  Typed via a cast because the generated client types trail a schema deploy. */
+/** The createSetupIntent mutation carries the portal add-service actions too —
+ *  `action` folds them onto this op so no new AppSync resource is spent. */
 function addServiceMutation() {
-  return (
-    api().mutations as unknown as {
-      createSetupIntent: (a: {
-        customerId: string;
-        action: string;
-        payload: unknown;
-      }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-    }
-  ).createSetupIntent;
+  return api().mutations.createSetupIntent;
 }
 
 export default function PortalAddService() {

@@ -935,15 +935,7 @@ function RollbackPanel({
     setError(null);
     try {
       unwrap(
-        await (
-          api().mutations as unknown as {
-            rollbackPricing: (a: {
-              versionId: string;
-              reasonCode: string;
-              note?: string;
-            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-          }
-        ).rollbackPricing({
+        await api().mutations.rollbackPricing({
           versionId,
           reasonCode: reason,
           note: note.trim() || undefined,

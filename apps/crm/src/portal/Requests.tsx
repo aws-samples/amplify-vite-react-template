@@ -3,8 +3,10 @@ import {
   api,
   listAll,
   opResult,
+  type CallbackRequest,
   type Customer,
   type Job,
+  type PortalRequest,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
 import { fmtDate, todayEastern } from "../lib/format";
@@ -37,38 +39,14 @@ import { loadMyCustomers } from "./portalData";
  * retry; nothing falls back to an untracked phone call.
  */
 
-type PortalRequestRow = {
-  id: string;
-  customerId: string;
-  kind: string;
-  jobId?: string | null;
-  preferredDate?: string | null;
-  message?: string | null;
-  status: string;
-  resolutionNote?: string | null;
-  resolvedAt?: string | null;
-  createdAt?: string | null;
-};
-
-type CallbackRow = {
-  id: string;
-  customerId: string;
-  originalJobId: string;
-  status: string;
-  promisedBy?: string | null;
-  scheduledDate?: string | null;
-  finding?: string | null;
-  findingNote?: string | null;
-};
-
 type Mode = "RESCHEDULE" | "CALLBACK" | "HELP";
 
 export default function PortalRequests() {
   const roles = useRoles();
   const [customers, setCustomers] = useState<Customer[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [requests, setRequests] = useState<PortalRequestRow[]>([]);
-  const [callbacks, setCallbacks] = useState<CallbackRow[]>([]);
+  const [requests, setRequests] = useState<PortalRequest[]>([]);
+  const [callbacks, setCallbacks] = useState<CallbackRequest[]>([]);
   const [mode, setMode] = useState<Mode>("RESCHEDULE");
   const [customerId, setCustomerId] = useState("");
   const [jobId, setJobId] = useState("");
@@ -103,14 +81,14 @@ export default function PortalRequests() {
             customerId: string;
             limit?: number;
             nextToken?: string | null;
-          }) => Promise<{ data: PortalRequestRow[]; nextToken?: string | null }>;
+          }) => Promise<{ data: PortalRequest[]; nextToken?: string | null }>;
         };
         CallbackRequest?: {
           listCallbackRequestByCustomerId: (a: {
             customerId: string;
             limit?: number;
             nextToken?: string | null;
-          }) => Promise<{ data: CallbackRow[]; nextToken?: string | null }>;
+          }) => Promise<{ data: CallbackRequest[]; nextToken?: string | null }>;
         };
       };
       if (models.PortalRequest) {
@@ -181,14 +159,7 @@ export default function PortalRequests() {
     setError(null);
     try {
       const res = opResult<{ uploadUrl: string; key: string }>(
-        await (
-          api().mutations as unknown as {
-            getCallbackPhotoUploadUrl: (a: {
-              customerId: string;
-              contentType: string;
-            }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-          }
-        ).getCallbackPhotoUploadUrl({
+        await api().mutations.getCallbackPhotoUploadUrl({
           customerId,
           contentType: file.type,
         })
@@ -225,16 +196,7 @@ export default function PortalRequests() {
           promisedBy: string;
           status: string;
         }>(
-          await (
-            api().mutations as unknown as {
-              requestCallback: (a: {
-                customerId: string;
-                originalJobId: string;
-                photoKey: string;
-                note?: string;
-              }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-            }
-          ).requestCallback({
+          await api().mutations.requestCallback({
             customerId,
             originalJobId: jobId,
             photoKey,
@@ -248,17 +210,7 @@ export default function PortalRequests() {
         );
       } else {
         const res = opResult<{ reference: string }>(
-          await (
-            api().mutations as unknown as {
-              submitPortalRequest: (a: {
-                customerId: string;
-                kind: string;
-                jobId?: string;
-                preferredDate?: string;
-                message?: string;
-              }) => Promise<{ data: unknown; errors?: { message: string }[] }>;
-            }
-          ).submitPortalRequest({
+          await api().mutations.submitPortalRequest({
             customerId,
             kind: mode,
             jobId: mode === "RESCHEDULE" ? jobId : undefined,

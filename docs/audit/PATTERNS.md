@@ -119,3 +119,61 @@ Closing that gap GRANTS access on three portal paths. `getDocumentUrl` also
 moved off `customer.groupId` onto the live stamp, keeping its separate
 technician-per-document branch. Twenty-four role gates in crm-docs and
 crm-pricing collapsed onto `assertOffice`/`assertOwner`.
+
+## 3. The generated schema is the type — do not re-type it by hand
+
+**Rule.** The CRM imports `Schema` from the backend *source*
+(`apps/web/amplify/data/resource.ts`), not from a generated artifact, so every
+model, enum and custom operation is typed the moment it is written in the
+schema. There is no window in which the CRM has to describe the contract by
+hand.
+
+That makes `api().mutations as unknown as { someOp: ... }` and
+`type Foo = { ...fields copied from a model... }` unnecessary, and worse than
+unnecessary: a hand copy compiles happily while it disagrees with the schema,
+so drift is invisible until it reaches a user. Call the op directly and let the
+argument types come from `.arguments()`. Derive entity types with
+`Schema["Model"]["type"]`, and enums with `Schema["SomeEnum"]["type"]`.
+
+Deploy lag is not a reason to widen. A schema deploy affects whether an op
+*answers at runtime*, never whether it *type-checks* — and a cast does nothing
+to help the former.
+
+A hand type is still fine when it is a genuinely different shape: a projection
+the server deliberately reduces (`technicianReads` strips a Job's money
+fields), or a wire payload that no model backs. Type those to what actually
+crosses the wire, and say so.
+
+**Canonical location.** `apps/crm/src/lib/api.ts` — the `Schema[...]["type"]`
+re-exports at the top, and thin wrappers that call `api().mutations.<op>`
+directly.
+
+**Example.** Before:
+
+```ts
+return (
+  api().mutations as unknown as { createLead: (i: typeof input) => OpResult }
+).createLead(input);
+```
+
+after:
+
+```ts
+return api().mutations.createLead(input);
+```
+
+**Migration note (2026-08-02).** 27 casts in api.ts fell to 8, and all 8 that
+remain are the separate "tolerate an absent model" wrapper (INVENTORY D16), not
+schema re-typing. 11 further op widenings were removed from CustomerDetail,
+Requests, Work, Schedule, MarketRates, JobDetail and AddService. Hand copies of
+`Dispute`, `DisputeStatus`, `Invoice`, `MarketRate`, `PortalRequest`,
+`CallbackRequest`, `InFlightBooking` and `DiscountBooking` now read off the
+schema.
+
+De-widening immediately earned its keep: the hand `Dispute` declared
+`customerId: string`, but the schema has it nullable and
+`stripe-webhook/handler.ts:1069` really does create a Dispute with no customer
+(the dispute-closed path, when the created event never landed). The Dashboard's
+recovery queue would have navigated to `/customers/undefined`. The type is now
+nullable end to end and the row guards its link — which the neighbouring
+disputes card had been doing all along.

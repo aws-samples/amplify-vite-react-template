@@ -7,6 +7,7 @@ import {
   listWorkItems,
   opResult,
   updateOwnedWork,
+  type BookingRequest,
   type WorkEvent,
   type WorkItem,
   liftEmailSuppression,
@@ -147,14 +148,7 @@ export default function WorkQueue() {
     setError(null);
     try {
       const result = opResult(
-        await (
-          api().mutations as unknown as {
-            resendEmailLog: (a: { emailLogId: string }) => Promise<{
-              data: unknown;
-              errors?: { message: string }[];
-            }>;
-          }
-        ).resendEmailLog({ emailLogId: item.relatedId! })
+        await api().mutations.resendEmailLog({ emailLogId: item.relatedId! })
       ) as { resent?: boolean } | null;
       if (!result?.resent) {
         throw new Error(
@@ -742,31 +736,14 @@ export default function WorkQueue() {
  * mental math and no way to bypass policy (collection and recovery happen
  * only through the owned cases below).
  */
-type InFlightBooking = {
-  id: string;
-  status?: string | null;
-  name?: string | null;
-  email?: string | null;
-  amountCents?: number | null;
-  selectedDate?: string | null;
-  jobId?: string | null;
-  customerId?: string | null;
-  processingStartedAt?: string | null;
-  processingMethodLabel?: string | null;
-  processingExpectedBy?: string | null;
-  paymentFailedReason?: string | null;
-  paymentFailedNoticeSentAt?: string | null;
-  pendingConfirmationSentAt?: string | null;
-  updatedAt?: string | null;
-};
 
 export function PaymentsInFlight() {
-  const [rows, setRows] = useState<InFlightBooking[] | null>(null);
+  const [rows, setRows] = useState<BookingRequest[] | null>(null);
 
   useEffect(() => {
     void (async () => {
       try {
-        const data = await listAll<InFlightBooking>((t) =>
+        const data = await listAll((t) =>
           api().models.BookingRequest.list({
             filter: {
               or: [
@@ -776,11 +753,7 @@ export function PaymentsInFlight() {
             },
             limit: 500,
             nextToken: t,
-          } as Parameters<ReturnType<typeof api>["models"]["BookingRequest"]["list"]>[0]) as Promise<{
-            data: InFlightBooking[];
-            nextToken?: string | null;
-            errors?: { message: string }[];
-          }>
+          })
         );
         // Failed attempts age out of this operating view after two weeks —
         // their money consequences live on as owned cases either way.

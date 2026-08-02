@@ -810,18 +810,7 @@ function ScopePrepExits({ job, onDone }: { job: Job; onDone: () => Promise<void>
     setBusy(true);
     setError(null);
     try {
-      const mutations = api().mutations as unknown as {
-        reportScopeMismatch: (i: {
-          jobId: string;
-          reason: string;
-          note?: string;
-        }) => Promise<{ errors?: { message: string }[] }>;
-        reportPrepMissing: (i: {
-          jobId: string;
-          reason: string;
-          note?: string;
-        }) => Promise<{ errors?: { message: string }[] }>;
-      };
+      const mutations = api().mutations;
       const res =
         mode === "scope"
           ? await mutations.reportScopeMismatch({

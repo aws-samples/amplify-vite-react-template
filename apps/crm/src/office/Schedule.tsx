@@ -694,9 +694,7 @@ function AvailabilityPanel({
     setErr(null);
     try {
       const [factsRes, exRes, closureRes] = await Promise.all([
-        (api().queries as unknown as {
-          capacityDayFacts: (input: { date: string }) => Promise<{ data: unknown }>;
-        }).capacityDayFacts({ date }),
+        api().queries.capacityDayFacts({ date }),
         models.TechnicianDayException.listTechnicianDayExceptionByDate(
           { date },
           { limit: 200 }

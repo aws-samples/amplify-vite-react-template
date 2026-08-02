@@ -7,6 +7,7 @@ import {
   listDisputes,
   settleInvoice,
   unwrap,
+  type BookingRequest,
   type Customer,
   type Dispute,
   type Invoice,
@@ -73,22 +74,6 @@ type DrillKey =
 /** One line of a tile's breakdown: an invoice and the amount it contributes. */
 type DrillRow = { invoice: Invoice; amountCents: number };
 
-/**
- * The slice of a BookingRequest the discount figure needs. Typed by hand the
- * same way Work.tsx does, so the dashboard still builds while the generated
- * Schema lags a backend wave.
- */
-type DiscountBooking = {
-  id: string;
-  status?: string | null;
-  name?: string | null;
-  promoCode?: string | null;
-  promoDiscountCents?: number | null;
-  customerId?: string | null;
-  tcAcceptedAt?: string | null;
-  createdAt?: string | null;
-};
-
 function inPeriod(iso: string | null | undefined, period: Period): boolean {
   if (period === "ALL") return true;
   if (!iso) return false;
@@ -109,7 +94,7 @@ export default function Dashboard() {
   const [plans, setPlans] = useState<ServicePlan[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [disputes, setDisputes] = useState<Dispute[]>([]);
-  const [bookings, setBookings] = useState<DiscountBooking[]>([]);
+  const [bookings, setBookings] = useState<BookingRequest[]>([]);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [depositingId, setDepositingId] = useState<string | null>(null);
   const [showDiscounts, setShowDiscounts] = useState(false);
@@ -126,16 +111,9 @@ export default function Dashboard() {
         // Discounts live on BookingRequest (promoDiscountCents snapshot), not
         // on invoices. Tolerate this list failing — a dashboard that can't say
         // "discounts" should still say everything else.
-        listAll<DiscountBooking>((t) =>
-          api().models.BookingRequest.list({
-            limit: 1000,
-            nextToken: t,
-          } as Parameters<ReturnType<typeof api>["models"]["BookingRequest"]["list"]>[0]) as Promise<{
-            data: DiscountBooking[];
-            nextToken?: string | null;
-            errors?: { message: string }[];
-          }>
-        ).catch(() => [] as DiscountBooking[]),
+        listAll((t) =>
+          api().models.BookingRequest.list({ limit: 1000, nextToken: t })
+        ).catch(() => [] as BookingRequest[]),
       ]);
       setInvoices(inv);
       setCustomers(cus);
@@ -620,7 +598,11 @@ export default function Dashboard() {
           {recoveryQueue.slice(0, 15).map((item) => (
             <ListRow
               key={`${item.refType}-${item.id}`}
-              title={customerById.get(item.customerId)?.displayName ?? "Unknown"}
+              title={
+                (item.customerId
+                  ? customerById.get(item.customerId)?.displayName
+                  : undefined) ?? "Unknown"
+              }
               subtitle={
                 <>
                   {`${RECOVERY_KIND_LABEL[item.kind]} · ${item.slaLabel}`}
@@ -645,7 +627,11 @@ export default function Dashboard() {
                   />
                 </>
               }
-              onClick={() => navigate(`/customers/${item.customerId}`)}
+              onClick={
+                item.customerId
+                  ? () => navigate(`/customers/${item.customerId}`)
+                  : undefined
+              }
             />
           ))}
         </Card>
