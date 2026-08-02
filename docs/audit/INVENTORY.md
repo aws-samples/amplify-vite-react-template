@@ -1,14 +1,19 @@
 # Repository inventory — 2026-08-02
 
-Read-only audit at `0b32017` (branch `staging`, clean tree). No code changed.
+Read-only audit at `4e20a4f` (branch `staging`, clean tree). No code changed.
 
-Scope: `apps/web/**`, `apps/crm/**`. 387 source files (`.ts`/`.tsx`), excluding
-tests where noted. `.claude/worktrees/**` is excluded throughout — it holds three
-stale copies of the tree and doubles every raw grep count.
+Scope: `apps/web/src` (72 files), `apps/web/amplify` (120 files + `data/resource.ts`),
+`apps/crm/src` (69 files) — 261 non-test source files, ~97k lines, plus 109 test files.
+`.claude/worktrees/**` is excluded throughout: it holds three stale checkouts and
+doubles every raw grep count.
+
+This replaces the inventory written at `0b32017`. Items 2, 3 and 4 of that
+document were worked in `9b8f66a`, `60f3c52`, `b58b507`, `77a5ed2`; this scan was
+run fresh against the post-fix tree and reports what is there now.
 
 Neither app has a form library, toast library, table library, state manager, or
 date library in its dependencies. Every abstraction in those categories is
-hand-rolled, which is the root cause of most of section 1.
+hand-rolled.
 
 ---
 
@@ -17,1265 +22,865 @@ hand-rolled, which is the root cause of most of section 1.
 Ordered by blast radius × how often the divergence produces an inconsistency.
 "Sites" is the number of places that would change if the item were fixed.
 
-Items marked **✗** already produce a wrong result today; the rest are debt that has
-not yet diverged.
+**✗** = produces a wrong result today. **△** = the type system or the wiring
+permits the divergence but no current call site exercises it.
 
-| # | Item | Sites | Blast radius | Diverges today? | § |
+| # | Item | Sites | Blast radius | Wrong today? | § |
 |---|---|---|---|---|---|
-| 1 | `lead-intake` public endpoint has no server-side gate | 1 | Unauthenticated writes to `Customer`/`Lead` | **✗** wildcard CORS contradicts the CDK allowlist | 1.3 |
-| 2 | ~~Money formatting — 9 helpers + 89 inline `toFixed(2)`~~ | ~98 | Every customer-facing price surface | **FIXED** `9b8f66a` — one `shared/money.ts` | 1.4 |
-| 3 | ~~`quoteJson` parsed unvalidated~~ | 9 shapes | The card-charge amount | **FIXED** `60f3c52` — one validating `shared/quoteSnapshot.ts` | 4.3–4.4 |
-| 4 | Async load/error state copy-pasted (no `useAsync`) | ~78 | Every CRM + portal screen | **PARTLY FIXED** `b58b507`, `77a5ed2` — hooks + 16 screens; mutation sites remain | 1.6 |
-| 5 | `err instanceof Error ? …` inline | 144 | All error text, both apps | **✗** ~85 distinct fallback strings | 1.7 |
-| 6 | `pageErrors: "ignore"` swallowed pagination errors | 110 | Partial reads pass as complete | **✗** by construction | 1.8 |
-| 7 | `.catch(() => undefined)` in money/scheduling paths | 114 | Capacity + payment bookkeeping leaks | **✗** silent state drift | 1.8 |
-| 8 | `statusTone` keyed by `string`, not the enums | ~15 badges | Every status badge in the CRM | **✗** `NO_ACCESS`, all `PricingDecision` render grey | 4.2 |
-| 9 | MA/RI territory rule — 3 encodings | 3 | Who may be quoted online | **✗** 2 reject `"Massachusetts"` | 5.1 |
-| 10 | CRM screens bypass `lib/api.ts` | 137 | All CRM data access | Partly — 49 mutations unwrapped | 1.1 |
-| 11 | `NO_ACCESS_LABEL` duplicated frontend/backend | 2 maps | Tech app vs office audit record | **✗** 3 of 6 labels differ | 5.2 |
-| 12 | `CRM_APP_URL` fallback inconsistent | 8 | Links in outbound email | **✗** 5 sites emit dead relative links | 5.4 |
-| 13 | Handler error conventions | 18 | Every Lambda boundary | **✗** 6 conventions | 1.7 |
-| 14 | Four names for one owner predicate | 48 | Every backend authz check | No — aliases agree | 1.3 |
-| 15 | `addDays` — 6 implementations | 6 | Scheduling, aging, recurrence | **✗** CRM copy mixes local/UTC | 1.5 |
-| 16 | Cross-Lambda invoke — 6 clients, 3 protocols | 6 | All service-to-service calls | **✗** discriminator name differs | 1.2 / 4.5 |
-| 17 | `window.confirm` / `alert()` vs `Sheet` | 22 | Destructive CRM actions | **✗** 2 confirm styles | 1.6 |
-| 18 | Pretty-date rendering — 7 implementations | 7 | Emails, PDFs, CRM, funnel | **✗** 4 anchoring strategies | 1.5 |
-| 19 | `servicePages.ts` missing — `RELATED` copied 14× | 14 | Public site navigation | **✗** 4 slugs carry two labels | 5.5 |
-| 20 | Presigned S3 upload — 5 backend + 5 frontend | 10 | All file uploads | **✗** 4 of 5 mis-send Content-Type | 1.2 / 1.1 |
-| 21 | Idempotency — 5 mechanisms, 4 Stripe key formats | ~30 | Retry safety on money paths | **✗** key formats differ | 1.7 |
-| 22 | `ServiceCode` / cadence enums re-declared | 4 + 5 | Funnel ↔ schema | **✗** funnel type omits both mosquito services | 4.1 |
-| 23 | `VISIT_NOTE` missing `SEMIANNUAL` | 1 | Start-billing confirmation | **✗** cadence sentence silently omitted | 4.1 |
-| 24 | `rateKey` — 1 builder, 3 parsers | 4 | Pricing reports | **✗** one parser has no `NaN` guard | 5.3 |
-| 25 | `CANCEL_FULL_REFUND_HOURS` — "72 hours" hard-typed | ~18 | Refund copy incl. CRM UI | No — agrees today | 5.9 |
-| 26 | Two `stripeClient()` factories | 21 | All Stripe calls | **✗** 19 sites lack the live-key guard | 1.2 |
-| 27 | `getSecret()` triplicated | 3 | Secret resolution | **✗** 2 cache negative lookups | 1.2 |
-| 28 | `addressAutocomplete.tsx` forked across apps | 2 | Address entry in both apps | No — 3 comment lines only | 1.1 |
+| 1 | Zip validated nowhere in the booking path, hard-required at dispatch | 3 | Every booking | **✗** dead error slot, 100% latent bad data | 1.7 / 5.2 |
+| 2 | `productsUsed` typed `string` in the CRM, `number` on the wire | 4 parsers | Tech report submit | **✗** `TypeError: .trim is not a function` | 4.1 |
+| 3 | `pageErrors: "ignore"` swallows pagination errors | 116 | Partial reads pass as complete | **✗** by construction | 1.2 |
+| 4 | `useAction` has zero adopters; mutations hand-rolled | ~50 | Every CRM mutation incl. payment | **✗** double-submit guarded only by `disabled` | 1.1 |
+| 5 | `err instanceof Error ? …` inline | 79 | All error text, both apps | **✗** ~25 files, no empty-message handling | 1.6 |
+| 6 | `crm-admin` is the only handler with no in-handler authz | 1 file | ~25 privileged ops | **✗** 2 ops absent from the schema entirely | 2.4 |
+| 7 | `cadenceLabel` — 9 encodings | 9 | Quotes, dropdowns, PDFs, email | **✗** hyphenation split; `SEMIANNUAL` prints raw | 5.1 |
+| 8 | Inline `res.errors[0].message` | 12 | CRM mutation errors | **✗** drops errors 2..n | 1.6 |
+| 9 | Stripe live-key guard on 1 of 2 clients | 45 | Every money-moving handler | **✗** guard absent on the shared client | 1.3 |
+| 10 | Email validation — 5 regexes | ~10 | Lead + booking intake | **✗** CRM accepts what the funnel rejects | 1.7 |
+| 11 | `stripe-webhook:490` formats an instant with no `timeZone` | 1 | Invoice descriptions | **✗** wrong month, last ~5h of each month | 1.5 |
+| 12 | `escapeHtml` — 8 copies | 8 | Every outbound email | **✗** coverage differs, not bodies | 5.3 |
+| 13 | Marketing final-CTA block copied | 26 | Public site | **✗** 3 user-visible wording splits | 5.9 |
+| 14 | `CRM_APP_URL` fallback inconsistent | 7 | Links in staff email | **✗** 5 sites emit dead relative links | 5.4 |
+| 15 | Cross-Lambda invoke — 5 resolvers, 4 wire shapes | 5 | All service-to-service calls | **✗** throw-vs-null split | 1.2 / 4.5 |
+| 16 | `getSecret` triplicated + hardcoded app id | 3 (+1) | Secret resolution | **✗** app id blocks account portability | 1.3 / 5.5 |
+| 17 | `prettyDate` — 6 encodings | 6 | Emails, receipts, quotes | **✗** 3 formats for one visit date | 1.5 / 5.6 |
+| 18 | `assertOffice`/`assertOwner`/`assertFinance` are aliases | 36 | Every backend authz call | **✗** `crm-pricing` "OWNER-only" is a dead check | 2.2 |
+| 19 | Presigned upload — 5 copies | 5 | All file uploads | **✗** 3 of 5 send empty `Content-Type` | 1.1 |
+| 20 | `setTimeout(load, 1500)` refetch | 3 | Portal billing state | **✗** stale invoice if backend is slow | 1.1 |
+| 21 | `window.confirm` / `alert()` vs `Sheet` | 22 | Destructive CRM actions | **✗** native dialogs, unstyleable in PWA | 1.4 |
+| 22 | `Sheet` has no `role="dialog"` / focus trap / Escape | 14 | Every CRM modal | **✗** for keyboard + screen-reader users | 1.4 |
+| 23 | Service-area state gate — 2 copies | 2 | Who may be quoted | **✗** one rejects `"ma"`, the other accepts | 5.7 |
+| 24 | `normalizePhone` — 4 copies | 4 | Lead + booking intake | **✗** lead-intake drops non-NANP numbers | 1.7 |
+| 25 | Brand identity: phone in 4 formats, HQ address disagrees | 30+ | Site, PDFs, drive-time math | **✗** `driveTime.ts` anchors on Ware | 5.8 |
+| 26 | `reasonLabel` — 5 copies + ~13 lowercase variants | 18 | CRM labels | **✗** same code, two casings | 5.10 |
+| 27 | `rateKey` — 1 builder, 3 parsers | 4 | Pricing reports | **✗** unstated no-`#` invariant | 5.11 |
+| 28 | CRM mirrors drop server fields (`pendingMessage`, `FAILED`) | 3 | Cancel flows | **✗** required message unreachable | 4.2 |
+| 29 | `Job.cancelDisposition` — 3 vocabularies | 3 | Refund settlement | **✗** `"REFUNDED"` not in the schema's set | 4.3 |
+| 30 | `money()` re-forked in the portal | 1 | Portal add-service price | **✗** `$1200` vs `$1,200.00` | 1.4 |
+| 31 | `TrackPage` retries permanent errors forever | 1 | Customer tracking page | **✗** unbounded polling | 1.1 |
+| 32 | Two POST-JSON clients + 3 outputs loaders | 7 | Public site transport | Partly — B loses HTTP status | 1.1 |
+| 33 | `ServiceCode` — funnel union missing 2 members | 3 | Funnel typing | **△** casts hide it; runtime correct | 4.4 |
+| 34 | `onsiteMinutesFor` — the 60/30 rule, 3 copies | 3 | Capacity math | No — agree today | 5.12 |
+| 35 | Seasonal-window sentence — 8 prose copies | 8 | Funnel, portal, PDF, email | **✗** wording/dash style only | 5.13 |
+| 36 | Environment→URL derivation — 3 encodings, 9 bare app ids | 9 | Deploy wiring | No — agree today | 5.5 |
+| 37 | CSV export block — 4 copies | 4 | CRM exports | No — none handles embedded newlines | 5.14 |
+| 38 | Dead code: 9 exports, 1 module, 3 components, 2 routes | 15 | — | n/a | 3 |
 
 ---
-
-> **Status, 2026-08-02.** Items 2, 3 and 4 have been worked. Sections below
-> are left as written at audit time so the findings stay readable against the
-> code they described; see the fix commits for what changed, and note the
-> correction to item 3 recorded in §4.3.
 
 ## 1. Duplicate implementations
 
-### 1.1 Frontend data access
+### 1.1 Frontend data access and mutation
 
-**CRM screens bypass the shared api layer.** `apps/crm/src/lib/api.ts` exports 40
-typed helpers wrapping 34 operations. 28 component files call the generated
-client directly instead.
+**Already consolidated — verified, no action:**
 
-- Canonical: [apps/crm/src/lib/api.ts:118](apps/crm/src/lib/api.ts:118)–949
-- Bypasses: 137 raw `api().` calls
-  (`grep -rn "api()\." apps/crm/src --include='*.tsx' | grep -v 'lib/api.ts'`)
-  — `models` 67, `mutations` 66, `queries` 4
-- 49 distinct mutations are invoked with no wrapper; only 19 have one
-- Worst offenders: [CustomerDetail.tsx](apps/crm/src/office/CustomerDetail.tsx) 34,
-  [Schedule.tsx](apps/crm/src/office/Schedule.tsx) 12,
-  [JobDetail.tsx](apps/crm/src/tech/JobDetail.tsx) 11,
-  [MarketRates.tsx](apps/crm/src/office/MarketRates.tsx) 10,
-  [GroupDetail.tsx](apps/crm/src/office/GroupDetail.tsx) 8
+- One `generateClient`: `apps/crm/src/lib/api.ts:18` (lazy singleton `api()`). `apps/web/src` never touches Amplify Data.
+- Pagination: `listAll` re-exported at `apps/crm/src/lib/api.ts:975`, 40 call sites in 20 files, zero hand-rolled `nextToken` loops. One documented opt-out at `apps/crm/src/pages/More.tsx:299`.
+- `unwrap` (`apps/crm/src/lib/api.ts:978`, 44 uses) and `opResult` (`:994`, 88 uses).
+- `Spinner` / `EmptyState` / `ErrorNote` / `SuccessNote` — `apps/crm/src/ui/kit.tsx:5,309,424,443`.
+- One auth context: `RolesContext`, `apps/crm/src/lib/auth.tsx:30`.
+- Portal scoping: `loadMyCustomers`, `apps/crm/src/portal/portalData.ts:21`, used by 5 of 6 portal screens.
 
-Most used: raw client (137 vs 34). Most correct: `lib/api.ts` — typed inputs plus
-consistent `unwrap`/`opResult` handling. **Canonical: `lib/api.ts`.**
+**A. `useAsync` vs hand-rolled `useCallback load` + `useEffect` — 20 vs 24**
 
-**`addressAutocomplete.tsx` is forked across both apps.** 247 lines each;
-`diff` reports only three differing comment lines (106–108, 120). Both issue
-byte-identical Google Places `places:autocomplete` and place-details fetches.
+- Canonical: `apps/crm/src/lib/useAsync.ts:48`, core `apps/crm/src/lib/asyncCore.ts:36`.
+- Hand-rolled, 24 sites: `office/CustomerDetail.tsx:266,272,298,3215,3345,3349` · `office/Dashboard.tsx:129` · `office/Schedule.tsx:145,716` · `office/MarketRates.tsx:324` · `office/technicians.tsx:203` · `office/Staff.tsx:683` · `portal/Billing.tsx:78` · `portal/Requests.tsx:129` · `portal/AddService.tsx:152` · `tech/JobDetail.tsx:287,293` · `pages/More.tsx:298` · `components/LeadPanel.tsx:72` · `components/QuoteHistory.tsx:103` · `components/CollectPaymentSheet.tsx:40` · `components/CancelPlanSheet.tsx:42` · `components/VisitCancelSheet.tsx:53` · `components/ReportPhotos.tsx:13`.
+- `office/technicians.tsx` and `office/Staff.tsx` use both — `useAsync` at the top level, hand-rolled in a nested sub-component of the same file.
+- Most correct: `useAsync`. `asyncCore.ts:36-48` is a monotonic request guard (an older in-flight response cannot overwrite a newer one); `useAsync.ts:87` clears stale rows on dep change.
+- Dep-keyed sites where this bites: `Schedule.tsx:145` (`[weekStart]`), `CustomerDetail.tsx:266` (`[id]`), `JobDetail.tsx:287` (`[jobId]`), `VisitCancelSheet.tsx:53`, `CancelPlanSheet.tsx:42`. `Schedule.tsx:719` nulls prior state manually, which hides the flash but not the out-of-order write.
 
-- [apps/web/src/lib/addressAutocomplete.tsx](apps/web/src/lib/addressAutocomplete.tsx)
-- [apps/crm/src/lib/addressAutocomplete.tsx](apps/crm/src/lib/addressAutocomplete.tsx)
+**B. Stale-response guards — 4 mechanisms, 3 of them one-off**
 
-The CRM already cross-imports `apps/web/amplify/functions/shared/*`
-([api.ts:3](apps/crm/src/lib/api.ts:3)), so a shared module is precedented.
-**Canonical: one copy under `shared/`.**
-
-**Function-URL resolution from `amplify_outputs.json` — 3 copies, one dead.**
-
-| Impl | Location | Callers |
+| Mechanism | Location | Sites |
 |---|---|---|
-| `getBookingApiUrl` | [bookingApi.ts:18](apps/web/src/lib/bookingApi.ts:18) | 4 booking pages |
-| `getLeadIntakeUrl` | [leadIntakeApi.ts:18](apps/web/src/lib/leadIntakeApi.ts:18) | 2 |
-| `getCustomOutput` | [apps/crm/src/lib/backend.ts:28](apps/crm/src/lib/backend.ts:28) | **0 — dead** |
+| `createRequestGuard` (monotonic + alive flag) | `apps/crm/src/lib/asyncCore.ts:36` | 20 |
+| `let stale = false` | `apps/crm/src/office/CustomerDetail.tsx:277` | 1 |
+| `let cancel = false` | `apps/crm/src/components/ReportPhotos.tsx:14` | 1 |
+| `let stopped = false` | `apps/web/src/pages/booking/TrackPage.tsx:78`, `QuotePage.tsx:260` | 2 |
+| none | the other 22 hand-rolled loads | 22 |
 
-`leadIntakeApi.ts:3` states it "Mirrors `bookingApi.ts`'s URL resolution". The
-POST transport below it is duplicated too: [bookingApi.ts:300](apps/web/src/lib/bookingApi.ts:300)
-`post<T>()` vs [leadIntakeApi.ts:67](apps/web/src/lib/leadIntakeApi.ts:67) `submitLead()`.
-**Canonical: `post<T>()` — generic over path and response type.**
+`AbortController` appears once and is not a fetch guard: `apps/web/src/lib/addressAutocomplete.tsx:128` and `apps/crm/src/lib/addressAutocomplete.tsx:128` (Places typeahead). No AppSync call in either app is abortable.
 
-**Presigned-upload client — 5 copies of the same fetch block.**
-[Requests.tsx:168](apps/crm/src/portal/Requests.tsx:168),
-[ReportPhotos.tsx:64](apps/crm/src/components/ReportPhotos.tsx:64),
-[CustomerDocuments.tsx:84](apps/crm/src/components/CustomerDocuments.tsx:84),
-[JobDetail.tsx:940](apps/crm/src/tech/JobDetail.tsx:940),
-[JobDetail.tsx:1074](apps/crm/src/tech/JobDetail.tsx:1074).
+**C. `useAction` — exists, tested, zero adopters**
 
-Only `ReportPhotos.tsx:59-70` falls back to `image/jpeg` when `file.type` is
-empty. iOS HEIC pickers send a blank type, so the other four send an empty
-`Content-Type` and mismatch the presigned signature. **Canonical: `ReportPhotos`'
-version, extracted to `lib/api.ts`.**
+- `apps/crm/src/lib/useAsync.ts:106`; single-flight gate at `apps/crm/src/lib/asyncCore.ts:94`.
+- Verified zero call sites (`grep "useAction[<(]"` excluding `lib/useAsync.ts` returns empty). `useAction` and `createSingleFlight` are exported-but-unused production code with passing tests in `asyncCore.test.ts`.
+- ~50 hand-rolled `setBusy`/`try`/`catch`/`finally` handlers across ~18 files: `office/CustomerDetail.tsx:2054,2179,2341,2477,2558,2656` · `tech/JobDetail.tsx:803,920,957,1056,1091,1302` · `office/MarketRates.tsx:160,565,614,634,934,964` · `office/Schedule.tsx:179,222,245,266,734` · `portal/Requests.tsx:158,183` · `portal/AddService.tsx:183,237` · `components/CustomerDocuments.tsx:73` · `components/ReportPhotos.tsx:53` · `components/CancelPlanSheet.tsx:61` · `components/VisitCancelSheet.tsx:74` · `components/QuoteHistory.tsx:116` · `components/LeadPanel.tsx:77` · `components/CollectPaymentSheet.tsx:82` · `pages/More.tsx:207,248` · `office/Dashboard.tsx:136,158`.
+- All rely on a `disabled` button, which a double-click or held Enter can beat. `useAsync.ts:88-97` documents this as the difference between one charge and two. Financially material at `components/CollectPaymentSheet.tsx:82` and `portal/Billing.tsx:85`.
+- **Recommended canonical: `useAction`.**
 
-**Portal customer scan — 2 copies.** [portalData.ts:21](apps/crm/src/portal/portalData.ts:21)
-`loadMyCustomers` is used by 5 portal screens; [Group.tsx:25](apps/crm/src/portal/Group.tsx:25)
-inlines its own `CustomerGroup.get` + filtered `Customer.list` and is the only
-portal screen that does not import it.
+**D. Refetch-after-mutation — 4 mechanisms**
 
-**Dead canonical helper with 11 hand-rolled copies.** `jsonField<T>()`
-([api.ts:958](apps/crm/src/lib/api.ts:958)) has zero call sites. The inline
-`typeof raw === "string" ? JSON.parse(raw) : raw` it exists to replace appears at
-[ProductLog.tsx:156](apps/crm/src/office/ProductLog.tsx:156),
-[ProductUsage.tsx:54](apps/crm/src/office/ProductUsage.tsx:54),
-[CustomerDetail.tsx:335](apps/crm/src/office/CustomerDetail.tsx:335),
-[MarketRates.tsx:306](apps/crm/src/office/MarketRates.tsx:306),
-[Schedule.tsx:706](apps/crm/src/office/Schedule.tsx:706),
-[QuoteHistory.tsx:34](apps/crm/src/components/QuoteHistory.tsx:34),
-[CustomerDocuments.tsx:38](apps/crm/src/components/CustomerDocuments.tsx:38),
-[JobDetail.tsx:101,167,181](apps/crm/src/tech/JobDetail.tsx:101).
+| Mechanism | Sites |
+|---|---|
+| `useAsync().reload` | `office/Inventory.tsx:53`, `technicians.tsx:58`, `PromoCodes.tsx:44`, `Staff.tsx:99`, `Customers.tsx:211`, `ProductLog.tsx:37` |
+| bespoke `onChanged`/`onDone`/`onSaved` prop | 34 JSX bindings in 12 files; `CustomerDetail.tsx` alone passes 13 (e.g. `:541`, `:1860`), `JobDetail.tsx` 6, `MarketRates.tsx` 3 (`:331`, `:338`) |
+| **`setTimeout(() => void load(), 1500)`** | `portal/Billing.tsx:109`, `:298`; `office/CustomerDetail.tsx:1946` |
+| direct `await load()` | `office/Dashboard.tsx:144`, `:164` |
 
-### 1.2 Backend data access and service calls
+Most used: the bespoke prop (34). Most correct: `reload`, which re-enters the request guard (`useAsync.ts:92`). The three `setTimeout` sites are a fixed sleep to outrun Stripe/backend eventual consistency with no retry — if the backend has not settled in 1500 ms the customer sees the pre-payment invoice state at `portal/Billing.tsx:109` and must refresh manually.
 
-**Cross-Lambda invoke — 6 hand-rolled clients, 3 incompatible payload protocols.**
+**E. Presigned upload — 5 copies in 4 files**
 
-| Caller → target | Location | Protocol |
-|---|---|---|
-| crm-billing → booking-public | [handler.ts:365](apps/web/amplify/functions/crm-billing/handler.ts:365) | `{internalOp:{kind}}` |
-| thumbtack → booking-public | [autoQuote.ts:93](apps/web/amplify/functions/thumbtack-webhook/autoQuote.ts:93) | `{internalOp:{kind}}` |
-| booking-public → crm-pricing | [handler.ts:1117](apps/web/amplify/functions/booking-public/handler.ts:1117) | `{internalOp:{**op**}}` — different discriminator |
-| pricing-refresh → booking-public | [handler.ts:381](apps/web/amplify/functions/pricing-refresh/handler.ts:381) | synthesized `APIGatewayProxyEventV2` |
-| booking-public → pricing-refresh | [handler.ts:931](apps/web/amplify/functions/booking-public/handler.ts:931) | `{rateKey, source}` |
-| crm-pricing → pricing-refresh | [handler.ts:143](apps/web/amplify/functions/crm-pricing/handler.ts:143) | `{rateKey, source}` — same job as above |
-| daily-reminders → crm-admin | [handler.ts:2326](apps/web/amplify/functions/daily-reminders/handler.ts:2326) | synthesized AppSync resolver event |
+`components/CustomerDocuments.tsx:72` · `components/ReportPhotos.tsx:52` · `tech/JobDetail.tsx:929` · `tech/JobDetail.tsx:1060` · `portal/Requests.tsx:157`.
 
-Each re-implements the `FunctionError` → `JSON.parse(Buffer.from(Payload))` →
-`{ok}` unwrap. Most correct: `invokeBookingPublic`
-([crm-billing/handler.ts:365](apps/web/amplify/functions/crm-billing/handler.ts:365))
-— smallest, unwraps the documented envelope. **Canonical: one
-`shared/invokeFunction.ts` with a single `internalOp` envelope; drop both
-synthesized-event variants.** Collapse `booking-public:931` and
-`crm-pricing:143` first — identical operation.
+Each is: `setBusy(true)` → `opResult<{key,uploadUrl}>` → throw if missing → `fetch(url, {method:"PUT", headers:{"Content-Type":…}})` → throw on `!ok` → catch ternary → `finally setBusy(false)`.
 
-**The same endpoint is reachable three ways.** `booking-public`'s `quote`/`book`:
+- Most correct: `ReportPhotos.tsx:52` — the only one handling a multi-file `FileList` and sending a key delta (`:76`).
+- **Content-Type divergence:** `CustomerDocuments.tsx:76` has a fallback (`file.type || "application/pdf"`); `ReportPhotos.tsx:60,67` is safe; `JobDetail.tsx:943`, `JobDetail.tsx:1077` and `Requests.tsx:171` pass a possibly-empty `file.type` straight through. Empty `file.type` is common for HEIC and some Android pickers.
+- Canonical: one `uploadViaPresignedUrl(getUrlMutation, file)` in `apps/crm/src/lib/api.ts`, wrapped in `useAction`.
 
-1. Public Function URL — [handler.ts:391](apps/web/amplify/functions/booking-public/handler.ts:391), called by [bookingApi.ts:300](apps/web/src/lib/bookingApi.ts:300)
-2. IAM invoke via `handleInternalOp` — [handler.ts:317](apps/web/amplify/functions/booking-public/handler.ts:317)
-3. IAM invoke with a **fake HTTP event** re-entering the public route table — [handler.ts:402](apps/web/amplify/functions/booking-public/handler.ts:402), from [pricing-refresh/handler.ts:381](apps/web/amplify/functions/pricing-refresh/handler.ts:381)
+**F. Signed-document-URL fetch — 2 copies**
 
-Path 3 deliberately bypasses `handleInternalOp` and lands in the CORS/origin gate
-with an empty `headers` object. **Canonical: `handleInternalOp` for all
-server-side callers.**
+`components/DocButton.tsx:14` (one-shot, opens a tab, `alert()` on error) vs `components/ReportPhotos.tsx:11` (`useSignedUrls`, batched, memoised, cancel guard). `DocButton.tsx:21` is the only `alert()`-based error surface in the CRM; everything else uses `ErrorNote`.
 
-**`getSecret()` triplicated verbatim.**
-[booking-public/handler.ts:97](apps/web/amplify/functions/booking-public/handler.ts:97),
-[pricing-refresh/handler.ts:126](apps/web/amplify/functions/pricing-refresh/handler.ts:126)
-(comment: "same lookup as booking-public"),
-[crm-pricing/handler.ts:383](apps/web/amplify/functions/crm-pricing/handler.ts:383).
+**G. Public-site transport — 2 POST-JSON clients, 3 outputs loaders**
 
-Same two SSM paths, same `placeholder-set-me` sentinel, same env-first order.
-Most correct: crm-pricing — the only one that does not cache negative lookups
-([:407](apps/web/amplify/functions/crm-pricing/handler.ts:407)); the other two pin
-a miss for the container lifetime. **Canonical: crm-pricing's version, extracted.**
+- `post<T>()` — `apps/web/src/lib/bookingApi.ts:300`, URL resolution `:18`, `ApiResult<T>` `:289`. 5 consumers.
+- `submitLead()` — `apps/web/src/lib/leadIntakeApi.ts:67`, URL resolution `:18`, `LeadResult` `:63`. 2 consumers. `leadIntakeApi.ts:3` states it mirrors `bookingApi.ts`'s URL resolution.
+- A third copy of the glob-loader + module singleton: `apps/crm/src/lib/backend.ts:12`.
+- Most correct: `post<T>` — it preserves the HTTP status (`bookingApi.ts:288`), which callers branch on (`QuotePage.tsx:311` on 400/404/409/410; `CancelPage.tsx:81,89,97` on 503/404). `submitLead` collapses everything to `{ok:false,error}`.
 
-**`bookingPublicFunctionName()` — 4 copies.**
-[crm-billing:346](apps/web/amplify/functions/crm-billing/handler.ts:346) (throws a
-customer-facing string on miss),
-[autoQuote.ts:71](apps/web/amplify/functions/thumbtack-webhook/autoQuote.ts:71),
-[pricing-refresh:347](apps/web/amplify/functions/pricing-refresh/handler.ts:347),
-[daily-reminders:2311](apps/web/amplify/functions/daily-reminders/handler.ts:2311)
-(same shape, different target). Most correct: pricing-refresh — memoizes and
-distinguishes "unconfigured" from "transient failure". **Canonical: one
-`shared/functionName.ts` taking `(envVar, paramVar)`.**
+**H. Poll loops — 2 independent implementations**
 
-**Two `stripeClient()` factories.**
+`apps/web/src/pages/booking/TrackPage.tsx:73` and `QuotePage.tsx:255`. Both: `stopped` flag + recursive `setTimeout` + a parallel `setInterval` elapsed-ticker + cleanup.
 
-| Impl | Location | Key source | Sites |
+Most correct: `QuotePage` — it separates terminal HTTP statuses (`:311`, stops on 400/404/409/410) from transient failure (`:319`, retries) and backs off 3 s → 5 s past `LONG_WAIT_MS` (`:326`). `TrackPage.tsx:84` retries on **every** failure at a fixed interval including permanent ones, so a dead token polls forever.
+
+**I. Lead-form submit — 2 copies, no shared hook**
+
+`apps/web/src/pages/Contact.tsx:15` and `apps/web/src/components/TalkToExpertModal.tsx:21` — same `status`/`errorMsg` pair, same two validation branches (`Contact.tsx:32,36` / `TalkToExpertModal.tsx:69,73`), same analytics triple (`:57` / `:91`). `apps/web/src` has no async hook of any kind; `apps/web/src/lib/` holds only `addressAutocomplete`, `analytics`, `bookingApi`, `bookingFunnel`, `leadIntake`, `leadIntakeApi`, `portal`. The CRM's `useAsync` is not importable from web.
+
+**J. Minor**
+
+- Raw `.data ??` bypassing `unwrap` — 4 sites: `office/technicians.tsx:197`, `office/CustomerDetail.tsx:249`, `office/Schedule.tsx:709`, `components/LeadPanel.tsx:59`. A GraphQL error renders an empty list instead of surfacing.
+- `addressAutocomplete.tsx` forked across apps — `apps/web/src/lib/` vs `apps/crm/src/lib/`, ~150 lines, differing only in comment wording at lines 106-108 and 120.
+- `portal/Group.tsx:25` reimplements the group half of `loadMyCustomers`. Partial overlap only — flagged as probable, not certain.
+
+### 1.2 Backend data access
+
+**Already consolidated — verified, no action:**
+
+- One `generateClient` in the backend: `functions/shared/dataClient.ts:25`. 285 `dataClient()` calls across 50 files. No per-handler client, no direct AppSync SigV4.
+- One CAS layer: `functions/shared/atomicLock.ts`, ~99 call sites in 24 files. Delete-then-create is documented as the rejected prior design (`atomicLock.ts:17-22`) and no surviving instance was found.
+- One pagination module: `functions/shared/pagination.ts` (`forEachPage:41`, `listAll:59`), 119 call sites in 38 files, zero hand-rolled Amplify `nextToken` loops.
+
+**A. `pageErrors: "ignore"` — 113 sites**
+
+`pagination.ts:19-25` documents the flag as migration debt with the instruction not to write it into new code. Actual usage: **116 sites pass `"ignore"` (115 in `apps/web/amplify`, 1 in `apps/crm/src`; 114 excluding tests), 0 pass `"throw"`**, ~6 rely on the safe default. A partial scan silently reads as a complete one at 95% of call sites. Affects dashboard totals, rosters and reconciliation sweeps; the symptom is a wrong number, never an error.
+
+**B. Cognito pagination — 3 hand-rolled loops, 2 near-clones**
+
+`crm-admin/handler.ts:2186`, `:2209`, `:3155`. These page `ListUsersInGroup`/`ListUsers` (capital-`N` `NextToken`), which `PageResult<T>` does not fit, so they are justified. `countOtherUsableOwners` (`:2186`) and `countUsableOwners` (`:2209`) differ only by an `exceptUsername` filter (`:2190` vs `:2213`) and should be one helper.
+
+**C. Cross-Lambda invoke — 5 name resolvers, 4 wire shapes**
+
+| # | Location | Import | Memoized | On unresolved |
+|---|---|---|---|---|
+| 1 | `crm-billing/handler.ts:345` | dynamic `:349` | no | **throws** a user-facing string `:359` |
+| 2 | `pricing-refresh/handler.ts:322` | static | **yes** (`:313`) | `null` |
+| 3 | `thumbtack-webhook/autoQuote.ts:71` | static | no | `null` |
+| 4 | `daily-reminders/handler.ts:2312` (inline) | dynamic `:2316` | no | logs + `continue` `:2371` |
+| 5 | `booking-public/handler.ts:924`, `:1103` | `process.env` only, no SSM | n/a | logs + skip |
+
+#1, #2 and #3 resolve the same function from the same SSM parameter with three different signatures.
+
+Wire shapes:
+1. `{ internalOp: {...} }` — receivers `booking-public/handler.ts:363`, `crm-pricing/handler.ts:94`; senders `crm-billing:368`, `autoQuote:104`, `booking-public:935`.
+2. Synthetic AppSync event `{ info:{fieldName}, arguments, identity:null }` — `daily-reminders/handler.ts:2375` → crm-admin. See §2.4.
+3. Synthetic API-Gateway-v2 event — `pricing-refresh/handler.ts:362` → booking-public `/quote-status`.
+4. Bare `{ rateKey, source }` — `booking-public:935`, `crm-pricing:151` → pricing-refresh.
+
+Most correct: #2, the only memoized resolver; #1/#3/#4 hit SSM on every invocation. The throw-vs-null split means the same failure is a 500 in crm-billing and a silent no-op in thumbtack.
+
+Canonical: `shared/invokeFunction.ts` exporting a memoized `resolveFunctionName(envVar, paramVar)` and `invokeInternalOp(name, op)` returning the `{ok}` envelope.
+
+### 1.3 Secrets and the Stripe client
+
+**A. Stripe client — 2 implementations, live-key guard on one**
+
+| Impl | Location | Key source | Guard |
 |---|---|---|---|
-| shared, sync | [stripeClient.ts:9](apps/web/amplify/functions/shared/stripeClient.ts:9) | `process.env` only | 19 |
-| booking-public, async, private | [handler.ts:141](apps/web/amplify/functions/booking-public/handler.ts:141) | env → SSM, plus `assertStripeKeyAllowed` live-key guard at [:130](apps/web/amplify/functions/booking-public/handler.ts:130) | 2 |
+| shared | `functions/shared/stripeClient.ts:9` | `process.env.STRIPE_SECRET_KEY`, sync | **none** |
+| booking-public local | `functions/booking-public/handler.ts:147` | `getSecret()` → env then SSM, async | **yes** — `assertStripeKeyAllowed:76` refuses `sk_live_`/`rk_live_` when `AMPLIFY_BRANCH !== "main"` |
 
-Most used is the shared one; most correct is the local one — it is the only
-version that refuses a live key off `main`. The 19 sites on the shared factory
-have neither the SSM fallback nor the guard. **Canonical: move booking-public's
-version into `shared/stripeClient.ts`.**
+Most used: the shared client (~45 call sites — `stripe-webhook`, `crm-billing`, `crm-docs`, `crm-admin`, `daily-reminders`, `shared/bookingFinalize.ts`). Most correct: the local one. The comment at `handler.ts:75-81` records the defect it prevents: the shared `/amplify/shared/<appId>/STRIPE_SECRET_KEY` SSM fallback holds the live key, so a missing branch secret silently ran the funnel in live mode.
 
-**Presigned-PUT generation — 5 near-identical implementations, 5 S3 clients.**
-[crm-docs:941](apps/web/amplify/functions/crm-docs/handler.ts:941) (`expiresIn:300`),
-[crm-docs:5624](apps/web/amplify/functions/crm-docs/handler.ts:5624),
-[crm-docs:5643](apps/web/amplify/functions/crm-docs/handler.ts:5643),
-[crm-docs:5681](apps/web/amplify/functions/crm-docs/handler.ts:5681),
-[crm-pricing:421](apps/web/amplify/functions/crm-pricing/handler.ts:421).
-Bucket resolution is duplicated in parallel (`BUCKET()` in two files plus four raw
-`process.env.DOCS_BUCKET` reads). Most correct: `getReportPhotoUploadUrl` —
-validates content type against an allow-map and validates the parent record.
-**Canonical: `shared/s3Presign.ts` + one `S3Client`.**
+The shared client reads only `secret("STRIPE_SECRET_KEY")`, which is branch-scoped (`crm-billing/resource.ts:24`, `crm-docs/resource.ts:32`, `crm-admin/resource.ts:31`, `daily-reminders/resource.ts:15`, `stripe-webhook/resource.ts:25`), so it does not traverse the shared-SSM path.
 
-**`ensureRouteAndOrder()` copied verbatim.**
-[bookingFinalize.ts:33](apps/web/amplify/functions/shared/bookingFinalize.ts:33)–92
-and [assignVisit.ts:98](apps/web/amplify/functions/shared/assignVisit.ts:98)–155,
-identical bodies including the identical inline comment. `assignVisit.ts:93-97`
-documents the copy as intentional (bundle size), but both files already import
-`shared/pagination`. **Canonical: `shared/routeOrder.ts`.**
+> **Not verified.** Whether Amplify's `secret()` can itself resolve to a shared/parent value on a branch with no override. That determines whether the missing guard is reachable. Recommended regardless: move `assertStripeKeyAllowed` into `shared/stripeClient.ts` — it is a 6-line pure check that already has a test.
 
-**Cognito `ListUsersInGroup` pagination hand-rolled 3×** — the only surviving
-`do…while(token)` loops:
-[crm-admin:2177](apps/web/amplify/functions/crm-admin/handler.ts:2177),
-[:2200](apps/web/amplify/functions/crm-admin/handler.ts:2200) (differs from the
-previous only by `u.Username !== exceptUsername &&`),
-[:3148](apps/web/amplify/functions/crm-admin/handler.ts:3148). Competing with
-[shared/pagination.ts:41](apps/web/amplify/functions/shared/pagination.ts:41)
-`forEachPage` / `:62` `listAll`, used 120× in Lambdas and 56× in the CRM, whose
-header states "nobody hand-writes `do … while (nextToken)`". **Canonical:
-`forEachPage` + a `listUsersInGroup` adapter for `PascalCase` `NextToken`.**
+**B. `getSecret` — 3 verbatim copies**
 
-**Smaller backend duplicates.**
+`booking-public/handler.ts:103` · `pricing-refresh/handler.ts:127` (comment at `:126`: "same lookup as booking-public") · `crm-pricing/handler.ts:383`.
 
-- Customer creation, 3 paths: [leadLifecycle.ts:275](apps/web/amplify/functions/shared/leadLifecycle.ts:275) `createLead` (canonical, dedupes via [leadIdentity.ts:74](apps/web/amplify/functions/shared/leadIdentity.ts:74)) vs [bookingFinalize.ts:1400](apps/web/amplify/functions/shared/bookingFinalize.ts:1400) (deterministic `cust-<bookingId>`, own phone-rejection retry) vs [agreementImport.ts:145](apps/web/amplify/functions/shared/agreementImport.ts:145)
-- `normalizeEmail`/`normalizePhone`, 3 copies with **different return contracts** (`undefined` vs `null`): [leadIdentity.ts:18](apps/web/amplify/functions/shared/leadIdentity.ts:18), [lead-intake/handler.ts:86](apps/web/amplify/functions/lead-intake/handler.ts:86), [booking-public/handler.ts:256](apps/web/amplify/functions/booking-public/handler.ts:256)
-- `parseQuoteSnapshot`, 2 copies: [quoteDoc.ts:41](apps/web/amplify/functions/shared/quoteDoc.ts:41) (exported) vs [pricing-refresh/handler.ts:306](apps/web/amplify/functions/pricing-refresh/handler.ts:306) (private re-implementation)
-- [driveTime.ts](apps/web/amplify/functions/shared/driveTime.ts) issues three near-identical `computeRoutes` POSTs (`:27`, `:66`, `:106`) and two `distanceMatrix` POSTs (`:145`, `:212`) — five copies of the same headers/field-mask boilerplate
+All three hardcode the app id `"d26qpsjewk0bee"` (`:107`, `:131`, `:388`), the branch default `"staging"`, both SSM paths, and the sentinel `"placeholder-set-me"`. The sentinel also appears at `backend.ts:556` and `thumbtack-webhook/handler.ts:439` — 5 copies of one magic string. The app id appears a fourth time at `apps/crm/src/lib/bookingLink.ts:37`.
 
-### 1.3 Auth and permission checks
+Most correct: `crm-pricing`, whose `Map<string, string|null>` and comment at `:405-407` explain hits-only caching. Canonical: `shared/secrets.ts`; drop the hardcoded app id and fail loudly when `AMPLIFY_APP_ID` is unset — it currently makes the backend non-portable across AWS accounts.
 
-Server-side role *reading* is well centralized: `cognito:groups` is parsed in
-exactly two places repo-wide —
-[authz.ts:17](apps/web/amplify/functions/shared/authz.ts:17) for all Lambdas and
-[auth.tsx:49](apps/crm/src/lib/auth.tsx:49) for the browser. The duplication is in
-layering and in identity resolution.
+### 1.4 Notifications, modals, money display
 
-**Four names for one predicate.** `callerIsOffice` and `callerIsFinance` are
-aliases of `callerIsOwner`; `assertOffice`/`assertFinance` alias `assertOwner`.
+**A. No toast library and no toast component exists** — `grep -i toast` returns zero hits in both apps.
 
-| Name | Location | Sites |
+| Mechanism | Count | Sites |
 |---|---|---|
-| `callerIsOwner` | [authz.ts:68](apps/web/amplify/functions/shared/authz.ts:68) | 9 |
-| `callerIsOffice` | [authz.ts:74](apps/web/amplify/functions/shared/authz.ts:74) | 10 |
-| `callerIsFinance` | [authz.ts:82](apps/web/amplify/functions/shared/authz.ts:82) | 4 |
-| `assertOffice` | [authz.ts:88](apps/web/amplify/functions/shared/authz.ts:88) | 24 |
-| `assertFinance` | [authz.ts:100](apps/web/amplify/functions/shared/authz.ts:100) | 10 |
-| `assertOwner` | [authz.ts:108](apps/web/amplify/functions/shared/authz.ts:108) | 2 |
+| `<ErrorNote>` (`ui/kit.tsx:424`) | 82 | CRM-wide |
+| `<SuccessNote>` (`ui/kit.tsx:443`) | 3 | CRM |
+| `window.confirm()` | 17 | `office/Work.tsx:246,301,330,360,392`; `office/CustomerDetail.tsx:746,769,795,961,992,1379`; `office/GroupDetail.tsx:177`; `office/Schedule.tsx:217`; `office/PromoCodes.tsx:296`; `office/MarketRates.tsx:958`; `components/QuoteHistory.tsx:111`; `components/ReportPhotos.tsx:92` |
+| `alert()` | 5 | `office/Work.tsx:196,228`; `office/CustomerDetail.tsx:1909`; `office/technicians.tsx:453`; `components/DocButton.tsx:21` |
+| Inline banner state (`bk-notice`/`bk-form-error`/`bk-field-error`) | 25 | `apps/web/src` — `QuotePage.tsx:537,784,829,1242,1244,1328`; `BookPage.tsx:632,852,1014`; `Contact.tsx`; `TalkToExpertModal.tsx` |
 
-They agree today, so this causes no live inconsistency — but it makes the
-privilege surface unreadable. One inline check inside `authz.ts` itself bypasses
-the helper: [authz.ts:141](apps/web/amplify/functions/shared/authz.ts:141) uses
-`groups.includes("OWNER")` where it should call `callerIsOwner`.
-**Canonical: `callerIsOwner`/`assertOwner`; retire the four aliases (48 sites).**
+Most correct: `<ErrorNote>` — `role="alert"`, `scrollIntoView`, and a `TECHNICAL_ERROR` regex (`kit.tsx:421`) that replaces stack-trace text with friendly copy.
 
-**Role vocabulary declared 4 times.** Cognito
-([auth/resource.ts:58](apps/web/amplify/auth/resource.ts:58), source of truth) vs
-`STAFF_ROLES` ([staffRoles.ts:12](apps/web/amplify/functions/shared/staffRoles.ts:12))
-vs `STAFF_GROUPS` ([authz.ts:94](apps/web/amplify/functions/shared/authz.ts:94),
-**verbatim duplicate, zero callers**) vs `ROLE_CHOICES`
-([Staff.tsx:53](apps/crm/src/office/Staff.tsx:53)).
-**Canonical: `staffRoles.ts`; delete `authz.ts:94-98`.**
+- 3 `SuccessNote` against 82 `ErrorNote`: most CRM mutations confirm failure but not success.
+- `DocButton.tsx:21` is the only CRM error path that bypasses the technical-text filter.
+- The 17 `window.confirm()` calls are native OS dialogs inside a fully styled app, and are unstyleable in the iOS PWA this CRM installs as (`components/InstallBanner.tsx`).
 
-**Removed roles still referenced.** `OFFICE`/`FINANCE` were deleted from the pool
-but survive in live branches:
+**B. Modals — 2 implementations, structurally fine**
 
-- [Staff.tsx:71](apps/crm/src/office/Staff.tsx:71) — `set.has("OWNER") || set.has("OFFICE") || set.has("FINANCE")`; the latter two can never appear
-- [crm-admin/handler.ts:2812](apps/web/amplify/functions/crm-admin/handler.ts:2812) — offboarding still sweeps both deleted groups
-- [auth.tsx:15](apps/crm/src/lib/auth.tsx:15) keeps `office`/`finance` as aliases; ~60 sites across 10 files consume them
+`Sheet` (`ui/kit.tsx:327`) — 14 instances across 19 files; the three `*Sheet.tsx` components all compose it (`CollectPaymentSheet.tsx:10,55`, `VisitCancelSheet.tsx`, `CancelPlanSheet.tsx`). `TalkToExpertModal.tsx:106` is a hand-rolled overlay used by 14 service pages.
 
-Not to be confused with `ownerTeam: "FINANCE"` (~60 hits) — that is a work-queue
-team label from [ownedWork.ts:11](apps/web/amplify/functions/shared/ownedWork.ts:11),
-unrelated to auth.
+No hand-rolled fixed-overlay divs exist (`grep 'position: "fixed"'` in `.tsx` returns zero).
 
-**"Which customer is this request for?" — 5 resolvers.**
+The gap here is accessibility, not duplication: `TalkToExpertModal.tsx:113` is the only one with `role="dialog"` + `aria-modal`. `kit.tsx:327` has neither, no focus trap and no Escape handling — only `aria-label="Close"` on the button (`:341`). That affects all 14 CRM modals, for every keyboard and screen-reader user, always.
 
-| Entry | Impl | Sites |
+**C. Money — 1 canonical + 257 sites, 2 divergent**
+
+- Canonical `shared/money.ts:32` (`formatMoney`, `formatMonthly:62`, `formatYearly:68`, `NO_AMOUNT = "—"` `:38`). Re-exported at `apps/crm/src/lib/format.ts:4`, `apps/web/src/lib/bookingFunnel.ts:144`, `crm-pricing/rateCards.ts:199`.
+- 257 call sites. Top: `office/CustomerDetail.tsx` 34, `shared/bookingFinalize.ts` 33, `office/Dashboard.tsx` 21, `daily-reminders/handler.ts` 15, `shared/receipts.ts` 14.
+- **`apps/crm/src/portal/AddService.tsx:75`** — local `money()`: `Number.isInteger(d) ? \`$${d}\` : \`$${d.toFixed(2)}\``. Renders `$1200` where every other surface renders `$1,200.00`. This is the exact style `money.ts:12-18` documents as the bug it was written to eliminate, on a customer-facing portal page.
+- **`crm-billing/handler.ts:147`** — `` `$${(amountCents/100).toLocaleString("en-US")}` `` drops cents (`2000050` → `$20,000`). Fires only above the $20k ceiling, in a refusal message about money. `money.ts:19-20` names this hazard.
+- Two cents→dollars rounding rules: `shared/marketRate.ts:165` rounds to the nearest dollar; `booking-public/availability.ts:52` rounds to the nearest dollar then re-multiplies to cents (`$12.49` → `$12.00`). Both feed prices. *Not verified* whether one rate can traverse both.
+- Input seeding (not display, correct): `office/CustomerDetail.tsx:2051,2257`; `office/Inventory.tsx:217`; `office/ProductLog.tsx:193`; `office/PromoCodes.tsx:202`; `office/MarketRates.tsx:428`.
+
+### 1.5 Dates
+
+| Module | Purpose | Zone |
 |---|---|---|
-| `customerId` | `canActForCustomer` [authz.ts:136](apps/web/amplify/functions/shared/authz.ts:136) | 9 |
-| `servicePlanId` | `assertCanActForPlan` [crm-billing:113](apps/web/amplify/functions/crm-billing/handler.ts:113) | 2 |
-| `invoiceId` | inline [crm-billing:1051](apps/web/amplify/functions/crm-billing/handler.ts:1051) | 1 |
-| S3 `key` | inline regex [crm-docs:5798](apps/web/amplify/functions/crm-docs/handler.ts:5798) | 1 |
-| `callbackRequestId` | inline [crm-docs:521](apps/web/amplify/functions/crm-docs/handler.ts:521) | 1 |
-| `jobId`/`reportId` | [jobAssignment.ts:165](apps/web/amplify/functions/shared/jobAssignment.ts:165) | 15 |
+| `shared/dates.ts:24` | `todayEastern`, `easternPlusDays`, `todayUtc` | Eastern, formatter hoisted |
+| `shared/businessDays.ts:30` | Eastern wall-clock → UTC reconstruction `:52`, `oneBusinessDayDeadline` | Eastern |
+| `shared/businessHours.ts:14` | `OPEN_HOUR=8`/`CLOSE_HOUR=18`, `isWithinBusinessHours:83`, `contactDueAt:126` | Eastern |
+| `shared/season.ts:34` | `monthKeyOf` (Eastern `:36`), `firstWeekdayOf:93` (`Date.UTC`) | **mixed** |
+| `shared/cancellationPolicy.ts:49` | `dayEpoch(iso)+days` | UTC epoch |
+| `apps/crm/src/lib/format.ts:7` | `fmtDate`, `fmtDateTime`, `todayEastern:30`, `addDays:38` | mixed |
 
-The three inline variants each re-implement the "opaque error whether missing or
-someone else's" idiom differently. Most correct: `canActForCustomer` — reads the
-row's live `accessGroups` stamp rather than trusting the token, so group removal
-takes effect without re-login. **Canonical: keep it as the leaf; add one
-`assertCanActForRecord(identity, model, id)` for the three inline copies.**
+Most used: `todayEastern()` 39 sites, `todayUtc()` 9, `easternPlusDays()` 4; 13 backend files import `shared/dates`. Most correct: `shared/dates.ts` for calendar days (`:12-18` documents why `todayUtc` stays separate — dedupe keys must not shift their boundary on deploy), `shared/businessHours.ts` for instants.
 
-**Two authorization layers, applied inconsistently.** ~110 declarative
-`allow.groups(...)` gates in [resource.ts](apps/web/amplify/data/resource.ts)
-vs imperative re-asserts in handlers: crm-docs 24, crm-billing 13, crm-pricing 3,
-and **crm-admin 0 across all 24 cases**. Cleanest form is
-[crm-pricing:103](apps/web/amplify/functions/crm-pricing/handler.ts:103) — one
-blanket assert before the switch, narrowed per case. **Canonical: that shape.**
+**Duplicate "today":** `booking-public/handler.ts:1941` and `:3362` hand-roll it. That handler does not import `shared/dates` (its imports at `:89` pull only `formatMoney`), while its sibling `booking-public/availability.ts:13` does.
 
-**`grp-`/`cus-` handling spread across ~5 places.** Names come from
-[dynamicGroups.ts:11](apps/web/amplify/functions/shared/dynamicGroups.ts:11), but
-[agreementImport.ts:133](apps/web/amplify/functions/shared/agreementImport.ts:133)
-hand-builds `` `grp-${groupId}` ``, and the grant loop is written three times:
-[portalProvision.ts:136](apps/web/amplify/functions/shared/portalProvision.ts:136),
-[:172](apps/web/amplify/functions/shared/portalProvision.ts:172),
-[crm-admin:1334](apps/web/amplify/functions/crm-admin/handler.ts:1334).
-`addToGroup` ([portalProvision.ts:51](apps/web/amplify/functions/shared/portalProvision.ts:51))
-and `removeFromGroup` ([crm-admin:662](apps/web/amplify/functions/crm-admin/handler.ts:662))
-live in different modules. Frontend re-parses the prefix with a magic
-`.slice(4)` at [auth.tsx:91,98](apps/crm/src/lib/auth.tsx:91).
-**Canonical: one `syncPortalGroups(username, wanted)` in `portalProvision.ts`;
-add `parseGrpGroup`/`parseCusGroup` to `dynamicGroups.ts`.**
+**17 inline `toISOString().slice(0,10)` sites:** `dates.ts:53`, `crm/lib/format.ts:36,41`, `daily-reminders/handler.ts:1897`, `cancellationPolicy.ts:49`, `businessDays.ts:80,88`, `bookingFinalize.ts:1989`, `pricingControl.ts:51`, `bookingPayment.ts:173`, `agingMath.ts:35`, `assignVisit.ts:20`, `compliance.ts:26`, `recurring.ts:33`, `availability.ts:44`, `booking-public/handler.ts:2767`, `pricing-refresh/handler.ts:639`.
 
-#### Reachable entry points with no authz check
+**Three incompatible `YYYY-MM-DD` noon anchors:**
 
-1. **[crm-admin/handler.ts:221](apps/web/amplify/functions/crm-admin/handler.ts:221)** — all 24 cases, zero in-handler assertion. Sole gate is `allow.groups(["OWNER"])` in the schema. Covers `adminCreateUser`, `changeStaffRoles`, `offboardStaff`, `revokePortalAccess`. The privilege-granting surface is the one without defense in depth.
-2. **[crm-admin/handler.ts:247](apps/web/amplify/functions/crm-admin/handler.ts:247)** `resumeGroupChange` — verified absent from `resource.ts` (0 occurrences), so it is reachable only by direct Lambda invoke. The comment at `:248-250` claims an AppSync office identity may trigger it; that path does not exist.
-3. **[crm-admin/handler.ts:351](apps/web/amplify/functions/crm-admin/handler.ts:351)** `reportSuspectAddresses` — same, also undeclared. Read-only, low severity.
-4. **[crm-billing/handler.ts:296](apps/web/amplify/functions/crm-billing/handler.ts:296)** `assignRecoveryOwner` — the only case in that file without an assert; correct today via the schema gate, but the lone exception among 13 siblings.
-5. **[lead-intake/handler.ts:187](apps/web/amplify/functions/lead-intake/handler.ts:187)** — **highest severity.** Public Function URL with `authType: NONE`. Verified: no signature, no secret, no bot token, no rate limit (`grep -nE "throttle|botToken|secret|signature|hmac|captcha"` → no matches). Writes `Customer` rows via `createLead(..., force: true)` at `:245`. [backend.ts:240](apps/web/amplify/backend.ts:240) names CORS as the protection — but the handler returns `Access-Control-Allow-Origin: "*"` at [:67](apps/web/amplify/functions/lead-intake/handler.ts:67), contradicting the CDK allowlist, and CORS is a browser policy that `curl` ignores either way. The three sibling public endpoints all gate properly: [stripe-webhook:42](apps/web/amplify/functions/stripe-webhook/handler.ts:42) verifies signatures, [thumbtack-webhook:109](apps/web/amplify/functions/thumbtack-webhook/handler.ts:109) uses `timingSafeEqual`, [booking-public:882,904](apps/web/amplify/functions/booking-public/handler.ts:882) has `verifyBotToken` + `throttleOk`.
-6. **[booking-public/handler.ts:358](apps/web/amplify/functions/booking-public/handler.ts:358)** — the `internalOp` trusted branch is gated only by the *absence* of `requestContext.http`. The reasoning is sound but the whole portal add-service trust boundary rests on one negative check with no secondary marker.
+| Anchor | Sites |
+|---|---|
+| `T12:00:00` (runtime-local) | `crm/lib/format.ts:9,39,46,51`; `crm/portal/AddService.tsx:475`; `daily-reminders/handler.ts:113` |
+| `T12:00:00Z` (UTC) | `shared/recurring.ts:342`; `shared/receipts.ts:28`; `shared/businessDays.ts:75`; `thumbtack-webhook/autoQuote.ts:138` |
+| `T00:00:00Z` + `timeZone:"UTC"` | `shared/planCancellationPolicy.ts:181` |
 
-### 1.4 Money formatting
+**Disagreements:**
 
-Storage is unambiguously cents — every money field in the schema is `a.integer()`
-with a `Cents` suffix, and no dollar-denominated persisted field exists. Rounding
-mode is consistently `Math.round`, and no float accumulation was found: totals sum
-integer cents and divide by 100 only at the render boundary. **Proration, tax, and
-discount are each single-sourced** (Stripe `proration_behavior: "none"`, Stripe tax
-rates, and [promo.ts:118](apps/web/amplify/functions/booking-public/promo.ts:118)
-`discountFor`). The problem is display.
+1. **`stripe-webhook/handler.ts:490-492`** — no `timeZone` and it formats a real instant (`stripeInvoice.created * 1000`), not a noon-anchored date. An invoice created after 19:00 ET on the last day of a month renders as the **next month** in the invoice description. Clearest UTC-vs-Eastern day-boundary defect in the scan.
+2. **`stripe-webhook/handler.ts:1029`** pins `timeZone:"UTC"` for a dispute deadline while `shared/pdf.ts:153,160,195,747` pin `America/New_York` for every other customer-visible date.
+3. **`apps/crm/src/lib/format.ts:19`** (`fmtDateTime`) has no `timeZone`, so a visit timestamp renders in the viewer's zone in the CRM and in Eastern on the PDF (`pdf.ts:153`). Permanent for any non-Eastern CRM user. (`fmtDate` at `:9` uses local noon, which is safe for ±11h.)
+4. **`daily-reminders/handler.ts:113`** is the only backend date formatter with no explicit zone; it inherits the Lambda's `TZ`. Correct today because Lambda runs UTC and the anchor is noon — fragile, not currently wrong.
+5. **`shared/pdf.ts:746`** (`fmtQuoteDate`) does `new Date(iso)` with `timeZone:"America/New_York"` and **no noon anchor** — the exact off-by-one `bookingFunnel.ts:149-152` documents. Callers: `pdf.ts:975,976,1105,1261`. If any receives a date-only string the quote PDF prints the previous day.
+6. Bare `toLocaleDateString()`/`toLocaleString()` with no locale and no zone: `office/GroupDetail.tsx:264`, `tech/JobDetail.tsx:1630,1823`, `components/CustomerDocuments.tsx:52`.
+7. `season.ts:36` derives month keys in Eastern while `season.ts:97` uses `Date.UTC` — two halves of one function on different calendars. Same-day in practice.
 
-**9 named formatters plus 89 inline `toFixed(2)` sites. No `Intl.NumberFormat`
-anywhere (0 hits).**
+Canonical: `shared/dates.ts` for calendar days, `shared/businessHours.ts` for instants; add `formatEasternDate(iso)` / `formatEasternDateTime(iso)` and route the ~20 inline formatters through it. Every display formatter must pin `timeZone`.
 
-| Group | Shape | Copies |
+### 1.6 Error handling
+
+**Backend — 5 shapes:**
+
+| Shape | Where |
+|---|---|
+| `throw new Error(...)` (AppSync) | `crm-docs/handler.ts` (206), `crm-admin/handler.ts` (69), `shared/leadLifecycle.ts` (62), `crm-billing/handler.ts` (51), `shared/visitChange.ts` (28), `crm-pricing/handler.ts` (28), `shared/bookingFinalize.ts` (22), `shared/callbacks.ts` (21), `shared/compliance.ts` (18), ~30 more |
+| `HttpError(status, payload)` | class `booking-public/handler.ts:451`, caught `:338`, `:439`; ~20 throws, that file only |
+| Raw `{statusCode, body}` | `stripe-webhook/handler.ts:46,61,186,189`; `thumbtack-webhook/handler.ts:103`; `lead-intake/handler.ts:62`; `booking-public/handler.ts:371` |
+| Result union `{ok:true,data} \| {ok:false,status,error}` | `booking-public/handler.ts:320` |
+| `Promise<void>` | `ops-alerts/handler.ts:60`, `ses-events/handler.ts:357`, `post-auth/handler.ts:35`, `pre-token/handler.ts:17`, `lead-sweep/handler.ts:3`, `daily-reminders/handler.ts:119` |
+
+No `return {error: ...}` shape exists — confirmed by grep. Most correct: `HttpError`, which carries the status and the customer-safe payload together so `:440` maps it without guessing.
+
+**Frontend — 3 shapes:**
+
+1. `<ErrorNote>` — `ui/kit.tsx:424`, 82 usages, the only surface that filters technical text.
+2. Per-page `useState<string|null>` + hand-rolled JSX — 25 sites in `apps/web/src`. **`apps/web/src` has no `ErrorNote` equivalent**, so the public funnel's ~8 error surfaces get no filtering; a raw `"Failed to fetch"` reaches a paying customer at `BookPage.tsx:990`.
+3. **Inline GraphQL unwrapping — 12 copies that drop errors 2..n.** `if (res.errors?.length) throw new Error(res.errors[0].message)` at `office/technicians.tsx:223,251,436`; `office/Staff.tsx:425,465,763`; `office/CustomerDetail.tsx:2784`; `tech/JobDetail.tsx:636,685,826,1535,1540`. The version that joins all messages exists once, at `apps/crm/src/lib/api.ts:982-983`.
+
+**`toMessage` vs inline ternary:** `toMessage(err, fallback)` at `asyncCore.ts:14` handles a thrown bare string and treats a whitespace-only `Error.message` as absent (`:15-16`). It has **zero direct call sites** outside `lib/`; it reaches code only through the 20 `useAsync` loaders. The inline form `err instanceof Error ? err.message : "…"` appears **79 times across 25 files** — `office/Work.tsx` 11, `office/CustomerDetail.tsx` 10, `office/MarketRates.tsx` 7, `office/Schedule.tsx` 6, `office/GroupDetail.tsx` 5.
+
+**Swallowed errors — 36 empty or comment-only `catch` blocks** (of 576 total `catch` occurrences). Line numbers are the closing brace:
+
+`crm/App.tsx:104` · `office/MarketRates.tsx:318` · `components/InstallBanner.tsx:24` · `components/ReportPhotos.tsx:24` · `lib/reportDraft.ts:127,146` · `tech/JobDetail.tsx:197` · `pages/Welcome.tsx:41` · `web/src/lib/bookingApi.ts:45` · `web/src/lib/leadIntake.ts:49` · `web/src/lib/bookingFunnel.ts:356,372` · `web/src/lib/leadIntakeApi.ts:42,99` · `web/src/pages/booking/QuotePage.tsx:64,73,81` · `shared/bookingFinalize.ts:67` · `shared/marketRateKeys.ts:103` · `shared/pricingControl.ts:78` · `shared/assignVisit.ts:129` · `shared/marketRate.ts:520` · `shared/pdf.ts:827` · `shared/capacity.ts:585` · `booking-public/handler.ts:123,2068,2165,2936,2964,2981,3065,3093,3153` · `pricing-refresh/handler.ts:147` · `crm-billing/handler.ts:395` · `crm-pricing/handler.ts:404`
+
+Most are annotated and defensible (sessionStorage in private mode, storage codecs). `booking-public/handler.ts` holds 9 of the 36; that concentration inside the paid-booking path is the subset worth auditing.
+
+### 1.7 Forms and validation
+
+No form library. Controlled state per field everywhere; `<Field>` (`ui/kit.tsx:151`) wraps 161 sites; ~200 `onChange` handlers. One reusable form component exists: `components/CustomerForm.tsx`, used twice (`office/CustomerDetail.tsx:1786`, `office/Leads.tsx:247`). The CRM uses zero `<form>` elements; all three `<form onSubmit>` are in `apps/web/src` (`TalkToExpertModal.tsx:134`, `Contact.tsx:106`, `QuotePage.tsx:835`, all `noValidate`).
+
+**Email — 5 distinct rules:**
+
+| Regex | Sites |
+|---|---|
+| `/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$/` | `web/src/lib/bookingFunnel.ts:199` **and** `booking-public/handler.ts:258` — a matched client/server pair |
+| `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` | `shared/leadIdentity.ts:16`, `lead-intake/handler.ts:79` |
+| `/^\S+@\S+\.\S+$/` | `components/CustomerForm.tsx:70`, `office/Staff.tsx:704` |
+| `/^[^@\s]+@[^@\s]+\.[^@\s]+$/` | `crm-admin/handler.ts:1635` |
+| `email.includes("@")` | `crm-docs/handler.ts:1050`, `crm-admin/handler.ts:3246` |
+
+Divergences: `foo@bar_baz.com` is rejected by the funnel pair (domain class has no `_`) and accepted by rules 2–4, so a lead created in the CRM can hold an address the funnel would refuse. `foo@bar.com.` is rejected by the funnel pair and accepted by rules 2–4 via backtracking — `lead-intake/handler.ts:81-84` exists specifically to keep AppSync's `AWSEmail` from rejecting the record, but its regex is looser than `AWSEmail`, so it does not achieve that. `crm-admin/handler.ts:3246` and `crm-docs/handler.ts:1050` accept `"a@"`.
+
+**Phone — 4 `normalizePhone` implementations:**
+
+| Impl | Non-US E.164 | Lowercases email |
 |---|---|---|
-| A | `toLocaleString` w/ 2 fraction digits | 5 byte-identical: [cancellationPolicy.ts:51](apps/web/amplify/functions/shared/cancellationPolicy.ts:51), [planCancellationPolicy.ts:43](apps/web/amplify/functions/shared/planCancellationPolicy.ts:43), [visitChange.ts:91](apps/web/amplify/functions/shared/visitChange.ts:91), [pdf.ts:191](apps/web/amplify/functions/shared/pdf.ts:191), [deactivation.ts:651](apps/web/amplify/functions/shared/deactivation.ts:651) |
-| B | `toFixed(2)`, no separator | [receipts.ts:20](apps/web/amplify/functions/shared/receipts.ts:20) + 89 inline |
-| C | whole dollars stay whole | 2: [rateCards.ts:197](apps/web/amplify/functions/crm-pricing/rateCards.ts:197), [bookingFunnel.ts:142](apps/web/src/lib/bookingFunnel.ts:142) |
-| D | `Intl` via `style:"currency"` | 1: [format.ts:1](apps/crm/src/lib/format.ts:1) — the only null-safe one |
-| E | no fraction digits | 1: [crm-billing:147](apps/web/amplify/functions/crm-billing/handler.ts:147) |
+| `web/src/lib/bookingFunnel.ts:202` | accepts `+\d{10,15}` | n/a |
+| `booking-public/handler.ts:262` | byte-identical to the above | n/a |
+| `shared/leadIdentity.ts:24` / `:19` | accepts (E.164 fast path) | yes |
+| `lead-intake/handler.ts:91` / `:86` | **rejects** — `digitsOnly()` at `:75` strips `+` | **no**, `.trim()` only |
 
-Verified divergence for `priceCents = 120000`: A → `$1,200.00`, B → `$1200.00`,
-C → `$1200`, D → `$1,200.00`, E → `$1,200`. A single plan price therefore renders
-four different ways depending on whether the customer is looking at the booking
-funnel (C), the PDF agreement (A), the receipt email (B), or the CRM (D).
+`+442071234567` is accepted by three paths and dropped by `lead-intake` (12 bare digits → `undefined`, phone silently moved into notes per `:81-84`). `leadIdentity.ts:4-5` states it consolidated three divergent copies; `lead-intake/handler.ts:91` is one of the old copies, still live. Separately, `lead-intake` stores `Jane@Example.com` un-lowercased while `leadIdentity.normalizeEmail` lowercases before matching, so the identity match at `leadIdentity.ts:82-95` misses that lead.
 
-Group B's 89 inline sites concentrate in
-[bookingFinalize.ts](apps/web/amplify/functions/shared/bookingFinalize.ts) (29),
-[daily-reminders](apps/web/amplify/functions/daily-reminders/handler.ts) (14),
-[stripe-webhook](apps/web/amplify/functions/stripe-webhook/handler.ts) (11).
+**Zip — validated nowhere in the booking path:**
 
-Most correct: [format.ts:1](apps/crm/src/lib/format.ts:1) — locale-aware, null-safe,
-correct grouping. **Canonical: a shared `money.ts` exporting
-`formatMoney(cents, {compactWholeDollars?})` backed by a module-level
-`Intl.NumberFormat`** (construct once — `dates.ts:24` and `businessHours.ts:18`
-already hoist their `Intl` instances; none of the 9 money helpers do).
+- `shared/dispatchReadiness.ts:66,97` — `MA_RI_ZIP_RE = /^0[12]\d{3}(-\d{4})?$/`, hard-required at dispatch.
+- `shared/leadIdentity.ts:40` — `normalizeZip`, 5 digits, no territory check.
+- `web/src/lib/bookingFunnel.ts` `validateQuoteForm` (`:239-279`) — `zip` is declared at `:227` and **never checked**.
+- `booking-public/handler.ts:1194-1206` — checks `street`, `city`, `state`; stores `zip` unchecked at `:1318`, `:1333`.
+- `QuotePage.tsx:1223` clamps input to 5 digits and `:1228` renders `fieldError("address.zip")` — a UI slot for an error message neither client nor server can emit.
 
-**Dollars→cents conversion — ~13 sites, no shared helper**, all
-`Math.round(x * 100)` but with **different input validation**:
-[autoQuote.ts:68](apps/web/amplify/functions/thumbtack-webhook/autoQuote.ts:68)
-guards `Number.isFinite`; [marketRate.ts:952](apps/web/amplify/functions/shared/marketRate.ts:952)
-guards finite-and-positive; the four sites in
-[CustomerDetail.tsx:2057,2185,2344,2995](apps/crm/src/office/CustomerDetail.tsx:2057)
-call bare `parseFloat` and yield `NaN` cents on malformed input.
-**Canonical: `dollarsToCents(input): number | null` with the guard baked in.**
+A customer can complete and pay for a booking with an empty or out-of-territory zip. The failure surfaces later at `dispatchReadiness.ts:97` as an ops-side checklist error the customer never sees.
 
-Naming collision worth fixing: `tidy`
-([marketRate.ts:164](apps/web/amplify/functions/shared/marketRate.ts:164), rounds to
-a `$X9` ending) vs `tidyDollars`
-([availability.ts:52](apps/web/amplify/functions/booking-public/availability.ts:52),
-rounds to a whole dollar). Different jobs, near-identical names, different results
-(`12750` → `$129` vs `$128`).
+**Required-field rule, lead intake:** client (`Contact.tsx:30-33`, `TalkToExpertModal.tsx:69`) requires name and (phone or email); server (`lead-intake/handler.ts:216-222`) has the same rule but evaluates it **after** `normalizeEmail`/`normalizePhone` (`:214`), which return `undefined` for malformed input. `name="Bob", email="bob@", phone=""` passes the client and returns 400 "email or phone missing" — an error naming a field the user filled in. The client never format-checks email on this path.
 
-### 1.5 Date handling
+Most correct: `bookingFunnel.ts:239-279` + `booking-public/handler.ts:1194+`, the only genuinely mirrored client/server pair; `bookingFunnel.ts:236-238` documents that it uses the same keys as the server's 400 payload so both render through one path (`QuotePage.tsx:535-538`).
 
-No date library. `dates.ts` documents an intentional Eastern/UTC split, and the
-UTC callers mostly hold to it (dedupe keys, day-bucket ids, export filenames), so
-this is not the "UTC-today" class of bug — that was closed in `635fafa`.
+### 1.8 Table and list rendering — no duplication
 
-**`addDays(iso, n)` — 6 implementations.**
-[cancellationPolicy.ts:47](apps/web/amplify/functions/shared/cancellationPolicy.ts:47),
-[assignVisit.ts:17](apps/web/amplify/functions/shared/assignVisit.ts:17),
-[recurring.ts:30](apps/web/amplify/functions/shared/recurring.ts:30),
-[availability.ts:41](apps/web/amplify/functions/booking-public/availability.ts:41),
-[agingMath.ts:32](apps/web/amplify/functions/shared/agingMath.ts:32) (comment
-acknowledges the copy: "like recurring.ts"),
-[format.ts:41](apps/crm/src/lib/format.ts:41).
+**Zero `<table>` elements in the entire scope.** `ListRow` (`ui/kit.tsx:269`) is used 75 times across 24 files; `Card` 41; `EmptyState` 32. `statusTone` (`kit.tsx:192`) centralises status→colour. `apps/web/src` uses none of these, which is appropriate for a marketing site.
 
-The CRM copy is the odd one out — **verified**: it constructs at local noon
-(`` new Date(`${isoDate}T12:00:00`) ``), mutates with `setDate`, then extracts with
-`toISOString()` (UTC). Correct at any UTC-negative offset, so correct for all US
-staff; it returns `n-1` for a browser at UTC+13 or beyond. It feeds
-[format.ts:48](apps/crm/src/lib/format.ts:48) `startOfWeek` and the Schedule week
-grid. Narrow in practice, but it is the only one of the six that depends on the
-viewer's timezone. Most correct: `cancellationPolicy.ts:47` — pure calendar
-arithmetic with no wall-clock anchor. **Canonical: promote it into `dates.ts`.**
-
-**Day-difference — 4 implementations, one with different semantics.**
-[agingMath.ts:64](apps/web/amplify/functions/shared/agingMath.ts:64) `daysBetween`
-(shared, tested) vs inline copies at
-[cancellationPolicy.ts:123](apps/web/amplify/functions/shared/cancellationPolicy.ts:123),
-[businessHours.ts:114](apps/web/amplify/functions/shared/businessHours.ts:114),
-[recovery.ts:49](apps/web/amplify/functions/shared/recovery.ts:49) (re-derives
-`utcDayNumber` in a file that already imports from `agingMath`), and
-[Work.tsx:783](apps/crm/src/office/Work.tsx:783) — which is **instant-based, not
-calendar-based**: a job completed 23h ago reads 0 days regardless of how many
-midnights passed, diverging from the AR aging semantics used everywhere else.
-
-The day-length constant is spelled five ways: `MS_PER_DAY` (twice, two different
-literals), `DAY_MS`, bare `86_400_000` (11 sites), bare `24*60*60*1000` (6 sites),
-`86400_000` (2 sites).
-
-**`isWeekday` — 4 implementations** ([capacity.ts:68](apps/web/amplify/functions/shared/capacity.ts:68)
-is shared and already imported by `businessDays.ts`; `assignVisit.ts:23`,
-`availability.ts:47`, `businessHours.ts:79` re-derive), plus a fifth spelling in
-[season.ts:105](apps/web/amplify/functions/shared/season.ts:105). All agree on
-output. **Canonical: `capacity.ts:68`.**
-
-**Pretty-date rendering — 7 implementations, 4 anchoring strategies.**
-
-| Location | Anchor | Render TZ |
-|---|---|---|
-| [recurring.ts:341](apps/web/amplify/functions/shared/recurring.ts:341) | `T12:00:00Z` | explicit UTC |
-| [receipts.ts:26](apps/web/amplify/functions/shared/receipts.ts:26) | `T12:00:00Z` | explicit UTC |
-| [planCancellationPolicy.ts:183](apps/web/amplify/functions/shared/planCancellationPolicy.ts:183) | `T00:00:00Z` | explicit UTC |
-| [autoQuote.ts:138](apps/web/amplify/functions/thumbtack-webhook/autoQuote.ts:138) | `T12:00:00Z` | America/New_York |
-| [daily-reminders:111](apps/web/amplify/functions/daily-reminders/handler.ts:111) | `T12:00:00` (no `Z`) | **none** |
-| [bookingFunnel.ts:152](apps/web/src/lib/bookingFunnel.ts:152) | local parts | none |
-| [format.ts:11](apps/crm/src/lib/format.ts:11) | `T12:00:00` (no `Z`) | none |
-
-`daily-reminders:111` is correct only because Lambda runs `TZ=UTC`; it is the
-only server-side "weekday, month day" formatter omitting both the `Z` and the
-`timeZone`. Separately, instant formatting diverges by design boundary: server
-PDFs render Eastern ([pdf.ts:151,158,749](apps/web/amplify/functions/shared/pdf.ts:151))
-while CRM screens render the viewer's zone ([format.ts:20](apps/crm/src/lib/format.ts:20))
-— the same timestamp shows two different times.
-
-`America/New_York` appears as a bare literal 23 times; `BUSINESS_TZ`
-([businessHours.ts:14](apps/web/amplify/functions/shared/businessHours.ts:14)) is
-the only named constant and has zero external importers.
-
-**Invoice due-date — 2 implementations.**
-[agingMath.ts:39](apps/web/amplify/functions/shared/agingMath.ts:39)
-`dueDateForTerms` (shared, tested, 2 callers) vs the hand-rolled
-`due.setUTCDate(due.getUTCDate() + 30)` at
-[booking-public/handler.ts:2753](apps/web/amplify/functions/booking-public/handler.ts:2753),
-which bypasses `normalizeTerms`/`TERMS_DAYS`. Its comment claims it "drives AR
-aging exactly like any other net-terms bill", but it is the one net-terms bill not
-produced by the shared function — a change to `TERMS_DAYS` silently misses the
-booking funnel. **Canonical: `dueDateForTerms`.**
-
-**Eastern wall-clock → UTC instant — 2 implementations.**
-[businessDays.ts:48](apps/web/amplify/functions/shared/businessDays.ts:48)
-`easternWallToUtc` uses a two-pass convergence with no hard-coded offset.
-[cancellationPolicy.ts:67](apps/web/amplify/functions/shared/cancellationPolicy.ts:67)
-`easternEpochMs` parses `shortOffset` with a regex and **falls back to `-5` when
-the regex misses** ([:75](apps/web/amplify/functions/shared/cancellationPolicy.ts:75)),
-which is wrong half the year. It is also single-pass, so an instant near a DST
-transition can resolve with the wrong offset. Its docstring claims it is the one
-place callers share "this one DST-correct boundary maths" — but `businessDays.ts:48`
-is the other one, and it is the more robust. This sits on the refund-window
-boundary. **Canonical: `easternWallToUtc`.**
-
-`businessDays.ts` / `businessHours.ts` / `season.ts` are otherwise the healthiest
-cluster in the repo — genuinely single-sourced.
-
-### 1.6 Forms, modals, lists, and component state
-
-`apps/crm/src/ui/kit.tsx` (454 lines) is a real, well-adopted design kit —
-`<Page>` 46 uses, `<Card>` 27 files, `<Button>` 35 files vs 8 files with raw
-`<button>`. **`apps/web/src` has no shared UI primitives at all**; every form
-control there is a raw `<input>` plus `bk-*` CSS classes.
-
-**Forms.** No form library and no `useForm` hook. Four competing patterns:
-
-| Pattern | Where |
-|---|---|
-| `useState`-per-field + inline `if (!x)` | [TalkToExpertModal.tsx:20](apps/web/src/components/TalkToExpertModal.tsx:20), [Contact.tsx:15](apps/web/src/pages/Contact.tsx:15) |
-| Pure validator → field-keyed error map | [bookingFunnel.ts:238](apps/web/src/lib/bookingFunnel.ts:238) `validateQuoteForm`, consumed by [QuotePage.tsx:397](apps/web/src/pages/booking/QuotePage.tsx:397) |
-| `values` object + `set(key)` curry | [CustomerForm.tsx:58](apps/crm/src/components/CustomerForm.tsx:58) |
-| Ad-hoc `useState` in a `<Sheet>`, validation = `disabled={!x.trim()}` | ~35 CRM surfaces |
-
-There are 3 `<form>` elements in the repo, all in `apps/web`. **`apps/crm` has
-zero** across ~38 data-entry surfaces — no Enter-to-submit, no native validation.
-`CustomerDetail.tsx` alone hosts 13 sheets.
-
-Repeated validation:
-- **Three competing email regexes** — [bookingFunnel.ts:198](apps/web/src/lib/bookingFunnel.ts:198) (strict, mirrors the server), [CustomerForm.tsx:70](apps/crm/src/components/CustomerForm.tsx:70) and [Staff.tsx:710](apps/crm/src/office/Staff.tsx:710) (both `/^\S+@\S+\.\S+$/`, retyped). `Contact.tsx` and `TalkToExpertModal.tsx` validate email **not at all**
-- `normalizePhone` exists once ([bookingFunnel.ts:202](apps/web/src/lib/bookingFunnel.ts:202)) and is used only by `validateQuoteForm`; the CRM has no phone validation anywhere
-- `onlyDigits` defined byte-identically twice: [QuotePage.tsx:135](apps/web/src/pages/booking/QuotePage.tsx:135), [AddService.tsx:79](apps/crm/src/portal/AddService.tsx:79)
-- ZIP validated only at [QuotePage.tsx:1223](apps/web/src/pages/booking/QuotePage.tsx:1223)
-- **~45-line verbatim duplicated lead-submit block**: [Contact.tsx:24-64](apps/web/src/pages/Contact.tsx:24) vs [TalkToExpertModal.tsx:62-98](apps/web/src/components/TalkToExpertModal.tsx:62) — same guards, same error copy, same name-splitting, same analytics triple; differs only in `formId` and 3 fields
-
-**Toasts/notifications.** No toast system — `grep -rni "toast|snackbar|notification"`
-returns 0 hits.
-
-| Pattern | Count |
-|---|---|
-| `<ErrorNote>` ([kit.tsx:424](apps/crm/src/ui/kit.tsx:424)) | 82 uses / 34 files |
-| `<SuccessNote>` ([kit.tsx:443](apps/crm/src/ui/kit.tsx:443)) | 3 |
-| `alert()` | 5 |
-| Hand-rolled `role="alert"` divs in `apps/web` | 17, across **3 competing class names** (`bk-field-error`, `bk-form-error`, `bk-notice`) |
-
-Most correct: `ErrorNote` — handles `role="alert"`, scroll-into-view, and hides
-raw exception text. **Canonical: export `ErrorNote`/`SuccessNote` into a package
-shared with `apps/web`.** Note the 82:3 ratio — success feedback is largely absent.
-
-**Modals.** `<Sheet>` ([kit.tsx:327](apps/crm/src/ui/kit.tsx:327)) used 39×; one
-hand-rolled overlay ([TalkToExpertModal.tsx:106](apps/web/src/components/TalkToExpertModal.tsx:106));
-zero `<dialog>`; **17 `window.confirm()`** for destructive actions.
-
-Capability split: the web modal implements Escape-to-close, autofocus, and
-scroll-lock; `Sheet` implements none of these and has no `role="dialog"`/
-`aria-modal`. Neither has a focus trap. **Canonical: `Sheet`'s API + the web
-modal's behavior; replace the 17 `window.confirm` with a `ConfirmSheet`** — that
-pattern already exists twice as [VisitCancelSheet.tsx:98](apps/crm/src/components/VisitCancelSheet.tsx:98)
-and [CancelPlanSheet.tsx:86](apps/crm/src/components/CancelPlanSheet.tsx:86).
-
-**Lists.** There are **zero `<table>` elements** in either frontend; all tabular
-data renders as div lists. `<ListRow>` ([kit.tsx:269](apps/crm/src/ui/kit.tsx:269))
-is used 75×/24 files. [CustomerDocuments.tsx:160](apps/crm/src/components/CustomerDocuments.tsx:160)
-re-implements the markup by hand and invents `list-row-subtitle` where the kit
-uses `list-row-sub` — a live CSS divergence.
-
-Per-list concerns re-implemented each time: 31 inline `.sort()` calls with no
-shared comparator (the date-desc `localeCompare` idiom appears ≥8×); the
-`q.trim().toLowerCase()` filter written 4×; `<EmptyState>` used 32× but
-hand-rolled as `<p className="muted small">No … yet.</p>` in ~10 more places; no
-loading skeletons; **no pagination UI anywhere** — every list full-fetches with
-`listAll(... limit: 500 ...)`.
-
-**Async state.** No `useAsync`/`useFetch`/`useQuery` hook exists. Only 2 Contexts
-in the entire frontend ([auth.tsx:30](apps/crm/src/lib/auth.tsx:30),
-[TalkToExpertModal.tsx:10](apps/web/src/components/TalkToExpertModal.tsx:10)); 5
-custom hooks total, none of them fetch abstractions.
-
-| Grep | Count |
-|---|---|
-| `const [error, setError] = useState<string \| null>(null)` | ~78 across ~45 files (13 in `CustomerDetail.tsx` alone) |
-| busy/loading/saving state declarations | 52 |
-| `} finally {` | 48 across 19 files |
-| `catch (` | 95 |
-
-The copy-pasted shape is `setBusy(true); setError(null); try { … } catch (err)
-{ setError(err instanceof Error ? err.message : "Could not X") } finally
-{ setBusy(false) }`. Of ~25 list screens, exactly one guards against stale
-responses: [Customers.tsx:32](apps/crm/src/office/Customers.tsx:32) uses a
-monotonic `reqRef`, with a comment explaining the bug. **Nobody else adopted it**,
-so every other tab- or filter-switching list carries the same latent race. Zero
-uses of the `let alive = true` cleanup idiom, so unmount-after-fetch `setState` is
-unguarded everywhere. **Canonical: one `useAsync<T>(fn, deps)` with the `reqRef`
-guard baked in, plus `useAction(fn, fallbackMsg)` for mutations.**
-
-**Cross-app duplication.** Beyond `addressAutocomplete`: `money` (§1.4),
-`formatDay`/`fmtDate`, `onlyDigits`, the email regex, and the office phone number
-— hard-coded **14 times in 3 formats** across `apps/web/src`
-([TalkToExpertModal.tsx:6](apps/web/src/components/TalkToExpertModal.tsx:6),
-[Contact.tsx:8](apps/web/src/pages/Contact.tsx:8),
-[QuoteCTA.tsx:4](apps/web/src/components/QuoteCTA.tsx:4),
-[BookPage.tsx:38](apps/web/src/pages/booking/BookPage.tsx:38),
-[SEO.tsx:139,166,276](apps/web/src/components/SEO.tsx:139), and 6 more).
-
-### 1.7 Error handling
-
-**No shared error module exists.** One error class
-([`HttpError`, booking-public/handler.ts:445](apps/web/amplify/functions/booking-public/handler.ts:445))
-— not exported, not reused. `grep -rn "AppError|ErrorCode|class .*Error"` → 1 hit.
-
-**Six mutually incompatible handler conventions across 18 entry points:**
-
-| Convention | Handlers |
-|---|---|
-| `HttpError` → `{statusCode, body:{error}}` | booking-public |
-| `{statusCode, body:"<plain string>"}` — not JSON | stripe-webhook |
-| `jsonResponse(status,{error})` | lead-intake, thumbtack-webhook |
-| bare `throw new Error("free text")` → GraphQL `errors[]` | crm-docs (206 throws), crm-admin (69), crm-billing (51), crm-pricing (28) |
-| domain result `{ok:false, …}` — **4 different field names** (`message`, `problem`, `reason`, `error`) | [crm-docs:967](apps/web/amplify/functions/crm-docs/handler.ts:967), [:1206](apps/web/amplify/functions/crm-docs/handler.ts:1206), [:4430](apps/web/amplify/functions/crm-docs/handler.ts:4430), [crm-billing:379](apps/web/amplify/functions/crm-billing/handler.ts:379) |
-| collect `{task,error}[]`, open owned work, throw at end | daily-reminders, ses-events, ops-alerts — **the same pattern implemented three times** |
-
-Outliers: [thumbtack-webhook:487](apps/web/amplify/functions/thumbtack-webhook/handler.ts:487)
-returns HTTP **200** with `{ok:false}` after a failure (deliberate, to kill provider
-retries, but it is the only handler reporting success on failure);
-[pricing-refresh:1170](apps/web/amplify/functions/pricing-refresh/handler.ts:1170)
-never throws; `pre-token` and `lead-sweep` have no error boundary at all.
-
-Most correct: the daily-reminders/ses-events/ops-alerts triad — partial failure is
-collected, made durably visible as owned work, *and* rethrown so the CloudWatch
-alarm fires. **Canonical: one `shared/lambdaResult.ts` (`HttpError` moved out of
-booking-public, one `httpFail`, one `runSubtasks`).**
-
-**`err instanceof Error ? err.message : …` written out 144 times.** No
-`errMessage()` helper exists (`grep -rn "function errMessage|toMessage|errorText"`
-→ 0). In the frontend this pairs with ~85 distinct hand-written fallback strings
-("Could not load", "Could not save", …), several duplicated verbatim.
-
-**Customer-facing leakage: clean.** The catch-all at
-[booking-public:434](apps/web/amplify/functions/booking-public/handler.ts:434)
-returns fixed copy, and all 74 `throw new HttpError` payloads are author-written.
-Raw `err.message` reaches only office-facing surfaces
-([:3537](apps/web/amplify/functions/booking-public/handler.ts:3537) owned-work
-detail, [:3558](apps/web/amplify/functions/booking-public/handler.ts:3558) ops
-email, escaped). This is achieved by discipline, not by a mechanism — the other 14
-handlers have no way to express the customer/ops split. **Canonical: `AppError`
-with `customerMessage` (safe, always returned) vs `cause` (ops-only, never
-serialized).**
-
-**Idempotency — 5 mechanisms.** CAS conditional writes
-([atomicLock.ts](apps/web/amplify/functions/shared/atomicLock.ts)) are the real
-primitive. Above them sit two near-identical durable-command claim state machines
-with different failure vocabularies —
-[lifecycleCommand.ts:109](apps/web/amplify/functions/shared/lifecycleCommand.ts:109)
-and [staffAccessCommand.ts:102](apps/web/amplify/functions/shared/staffAccessCommand.ts:102)
-— plus deterministic digest ids, owned-work `dedupeKey`, and **four ad-hoc Stripe
-idempotency key formats** ([refund.ts:117](apps/web/amplify/functions/shared/refund.ts:117),
-[recovery.ts:180](apps/web/amplify/functions/shared/recovery.ts:180),
-[subscription.ts:267](apps/web/amplify/functions/shared/subscription.ts:267),
-[leadLifecycle.ts:558](apps/web/amplify/functions/shared/leadLifecycle.ts:558)).
-
-On `recovery.ts:180`: the minute bucket in that key is **deliberate and
-documented** — the comment explains it lets a customer retry with a new card
-instead of replaying a 24h-cached decline. Worth noting only because the key
-already includes `pm.id`, which covers that case on its own; the residual effect
-is that a genuine double-submit straddling a minute boundary produces two charges.
-
-`bookingFinalize.ts` documents idempotency in 13 places but has no helper of its
-own. **Canonical: one `shared/idempotency.ts` on top of `atomicLock`, plus one
-`stripeIdempotencyKey(scope, id, discriminator)` builder.**
-
-**Logging.** No structured logger. `shared/opEvent.ts` is not one — it is a
-15-line AppSync field-name resolver. Three unrelated structured-event writers
-exist (`lifecycleLog`, `staffAccessLog`, `ownedWork`); everything else is raw
-console: ~180 `console.error` across 38 files, 32 `console.log`, 9 `console.warn`,
-0 structured loggers. Modules that log *only* to console — a failure there is
-log-search-only — include [receipts.ts](apps/web/amplify/functions/shared/receipts.ts) (5),
-[capacity.ts](apps/web/amplify/functions/shared/capacity.ts) (7),
-[planCancellation.ts](apps/web/amplify/functions/shared/planCancellation.ts) (6),
-[marketRate.ts](apps/web/amplify/functions/shared/marketRate.ts) (5).
-**Canonical: `shared/log.ts` emitting one JSON line, with a rule that any
-`console.error` in a money/scheduling/auth path is paired with `openOwnedWork`.**
-
-### 1.8 Swallowed errors
-
-Three idioms, all hand-written at each site.
-
-**`.catch(() => <fallback>)` — 114 backend sites**
-(`=> undefined` ×90, `=> ({data:null})` ×12, `=> null` ×5, `=> false` ×3).
-Most consequential, all in money or scheduling paths:
-
-| Location | What is masked |
-|---|---|
-| [bookingFinalize.ts:26](apps/web/amplify/functions/shared/bookingFinalize.ts:26) | `releaseSlot` failure — reserved capacity minutes leak after a failed finalize |
-| [bookingFinalize.ts:551](apps/web/amplify/functions/shared/bookingFinalize.ts:551) | CAS stamp coerced to `{ok:false, reason:"UNSUPPORTED"}` — a real CAS error is indistinguishable from missing wiring |
-| [bookingFinalize.ts:556,561,577](apps/web/amplify/functions/shared/bookingFinalize.ts:556) | the compensating releases on that path are themselves swallowed |
-| [capacity.ts:521](apps/web/amplify/functions/shared/capacity.ts:521), [:619](apps/web/amplify/functions/shared/capacity.ts:619) | stop-counter giveback — a stop leaks on every refused claim / failed release |
-| [capacity.ts:710,716,727](apps/web/amplify/functions/shared/capacity.ts:710) | the "move a hold to a new day" path: update and both releases all swallow |
-| [capacity.ts:776](apps/web/amplify/functions/shared/capacity.ts:776) | `extendCapacityClaim` returns `false` on error identically to "no such claim" |
-| [stripe-webhook:107,120](apps/web/amplify/functions/stripe-webhook/handler.ts:107) | pending-bank-debit re-claim — a slot silently not re-held |
-| [planCancellation.ts](apps/web/amplify/functions/shared/planCancellation.ts) ×8 | settlement writes |
-
-**`catch (e) { console.error(...) }` with no rethrow and no caller signal —
-~120 sites.** Most consequential:
-
-| Location | Path | What is lost |
-|---|---|---|
-| [bookingFinalize.ts:1231](apps/web/amplify/functions/shared/bookingFinalize.ts:1231) | money | default payment method never set — renewals fail later with no marker |
-| [bookingFinalize.ts:2725](apps/web/amplify/functions/shared/bookingFinalize.ts:2725) | money | a failed bank debit can leave a live subscription |
-| [bookingFinalize.ts:2172](apps/web/amplify/functions/shared/bookingFinalize.ts:2172) | comms | catch **returns `true`** ("treat as sent") — a deliberate but silent lie |
-| [receipts.ts:103,151,191,237,286](apps/web/amplify/functions/shared/receipts.ts:103) | money | all five customer money notices swallow identically — 5 copies of one 4-line block |
-| [booking-public:3421,3427](apps/web/amplify/functions/booking-public/handler.ts:3421) | money | `cancelRequestedAt` anchor not persisted — a later retry recomputes refundability from a different instant |
-
-**`pageErrors: "ignore"` — 110 sites.** Defined once, correctly, at
-[pagination.ts:14](apps/web/amplify/functions/shared/pagination.ts:14), whose
-docstring already names it as debt and says "do not write it into new code".
-Concentration: [daily-reminders](apps/web/amplify/functions/daily-reminders/handler.ts) 34,
-[crm-docs](apps/web/amplify/functions/crm-docs/handler.ts) 14,
-[capacity.ts](apps/web/amplify/functions/shared/capacity.ts) 10,
-[technicianReads.ts](apps/web/amplify/functions/shared/technicianReads.ts) 7,
-[planCancellation.ts](apps/web/amplify/functions/shared/planCancellation.ts) 7.
-
-**Frontend `} catch { }` returning a benign value — 52 sites.** Notable:
-[api.ts:943](apps/crm/src/lib/api.ts:943) `listLifecycleCommands` returns `[]` on
-failure, so a read error renders as "no stuck transitions" and the recovery banner
-disappears. [api.ts:908](apps/crm/src/lib/api.ts:908) is the only site in the repo
-that signals partial failure (`{data, readFailed:true}`) — 1 of 7 sibling call
-sites. **No `ErrorBoundary` exists in either frontend** (0 hits).
-
-**Canonical: `Result<T> = {ok:true,data:T} | {ok:false,code,message,partial?:T}`
-plus one `bestEffort(fn, {reason})` that logs *and* records an ops marker.**
+The only gap: no sortable/paginated variant exists, so screens needing sort re-implement it locally (`office/MarketRates.tsx`, `office/Work.tsx`). *Not verified* — sort logic was not audited in depth.
 
 ---
 
-## 2. File size offenders
+## 2. Authorization
 
-60 non-test files exceed 500 lines. The 20 test files over 500 lines are listed at
-the end and are not analysed — large test files are not the same defect.
+### 2.1 Mechanism inventory
 
-| File | Lines | Distinct responsibilities |
+Twenty distinct ways a caller is authorised. Schema rules: 141 `allow.groups`, 13 `allow.groupsDefinedIn("accessGroups")`, 15 `allow.resource` in `data/resource.ts`.
+
+| Mechanism | Definition | Sites |
 |---|---|---|
-| [crm-docs/handler.ts](apps/web/amplify/functions/crm-docs/handler.ts) | 5946 | **21** — dispatch table (~48 cases), portal requests, per-visit money reconciliation, 8 work-item verifiers, office email, job creation + dispatch packet, assignment events + field authz, geo presence + accuracy review, report validation, PDF delivery, finalize claim lease, inventory depletion, 4-checkpoint finalize saga, amendment parsing, plan billing start, On-My-Way tracking, draft save + photo attach, no-access exits, 4 presign endpoints, customer document registry |
-| [data/resource.ts](apps/web/amplify/data/resource.ts) | 4043 | 6 — field-auth helpers, ~22 enums, ~50 `a.model()` entities, ~10 saga/claim models, ~85 custom ops across 6 handlers, `defineData` |
-| [booking-public/handler.ts](apps/web/amplify/functions/booking-public/handler.ts) | 3716 | 12 — SSM/Stripe/CORS shell, internal-op path, 8-suffix HTTP router, quote parsing, track/status polling, bot+throttle, lead prefill, **~900-line `quote`**, Stripe intent convergence, promo preview, **~800-line `book`**, cancel + refund policy |
-| [office/CustomerDetail.tsx](apps/crm/src/office/CustomerDetail.tsx) | 3492 | 14 — container with ~25 state slices, payment method, portal access, plans, jobs, records/history, invoices, 5 sheet hosts, `RefundSheet`, `ChargeCardSheet`, `RecordPaymentSheet`+`SettleInvoiceSheet`, reschedule/amend/recovery forms, packet+job forms, `GroupPicker`, portal requests, callbacks |
-| [crm-admin/handler.ts](apps/web/amplify/functions/crm-admin/handler.ts) | 3351 | 12 — ~28-case dispatch, lifecycle preview, technician + license, Cognito membership + login kill, invite provisioning, group sync, portal revoke/restore, reactivate + contact, job reassignment + offboard notify, staff roles + owner-count guards, `changeStaffRoles`, `offboardStaff`, roster query, suppression lift |
-| [daily-reminders/handler.ts](apps/web/amplify/functions/daily-reminders/handler.ts) | 3009 | 13 — cron orchestrator + 5 reconciler groups, 5 ops reports, staffing digest, dunning + delinquency, invoice reminders, AR aging + dispute deadlines, processing-payment recon, ownership/group recon, queued email retry, paid-booking recon, overdue escalation |
-| [shared/bookingFinalize.ts](apps/web/amplify/functions/shared/bookingFinalize.ts) | 2838 | 10 — slot release + route creation, agreement content constants, finalize entry + claim, retry/orphan reclaim, attribution parsing, existing-customer matching, pricing won-marking, **`finalizeClaimed` (863 lines)**, comms claim lease, comms delivery + drain, late-payment settlement |
-| [tech/JobDetail.tsx](apps/crm/src/tech/JobDetail.tsx) | 2011 | 8 — product row helpers + localStorage memory, `useOnline`, job container, On-My-Way controls, detail cards, `ScopePrepExits`, `CallbackFindingCard`, `NoAccessCard`, **`ReportForm` (696 lines)**, `ProductRowEditor` |
-| [shared/visitChange.ts](apps/web/amplify/functions/shared/visitChange.ts) | 2002 | 9 — lease constants, invoice classification, preview building, event recording, notification, **`cancelVisit` saga (653 lines)**, claim lifecycle, outcome derivation, `resumeVisitChange`, **`rescheduleVisit` (601 lines)** |
-| [shared/pdf.ts](apps/web/amplify/functions/shared/pdf.ts) | 1599 | 6 — `PdfWriter` primitive, brand constants, `AgreementDoc`, and four document renderers (agreement, quote, service report, amendment) |
-| [shared/capacity.ts](apps/web/amplify/functions/shared/capacity.ts) | 1533 | 8 — keys/constants, tech base resolution, day eligibility, slot reads, reserve/release, pool minutes, day claim lease, schedule guards, feasibility + `bestSlotFor`, closed-tour routing, day reconciliation |
-| [crm-pricing/handler.ts](apps/web/amplify/functions/crm-pricing/handler.ts) | 1514 | 8 — clients, 5-case dispatch, research request, rollback, presign, drive-minutes, reply composition, **`priceLead` (~840 lines)**, `extractQuoteIntent` |
-| [booking/QuotePage.tsx](apps/web/src/pages/booking/QuotePage.tsx) | 1386 | 7 — pending-quote localStorage, field types, container with ~15 state slices, lead prefill, form render, priced result + date selection, loading screen |
-| [pricing-refresh/handler.ts](apps/web/amplify/functions/pricing-refresh/handler.ts) | 1353 | 9 — budget/backoff, secret cache, row listing, work selection, quote snapshot parsing, cross-Lambda recompute, rate-ready PDF email, digest formatting, failure settlement, orchestration |
-| [shared/planCancellation.ts](apps/web/amplify/functions/shared/planCancellation.ts) | 1268 | 8 — preview types + balance, `buildCancellationPreview`, outcome types, settlement, invoice facts, drive saga, claim write + `cancelPlanForCustomer`, orphan reclaim + resume, confirmation email |
-| [crm-billing/handler.ts](apps/web/amplify/functions/crm-billing/handler.ts) | 1119 | 9 — arg types, actor + charge-ceiling authz, ~19-case dispatch, setup intent, booking-public bridge, payment summary, subscription lifecycle, charges, invoice ops, recovery assignment |
-| [stripe-webhook/handler.ts](apps/web/amplify/functions/stripe-webhook/handler.ts) | 1089 | 8 — verify + 11-case dispatch, setup intent, funnel payment, subscription invoice paid, post-cancellation staging, decline reasons, refunds, subscription deleted, disputes |
-| [office/MarketRates.tsx](apps/crm/src/office/MarketRates.tsx) | 1063 | 5 — status maps, `EnginePanel`, container, `RateForm`, `RollbackPanel` |
-| [office/Schedule.tsx](apps/crm/src/office/Schedule.tsx) | 1062 | 5 — week date math, container, week board, needs-scheduling pool + assignment, `AvailabilityPanel` (PTO/closures) |
-| [booking/BookPage.tsx](apps/web/src/pages/booking/BookPage.tsx) | 1060 | 7 — constants, container with ~25 state slices, terms acceptance, promo, payment mode + intent, finalize polling, `PaymentForm`, layout |
-| [shared/marketRate.ts](apps/web/amplify/functions/shared/marketRate.ts) | 1058 | 8 — re-exports, TTL/model constants, HOA multiplier, tidying + floors, key derivation, rollback + catalog snapshot, cache read, enqueue, research + LLM prompt/parse |
-| [shared/leadLifecycle.ts](apps/web/amplify/functions/shared/leadLifecycle.ts) | 1057 | 8 — actor/channel types, id helpers, activity append, recovery work, `createLead`, consent gate, `logLeadTouch`, website intake ×3, `setLeadDisposition`, ownership assignment |
-| [lib/api.ts](apps/crm/src/lib/api.ts) | 1008 | 7 — client factory, ~25 type re-exports, lead constants, lead ops, technician queries, work/suppression ops, invoice ops, plan cancellation, visit change |
-| [shared/deactivation.ts](apps/web/amplify/functions/shared/deactivation.ts) | 1006 | 5 — option types, **`deactivateCustomer` (~530 lines)**, cents formatting, job sweep, inventory building, notice email, balance |
-| [amplify/backend.ts](apps/web/amplify/backend.ts) | 966 | 10 — backend registration, Cognito hardening, CAS lock IAM, SSM publication, 4 function URLs, S3 + SES policy, cross-invoke SSM names, SES config set + SNS + DLQ, CloudWatch alarms, backup vault |
-| [office/Dashboard.tsx](apps/crm/src/office/Dashboard.tsx) | 935 | 8 — period types, container loads, revenue + discounts, AR aging, recovery queue, disputes, 4 exception cards, `DrillPanel` |
-| [office/Work.tsx](apps/crm/src/office/Work.tsx) | 843 | 5 — kind labels, container, open/resolved lists, override sheet, `PaymentsInFlight` |
-| [shared/workPolicy.ts](apps/web/amplify/functions/shared/workPolicy.ts) | 824 | 3 — types, **~40-entry `WORK_POLICY` data table (673 lines)**, lookup helpers. *Mostly data; least urgent on this list.* |
-| [office/Staff.tsx](apps/crm/src/office/Staff.tsx) | 782 | 5 — role mapping, roster, `AccessHistory`, `RosterBadges`, `StaffActions`, `InviteForm` |
-| [office/technicians.tsx](apps/crm/src/office/technicians.tsx) | 746 | 4 — compliance derivation, roster, `LicenseRecords`, `TechForm` |
-| [shared/subscription.ts](apps/web/amplify/functions/shared/subscription.ts) | 724 | 5 — Stripe resource ensures, cycle anchor, `startPlanBilling`, queued visit cancellation, job money facts, `cancelPlanBilling` |
-| [shared/email.ts](apps/web/amplify/functions/shared/email.ts) | 597 | 6 — SES client, `emailShell` template, MIME building, send + resend, consent/suppression gates, logging + failure work, ops notifications |
-| [residential/Residential.tsx](apps/web/src/pages/residential/Residential.tsx) | 554 | 2 — 192 lines of static content data, then 11 marketing sections |
-| [shared/atomicLock.ts](apps/web/amplify/functions/shared/atomicLock.ts) | 552 | 5 — types + store interface, table suffix resolution, condition building, `dynamoStore` + error classification, 6 CAS operations, memory test double |
-| [portal/AddService.tsx](apps/crm/src/portal/AddService.tsx) | 515 | 4 — service types + needs, result types, container, confirmation render |
-| [services/Wildlife.tsx](apps/web/src/pages/services/Wildlife.tsx) | 503 | 2 — 119 lines of content data, 9 marketing sections |
-| [lib/bookingApi.ts](apps/web/src/lib/bookingApi.ts) | 503 | 4 — URL discovery, ~20 request/response types, generic `post`, lead token storage, 7 endpoint wrappers |
-| [services/HumaneRemoval.tsx](apps/web/src/pages/services/HumaneRemoval.tsx) | 501 | 2 — 181 lines of content data, 9 marketing sections |
+| `assertOffice` | `shared/authz.ts:88` | 24 (crm-docs 21, crm-billing 3, crm-pricing 1) |
+| `assertFinance` | `shared/authz.ts:101` | 10 (all `crm-billing/handler.ts:178-238`) |
+| `assertOwner` | `shared/authz.ts:111` | 2 (`crm-pricing/handler.ts:114,117`) |
+| `callerIsOffice` branch | `shared/authz.ts:74` | 6 (`crm-docs:423,522,2416,5819`; `technicianReads:98,341`) |
+| `callerIsOwner` as a fact | `shared/authz.ts:67` | 6 (`crm-admin:361,367,373,379`; `crm-billing:96`; `crm-docs:675`) |
+| `callerIsFinance` branch | `shared/authz.ts:82` | 3 (`crm-billing:1060,1065`; `crm-docs:678`) |
+| `canActForCustomer` / `assertCanActForCustomer` | `shared/authz.ts:136` / `:165` | 8 |
+| Job-scoped tech proofs | `shared/jobAssignment.ts:81,147,~172,~186` | 15 |
+| `assertOfficeFieldAccess` (handler-local) | `crm-docs/handler.ts:2411` | 6 |
+| **Inline raw group check** | `crm-docs/handler.ts:5811,5826` | 1 — the only raw group-string test outside `authz.ts` |
+| `assertOwnerRemains` | `shared/staffRoles.ts:125` | 2 |
+| Thumbtack shared secret | `thumbtack-webhook/handler.ts:110`, gate `:438` | 1 |
+| Stripe signature | `stripe-webhook/handler.ts:43` | 1 |
+| Magic-link token | `auth-challenge/verify.ts:52` | 1 |
+| CORS allowlist (self-declared not a boundary, `:157-159`) | `booking-public/handler.ts:155` | 1 |
+| Trusted-invoke shape check | `booking-public/handler.ts:363` | 1 |
+| Trusted-invoke op check **before** role check | `crm-pricing/handler.ts:94`, `assertOffice` at `:103` | 1 |
+| **Nothing** | `crm-admin/handler.ts:221-431` | — |
 
-**Patterns across the list.** Four recurring shapes drive most of the bulk:
+`data/resource.ts` contains no `allow.authenticated`, `allow.publicApiKey`, `allow.guest` or `allow.owner` anywhere — authorization is uniformly group-based. `TECH` has model-level access to exactly one model (`Product` read, `resource.ts:1875`), which is why the job-scoped proofs carry so much weight.
 
-1. **Dispatch-table handlers** (`crm-docs` 48 cases, `crm-admin` 28, `crm-billing` 19, `stripe-webhook` 11) — the router and every operation body live in one file.
-2. **Saga bodies** — single functions of 500–900 lines: `finalizeClaimed` (863), `priceLead` (~840), `quote` (~900), `book` (~800), `cancelVisit` (653), `rescheduleVisit` (601), `deactivateCustomer` (~530).
-3. **Container + every sheet it opens** — `CustomerDetail.tsx` holds 8 sheet components; `JobDetail.tsx` holds 5 cards plus a 696-line form.
-4. **Marketing pages inlining their content** — `Residential`, `Wildlife`, `HumaneRemoval` are 35–40% static data arrays. These three also share an identical 9-section structure and are the natural home for the shared service-page component noted in §5.
+### 2.2 The three role tiers are aliases
 
-Test files over 500 lines (not analysed): `crm-docs/compliance.test.ts` 2248,
-`crm-admin/offboarding.test.ts` 1932, `booking-public/quote.test.ts` 1920,
-`bookingFinalize.test.ts` 1751, `pricing-refresh/handler.test.ts` 1674,
-`booking-public/book.test.ts` 1218, `crm-pricing/handler.test.ts` 1145,
-`capacity.test.ts` 1107, `visitChange.test.ts` 1035, `marketRate.test.ts` 1035,
-`planCancellation.test.ts` 785, `subscription.test.ts` 781,
-`leadLifecycle.test.ts` 708, `crm-billing/money.test.ts` 699,
-`stripe-webhook/handler.test.ts` 647, `deactivation.test.ts` 639,
-`callbacks.test.ts` 551, `booking-public/cancel.test.ts` 524,
-`bookingFunnel.test.ts` 516, `daily-reminders/handler.test.ts` 503.
+`callerIsOffice` (`authz.ts:74`) and `callerIsFinance` (`:82`) both `return callerIsOwner(identity)`. `assertOffice:88` and `assertOwner:111` throw the identical string `"Owner role required"`; `assertFinance:101` throws a different, longer message and is the only one whose text says why.
+
+Consequence at `crm-pricing/handler.ts:112-117`: the comment states "price authority stays role-controlled — OWNER only, checked server-side on top of the schema's group rule", but `assertOffice(event.identity)` already ran at `:103` and is the same predicate. **The two `assertOwner` calls are dead checks.** Not a vulnerability — a comment that will mislead the next person who tries to re-split the tiers.
+
+### 2.3 One dead role-set constant
+
+`STAFF_GROUPS` (`shared/authz.ts:95`) is consumed only by `isStaff` (`:97`), and **`isStaff` has zero callers** — the only mention is a comment at `jobAssignment.ts:12` explaining that field mutations used to gate on it. `STAFF_ROLES` (`shared/staffRoles.ts:13`) is the live one, consumed by `isStaffRole`, `staffRolesIn`, `assertValidRoleSet` and `crm-admin:100,748,2815`. Deleting `authz.ts:95-99` has zero blast radius.
+
+### 2.4 `crm-admin` enforces nothing in-handler
+
+`crm-admin/handler.ts:221-431` dispatches ~25 privileged operations (`adminCreateUser`, `offboardStaff`, `changeStaffRoles`, `revokePortalAccess`, `setLeadDisposition`, …) and calls `callerSub`/`callerEmail`/`callerIsOwner` only to record the actor, never to gate. Every sibling asserts: crm-billing 13, crm-docs 21, crm-pricing 3.
+
+The schema does cover the declared operations — `allow.groups(["OWNER"])` verified on `adminCreateUser:2543`, `importAgreements:2652`, `updateCustomerContact:2738`, `createLead:2772`, `logLeadTouch:2795`, `setLeadDisposition:2825`, `assignLeadOwner:2842`, `liftEmailSuppression:2871`, `staffRoster:2919`.
+
+But **two dispatch cases are absent from the schema entirely** — `grep` for `reportSuspectAddresses` and `resumeGroupChange` in `data/resource.ts` returns nothing. They are reachable only by direct IAM invoke, and the handler keys its switch on `opFieldName(event)` (`shared/opEvent.ts:7`) read from the invoke payload. `daily-reminders/handler.ts:2375-2387` demonstrates the synthesis:
+
+```
+{ info: { fieldName: "resumeGroupChange" }, arguments: { commandId }, identity: null }
+```
+
+Any principal holding `lambda:InvokeFunction` on crm-admin could substitute `"offboardStaff"`; with `identity: null`, `callerGroups` returns `[]` (`authz.ts:17`) and nothing rejects it. Today the only grant is `daily-reminders` (`backend.ts:403-410`, resource pattern `*crmadmin*`), so this is **defense-in-depth, not a live exploit path** — but it is the largest asymmetry in the codebase. A ~10-line allow-list at the top of the dispatch closes it.
+
+### 2.5 `canActForCustomer` — two revocation latencies
+
+`shared/authz.ts:140-156`. The docstring (`:110-134`) states the check reads the customer's live `accessGroups` stamp so a property removed from a group loses access immediately with no re-issued token. That holds for branch (3), the `grp-` path (`:145-155`). It does not hold for branch (2): `:141` returns `true` on `groups.includes(cusGroup(customerId))` from the token alone, with no read, so a portal user whose own `cus-` group was removed retains access until token expiry.
+
+> **Not verified** whether this is deliberate. The performance note at `:132-134` says owners and ordinary portal customers "return on the token alone, so the existing hot path is unchanged", which suggests yes. Recorded as a documentation/behaviour mismatch, not asserted as a bug.
+
+### 2.6 Three shapes for "portal customer acting on their own record"
+
+- `crm-docs/handler.ts:424,445,467` — `canActForCustomer` alone, distinct per-op error strings.
+- `crm-docs/handler.ts:522-530` (`finalizeCallback`) — `!callerIsOffice` → load `CallbackRequest` → `assertCanActOnJobId` (job-scoped, not customer-scoped).
+- `crm-billing/handler.ts:1051-1071` (`payInvoice`) — `callerIsFinance` bypass → `assertCanActForCustomer` → catch and rewrite to a uniform `"Not authorized for this invoice"`, same message for a missing invoice (`:1059-1063`).
+
+Only `payInvoice` normalizes errors to prevent id-probing, and is explicit about why (`:1046-1049`). Most correct; the shape to copy for future customer-scoped operations.
 
 ---
 
-## 3. Dead code
+## 3. File size offenders
 
-Method: every identifier in 431 files tokenized and cross-referenced against 861
-extracted export declarations. NUL bytes stripped so `inventory.ts` indexed fully.
-Spot-validated against manual `grep -w` on 10 symbols.
+59 files over 500 lines — 39 non-test, 20 test. None under `.claude/`.
 
-### 3.1 Unused exports — 225 total
+### 3.1 The 8 carrying genuinely unrelated responsibilities
 
-**219 with zero references outside their own file; 6 referenced only by tests.**
+**`amplify/functions/crm-docs/handler.ts` — 5946.** The entire field-and-office domain behind one Lambda; 48 `case` arms.
+`L1-267` env accessors, `parseProducts`, `toAwsJson`, `Args` union · `L268-756` the switch router · `L756-1032` comms + portal cases · `L1032-1812` work-queue/recovery engine (`runWorkVerifier`, `updateOwnedWork`, `closeResolvedWorkItem`) · `L1812-2068` lead quote prep, `sendCustomerEmail` · `L2068-2464` product catalog, `createOfficeJob`, packet field mapping · `L2464-3365` scheduling (`updateJobSchedule` is 660 lines alone) · `L3365-3608` no-access resolution, presence assertions · `L3608-3797` report-immutability + product approval gates · `L3797-4535` report delivery + finalize · `L4535-4871` amendments · `L4871-5025` `startBillingForPlan`, `completeJob` · `L5025-5185` tech field lifecycle · `L5185-5625` report authoring · `L5625-5946` S3 upload URLs, customer documents.
+Seam: `L1032-1812` moves out whole — it shares nothing with the report path but the data client. Second: `L3797-4871` as `reportFinalize.ts`.
 
-Whole modules that are dead:
+**`amplify/data/resource.ts` — 4043.** Uniform, not tangled: `L40-64` field-auth helpers · `L66-320` 21 enums · `L321-2525` ~54 models (Customer `L352`, ServicePlan `L516`, BookingRequest `L607`, Job `L1621`, ServiceReport `L1912`, Invoice `L2016`, ~14 claim/command lock models `L773-1098`) · `L2526-4034` ~130 custom operations · `L4036-4043` exports.
+Seam: `L2526-4034` is exactly half the file, depends on nothing above it, and splits mechanically into per-function operation modules.
 
-| Module | Note |
-|---|---|
-| [apps/web/src/lib/analytics.ts](apps/web/src/lib/analytics.ts) | `GA_EVENTS:19`, `GAEventName`, `trackEvent:49` — **verified zero references**. The tracker components (`ClickTracker`, `ScrollDepthTracker`, `AnalyticsTracker`) do not import it. The entire GA event API is unused. |
-| [shared/planCancellationPolicy.ts](apps/web/amplify/functions/shared/planCancellationPolicy.ts) | all 6 exports dead (5 sentence builders + the policy const) |
-| [shared/pricingControl.ts](apps/web/amplify/functions/shared/pricingControl.ts) | all 4 exports dead |
-| [apps/crm/src/lib/amountWords.ts](apps/crm/src/lib/amountWords.ts) | sole export `numberToWords:60` dead outside its own test |
+**`amplify/functions/booking-public/handler.ts` — 3728.** `L103-176` secrets, Stripe client, CORS · `L177-350` types, sanitization, `handleInternalOp` · `L351-460` HTTP router · `L460-863` quote snapshot parse + three read endpoints · `L863-1132` anti-abuse + lead plumbing · **`L1132-2053` `quote()` — 920 lines** · `L2053-2491` Stripe intent convergence · **`L2491-3336` `book()` — 830 lines** · `L3342-3728` `cancel()` + refund policy.
+Seam: `L2053-2491` → `shared/paymentIntent.ts`, self-contained Stripe reconciliation with no coupling to quoting.
 
-Test-only exports (dead as production code):
+**`apps/crm/src/office/CustomerDetail.tsx` — 3492.** `L80-149` helpers · **`L150-2038` `CustomerDetail()` — 1888 lines** (10+ entity loads `L150-330`, payment card `L553`, portal access `L627`, plans `L718`, jobs `L838`, records `L1083-1278`, invoices `L1279-1490`, then 12 inline `<Sheet>` bodies `L1539-2006`) · `L2038-2546` four money sheets · `L2546-2827` reschedule/amend/recovery forms · `L2827-3116` packet + job forms · `L3116-3492` group picker, portal requests, callbacks.
+Seam: `L2038-2546` → `office/customer/moneySheets.tsx`; already separate components, only prop-coupled.
 
-| Symbol | Location |
-|---|---|
-| `driveMatrixTo` | [driveTime.ts:137](apps/web/amplify/functions/shared/driveTime.ts:137) |
-| `WORK_SUPPRESSED` | [ownedWork.ts:193](apps/web/amplify/functions/shared/ownedWork.ts:193) |
-| `PRICING_MODEL` | [marketRate.ts:106](apps/web/amplify/functions/shared/marketRate.ts:106) |
-| `collectLeadActivityPages` | [api.ts:99](apps/crm/src/lib/api.ts:99) |
-| `solveClosedTsp` | [routeOptimizer.ts:165](apps/web/amplify/functions/shared/routeOptimizer.ts:165) |
-| `_setS3ClientForTests` | [photoVerify.ts:58](apps/web/amplify/functions/shared/photoVerify.ts:58) — **zero refs even in tests**, unlike its `_setLockStoreForTests` sibling (20 test files) |
+**`amplify/functions/crm-admin/handler.ts` — 3351.** `L111-220` arg types · `L221-441` router · `L441-662` lifecycle/technician saves · `L662-1073` Cognito identity admin · `L1073-1113` `importAgreements` (unrelated) · `L1113-1364` group assignment + portal revoke · `L1364-1705` customer reactivate/contact · `L1705-2117` technician offboarding · **`L2117-3115` GL-14 staff role management** · `L3115-3241` `staffRoster` · `L3241-3351` suppression + suspect addresses.
+Seam: `L2117-3241` → `crm-admin/staff.ts` — 1124 lines, already fenced by its own banner comment and already covered by `offboarding.test.ts`.
 
-`_setLockStoreForTests` ([atomicLock.ts:351](apps/web/amplify/functions/shared/atomicLock.ts:351))
-and `capacityFixtureModels` ([capacityTestFixture.ts:12](apps/web/amplify/functions/shared/capacityTestFixture.ts:12))
-are deliberate test seams — not dead.
+**`amplify/functions/daily-reminders/handler.ts` — 3010.** A cron dispatcher for ~30 unrelated sweeps. `L119-298` handler sequencing · `L298-811` eight state reconcilers · `L811-1190` five ops reports · `L1190-1430` staffing/dispatch · `L1430-1768` AR/dunning · `L1768-1943` `reconcileProcessingPayments` · `L1943-2407` seven GL-19 daily reconciliations · `L2407-2528` `retryQueuedEmails` · `L2528-3010` `reconcilePaidBookings` + four private loaders.
+Seam: `L2528-3010` moves whole — nothing else calls those loaders. Next: `L1430-1768`.
 
-98 further value exports have zero non-test importers. Notable clusters in
-`shared/`: `bookingLink.ts` (2), `bookingPayment.ts` (4), `businessHours.ts` (4 —
-including `BUSINESS_TZ`, the only named timezone constant, while 23 bare
-`America/New_York` literals exist), `callbacks.ts` (3), `capacity.ts` (3),
-`marketRate.ts` (4), `serviceCatalog.ts` (4), `subscription.ts` (3),
-`lifecycleReasons.ts` (2), `units.ts` (2). In `apps/crm/src/lib/`: `bookingLink.ts`
-(3), `marketRates.ts` (3), `recovery.ts` (3), `revenue.ts` (3), `installPrompt.ts`
-(2), `billingDisclosure.ts` (2).
+**`amplify/functions/shared/bookingFinalize.ts` — 2831.** `L22-122` slot/route helpers · **`L122-188` agreement document marketing copy** (masthead, covered-pest grid — content, not logic) · `L188-648` `finalizeBooking` · `L648-761` retry/reclaim · `L761-1210` customer matching and conversion · **`L1210-2075` `finalizeClaimed()` — 865 lines** · `L2075-2595` comms claim + delivery · `L2595-2831` failure settlement.
+Seam: `L2075-2595` → `shared/bookingComms.ts`, a distinct idempotency domain with its own lock. `L122-188` belongs in a content module.
 
-A further **121 type/interface exports** have no non-test importers, concentrated
-in [bookingApi.ts](apps/web/src/lib/bookingApi.ts) (11), `revenue.ts` (6),
-`bookingFunnel.ts` (5), `groupChange.ts` (5), `pdf.ts` (4), `marketRate.ts` (4),
-`inventory.ts` (4), `deactivation.ts` (4), `capacity.ts` (4), `atomicLock.ts` (4),
-`workQueues.ts` (4). Most are still used *inside* their own file — the fix is
-dropping `export`, not deleting the type. This list is not separated by that
-distinction; treat it as a review queue, not a delete list.
+**`apps/crm/src/tech/JobDetail.tsx` — 2011.** `L41-186` product-row model + helpers · `L205-751` `TechJob()` shell · `L751-801` label tables · `L801-895` `ScopePrepExits` · `L895-1046` `CallbackFindingCard` · `L1046-1183` `NoAccessCard` · **`L1183-1879` `ReportForm` — 696 lines** · `L1879-2011` `ProductRowEditor`.
+Seam: `L1183-2011` plus the `L41-186` helpers they own → `tech/ReportForm.tsx`, ~1000 lines, leaving JobDetail as the job shell.
 
-### 3.2 Routes
+### 3.2 The rest, with their seams
 
-**Web — 6 routes with no in-app reference:**
+| File | Lines | Distinct responsibilities | Clearest seam |
+|---|---|---|---|
+| `shared/visitChange.ts` | 1999 | types/invoice classification `L51-166`; preview `L166-405`; notify `L289-405`; `cancelVisit` + held-lock machine `L405-1058`; claim lifecycle `L1058-1296`; `resumeVisitChange` `L1296-1398`; `rescheduleVisit` `L1418-1999` | `L1058-1296` → shared claim module |
+| `shared/pdf.ts` | 1596 | four unrelated renderers on a shared toolkit: primitives `L152-400`; agreement `L400-737`; quote helpers `L737-877`; quote `L877-1122`; service report `L1124-1413`; amendment `L1421-1596` | `L1124-1596` |
+| `shared/capacity.ts` | 1533 | constants `L44-101`; tech eligibility `L101-370`; slot ledger `L370-660`; claim lifecycle `L651-916`; **routing/travel math `L916-1103`**; tour + reconcile `L1103-1533` | `L916-1191` → `shared/routing.ts` (pure geometry, no Dynamo semantics) |
+| `crm-pricing/handler.ts` | 1532 | env/router `L58-134`; research wake `L134-270`; rollback `L270-421`; upload/drive `L421-469`; sheet→offer + reply composition `L469-654`; **`priceLead()` 838 lines `L654-1492`**; `extractQuoteIntent` `L1492-1532` | `L469-654` |
+| `apps/web/src/pages/booking/QuotePage.tsx` | 1386 | sessionStorage codec `L44-141`; **`QuotePage()` 1140 lines `L142-1282`** (poll `:266`, wizard `:835`, three result sections); loading screen `L1282-1386` | wizard body `L817-1280` → `QuoteWizard.tsx` |
+| `pricing-refresh/handler.ts` | 1334 | backoff `L74-127`; queue selection `L127-297`; **rate-ready customer email + PDF `L297-486`**; digest HTML `L578-747`; failure settle `L858-1012`; run summary `L1012-1334` | `L297-486` — customer-facing delivery inside a queue drainer |
+| `shared/planCancellation.ts` | 1269 | preview `L48-243`; outcome union `L243-321`; settlement `L321-604`; held drive `L604-880`; cancel/repair/reclaim `L880-1065`; resume + confirmation `L1065-1269` | `L48-243` (read-only projection) |
+| `crm-billing/handler.ts` | 1119 | args/actor/guards `L47-152`; router `L152-317`; setup intent + cross-Lambda `L317-410`; portal proxies `L401-410`; subscription ops `L410-529`; charging `L529-771`; **invoice ops `L771-1050`**; recovery owner `L1085-1119` | `L771-1050` → `crm-billing/invoices.ts` (already has `money.test.ts`) |
+| `stripe-webhook/handler.ts` | 1090 | verify + router `L40-193`; funnel payments `L193-355`; subscription invoices `L355-744`; refunds/deletions `L744-952`; disputes `L952-1090` | `L952-1090` |
+| `apps/crm/src/office/MarketRates.tsx` | 1063 | three unrelated admin panels: `EnginePanel` `L98-233`; list `L233-425`; `RateForm` 438 lines `L425-893`; `RollbackPanel` `L893-1063` | `L893-1063` and `L98-233` both lift cleanly |
+| `apps/crm/src/office/Schedule.tsx` | 1062 | board + 5 mutations `L46-637`; `AvailabilityPanel` (own data, own `act()` at `L730`) `L637-1062` | `L637-1062` |
+| `apps/web/src/pages/booking/BookPage.tsx` | 1060 | **`BookPage()` 886 lines `L47-933`**; `PaymentForm` `L933-1034`; shell `L1034-1060` | body is one function — needs extraction, not a move |
+| `shared/marketRate.ts` | 1058 | config `L26-152`; price math `L152-257`; **catalog versioning/rollback `L257-444`**; cache read `L444-534`; notify queue `L496-643`; **LLM research `L643-1058`** | `L643-1058` → `shared/rateResearch.ts` |
+| `shared/leadLifecycle.ts` | 1058 | constants `L33-75`; activity/recovery `L75-195`; `createLead` `L195-392`; outreach gating `L392-547`; **funnel ingress adapters `L547-679`**; disposition `L679-937`; ownership `L937-1058` | `L547-679` |
+| `apps/crm/src/lib/api.ts` | 1008 | **largely cohesive** — one typed client facade: ~60 types interleaved with ~40 thin wrappers; `L958-1008` is generic result plumbing | split types from calls; no behavioural tangle |
+| `shared/deactivation.ts` | 1001 | types `L60-121`; **`deactivateCustomer` 533 lines `L121-654`**; sweep `L654-829`; inventory `L829-918`; notice `L918-1001` | `L829-1001` |
+| `amplify/backend.ts` | 966 | Cognito hardening `L56-136`; CAS lock IAM `L137-240`; Function URLs `L240-281`; **~340 lines of per-function env + IAM `L281-623`**; SES `L623-670`; booking URL `L670-695`; **alarms `L695-966`** | `L695-966` → `amplify/observability.ts` |
+| `apps/crm/src/office/Dashboard.tsx` | 935 | aggregation `L129`; `drillRowsFor` `L308`; ten independent `<Card>` panels `L432-766`; drill panel `L798-935` | `L592-766` (the four exception queues) |
+| `apps/crm/src/office/Work.tsx` | 842 | `WorkQueue()` 698 lines `L45-743`; **`PaymentsInFlight` `L743-842`** — different data, different purpose, only co-located | `L743-842` |
+| `apps/crm/src/office/Staff.tsx` | 776 | roster `L93-221`; `AccessHistory` (own fetch) `L221-344`; badges `L344-374`; `StaffActions` `L374-671`; `InviteForm` `L671-776` | `L221-344` |
+| `apps/crm/src/office/technicians.tsx` | 740 | roster `L54-170`; `LicenseRecords` (own entity, own mutations) `L170-362`; `TechForm` 378 lines `L362-740` | `L170-362` |
+| `shared/subscription.ts` | 725 | Stripe ensure-ers `L32-152`; `startPlanBilling` `L152-291`; **queued-visit cancellation `L291-576`** (job/scheduling work in a Stripe module); `cancelPlanBilling` `L576-725` | `L291-576` |
+| `shared/email.ts` | 597 | shell `L17-92`; MIME + send `L92-302`; resend/suppression `L302-402`; logging + **`openEmailFailureWork` `L402-479`** (reaches into the work-item domain from transport); ops notify `L479-597` | `L430-479` |
+| `apps/crm/src/portal/AddService.tsx` | 515 | types + capability matrix + helpers `L27-128`; wizard `L132-515` | `L27-128` |
 
-| Route | Component |
-|---|---|
-| `/lp/protect` | `pages/lp/LPProtect` |
-| `/lp/quote` | `pages/lp/LPQuote` |
-| `/lp/call` | `pages/lp/LPCall` |
-| `/request-quote` | `<Navigate to="/quote">` — [App.tsx:207](apps/web/src/App.tsx:207) |
-| `/residential/termite/treatment` | `TermiteTreatment` — the `/services/...` twin *is* linked |
-| `/residential/wildlife/humane-removal` | `HumaneRemoval` — same |
+### 3.3 Big but cohesive — leave alone
 
-The three `/lp/*` pages are paid-ad landing targets and are plausibly unlinked by
-design; the other three are legacy/SEO aliases. **None are safe to delete without
-checking ad configs and the sitemap.**
+- `shared/workPolicy.ts` (824) — `L123-796` is a single declarative `WORK_POLICY` table keyed by work kind; the size is data, not logic.
+- `shared/atomicLock.ts` (552) — one DynamoDB conditional-write primitive plus its test double.
+- `apps/web/src/lib/bookingApi.ts` (503) — ~25 request/response types dominate.
+- `apps/web/src/pages/residential/Residential.tsx` (554), `services/Wildlife.tsx` (503), `services/HumaneRemoval.tsx` (501) — static marketing content, no branching logic.
 
-**CRM — no orphaned routes.** An earlier pass in this audit flagged `/work`,
-`/schedule`, and the `/portal/*` routes as unlinked; that is **wrong** — all are
-linked via `<Tab to=...>` at [App.tsx:255-280](apps/crm/src/App.tsx:255).
-`/welcome` is a magic-link email landing target, and `/groups/:id` is a parameter
-route reached by navigation. Correction recorded because the raw grep signal
-("no literal `"/work"` string outside App.tsx") is misleading here.
+### 3.4 Functions over 500 lines on their own
 
-**Page components never routed: none.** Every page under `apps/web/src/pages/**`
-and `apps/crm/src/{pages,office,tech,portal}/**` is imported by its router.
+Not fixable by moving symbols between files:
 
-**Stale remnant:** [App.tsx:229-231](apps/crm/src/App.tsx:229) is a 3-line JSX
-comment describing a "Staging-only database reset" screen with no accompanying
-`<Route>`. The component was removed in `9c9bff4`; only the comment survives.
+| Function | Location | Lines |
+|---|---|---|
+| `CustomerDetail()` | `apps/crm/src/office/CustomerDetail.tsx:150-2038` | 1888 |
+| `QuotePage()` | `apps/web/src/pages/booking/QuotePage.tsx:142-1282` | 1140 |
+| `quote()` | `booking-public/handler.ts:1132-2053` | 920 |
+| `BookPage()` | `apps/web/src/pages/booking/BookPage.tsx:47-933` | 886 |
+| `finalizeClaimed()` | `shared/bookingFinalize.ts:1210-2075` | 865 |
+| `book()` | `booking-public/handler.ts:2491-3336` | 845 |
+| `priceLead()` | `crm-pricing/handler.ts:654-1492` | 838 |
+| `ReportForm` | `apps/crm/src/tech/JobDetail.tsx:1183-1879` | 696 |
+| `updateJobSchedule()` | `crm-docs/handler.ts:2464-3124` | 660 |
+| `deactivateCustomer()` | `shared/deactivation.ts:121-654` | 533 |
 
-### 3.3 Orphaned components — 3, all verified
+### 3.5 Test files over 500 lines
 
-| File | Verification |
-|---|---|
-| [apps/web/src/components/WhyUs.tsx](apps/web/src/components/WhyUs.tsx) | zero references outside itself |
-| [apps/web/src/components/NumberedSteps.tsx](apps/web/src/components/NumberedSteps.tsx) | zero references outside itself |
-| [apps/web/src/components/ServiceSection.tsx](apps/web/src/components/ServiceSection.tsx) | zero references outside itself |
+20 files, largest first: `crm-docs/compliance.test.ts` 2248 · `crm-admin/offboarding.test.ts` 1932 · `booking-public/quote.test.ts` 1920 · `shared/bookingFinalize.test.ts` 1751 · `pricing-refresh/handler.test.ts` 1674 · `booking-public/book.test.ts` 1218 · `crm-pricing/handler.test.ts` 1165 · `shared/capacity.test.ts` 1107 · `shared/visitChange.test.ts` 1035 · `shared/marketRate.test.ts` 1035 · `shared/planCancellation.test.ts` 785 · `shared/subscription.test.ts` 781 · `shared/leadLifecycle.test.ts` 708 · `crm-billing/money.test.ts` 699 · `stripe-webhook/handler.test.ts` 647 · `shared/deactivation.test.ts` 639 · `shared/callbacks.test.ts` 551 · `booking-public/cancel.test.ts` 524 · `web/src/lib/bookingFunnel.test.ts` 516 · `daily-reminders/handler.test.ts` 503.
 
-All three are default-exported presentational components. Notably, they are
-exactly the abstractions the marketing pages re-implement inline (§5) — they look
-like an extraction that was started and abandoned rather than accidental orphans.
+These are large by scenario count and `describe`-partitioned. The structural issue is the **mock/fixture preamble before the first `describe`**: 522 lines in `offboarding.test.ts`, 418 in `quote.test.ts`, 409 in `bookingFinalize.test.ts`, 404 in `pricing-refresh/handler.test.ts`, 322 in `book.test.ts`, 314 in `crm-pricing/handler.test.ts`, 301 in `deactivation.test.ts`, 279 in `visitChange.test.ts` — roughly 4,500 lines of scaffolding, much of it rebuilding the same fake Amplify data client and Stripe stubs. Seam: a shared `functions/shared/__fixtures__` module.
 
-### 3.4 Commented-out code and markers
+### 3.6 One duplicated pattern across the large files
 
-**No commented-out code blocks exist.** Two independent scans (runs of 5+ `//`
-lines containing code-shaped content, and separately all `//`-runs ≥8 lines plus
-`{/* <Component` and `/* …` block comments) found zero. The longest comment runs
-are prose rationale, e.g. [crm-docs/handler.ts:2669-2688](apps/web/amplify/functions/crm-docs/handler.ts:2669)
-and [resource.ts:491-510](apps/web/amplify/data/resource.ts:491).
-
-**Marker comments: TODO 0, FIXME 0, HACK 0, `@deprecated` 0.** The 4 `XXX` hits
-are false positives inside the base64 PNG literal at
-[logoAsset.ts:13](apps/web/amplify/functions/shared/logoAsset.ts:13).
-
-This is unusual and worth stating plainly: the codebase carries its debt in prose
-rationale and in one machine-greppable flag (`pageErrors: "ignore"`), not in
-marker comments.
-
-### 3.5 Dangling references to deleted docs
-
-Four source comments cite audit docs removed in `0b32017`:
-
-| Location | Reference |
-|---|---|
-| [pagination.ts:6](apps/web/amplify/functions/shared/pagination.ts:6) | `docs/audit/PATTERNS.md, pattern 3` |
-| [pagination.ts:22](apps/web/amplify/functions/shared/pagination.ts:22) | `INVENTORY.md item on swallowed errors` |
-| [dynamicGroups.ts:9](apps/web/amplify/functions/shared/dynamicGroups.ts:9) | `docs/audit/PATTERNS.md` |
-| [apps/crm/src/lib/api.ts:973](apps/crm/src/lib/api.ts:973) | `docs/audit/PATTERNS.md pattern 3` |
-
-This file restores the `INVENTORY.md` referent. `PATTERNS.md` remains dangling.
-
-### 3.6 Not verified
-
-- `export { a, b } from "…"` re-export blocks (14 sites) were not enumerated; some pass-through names may also be dead.
-- The 121 type exports conflate "should lose `export`" with "should be deleted".
-- Non-TS consumers (HTML, CSS, JSON config, CDK string references) were not scanned for symbol usage.
+The claim/lease lifecycle (reclaim orphan → write claim → release → sweep) is reimplemented in at least four places: `shared/visitChange.ts:1058-1296`, `shared/planCancellation.ts:1005-1065`, `shared/bookingFinalize.ts:709-761` and `:2075-2147`, `crm-docs/handler.ts:4082-4154`.
 
 ---
 
 ## 4. Type drift
 
-Baseline: only **two files** in either frontend derive types from the schema of
-record — [apps/crm/src/lib/api.ts](apps/crm/src/lib/api.ts) (24 model types,
-correctly) and [portalData.ts](apps/crm/src/portal/portalData.ts).
-**`apps/web/src/**` derives zero types from `resource.ts`.** The drift is
-concentrated in (a) the public funnel's hand-written wire types and (b) everything
-returned through `.returns(a.json())` custom ops.
+**Structural cause.** ~100 custom operations in the schema declare `.returns(a.json())` (`resource.ts:2542`–`4012`). Every CRM↔Lambda RPC return is therefore untyped `AWSJSON`, unwrapped by a blind cast at `apps/crm/src/lib/api.ts:994-1008` (`opResult<T>` → `JSON.parse(data) as T`). Nothing in the type system connects a Lambda's return type to the CRM's declared shape for it, so every mirror in §4.2 is unchecked by construction.
 
-### 4.1 Same entity typed differently
+### 4.1 `productsUsed` — `string` in the CRM, `number` on the wire (live crash)
 
-**Service vocabulary — 4 declarations, one of them incomplete (live).**
-
-| Declaration | Members |
-|---|---|
-| [resource.ts:632](apps/web/amplify/data/resource.ts:632) `BookingRequest.service` | 8 |
-| [serviceCatalog.ts:39](apps/web/amplify/functions/shared/serviceCatalog.ts:39) `CatalogServiceId` | 10 |
-| [bookingApi.ts:54](apps/web/src/lib/bookingApi.ts:54) `ServiceCode` | **6 — missing `MOSQUITO`, `MOSQUITO_TICK`** |
-| [AddService.tsx:27](apps/crm/src/portal/AddService.tsx:27) `ServiceCode` | 8 |
-
-[serviceCatalog.ts:250,266](apps/web/amplify/functions/shared/serviceCatalog.ts:250)
-mark both mosquito services `funnel: true`, so the public dropdown offers services
-its own type cannot express. Two casts hide it:
-[bookingFunnel.ts:37](apps/web/src/lib/bookingFunnel.ts:37) `e.id as ServiceCode`
-and [QuotePage.tsx:409](apps/web/src/pages/booking/QuotePage.tsx:409).
-
-**Plan cadence — 5 spellings; one map is missing a member (live).**
-
-| Declaration | Members |
-|---|---|
-| [resource.ts:79](apps/web/amplify/data/resource.ts:79) `ServiceFrequency` | 4, incl. `SEMIANNUAL` |
-| [marketRateKeys.ts:24](apps/web/amplify/functions/shared/marketRateKeys.ts:24) `PlanCadence` | 3 |
-| [bookingApi.ts:63](apps/web/src/lib/bookingApi.ts:63) `RecurringFrequency` | 3 |
-| [api.ts:161](apps/crm/src/lib/api.ts:161), [LeadPanel.tsx:51](apps/crm/src/components/LeadPanel.tsx:51) | 4 |
-| [AddService.tsx:83](apps/crm/src/portal/AddService.tsx:83) `RecurringOffer.frequency` | `string` |
-
-**Verified live defect:** [billingDisclosure.ts:16](apps/crm/src/lib/billingDisclosure.ts:16)
-`VISIT_NOTE: Record<string, string>` has `MONTHLY`, `BIMONTHLY`, `QUARTERLY` — **no
-`SEMIANNUAL`**. It is read at [:38](apps/crm/src/lib/billingDisclosure.ts:38)
-(`VISIT_NOTE[plan.serviceFrequency ?? ""]`) inside `firstChargeWords`, which
-reaches `startBillingConfirmText`, which [CustomerDetail.tsx:44](apps/crm/src/office/CustomerDetail.tsx:44)
-imports. [LeadPanel.tsx:235](apps/crm/src/components/LeadPanel.tsx:235) lets the
-office sell a SEMIANNUAL plan, and the start-billing confirmation then silently
-omits the visit-cadence sentence. Because the map is keyed by `string`, tsc cannot
-catch it. The sibling map [planCadence.ts:22](apps/crm/src/lib/planCadence.ts:22)
-*does* include `SEMIANNUAL` — two parallel maps of one enum, one incomplete.
-
-(Note: `VISIT_NOTE` appears in the §3.1 unused-export list. That is accurate about
-the `export` keyword only — it has no external importer but is live via the
-internal read at `:38`. Do not delete it.)
-
-**Property class — 3 vocabularies.** [resource.ts:626](apps/web/amplify/data/resource.ts:626)
-`propertyKind` (`RESIDENTIAL|COMMUNITY|COMMERCIAL`) vs `Customer.propertyClass` /
-`Job.propertyClass` typed as plain `a.string()` in the schema itself vs
-[leadIntakeApi.ts:54](apps/web/src/lib/leadIntakeApi.ts:54) `"Residential" |
-"Association" | "Specialty"` (title case, different member names) vs
-[revenue.ts:55](apps/crm/src/lib/revenue.ts:55) `ClientType`, which adds a fourth
-`UNCLASSIFIED` and re-normalizes via a cast at `:81`.
-
-**The funnel wire types shadow `BookingRequest` wholesale.**
-[bookingApi.ts](apps/web/src/lib/bookingApi.ts) declares 25 types with no link to
-the schema. `PricedQuote.service` is `string` where the schema has an 8-member
-enum; `BookedResponse` ([:249](apps/web/src/lib/bookingApi.ts:249)) is **missing
-`processing`**, which [booking-public/handler.ts:3209](apps/web/amplify/functions/booking-public/handler.ts:3209)
-actually returns. Server-side, the same model is shadowed again by
-`QuotableBooking` ([quoteDoc.ts:26](apps/web/amplify/functions/shared/quoteDoc.ts:26)),
-`ReadyBooking` ([pricing-refresh:315](apps/web/amplify/functions/pricing-refresh/handler.ts:315)),
-and two row types in daily-reminders.
-
-**Technician read surface — server strips fields the client types as present.**
-[technicianReads.ts:55-60](apps/web/amplify/functions/shared/technicianReads.ts:55)
-`pickJob()` deletes `priceCents` and `paidPaymentIntentId`;
-[:44-50](apps/web/amplify/functions/shared/technicianReads.ts:44) `pickCustomer()`
-keeps 11 of ~55 Customer fields. The client
-([api.ts:220](apps/crm/src/lib/api.ts:220)) types them as full
-`Schema["Job"]["type"]` / `Schema["Customer"]["type"]`. Every stripped field reads
-as present-and-typed in `tech/JobDetail.tsx` and `tech/Today.tsx`.
-
-**Cancellation outcomes — narrower unions and dropped fields.**
-
-| Client | Server | Drift |
+| Declaration | Location | `amountValue` |
 |---|---|---|
-| [api.ts:481](apps/crm/src/lib/api.ts:481) `VisitCancelOutcome` | [visitChange.ts:423](apps/web/amplify/functions/shared/visitChange.ts:423) | client union **missing `"FAILED"`** — the conflicting-terminal state where money already moved falls through [VisitCancelSheet.tsx:104](apps/crm/src/components/VisitCancelSheet.tsx:104)'s `!== "COMPLETE"` as a plain warning |
-| [api.ts:389](apps/crm/src/lib/api.ts:389) `PlanCancellationPreview` | [planCancellation.ts:56](apps/web/amplify/functions/shared/planCancellation.ts:56) | missing `pendingMessage` — never referenced anywhere in `apps/crm/src`, though the field exists specifically so the portal stops rendering "you won't be charged again" against live billing |
-| [api.ts:422](apps/crm/src/lib/api.ts:422) `CustomerCancelOutcome` | [planCancellation.ts:242](apps/web/amplify/functions/shared/planCancellation.ts:242) | missing `stripeSubscriptionCanceled`, `settled` |
-| [CustomerDetail.tsx:1639](apps/crm/src/office/CustomerDetail.tsx:1639) (inline, 5 fields) | [deactivation.ts:83](apps/web/amplify/functions/shared/deactivation.ts:83) (11 fields) | office is never told how many plans/visits the deactivation stopped |
+| Wire/server (canonical) | `shared/inventory.ts:15-31` | `amountValue?: number` |
+| CRM tech UI | `apps/crm/src/tech/JobDetail.tsx:41-60` | `amountValue?: string` |
 
-Further shadows: `StaffRosterRow` ([api.ts:738](apps/crm/src/lib/api.ts:738)),
-`TechnicianLicenseRecord` ([api.ts:769](apps/crm/src/lib/api.ts:769), field-for-field
-copy), `ExceptionRow` ([Schedule.tsx:659](apps/crm/src/office/Schedule.tsx:659), via
-`as unknown as` at `:677`), `Outcome` ([PricingLog.tsx:19](apps/crm/src/office/PricingLog.tsx:19),
-exact copy of `PricingOutcome`), `RevenueInvoice`/`AgingInvoice` (which widen
-`InvoiceStatus` to `string` inside the revenue math).
+The writer coerces correctly (`JobDetail.tsx:1416` `Number(p.amountValue)`, written as a number at `:1431`). The reader does not: `parseProducts` (`:98-105`) blind-casts stored JSON to `ProductRow[]`, and `normalizeRow` (`:138`) passes the value through unchanged, so state holds a **number**. Three `.trim()` call sites then run on it: `:190`, `:1416`, `:1695`.
 
-`PromoRow` ([promo.ts:25](apps/web/amplify/functions/booking-public/promo.ts:25)) is
-a **deliberate, documented** shadow (tsc depth ceiling); its only drift is `active`
-optional vs schema-required.
+Reopening an existing draft service report that already has a structured amount and saving without touching the amount input reaches `p.amountValue?.trim()` on a number → `TypeError: ... .trim is not a function`. TypeScript cannot see it because `parseProducts` casts.
 
-### 4.2 Enums as bare strings
+Also: `quantity`/`targetPest` are required in `ProductRow`, optional in `ReportProduct`. Four independent parsers of the same blob exist — `tech/JobDetail.tsx:98`, `office/ProductUsage.tsx:52`, `crm-docs/handler.ts:159`, consumed by `shared/pdf.ts:1143`.
 
-**No typo'd enum literal exists.** Verified mechanically: all 129 enum members
-extracted from `resource.ts` and diffed against every `kind:`/`status:` string
-literal in the tree. The 30 non-matches are all non-enum fields (`PTO`,
-`BASE_OVERRIDE`, `EN_ROUTE`, `ARRIVED`, …). The 24 `"COMPLETE"` literals are
-command-stage vocabularies, not `JobStatus.COMPLETED` — no confusion between them.
+### 4.2 CRM mirrors that drop server fields
 
-**The hazard is non-exhaustive maps keyed by `string`, which tsc cannot check.**
-[kit.tsx:192](apps/crm/src/ui/kit.tsx:192) `statusTone: Record<string, BadgeTone>`
-— verified contents — is missing:
+**`PlanCancellationPreview`** — server `shared/planCancellation.ts:57-91` declares and populates `pendingMessage: string` (required, produced at `:239`); the CRM copy `apps/crm/src/lib/api.ts:389-411` stops at `saveOfferAvailable`. `components/CancelPlanSheet.tsx:92` renders `outcome.message` and never reads `preview.pendingMessage`. The server comment at `:87-89` states its purpose is precisely that the portal render it — the field is computed on every preview and is unreachable from the client.
 
-- `JobStatus`: **`NO_ACCESS`, `SCOPE_MISMATCH`, `PREP_MISSING`** — the three honest-failure states, rendered as neutral grey "muted". Reached at [CustomerDetail.tsx:926](apps/crm/src/office/CustomerDetail.tsx:926), [Schedule.tsx:410,539](apps/crm/src/office/Schedule.tsx:410), [JobDetail.tsx:442,547](apps/crm/src/tech/JobDetail.tsx:442), [Today.tsx:199](apps/crm/src/tech/Today.tsx:199)
-- `BookingRequest.status`: `QUOTED`, `EXPIRED`, `CONTACT`, `PROCESSING`, `PAYMENT_FAILED`
-- `PricingDecision`: **all six** — [PricingLog.tsx:82](apps/crm/src/office/PricingLog.tsx:82) passes `r.decision` to `StatusBadge`, so every pricing-decision badge renders grey
-- `DisputeStatus`: `NEEDS_RESPONSE`, `UNDER_REVIEW`, `WON`, `LOST`
+**`CustomerCancelOutcome`** — server `planCancellation.ts:243-261` CANCELED variant has `stripeSubscriptionCanceled: boolean` (required) and `settled?: boolean`; CRM mirror `api.ts:422-433` has neither. `settled` is documented at `:253-255` as the flag a sweep must not ignore. Zero references to either in `apps/crm/src`.
 
-Keying `statusTone` off the schema enums instead of `string` turns ~15 silent grey
-badges into compile errors. **Highest-leverage single type fix in the repo.**
+**`VisitCancelOutcome.outcome`** — server `shared/visitChange.ts:405-422` is `"COMPLETE" | "PARTIAL" | "PENDING" | "FAILED"`; CRM mirror `api.ts:481-493` omits `"FAILED"`. It is documented at `visitChange.ts:415-419` as the conflicting-terminal-outcome case that a Finance case owns. No CRM call site currently compares against it, so today it falls to a default branch — live drift, currently silent.
 
-Separately, 168 raw job-status literal comparisons exist with no shared `JobStatus`
-constant.
+The rest of these pairs are faithful: `VisitRescheduleOutcome` (`visitChange.ts:1398` vs `api.ts:530`), `VisitCancellationPolicy` (`cancellationPolicy.ts:21` vs `api.ts:446`), `VisitChangePreview` (`visitChange.ts:166` vs `api.ts:456`).
 
-### 4.3 `any`, casts, and non-null assertions
+### 4.3 `Job.cancelDisposition` — a free-text column with three vocabularies
 
-| Pattern | Count (non-test) |
-|---|---|
-| `as unknown as` | 78 (33 are `models as unknown as`, 12 `event.arguments as unknown as`) |
-| `: any` | **3 real** (9 further hits are the word "any" in prose) |
-| `as any` | 0 real (3 hits are prose) |
-| `@ts-ignore` / `@ts-expect-error` | 1, test-only |
-| `event.arguments.X!` | 80 (crm-docs 52, crm-billing 27) |
-| `JSON.parse` | 46 |
+Schema `resource.ts:1678` types it `a.string()`; the comment at `:1674-1677` documents `REFUND_OWED | FEE_RETAINED | AWAIT_SETTLEMENT | NONE`.
 
-The 3 real `: any` are all the data client
-([bookingLink.ts:70](apps/web/amplify/functions/shared/bookingLink.ts:70),
-[booking-public:970](apps/web/amplify/functions/booking-public/handler.ts:970),
-[pricing-refresh:420](apps/web/amplify/functions/pricing-refresh/handler.ts:420)),
-each documented as a tsc-instantiation-depth workaround. They are the acknowledged
-root cause of the 33 `models as unknown as` sites.
+- `shared/visitChange.ts:843-851` writes `"AWAIT_SETTLEMENT" | "REFUNDED" | "REFUND_OWED" | "FEE_RETAINED" | "NONE"` — **`"REFUNDED"` is not in the documented set.**
+- `shared/subscription.ts:420-427` writes only the four documented values.
+- `shared/planCancellation.ts:434-444` re-reads it via a local inline cast and branches only on `"FEE_RETAINED"`; everything else, including `"REFUNDED"`, falls into the not-settled path guarded by `paidRemainingCents`.
+- The in-memory `Disposition` type at `visitChange.ts:279` is a third vocabulary — `"REFUND" | "FEE_RETAINED" | "NONE"` — mapped to the persisted form only inside the ternary at `:845-849`.
 
-**Ranked by consequence:**
+### 4.4 Enums re-declared as string unions
 
-1. **Money — the card is charged off an unvalidated parse chain.** [booking-public/handler.ts:2588](apps/web/amplify/functions/booking-public/handler.ts:2588) does `JSON.parse(String(booking.quoteJson ?? "{}")) as {…}` with no runtime validation, then charges via non-null assertions.
-   **Correction (recorded while fixing this).** The `!` assertions were *not* the defect — they sit behind guards at `:2613-2627` that already throw, and the comment at `bookDatedAttempt` says exactly that; TS simply cannot narrow across the closure boundary. The real hole was that those guards test the recurring offer's **presence** while the parse was an unchecked cast, so a stored `recurringOffer: { frequency: "MONTHLY" }` satisfied `!stored.recurringOffer` and delivered `undefined` to `pricedWithPromo` — `NaN` as the amount charged. Fixed in `60f3c52` by making the parse all-or-nothing; the assertions went away as a consequence, not as the cure.
-2. **Money — one field, two shapes in one file.** [:2462](apps/web/amplify/functions/booking-public/handler.ts:2462) (`/promo`) declares `recurringOffer?: {initialFeeCents}`; [:2588](apps/web/amplify/functions/booking-public/handler.ts:2588) (`/book`) declares `{frequency, monthlyCents, initialFeeCents}`. Preview and charge read the same bytes through different types.
-3. **Money — field silently dropped on resume paths.** [bookingFinalize.ts:2218](apps/web/amplify/functions/shared/bookingFinalize.ts:2218) and [:2464](apps/web/amplify/functions/shared/bookingFinalize.ts:2464) omit `initialFeeCents` from `recurringOffer`; [:1238](apps/web/amplify/functions/shared/bookingFinalize.ts:1238) (main path) has all three.
-4. **Auth — the IAM-trust branch is entered on a cast.** [booking-public/handler.ts:357](apps/web/amplify/functions/booking-public/handler.ts:357) `(event as unknown as {internalOp?}).internalOp`; nothing type-checks the payload the trusting side receives (see also §1.3 gap 6).
-5. **Auth — 80 non-null assertions on optional GraphQL args** in authorization-gated mutations, e.g. [crm-docs:667](apps/web/amplify/functions/crm-docs/handler.ts:667). A missing arg becomes `undefined` inside the handler rather than a 400.
-6. **Scheduling — capacity arithmetic on asserted optionals.** [visitChange.ts:1660,1721](apps/web/amplify/functions/shared/visitChange.ts:1660) `priorAssignedFacts!.minutes`; [crm-docs:2728,2799](apps/web/amplify/functions/crm-docs/handler.ts:2728) `priorHeldFacts!.minutes`. A wrong release under- or over-counts a technician-day slot.
-7. **Scheduling — schema bypassed for PTO/closure writes.** [Schedule.tsx:677](apps/crm/src/office/Schedule.tsx:677) re-declares `TechnicianDayException` and `CompanyClosure` behind `api().models as unknown as {…}`.
+**`ServiceCode`** — schema `resource.ts:632-643` has 8 members; `shared/serviceCatalog.ts:39-49` has 10 (adds `COMMERCIAL_PEST`, `HOA_COMMON_AREA`); `apps/crm/src/portal/AddService.tsx:26-34` has the full 8; **`apps/web/src/lib/bookingApi.ts:54-61` has 6 — missing `MOSQUITO` and `MOSQUITO_TICK`.** Two casts keep it compiling: `bookingFunnel.ts:37` (`e.id as ServiceCode`) and `QuotePage.tsx:409` (`fields.service as ServiceCode`). `serviceCatalog.ts:268` marks `MOSQUITO_TICK` as `funnel: true`, so those codes are in `SERVICE_OPTIONS` at runtime and are sent as `service`. Runtime is correct only because `quoteFieldNeeds(service: string, …)` (`bookingFunnel.ts:84`) is widened to `string` and never narrows exhaustively.
 
-**`opResult<T>` is the CRM's single unchecked gate.**
-[api.ts:994](apps/crm/src/lib/api.ts:994) does `JSON.parse(data) as T` with zero
-validation, across **53 call sites**, each naming its own inline `T`. Money sites:
-[CustomerDetail.tsx:2064](apps/crm/src/office/CustomerDetail.tsx:2064) (refund),
-[:1388](apps/crm/src/office/CustomerDetail.tsx:1388) (settle),
-[CollectPaymentSheet.tsx:47](apps/crm/src/components/CollectPaymentSheet.tsx:47)
-(client secret). [bookingApi.ts:339](apps/web/src/lib/bookingApi.ts:339) is the web
-equivalent — every funnel response is an unvalidated cast.
+**`ServiceFrequency` / cadence** — schema `resource.ts:79-87` has 4 including `SEMIANNUAL`. Funnel-side copies have 3: `bookingApi.ts:63`, `booking-public/handler.ts:515`, `shared/marketRateKeys.ts:24-29`. Office paths have all 4: `api.ts:161`, `components/LeadPanel.tsx:51,228`, `lib/planCadence.ts:22-27`, `shared/recurring.ts:26`, `shared/leadLifecycle.ts:770,789`. The schema comment at `:82-84` states the public funnel does not sell `SEMIANNUAL` — **intentional and correctly partitioned**. One consequence: `planPrefill(rate, cadence: PlanCadence)` (`apps/crm/src/lib/marketRates.ts:208-210`) cannot be called for a semiannual plan, so an office-created semiannual plan has no market-rate prefill path.
 
-### 4.4 `a.json()` / AWSJSON fields
-
-19 model fields are `a.json()`; ~85 custom ops `.returns(a.json())`. **There is no
-shared parse/serialize helper — there are ten local ones**, three of them
-duplicated across files (`parseQuoteSnapshot` in two places and divergent,
-`parseProducts` in two, `readDocuments`/`parseDocuments` in two).
-`toAwsJson` ([crm-docs:177](apps/web/amplify/functions/crm-docs/handler.ts:177)) is
-the only serializer and is private to one Lambda.
-
-**Worst offender: `BookingRequest.quoteJson`
-([resource.ts:675](apps/web/amplify/data/resource.ts:675)) — 9 independent reader
-shapes** against one writer
-([booking-public:1991](apps/web/amplify/functions/booking-public/handler.ts:1991)).
-Two of the nine omit `initialFeeCents` (§4.3 item 3); one narrows `baseCents` to
-non-null where the writer can emit null.
-
-The parsed-vs-string hazard is documented at
-[crm-docs:170-180](apps/web/amplify/functions/crm-docs/handler.ts:170): an
-`a.json()` *argument* arrives already parsed, but an `a.json()` *model field* write
-needs a string, and AppSync rejects the raw object. `toAwsJson` is the fix but is
-applied at only two call sites; [crm-docs:277](apps/web/amplify/functions/crm-docs/handler.ts:277)
-and [:547](apps/web/amplify/functions/crm-docs/handler.ts:547) pass through raw, and
-[crm-billing:383](apps/web/amplify/functions/crm-billing/handler.ts:383) `asObject()`
-is a third, inverse convention. ~25 further sites stringify by hand.
+**Schema fields declared `a.string()` with an enum in the comment** — no generated union, no checking anywhere:
+`resource.ts:333` `CustomerGroup.status` (while `CustomerStatus` exists at `:66`) · `:377` `Customer.propertyClass` and `:1702` `Job.propertyClass` (while the same concept is a real enum as `BookingRequest.propertyKind` at `:628`; the untyped form repeats in mutation args at `:2735`, `:3028`, and binds to a free-text CRM field at `components/CustomerForm.tsx:16`) · `:1234`, `:1261` `TechnicianLicense.status` · `:1420` `PortalRequest.status` (comment `// OPEN | RESOLVED` while `WorkStatus` exists at `:293`) · `:1444` `CallbackRequest.status` · saga `stage` fields at `:819, 859, 968, 1004, 1044` · `:2531` and `:2933` `roles: a.string().required().array()` — the whole role vocabulary is a bare string array on the wire.
 
 ### 4.5 Cross-boundary drift
 
-Both sides declare the shape independently at **22 boundaries**. Lambda↔Lambda:
+| Boundary | Sender | Receiver | Status |
+|---|---|---|---|
+| CRM → AppSync → Lambda | hand-written arg objects in `apps/crm/src/lib/api.ts` | `event.arguments as unknown as {…}`, 14 sites | unchecked both ways |
+| Lambda → AppSync → CRM | Lambda return, `.returns(a.json())` | `opResult<T>` cast, `api.ts:994` | unchecked both ways — root cause of §4.2 |
+| Web → booking-public HTTP | `bookingApi.ts:65-108` | `booking-public/handler.ts:177-210` | deliberately asymmetric; server treats input as untrusted and sanitizes at `:227+` |
+| Web → lead-intake HTTP | `leadIntakeApi.ts:49-61` | `lead-intake/handler.ts:29-59` | already diverged both directions |
+| crm-billing → booking-public | `crm-billing/handler.ts:366-382` | `booking-public/handler.ts:309-320, 363` | three declarations, one payload |
+| crm-docs → CRM tech app | `technicianReads.ts:63, 275` (`AnyRecord`) | `api.ts:220, 259` (full model types) | over-promised |
 
-| Sender | Receiver | Drift |
-|---|---|---|
-| [crm-billing:365](apps/web/amplify/functions/crm-billing/handler.ts:365) `op: Record<string, unknown>` | [booking-public:303](apps/web/amplify/functions/booking-public/handler.ts:303) `InternalOp` | sender fully untyped; receiver's union never applied to the send |
-| [autoQuote.ts:109](apps/web/amplify/functions/thumbtack-webhook/autoQuote.ts:109) `input: Record<string, unknown>` | [booking-public:304](apps/web/amplify/functions/booking-public/handler.ts:304) `input: QuoteInput` | untyped on the wire, typed on arrival |
-| [booking-public:1121](apps/web/amplify/functions/booking-public/handler.ts:1121) `{internalOp:{**op**}}` | [crm-pricing:98](apps/web/amplify/functions/crm-pricing/handler.ts:98) | **discriminator name differs** (`op` vs `kind`) — two incompatible "internalOp" protocols, while [crm-pricing:96](apps/web/amplify/functions/crm-pricing/handler.ts:96) comments that it is "the same shape booking-public's own internalOp uses" |
-| [pricing-refresh:384](apps/web/amplify/functions/pricing-refresh/handler.ts:384) | booking-public `/quote-status` | hand-built fake `APIGatewayProxyEventV2` |
-| [daily-reminders:2377](apps/web/amplify/functions/daily-reminders/handler.ts:2377) | [crm-admin:251](apps/web/amplify/functions/crm-admin/handler.ts:251) | forged AppSync event, re-cast on receipt |
+**Lead intake** — the client declares `first` and `formId` as required where the server has both optional, and the server additionally accepts `idempotencyKey`, `addr`, `city`, `state`, `zip`, `sqft`, `units`, `freq`, `company`, `specialtyService`, `specialtyPropertyType`, none declared client-side. Callers currently send only declared fields (`Contact.tsx:42`, `TalkToExpertModal.tsx:79`) — theoretical, but the two declarations have already diverged in both directions.
 
-Frontend↔Lambda drift is itemised in §4.1. Two further cases:
-[leadIntakeApi.ts:49](apps/web/src/lib/leadIntakeApi.ts:49) `LeadRequest` cannot
-express 11 fields the server accepts; and `Attribution` is declared **4 independent
-times** ([leadIntake.ts:13](apps/web/src/lib/leadIntake.ts:13),
-[lead-intake:18](apps/web/amplify/functions/lead-intake/handler.ts:18),
-[bookingFinalize.ts:839](apps/web/amplify/functions/shared/bookingFinalize.ts:839),
-[booking-public:219](apps/web/amplify/functions/booking-public/handler.ts:219)) —
-the key sets currently agree, but nothing keeps them agreeing.
+**`InternalOp`** — declared at `booking-public/handler.ts:309-320`; the sender re-declares the result inline at `crm-billing/handler.ts:366-382` as a hand-copy of `InternalResult`; the receiver reads it through `(event as unknown as { internalOp?: InternalOp })` at `:363`. `data` is `unknown` on both sides and gets a third independent declaration in the browser at `apps/crm/src/portal/AddService.tsx:103-118` (`decision: string` instead of the server's discriminated union).
+
+**`TechnicianDay` / `TechnicianJobDetail`** — `technicianReads.ts:56-59` deletes `priceCents` and `paidPaymentIntentId` from every job and `:44-49` reduces Customer to the 11 fields in `CUSTOMER_VISIT_FIELDS`, while the CRM types (`api.ts:220-241`, `:259-281`) promise the full `Job` and `Customer` models. **Theoretical, not live** — `grep priceCents|paidPaymentIntentId` in `apps/crm/src/tech/` returns zero hits and all customer field reads (`tech/JobDetail.tsx:434,460,480,656`) are within `CUSTOMER_VISIT_FIELDS`.
+
+**`Customer.documents`** — three independent parsers of one `a.json()` blob (`resource.ts:477`): writer `crm-docs/handler.ts:5703-5712` has `kind` and `uploadedAt` required; reader `components/CustomerDocuments.tsx:18-27` has both optional; `office/CustomerDetail.tsx:330-341` is an inline count-only `unknown` check. The optionality drift runs in the safe direction. `KINDS` is duplicated as a bare array at `CustomerDocuments.tsx:29` and `DOCUMENT_KINDS` at `crm-docs/handler.ts:5714-5720` — same 5 members today.
+
+**`Attribution`** is declared four times, byte-identical in three: `web/src/lib/leadIntake.ts:13-22`, `lead-intake/handler.ts:18-27`, `shared/bookingFinalize.ts:841-850`, plus a derived form at `booking-public/handler.ts:213-225`. All eight keys agree.
+
+### 4.6 Casts and escape hatches
+
+| Pattern | Count (non-test, in scope) |
+|---|---|
+| `as any` | **0** |
+| `@ts-ignore` / `@ts-expect-error` | **0** in production (one deliberate in `bookingFinalize.test.ts:962`) |
+| `: any` annotation | **3** — `shared/bookingLink.ts:70`, `pricing-refresh/handler.ts:401`, `booking-public/handler.ts:963`, all `client: any` |
+| `as unknown as` | **78** |
+
+The 78 break down as:
+
+- **≈40 (51%) benign** — `client.models as unknown as {…}`, reaching models absent from the generated `Schema` until a backend wave lands, or dodging Amplify's type-depth ceiling. `api.ts:183,516,647,677,700,844,877,918`; `portal/Requests.tsx:78`; `office/technicians.tsx:185`, `MarketRates.tsx:270`, `CustomerDetail.tsx:3188,3317`, `Schedule.tsx:677`; `crm-docs/handler.ts:759,1318`; `daily-reminders/handler.ts:2332,2420,2879`; `shared/bookingFinalize.ts:43,1262`, `lifecycleCommand.ts:83,150`, `assignVisit.ts:105`, `marketRate.ts:302,371`, `leadClaim.ts:19,68`, `capacity.ts:553,1478,1525`, `groupChange.ts:83,131,169,247`; `pricing-refresh/handler.ts:1202`; `crm-admin/handler.ts:1194`; `crm-pricing/handler.ts:286`; `booking-public/handler.ts:3186,3292`.
+- **14 (18%) AppSync arg re-typing** — `event.arguments as unknown as {…}` asserts a shape AppSync does not guarantee, because the schema arg lists and these inline types are maintained separately: `crm-docs/handler.ts:416,440,459,482,494,499,515,616`; `crm-admin/handler.ts:245,251,410,415`; `crm-pricing/handler.ts:98`; `booking-public/handler.ts:363`.
+- **≈24 (31%) row-shape assertions** — the ones that hide real mismatches: `daily-reminders/handler.ts:1797,2071,2111,2119,2805,2840`; `bookingFinalize.ts:247,258,291`; `crm-docs/handler.ts:1931,3149,5868`; `technicianReads.ts:307,409` (the erasure behind the over-promise above); `portal/Group.tsx:42`, `portalData.ts:41`; `leadLifecycle.ts:474`. Plus Stripe shape assertions: `stripe-webhook/handler.ts:391,424,675`; `daily-reminders/handler.ts:2037`; `crm-billing/handler.ts:514` (`"" as unknown as { behavior: "void" }`, deliberately lying to the Stripe SDK's types to clear a pause).
+
+**Non-null `!` on cross-boundary data** (~30 total, most benign `Map.get(k)!` after a `has` check or DOM roots): `office/CustomerDetail.tsx:1586`; `BookPage.tsx:534,891` (both assert non-null on optional server response fields — `BookResponse.statusToken` at `bookingApi.ts:246` and `PricedQuote.statusToken` at `:163` are both optional); `shared/bookingFinalize.ts:1709`; `shared/agreementImport.ts:126-130`; `shared/compliance.ts:264`; `shared/leadLifecycle.ts:863-864`.
+
+### 4.7 `a.json()` fields — producers and consumers
+
+19 model fields plus ~100 operation returns/args.
+
+**Correctly funnelled through one parser:** `quoteJson` (`resource.ts:675`) — `shared/quoteSnapshot.ts` is the sole reader/writer (`:95` parse, `:138` write), six consumers · `ratesJson` (`:1292`) — one `parseSheet` at `shared/marketRateKeys.ts:87` · `attribution` (`:672`) — one tolerant parser at `bookingFinalize.ts:854`.
+
+**Parsed into different shapes at different call sites:**
+
+- `productsUsed` (`:1938`, `:3565`) — four parsers, two target types (§4.1).
+- `documents` (`:477`) — three parsers, two shapes (§4.5).
+- `labelRulesJson` (`:1847`, `:2977`) — three independent reads: `office/ProductLog.tsx:149` (local shape), `tech/JobDetail.tsx:166` (inline cast), `crm-docs/handler.ts:2075` (`parseLabelRules`).
+- `extracted` (`:1543`) — bare `as Extraction` + truthiness check at `crm-pricing/handler.ts:728-731`.
+- `inventoryJson` (`:969`) — typed `unknown` at `lifecycleCommand.ts:50` but `string` at `:244`; written stringified at `deactivation.ts:337`, forwarded unparsed at `:256`, `:274`.
+- `priceBreakdown` (`:1550`) — three producers with three line shapes (`thumbtack-webhook/handler.ts:327`, `booking-public/handler.ts:2017`, `crm-pricing/handler.ts:1387,1477`). No declared consumer type.
+
+**The unstringified-write hazard is handled by convention, not by type.** `crm-docs/handler.ts:168-181` (`toAwsJson`) documents that an `a.json()` mutation *argument* arrives already parsed, so forwarding it into a model write is rejected by AppSync. Mirrored by explicit `JSON.stringify` at `tech/JobDetail.tsx:1404` and `office/ProductLog.tsx:250`, and by `asObject` at `crm-billing/handler.ts:385-396`. Nothing prevents a new write path from omitting it.
+
+### 4.8 What is broken today
+
+1. `apps/crm/src/tech/JobDetail.tsx:1416` (also `:190`, `:1695`) — `.trim()` on a number from `productsUsed`. Reproducible.
+2. `apps/crm/src/lib/api.ts:389-411` — `pendingMessage` unreachable; the pending-cancel message the server computes cannot be rendered.
+3. `apps/crm/src/lib/api.ts:481-493` — `"FAILED"` not representable; currently falls to a default branch.
+4. `shared/visitChange.ts:846` — writes `"REFUNDED"` into `Job.cancelDisposition`, a value the schema's own documented vocabulary does not list and `subscription.ts:420-427` never produces.
+
+Everything else in this section is a divergence the type system permits but that no current call site exercises.
 
 ---
 
 ## 5. Missing patterns
 
-Where the same knowledge is re-typed because no shared name exists. `⚠` marks
-places where the sites **currently disagree** — those are defects, not just debt.
+Only cases with 3+ copies, or 2 copies that already disagree. ⚠ marks a live divergence.
 
-### 5.1 ⚠ `serviceTerritory.ts` — the MA/RI rule, 3 encodings, 2 of which disagree
+### 5.1 ⚠ `cadenceLabel(frequency)` — 9 encodings
 
-**Verified live divergence:**
+Should be `shared/cadenceLabels.ts` (pure leaf, value-importable by both apps as `serviceCatalog.ts` already is). Contract: `RecurringFrequency → { short, sentence }`.
 
-| Location | Rule |
+| Location | `BIMONTHLY` renders as | Handles `SEMIANNUAL`? |
+|---|---|---|
+| `apps/web/src/lib/bookingFunnel.ts:135` | `"Every 2 months"` | no |
+| `apps/web/src/pages/booking/QuotePage.tsx:1086` | `"Every-2-months visits"` | no |
+| `apps/crm/src/portal/AddService.tsx:402` | `"Every-2-months plan"` | no |
+| `apps/crm/src/components/LeadPanel.tsx:233` | `"Every 2 months"` | no |
+| `apps/crm/src/lib/marketRates.ts:53` | `"bi-monthly"` | no |
+| `apps/crm/src/lib/planCadence.ts:24` | `"technician visits every 2 months"` | **yes** |
+| `apps/crm/src/lib/billingDisclosure.ts:18` | `"A technician visits every 2 months — the charge is still monthly."` | no |
+| `shared/pdf.ts:738-744` | `"Every 2 months"` (ternary chain) | no — falls through to the raw enum |
+| `booking-public/handler.ts:546-550` | `"Every-2-months"` | no |
+
+Two disagreements: hyphenation splits the customer's dropdown choice (`"Every-2-months plan"`) from the agreement PDF (`"Every 2 months"`); and `SEMIANNUAL` is a legal value (`api.ts:161`) that only `planCadence.ts:25` handles — `pdf.ts:744` prints the literal enum `SEMIANNUAL` on the agreement PDF, and `billingDisclosure.ts` returns `undefined`, dropping the visit sentence from the money-confirm sheet.
+
+### 5.2 ⚠ Booking-path zip validation
+
+Covered in §1.7. The abstraction that does not exist is a shared `MA_RI_ZIP_RE` consumed by `validateQuoteForm` and `booking-public/handler.ts`; it currently lives only at the dispatch end (`shared/dispatchReadiness.ts:66`).
+
+### 5.3 ⚠ `escapeHtml(s)` — 8 copies
+
+Should move from `shared/receipts.ts:35` (already exported, nobody outside imports it) to `shared/html.ts`.
+
+`shared/receipts.ts:35` (`escapeHtml`) · `shared/bookingPaymentFailure.ts:21` (`esc`) · `booking-public/handler.ts:3722` · `lead-intake/handler.ts:162` · `daily-reminders/handler.ts:3004` (`escapeHtmlLite`) · `thumbtack-webhook/handler.ts:422` · `pricing-refresh/handler.ts:587` (`esc`) · `crm-docs/handler.ts:5076-5080` (inline `.replace`, applied to `techFirst` only).
+
+Bodies agree (`& < > "`, no `'`). The divergence is **coverage**: `crm-docs` escapes exactly one interpolated variable in that email; the other seven are module-level helpers callers may or may not reach for. Any new email path forks a ninth copy.
+
+### 5.4 ⚠ `CRM_APP_URL` — one variable, two fallbacks
+
+Should be `shared/appUrls.ts` exporting `crmAppUrl()` / `marketingUrl()` / `portalBillingUrl()`.
+
+`?? ""` (emits a relative URL inside an HTML email): `lead-intake/handler.ts:319`, `pricing-refresh/handler.ts:693`, `:798`, `shared/portalProvision.ts:216`, `auth-challenge/verify.ts:98`.
+`?? "https://app.pestbuzzkill.com"`: `crm-docs/handler.ts:153`, `shared/receipts.ts:25`.
+
+If the variable is ever unset on a function, the first group emits `href="/customers/abc"` — a dead link in a staff email — while the second emits a working absolute URL. The two staff-facing emails that fail are the lead-intake notification and the pricing-refresh digest.
+
+`MARKETING_URL` has the same shape across 9 sites (`thumbtack-webhook/autoQuote.ts:247`, `crm-docs/handler.ts:156`, `:5026`, `shared/bookingFinalize.ts:2193`, `:2444`, `shared/email.ts:38`, `shared/bookingPaymentFailure.ts:88`, `pricing-refresh/handler.ts:491`, `crm-pricing/handler.ts:70`) but all 9 agree.
+
+### 5.5 Environment → URL derivation — 3 encodings, 9 bare app ids
+
+`backend.ts:288-292` (CRM URL from `AWS_BRANCH`) · `backend.ts:534-537` (marketing URL from `branch`) · `apps/crm/src/lib/bookingLink.ts:16-37` (same decision from `window.location.hostname`, hardcoding both Amplify app ids). `backend.ts:549-551` re-encodes the split for `BOOKING_CORS_ORIGINS` and `apps/web/src/lib/portal.ts:12-14` for `PORTAL_URL`.
+
+Two Amplify app ids appear as bare literals in 9 places: `backend.ts:204,369,537,549`, `booking-public/handler.ts:107`, `crm-pricing/handler.ts:388`, `pricing-refresh/handler.ts:131`, `crm/src/lib/bookingLink.ts:18,37`. They agree today; combined with §1.3's `getSecret` copies this is what makes the backend non-portable across AWS accounts.
+
+### 5.6 ⚠ `prettyDate(isoDate)` — 6 encodings
+
+Half-built already: `shared/recurring.ts:349` exports one and `crm-docs/handler.ts:53` imports it. Home should be `shared/dates.ts`.
+
+| Location | Anchor + zone | Output |
+|---|---|---|
+| `shared/recurring.ts:341` (exported) | `T12:00:00Z`, UTC | `"Monday, July 21"` |
+| `daily-reminders/handler.ts:112` (own copy) | `T12:00:00`, **no zone** | `"Monday, July 21"` |
+| `shared/receipts.ts:27` (own copy) | `T12:00:00Z`, UTC | `"July 21, 2026"` |
+| `thumbtack-webhook/autoQuote.ts:138` | `T12:00:00Z`, Eastern | `"Monday, Jul 21"` |
+| `apps/crm/src/lib/format.ts:50` (`prettyWeekday`) | `T12:00:00` local | `"Monday, July 21"` |
+| `apps/web/src/lib/bookingFunnel.ts:154` (`formatDay`) | local date parts | `"Mon, Jul 21"` |
+
+The same visit date renders three ways: `"Monday, July 21"` in the reminder email, `"Monday, Jul 21"` in the Thumbtack auto-quote, `"July 21, 2026"` on the receipt.
+
+### 5.7 ⚠ Service-area state gate — 2 copies that disagree
+
+Should be `shared/serviceArea.ts` — `SERVED_STATES` + `isServedState(s)`.
+
+- `crm-docs/handler.ts:1839` — `if (!new Set(["MA","RI"]).has(state))` — case-**sensitive**, rejects an empty state.
+- `crm-pricing/handler.ts:798` — `if (extracted.state && !["MA","RI"].includes(extracted.state.toUpperCase()))` — case-**insensitive**, passes when `state` is falsy.
+
+`crm-docs` rejects `"ma"` where `crm-pricing` accepts it; `crm-docs` rejects an empty state where `crm-pricing` lets it through. The same two-state footprint is encoded a third way at `apps/web/src/data/cities.ts:22-25` and a fourth as free text (`"MA • RI"`) at `components/QuoteCTA.tsx:58` and `pages/lp/LPCall.tsx:133`.
+
+### 5.8 ⚠ Brand identity — phone in 4 formats, HQ address disagrees
+
+Should be `shared/brand.ts` (pure leaf) consumed by web, CRM and Lambdas.
+
+Structured copies that agree: `shared/bookingFinalize.ts:131-137` (`AGREEMENT_COMPANY`), `shared/pdf.ts:216-223` (`DEFAULT_COMPANY`, comment says it mirrors the former), `shared/email.ts:75-81`, `apps/web/src/components/SEO.tsx:139,167,277` (three JSON-LD blocks each repeating the full PostalAddress), `components/Footer.tsx:35-53`, `pages/PrivacyPolicy.tsx:190`, `pages/TermsOfService.tsx:154`.
+
+Phone — 6 local constants in 4 display formats: `"508-258-9294"` at `components/TalkToExpertModal.tsx:6`, `pages/Contact.tsx:8`, `pages/booking/BookPage.tsx:38`; `"(508) 258-9294"` at `components/QuoteCTA.tsx:4`, `pages/booking/CancelPage.tsx:18`, `pages/booking/TrackPage.tsx:7`, `booking-public/handler.ts:3340`, `lead-intake/handler.ts:60`; `"+1-508-258-9294"` at `components/SEO.tsx:139`. Plus un-named literals at `components/QuoteCard.tsx:27,31`, `Header.tsx:149`, `Footer.tsx:41-42`, `ComingSoon.tsx:17`, `pages/services/HumaneRemoval.tsx:402-403`, `TermiteTreatment.tsx:380-381`, `Wildlife.tsx:331,335`, `pages/communities/CommonAreaProtection.tsx:179,447`, `ForUnitOwners.tsx:161,366`, `InUnitService.tsx:179`, `pages/Home.tsx:250`.
+
+**HQ address disagrees outright:** `shared/driveTime.ts:14` — `HQ_ADDRESS = "81 Greenwich Rd, Ware, MA 01082"` against the letterhead `"420 Lakeside Ave, Suite 104, Marlborough, MA 01752"`. Drive-time and capacity math anchor on a different town from every customer-facing document. `driveTime.ts:9` labels it a legacy fallback, but it is still the fallback reached from `capacity.ts:4`.
+
+Placeholder area codes also disagree: `bookingFunnel.ts:250` and `booking-public/handler.ts:1198` say `"e.g. (413) 555-0123"`; the field placeholder at `QuotePage.tsx:1148` says `"(508) 555-0123"`.
+
+License `CC-0060592` appears at `pages/LicensedInsured.tsx:175`, `shared/bookingFinalize.ts:136`, `shared/pdf.ts:222`.
+
+### 5.9 ⚠ Marketing final-CTA block — 26 copies
+
+Should be `apps/web/src/components/ScheduleCTA.tsx` with props for eyebrow/title/sub/cta.
+
+The `bk-schedule-section` block appears verbatim in 26 files: every `pages/services/*.tsx` (15), every `pages/communities/*.tsx` (4), `pages/residential/Residential.tsx`, `Home.tsx:367`, `Contact.tsx:216`, `PropertyManagers.tsx:354`, `Communities.tsx:425`, `ServiceAreas.tsx:248`, `LicensedInsured.tsx:241`.
+
+Three user-visible wording splits:
+- Eyebrow: `"Ready to Get BuzzKilled?"` ×16 vs `"Ready To Get BuzzKilled?"` ×3 (`PropertyManagers.tsx:357`, `communities/HOAResources.tsx:359`, `communities/ForUnitOwners.tsx:359`).
+- Sub: `"…protect your property with BuzzKill."` ×13 vs `"…protect your home with BuzzKill."` ×1 (`residential/Residential.tsx:544`).
+- CTA: `"Get My Instant Quote"` vs `"Get an Instant Quote"` vs `"Get Instant Quote"`.
+
+### 5.10 ⚠ `reasonLabel(code)` — 5 copies + ~13 lowercase variants
+
+Should be `apps/crm/src/lib/customerPresentation.ts`, which already holds the sibling `lifecycleActionTitle`.
+
+Byte-identical bodies (`code.replace(/_/g," ").toLowerCase()` + capitalize first): `office/CustomerDetail.tsx:80-83` · `office/Staff.tsx:80-83` · `components/VisitCancelSheet.tsx:15-18` · `pages/VisitChangeHistory.tsx:31-34` · `lib/customerPresentation.ts:5-6` (inlined). `CustomerDetail.tsx:79` documents the duplication.
+
+Lowercase-only variants without the capitalize step: `ui/kit.tsx:220`, `office/technicians.tsx:700`, `office/Dashboard.tsx:669`, `portal/Requests.tsx:386`, `office/CustomerDetail.tsx:909,1487,1577,3412`, `tech/JobDetail.tsx:535`, `components/VisitCancelSheet.tsx:125`, `shared/bookingFinalize.ts:1749,1817,1856,1857,2272`. The same reason code renders `"Customer request"` on one screen and `"customer request"` on another.
+
+### 5.11 ⚠ `rateKey` — 1 builder, 3 hand parsers
+
+Should be `parseRateKey(key)` beside the builder in `shared/marketRateKeys.ts`.
+
+Builder: `shared/marketRate.ts:241-247` — `` `${service}#${areaKey}${bucket ? `#${bucket}` : ""}` ``.
+Parsers: `apps/crm/src/lib/marketRates.ts:76` (`.split("#")[2]`) · `crm-pricing/handler.ts:205` (`.split("#")[2]`) · `pricing-refresh/handler.ts:582-583` (length-checked, `Number(parts[2])`).
+
+All three assume `areaKey` contains no `#`, true only because `areaKeyFor` (`marketRateKeys.ts:111-113`) slugifies on `-`. The invariant is unstated and unenforced. `crm-pricing/handler.ts:134` additionally hand-parses `areaKey` back into `{city,state}` with no shared inverse of `areaKeyFor`.
+
+Same unpaired shape for `` `${date}#${technicianId}` ``: built at `shared/capacity.ts:65`, `:74`, `:1446`; parsed at `:1410` (`const [, techId] = id.split("#")`).
+
+### 5.12 `onsiteMinutesFor(propertyClass)` — the 60/30 rule, 3 copies
+
+`shared/dispatchReadiness.ts:29-31` (the one `capacity.ts:79-81` delegates to) · `shared/serviceCatalog.ts:300-306` (`onsiteMinutesForClass`, **zero callers**) · `booking-public/handler.ts:1921` (inline ternary). All agree today. `serviceCatalog.ts:299` calls it "the LOCKED property-class rule", which is exactly the claim three copies cannot keep.
+
+### 5.13 Seasonal-window sentence — 8 prose copies
+
+`shared/bookingTerms.ts:35` already holds the approved sentence and `shared/season.ts:15` holds the month set, so the rule is centralised — the **wording** is not.
+
+`QuotePage.tsx:671` (same sentence, commas instead of em dashes) · `QuotePage.tsx:1070` · `BookPage.tsx:729` · `portal/AddService.tsx:424` · `lib/planCadence.ts:40` · `crm-docs/handler.ts:2247,2626,2978` and `shared/visitChange.ts:1515` (same refusal message; three byte-identical, `:2247` differs) · `shared/bookingFinalize.ts:1814,2276,2283,2512`.
+
+All agree on the rule; they disagree on wording and dash style across funnel, portal, PDF and email for one promise.
+
+### 5.14 CSV export block — 4 copies
+
+Should be `apps/crm/src/lib/csv.ts` — `toCsv(cols, rows)` + `downloadCsv(name, text)`.
+
+`office/ProductUsage.tsx:125,149` · `office/Staff.tsx:270,275` · `pages/VisitChangeHistory.tsx:108,113` · `components/LeadPanel.tsx:438,443`. Identical `esc` + `Blob` + `createObjectURL` sequence. Copies agree; none escapes embedded newlines or emits a BOM.
+
+### 5.15 Checked, no abstraction needed
+
+Already centralised and consumed correctly: `shared/money.ts` (except §1.4), `shared/season.ts`, `shared/cancellationPolicy.ts` (the 72-hour rule is one constant), `shared/staffRoles.ts`, `shared/serviceCatalog.ts` labels, `shared/adminJobTypes.ts`, `shared/leadStage.ts`, `apps/web/src/data/cities.ts`, `apps/web/src/lib/portal.ts`.
+
+Below threshold (2 copies that agree): `COST_PER_RESEARCH_USD = 0.35` (`pricing-refresh/handler.ts:96`, `office/MarketRates.tsx:84`); `onlyDigits` (`QuotePage.tsx:135`, `AddService.tsx:79`); `fmtQty` (`Inventory.tsx:34`, `ProductUsage.tsx:32`); social URLs (`Footer.tsx:57-73`, `SEO.tsx:150-153`); `SQFT_MIN`/`SQFT_MAX` 100/50000 (`bookingFunnel.ts:211-212` vs inline at `booking-public/handler.ts:1233,1238`).
+
+---
+
+## 6. Dead code
+
+**Method.** Extracted 1039 exported symbols across 992 unique names, built a usage map with one bulk grep over all three trees, subtracted self-references, then classified remaining referrers as test vs non-test. Every "no external reference" hit was re-checked with an individual word-boundary grep, and in-file occurrence counts were used to separate *never referenced anywhere* from *export keyword is redundant but the symbol is live in its module*. Amplify entrypoints, React default exports in routers, and string-referenced entries were verified before exclusion — `auth-challenge/define.ts` and `create.ts` show as never-imported by path but are wired by string at `functions/auth-challenge/resource.ts:12,18`.
+
+### 6.1 Fully dead — never referenced anywhere, including their own file (9)
+
+| Symbol | file:line |
 |---|---|
-| [dispatchReadiness.ts:65](apps/web/amplify/functions/shared/dispatchReadiness.ts:65) | `/^(ma\|massachusetts\|ri\|rhode\s*island)$/i` — **accepts full state names** |
-| [crm-docs:1839](apps/web/amplify/functions/crm-docs/handler.ts:1839) | `new Set(["MA","RI"]).has(state.toUpperCase())` — **rejects "Massachusetts"** |
-| [crm-pricing:780](apps/web/amplify/functions/crm-pricing/handler.ts:780) | `["MA","RI"].includes(state.toUpperCase())` — **rejects "Massachusetts"** |
+| `LEAD_OUTCOME_CODES_BY_CHANNEL` | `apps/crm/src/lib/api.ts:85` |
+| `jsonField` | `apps/crm/src/lib/api.ts:958` |
+| `getCustomOutput` | `apps/crm/src/lib/backend.ts:28` |
+| `adaptFieldRoutesRows` | `shared/fieldRoutesImport.ts:163` |
+| `bookingToProcessing` | `shared/bookingPayment.ts:148` |
+| `bookingToBooked` | `shared/bookingPayment.ts:185` |
+| `getBooking` | `shared/bookingPayment.ts:258` |
+| `findStaffAccessEventByKey` | `shared/staffAccessLog.ts:107` |
+| `invoiceAgingBucket` | `shared/recovery.ts:54` |
 
-A customer whose `serviceState` is `"Massachusetts"` passes dispatch readiness but
-is refused by "build online quote" with *"Online quoting is available only for MA
-and RI addresses."* `MA_RI_STATE_RE` is module-private and never exported. The ZIP
-rule `/^0[12]\d{3}(-\d{4})?$/` lives only at
-[dispatchReadiness.ts:66](apps/web/amplify/functions/shared/dispatchReadiness.ts:66);
-the CRM form defaults `serviceState: "MA"`
-([CustomerForm.tsx:33](apps/crm/src/components/CustomerForm.tsx:33)), which is why
-this has not surfaced more often.
+Plus `isStaff` / `STAFF_GROUPS` (`shared/authz.ts:95-99`) — see §2.3.
 
-**Wants:** `isServiceableState()`, `isServiceableZip()`, `SERVICE_STATES`.
+### 6.2 One whole dead module
 
-### 5.2 ⚠ `shared/noAccessReasons.ts` — labels already differ
+`shared/fieldRoutesImport.ts` — 236 lines. No file anywhere imports it (`grep fieldRoutesImport` returns only the file itself). Its sibling `shared/agreementImport.ts` **is** imported by `crm-admin/handler.ts`, so this reads as a superseded migration adapter.
 
-**Verified: 3 of 6 labels diverge between the technician's app and the office
-record.**
+### 6.3 Test-only exports — 80, dead in production
 
-| Code | [JobDetail.tsx:763](apps/crm/src/tech/JobDetail.tsx:763) | [crm-docs:5342](apps/web/amplify/functions/crm-docs/handler.ts:5342) |
+Referenced outside their defining file solely by a `.test.ts`. By file: `web/src/lib/bookingFunnel.ts` 6 · `crm/src/lib/recovery.ts` 5 · `thumbtack-webhook/leadMapping.ts` 4 · `shared/marketRate.ts` 4 · `pricing-refresh/handler.ts` 4 · `daily-reminders/handler.ts` 4 · `crm/src/lib/workQueues.ts` 4 · `shared/serviceCatalog.ts` 3 · `shared/inventory.ts` 3 · `shared/atomicLock.ts` 3 · `crm/src/lib/reportDraft.ts` 3 · `crm/src/lib/marketRates.ts` 3 · `shared/units.ts`, `shared/capacity.ts`, `crm-pricing/handler.ts`, `booking-public/handler.ts`, `crm/lib/bookingLink.ts`, `crm/lib/billingDisclosure.ts` 2 each · 22 further files 1 each.
+
+Six of these are deliberate test seams, not accidents: `_setLockStoreForTests` (`shared/atomicLock.ts:351`), `_resolveTableSuffix` (`:112`), `_classifyLockError` (`:334`), `_setS3ClientForTests` (`shared/photoVerify.ts:58`), `_resetBookingPublicNameCacheForTests` (`pricing-refresh/handler.ts:317`), and all of `shared/capacityTestFixture.ts:12`.
+
+### 6.4 Export-redundant but live — 199, not removable
+
+The symbol is used inside its own module; only the `export` keyword is surplus. Largest cluster is the reconciler set in `daily-reminders/handler.ts` (`:298, 349, 414, 518, 588, 640, 703, 771, 1768, 2002, 2089, 2305, 2407`), all called from the local `handler`. Also `trackEvent`/`GA_EVENTS` (`apps/web/src/lib/analytics.ts:49`, `:19`), wrapped by same-file helpers.
+
+### 6.5 Routes
+
+**Web (60 routes) — 2 genuinely orphaned:**
+
+- `apps/web/src/App.tsx:150` `/residential/termite/treatment` — not in `apps/web/public/sitemap.xml`, not in the nav (`Header.tsx:93-96` lists only `/residential/termite` and `/residential/termite/wood-boring`). Its `/services/…` twin at `App.tsx:179` is sitemapped and self-links from `pages/services/TermiteTreatment.tsx:207,212`.
+- `apps/web/src/App.tsx:153` `/residential/wildlife/humane-removal` — same pattern; `Header.tsx:101-103` lists only `/residential/wildlife`, and `/services/wildlife/humane-removal` (`App.tsx:184`) is sitemapped and self-linked from `pages/services/HumaneRemoval.tsx:223,228`.
+
+Deep-link by design, not orphaned: `/lp/quote` (`:125`), `/lp/protect` (`:126`), `/lp/call` (`:127`, asserted in `lead-intake/handler.test.ts:218`), `/track/:token` (`:130`), `/request-quote` (`:211`, a legacy redirect). `/pest-control/:slug` (`:201`) is reachable via 55 concrete slugs in `sitemap.xml`.
+
+**CRM (26 routes) — every route resolves.** `/welcome` (`apps/crm/src/App.tsx:60`) is a magic-link landing documented at `pages/Welcome.tsx:9-14`. `/work`, `/schedule` and the four `/portal/*` routes are linked from the tab bar inside `App.tsx:258-278`.
+
+### 6.6 Orphaned components — 3, all in `apps/web/src/components`
+
+| File | Export | Lines |
 |---|---|---|
-| `LOCKED_OUT` | "Couldn't get in" | "Couldn't get in — locked gate or door" |
-| `DOG_LOOSE` | "Dog loose" | "Dog loose in the treatment area" |
-| `UNSAFE_CONDITIONS` | "Unsafe on site" | "Unsafe conditions on site" |
+| `components/WhyUs.tsx:13` | `export default function WhyUs` | 29 |
+| `components/NumberedSteps.tsx:15` | `export default function NumberedSteps` | 38 |
+| `components/ServiceSection.tsx:13` | `export default function ServiceSection` | 53 |
 
-The technician taps one label; the office email and audit row
-([crm-docs:5366,5421](apps/web/amplify/functions/crm-docs/handler.ts:5366)) record a
-different one. [leadReasons.ts](apps/web/amplify/functions/shared/leadReasons.ts)
-exists *specifically* to prevent this — its header reads "a code the office can
-pick that the server refuses… is exactly the drift this file exists to prevent."
-The no-access vocabulary never got the same treatment.
+Each carries a dead companion type (`WhyItem` at `WhyUs.tsx:3`, plus the two local `*Props`). No orphaned `.tsx` in `apps/crm/src`. `ComingSoon.tsx` looked orphaned but is live (`pages/AboutPage.tsx:1`, `pages/Reviews.tsx:1`, `pages/Careers.tsx:1`).
 
-### 5.3 ⚠ `parseRateKey` — 1 builder, 3 hand-rolled parsers
+### 6.7 Commented-out code and markers
 
-Builder [marketRate.ts:241](apps/web/amplify/functions/shared/marketRate.ts:241)
-lives in the *impure* module, so the CRM cannot import it. Three parsers:
-[marketRates.ts:75](apps/crm/src/lib/marketRates.ts:75) (guards `Number.isFinite`),
-[pricing-refresh:601](apps/web/amplify/functions/pricing-refresh/handler.ts:601)
-(**no finite check** — a malformed key yields `NaN`, and `NaN &&` silently drops the
-band from the report label),
-[crm-pricing:205](apps/web/amplify/functions/crm-pricing/handler.ts:205) (third
-variant). [marketRateKeys.ts](apps/web/amplify/functions/shared/marketRateKeys.ts)
-is the pure leaf both apps already import and holds `areaKeyFor`/`sqftBucket` —
-**move `rateKeyFor` there and add `parseRateKey()`.**
+**None found.** An AWK scan for contiguous runs of 3+ commented lines scoring for code shape surfaced two candidates, both prose: `amplify/backend.ts:889-892` (GL-22 rationale) and `shared/workPolicy.ts:472-475` (a note inside the `STALE_DRAFT` policy). Inline `/* … */` occurrences are all short empty-catch annotations.
 
-### 5.4 ⚠ `shared/config.ts` — env access with inconsistent fallbacks
+**Zero `TODO`, `FIXME`, `HACK`, `XXX` or `@deprecated` markers in scope.** (An initial `XXX` hit inside the base64 blob at `shared/logoAsset.ts:13` is a false positive.)
 
-`process.env` is read directly in 15 Lambda modules.
+Suppression comments present: `eslint-disable-next-line react-hooks/exhaustive-deps` at `TalkToExpertModal.tsx:59`, `BookPage.tsx:243`, `QuotePage.tsx:337`, `office/CustomerDetail.tsx:294`, `components/ReportPhotos.tsx:30`, `portal/Requests.tsx:127`, `portal/AddService.tsx:163`, `lib/useAsync.ts:89`; `@typescript-eslint/no-explicit-any` at `shared/bookingLink.ts:69`, `pricing-refresh/handler.ts:400`, `booking-public/handler.ts:962`.
 
-| Var | Reads | Fallback variance |
-|---|---|---|
-| `MARKETING_URL` | 9 | same literal `"https://www.pestbuzzkill.com"` retyped 9× |
-| `CRM_APP_URL` | 8 | **⚠ `?? "https://app.pestbuzzkill.com"` at [crm-docs:152](apps/web/amplify/functions/crm-docs/handler.ts:152), [receipts.ts:24](apps/web/amplify/functions/shared/receipts.ts:24) but `?? ""` at [portalProvision.ts:216](apps/web/amplify/functions/shared/portalProvision.ts:216), [auth-challenge/verify.ts:98](apps/web/amplify/functions/auth-challenge/verify.ts:98), [lead-intake:319](apps/web/amplify/functions/lead-intake/handler.ts:319), [pricing-refresh:712,817](apps/web/amplify/functions/pricing-refresh/handler.ts:712)** |
-| `AWS_BRANCH`/`AMPLIFY_BRANCH`/`AMPLIFY_APP_ID`/`AWS_APP_ID` | 5/4/3/2 | ⚠ four names for two facts |
+### 6.8 Feature flags and config
 
-The `?? ""` sites emit `href="/customers/…"` and `href="/market-rates"` — **relative
-links inside outbound email, which are dead on arrival.**
+**No dead env flags.** All 36 distinct `process.env`/`import.meta.env` keys have a reader, and every `addEnvironment` write in `backend.ts` and the `resource.ts` files has a consumer. Verified individually for the flag-shaped ones: `OPS_EMAIL_MUTED` (`backend.ts:330,346` → `shared/email.ts:480`), `ALLOW_UNVERIFIED_ROUTES` (→ `shared/visitChange.ts:1615`, `shared/dispatchReadiness.ts:138`), `GOOGLE_REVIEW_URL` (`backend.ts:323` → `crm-docs/handler.ts:3996`), `BOOKING_CORS_ORIGINS` (`backend.ts:546` → `booking-public/handler.ts:156`), `RECONCILE_WINDOW_DAYS` (→ `daily-reminders/handler.ts:2012,2760`), `TURNSTILE_SECRET` (→ `booking-public/handler.ts:876`), `SES_CONFIGURATION_SET` (`backend.ts:666` → `shared/email.ts:220`), `AMPLIFY_DATA_API_ID_PARAM` (`backend.ts:237` → `shared/atomicLock.ts:123`, read via the Amplify generated `env` module rather than `process.env`). All five `VITE_*` client vars have readers.
 
-**Also ⚠ environment→URL mapping encoded twice with different host sets:**
-[backend.ts:286-292](apps/web/amplify/backend.ts:286) is branch-based;
-[bookingLink.ts:16-19](apps/crm/src/lib/bookingLink.ts:16) is hostname-based with
-its own copy of the Amplify app IDs. A branch rename in `backend.ts` does not reach
-the CRM, which silently downgrades an unrecognised host to staging checkout.
+Module-level constants that read as tunables but are exported-and-local-only: `BACKOFF_MAX_MS` (`pricing-refresh/handler.ts:88`), `DIGEST_UTC_HOUR` (`:114`), `FAILING_THRESHOLD` (`:99`), `CHECKOUT_CLAIM_MS` (`shared/capacity.ts:47`), `DRAIN_LEASE_MS`/`ROW_LEASE_MS`/`DRAIN_ID` (`shared/pricingControl.ts:45,48,41`), `PAYMENT_ATTEMPT_LEASE_MS` (`shared/bookingPayment.ts:38`), `BOOKING_LINK_TOKEN_TTL_MS` (`shared/bookingLink.ts:26`), `OPEN_HOUR`/`CLOSE_HOUR`/`BUSINESS_TZ` (`shared/businessHours.ts:15,16,14`), `WORK_SLA_MINUTES` (`shared/ownedWork.ts:13`), `SQFT_MIN`/`SQFT_MAX` (`bookingFunnel.ts:211,212`). The constant is used; the export is what is dead.
 
-### 5.5 ⚠ `servicePages.ts` — 14 copies of one array, 4 slugs with two labels
+### 6.9 Not verified
 
-An identical 4-entry `RELATED` array is copy-pasted into **14** files under
-[apps/web/src/pages/services/](apps/web/src/pages/services/) (`AntsSpiders.tsx:116`,
-`Cockroach.tsx:91`, `Termite.tsx:91`, `Wildlife.tsx:90`, … ). Several self-link
-(`Cockroach.tsx` lists "Cockroach Control"). Same slug, different label:
-
-| Slug | Related-list label (×13–14) | [Header.tsx](apps/web/src/components/Header.tsx) |
-|---|---|---|
-| `/services/wasp-hornet-bee` | "Wasp & Hornet Control" | "Wasp / Hornet / Bee" (`:24`) |
-| `/services/mosquito-tick` | "Mosquito & Tick Control" | "Yard Mosquito Treatment" (`:41`) |
-| `/services/rodent-control` | "Rodent Control" | "Mice & Rat Removal" (`:31`) |
-| `/services/wildlife` | "Wildlife Removal" | "Squirrel, Raccoon & Bat" (`:57`) |
-
-Routes are a fourth list ([App.tsx:162-175](apps/web/src/App.tsx:162)) and SEO
-breadcrumbs a fifth. **Wants** `apps/web/src/data/servicePages.ts` →
-`{slug, label, desc, component}` driving routes, header, footer, related-lists and
-breadcrumbs. Note the three orphaned components in §3.3 (`ServiceSection`,
-`NumberedSteps`, `WhyUs`) are exactly the abstraction these 14 pages inline.
-
-### 5.6 ⚠ `CADENCE_LABEL` — 7 maps, 4 phrasings for `BIMONTHLY`
-
-"Every 2 months" ([bookingFunnel.ts:133](apps/web/src/lib/bookingFunnel.ts:133),
-[pdf.ts:740](apps/web/amplify/functions/shared/pdf.ts:740)) vs "every 2 months"
-([rateCards.ts:187](apps/web/amplify/functions/crm-pricing/rateCards.ts:187)) vs
-**"bi-monthly"** ([marketRates.ts:51](apps/crm/src/lib/marketRates.ts:51)) vs
-"technician visits every 2 months" ([planCadence.ts:22](apps/crm/src/lib/planCadence.ts:22)),
-plus three `<option>` literals. The quote PDF and the funnel screen agree only by
-coincidence.
-
-### 5.7 ⚠ `humanizeCode()` — 4 identical private copies + ~24 inline, with variants
-
-Byte-identical 2-line body in [CustomerDetail.tsx:80](apps/crm/src/office/CustomerDetail.tsx:80),
-[Staff.tsx:78](apps/crm/src/office/Staff.tsx:78),
-[VisitCancelSheet.tsx:14](apps/crm/src/components/VisitCancelSheet.tsx:14),
-[VisitChangeHistory.tsx:30](apps/crm/src/pages/VisitChangeHistory.tsx:30); plus ~24
-inline `.replace(/_/g," ").toLowerCase()` sites across both apps. ⚠ The variants
-disagree on casing — some Title-case the first letter, some stay all-lowercase, and
-[crm-pricing:774](apps/web/amplify/functions/crm-pricing/handler.ts:774) preserves
-case.
-
-### 5.8 Business predicates re-encoded
-
-- **`invoiceCoversJob`** — [workQueues.ts:31](apps/crm/src/lib/workQueues.ts:31) (named) vs inline at [daily-reminders:1061](apps/web/amplify/functions/daily-reminders/handler.ts:1061) and [crm-billing:583](apps/web/amplify/functions/crm-billing/handler.ts:583). All three carry a comment saying the other side "enforces the same rule server-side" — the textbook symptom. It lives in the CRM, so the Lambdas *cannot* import it; it belongs in `amplify/functions/shared/`.
-- **"uncharged one-time job"** — the same 5-clause conjunction written three ways: as a predicate ([workQueues.ts:42](apps/crm/src/lib/workQueues.ts:42)), as a query filter plus `.filter()` ([daily-reminders:1033](apps/web/amplify/functions/daily-reminders/handler.ts:1033)), and as a sequence of `throw`s ([crm-billing:539](apps/web/amplify/functions/crm-billing/handler.ts:539)).
-
-### 5.9 Constants that want a name
-
-- ⚠ **`PAGE_LIMIT`** — `pagination.ts` centralizes the loop but not the size: `limit: 200` ×117, `500` ×29, `1000` ×14, `100` ×12, `50` ×11. `Product.list` uses `1000` in two places and `200` elsewhere for the same model.
-- ⚠ **`QUOTE_TTL_MS`** — 24h built at [booking-public:1984](apps/web/amplify/functions/booking-public/handler.ts:1984) and re-typed as customer-facing prose at [QuotePage.tsx:239,516](apps/web/src/pages/booking/QuotePage.tsx:239) and [BookPage.tsx:615](apps/web/src/pages/booking/BookPage.tsx:615). Bumping the server's TTL silently makes three sentences lie.
-- ⚠ **`CANCEL_FULL_REFUND_HOURS`** — the constant exists ([bookingTerms.ts:17](apps/web/amplify/functions/shared/bookingTerms.ts:17), `= 3` days) and is derived correctly once, but "72 hours" is hard-typed in ~18 further places including the CRM UI ([VisitCancelSheet.tsx:160,170](apps/crm/src/components/VisitCancelSheet.tsx:160)) and all of [planCancellationPolicy.ts](apps/web/amplify/functions/shared/planCancellationPolicy.ts), which imports nothing from `bookingTerms`.
-- **7-day TTL** — named twice (`BOOKING_LINK_TOKEN_TTL_MS`, `PROCESSING_CLAIM_MS`), inline once ([portalProvision.ts:211](apps/web/amplify/functions/shared/portalProvision.ts:211)).
-
-Already well-named — **do not "fix" these**: `DAY_MINUTES = 540`,
-`STOPS_PER_TECH = 8`, `CHECKOUT_CLAIM_MS`, `POOL_TECH`
-([capacity.ts:44-59](apps/web/amplify/functions/shared/capacity.ts:44)), the zone
-bands and `zoneFromMinutes`, `sqftBucket`/`hoaBandFor`,
-`HOA_ONE_TIME_MULTIPLIER = 3.5`, `SEASONAL_SERVICE_MONTHS`.
-
-### 5.10 Key builders and identifiers
-
-- ⚠ **`${technicianId}:${date}`** ([daily-reminders:1262](apps/web/amplify/functions/daily-reminders/handler.ts:1262)) vs **`${date}#${technicianId}`** ([capacity.ts:73](apps/web/amplify/functions/shared/capacity.ts:73)) — same pair, **opposite order, different separator**.
-- **`parseSlotId`** does not exist: [capacity.ts:1409](apps/web/amplify/functions/shared/capacity.ts:1409) hand-parses with `id.split("#")`, and [:1446](apps/web/amplify/functions/shared/capacity.ts:1446) rebuilds the key inline instead of calling `slotId()`.
-- ⚠ **Reason envelope `"CODE — note"`** — builders in `apps/web` ([visitChangeReasons.ts:73](apps/web/amplify/functions/shared/visitChangeReasons.ts:73), [lifecycleReasons.ts:70](apps/web/amplify/functions/shared/lifecycleReasons.ts:70)), parser in `apps/crm` ([customerPresentation.ts:14](apps/crm/src/lib/customerPresentation.ts:14)) splitting on a literal `" — "`. A note containing that sequence mis-splits.
-- **`ids.ts`** — ~30 inline entity-ID prefixes (`booking-`, `cust-`, `plan-`, `job-`, `agr-`, `cb-`, `gc-`, `lead-`, …). Notably `booking-${booking.id}` is the *invoice* id, built in four separate places in `bookingFinalize.ts` — one typo desynchronizes reconcile from finalize.
-- **`stripeIdempotencyKey()`** — 11 ad-hoc formats (see also §1.7).
-- One documented rule is violated once: [dynamicGroups.ts:7-9](apps/web/amplify/functions/shared/dynamicGroups.ts:7) says "import them from here rather than restating the prefixes"; [agreementImport.ts:133](apps/web/amplify/functions/shared/agreementImport.ts:133) restates `` `grp-${groupId}` `` two lines below a correct call to `customerAccessGroups`.
-
-### 5.11 Hard-coded external identifiers
-
-- **Phone `508-258-9294`** — 26 files, 3 formats, no constant (see §1.6).
-- **Emails** — `info@` ×27, `system@` ×13, `sales@` ×2, plus `contact@getgim.com` ×3 and one personal address. `system@pestbuzzkill.com` is the synthetic system-actor identity and is retyped rather than named ([ownedWork.ts:295](apps/web/amplify/functions/shared/ownedWork.ts:295), [bookingFinalize.ts:1064,1125](apps/web/amplify/functions/shared/bookingFinalize.ts:1064), [daily-reminders:2976](apps/web/amplify/functions/daily-reminders/handler.ts:2976)).
-- **Postal address** (`420 Lakeside Ave, Marlborough`) — 3 copies inside [SEO.tsx](apps/web/src/components/SEO.tsx) alone, plus 4 more. ⚠ Distinct from `HQ_ADDRESS = "81 Greenwich Rd, Ware, MA 01082"` ([driveTime.ts:14](apps/web/amplify/functions/shared/driveTime.ts:14)) — two different "company addresses", neither defined in terms of the other. Per prior work, Ware is not an operating location.
-- **License `CC-0060592`** — 2 copies.
-- **AWS** — `us-east-1` hard-coded 23× in [backend.ts](apps/web/amplify/backend.ts); the SSM path shape re-typed 12× at `:577-610`. Wants `ssmParamArn(scope, name)` + a `REGION` constant.
+- Symbols reachable only through dynamic string dispatch or GraphQL resolver wiring in `amplify/data/resource.ts` — the export scan is lexical.
+- Values injected at deploy time (`amplify.yml`, Amplify Hosting console, SSM) — only the presence of a reader was confirmed, not that the value is set.
+- Feature toggles expressed as data fields in `data/resource.ts` rather than env vars.
 
 ---
 
 ## Appendix — method and confidence
 
-Nine parallel read-only scans, each restricted to `apps/web/**` and `apps/crm/**`.
-Counts come from stated greps; the highest-severity claims were re-verified
-directly against source before inclusion.
+Seven independent read-only scans, one per dimension, run in parallel against
+`4e20a4f` with `.claude/worktrees/**` excluded. `shared/inventory.ts` contains a
+NUL byte that makes plain `grep` skip it; every scan that touched it used `grep -a`.
 
-**Verified in the main pass:** the `lead-intake` gate (§1.3), `money()` divergence
-(§1.4), CRM `addDays` local/UTC mix (§1.5), `easternEpochMs` DST fallback (§1.5),
-`isStaff` dead (§3.1), the three orphaned components and dead `analytics.ts`
-(§3.1/3.3), `resumeGroupChange`/`reportSuspectAddresses` absent from the schema
-(§1.3), the MA/RI split (§5.1), `NO_ACCESS_LABEL` (§5.2), `statusTone` contents
-(§4.2), `VISIT_NOTE` reachability (§4.1), and the four dangling doc references
-(§3.5).
+Counts stated as "N sites" come from scripted greps over the three source roots
+excluding tests unless the text says otherwise; the counting method is recorded
+inline where it materially affects the number.
 
-**Corrected during the audit:**
+Findings are marked **✗** only where a divergence produces a wrong result on a
+path that exists today. Where a scan could not settle a question it is called out
+in place rather than resolved by inference — the open ones are:
 
-- A scan reported `/work`, `/schedule`, and the `/portal/*` routes as unlinked in the CRM. **Refuted** — all are linked via `<Tab to=…>` at [App.tsx:255-280](apps/crm/src/App.tsx:255). Only `/welcome` (magic-link target) and `/groups/:id` (param route) lack literal in-app links, both by design.
-- A scan called the minute bucket in [recovery.ts:180](apps/web/amplify/functions/shared/recovery.ts:180)'s Stripe key a bug. **Softened** — it is deliberate and documented; the residual risk is narrower than stated (§1.7).
-- Two scans appeared to contradict each other on `VISIT_NOTE`. **Reconciled** — the `export` is unused, but the constant is live via an internal read (§4.1).
-
-**Not verified:** `export { … } from` re-export blocks (14 sites) were not
-enumerated for dead names; the 121 unused *type* exports conflate "drop the
-`export`" with "delete"; non-TS consumers (HTML, CSS, CDK string references) were
-not scanned for symbol usage; the CRM route list depends on literal path strings.
+1. Whether Amplify's `secret()` can resolve to a shared/parent SSM value on a branch with no override (determines whether §1.3's missing live-key guard is reachable).
+2. Whether all ~99 CAS `UNSUPPORTED` fallback branches are safe — sampled, not exhausted.
+3. Whether `canActForCustomer`'s token-only `cus-` branch (§2.5) is a deliberate performance trade-off.
+4. Whether a single rate can traverse both cents→dollars rounding rules in §1.4.
+5. Whether the CRM's sort-capable screens (§1.8) share logic — sort was not audited.
