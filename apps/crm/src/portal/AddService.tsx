@@ -84,6 +84,22 @@ type RecurringOffer = {
   monthlyCents: number;
   initialFeeCents: number;
 };
+/**
+ * What /quote actually returns. Kept faithful to the wire even where this
+ * screen does not act on a field, so the next reader can see what the server
+ * said rather than rediscovering it:
+ *
+ *  - `offSeason` ships an EMPTY day board. Self-serve checkout is refused for
+ *    it on this path (booking-public `book`, trusted branch), so the screen
+ *    explains and stops instead of offering an unbookable day picker.
+ *  - `offSeasonMessage` is deliberately NOT rendered here: it is written for
+ *    the public funnel ("Enroll now and your plan starts today"), which is
+ *    true there and false here, where the office sets the plan up.
+ *  - `invoiceEligible` is never offered: net terms are refused on this path by
+ *    the same server branch.
+ *  - `statusToken` belongs to the funnel's /booking-status polling; a portal
+ *    booking charges the saved card and finalizes synchronously.
+ */
 type QuoteResult = {
   decision: string;
   bookingId?: string;
@@ -94,6 +110,11 @@ type QuoteResult = {
   requestedFrequency?: string | null;
   terms?: { version: string; text: string };
   message?: string;
+  offSeason?: boolean;
+  offSeasonMessage?: string;
+  invoiceEligible?: boolean;
+  expiresAt?: string;
+  statusToken?: string;
 };
 type BookResult = {
   booked?: boolean;
@@ -392,7 +413,28 @@ export default function PortalAddService() {
         </Button>
       </Card>
 
-      {quote ? (
+      {quote?.offSeason ? (
+        <Card title="Your price">
+          {/* GL-17: an off-season seasonal quote carries no bookable day, and
+              the server refuses date-less enrollment on the portal path — it
+              is office-assisted on purpose. Say so plainly here rather than
+              showing a price with a day picker that can never be filled and a
+              button that can never be pressed. */}
+          <p className="small">
+            Mosquito season runs April through October, so this one is set up by
+            the office rather than instantly here. We&rsquo;ll reach out to
+            start your plan and confirm your first treatment. Nothing has been
+            charged.
+          </p>
+          {offer ? (
+            <p className="small muted">
+              When it starts, it&rsquo;s {money(offer.monthlyCents)}/mo, billed
+              monthly year-round.
+            </p>
+          ) : null}
+          <ErrorNote error={error} />
+        </Card>
+      ) : quote ? (
         <Card title="Your price">
           {offer && (quote.planOnly || plan === "PLAN") ? (
             <p className="small">

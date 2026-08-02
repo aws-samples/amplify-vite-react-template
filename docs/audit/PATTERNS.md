@@ -177,3 +177,47 @@ De-widening immediately earned its keep: the hand `Dispute` declared
 recovery queue would have navigated to `/customers/undefined`. The type is now
 nullable end to end and the row guards its link — which the neighbouring
 disputes card had been doing all along.
+
+## 4. A client copy of a wire payload must carry the fields that say "stop"
+
+**Rule.** When a screen re-declares a server response by hand, the fields it
+omits are not neutral. Dropping a *value* field costs a display; dropping a
+field that means "this path is closed" turns a clear refusal into a dead end,
+because the screen renders its normal happy path against a payload that was
+telling it not to.
+
+So a hand copy carries every field the server can send, even the ones the
+screen does not act on, and says in a comment why each unused one is unused.
+"Not needed here" is a claim that stops being true the moment the server grows
+a case, and a comment is what makes that visible on the next read.
+
+Copy is not interchangeable across surfaces either. The same `offSeasonMessage`
+is true on the public funnel, where a customer really can enroll themselves,
+and false in the portal, where the server hands the case to the office. Render
+server copy only where the server's assumptions hold.
+
+**Canonical location.** Response shapes belong to the endpoint. Until
+booking-public exports them (INVENTORY T3), each client copy is a liability and
+should be annotated as one — see the `QuoteResult` block in
+`apps/crm/src/portal/AddService.tsx`.
+
+**Example.** The portal's quote type omitted `offSeason`, so an off-season
+mosquito quote — which the server answers with `decision: "PRICED"` and an
+empty `days` board — rendered a price card, a terms checkbox, and a
+permanently disabled button with nothing explaining why:
+
+```ts
+if (res.days?.length) setSelDate(res.days[0].date);   // never runs
+// …
+<Button disabled={!accepted || !selDate}>            // never enables
+```
+
+The type now carries `offSeason`, and the screen explains that the office sets
+this one up.
+
+**Migration note (2026-08-02).** The inventory read this as an unbookable
+dead end to be opened up. It is narrower than that: `booking-public` `book`
+*deliberately* refuses date-less off-season enrollment and net-terms invoicing
+on the trusted portal path ("office-assisted paths, not self-serve"), and that
+decision stands. The defect was only that the portal never learned of it, so
+the fix is an honest explanation at quote time, not a new self-serve path.
