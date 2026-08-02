@@ -21,6 +21,13 @@ export type PageOptions = {
    * treated an errored page as a short page. Every "ignore" is marked debt
    * for the error-handling cleanup (INVENTORY.md item on swallowed errors);
    * do not write it into new code.
+   *
+   * An EXPLICIT "throw" means the site was reviewed and is deliberately
+   * strict: it feeds a decision about money, capacity, or access, where a
+   * short read does not degrade an answer but inverts it — an unpaid balance
+   * reads as settled, a booked day reads as free. Those paths must fail loudly
+   * rather than decide on half the rows. The remaining "ignore" count is still
+   * the greppable backlog.
    */
   pageErrors?: "throw" | "ignore";
 };

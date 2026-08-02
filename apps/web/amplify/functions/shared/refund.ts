@@ -221,7 +221,7 @@ export async function applyRefundToInvoice(opts: {
         invoice = (items[0] as RefundTargetRow | undefined) ?? null;
         if (invoice) return false;
       },
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
   }
   if (!invoice) {

@@ -574,7 +574,7 @@ async function chargeOneTimeJob(actor: Actor, jobId: string) {
         filter: { jobId: { eq: jobId } },
         nextToken,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   // FAILED may be retried, and VOID was withdrawn as wrong — neither speaks
   // for the job any more. Anything else (OPEN, PAID, REFUNDED) means the money

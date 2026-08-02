@@ -62,7 +62,7 @@ export async function technicianForCaller(
   // make this a point read; the roster is small enough that paging is fine.)
   const data = await listAll(
     (nextToken) => client.models.Technician.list({ limit: 200, nextToken }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   return (data as LinkedTechnician[]).find((t) => t.userSub === sub) ?? null;
 }
@@ -262,7 +262,7 @@ export async function technicianDocumentAllowed(
           ) ?? null;
         if (report) return false;
       },
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
   } else {
     // agreements/ and anything else: never a technician document.
@@ -316,7 +316,7 @@ export async function disposeStaleDrafts(
           { jobId },
           { limit: 200, nextToken }
         ),
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
     const drafts = reports.filter(
       (r) => r.status === "DRAFT" && r.technicianId === priorTechnicianId

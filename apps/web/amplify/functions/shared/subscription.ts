@@ -519,7 +519,7 @@ export async function cancelQueuedPlanVisits(
         }
       }
     },
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
 
   return resolution;
@@ -546,7 +546,7 @@ async function jobMoneyFacts(jobId: string): Promise<{
         limit: 200,
         nextToken,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   for (const inv of invoices) {
     if (inv.status === "PAID") {

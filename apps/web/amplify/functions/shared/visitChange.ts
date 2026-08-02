@@ -125,7 +125,7 @@ async function invoicesForJob(jobId: string): Promise<InvoiceRow[]> {
         nextToken,
         limit: 200,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   )) as InvoiceRow[];
 }
 
@@ -1069,7 +1069,7 @@ async function priorAcceptedVisitNotice(
           { relatedId: jobId },
           { limit: 50, nextToken }
         ),
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
     return data.some(
       (l) =>
@@ -1197,7 +1197,7 @@ async function latestVisitChangeEvent(jobId: string): Promise<{
         limit: 200,
         nextToken,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   ).catch(() => [] as Record<string, unknown>[]);
   const rows = data as {
     occurredAt?: string | null;

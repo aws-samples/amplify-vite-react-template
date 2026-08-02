@@ -181,7 +181,7 @@ export async function activeTechBases(): Promise<string[] | null> {
     const client = await dataClient();
     techs = (await listAll(
       (nextToken) => client.models.Technician.list({ limit: 200, nextToken }),
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     )) as TechRow[];
   } catch (err) {
     console.error("activeTechBases: roster read failed", err);
@@ -226,7 +226,7 @@ export async function dayEligibilityMap(
   try {
     techs = (await listAll(
       (nextToken) => client.models.Technician.list({ limit: 200, nextToken }),
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     )) as TechRow[];
   } catch (err) {
     console.error("dayEligibilityMap: roster read failed", err);
@@ -288,7 +288,7 @@ export async function dayEligibilityMap(
               { date },
               { limit: 200, nextToken }
             ),
-          { pageErrors: "ignore" }
+          { pageErrors: "throw" }
         );
         for (const ex of exceptions) {
           if (ex.kind === "PTO") onPto.add(ex.technicianId);
@@ -386,7 +386,7 @@ export async function slotStates(
         { date },
         { limit: 200, nextToken }
       ),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   for (const row of rows) {
     if (!row.technicianId) continue;
@@ -417,7 +417,7 @@ export async function liveClaimsOn(date: string): Promise<
         { date },
         { limit: 200, nextToken }
       ),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   return claims
     .filter((claim) => String(claim.expiresAt) > nowIso)
@@ -1077,7 +1077,7 @@ export async function stopsBySlotOn(
           push(slotId(date, stopTechId), address, job.routeOrder ?? 999);
         }
     },
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   for (const claim of await liveClaimsOn(date)) {
     if (claim.technicianId === POOL_TECH) continue;
@@ -1234,7 +1234,7 @@ export async function recomputeSlotMinutes(
           });
         }
       },
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
     stops.sort((a, b) => a.routeOrder - b.routeOrder);
 
@@ -1309,7 +1309,7 @@ export async function reconcileCapacityDay(
           }
         }
       },
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
   }
 
@@ -1384,7 +1384,7 @@ export async function reconcileCapacityDay(
       }
     }
     },
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
 
   const assignedStopsByTechFinal = assignedStopsByTech;
@@ -1504,7 +1504,7 @@ export async function reconcileCapacityDay(
             }
           }
         },
-        { pageErrors: "ignore" }
+        { pageErrors: "throw" }
       );
     }
   }

@@ -103,7 +103,7 @@ async function outstandingBalanceForPlan(servicePlanId: string): Promise<number>
         limit: 200,
         nextToken,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   let total = 0;
   for (const inv of invoices) {
@@ -138,7 +138,7 @@ async function listQueuedVisits(
         { servicePlanId },
         { nextToken, limit: 200 }
       ),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   for (const job of jobs) {
     if (job.status === "IN_PROGRESS") {
@@ -414,7 +414,7 @@ export async function planCancellationSettled(
           { servicePlanId },
           { limit: 200, nextToken }
         ),
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
     for (const job of planJobs) {
       if (job.status === "IN_PROGRESS") {
@@ -499,7 +499,7 @@ export async function planCancellationSettled(
             { relatedId: servicePlanId },
             { limit: 50, nextToken }
           ),
-        { pageErrors: "ignore" }
+        { pageErrors: "throw" }
       );
       const delivered = logs.some(
         (l) =>
@@ -547,7 +547,7 @@ async function jobInvoiceFacts(jobId: string): Promise<{
         limit: 200,
         nextToken,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   let paidRemainingCents = 0;
   let inFlightCents = 0;
@@ -584,7 +584,7 @@ async function listPlanInvoices(servicePlanId: string): Promise<PlanInvoiceRow[]
         limit: 200,
         nextToken,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
 }
 
@@ -1214,7 +1214,7 @@ async function sendCancellationConfirmation(
             { relatedId: servicePlanId },
             { limit: 50, nextToken }
           ),
-        { pageErrors: "ignore" }
+        { pageErrors: "throw" }
       );
       const accepted = prior.some(
         (l) =>

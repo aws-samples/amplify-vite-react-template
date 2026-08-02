@@ -662,7 +662,7 @@ async function listActivePlans(
         nextToken,
         limit: 200,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   return plans
     .filter((plan) => plan.status === "ACTIVE")
@@ -796,7 +796,7 @@ async function sweepRemainingFutureJobs(
           }
         }
       },
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
   } catch (err) {
     // A failed schedule READ cannot be skipped or hidden by the final status.
@@ -859,7 +859,7 @@ export async function buildLifecycleInventory(customerId: string): Promise<{
           nextToken,
           limit: 200,
         }),
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
     for (const plan of plans) {
       if (plan.status === "ACTIVE") {
@@ -882,7 +882,7 @@ export async function buildLifecycleInventory(customerId: string): Promise<{
           nextToken,
           limit: 200,
         }),
-      { pageErrors: "ignore" }
+      { pageErrors: "throw" }
     );
     for (const job of jobs) {
       const summary = {
@@ -989,7 +989,7 @@ async function outstandingBalance(customerId: string): Promise<number> {
         nextToken,
         limit: 200,
       }),
-    { pageErrors: "ignore" }
+    { pageErrors: "throw" }
   );
   let total = 0;
   for (const inv of invoices) {
