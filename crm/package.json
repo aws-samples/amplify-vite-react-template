@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "sandbox": "ampx sandbox",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "typecheck:backend": "tsc -p amplify/tsconfig.json --noEmit",
+    "typecheck": "tsc -b && npm run typecheck:backend"
   },
   "overrides": {
     "@opentelemetry/core": "^2.0.0"

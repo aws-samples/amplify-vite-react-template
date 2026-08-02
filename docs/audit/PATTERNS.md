@@ -100,3 +100,37 @@ or the suite actually fails each time.
 does not reorder a dropdown, and renaming a label does reorder it. Each migrated list has a
 regression lock in `enums.test.ts` pinning the exact rendered order, which is what makes a
 label edit a visible, reviewed decision instead of a silent one.
+
+---
+
+## Backend code is type-checked before it deploys
+
+**Rule.** Anything under `crm/amplify/` is checked by `npm run typecheck:backend` in the
+`backend` phase of `amplify.yml`, ahead of `ampx pipeline-deploy`. Adding a Lambda, or a module
+a Lambda imports, does not need new wiring — `amplify/tsconfig.json` has no `include`, so it
+picks up everything under `crm/amplify/` plus whatever those files import.
+
+**Why.** `ampx` bundles handlers with esbuild, which strips types without checking them, and
+`crm/tsconfig.json` is `"include": ["src"]`, so the frontend's `tsc -b` never sees the handlers.
+There is no CI — Amplify Hosting is the only pipeline. The result was that all seven handlers
+deployed with zero type checking: `crm/amplify/tsconfig.json` existed and was `strict: true`,
+but no script or phase invoked it. A type error in a handler passed `tsc -b` cleanly and
+shipped.
+
+**Which command gates what.**
+
+| Command | Covers |
+|---|---|
+| `npm run build` (`tsc -b && vite build`) | `crm/src` only — the SPA |
+| `npm run typecheck:backend` | `crm/amplify/**` + imported modules (24 files) |
+| `npm run typecheck` | both |
+
+The check sits in the `backend` phase rather than in `build` on purpose: `build` runs in the
+`frontend` phase, which Amplify runs *after* the backend deploy, so a type error there would be
+reported only once the broken Lambda was already live. In the backend phase it runs exactly
+when a deploy would happen, and blocks it.
+
+**Still open:** `web` has no typecheck at all. `astro build` does not type-check, there is no
+`astro check` script, and adding one needs `@astrojs/check` + `typescript` as devDependencies.
+Until that exists, nothing verifies `web/src` — including the four `(window as any).gtag` sites
+and the `CrmLeadInput` shape the CRM depends on.

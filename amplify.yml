@@ -26,6 +26,13 @@ applications:
         build:
           commands:
             - npm ci --cache .npm --prefer-offline
+            # `ampx` bundles the handlers with esbuild, which strips types
+            # without checking them, and the frontend's `tsc -b` covers only
+            # `src`. Without this line nothing type-checks amplify/ — a broken
+            # handler deploys clean and fails in production. Runs before
+            # pipeline-deploy so a type error stops the deploy rather than
+            # being reported after it.
+            - npm run typecheck:backend
             - npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
     frontend:
       phases:
