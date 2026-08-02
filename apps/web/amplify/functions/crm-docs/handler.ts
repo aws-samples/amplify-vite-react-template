@@ -21,6 +21,7 @@ import { retryBookingFinalization } from "../shared/bookingFinalize";
 import { depletionsForReport } from "../shared/inventory";
 import { opFieldName } from "../shared/opEvent";
 import {
+  assertOffice,
   callerEmail,
   callerGroups,
   callerIsFinance,
@@ -28,8 +29,9 @@ import {
   callerIsOwner,
   callerName,
   callerSub,
+  canActForCustomer,
 } from "../shared/authz";
-import { cusGroup, customerAccessGroups, grpGroup } from "../shared/dynamicGroups";
+import { customerAccessGroups } from "../shared/dynamicGroups";
 import {
   assertCanActOnJobId,
   assertCanActOnReportId,
@@ -407,8 +409,9 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       return completeJob(event.arguments.jobId!);
     }
     case "requestCallback": {
-      // GL-10: a portal customer may request only for their OWN account (the
-      // dynamic cus-<id> group proves it); the office may act for anyone.
+      // GL-10: a portal customer may request only for an account they may act
+      // for — their own, or a member property of their management-company
+      // group login. The office may act for anyone.
       const cbArgs = event.arguments as unknown as {
         customerId?: string;
         originalJobId?: string;
@@ -417,11 +420,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       };
       const cbCustomerId = String(cbArgs.customerId ?? "");
       const office = callerIsOffice(event.identity);
-      if (
-        !office &&
-        !callerGroups(event.identity).includes(cusGroup(cbCustomerId))
-      ) {
-        throw new Error("You can only request a callback for your own account");
+      if (!(await canActForCustomer(event.identity, cbCustomerId))) {
+        throw new Error(
+          "You can only request a callback for an account you manage"
+        );
       }
       return requestCallback(
         {
@@ -439,11 +441,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         contentType?: string;
       };
       const upCustomerId = String(upArgs.customerId ?? "");
-      if (
-        !callerIsOffice(event.identity) &&
-        !callerGroups(event.identity).includes(cusGroup(upCustomerId))
-      ) {
-        throw new Error("You can only upload a photo for your own account");
+      if (!(await canActForCustomer(event.identity, upCustomerId))) {
+        throw new Error(
+          "You can only upload a photo for an account you manage"
+        );
       }
       return getCallbackPhotoUploadUrl(
         upCustomerId,
@@ -451,8 +452,9 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "submitPortalRequest": {
-      // GL-11: a portal customer may submit only for their OWN account; the
-      // office may act for anyone.
+      // GL-11: a portal customer may submit only for an account they may act
+      // for — their own, or a member property of their group login; the office
+      // may act for anyone.
       const prArgs = event.arguments as unknown as {
         customerId?: string;
         kind?: string;
@@ -461,11 +463,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
         message?: string | null;
       };
       const prCustomerId = String(prArgs.customerId ?? "");
-      if (
-        !callerIsOffice(event.identity) &&
-        !callerGroups(event.identity).includes(cusGroup(prCustomerId))
-      ) {
-        throw new Error("You can only submit a request for your own account");
+      if (!(await canActForCustomer(event.identity, prCustomerId))) {
+        throw new Error(
+          "You can only submit a request for an account you manage"
+        );
       }
       return submitPortalRequest({
         customerId: prCustomerId,
@@ -476,7 +477,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "resolvePortalRequest": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       const rpArgs = event.arguments as unknown as {
         portalRequestId?: string;
         note?: string;
@@ -488,12 +489,12 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "resendEmailLog": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       const reArgs = event.arguments as unknown as { emailLogId?: string };
       return resendEmailLogExact(String(reArgs.emailLogId ?? ""));
     }
     case "scheduleCallback": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       const scArgs = event.arguments as unknown as {
         callbackRequestId?: string;
         scheduledDate?: string;
@@ -540,7 +541,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "amendServiceReport": {
       // The office issues amendments; a technician asks the office. No role
       // overwrites the issued record, so this only ever appends a new one.
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return amendServiceReport(event.arguments.reportId!, {
         reason: event.arguments.reason,
         changes: event.arguments.changes,
@@ -550,7 +551,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "recordReportDelivery": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return recordReportDelivery({
         reportId: event.arguments.reportId,
         amendmentId: event.arguments.amendmentId,
@@ -560,25 +561,25 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       });
     }
     case "saveProduct": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return saveProduct(event.arguments);
     }
     case "createOfficeJob": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return createOfficeJob(event.arguments);
     }
     case "updateJobSchedule": {
       // GL-13: the actor and controlled reason travel with the change into the
       // immutable assignment audit.
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return updateJobSchedule(event.identity, event.arguments);
     }
     case "updateJobPacket": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return updateJobPacket(event.identity, event.arguments);
     }
     case "rebookJob": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return rebookJob(
         event.arguments.jobId!,
         callerSub(event.identity),
@@ -588,18 +589,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "retryBookingFinalization": {
       // Finance owns the PAID_NOT_FINALIZED exception this recovers, so finance
       // (as well as office) must be able to run it.
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return retryBookingFinalization(event.arguments.bookingRequestId!);
     }
     case "resumePlanCancellation": {
       // GL-08: the safe re-run the PLAN_CANCELLATION_RECOVERY case prescribes.
       // Finance owns cancellation recovery; office may also run it. auto:false —
       // a person pressing the button drives immediately (no attempt-cap pacing).
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return resumePlanCancellation(
         stripeClient(),
         event.arguments.servicePlanId!,
@@ -608,17 +605,13 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     }
     case "resumeVisitChange": {
       // GL-07: the safe re-run the VISIT_CHANGE_RECOVERY case prescribes.
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return resumeVisitChange(stripeClient(), event.arguments.jobId!, {
         auto: false,
       });
     }
     case "recordNoticeAlternateDelivery": {
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Owner role required");
-      }
+      assertOffice(event.identity);
       const altArgs = event.arguments as unknown as {
         relatedId?: string;
         template?: string;
@@ -634,9 +627,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "capacityDayFacts": {
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Owner role required");
-      }
+      assertOffice(event.identity);
       const date = String(event.arguments.date ?? "");
       const [eligibility, slots, claims] = await Promise.all([
         dayEligibility(date),
@@ -669,9 +660,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       };
     }
     case "updateOwnedWork": {
-      if (!callerIsOffice(event.identity) && !callerIsFinance(event.identity)) {
-        throw new Error("Office or finance role required");
-      }
+      assertOffice(event.identity);
       return updateOwnedWork({
         workItemId: event.arguments.workItemId!,
         action: event.arguments.action!,
@@ -711,14 +700,14 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "getCustomerDocumentUploadUrl": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return getCustomerDocumentUploadUrl(
         event.arguments.customerId!,
         event.arguments.contentType!
       );
     }
     case "recordCustomerDocument": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return recordCustomerDocument(
         {
           customerId: event.arguments.customerId!,
@@ -732,7 +721,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "sendCustomerEmail": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return sendCustomerEmail(
         event.arguments.customerId!,
         event.arguments.kind!,
@@ -742,7 +731,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
       );
     }
     case "prepareLeadQuote": {
-      if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+      assertOffice(event.identity);
       return prepareLeadQuote(event.arguments.customerId!);
     }
     default:
@@ -5828,16 +5817,12 @@ async function getDocumentUrl(
   // technician to other workers' reports or every future document. The
   // customer's own portal access is unchanged.
   if (!callerIsOffice(identity)) {
-    let allowed = groups.includes(cusGroup(customerId));
-    if (!allowed) {
-      const client = await dataClient();
-      const { data: customer } = await client.models.Customer.get({
-        id: customerId,
-      });
-      allowed = Boolean(
-        customer?.groupId && groups.includes(grpGroup(customer.groupId))
-      );
-    }
+    // The customer-side half of this is the shared rule (own cus- group, or a
+    // group login whose grp- appears in the customer's LIVE accessGroups
+    // stamp). Reading the stamp rather than re-deriving from customer.groupId
+    // means a property removed from a management company loses access to its
+    // documents immediately, without a re-issued token.
+    let allowed = await canActForCustomer(identity, customerId);
     if (!allowed && groups.includes("TECH")) {
       allowed = await technicianDocumentAllowed(identity, key);
     }

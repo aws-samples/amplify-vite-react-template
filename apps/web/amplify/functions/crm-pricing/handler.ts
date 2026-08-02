@@ -18,7 +18,7 @@ import {
   quoteInputFromExtraction,
   type Extraction,
 } from "../shared/leadExtraction";
-import { callerEmail, callerIsOffice, callerIsOwner } from "../shared/authz";
+import { assertOffice, assertOwner, callerEmail } from "../shared/authz";
 import { bookingLinkUrl, ensureBookingLinkToken } from "../shared/bookingLink";
 import { activeTechBases } from "../shared/capacity";
 import { driveMinutesFromNearestBase } from "../shared/driveTime";
@@ -100,7 +100,7 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
   if (internal?.op === "extractQuoteIntent") {
     return await extractQuoteIntent(internal.describe ?? "");
   }
-  if (!callerIsOffice(event.identity)) throw new Error("Owner role required");
+  assertOffice(event.identity);
   switch (opFieldName(event)) {
     case "priceLead":
       return priceLead(event.arguments);
@@ -111,10 +111,10 @@ export const handler = async (event: AppSyncResolverEvent<Args>) => {
     case "rollbackPricing":
       // GL-16: price authority stays role-controlled — OWNER only, checked
       // server-side on top of the schema's group rule.
-      if (!callerIsOwner(event.identity)) throw new Error("Owner role required");
+      assertOwner(event.identity);
       return rollbackPricing(event.arguments, callerEmail(event.identity));
     case "clearPricingRollback":
-      if (!callerIsOwner(event.identity)) throw new Error("Owner role required");
+      assertOwner(event.identity);
       return clearPricingRollback(event.arguments, callerEmail(event.identity));
     default:
       throw new Error(`Unknown field ${opFieldName(event)}`);

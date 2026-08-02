@@ -31,7 +31,7 @@ const fakeDataClient = {
 
 vi.mock("./dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-const { assertCanActForCustomer } = await import("./authz");
+const { assertCanActForCustomer, canActForCustomer } = await import("./authz");
 
 /** An AppSync Cognito identity carrying exactly these groups. */
 const as = (groups: string[]) =>
@@ -123,5 +123,42 @@ describe("assertCanActForCustomer — management-company group login", () => {
     await expect(
       assertCanActForCustomer(as(["CUSTOMER", "grp-g1", "grp-g2"]), "c3")
     ).rejects.toThrow(/not authorized/i);
+  });
+});
+
+/**
+ * The boolean form exists for READ paths that fold this decision into a wider
+ * entitlement — getDocumentUrl allows a technician who is proven against the
+ * specific document, so it needs an answer rather than an exception.
+ */
+describe("canActForCustomer — the predicate behind the assert", () => {
+  it("answers instead of throwing, with the same verdicts", async () => {
+    await expect(canActForCustomer(as(["OWNER"]), "c1")).resolves.toBe(true);
+    await expect(
+      canActForCustomer(as(["CUSTOMER", "cus-c1"]), "c1")
+    ).resolves.toBe(true);
+    await expect(
+      canActForCustomer(as(["CUSTOMER", "grp-g1"]), "c1")
+    ).resolves.toBe(true);
+    await expect(
+      canActForCustomer(as(["CUSTOMER", "grp-g1"]), "c2")
+    ).resolves.toBe(false);
+    await expect(canActForCustomer(as([]), "c1")).resolves.toBe(false);
+  });
+
+  it("keeps the token-only fast paths free of a customer read", async () => {
+    await canActForCustomer(as(["OWNER"]), "c1");
+    await canActForCustomer(as(["CUSTOMER", "cus-c1"]), "c1");
+    expect(reads).toHaveLength(0);
+  });
+
+  it("drops a group login the moment the property leaves the group", async () => {
+    await expect(
+      canActForCustomer(as(["CUSTOMER", "grp-g1"]), "c1")
+    ).resolves.toBe(true);
+    customers.set("c1", { id: "c1", accessGroups: ["cus-c1"] });
+    await expect(
+      canActForCustomer(as(["CUSTOMER", "grp-g1"]), "c1")
+    ).resolves.toBe(false);
   });
 });

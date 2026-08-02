@@ -2152,7 +2152,7 @@ describe("GL-11 — portal requests are durable cases, never untracked calls", (
         { customerId: "c1", kind: "HELP", message: "hi" },
         ["CUSTOMER", "cus-OTHER"]
       )
-    ).rejects.toThrow(/own account/);
+    ).rejects.toThrow(/account you manage/);
   });
 
   it("a reschedule must name the customer's OWN live visit", async () => {

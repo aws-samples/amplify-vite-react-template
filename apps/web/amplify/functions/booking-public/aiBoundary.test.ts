@@ -55,8 +55,15 @@ describe("crm-pricing is where the key legitimately lives", () => {
   it("serves the internal extraction op, and only by direct invoke", () => {
     expect(pricingHandler).toContain("extractQuoteIntent");
     // The internal branch must come BEFORE the office check — a direct invoke
-    // carries no AppSync identity and could never satisfy it.
-    expect(pricingHandler.indexOf('internal?.op === "extractQuoteIntent"')).
-      toBeLessThan(pricingHandler.indexOf("if (!callerIsOffice(event.identity))"));
+    // carries no AppSync identity and could never satisfy it. Both needles are
+    // asserted present first: a renamed gate would otherwise read as index -1
+    // and quietly pass the ordering check.
+    const internalAt = pricingHandler.indexOf(
+      'internal?.op === "extractQuoteIntent"'
+    );
+    const gateAt = pricingHandler.indexOf("assertOffice(event.identity)");
+    expect(internalAt).toBeGreaterThan(-1);
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(internalAt).toBeLessThan(gateAt);
   });
 });
