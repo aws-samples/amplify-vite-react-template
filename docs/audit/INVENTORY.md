@@ -1,6 +1,8 @@
 # Repository inventory — 2026-08-02
 
-Read-only audit at `4e20a4f` (branch `staging`, clean tree). No code changed.
+Audit at `4e20a4f` (branch `staging`). Scanned read-only; ranking items 1–4 were
+subsequently fixed in `46049f4`, `07379d5`, `e47db11`, `15cce63`, `51a692b` and
+this document annotated in place — see the status note under the ranking.
 
 Scope: `apps/web/src` (72 files), `apps/web/amplify` (120 files + `data/resource.ts`),
 `apps/crm/src` (69 files) — 261 non-test source files, ~97k lines, plus 109 test files.
@@ -27,11 +29,11 @@ permits the divergence but no current call site exercises it.
 
 | # | Item | Sites | Blast radius | Wrong today? | § |
 |---|---|---|---|---|---|
-| 1 | Zip validated nowhere in the booking path, hard-required at dispatch | 3 | Every booking | **✗** dead error slot, 100% latent bad data | 1.7 / 5.2 |
-| 2 | `productsUsed` typed `string` in the CRM, `number` on the wire | 4 parsers | Tech report submit | **✗** `TypeError: .trim is not a function` | 4.1 |
-| 3 | `pageErrors: "ignore"` swallows pagination errors | 116 | Partial reads pass as complete | **✗** by construction | 1.2 |
-| 4 | `useAction` has zero adopters; mutations hand-rolled | ~50 | Every CRM mutation incl. payment | **✗** double-submit guarded only by `disabled` | 1.1 |
-| 5 | `err instanceof Error ? …` inline | 79 | All error text, both apps | **✗** ~25 files, no empty-message handling | 1.6 |
+| 1 | ~~Zip validated nowhere in the booking path~~ | 3 | Every booking | **FIXED** `46049f4` — `shared/postalCode.ts` | 1.7 / 5.2 |
+| 2 | ~~`productsUsed` typed `string` in the CRM, `number` on the wire~~ | 4 parsers | Tech report submit | **FIXED** `46049f4` — coerced at both boundaries | 4.1 |
+| 3 | `pageErrors: "ignore"` swallows pagination errors | 82 | Partial reads pass as complete | **PARTLY FIXED** `e47db11` — 32 decision sites flipped; 82 remain | 1.2 |
+| 4 | ~~`useAction` has zero adopters; mutations hand-rolled~~ | ~65 | Every CRM mutation incl. payment | **FIXED** `07379d5`, `15cce63`, `51a692b` (+ `useKeyedAction`) | 1.1 |
+| 5 | `err instanceof Error ? …` inline | 16 | Error text, CRM | **REDUCED** 79 → 16 by the item-4 migration; 14 of 16 are loads | 1.6 |
 | 6 | `crm-admin` is the only handler with no in-handler authz | 1 file | ~25 privileged ops | **✗** 2 ops absent from the schema entirely | 2.4 |
 | 7 | `cadenceLabel` — 9 encodings | 9 | Quotes, dropdowns, PDFs, email | **✗** hyphenation split; `SEMIANNUAL` prints raw | 5.1 |
 | 8 | Inline `res.errors[0].message` | 12 | CRM mutation errors | **✗** drops errors 2..n | 1.6 |
@@ -68,6 +70,19 @@ permits the divergence but no current call site exercises it.
 
 ---
 
+> **Status, 2026-08-02.** Items 1, 2 and 4 are closed; item 3 is closed for the
+> paths where a short read inverts an answer and left open elsewhere. Item 5
+> fell from 79 sites to 16 as a side effect of item 4. Section bodies below are
+> annotated in place rather than rewritten, so each finding stays readable
+> against the code it described.
+>
+> The work added three modules — `shared/postalCode.ts`,
+> `crm/src/lib/productAmount.ts`, and `useKeyedAction` in
+> `crm/src/lib/useAsync.ts` — and surfaced four defects that were not the
+> duplication itself; they are recorded in §7.
+
+---
+
 ## 1. Duplicate implementations
 
 ### 1.1 Frontend data access and mutation
@@ -101,7 +116,7 @@ permits the divergence but no current call site exercises it.
 
 `AbortController` appears once and is not a fetch guard: `apps/web/src/lib/addressAutocomplete.tsx:128` and `apps/crm/src/lib/addressAutocomplete.tsx:128` (Places typeahead). No AppSync call in either app is abortable.
 
-**C. `useAction` — exists, tested, zero adopters**
+**C. `useAction` — exists, tested, zero adopters** — **FIXED** `07379d5`, `15cce63`, `51a692b`. 72 call sites across 28 files. Two screens route many independent writes through one keyed handler (`office/Work.tsx` 11 writes, `office/CustomerDetail.tsx` ~17) and use the new `useKeyedAction` (`lib/useAsync.ts`, gate from `createKeyedSingleFlight` in `lib/asyncCore.ts`): a per-hook gate there would let one write in flight silently refuse a press on an unrelated button, which is the failure mode the migration exists to remove. Loads are untouched — that is item D/§1.1 A, still open.
 
 - `apps/crm/src/lib/useAsync.ts:106`; single-flight gate at `apps/crm/src/lib/asyncCore.ts:94`.
 - Verified zero call sites (`grep "useAction[<(]"` excluding `lib/useAsync.ts` returns empty). `useAction` and `createSingleFlight` are exported-but-unused production code with passing tests in `asyncCore.test.ts`.
@@ -120,14 +135,14 @@ permits the divergence but no current call site exercises it.
 
 Most used: the bespoke prop (34). Most correct: `reload`, which re-enters the request guard (`useAsync.ts:92`). The three `setTimeout` sites are a fixed sleep to outrun Stripe/backend eventual consistency with no retry — if the backend has not settled in 1500 ms the customer sees the pre-payment invoice state at `portal/Billing.tsx:109` and must refresh manually.
 
-**E. Presigned upload — 5 copies in 4 files**
+**E. Presigned upload — 5 copies in 4 files** — still open. Line numbers below are current as of `51a692b`; the bodies moved when their handlers became `useAction`, but the duplication and the Content-Type divergence are unchanged.
 
-`components/CustomerDocuments.tsx:72` · `components/ReportPhotos.tsx:52` · `tech/JobDetail.tsx:929` · `tech/JobDetail.tsx:1060` · `portal/Requests.tsx:157`.
+`components/CustomerDocuments.tsx:77` · `components/ReportPhotos.tsx:58` · `tech/JobDetail.tsx:922` · `tech/JobDetail.tsx:1045` · `portal/Requests.tsx:135`.
 
 Each is: `setBusy(true)` → `opResult<{key,uploadUrl}>` → throw if missing → `fetch(url, {method:"PUT", headers:{"Content-Type":…}})` → throw on `!ok` → catch ternary → `finally setBusy(false)`.
 
 - Most correct: `ReportPhotos.tsx:52` — the only one handling a multi-file `FileList` and sending a key delta (`:76`).
-- **Content-Type divergence:** `CustomerDocuments.tsx:76` has a fallback (`file.type || "application/pdf"`); `ReportPhotos.tsx:60,67` is safe; `JobDetail.tsx:943`, `JobDetail.tsx:1077` and `Requests.tsx:171` pass a possibly-empty `file.type` straight through. Empty `file.type` is common for HEIC and some Android pickers.
+- **Content-Type divergence:** `CustomerDocuments.tsx:83` resolves a `contentType` with a fallback; `ReportPhotos.tsx:63` falls back to `image/jpeg`; `JobDetail.tsx:932`, `JobDetail.tsx:1055` and `Requests.tsx:145` pass a possibly-empty `file.type` straight through. Empty `file.type` is common for HEIC and some Android pickers.
 - Canonical: one `uploadViaPresignedUrl(getUrlMutation, file)` in `apps/crm/src/lib/api.ts`, wrapped in `useAction`.
 
 **F. Signed-document-URL fetch — 2 copies**
@@ -165,9 +180,13 @@ Most correct: `QuotePage` — it separates terminal HTTP statuses (`:311`, stops
 - One CAS layer: `functions/shared/atomicLock.ts`, ~99 call sites in 24 files. Delete-then-create is documented as the rejected prior design (`atomicLock.ts:17-22`) and no surviving instance was found.
 - One pagination module: `functions/shared/pagination.ts` (`forEachPage:41`, `listAll:59`), 119 call sites in 38 files, zero hand-rolled Amplify `nextToken` loops.
 
-**A. `pageErrors: "ignore"` — 113 sites**
+**A. `pageErrors: "ignore"` — was 116 sites, now 82** — **PARTLY FIXED** `e47db11`.
 
-`pagination.ts:19-25` documents the flag as migration debt with the instruction not to write it into new code. Actual usage: **116 sites pass `"ignore"` (115 in `apps/web/amplify`, 1 in `apps/crm/src`; 114 excluding tests), 0 pass `"throw"`**, ~6 rely on the safe default. A partial scan silently reads as a complete one at 95% of call sites. Affects dashboard totals, rosters and reconciliation sweeps; the symptom is a wrong number, never an error.
+`pagination.ts:19-25` documents the flag as migration debt with the instruction not to write it into new code. At audit time: **116 sites passed `"ignore"`, 0 passed `"throw"`**, ~6 relied on the safe default — a partial scan silently read as a complete one at 95% of call sites.
+
+32 sites now pass an explicit `"throw"`: the ones where a short read does not degrade an answer but inverts it — `capacity.ts` (10, a booked day reads as free), `planCancellation.ts` (7, an outstanding balance reads as settled), `deactivation.ts` (5, missed active plans keep billing), `jobAssignment.ts` (3, an authz proof decided on half the rows), `visitChange.ts` (3), `subscription.ts` (2), `refund.ts` (1), `crm-billing/handler.ts` (1). The `PageOptions` doc now records what earns an explicit throw.
+
+**82 remain**, deliberately: they feed reports and rosters where a short page is cosmetic. That count is still the greppable backlog. The largest holders are `daily-reminders/handler.ts` (34 — mixed reconciliation and reporting, needs per-site judgement) and `crm-docs/handler.ts` (14).
 
 **B. Cognito pagination — 3 hand-rolled loops, 2 near-clones**
 
@@ -310,7 +329,11 @@ No `return {error: ...}` shape exists — confirmed by grep. Most correct: `Http
 2. Per-page `useState<string|null>` + hand-rolled JSX — 25 sites in `apps/web/src`. **`apps/web/src` has no `ErrorNote` equivalent**, so the public funnel's ~8 error surfaces get no filtering; a raw `"Failed to fetch"` reaches a paying customer at `BookPage.tsx:990`.
 3. **Inline GraphQL unwrapping — 12 copies that drop errors 2..n.** `if (res.errors?.length) throw new Error(res.errors[0].message)` at `office/technicians.tsx:223,251,436`; `office/Staff.tsx:425,465,763`; `office/CustomerDetail.tsx:2784`; `tech/JobDetail.tsx:636,685,826,1535,1540`. The version that joins all messages exists once, at `apps/crm/src/lib/api.ts:982-983`.
 
-**`toMessage` vs inline ternary:** `toMessage(err, fallback)` at `asyncCore.ts:14` handles a thrown bare string and treats a whitespace-only `Error.message` as absent (`:15-16`). It has **zero direct call sites** outside `lib/`; it reaches code only through the 20 `useAsync` loaders. The inline form `err instanceof Error ? err.message : "…"` appears **79 times across 25 files** — `office/Work.tsx` 11, `office/CustomerDetail.tsx` 10, `office/MarketRates.tsx` 7, `office/Schedule.tsx` 6, `office/GroupDetail.tsx` 5.
+**`toMessage` vs inline ternary** — **REDUCED** by `07379d5`/`15cce63`/`51a692b`. `toMessage(err, fallback)` at `asyncCore.ts:14` handles a thrown bare string and treats a whitespace-only `Error.message` as absent (`:15-16`).
+
+At audit time it had **zero direct call sites** outside `lib/`, reaching code only through the 20 `useAsync` loaders, while the inline form `err instanceof Error ? err.message : "…"` appeared **79 times across 25 files** (`office/Work.tsx` 11, `office/CustomerDetail.tsx` 10, `office/MarketRates.tsx` 7, `office/Schedule.tsx` 6, `office/GroupDetail.tsx` 5).
+
+The `useAction` migration routes every mutation through `toMessage`, taking the inline form to **16**, of which **14 are load paths** (`"Could not load …"`) that belong to the open `useAsync` migration. The two that are not: `office/GroupDetail.tsx` and `components/LeadPanel.tsx`, both inside a `catch` that inspects the message to recover from a specific server refusal rather than to display it. `apps/web/src` has **zero** — it never used this idiom.
 
 **Swallowed errors — 36 empty or comment-only `catch` blocks** (of 576 total `catch` occurrences). Line numbers are the closing brace:
 
@@ -345,7 +368,7 @@ Divergences: `foo@bar_baz.com` is rejected by the funnel pair (domain class has 
 
 `+442071234567` is accepted by three paths and dropped by `lead-intake` (12 bare digits → `undefined`, phone silently moved into notes per `:81-84`). `leadIdentity.ts:4-5` states it consolidated three divergent copies; `lead-intake/handler.ts:91` is one of the old copies, still live. Separately, `lead-intake` stores `Jane@Example.com` un-lowercased while `leadIdentity.normalizeEmail` lowercases before matching, so the identity match at `leadIdentity.ts:82-95` misses that lead.
 
-**Zip — validated nowhere in the booking path:**
+**Zip — validated nowhere in the booking path** — **FIXED** `46049f4`. `shared/postalCode.ts` now holds both rules and keeps them apart: `isValidZip` (shape) is what the funnel and `quote()` ask; `isMaRiZip` (territory) is what `dispatchReadiness` asks, and it imports it rather than keeping a private copy. Territory was deliberately NOT added to the funnel gate — `booking-public/handler.ts:1495` routes a far address to Zone C behind a lead token, so a distant ZIP is a priceable lead, not a form error. The trusted portal invoke is exempt from the requirement: it forwards the address on file, so a customer record with no ZIP is an office data fix rather than a mid-purchase hard stop. `QuotePage.tsx:1228`'s error slot is now reachable. The finding as originally written:
 
 - `shared/dispatchReadiness.ts:66,97` — `MA_RI_ZIP_RE = /^0[12]\d{3}(-\d{4})?$/`, hard-required at dispatch.
 - `shared/leadIdentity.ts:40` — `normalizeZip`, 5 digits, no territory check.
@@ -536,7 +559,9 @@ The claim/lease lifecycle (reclaim orphan → write claim → release → sweep)
 
 **Structural cause.** ~100 custom operations in the schema declare `.returns(a.json())` (`resource.ts:2542`–`4012`). Every CRM↔Lambda RPC return is therefore untyped `AWSJSON`, unwrapped by a blind cast at `apps/crm/src/lib/api.ts:994-1008` (`opResult<T>` → `JSON.parse(data) as T`). Nothing in the type system connects a Lambda's return type to the CRM's declared shape for it, so every mirror in §4.2 is unchecked by construction.
 
-### 4.1 `productsUsed` — `string` in the CRM, `number` on the wire (live crash)
+### 4.1 `productsUsed` — `string` in the CRM, `number` on the wire (live crash) — **FIXED** `46049f4`
+
+The type was not flipped: `ProductRow.amountValue` is a `string` on purpose — it is the text buffer of a controlled input, so a half-typed `"2."` stays renderable. The defect was the missing coercion at the parse boundary. `toAmountText` now runs on every row entering from the AWSJSON blob (`parseProducts`) and from a restored localStorage draft (`normalizeRow`, which the draft path reaches without passing through `parseProducts`). The amount codec moved to `crm/src/lib/productAmount.ts` so it is testable without importing the 2000-line component (8 tests). The finding as originally written:
 
 | Declaration | Location | `amountValue` |
 |---|---|---|
@@ -665,9 +690,9 @@ Should be `shared/cadenceLabels.ts` (pure leaf, value-importable by both apps as
 
 Two disagreements: hyphenation splits the customer's dropdown choice (`"Every-2-months plan"`) from the agreement PDF (`"Every 2 months"`); and `SEMIANNUAL` is a legal value (`api.ts:161`) that only `planCadence.ts:25` handles — `pdf.ts:744` prints the literal enum `SEMIANNUAL` on the agreement PDF, and `billingDisclosure.ts` returns `undefined`, dropping the visit sentence from the money-confirm sheet.
 
-### 5.2 ⚠ Booking-path zip validation
+### 5.2 ~~Booking-path zip validation~~ — **FIXED** `46049f4`
 
-Covered in §1.7. The abstraction that does not exist is a shared `MA_RI_ZIP_RE` consumed by `validateQuoteForm` and `booking-public/handler.ts`; it currently lives only at the dispatch end (`shared/dispatchReadiness.ts:66`).
+The missing abstraction is now `shared/postalCode.ts`, consumed by `validateQuoteForm`, `booking-public/handler.ts` and `dispatchReadiness.ts`. It exports the shape rule and the territory rule as separate predicates, because the funnel and dispatch are asking different questions. See §1.7.
 
 ### 5.3 ⚠ `escapeHtml(s)` — 8 copies
 
@@ -862,6 +887,41 @@ Module-level constants that read as tunables but are exported-and-local-only: `B
 - Symbols reachable only through dynamic string dispatch or GraphQL resolver wiring in `amplify/data/resource.ts` — the export scan is lexical.
 - Values injected at deploy time (`amplify.yml`, Amplify Hosting console, SSM) — only the presence of a reader was confirmed, not that the value is set.
 - Feature toggles expressed as data fields in `data/resource.ts` rather than env vars.
+
+---
+
+## 7. Defects surfaced while fixing, not by the scan
+
+The scan found duplication. Converting it turned up four bugs the duplication
+was hiding — recorded here because none of them is a consolidation task.
+
+**7.1 `LeadPanel` idempotency keys never collapsed anything.** ✗ **FIXED** `15cce63`.
+`clientActionId` (`apps/crm/src/lib/api.ts:112`) is `crypto.randomUUID()`, and it
+is called inline at each click site — `components/LeadPanel.tsx:180, 259, 303,
+322, 368, 397`. Every click therefore carried a *new* key, so the server-side
+idempotency guard collapsed nothing and `disabled` was the only protection. Two
+presses of "Add plan & convert" wrote two plans. The single-flight gate now stops
+the second request; the keys themselves are still minted per click, which is
+worth revisiting if any of these ops is ever retried.
+
+**7.2 `Schedule.bump` had no `catch`.** ✗ **FIXED** `15cce63`.
+`office/Schedule.tsx` reordered a route stop inside `try { … } finally {
+setBusy(null) }` with no catch arm, so a failed `updateJobSchedule` REORDER was
+an unhandled promise rejection: the spinner cleared, the board did not move, and
+the office was told nothing.
+
+**7.3 `LeadPanel.convert` could reject unhandled.** ✗ **FIXED** `15cce63`.
+The shared `act()` helper rethrew after setting its error; five of six call sites
+suppressed that with `.catch(() => undefined)` and `convert` did not.
+
+**7.4 `PricingLog` outcome save never checks its result.** ✗ **OPEN**.
+`office/PricingLog.tsx` calls `api().models.LeadPricingRun.update(...)` bare —
+no `unwrap` (`lib/api.ts:978`), no `opResult` (`:994`). Amplify Data reports a
+GraphQL failure in `res.errors` rather than throwing, so an authorization or
+validation failure resolves normally: the sheet closes and the office believes
+the outcome was recorded. Every other CRM mutation site unwraps. Left unfixed
+deliberately — starting to surface those errors changes what the screen tells
+the office, which is a product decision, not a refactor.
 
 ---
 
