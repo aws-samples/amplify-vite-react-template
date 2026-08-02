@@ -15,6 +15,7 @@ import {
   type TechnicianJobDetail,
 } from "../lib/api";
 import { fmtDate } from "../lib/format";
+import { toAmountText, splitAmount, composeAmount } from "../lib/productAmount";
 import {
   clearDraft,
   isConnectivityError,
@@ -95,11 +96,18 @@ function useOnline(): boolean {
   return online;
 }
 
-/** productsUsed is an AWSJSON field — arrives as a JSON string or value. */
+/** productsUsed is an AWSJSON field — arrives as a JSON string or value.
+ *  The stored rows carry `amountValue` as a NUMBER while this editor keeps it
+ *  as input text, so every row is coerced on the way in (`toAmountText`); a
+ *  restored localStorage draft gets the same treatment in `normalizeRow`. */
 function parseProducts(raw: unknown): ProductRow[] {
   try {
     const v = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return Array.isArray(v) ? (v as ProductRow[]) : [];
+    if (!Array.isArray(v)) return [];
+    return (v as ProductRow[]).map((row) => ({
+      ...row,
+      amountValue: toAmountText((row as { amountValue?: unknown }).amountValue),
+    }));
   } catch {
     return [];
   }
@@ -110,20 +118,6 @@ function parseProducts(raw: unknown): ProductRow[] {
  *  readonly string[] so an unrecognized stored unit can still be compared. */
 const AMOUNT_UNITS: readonly string[] = COMMON_UNITS;
 
-/** Split a composed amount ("2 fl oz") into its value + unit for the inputs. */
-function splitAmount(raw: string | undefined): { value: string; unit: string } {
-  const m = (raw ?? "").trim().match(/^([0-9]*\.?[0-9]+)\s*(.*)$/);
-  if (!m) return { value: "", unit: "" };
-  return { value: m[1], unit: m[2].trim() };
-}
-
-/** Compose the amount string the PDF and legacy readers use. */
-function composeAmount(value: string | undefined, unit: string | undefined): string {
-  const v = (value ?? "").trim();
-  if (!v) return "";
-  return unit ? `${v} ${unit}` : v;
-}
-
 /** Give a parsed/restored row its structured fields (productId, amountValue,
  *  amountUnit) from the catalog + composed quantity, so the editor renders them
  *  and older reports upgrade seamlessly. Idempotent. */
@@ -132,10 +126,12 @@ function normalizeRow(row: ProductRow, catalog: CatalogProduct[]): ProductRow {
     ? catalog.find((c) => c.id === row.productId)
     : catalog.find((c) => c.name === row.name);
   const split = splitAmount(row.quantity);
+  // A restored draft bypasses parseProducts, so coerce here too.
+  const stored = toAmountText(row.amountValue);
   return {
     ...row,
     productId: row.productId ?? match?.id,
-    amountValue: row.amountValue ?? split.value,
+    amountValue: stored ?? split.value,
     amountUnit: row.amountUnit ?? split.unit,
   };
 }

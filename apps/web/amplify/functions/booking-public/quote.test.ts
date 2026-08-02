@@ -1918,3 +1918,53 @@ describe("GL-17 — mosquito seasonal plans on the funnel", () => {
     }
   });
 });
+
+// ── ZIP: shape is required on the public path, territory is not ─────
+//
+// The funnel collected `zip` and neither side ever checked it, so a customer
+// could pay for a booking with no ZIP; the omission surfaced downstream as a
+// dispatch-readiness checklist error they never saw. Territory stays OUT of
+// this gate on purpose — a far ZIP is a Zone C lead, not a form error.
+describe("ZIP validation", () => {
+  it("refuses a public quote with no ZIP", async () => {
+    const res = await postQuote({ ...rodentInput, address: { ...rodentInput.address, zip: undefined } });
+    expect(res.status).toBe(400);
+    expect(res.body.errors["address.zip"]).toBeDefined();
+  });
+
+  it("refuses a blank or partial ZIP", async () => {
+    const blank = await postQuote({ ...rodentInput, address: { ...rodentInput.address, zip: "  " } });
+    expect(blank.status).toBe(400);
+    expect(blank.body.errors["address.zip"]).toBeDefined();
+
+    const partial = await postQuote({ ...rodentInput, address: { ...rodentInput.address, zip: "018" } });
+    expect(partial.status).toBe(400);
+    expect(partial.body.errors["address.zip"]).toBeDefined();
+  });
+
+  it("accepts ZIP+4", async () => {
+    const res = await postQuote({ ...rodentInput, address: { ...rodentInput.address, zip: "01082-1234" } });
+    expect(res.body.errors?.["address.zip"]).toBeUndefined();
+  });
+
+  it("does NOT treat an out-of-territory ZIP as a form error", async () => {
+    const res = await postQuote({ ...rodentInput, address: { ...rodentInput.address, zip: "90210" } });
+    // It may still refuse for zone/routing reasons — what it must not do is
+    // call the ZIP itself invalid.
+    expect(res.body.errors?.["address.zip"]).toBeUndefined();
+  });
+
+  it("exempts the trusted portal invoke — the address on file is the office's to fix", async () => {
+    const res = (await handler({
+      internalOp: {
+        kind: "QUOTE",
+        customerId: "cus-existing",
+        input: { ...rodentInput, address: { ...rodentInput.address, zip: undefined } },
+      },
+    } as never)) as { ok: boolean; status?: number; error?: string; data?: unknown };
+
+    // The trusted path returns the {ok} envelope, not an HTTP response. A ZIP
+    // complaint would show up as ok:false with a 400.
+    expect(res.ok === false && res.status === 400).toBe(false);
+  });
+});

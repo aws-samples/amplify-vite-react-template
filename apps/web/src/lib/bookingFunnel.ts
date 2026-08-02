@@ -13,6 +13,7 @@ import type {
   ServiceCode,
 } from "./bookingApi";
 import { funnelCatalog } from "../../amplify/functions/shared/serviceCatalog";
+import { isValidZip } from "../../amplify/functions/shared/postalCode";
 
 // ── Service catalog ─────────────────────────────────────────────────
 
@@ -252,6 +253,11 @@ export function validateQuoteForm(f: QuoteFormFields): Record<string, string> {
   if (!f.street.trim()) errors["address.street"] = "Street address is required";
   if (!f.city.trim()) errors["address.city"] = "City is required";
   if (!f.state.trim()) errors["address.state"] = "State is required";
+  // Shape only — an out-of-territory ZIP is a lead we price through Zone C,
+  // not a form error. The field feeds geocoding, so a blank one degrades the
+  // drive-time proof capacity depends on.
+  if (!f.zip.trim()) errors["address.zip"] = "ZIP code is required";
+  else if (!isValidZip(f.zip)) errors["address.zip"] = "Enter a 5-digit ZIP code";
   if (needs.sqft) {
     const sqft = parseInt(f.sqft, 10);
     if (!sqft || sqft < SQFT_MIN || sqft > SQFT_MAX) {

@@ -84,17 +84,34 @@ describe("validateQuoteForm", () => {
       street: "",
       city: "",
       state: "",
+      zip: "",
     });
     expect(Object.keys(errors).sort()).toEqual(
       [
         "address.city",
         "address.state",
         "address.street",
+        "address.zip",
         "email",
         "name",
         "service",
       ].sort()
     );
+  });
+
+  describe("zip", () => {
+    it("is required — a booking with no ZIP reaches dispatch as a readiness failure", () => {
+      expect(validateQuoteForm({ ...validFields, zip: "" })["address.zip"]).toBeTruthy();
+      expect(validateQuoteForm({ ...validFields, zip: "   " })["address.zip"]).toBeTruthy();
+    });
+
+    it("rejects a partial ZIP", () => {
+      expect(validateQuoteForm({ ...validFields, zip: "018" })["address.zip"]).toBeTruthy();
+    });
+
+    it("accepts an OUT-OF-TERRITORY ZIP — those are Zone C leads, not form errors", () => {
+      expect(validateQuoteForm({ ...validFields, zip: "90210" })).toEqual({});
+    });
   });
 
   it("accepts the emails the server accepts and rejects the ones it rejects", () => {

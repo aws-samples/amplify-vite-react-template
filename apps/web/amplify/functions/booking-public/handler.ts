@@ -76,6 +76,7 @@ import {
   type PlanCadence,
 } from "../shared/marketRate";
 import { serviceLabelFor } from "../shared/serviceCatalog";
+import { isValidZip } from "../shared/postalCode";
 import {
   parseQuoteSnapshot,
   serializeQuoteSnapshot,
@@ -1204,6 +1205,17 @@ async function quote(
   if (!addr.street?.trim()) errors["address.street"] = "Street address is required";
   if (!addr.city?.trim()) errors["address.city"] = "City is required";
   if (!addr.state?.trim()) errors["address.state"] = "State is required";
+  // Shape only, and only on the public path. An out-of-territory ZIP stays a
+  // priceable lead (Zone C, below); what is refused here is a booking with no
+  // usable ZIP at all, which reaches dispatch as a readiness failure the
+  // customer never sees and weakens the geocode `address` is built from.
+  // The trusted portal invoke passes the customer's address ON FILE, so a
+  // record missing a ZIP is an office data fix, not a mid-purchase hard stop.
+  if (!trusted) {
+    const zip = addr.zip?.trim() ?? "";
+    if (!zip) errors["address.zip"] = "ZIP code is required";
+    else if (!isValidZip(zip)) errors["address.zip"] = "Enter a 5-digit ZIP code";
+  }
   if (SEASONAL_SERVICES.has(service)) {
     // GL-17: mosquito plans price on yard size alone (half-acres), at any
     // property kind — no sqft, nest, or unit inputs.
