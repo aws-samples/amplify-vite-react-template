@@ -88,6 +88,18 @@ const schema = a
     AggregateAppliesTo: a.enum(["POLICY", "PROJECT", "LOCATION", "OTHER"]),
 
     // ── Account: Lead → Client, converted in place ─────────────────────
+    //
+    // Authenticated read/write, ADMIN-only delete. Deleting an account is the
+    // cascade in DeleteLeadZone — it takes the quotes and documents with it —
+    // and that was gated in the client only (`if (!isAdmin) return null`),
+    // which is not a gate at all as far as the API is concerned.
+    //
+    // No owner-scoping: no model carries an owning-producer id, so there is
+    // nothing to anchor on. Same reasoning as Policy and Certificate.
+    //
+    // `leadIntake` creates Accounts and `extractLead` updates them, both
+    // without an explicit authMode. Neither is affected by this rule — see
+    // the note on `allow.resource` at the bottom of this file.
     Account: a
       .model({
         stage: a.ref("AccountStage").required(),
@@ -157,7 +169,11 @@ const schema = a
         policies: a.hasMany("Policy", "accountId"),
         certificates: a.hasMany("Certificate", "accountId"),
       })
-      .secondaryIndexes((index) => [index("stage").sortKeys(["name"])]),
+      .secondaryIndexes((index) => [index("stage").sortKeys(["name"])])
+      .authorization((allow) => [
+        allow.authenticated().to(["read", "create", "update"]),
+        allow.groups(["ADMIN"]),
+      ]),
 
     // Individual buildings on a property; total buildings/sqft are derived.
     Building: a.model({
@@ -172,6 +188,15 @@ const schema = a
     }),
 
     // ── Quotes: tied to an account; binding creates a Policy ───────────
+    //
+    // Authenticated read/write, ADMIN-only delete. There is no standalone
+    // "delete quote" anywhere in the app — the only caller is the lead
+    // cascade, which is admin-only — so this costs nothing and closes the
+    // same hole as the Account rule above.
+    //
+    // The nightly renewal sweep lists Quote (renewal-tasks/handler.ts) and
+    // `extractLead` reads them, both without an explicit authMode. Neither is
+    // affected — see the note on `allow.resource` at the bottom of this file.
     Quote: a.model({
       accountId: a.id().required(),
       account: a.belongsTo("Account", "accountId"),
@@ -203,7 +228,11 @@ const schema = a
       expirationDate: a.date(),
       notes: a.string(),
       policy: a.hasOne("Policy", "quoteId"),
-    }),
+    })
+      .authorization((allow) => [
+        allow.authenticated().to(["read", "create", "update"]),
+        allow.groups(["ADMIN"]),
+      ]),
 
     // ── Policies: created on bind; source data for COI generation ──────
     //

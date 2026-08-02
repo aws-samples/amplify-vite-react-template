@@ -207,3 +207,65 @@ template: stub `generateClient` (per `client.test.ts`), then assert all four sta
 error, empty, content — and specifically that the error state shows **neither** the empty message
 **nor** a stuck loader. Prove such a test has teeth by reverting the component to its
 hand-rolled shape and watching it fail.
+
+---
+
+## A client permission gate is never introduced alone
+
+**Rule.** A `useIsAdmin()` check that hides a destructive control must ship together with the
+model rule that enforces it. The client gate decides what is *offered*; only
+`amplify/data/resource.ts` decides what is *permitted*. Adding one without the other produces a
+screen that looks protected and an API that isn't.
+
+**Why.** `DeleteLeadZone` cascaded through an account's quotes, its documents and their S3
+objects, behind `if (!isAdmin) return null` — and `Account`, `Quote` and `Document` all inherited
+the schema default `allow.authenticated()`, which includes delete. Any signed-in STAFF user could
+destroy any lead and its quote history through the API. The file's own comment argued the gate was
+sufficient because "the zone can't be rendered without the check coming with it", which is true of
+the UI and false of the data.
+
+**The idiom**, on `Account`, `Quote`, `Policy`, `Certificate`, `License`, `UserProfile`:
+
+```ts
+.authorization((allow) => [
+  allow.authenticated().to(["read", "create", "update"]),
+  allow.groups(["ADMIN"]),   // bare — ADMIN keeps every operation, incl. delete
+]),
+```
+
+Each carries a comment saying why owner-scoping was not used (no model carries an
+owning-producer id, so there is nothing to anchor on) and which Lambdas touch the model.
+
+**Two things that will catch you out.**
+
+1. **`allow.resource()` is not a per-model grant.** It is stripped before any `@auth` directive is
+   generated and becomes an IAM policy over the *entire* API, and Amplify sets
+   `enableIamAuthorizationMode: true`, under which `@auth` rules do not apply. So the four granted
+   functions keep full data access no matter what a model declares — and a new Lambda added to
+   that list cannot be constrained by a model rule. The long comment at the foot of
+   `resource.ts` says this; believe it.
+2. **Tightening delete can be worse than leaving it open.** `DocumentsPanel` deletes the S3 object
+   *before* the row. Restricting `Document` delete to ADMIN would mean a staff delete destroys the
+   file, fails the row delete, and leaves a row pointing at a dead key. Fix the ordering first, or
+   leave the rule alone. `Document`, `Building` and `AppetiteGuide` are deliberately still open —
+   staff delete all three as normal work.
+
+**This protects rows, not files.** `documents/*`, `property-photos/*` and `signatures/*` grant
+`delete` to every group (`storage/resource.ts:18`), so any signed-in user can delete any object
+out-of-band. Narrowing that needs per-group grants rather than a one-line edit — see the note at
+`storage/resource.ts:14-17` on group members assuming their group's IAM role, and the known-gap
+block at `:42-67`. Still open.
+
+**Verification is a deploy, and cannot be anything else.** `npm run typecheck` is the only local
+check, and its teeth are narrow but real — a one-character typo in `.to(["updatte"])` is TS2820,
+verified by mutation. It says nothing about whether the generated directive denies anything. No
+test in this repo exercises AppSync authorization. After deploying, signed in as **STAFF**:
+
+```js
+await client.models.Account.delete({ id: "<a lead id>" })  // expect Not Authorized
+await client.models.Quote.delete({ id: "<a quote id>" })   // expect Not Authorized
+```
+
+Then as **ADMIN** confirm the danger zone still completes, and — the negative control most likely
+to be silently broken — confirm a **STAFF** user can still delete a document from the documents
+panel.
