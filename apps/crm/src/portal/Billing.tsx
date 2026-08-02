@@ -8,6 +8,7 @@ import {
   type Invoice,
 } from "../lib/api";
 import { useRoles } from "../lib/auth";
+import { useAction } from "../lib/useAsync";
 import { fmtDate, money, todayEastern } from "../lib/format";
 import { daysPastDue } from "../lib/aging";
 import { isOverdue } from "../lib/recovery";
@@ -82,35 +83,39 @@ export default function PortalBilling() {
   // Pay one invoice off the customer's saved card. Never claims a false
   // "paid": only an explicit success settles the copy, a declined card is
   // surfaced as an error, and anything genuinely in flight says so.
-  const pay = async (inv: Invoice) => {
-    setPayingId(inv.id);
+  // The single-flight gate is what stops a double-click from charging the card
+  // twice; the `disabled` button alone never did.
+  const payAction = useAction(async (inv: Invoice) => {
     setError(null);
     setNotice(null);
+    // The mutation records an off-session decline as FAILED and returns it
+    // rather than throwing, so a declined card must be surfaced from the
+    // status — not mistaken for a pending success.
+    const res = opResult<{ status?: string; failureReason?: string }>(
+      await payInvoice({ invoiceId: inv.id })
+    );
+    const status = res?.status;
+    if (status === "FAILED") {
+      throw new Error(
+        res?.failureReason
+          ? `The card was declined — ${res.failureReason}. Try updating your payment method.`
+          : "The card was declined. Try updating your payment method."
+      );
+    }
+    setNotice(
+      status === "PAID"
+        ? `Paid ${money(inv.amountCents)} — thank you. A receipt is on its way.`
+        : `Payment for ${money(inv.amountCents)} is processing — we'll email a receipt once it settles.`
+    );
+    setTimeout(() => void load(), 1500);
+  }, "Payment could not be completed");
+
+  // `payingId` stays: the gate allows only one payment at a time, but the row
+  // that is paying still needs its own spinner.
+  const pay = async (inv: Invoice) => {
+    setPayingId(inv.id);
     try {
-      // The mutation records an off-session decline as FAILED and returns it
-      // rather than throwing, so a declined card must be surfaced from the
-      // status — not mistaken for a pending success.
-      const res = opResult<{ status?: string; failureReason?: string }>(
-        await payInvoice({ invoiceId: inv.id })
-      );
-      const status = res?.status;
-      if (status === "FAILED") {
-        throw new Error(
-          res?.failureReason
-            ? `The card was declined — ${res.failureReason}. Try updating your payment method.`
-            : "The card was declined. Try updating your payment method."
-        );
-      }
-      setNotice(
-        status === "PAID"
-          ? `Paid ${money(inv.amountCents)} — thank you. A receipt is on its way.`
-          : `Payment for ${money(inv.amountCents)} is processing — we'll email a receipt once it settles.`
-      );
-      setTimeout(() => void load(), 1500);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Payment could not be completed"
-      );
+      await payAction.run(inv);
     } finally {
       setPayingId(null);
     }
@@ -119,7 +124,7 @@ export default function PortalBilling() {
   if (!customers) {
     return (
       <Page title="Billing">
-        <ErrorNote error={error} />
+        <ErrorNote error={error ?? payAction.error} />
         <Spinner />
       </Page>
     );
@@ -127,7 +132,7 @@ export default function PortalBilling() {
 
   return (
     <Page title="Billing">
-      <ErrorNote error={error} />
+      <ErrorNote error={error ?? payAction.error} />
       <SuccessNote message={notice} />
       {customers.map((c) => {
         const summary = pm[c.id];

@@ -33,6 +33,7 @@ import {
 } from "../lib/api";
 import { SERVICE_CATALOG } from "../../../web/amplify/functions/shared/serviceCatalog";
 import { fmtDate, fmtDateTime, money, todayEastern } from "../lib/format";
+import { useAction } from "../lib/useAsync";
 import { daysPastDue } from "../lib/aging";
 import { isManualSettled } from "../lib/deposits";
 import { dunningStateLabel, isOverdue } from "../lib/recovery";
@@ -2051,34 +2052,28 @@ function RefundSheet({
   const [amount, setAmount] = useState((remaining / 100).toFixed(2));
   const [reason, setReason] = useState("");
   const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const cents = Math.round(parseFloat(amount) * 100);
   const validAmount = Number.isFinite(cents) && cents > 0 && cents <= remaining;
 
+  const refund = useAction(async () => {
+    const res = opResult<{ refundedNowCents?: number; sentToStripe?: boolean }>(
+      await api().mutations.refundInvoice({
+        invoiceId: invoice.id,
+        amountCents: cents,
+        reason: reason.trim(),
+      })
+    );
+    await onDone(
+      res?.sentToStripe === false
+        ? `Recorded a ${money(cents)} refund — no card was charged for this invoice, so nothing was sent to Stripe.`
+        : `Refunded ${money(cents)} to ${customer.displayName}. It reaches their account in 5–10 days.`
+    );
+  }, "Could not refund this invoice");
+
+  // A refund cannot be undone, so a second click must not send a second one.
   const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<{ refundedNowCents?: number; sentToStripe?: boolean }>(
-        await api().mutations.refundInvoice({
-          invoiceId: invoice.id,
-          amountCents: cents,
-          reason: reason.trim(),
-        })
-      );
-      await onDone(
-        res?.sentToStripe === false
-          ? `Recorded a ${money(cents)} refund — no card was charged for this invoice, so nothing was sent to Stripe.`
-          : `Refunded ${money(cents)} to ${customer.displayName}. It reaches their account in 5–10 days.`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not refund this invoice");
-      setConfirming(false);
-    } finally {
-      setBusy(false);
-    }
+    if (!(await refund.run())) setConfirming(false);
   };
 
   if (confirming) {
@@ -2100,8 +2095,8 @@ function RefundSheet({
         <p className="muted small" style={{ margin: 0 }}>
           Reason: {reason.trim()}
         </p>
-        <ErrorNote error={error} />
-        <Button block variant="danger" loading={busy} onClick={() => void submit()}>
+        <ErrorNote error={refund.error} />
+        <Button block variant="danger" loading={refund.busy} onClick={() => void submit()}>
           Yes, refund {money(cents)}
         </Button>
         <Button block variant="subtle" onClick={() => setConfirming(false)}>
@@ -2136,7 +2131,7 @@ function RefundSheet({
           placeholder="Tech couldn't access the property"
         />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={refund.error} />
       <Button
         block
         disabled={!validAmount || !reason.trim()}
@@ -2176,8 +2171,6 @@ function ChargeCardSheet({
   const [description, setDescription] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [retyped, setRetyped] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   // One idempotency token per sheet open: accidental retries/double-taps
   // collapse to a single charge; a fresh sheet open charges again.
   const [idemToken] = useState(() => crypto.randomUUID());
@@ -2188,28 +2181,26 @@ function ChargeCardSheet({
   const retypeOk =
     !needsRetype || Math.round(parseFloat(retyped) * 100) === cents;
 
+  // The idempotency token already collapses a duplicate that REACHES Stripe;
+  // the gate stops the second request being made at all.
+  const charge = useAction(async () => {
+    const res = opResult<{ status?: string }>(
+      await api().mutations.chargeManualAmount({
+        customerId: customer.id,
+        amountCents: cents,
+        description: description.trim(),
+        idempotencyKey: idemToken,
+      })
+    );
+    await onDone(
+      res?.status === "succeeded"
+        ? `Charged ${money(cents)} to ${cardLabel ?? "the card on file"}`
+        : `Charge submitted for ${money(cents)} — the status updates when it settles`
+    );
+  }, "Could not charge the card");
+
   const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = opResult<{ status?: string }>(
-        await api().mutations.chargeManualAmount({
-          customerId: customer.id,
-          amountCents: cents,
-          description: description.trim(),
-          idempotencyKey: idemToken,
-        })
-      );
-      await onDone(
-        res?.status === "succeeded"
-          ? `Charged ${money(cents)} to ${cardLabel ?? "the card on file"}`
-          : `Charge submitted for ${money(cents)} — the status updates when it settles`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not charge the card");
-      setConfirming(false);
-      setBusy(false);
-    }
+    if (!(await charge.run())) setConfirming(false);
   };
 
   if (!hasPaymentMethod) {
@@ -2258,11 +2249,11 @@ function ChargeCardSheet({
             />
           </Field>
         ) : null}
-        <ErrorNote error={error} />
+        <ErrorNote error={charge.error} />
         <Button
           block
           variant="danger"
-          loading={busy}
+          loading={charge.busy}
           disabled={!retypeOk}
           onClick={() => void submit()}
         >
@@ -2298,7 +2289,7 @@ function ChargeCardSheet({
           placeholder="Extra visit — wasp nest follow-up"
         />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={charge.error} />
       <Button
         block
         disabled={!validAmount || !description.trim()}
@@ -2338,8 +2329,6 @@ function RecordPaymentSheet({
   const [status, setStatus] = useState<"PAID" | "OPEN">("PAID");
   const [terms, setTerms] = useState<InvoiceTerms>("DUE_ON_RECEIPT");
   const [poNumber, setPoNumber] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const cents = Math.round(parseFloat(amount) * 100);
   const validAmount = Number.isFinite(cents) && cents > 0;
@@ -2347,32 +2336,27 @@ function RecordPaymentSheet({
   // sees, before saving, exactly when the customer's clock runs out.
   const dueDate = dueDateForTerms(terms, todayEastern());
 
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      unwrap(
-        await recordOfflinePayment({
-          customerId: customer.id,
-          amountCents: cents,
-          description: description.trim(),
-          status,
-          method: status === "PAID" ? method : undefined,
-          terms: status === "OPEN" ? terms : undefined,
-          poNumber:
-            status === "OPEN" && poNumber.trim() ? poNumber.trim() : undefined,
-        })
-      );
-      await onDone(
-        status === "PAID"
-          ? `Recorded ${money(cents)} received by ${method.toLowerCase()}`
-          : `Raised a ${money(cents)} invoice — due ${fmtDate(dueDate, true)}`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not record the payment");
-      setBusy(false);
-    }
-  };
+  // Without the gate a double-click recorded the same cheque twice, which the
+  // books then had to be corrected for by hand.
+  const record = useAction(async () => {
+    unwrap(
+      await recordOfflinePayment({
+        customerId: customer.id,
+        amountCents: cents,
+        description: description.trim(),
+        status,
+        method: status === "PAID" ? method : undefined,
+        terms: status === "OPEN" ? terms : undefined,
+        poNumber:
+          status === "OPEN" && poNumber.trim() ? poNumber.trim() : undefined,
+      })
+    );
+    await onDone(
+      status === "PAID"
+        ? `Recorded ${money(cents)} received by ${method.toLowerCase()}`
+        : `Raised a ${money(cents)} invoice — due ${fmtDate(dueDate, true)}`
+    );
+  }, "Could not record the payment");
 
   return (
     <div className="form-grid">
@@ -2440,12 +2424,12 @@ function RecordPaymentSheet({
           placeholder="Extra visit — wasp nest follow-up"
         />
       </Field>
-      <ErrorNote error={error} />
+      <ErrorNote error={record.error} />
       <Button
         block
-        loading={busy}
+        loading={record.busy}
         disabled={!validAmount || !description.trim()}
-        onClick={() => void submit()}
+        onClick={() => void record.run()}
       >
         {status === "PAID" ? `Record ${validAmount ? money(cents) : "payment"} received` : "Raise invoice"}
       </Button>
@@ -2474,36 +2458,22 @@ function SettleInvoiceSheet({
     "CHEQUE"
   );
   const [reference, setReference] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const note = [
-        `Received by ${method.toLowerCase()}`,
-        reference.trim(),
-      ]
-        .filter(Boolean)
-        .join(" — ");
-      unwrap(
-        await settleInvoice({
-          invoiceId: invoice.id,
-          method: "OFFLINE",
-          note,
-        })
-      );
-      await onDone(
-        `Marked ${money(invoice.amountCents)} paid — received by ${method.toLowerCase()}`
-      );
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Could not settle this invoice"
-      );
-      setBusy(false);
-    }
-  };
+  const settle = useAction(async () => {
+    const note = [`Received by ${method.toLowerCase()}`, reference.trim()]
+      .filter(Boolean)
+      .join(" — ");
+    unwrap(
+      await settleInvoice({
+        invoiceId: invoice.id,
+        method: "OFFLINE",
+        note,
+      })
+    );
+    await onDone(
+      `Marked ${money(invoice.amountCents)} paid — received by ${method.toLowerCase()}`
+    );
+  }, "Could not settle this invoice");
 
   return (
     <div className="form-grid">
@@ -2533,8 +2503,8 @@ function SettleInvoiceSheet({
           placeholder="Cheque #1042"
         />
       </Field>
-      <ErrorNote error={error} />
-      <Button block loading={busy} onClick={() => void submit()}>
+      <ErrorNote error={settle.error} />
+      <Button block loading={settle.busy} onClick={() => void settle.run()}>
         Mark {money(invoice.amountCents)} paid
       </Button>
     </div>
