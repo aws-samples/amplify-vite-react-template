@@ -161,7 +161,6 @@ export default function Team({ profile }: { profile: UserProfile }) {
             {inviteStatus.busy ? "Inviting…" : "Send invite"}
           </button>
           <SaveStatus {...inviteStatus.status} />
-          {team.error && <span className="error-text">{team.error}</span>}
         </div>
         <p className="muted small" style={{ marginBottom: 0 }}>
           Producers complete their licensing details during first sign-in.
@@ -175,6 +174,8 @@ export default function Team({ profile }: { profile: UserProfile }) {
         <h2>Team members</h2>
         {!team.loaded ? (
           <p className="muted small">Loading…</p>
+        ) : team.error ? (
+          <p className="error-text">{team.error}</p>
         ) : users.length === 0 ? (
           <p className="muted small">No users found.</p>
         ) : (
