@@ -1,16 +1,21 @@
 # INVENTORY
 
-Read-only audit of `HOAInsuranceAgency` @ `9a8d055` (branch `staging`).
+Read-only audit of `HOAInsuranceAgency` @ `f0e07b6` (branch `staging`).
 Scope: `crm/` (React SPA + Amplify Gen2), `web/` (Astro + React islands), `shared/`.
-136 tracked `.ts`/`.tsx`/`.astro` files, 24,288 lines. No code was changed.
+140 tracked `.ts`/`.tsx`/`.astro` files, 25,493 lines. No code was changed.
 
-Context: Waves 0–5 (commits `acd6514`..`3a406f8`) built the shared primitives
-(`useFormState`, `useSort`, `useTextFilter`, `useAsyncResource`, `SaveStatus`, `Modal`,
-`ConfirmButton`, `badges`, `formCodec`, `storage`, `pagination`, `shared/agency`) and split
-the largest files. This pass audits the post-cleanup state. **The dominant finding is
-adoption, not absence:** the primitives exist, are tested, and are correct; three of them
-have zero production callers, and the remaining duplication is call sites that never
-migrated.
+Supersedes the audit at `9a8d055`. Four of that pass's top five findings have since been
+remediated (`d1b2e2a` enums, `c464605` backend typecheck, `a7c22a8` read path, `f0e07b6`
+cascade delete), and `docs/audit/PATTERNS.md` records the resulting conventions. Verified
+closed: **0** hand-rolled read triads remain (33 `useAsyncResource` sites, 0 surviving
+`.then(setX)` fetches); `enums.ts` ↔ `resource.ts` have **no** drift and are compile-enforced;
+`crm/amplify/**` is type-checked before deploy; `Account`/`Quote`/`Document` delete is
+group-gated.
+
+**The dominant finding is unchanged in kind: adoption, not absence.** Three primitives remain
+built, tested, and called by nothing, against ~100 live hand-rolled call sites. Two new
+categories have moved up: the write path (`{data, errors}`) has no primitive at all, and `web/`
+has received none of the consolidation `crm/` has had.
 
 ---
 
@@ -20,731 +25,748 @@ Ranked by blast radius × how often it produces an inconsistency.
 
 | # | Finding | Blast radius | Inconsistency rate | § |
 |---|---|---|---|---|
-| 1 | Schema enums hand-copied into app code; only `QuoteStatus` is compiler-guarded | 19 of 21 enums, both apps + Lambdas | Every enum edit; already drifted 4× | 4.1 |
-| 2 | `crm/amplify/**` is outside every typecheck the repo runs | 7 Lambda handlers, all backend logic | Silent on every backend edit | 4.6 |
-| 3 | 25 hand-rolled read triads with no error/cancel path vs `useAsyncResource` | 13 files, ~27 read sites | Every failed read renders as empty or hangs | 1.1 |
-| 4 | Cascade lead delete gated client-side only; `Account`/`Quote`/`Document` are `allow.authenticated()` | Whole data model | Always exploitable | 1.3 |
-| 5 | `storage.ts`, `useTextFilter.tsx`, `formCodec.ts` — built, tested, zero callers | 559 src + 936 test lines dead; 3 upload copies, 3 filter copies, ~79 coercions live | Every new upload/filter/coercion | 3.1 |
-| 6 | `notes` is the de-facto untyped overflow schema on the web→CRM boundary | 5 senders, 1 handler, 8 dropped columns | Every web lead | 4.5 |
-| 7 | Three `{ok:false,error}` payloads read as success | `submitWebLead`, `startLeadExtraction`, `reserveCertificateNumber` | Every backend-rejected write | 4.4 |
-| 8 | `fmtDate` timezone discriminator; `.slice(0,10)` repeated at 6 call sites | ~20 date renders | Every timestamp render for US users | 1.4 |
-| 9 | 12 bare `.list()` calls bypass `listAllPages` | 12 list views | At 100+ rows per table | 1.2 |
-| 10 | Document upload orchestration duplicated 3× | 3 write paths, S3 + DynamoDB | Every upload; bypasses path validation | 1.6 |
-| 11 | No `<Field>`; CRM has zero `<form>` and zero `htmlFor` | ~150 field blocks, 12 forms | Every form; all inaccessible | 5.3 |
-| 12 | `useFormState`+`useSaveStatus` handshake wired by hand, forgotten at 6 of 12 sites | 12 CRM forms | Stale "Saved." on 6 forms | 1.5 |
-| 13 | Three money shapes for one dollar amount | Screen / ACORD / PDF | Every premium render | 1.4 |
-| 14 | 9 mutations discard the `errors` array | 9 write sites | Every failed write shows success | 1.1 |
-| 15 | `US_STATES` checkbox/select grid duplicated 6× | 6 forms | Every state-list change | 5.4 |
-| 16 | gtag conversion block duplicated 4×, same `send_to` | 4 web forms | 1 of 5 forms missing it entirely | 1.7 |
-| 17 | Google Places loader duplicated 3× | 2 apps | `web`'s two copies lack single-flight dedupe | 1.7 |
-| 18 | Appetite-match rule implemented twice, already divergent | Dashboard + nightly sweep | Handler filters `linesWritten`; browser does not | 1.8 |
-| 19 | Tolerant `JSON.parse` decoder duplicated 3× | OCR tables | Every OCR read | 1.9 |
-| 20 | `Celebration` bypasses `Modal`; no focus trap/Escape, stacks above previews | 1 overlay | Whenever a lead converts | 1.10 |
-| 21 | No toast/aria-live anywhere; `.error-text` hand-rendered at ~30 sites | Both apps | Every error, for screen readers | 5.1 |
-| 22 | 29 bespoke empty/loading states; 3 list pages have neither | 12 list views | Failed fetch indistinguishable from empty | 5.2 |
-| 23 | `carrierName` lookup duplicated 5× | 5 list views | Every carrier-name render | 1.11 |
-| 24 | ACORD producer/insured header block written twice | 2 eForm fillers | Every agency-identity change | 1.12 |
-| 25 | Dead assets, phantom env vars, stray script, unused deps | 2.6 MB + 4 env vars | Static | 3.3–3.6 |
+| 1 | `storage.ts`, `formCodec.ts`, `useTextFilter.tsx` — built, tested, **zero callers** | 559 src + 936 test lines dead; ~100 live hand-rolled sites | Every upload, form write, filter | 1.1 |
+| 2 | No `unwrap({data,errors})`; 36 sites in 3 spellings, 10 non-throwing | 24 files | Every failed write | 1.2 |
+| 3 | 18 bare `.list()` bypass `listAllPages` | 12 files | Silently, at 100+ rows | 1.3 |
+| 4 | `web` lead pipeline hand-rolled 5×; 4 of 5 misread FormSubmit's `200 {"success":"false"}` | 5 forms | Every rejected web lead reports success | 1.4 |
+| 5 | Quote wizard's state select omits NY and OK while the site markets and prefills both | 1 select, 2 states | Every NY/OK visitor | 4.4 |
+| 6 | Loading/error/empty ladder written out 12×; `Team.tsx:176` has **no error branch** | 12 list views | Failed read renders "No users found." | 5.1 |
+| 7 | Extraction field catalogue hand-copied 3× across the Lambda boundary | 25 keys | Every schema/field change | 4.2 |
+| 8 | `web/` has no typecheck at all — `astro build` does not check types | All of `web/src` | Silent on every `web` edit | 4.7 |
+| 9 | `shared/agency.ts` unadopted in `web`: 13 literals, **3 spellings of one phone number** | 4 files | Every agency-detail edit | 1.9 |
+| 10 | `Quote` and `Policy` duplicate 20 columns; `CoverageForm` casts across the union unguarded | 2 models, 1 shared form | Every coverage save | 4.3 |
+| 11 | Carrier/entity name lookup duplicated 9× in 2 shapes (Map vs O(n) `.find`) | 7 files | Every carrier-name render | 1.6 |
+| 12 | gtag conversion block duplicated 4×; `ContactForm` fires **none** | 4 tsx + 4 astro | 1 of 5 forms never converts | 1.5 |
+| 13 | `TeamUser` consumer drops `status`/`enabled` the producer sends | 1 screen | Unconfirmed users render as active | 4.1 |
+| 14 | Google Places loader 3×; `InstantAssessment` lacks the no-key guard | 3 files, 2 apps | Whenever the key is unset | 1.7 |
+| 15 | Quote-wizard labels declared twice; **5 of 21 members already disagree** | 2 files, 12 uses | Every quote submission | 1.8 |
+| 16 | `fmtDate` mis-parses timestamps; 5 call sites pre-slice by hand | ~20 date renders | Every timestamp render | 1.10 |
+| 17 | `(x ?? []).filter(Boolean).join(", ") \|\| "—"` — 29 sites, varying separator/fallback | 12 files | Every list-cell render | 1.11 |
+| 18 | `client.ts` is a 420-line grab-bag of 8 unrelated concerns; `US_STATES` drags in `generateClient()` | 8 consumers + 2 test stubs | Static | 2.3 |
+| 19 | 4 validators + 2 types dead; ~30 over-exports; 4 unused `crm` deps | ~160 lines | Static | 3.2–3.4 |
+| 20 | `AllMarketingTasks` (a route) and `bind()` (the Quote→Policy transition) live inside component files | 2 files | Static | 2.2 |
+| 21 | Tolerant `a.json()` decoder duplicated 3×; `Team.tsx` omits the double-parse | 3 sites | On a double-encoded response | 1.12 |
+| 22 | 2 deletes discard `errors` and drop the row anyway; 5 storage deletes swallow silently | 7 sites | Every refused delete | 1.13 |
+| 23 | `auth.ts:13` `Role` re-types `UserRole` — documented as deliberate, enforced by nothing | 1 type | On a role change | 4.5 |
+| 24 | ACORD producer/insured header written twice; success panel written twice | 4 files | Every agency-identity change | 1.14 |
+| 25 | Committed live Buildium credentials (**carried over, still present**) | Credential | Static until rotated | 6.1 |
 
 ---
 
 ## 1. DUPLICATE IMPLEMENTATIONS
 
-### 1.1 Data fetching — read path
+### 1.1 Three canonical modules with zero callers
 
-| Implementation | Location | Call sites |
+The highest-leverage cluster in the repo. Each module is complete, documented, and covered by
+a substantial test suite; each has a worse hand-rolled counterpart shipping in production.
+
+| Module | Src | Test | Verification |
+|---|---|---|---|
+| `crm/src/lib/storage.ts` | 313 | 400 | Only importer is `storage.test.ts:34` |
+| `crm/src/lib/useTextFilter.tsx` | 149 | 382 | Zero references outside its own test |
+| `crm/src/lib/formCodec.ts` | 97 | 154 | 2 references, both comments declining to use it |
+
+**1.1a — S3 upload / download / delete.** `crm/src/lib/storage.ts` has 0 production imports;
+12 files import `aws-amplify/storage` directly instead.
+
+| Job | Canonical (0 sites) | Live implementations |
 |---|---|---|
-| `useAsyncResource` | `crm/src/lib/useAsyncResource.ts:80` | 10 sites / 7 files |
-| Raw `useState` + `useEffect` + `.then(setX)` | 13 files | 25 reads |
-| `observeQuery` subscription | `crm/src/components/DocumentsPanel.tsx:55` | 1 |
-| 4s polling loop | `crm/src/components/ExtractionPanel.tsx:171` | 1 |
-| Lazy Lambda client prologue (verbatim ×4) | `lead-intake/handler.ts:15`, `process-document/handler.ts:34`, `extract-lead/handler.ts:21`, `renewal-tasks/handler.ts:19` | 4 |
+| Upload a blob | `storage.ts:110` `uploadFile` | 7 raw `uploadData`: `FormsTab.tsx:139`, `SignatureManager.tsx:60`, `DocumentsPanel.tsx:85`, `property/PhotosCard.tsx:34`, `Settings.tsx:105`, `NewLead.tsx:102`, `CertificatesTab.tsx:145` |
+| Row → upload → link | `storage.ts:164` `uploadDocument` | `DocumentsPanel.tsx:63-101`, `NewLead.tsx:84-112` |
+| Download to a tab | `storage.ts:253` `downloadFile` | 3 byte-identical: `DocumentsPanel.tsx:103-106`, `DocumentSearch.tsx:61-64`, `CertificatesTab.tsx:193-197` |
+| Delete an object | `storage.ts:294` `deleteFile` | 5 `remove(...).catch(() => {})`: `DocumentsPanel.tsx:112`, `PhotosCard.tsx:44,55`, `SignatureManager.tsx:97`, `DeleteLeadZone.tsx:76` |
 
-Hand-rolled sites, none with an error state or cancellation:
-`Dashboard.tsx:25-55` (6 queries, one effect) · `Carriers.tsx:28` · `PoliciesList.tsx:15` ·
-`QuotesList.tsx:16` · `CarrierDetail.tsx:11` · `AccountDetail.tsx:51` ·
-`account/CertificatesTab.tsx:49` · `carrier/AppetiteGuides.tsx:19` · `FormsTab.tsx:47` ·
-`property/BuildingsCard.tsx:31` · `MarketingTasks.tsx:328` · `licensing/LegacyBackfill.tsx:39` ·
-`FilePreview.tsx:32` · `SignatureManager.tsx:36` · `property/PhotosCard.tsx:120` ·
-`Settings.tsx:69` · `ExtractionPanel.tsx:171`.
+- **Most used:** raw `aws-amplify/storage` — 12 files, ~17 call sites.
+- **Most correct:** `storage.ts`. It is the only version that checks the path prefix
+  (`assertGrantedPath:58`, against `GRANTED_PREFIXES:48`), sanitizes the filename segment
+  (`safeSegment:81`), orders record-then-upload with ghost cleanup, distinguishes a blocked
+  popup from a failed download, and returns delete failures instead of swallowing them.
+  `NewLead.tsx:84-112` in particular does not delete the ghost row on failure, and interpolates
+  `file.name` unsanitized into the S3 key.
+- **Canonical:** `crm/src/lib/storage.ts`. Blast radius: 8 files, ~17 call sites.
 
-Five use "data is still null" as the loading gate, so a failed read shows `Loading…`
-permanently: `CarrierDetail.tsx:18`, `AccountDetail.tsx:60`, and the three above it.
+**1.1b — Form-value ↔ column coercion.** `formCodec.ts` has 0 production imports.
 
-Mutations that discard `errors` entirely (write fails, UI shows success):
-`QuotesPanel.tsx:329`, `MarketingTasks.tsx:61`, `SignatureManager.tsx:100`,
-`property/PhotosCard.tsx:40,56`, `NewLead.tsx:81,96`, `account/CertificatesTab.tsx:89`.
-`if (errors?.length) throw …` appears 33× across 22 files — three times inside one function
-at `CoverageForm.tsx:155,162,169`.
-
-- **Most used:** bare `client.models.*` + `.then()` — 96 call sites / 34 files.
-- **Most correct:** `useAsyncResource` — guarantees an error state (`:146`), clears loading in
-  `finally` (`:147`), drops superseded responses via a monotonic ticket (`:127,142,148`) and
-  post-unmount writes (`:117`), normalizes through `friendlyError`, returns a non-rejecting
-  `refetch` (`:155`).
-- **Canonical:** `useAsyncResource` for all reads; add an `unwrap({data,errors})` helper for
-  writes; extract the Lambda client prologue into a shared module beside `pagination.ts`
-  (which already establishes the no-imports-shareable pattern at `pagination.ts:13`).
-
-### 1.2 Pagination
-
-`listAllPages` (`crm/src/lib/pagination.ts:17`) — 20 browser sites + 7 Lambda sites.
-Bypassed by 12 bare `.list()` calls that stop at the first DynamoDB page:
-`QuotesList.tsx:23-25`, `PoliciesList.tsx:21-23`, `Carriers.tsx:29-30`, `Dashboard.tsx:46-47`,
-`Licensing.tsx:39,45`, `Team.tsx:65`, `CertificatesTab.tsx:62`, `QuotesPanel.tsx:93`,
-`PoliciesTab.tsx:43`, `AccountsList.tsx:36`, `LegacyBackfill.tsx:40`.
-The unpaged **Carrier** list specifically is repeated at 7 of those sites.
-No UI paging exists anywhere; every list renders all rows.
-
-- **Canonical:** `listAllPages` everywhere; a shared `useCarriers()` for the 7-way repeat.
-
-### 1.3 Auth / permission checks
-
-| Mechanism | Location | Call sites |
+| Impl | Location | Sites |
 |---|---|---|
-| Cognito groups (the only enforced source) | `crm/src/lib/auth.ts:23` `fetchUserGroups` | 1 (`App.tsx:82`) |
-| `isAdminGroup` / `roleFromGroups` | `auth.ts:36,44` | `App.tsx:134,127` |
-| `useIsAdmin()` context | `auth.ts:57` | 3: `Settings.tsx:21`, `Licensing.tsx:31`, `DeleteLeadZone.tsx:22` |
-| `UserProfile.role` | `resource.ts:405` | Display only — **no code gates on it** (`App.tsx:281`, `Team.tsx:118,208`) |
-| AppSync `@auth` rules | `crm/amplify/data/resource.ts` | per model |
+| Canonical `str` / `num` / `inputValue` | `formCodec.ts:58`, `:78`, `:95` | **0** |
+| `x.trim() \|\| null` inline | 8 files | **36** |
+| `x.trim() \|\| undefined` inline | 6 files | **17** |
+| `x ? Number(x) : null \| undefined` inline | 5 files | **19** |
+| File-local `num` re-declaration | `CoverageForm.tsx:27`, `AppetiteGuides.tsx:198` | 24 in-file uses |
+| File-local `str` re-declaration | `CoverageForm.tsx:31`, `AppetiteGuides.tsx:166` | 21 in-file uses |
 
-Correctly paired client + server: `Settings.tsx:28,64` ↔ `resource.ts:520,526`;
-`Licensing.tsx:195,214` ↔ `resource.ts:481-484`.
+- **Most used:** inline coercion — 72 write-side sites across 11 files.
+- **Most correct:** `formCodec`. The two file-local `num` copies return `NaN` for unparseable
+  input where the canonical returns `null`, and write it into `a.float()` columns. The
+  `|| undefined` variants are a no-op on an Amplify `update`, so a blanked field silently keeps
+  its old value — `formCodec.ts:23-27` documents this bug class and names `Onboarding.tsx:91`,
+  which is still present. Note the naming collision: the local `str` (column → input) runs the
+  opposite direction from `formCodec.str` (input → column); `CoverageForm.tsx:29` flags this.
+- **Canonical:** `crm/src/lib/formCodec.ts`. Blast radius: ~72 write sites / 11 files.
 
-**Client-only, no server counterpart** — verified: `Account`, `Quote` and `Document` declare
-no `.authorization()` block, so they inherit the schema default `allow.authenticated()`
-(`resource.ts:564`), which permits delete.
+**1.1c — Text filtering.** `useTextFilter.tsx` has 0 references outside its own test.
 
-- `crm/src/pages/account/DeleteLeadZone.tsx:59` — `if (!isAdmin) return null` is the only gate
-  on a cascade that deletes Quote (`:37`), Document + S3 object (`:50`) and Account (`:54`).
-  Any signed-in STAFF user can perform the same deletes through the API. The file comment
-  (`:16-19`) asserts the gate "can't be rendered without the check coming with it" — true of
-  the UI, not of the data.
-- `crm/src/components/Licensing.tsx:126` — `LegacyBackfill` admin-gated; `License` create is
-  authenticated-open (`resource.ts:482`).
-- `crm/amplify/storage/resource.ts:~68` — `signatures/*` writable by any authenticated user at
-  a predictable key; signatures are stamped onto issued ACORD certificates. Already marked a
-  KNOWN GAP in-file.
-- `crm/amplify/auth/resource.ts:14` — comment "privileges are not enforced yet" is stale;
-  they are enforced at `resource.ts:483,520,526`.
-- `crm/amplify/functions/team-admin/handler.ts:129-149` — no role check inside the Lambda;
-  trusts AppSync. `invokedBy` (`:132`) is logged only.
-
-- **Canonical:** a `deleteLead` custom mutation behind `allow.groups(["ADMIN"])`, plus a
-  `<RequireAdmin>` wrapper so the client gate and the model rule are introduced together.
-  Today `useIsAdmin()` is spot-checked in three different shapes (`return null`, tab-array
-  splice, `canEdit` prop) with no convention linking either half.
-
-### 1.4 Date & money formatting
-
-**Date — 5 app implementations, 3 Lambda:**
-
-| | Location | Output |
+| Impl | Location | Memoised |
 |---|---|---|
-| `fmtDate` | `crm/src/lib/client.ts:129` | `8/2/2026`, `—` when falsy |
-| `fmtDateTime` | `client.ts:422` | `8/2/2026, 3:04 PM` |
-| `fmtUs` | `acordFormat.ts:16` | as `fmtDate`, `""` when absent |
-| `todayUs` | `acordFormat.ts:34` | local Y/M/D → `fmtDate` |
-| Inline `Intl` | `web/src/components/quote/submission.ts:58` | `Sunday, August 2, 2026 at 3:04 PM` |
-| `isoDay`/`addDays` | `renewal-tasks/handler.ts:31` | `2026-08-02`, UTC |
-| `getUTCFullYear` + pad | `cert-number/handler.ts:32,48` | `HOA-2026-00042` |
+| Canonical `useTextFilter` / `FilterInput` | `useTextFilter.tsx:76`, `:132` | ✅ / **0 sites** |
+| Inline predicate | `AccountsList.tsx:58-65` | ❌ |
+| Inline predicate | `MarketingTasks.tsx:353-360` | ❌ |
+| Inline predicate + second dimension | `Licensing.tsx:65-84` | ✅ |
 
-`fmtDate` is used at ~20 sites; `fmtDateTime` at exactly one (`FormsTab.tsx:254`).
+Search-input markup is tripled alongside it: `AccountsList.tsx:97-101` (no `type="search"`, no
+aria-label), `MarketingTasks.tsx:384-390`, `Licensing.tsx:153-159`.
 
-Correctness:
-- `client.ts:131` — the `d.length === 10` discriminator means a **timestamp** is parsed as a
-  UTC instant and rendered on the viewer's local calendar, shifting a day for US users. Six
-  call sites work around it by hand-slicing first, repeating `.slice(0,10)` verbatim:
-  `Team.tsx:234`, `DocumentSearch.tsx:155`, `AccountDetail.tsx:75`, `CertificatesTab.tsx:307`,
-  `MarketingTasks.tsx:303`. The guard is call-site discipline, not the function's.
-- `client.ts:131` renders the literal `Invalid Date` for a malformed 10-char string;
-  `fmtDateTime:425` returns `—` for the same input.
-- `acordApp.ts:181-184` — local parse → `+1 year` → `.toISOString()` (UTC). Off by one day for
-  UTC+X.
-- `Dashboard.tsx:260-273` — `from` uses local year (`:266`), `to` uses UTC day (`:261`); on
-  Dec 31 local / Jan 1 UTC the YTD range spans 12 months + 1 day.
-- `ExtractionPanel.tsx:124-129` renders raw ISO in a table whose sibling columns use `fmtDate`.
-- `MarketingTasks.tsx:50` uses UTC deliberately to match the sweep — documented, not a bug.
-- `client.ts:392` `daysUntil` — exact civil-day subtraction against local today; correct.
+- **Most correct:** `useTextFilter` — the only memoised version whose `where` slot covers
+  Licensing's second dimension. The two unmemoised copies re-invalidate the downstream
+  `useSort` memo every render.
+- **Canonical:** `crm/src/lib/useTextFilter.tsx`. Blast radius: 3 files, 6 sites.
 
-**Money — 3 shapes for one amount:**
-`fmtMoney` (`client.ts:124`) → `$11,000`, cents rounded away, ~15 sites ·
-`amt` (`acordFormat.ts:27`) → `1,000,000`, **no `$`** ·
-`acordApp.ts:225` → `toFixed(2)` → `12345.00`, **no separators**, three lines from `fmtUs` calls.
-KB formatting duplicated byte-for-byte: `DocumentsPanel.tsx:250` ↔ `NewLead.tsx:263`.
-**Percent has no shared formatter** — 4 inline unrounded sites (`Carriers.tsx:142`,
-`QuotesPanel.tsx:31,45`, `Dashboard.tsx:437`); a stored `12.345` renders `12.345%`.
+### 1.2 Write path — `{ data, errors }` handling
 
-- **Canonical:** `fmtDate` with the `.slice(0,10)` folded in and an `Invalid Date` guard;
-  `fmtMoney` for all screen money; add `fmtPercent`; `acordFormat` keeps its `""`-not-`—`
-  variants for PDF only.
+Amplify resolves rather than rejects, so every mutation hand-rolls the guard. **36 sites across
+24 files, in three mutually inconsistent spellings, with no primitive.**
 
-### 1.5 Form state
+| Spelling | Sites |
+|---|---|
+| `if (errors?.length) throw new Error(errors[0].message)` | `CoverageForm.tsx:146,153,160`, `QuotesPanel.tsx:108`, `ExtractionPanel.tsx:204`, `DocumentsPanel.tsx:117`, `BuildingsCard.tsx:81`, `Team.tsx:53,89`, `DeleteLeadZone.tsx:84`, `CertificatesTab.tsx:96` |
+| `if (errors?.length \|\| !data) throw new Error(errors?.[0]?.message)` | `MarketingTasks.tsx:154,177`, `ExtractionPanel.tsx:243`, `SignatureManager.tsx:67`, `DocumentsPanel.tsx:80`, `DetailsCard.tsx:99`, `BuildingsCard.tsx:62`, `Carriers.tsx:66`, `Onboarding.tsx:93`, `PoliciesTab.tsx:56`, `OverviewTab.tsx:79`, `CarrierForm.tsx:76` |
+| Non-throwing / ignored | `FormsTab.tsx:158`, `LicenseForm.tsx:99`, `LegacyBackfill.tsx:97`, `storage.ts:182`, `NewLead.tsx:75`, `AppetiteGuides.tsx:213`, `CertificatesTab.tsx:157`, `lead-intake/handler.ts:82`, `process-document/handler.ts:176`, `extract-lead/handler.ts:303` |
 
-| Approach | Location | Sites |
+- **Most used:** spelling 2 (12 sites) — which constructs `new Error(undefined)` when `data` is
+  null but `errors` is empty, yielding an empty message, rescued only by `friendlyError`'s
+  `msg || fallback` (`client.ts:196`).
+- **Most correct:** spelling 1, but only where `data` is genuinely unused afterward.
+- **Canonical:** an `unwrap({data, errors})` in `crm/src/lib/client.ts` beside `friendlyError`
+  — or in `pagination.ts` if the three Lambda sites must share it without pulling in
+  `generateClient()`. Blast radius: **36 sites / 24 files.**
+
+### 1.3 Reading a whole table
+
+| Impl | Location | Sites |
 |---|---|---|
-| `useFormState` | `crm/src/lib/useFormState.ts:137` | 12, all CRM |
-| Per-field `useState` | — | 7 (all of `web/` + `QuotesPanel.tsx:279`, `MagicLinkSignIn.tsx:15`) |
-| Schema/flow-driven | `web/src/components/quote/schema.ts:46` | 1 (`QuoteApp.tsx:134`) |
-| Uncontrolled (file/Places refs) | `FileButton.tsx:41`, `googlePlaces.tsx:54` | 3 |
+| `listAllPages(...)` | `crm/src/lib/pagination.ts:17` | **22** |
+| `(await client.models.X.list()).data` — one page, default 100 rows | 12 files | **18** |
 
-`useFormState` + `useSaveStatus` are always paired but wired by hand via
-`{ onEdit: saveStatus.markDirty }` — present at 6 sites (`CarrierForm.tsx:36`,
-`DetailsCard.tsx:49`, `BuildingsCard.tsx:26`, `Team.tsx:32`, `Carriers.tsx:24`,
-`OverviewTab.tsx:42`), **forgotten at 6** (`CoverageForm.tsx:93`, `LicenseForm.tsx:49`,
-`NewLead.tsx:11`, `Onboarding.tsx:52`, `AppetiteGuides.tsx:165`, `CertificatesTab.tsx:38`),
-which then hand-roll `saving`/`error` and get no ARIA and no stale-"Saved." retraction.
+Single-page sites: `QuotesPanel.tsx:93`, `Licensing.tsx:39,44`, `LegacyBackfill.tsx:45`,
+`Dashboard.tsx:82,83`, `Team.tsx:66`, `Carriers.tsx:28,38`, `QuotesList.tsx:21,30,37`,
+`AccountsList.tsx:36`, `CertificatesTab.tsx:62`, `PoliciesList.tsx:19,30,37`, `PoliciesTab.tsx:44`.
 
-- **Most used:** `useFormState` + inline `if`-guards in an async `save()` + one joined error
-  banner.
-- **Most correct:** `CarrierForm.tsx` / `DetailsCard.tsx` / `OverviewTab.tsx` /
-  `BuildingsCard.tsx` — the in-flight guard is owned by the same machine that runs the
-  mutation (`SaveStatus.tsx:198`), and `SaveStatus.tsx:97` is the only ARIA-carrying error
-  surface in the repo.
-- **Canonical:** one `useForm({ initial, validate, submit })` that composes both.
+`pagination.ts:4-8` frames the problem as filter-specific, which is why every *filtered* list
+migrated and no *unfiltered* one did — an unfiltered `.list()` is page-capped identically.
+Within the 18, `async () => (await client.models.Carrier.list()).data` is written verbatim **5
+times**; `Policy.list()` 3×; `Account.list()` 2×.
 
-### 1.6 File upload / download
+- **Most used:** `listAllPages` (22) — but the 18 holdouts are all the unfiltered reads.
+- **Most correct:** `listAllPages`. **Canonical:** same, plus a no-argument `listAll(model)`
+  wrapper for the unfiltered case. Blast radius: 12 files, 18 sites.
 
-| | Location | Status |
+### 1.4 `web` lead submission pipeline
+
+Identical body — `submitCrmLead` fire-and-forget → `fetch(FORMSUBMIT_URL)` with
+`_subject`/`_template`/`_captcha`/`_replyto` → response check → gtag → `setSent(true)` → identical
+catch — hand-rolled at 5 sites:
+
+| Impl | Location | Response check |
 |---|---|---|
-| `uploadDocument` etc. | `crm/src/lib/storage.ts:154-217` | canonical, **0 callers** |
-| Inline copy | `DocumentsPanel.tsx:63-100` | live |
-| Inline copy | `NewLead.tsx:79-107` | live |
+| `sendQuoteEmail` | `web/src/components/quote/submission.ts:159-178` | Parses body, checks `json.success === true \|\| "true"` |
+| Inline | `ContactForm.tsx:27-41` | `res.ok` only |
+| Inline | `AssociationLeadForm.tsx:63-85` | `res.ok` only |
+| Inline | `InstantAssessment.tsx:112-129` | `res.ok` only |
+| Inline | `CoverageCalculator.tsx:245-261` | `res.ok` only |
 
-Both live copies hardcode `"pending"` where `storage.ts:37` exports `PENDING_KEY`, and neither
-sanitizes the filename — `NewLead.tsx:95` interpolates `file.name` straight into the S3 key,
-which breaks the OCR key parse at `process-document/handler.ts:143` for any name containing `/`.
-Neither validates the path prefix (`storage.ts:58` `assertGrantedPath`).
+- **Most used:** the `res.ok` form — 4 of 5.
+- **Most correct:** `submission.ts:159-178`. FormSubmit returns **HTTP 200 with
+  `{"success":"false"}`** on rejection, so the four `res.ok`-only variants report success on a
+  rejected submission. Three of the five also duplicate the error string
+  `"Something went wrong. Please try again or call 508-233-2261."` with the phone hardcoded
+  (`AssociationLeadForm.tsx:96`, `InstantAssessment.tsx:140`, `CoverageCalculator.tsx:271`).
+- **Canonical:** `postFormSubmit(payload)` in `web/src/lib/` (alongside the existing
+  `crmLead.ts`), carrying `submission.ts`'s body check. Blast radius: 5 files, ~90 lines.
 
-Download-and-open: `storage.ts:253` (unused, handles popup blocking) vs three live copies with
-neither error handling nor popup detection: `DocumentsPanel.tsx:104`, `DocumentSearch.tsx:62`,
-`CertificatesTab.tsx:174`.
-All 6 live delete sites swallow failures with `.catch(() => {})`: `SignatureManager.tsx:97`,
-`DocumentsPanel.tsx:112`, `PhotosCard.tsx:44,55`, `DeleteLeadZone.tsx:48`.
-12 files import `aws-amplify/storage` directly.
+Submit-state is separately re-invented 5×: `ContactForm.tsx:11` (a 4-state union),
+`AssociationLeadForm.tsx:28-30`, `InstantAssessment.tsx:49-51`, `CoverageCalculator.tsx:133-135`
+(three booleans each), `QuoteApp.tsx:105-106`. The union makes `sending && sent`
+unrepresentable; the boolean triples do not. `AssociationLeadForm.tsx:21-30` and
+`InstantAssessment.tsx:43-51` additionally hold 10 and 9 per-field `useState` calls — the
+pattern `crm`'s `useFormState` was built to replace.
 
-- **Canonical:** `crm/src/lib/storage.ts` — it is the only version that validates the prefix,
-  sanitizes segments, orders record-then-upload, cleans up ghosts, and reports delete failures.
+### 1.5 Google Ads conversion
 
-### 1.7 `web/` form submission
+Byte-identical, including `send_to: "AW-18085022517/Csp3COKBgpscELWWzq9D"`, at
+`AssociationLeadForm.tsx:87-93`, `InstantAssessment.tsx:131-137`,
+`CoverageCalculator.tsx:262-268`, `QuoteApp.tsx:229-235`. The tag id is separately hardcoded in
+4 Astro `<head>` blocks: `Layout.astro:74,79`, `quote.astro:23,28`,
+`associations/[slug].astro:52,57`, `get-started/[...slug].astro:63,68`.
 
-The FormSubmit envelope + `res.ok` check + gtag conversion block (same
-`send_to: "AW-18085022517/…"`) is copy-pasted across 5 files: `quote/submission.ts:159-178`,
-`AssociationLeadForm.tsx:63-93`, `InstantAssessment.tsx:112-137`,
-`CoverageCalculator.tsx:245-268`, `ContactForm.tsx:27-40`.
-`sendQuoteEmail` is the only one that inspects the response body.
-`ContactForm.tsx` is the only one **missing the gtag block entirely**.
+**`ContactForm.tsx` fires no conversion at all** — the copy-paste missed one of the five forms.
 
-Google Places script loader duplicated 3×: `crm/src/lib/googlePlaces.tsx:21` (has single-flight
-`loadPromise` dedupe), `CoverageCalculator.tsx:20`, `InstantAssessment.tsx:9` (neither does).
-Three separate `address_components` parsers (`googlePlaces.tsx:69` full, the other two
-state-only), and the autocomplete fill is duplicated verbatim at `NewLead.tsx:173-180` ↔
-`DetailsCard.tsx:124-131`.
+- **Canonical:** `CONVERSION_ID` + `fireConversion()` in `web/src/constants.ts` (already the
+  home of `FORMSUBMIT_URL`, `QUOTE_URL`); the Astro blocks read the id from it.
+  Blast radius: 8 files.
 
-- **Canonical:** `submitToFormSubmit(payload)` + `trackConversion()` in `web/src/lib/`;
-  promote `crm/src/lib/googlePlaces.tsx` to `shared/`.
+### 1.6 Entity-name lookup (id → display name)
 
-### 1.8 Appetite matching (client ↔ server)
-
-`crm/amplify/functions/renewal-tasks/handler.ts:117-147` `guideFits` (comment at `:116`: "Mirrors
-the Appetite Finder") vs `crm/src/pages/Carriers.tsx:182-205`. Same state fallback, same
-inverted-range normalization (`handler.ts:39` `order()` vs `Carriers.tsx:188-197` inline
-ternaries), same TIV/year bounds. **Already divergent:** the handler additionally filters on
-`linesWritten` (`:142-145`); the browser copy does not.
-
-- **Canonical:** one appetite module both sides import; both already import the same
-  `AppetiteGuide` schema type.
-
-### 1.9 Tolerant JSON decoder
-
-Double-`JSON.parse` OCR-table decoder duplicated 3×: `DocumentsPanel.tsx:369-378`,
-`ExtractionPanel.tsx:141-148`, `extract-lead/handler.ts:194-206`.
-Writer sets the field to `undefined` when >100 KB (`process-document/handler.ts:167`), which is
-indistinguishable from "no tables" on every read side.
-
-Also duplicated 3× with no shared test-util module: the `deferred<T>()` helper —
-`SaveStatus.test.tsx:10`, `useAsyncResource.test.ts:6`, `ConfirmButton.test.tsx:7`. And the
-`generateClient` stub — `client.test.ts:15` ↔ `storage.test.ts:13`.
-
-### 1.10 Modals / overlays
-
-| Impl | Location | Escape | Focus trap | Focus restore | ARIA | Scroll lock |
-|---|---|---|---|---|---|---|
-| `Modal` | `crm/src/components/Modal.tsx:108` | ✅`:68` | ✅`:87` | ✅`:75` | ✅`:112` | ❌ |
-| `FilePreviewModal` | `FilePreview.tsx:45` | inherits | inherits | inherits | inherits | ❌ |
-| `Celebration` | `Celebration.tsx:113` | ❌ | ❌ | ❌ | ❌ none | ❌ |
-| CRM sidebar drawer | `App.tsx:254-267` | ❌ | ❌ | ❌ | partial | ❌ |
-| web nav drawer | `Navbar.astro:53-67` | ❌ | ❌ | ❌ | no `aria-expanded` | ❌ |
-
-`Modal` is reached only through `FilePreviewModal` (5 render sites).
-`Celebration` (z-index 200, `styles.css:252`) stacks above `.preview-overlay` (z-index 100,
-`styles.css:340`) — a conversion celebration covers an open file preview with an overlay that
-traps nothing and has no Escape.
-Two confirm idioms across the monorepo: `ConfirmButton` (crm, 6 sites, accessible) vs
-`window.confirm` (`QuoteApp.tsx:113`).
-
-- **Canonical:** `Modal.tsx` (+ scroll lock and a portal); route `Celebration` through it.
-
-### 1.11 Carrier-name lookup
-
-Byte-identical at `QuotesPanel.tsx:121-122` ↔ `PoliciesTab.tsx:65-66`; same concept as a Map at
-`PoliciesList.tsx:30`, `QuotesList.tsx:32`, inline at `Dashboard.tsx:302`.
-Note the direction of one dependency: `PoliciesTab.tsx:12` imports two pure formatters
-(`commissionCell`, `termsSummary`) **from a component module** (`QuotesPanel.tsx:22,34`).
-
-### 1.12 ACORD eForm header block
-
-The producer + insured header (date, 7 producer fields, 9 insured fields) is written twice:
-`crm/src/lib/acord25.ts:36-93` and `crm/src/lib/acordApp.ts:142-165` — same field names, same
-`AGENCY.*` bindings. `acordRegistry.ts:36-39` documents that these headers are shared across
-every eForm.
-
-### 1.13 Validation
-
-| Approach | Location | Sites |
+| Shape | Location | Cost |
 |---|---|---|
-| Problem-list validator | `client.ts:137` `validateAccountFields` | 3 |
-| Field validators | `client.ts:234,267,292,313` | **0 production** |
-| Schema-declared | `quote/schema.ts:27` `validateText` | 1 |
-| Inline `if` in `save()` | — | 10 |
-| HTML `required` | — | 4 web files; **zero in CRM** |
+| A — `useMemo` + `new Map(...)`, `.get(id) ?? "—"` | `PoliciesList.tsx:43-50` (used `:104,106`) | O(1)/cell |
+| A — byte-identical to the above | `QuotesList.tsx:43-50` (used `:114,116`) | O(1)/cell |
+| B — `carriers.find(c => c.id === id)?.name ?? "—"` | `QuotesPanel.tsx:121-122` | O(n)/cell |
+| B — byte-identical to the above | `PoliciesTab.tsx:66-67` | O(n)/cell |
 
-- **Email — 4 live copies, 2 regex shapes:** `client.ts:146` (inline, `+` TLD) ·
-  `client.ts:234` `EMAIL_RE` (`{2,}`, exported, **unused** — its own comment at `:232` says
-  "Exported so `web` can drop its private copy") · `quote/schema.ts:25` (the private copy,
-  still there) · `lead-intake/handler.ts:50` · `team-admin/handler.ts:33`.
-- **Date-range ordering** hand-rolled twice with identical condition *and* message string
-  (`CoverageForm.tsx:112-119`, `LicenseForm.tsx:61-68`) while `validateDateRange` sits unused.
-- **Year bounds** twice (`client.ts:158-163`, `DetailsCard.tsx:51-55`) while `validateYear`
-  sits unused.
-- `validateAccountFields` re-implements `EMAIL_RE`, `validateYear` and `validatePositiveInt`
-  from **the same file**.
-- **Unit count — 5 incompatible treatments:** `client.ts:153` (int 0–100000) ·
-  `NewLead.tsx:60` (`Number()`) · `DetailsCard.tsx:90` (`Number()`) ·
-  `CoverageCalculator.tsx:145` (`parseInt||0`) · `InstantAssessment.tsx:200` (raw string).
-- `quote/schema.ts:96` declares `unitCount`/`yearBuilt` as `inputType:"number"` but
-  `validateText` (`:27-44`) has no numeric branch — any text passes.
-- **Defect:** `QuoteApp.tsx:183` `handleTextSubmit` has no in-flight guard. The button is
-  disabled (`:361`) but the Enter path (`quote/ui.tsx:334-337`) is not, so Enter-Enter on the
-  final step fires `submitForm` twice.
-- `ContactForm.tsx:15` returns silently on invalid input, leaving the button stuck with no
-  message.
+The carrier fetch feeding these is itself repeated 7× (§1.3), and
+`const { sorted: carriers } = useSort(carrierRows, { name: (c) => c.name }, "name");` is verbatim
+at `QuotesPanel.tsx:119` and `PoliciesTab.tsx:64`.
+
+- **Most correct:** shape A. **Canonical:** a `useLookup(items, key, label)` in `crm/src/lib/`
+  plus a shared `useCarriers()`. Blast radius: 7 files, 9 fetch + 4 lookup sites.
+
+### 1.7 Google Places loader
+
+| Impl | Location | Dedupe | No-key guard | Parses |
+|---|---|---|---|---|
+| `googlePlaces.tsx` | `crm/src/lib/googlePlaces.tsx:21-34`, `:43-101` | ✅ module `loadPromise` | ✅ | address/city/state/zip |
+| Inline | `CoverageCalculator.tsx:20-44`, `:158-197` | ❌ | ✅ | state only |
+| Inline | `InstantAssessment.tsx:9-21`, `:62-91` | ❌ | ❌ | state only |
+
+`InstantAssessment` injects `?key=&libraries=places` and fails with `InvalidKey` when the key is
+unset. The crm helper is used 2× (`NewLead.tsx:177`, `DetailsCard.tsx:112`); the autocomplete
+fill is duplicated verbatim between those two call sites.
+
+- **Most correct / canonical:** `crm/src/lib/googlePlaces.tsx` — promote the *loader* (not the
+  React component; the two apps render different inputs) to `shared/googlePlaces.ts`, per the
+  dependency-free `shared/agency.ts` convention. Blast radius: 3 files, 2 apps.
+
+### 1.8 Quote-wizard option labels — declared twice, already drifted
+
+| Impl | Location | Sites |
+|---|---|---|
+| Labels on each `Option` inside `STEPS` | `web/src/components/quote/schema.ts:57-198` | Rendered by `QuoteApp` via `CardOption` |
+| `ROLE_LABELS`, `COVERAGE_LABELS`, `PROPERTY_LABELS`, `HO6_LABELS`, `DEDUCTIBLE_LABELS` | `web/src/components/quote/submission.ts:11-41` | 12 uses (`:63,78,84,96,100,118,123,127,131,137`) |
+
+**5 of 21 members already disagree** — the visitor sees one wording, the agent's email and the
+CRM note say another:
+
+| Visitor sees (`schema.ts`) | CRM/email gets (`submission.ts`) |
+|---|---|
+| `Unit owner (HO‑6)` | `Unit Owner (HO-6)` |
+| `Yes, I know it` | `Yes, knows the amount` |
+| `Review my existing policy` | `Review existing policy` |
+| `New HO‑6 policy` | `New HO-6 policy` |
+| `Not sure — help me figure it out` | `Not sure — needs guidance` |
+
+(Two of the five differ only by U+2011 vs ASCII hyphen.)
+
+- **Most correct:** `schema.ts` — it is what the visitor actually saw, and it is exhaustive by
+  construction.
+- **Canonical:** export `labelFor(stepKey, value)` derived from `STEPS`; delete all 5 maps.
+  Blast radius: 2 files, 12 sites. This is a correctness fix, not tidying.
+
+### 1.9 Agency contact facts
+
+`shared/agency.ts:27-49` is the documented single source (`:24`: "edit `AGENCY` only"), surfaced
+to `web` via `constants.ts:3-8`. `ContactForm.tsx` uses it correctly (`:60,64,68,121`). These do
+not — **13 literals across 4 files**:
+
+`AssociationLeadForm.tsx:96,116,117,251,252` · `InstantAssessment.tsx:140,160,161,269,270` ·
+`CoverageCalculator.tsx:271` · `QuoteApp.tsx:243,418`.
+
+**Three spellings of one phone number now exist:** `508-233-2261` (matches `AGENCY.phone`),
+`+15082332261` (matches `AGENCY_FMT.phoneHref`), and `(508) 233-2261` at `QuoteApp.tsx:243` —
+which matches nothing and would survive any edit to `shared/agency.ts`.
+`crm/src/test/sharedAgency.test.ts:230` asserts a changed phone propagates, but guards only
+`shared/` and cannot see these literals.
+
+- **Canonical:** `AGENCY`/`AGENCY_FMT` via `constants.ts`. Blast radius: 4 files, 13 literals.
+
+### 1.10 Date construction and rendering
+
+| Idiom | Sites |
+|---|---|
+| `new Date().toISOString().slice(0, 10)` (UTC today) | `MarketingTasks.tsx:50`, `FormsTab.tsx:136`, `Dashboard.tsx:328`, `acordApp.ts:166` — **4** |
+| `new Date().toISOString()` (timestamp column) | `QuotesPanel.tsx:332`, `MarketingTasks.tsx:65,151`, `CertificatesTab.tsx:119` — **4** |
+| `new Date().getFullYear()` (max-year bound) | `client.ts:145,284`, `DetailsCard.tsx:45` — **3** |
+| `fmtDate(x.slice(0, 10))` — pre-slicing a stored timestamp | `MarketingTasks.tsx:303`, `Team.tsx:237`, `AccountDetail.tsx:87`, `DocumentSearch.tsx:155`, `CertificatesTab.tsx:337` — **5** |
+
+`fmtDate` (`client.ts:114-117`) only appends `T00:00:00` when the string is exactly 10
+characters, so a full ISO datetime is parsed as a UTC instant and rendered on the viewer's local
+calendar — shifting a day for US users. The guard is call-site discipline, not the function's:
+five sites each independently pre-slice. `fmtDateTime` (`client.ts:407`) handles this internally
+and has 1 call site.
+
+- **Canonical:** fold the slice into `fmtDate`; add `isoToday()`/`isoNow()` beside `daysUntil`.
+  Blast radius: 9 files, 16 sites. Money formatting is **not** duplicated —
+  `client.ts:104-118` is sole, and `acordFormat.ts:16,27` are documented blank-vs-`—` wrappers.
+
+### 1.11 List-cell join
+
+`(x ?? []).filter(Boolean).join(", ") || "—"` — **29 sites across 12 files**, with the separator
+(`", "` / `" "`) and fallback (`"—"` / `null` / `"carrier default"` / `"no location"`) varying per
+site: `QuotesPanel.tsx:129,205` · `MarketingTasks.tsx:197,259,356,368,437` · `Licensing.tsx:79` ·
+`LicenseTable.tsx:232` · `Carriers.tsx:165,276` · `Dashboard.tsx:213` ·
+`AccountsList.tsx:75,76,153,158` · `AccountDetail.tsx:86` · `PoliciesTab.tsx:75,142` ·
+`CertificatesTab.tsx:280` · `AppetiteGuides.tsx:110,124` · `acord25.ts:298` · `googlePlaces.tsx:77`.
+
+- **Canonical:** `joinList(values, { sep, empty })` in `crm/src/lib/client.ts` beside `fmtNum`.
+
+### 1.12 Tolerant `a.json()` decoder
+
+Three independent implementations of "parse a possibly-double-stringified `a.json()` value,
+return null/`{}` on failure": `ExtractionPanel.tsx:131-140`, `DocumentsPanel.tsx:369-378`,
+`extract-lead/handler.ts:189-201`. Two do the double `JSON.parse`; **`Team.tsx:36-45` does not**,
+so a double-encoded `listTeamUsers` response silently renders an empty roster.
+
+- **Canonical:** `crm/src/lib/pagination.ts` — the established Lambda-safe, no-runtime-imports
+  module. `client.ts` cannot host it, since `extract-lead` must import it.
+
+### 1.13 Delete — errors checked vs swallowed
+
+| Shape | Location |
+|---|---|
+| Checks `errors`, throws, reports via `useSaveStatus` | `BuildingsCard.tsx:74-86`, `DocumentsPanel.tsx:108-127`, `DeleteLeadZone.tsx:32-36,83-84` |
+| Result ignored; row removed from local state regardless | `Licensing.tsx:115-118`, `AppetiteGuides.tsx:39-42` |
+
+A refused delete under the second shape removes the row from the table and reports success. Both
+are wired to `<ConfirmButton>`, which has an `onError` slot neither uses. Separately, all 5
+storage deletes swallow with `.catch(() => {})` (§1.1a).
+
+### 1.14 ACORD header and success panel
+
+- **ACORD producer/insured header** — the same date + 7 producer + 9 insured fields, same
+  `AGENCY.*` bindings, written twice: `crm/src/lib/acord25.ts:36-93` and
+  `crm/src/lib/acordApp.ts:114-196`. `acordRegistry.ts:36-39` documents that these headers are
+  shared across every eForm.
+- **Success panel** — structurally identical (same 64×64 SVG, same `#d1b378`/`#d1b37820` fills,
+  same `M20 32l8 8 16-18` path) at `AssociationLeadForm.tsx:102-122` and
+  `InstantAssessment.tsx:146-166`, differing only in class prefix and copy. A third checkmark
+  variant at `ContactForm.tsx:76-79` (48×48, CSS variables instead of hex).
+- **Lead-form CSS** — `AssociationLeadForm.css:9-211,308-383` ≈ `InstantAssessment.css:9-156,257-327`;
+  the Places dropdown override is duplicated at `CoverageCalculator.css:451-469` ↔
+  `InstantAssessment.css:328-346`.
+
+### 1.15 Verified single-source (no action)
+
+`useAsyncResource` (33 sites, 0 hand-rolled survivors) · `useSaveStatus`/`SaveStatus` (16) ·
+`useSort` (19) · `badges.tsx` · `enums.ts` · `quoteStatus.ts` · `pagination.ts` ·
+`friendlyError` (15 + 2 hooks) · `validateAccountFields` (3) · `auth.ts` (`useIsAdmin` ×3) ·
+`shared/accountType.ts` (compile-enforced both directions at `enums.ts:61-65`).
+Zero `window.confirm`, zero `alert(` in `crm`. `<ConfirmButton>` has 6 sites and no competitor;
+`<Modal>` has 1 (`FilePreview.tsx:43`) — under-used, not duplicated.
 
 ---
 
 ## 2. FILE SIZE OFFENDERS
 
-**Only two files exceed 500 lines**, one of them a test — the Wave 5 splits
-(`3a406f8`..`367f872`) cleared this tier.
+Per-app weight: `crm/src` 18,528 lines / 85 files (61%) · `web/src` 8,618 / 44 ·
+`crm/amplify` 2,249 / 23 · `shared/` 106 / 2 (0.3%).
 
-### Over 500
+### 2.1 Over 500 lines
 
-**`crm/src/lib/client.test.ts` — 711 (test)**
-10 responsibilities: mock harness `L1-21` · `legacyDaysUntilDate` differential oracle `L22-34` ·
-`EMAIL_RE` `L35-73` · `friendlyError` `L74-192` · `validateDateRange` `L193-294` ·
-`validateYear` `L295-367` · `validatePositiveInt` `L368-444` · TZ/fake-timer helper `L445-462` ·
-`daysUntil` `L463-627` · `fmtDateTime` `L628-711`.
-Tracks its subject: 4 of the 6 units it covers have no production caller.
-
-**`crm/amplify/data/resource.ts` — 586 (source)**
-18 responsibilities: Lambda imports `L1-19` · **22 enum declarations `L20-89`** · `Account`
-(~60 fields) `L90-161` · `Building` `L162-173` · `Quote` `L174-207` · `Policy` `L208-251` ·
-`Carrier`/`AppetiteGuide` `L252-289` · `Document` `L290-307` · `MarketingTask` `L308-347` ·
-`Certificate` `L348-371` · `UserProfile` `L372-422` · deprecated `ProducerLicense` `L423-436` ·
-`License` `L437-485` · `submitWebLead` `L486-511` · `inviteUser`/`listTeamUsers` `L512-528` ·
-`startLeadExtraction`/`reserveCertificateNumber` `L529-545` · schema authorization `L546-573` ·
-`defineData` `L574-586`.
-Exports 2. `Quote` and `Policy` are hand-duplicated field-for-field (19 identical fields,
-`L186-205` vs `L228-245`) with no shared fragment. This file is the origin of §4.1.
-
-### 300–500 (secondary tier, 25 files — 8 tests)
-
-Non-test files carrying ≥3 distinct responsibilities:
-
-| File | Lines | Distinct responsibilities | Hooks | Exports |
-|---|---|---|---|---|
-| `web/src/components/quote/ui.tsx` | 492 | 14 unrelated UI primitives in one module (`ProgressBar`, `TypeWriter`, `ProgressRing`, canvas `Confetti` `L92-175`, `ThemeIndicator`, `SlideIn`, `CardOption`, `TextField`, `PrimaryButton`, `BackButton`, `RestartButton`, `AgentHeader`, `FallbackAvatar`) | 9/5/2 | 10 |
-| `web/src/components/CoverageCalculator.tsx` | 485 | Places loader `L17-45` · state map `L46-64` · **underwriting rule engine `L65-94`** · risk copy `L95-107` · 7 inline SVGs `L108-124` · CRM+FormSubmit+gtag POST `L223-276` · 190 lines JSX `L295-485` | 11/2 | 1 |
-| `crm/src/pages/Dashboard.tsx` | 447 | 4 components: `Dashboard` (6 queries in one effect) `L24-86` · `Tile` · `RenewalsCard` `L114-241` · `CarrierCharts` `L246-389` · `BarCard` `L390-447` | 11/1 | 1 |
-| `crm/src/lib/acordApp.ts` | 444 | Constant maps `L15-51` · prose builder `L52-89` · shared eForm header `L97-175` · acord125 dates/indicators `L176-250` · LOB map `L251-284` · policy info `L285-321` · premises schedule `L322-385` · acord140 `L392-427` | — | 2 |
-| `crm/src/components/MarketingTasks.tsx` | 443 | 2 unrelated components + **a write-performing auto-close rule in a render module** (`settleSatisfiedTasks` `L36-71`) + a hand-rolled fetch `L325-364` alongside a sibling that uses the hook | 5/1 | 2 |
-| `crm/src/lib/client.ts` | 435 | **13 concerns**: network client singleton `L1-22` · licensing vocabulary `L24-51` · `licenseHealth` `L53-96` · `US_STATES`/`LINES_OF_BUSINESS` `L98-116` · formatters `L118-132` · `validateAccountFields` `L134-170` · `friendlyError` `L172-212` · `EMAIL_RE` `L214-239` · `isIsoDay` `L241-256` · `validateDateRange` `L258-283` · `validateYear`/`validatePositiveInt` `L285-330` · `daysUntil` `L332-400` · `fmtDateTime` `L402-435` | — | **33** |
-| `web/src/components/QuoteApp.tsx` | 435 | Theme state + localStorage + 60s day/night re-eval `L32-86` · flow hydration `L88-110` · restart dedupe loop `L111-132` · nav handlers `L149-215` · `submitForm` (CRM + email + gtag + confetti) `L217-248` · 5 step renderers `L278-435` | 12/5 | 1 |
-| `crm/src/components/ExtractionPanel.tsx` | 424 | Types + labels `L13-48` · value helpers `L50-78` · **24-entry field table `L80-137`** · JSON decoder `L139-148` · 4s poll `L171-182` · `apply()` transaction `L222-281` · review table `L283-424` | 5/2 | 1 |
-| `crm/src/components/CoverageForm.tsx` | 394 | Constants + file-local codecs `L22-40` · `useFormState` over **26 fields** `L42-94` · commission autofill `L96-109` · `save()` with inline validation + 3-way write branch `L111-177` · **196 lines JSX** `L187-382` | 3/0 | 1 |
-| `crm/src/components/QuotesPanel.tsx` | 386 | 2 formatters `L22-49` · fetches `L51-98` · status mutation `L99-116` · panel JSX `L140-266` · **quote→policy bind transaction `L290-343`** · BindForm JSX `L345-386` | 6/0 | 3 |
-| `crm/src/components/DocumentsPanel.tsx` | 378 | Categories `L15-26` · `observeQuery` `L54-61` · upload orchestration `L63-101` · delete `L108-127` · regex highlight `L129-135` · Ctrl+F `<mark>` indexing `L156-178` · table `L180-283` · preview + OCR viewer `L285-360` · `parseTables` `L365-378` | 8/2 | 1 |
-| `crm/src/pages/account/CertificatesTab.tsx` | 353 | 3 queries in one effect, no loading/error `L49-63` · `issue()` `L65-109` · `generatePdf()` (fill + S3 + patch + warnings) `L111-170` · download `L172-176` · form JSX `L212-273` · table `L275-341` | 8/1 | 1 |
-| `crm/amplify/functions/extract-lead/handler.ts` | 349 | Schema builders `L33-73` · **`EXTRACTION_SCHEMA` `L75-165` (never sent to the API — only `Object.keys()` at `L251` is used; ~90 dead lines)** · prompt `L167-176` · budget packing `L208-247` · Anthropic call `L248-290` · write-back `L292-319` · dual-shape handler `L321-349` | — | 1 |
-| `crm/src/lib/acord25.ts` | 338 | **~100-line field-mapping table inside a function body `L22-119`** · insurer letters `L121-144` · GL row `L146-178` · GL limits `L180-228` · umbrella `L230-260` · WC `L262-282` · OTHER `L284-321` | — | 1 |
-| `crm/src/lib/storage.ts` | 313 | Path grants `L32-55` · validation `L56-91` · `uploadFile` `L92-118` · `uploadAndLink` `L119-153` · `uploadDocument` `L154-217` · `getFileUrl` `L218-234` · `downloadFile` `L235-271` · `deleteFile` `L272-309` | — | 13 (all dead) |
-| `crm/src/components/SaveStatus.tsx` | 311 | Presentational component `L77-123` + state machine `L197-311`. **Not mixed** — clean separation | 13 | 8 |
-| `crm/src/pages/carrier/AppetiteGuides.tsx` | 307 | List + `load()` + `del()` `L14-35` · guides table `L78-138` · `GuideForm` + local `str`/`num` `L139-167` · `save()` `L168-207` · form JSX incl. 50-state grid `L208-307` | 5/1 | 1 |
-| `crm/src/pages/NewLead.tsx` | 306 | `useFormState` over 17 fields `L9-35` · validation `L36-47` · 17-field create mapping `L48-74` · **staged-upload loop `L75-121`** · form JSX `L125-239` · file table `L240-281` | 4/0 | 1 |
-| `crm/src/App.tsx` | 304 | `AuthGate` `L34-66` · `ProfileGate` (fetch + error + loading + onboarding + admin context) `L67-138` · `NotFound` · **9 inline SVG icon components, 86 lines `L151-237`** · `NAV_ITEMS` `L238-247` · `Shell` + 12 routes `L248-304` | 1/0 | 1 |
-
-**Fetching + business logic + presentation mixed in one module:** 12 of 19 non-test source
-files audited — `CoverageCalculator`, `Dashboard`, `MarketingTasks`, `QuoteApp`,
-`ExtractionPanel`, `CoverageForm`, `QuotesPanel`, `DocumentsPanel`, `CertificatesTab`,
-`AppetiteGuides`, `NewLead`, partially `App`.
-**Clean separation:** `quote/ui.tsx`, `SaveStatus.tsx`, `storage.ts`, `acord25.ts`,
-`acordApp.ts`, `resource.ts`, `extract-lead/handler.ts`.
-
-**Inline literal data belonging in a data module:**
-
-| File | Lines | Content |
+| File | Lines | Distinct responsibilities |
 |---|---|---|
-| `acord25.ts` | `L22-119` (~100) | ACORD field-mapping table inside a function body |
-| `extract-lead/handler.ts` | `L75-165` (~90) | `EXTRACTION_SCHEMA` — body is dead |
-| `App.tsx` | `L152-237` (86) | `iconProps` + 9 SVG icon components |
-| `CoverageCalculator.tsx` | `L47-50,66-92,96-105,109-123` (~60) | State map, rule engine copy, risk strings, `ICONS` — while `web/src/data/` already exists |
-| `ExtractionPanel.tsx` | `L80-131` (52) | `ALL_FIELD_DEFS` — must stay in sync with the Lambda, no shared source |
-| `client.ts` | `L26-51,98-116` (~45) | 5 reference tables in the module that instantiates the network client |
-| `acordApp.ts` | `L17-50,254-263` | 5 label/phrase maps + `LOB_FIELDS` |
+| `crm/src/lib/client.test.ts` | 711 | **7 unrelated units in one file:** mock + oracle `1-35` · `EMAIL_RE` `36-78` · `friendlyError` `79-193` · `validateDateRange` `194-295` · `validateYear` `296-368` · `validatePositiveInt` `369-462` · `daysUntil` + TZ harness `464-628` · `fmtDateTime` `629-711`. Exists as one unit only because `client.ts` does; 4 of the 7 subjects have no production caller |
+| `crm/amplify/data/resource.ts` | 615 | 5 concerns: 21 enum declarations `20-88` · entity models `90-335` · remaining models `337-513` · 5 custom operations `515-573` · schema authorization + `defineData` `575-615`. Single-responsibility by nature; ~40% is load-bearing auth prose. `Quote`/`Policy` duplicate 20 columns (§4.3) |
+| `web/src/styles/quote.css` | 604 | 21 sections, 1:1 with `quote/ui.tsx`. Splits only when that component splits |
+| `web/src/data/properties.json` | 578 | 64 pretty-printed property records. Pure data, not an offender in substance |
+| `crm/src/styles.css` | 515 | **20 unrelated sections for the entire CRM.** Only `1-232` is genuinely global; `249-311` celebration, `335-368` preview modal, `376-411` auth screen, `412-447` premium chart, `448-499` licensing, `500-515` signature pad are feature-local and belong beside their components — which is what `web/` already does |
+| `crm/src/pages/Dashboard.tsx` | 514 | **4 components + 2 pure functions, all three layers.** Fetch (6 parallel queries) `44-104` · shell `105-153` · `Tile` `155-168` · `RenewalsCard` `170-307` (business logic `193-232`) · `CarrierCharts` `309-455` (date presets `320-341`, aggregation `343-386`) · `BarCard` `457-514`. `193-232` and `354-386` are React-free pure functions belonging in `crm/src/lib/` |
 
-**Coupling defect:** `client.ts` calls `generateClient()` at module scope, so all 8 consumers
-of a pure constant like `US_STATES` transitively construct the network client. Two test files
-carry identical stubs solely to work around it (`client.test.ts:15`, `storage.test.ts:13`).
+### 2.2 Misplaced responsibilities (independent of line count)
+
+- **`crm/src/components/MarketingTasks.tsx:325-454`** — `AllMarketingTasks` is the route-level
+  `/tasks` **page**, with its own state, fetch, sort and render, living in a component file. Also
+  `settleSatisfiedTasks` (`:42-71`) performs API **writes** from a render module, and
+  `taskUrgency` (`:22-40`) is domain classification. Both belong in `crm/src/lib/` beside
+  `quoteStatus.ts`.
+- **`crm/src/components/QuotesPanel.tsx:290-343`** — `bind()` creates a Policy, flips the Account
+  to CLIENT and updates the Quote: the lifecycle transition documented at `resource.ts:12-15`,
+  and the single most consequential write in the app, living inside a form component. It also
+  exports two formatters (`commissionCell:22`, `termsSummary:34`) that `PoliciesTab.tsx:12`
+  imports — a page reaching into a component file for pure functions.
+- **`crm/src/pages/account/CertificatesTab.tsx:132-198`** — `generatePdf`/`downloadPdf` call
+  `uploadData`/`getUrl` directly, bypassing `storage.ts` (§1.1a). The clearest single
+  misplacement in the repo.
+- **`crm/src/lib/client.ts:46-81`** — `licenseHealth` imports `urgencyBadge`/`LICENSE_EXPIRY_SCALE`
+  from `badges.tsx`: a lib module reaching into presentation. The one true layering violation.
+- **`crm/src/lib/enums.ts:213-221`** — `ACORD25_AGGREGATE_FIELDS` is ACORD form-field mapping in
+  the enum module; belongs with `acordRegistry.ts`/`acord25.ts`.
+
+### 2.3 350–500 (secondary tier, 20 files — 6 tests)
+
+| File | Lines | Notes |
+|---|---|---|
+| `SaveStatus.test.tsx` | 494 | One module tested three ways. Legitimate |
+| `web/src/components/quote/ui.tsx` | 492 | **13 unrelated presentational components**, bound only by `useTheme`. Clean layer separation; a mechanical split into `quote/ui/` |
+| `CoverageCalculator.css` | 492 | Co-located, one feature |
+| `web/src/components/CoverageCalculator.tsx` | 485 | Places loader `20-45` · state map `47-64` · **underwriting rule engine `66-107`** · icons `109-124` · dual submission `207-292` · 190 lines JSX `293-485`. Mixes all three layers |
+| `MarketingTasks.tsx` | 454 | See §2.2 |
+| `useAsyncResource.test.ts` | 440 | Single module, 7 behaviour groups. Justified |
+| `web/src/components/QuoteApp.tsx` | 435 | Theme + `localStorage` + 60s interval `32-86` · flow `88-147` · handlers `149-216` · `submitForm` `217-251` · 5 renderers `278-435`. `33-69` belongs in `quote/theme.ts`/`session.ts`, which already exist; `217-251` duplicates `quote/submission.ts` |
+| `crm/src/lib/acordApp.ts` | 427 | One 327-line function (`buildAppFormValues:87-413`) of 6 independent field groups that never reference each other |
+| `crm/src/lib/client.ts` | 420 | **The grab-bag — 8 concerns:** Amplify client + 12 type aliases `1-19` · `listAllPages` re-export `21-25` · `LINES_OF_AUTHORITY` `27-45` · `licenseHealth` `46-81` · `US_STATES`/`LINES_OF_BUSINESS` `83-102` · formatters `103-118` · `validateAccountFields` `119-156` · `friendlyError` `157-198` · validators `199-316` · date arithmetic `317-420`. Natural split: `client.ts` (1-25), `format.ts`, `validate.ts`, `dates.ts`, `licensing.ts`. **Coupling defect:** `generateClient()` at module scope means all 8 consumers of a pure constant like `US_STATES` construct the network client; two test files carry identical stubs solely to work around it |
+| `ExtractionPanel.tsx` | 416 | Types `14-40` · helpers `42-70` · **58-line field catalogue `72-130`** · decoder `131-140` · 4s poll `142-196` · `apply()` `214-273` · 141-line review table `275-416` |
+| `AssociationLeadForm.css` | 408 | Near-identical to `InstantAssessment.css` (§1.14) |
+| `enums.test.ts` | 408 | Single subject, but `330-349` tests the extraction Lambda and `388-408` tests `shared/accountType.ts` — both belong with their subjects |
+| `storage.test.ts` | 400 | Cohesive — 400 lines testing code nothing calls (§3.1) |
+| `QuotesPanel.tsx` | 386 | See §2.2 |
+| `CoverageForm.tsx` | 386 | Size is field count (24-key form), not tangled responsibility. GL-limits block `301-350` is the 6-field shape declared on both Quote and Policy |
+| `CertificatesTab.tsx` | 383 | 3 parallel fetches `22-84` · `issue()` `86-130` · `generatePdf()` `132-191` · form `237-302` · table `316-374` |
+| `useTextFilter.test.tsx` | 382 | 382 lines testing code nothing calls (§3.1) |
+| `DocumentsPanel.tsx` | 378 | **Two features fused:** document CRUD, and an OCR text-search/viewer (`129-178` + `295-360`, ~110 lines) |
+| `InstantAssessment.css` | 371 | Duplicated against `AssociationLeadForm.css` |
+| `crm/src/lib/enums.ts` | 356 | Cohesive by design; size is the enum count |
 
 ---
 
 ## 3. DEAD CODE
 
-### 3.1 Orphaned modules — nothing but their own test imports them
+Method: 291 named exports extracted across `crm/src`, `crm/amplify`, `web/src`, `web/scripts`,
+`shared/`; every relative import specifier resolved into an import graph; per-symbol counts
+cross-checked by word-boundary grep over the full repo including tests and configs. Framework
+default exports excluded.
 
-| Module | Src | Test | Verification |
-|---|---|---|---|
-| `crm/src/lib/storage.ts` | 313 | 400 | `git grep "lib/storage"` → 1 hit: `storage.test.ts:34`. All 12 app files import `aws-amplify/storage` directly |
-| `crm/src/lib/useTextFilter.tsx` | 149 | 382 | `git grep -w useTextFilter` → only its own test + self doc-comments |
-| `crm/src/lib/formCodec.ts` | 97 | 154 | 1 real import (`formCodec.test.ts:2`); the other 2 hits are comments in `CoverageForm.tsx:38` and `AppetiteGuides.tsx:152` saying they are *not* using it |
+### 3.1 Modules dead in production — 1,495 lines
 
-**559 source + 936 test lines covering nothing shipped.** Each has a live hand-rolled
-counterpart: 3 upload copies (§1.6), 3 filter copies (`AccountsList.tsx:58`, `Licensing.tsx:65`,
-`MarketingTasks.tsx:344` — the exact three its docstring names), ~79 hand-written coercions
-(38 `.trim() || null`, 17 `.trim() || undefined`, ~24 `? Number(x) : null`).
+The three modules in §1.1. Their only importers are their own test files
+(`storage.test.ts:34`, `useTextFilter.test.tsx:5`, `formCodec.test.ts:2`). They are the only
+files unreachable from any production entry point.
+
+**559 source + 936 test lines covering nothing shipped.** Security-relevant: `assertGrantedPath`
+(`storage.ts:58`) and `safeSegment` (`storage.ts:81`) are a path guard and a filename sanitizer
+that enforce nothing today — `GRANTED_PREFIXES` (`storage.ts:48`) is checked only inside the
+dead module.
 
 ### 3.2 Exports with no production consumer
 
-Only their own test file references these:
-- `client.ts:234` `EMAIL_RE` · `:267` `validateDateRange` · `:292` `validateYear` ·
-  `:313` `validatePositiveInt`
-- `quoteStatus.ts:71` `isQuoteStatus` · `:83` `isClosedQuoteStatus` · `:90`
-  `isSelectableQuoteStatus` · `:97` `ALL_QUOTE_STATUSES` · `:105` `CLOSED_QUOTE_STATUSES` ·
-  `:130` `quoteStatusFilter`
-- `SaveStatus.tsx:56` `SaveStatusValue`
+**Dead logic (test-only, ~160 lines):** `client.ts:252` `validateDateRange` · `:277`
+`validateYear` · `:298` `validatePositiveInt` · `:219` `EMAIL_RE`. Between them, 89 test
+assertions and zero call sites, while §5.2 lists 7 live hand-rolled re-implementations.
+`client.ts:200-206` is a commented usage example for a migration that never landed.
+`EMAIL_RE`'s own doc comment says "Exported so `web` can drop its private copy" — the copy at
+`web/src/components/quote/schema.ts:25` is still there.
 
-Exported but used only inside the defining file (should be un-exported) — each verified with
-`git grep -ln -w` returning exactly one file:
-`Modal.tsx:36` `ModalProps` · `ConfirmButton.tsx:19` `ConfirmButtonProps` ·
-`SaveStatus.tsx:45,134,136,143,176` · `badges.tsx:32,123,155` · `client.ts:61` `LicenseLevel` ·
-`useFormState.ts:48,125` · `useAsyncResource.ts:45,71` · `quoteStatus.ts:57,59,61,127` ·
-`magic-link/token.ts:13` `TOKEN_TTL_MS`.
-`shared/agency.ts:72,73` `Agency`, `AgencyFormatted` — **zero references anywhere**.
+**Fully dead — zero references anywhere:** `shared/agency.ts:72` `Agency` · `:73`
+`AgencyFormatted`. The only mention is prose in this document.
 
-### 3.3 Dead assets
+**Test-only exports of otherwise-live modules** (over-exported, logic live):
+`quoteStatus.ts:97` `ALL_QUOTE_STATUSES` · `:105` `CLOSED_QUOTE_STATUSES` · `enums.ts:284`
+`USER_ROLES` · `badges.tsx:52` `BadgeMap`, `:179` `UrgencyScale` · `SaveStatus.tsx:56`
+`SaveStatusValue` · `enums.ts:44,48,50-53` (6 derived enum types).
 
-`web/src/assets/images/` — **all 11 files, 2.6 MB.** Verified: `grep -rn "assets/images\|\.\./assets" web/src`
-→ zero hits. Every image on the site is a public-dir URL resolving to `web/public/images/`,
-which holds its own copies. 6 of the 11 (`about.jpg`, `building-icon.png`, `community.jpg`,
-`what-we-do.jpg`, `why-choose.png`, `hero.jpg`) have no `public/` counterpart at all.
+**Unnecessary `export` — used only inside the defining file** (~30):
+`magic-link/token.ts:13` `TOKEN_TTL_MS` · `ConfirmButton.tsx:19` · `Modal.tsx:36` ·
+`SaveStatus.tsx:45,134,136,143,176` · `badges.tsx:46,137,166,169` · `client.ts:46`
+`LicenseLevel` · `enums.ts:72` `EnumOption` · `quoteStatus.ts:57,59,61,127` ·
+`useAsyncResource.ts:45,71` · `useFormState.ts:48,125` · `sync-buildium.ts:77` `Property`.
 
-### 3.4 Phantom env vars
+### 3.3 Routes
 
-`web/.env.example:11-22` — documented, never read. `git grep "ZAPIER_HOOK\|OWNER_LOOKUP_URL"`
-over all source → **zero hits**:
-`PUBLIC_ZAPIER_HOOK_HO6`, `PUBLIC_ZAPIER_HOOK_QUOTE`, `PUBLIC_ZAPIER_HOOK_LEAD`,
-`PUBLIC_OWNER_LOOKUP_URL`. The comment also points at `scripts/lookup-worker`, which does not
-exist (`web/scripts/` contains only `sync-buildium.ts`).
+**CRM — clean.** All 12 routes in `App.tsx:286-300` have inbound navigation. `/quotes` and
+`/policies` are absent from `NAV_ITEMS` (`App.tsx:239-247`) but reached via Dashboard tiles
+(`Dashboard.tsx:135,140`). No linked path lacks a route.
 
-### 3.5 Stray script
+**Web — two unlinked families, both apparently intentional:**
+- `/get-started` + 7 slugs (`web/src/pages/get-started/[...slug].astro`) — zero inbound links
+  site-wide; the only `get-started` strings are its own `canonical` (`:55`) and `og:url`
+  (`:60`). It **is** in the sitemap, so it reads as paid-landing. Note it is the sole importer
+  of `web/src/components/InstantAssessment.tsx` (~275 lines).
+- `/associations/{slug}` — zero inbound links, explicitly excluded from the sitemap
+  (`astro.config.mjs:10-12`, "PM-distributed links, not organic SEO targets") and `noindex`.
 
-`crm/scan.mjs` (15 lines, tracked) — ad-hoc ACORD PDF field dumper writing to
-`/tmp/acord-fields.json`. Zero references in any `package.json`/`yml`/`md`/`ts`.
+### 3.4 Orphaned components — none
+
+Every file under `crm/src/components`, `crm/src/pages` and `web/src/components` has at least one
+production importer, verified per-file by exact relative-specifier grep. `Team.tsx` and
+`Licensing.tsx` are live via `Settings.tsx` despite not being routed directly. All 11 Amplify
+`defineFunction`/`defineAuth`/`defineStorage` exports are wired into `backend.ts` or
+`data/resource.ts`.
+
+### 3.5 Commented-out code — none
+
+Every `//` and `/* */` candidate resolved to a doc comment, a doc example
+(`client.ts:200-206`), prose (`PhotosCard.tsx:78-80`), or string content
+(`accept="image/*,.pdf"` at `PhotosCard.tsx:150`, `resource.ts:437`). No disabled executable
+code, no `TODO`/`FIXME`/`HACK`, no `if (false)`, no feature flags.
 
 ### 3.6 Unused dependencies
 
-- `crm` devDep **`tsx`** — zero imports; no `crm` script invokes it. (`web`'s `tsx` **is** used
-  by `"sync"`.)
-- `crm` devDep **`esbuild`** — zero imports, not in `overrides`. Likely an Amplify bundler pin;
-  confirm before removing.
+`crm/package.json` — 4: `esbuild` (`:50`, zero references, not in `overrides`) · `constructs`
+(`:49`, zero imports; peer of `aws-cdk-lib` — verify CDK synth before removing) · `tsx` (`:52`,
+no `crm` script invokes it, unlike `web`'s `sync`) · `@testing-library/dom` (`:38`, peer of
+`@testing-library/react`).
 
-Not flagged despite zero literal imports (all legitimate): `@types/*` (ambient), `typescript`,
-`@aws-amplify/backend-cli` (`ampx`), `constructs`, `@testing-library/dom`, `web`'s `react-dom`.
+Retained despite naive-grep misses: `@types/aws-lambda`, `@types/google.maps`,
+`@aws-amplify/backend-cli` (`ampx`). **`web/package.json` is clean** — all 10 deps used.
 
-### 3.7 Dead schema surface
+### 3.7 Removable total
 
-- `resource.ts:416` `licenses: a.hasMany("ProducerLicense")  // deprecated` — no code reads
-  `profile.licenses`. Dead relationship.
-- `extract-lead/handler.ts:75-165` `EXTRACTION_SCHEMA` — never passed to the API (`:263-276`
-  sends no `tools`); only `Object.keys(...properties)` at `:251` is used. ~90 lines are an
-  unused body around a key list.
-- `Account.buildiumId` (`resource.ts:152`) — write-only; zero readers in `crm/src`.
-- `Account.priorCarrierName` (`:144`) and `priorPremium` (`:146`) exist and are never filled
-  from extraction, while extraction invents untyped `currentCarrier`/`currentAnnualPremium`
-  keys that land in `notes`.
+| Item | Lines |
+|---|---|
+| `storage.ts` + test | 713 |
+| `useTextFilter.tsx` + test | 531 |
+| `formCodec.ts` + test | 251 |
+| 3 validators + `EMAIL_RE` + their `client.test.ts` blocks | ~160 |
+| `Agency`, `AgencyFormatted` | 2 |
 
-### 3.8 Not dead — verified reachable
-
-- All 12 Amplify models are queried from `crm/src`; all 5 custom operations are live.
-- All 12 CRM routes reachable. `/quotes` and `/policies` are absent from `NAV_ITEMS`
-  (`App.tsx:239-247`) but reached via `Dashboard.tsx:68,73`.
-- `ProducerLicense` (marked DEPRECATED) is still queried at `LegacyBackfill.tsx:40`, rendered
-  behind an admin gate at `Licensing.tsx:127` — a one-time migration UI still shipped.
-- `web/src/pages/associations/[slug].astro` — deliberately unlinked (`robots.txt:3`,
-  `astro.config.mjs:12`), PM-distributed.
-- `web/src/pages/get-started/[...slug].astro` — zero inbound internal links; reachable only via
-  sitemap/ads. Likely intentional.
-- **Commented-out code: none.** The only candidate (`client.ts:214-225`) is an illustrative
-  usage example, not disabled code. No `TODO`/`FIXME`/`HACK`, no `if (false)`, no feature flags.
+**~1,657 lines** — but §1.1 and §5.2 are the reason to *adopt* the first three rather than
+delete them.
 
 ---
 
 ## 4. TYPE DRIFT
 
-`crm/src/lib/client.ts:7-18` re-exports every model as `Schema[M]["type"]`, so the **model
-types never drift**. All drift is in (a) hand-copied enums, (b) hand-written shapes for
-`a.json()` operations, (c) the web→CRM wire.
+Baseline: this is a well-typed repo. `client.ts:8-19` aliases all 12 models off `Schema`;
+`enums.ts:40-65` derives 14 enums with `satisfies` exhaustiveness plus a bidirectional assertion
+pinning `shared/accountType.ts`. **`enums.ts` ↔ `resource.ts` have no drift and cannot acquire
+any silently.** What follows is the residue.
 
-### 4.1 Enum vocabulary — 19 of 21 hand-copied, 1 guarded
+### 4.1 `TeamUser` — producer/consumer divergence
 
-`crm/src/lib/quoteStatus.ts:50` uses `satisfies Record<QuoteStatus, …>` and fails compilation on
-drift. **It is the only enum in the repo with that guard.** Every other copy is a
-`Record<string, …>`, which TypeScript cannot check for exhaustiveness.
+Writer `team-admin/handler.ts:117-124` vs reader `Team.tsx:10-15`, bridged by an unchecked
+`as TeamUser[]` at `Team.tsx:54`:
 
-| Schema enum | Copies | Locations |
+| Field | Handler | `TeamUser` |
 |---|---|---|
-| `ConstructionType` `:79-86` | **6** | `acordApp.ts:17-24` **and** `:36-43`, `ExtractionPanel.tsx:28-35` (byte-identical to `acordApp.ts:17-24`), `DetailsCard.tsx:12-19`, `extract-lead/handler.ts:92-99`, **`:260` as an LLM prompt string** |
-| `AccountType` `:24` | **5** | `crmLead.ts:16`, `lead-intake/handler.ts:33` (runtime `Set`), `NewLead.tsx:50` (cast), `:135-137` (`<option>`), `submission.ts:144` |
-| `UserRole` `:58` | **4** | `auth.ts:13`, `team-admin/handler.ts:27` (runtime `Set`), `Onboarding.tsx:7-11`, `Team.tsx:146-148` |
-| `PolicyStatus` `:34` | 3 | `CoverageForm.tsx:22-27`, `PoliciesTab.tsx:154`, `badges.tsx:81-86` — order differs (`CANCELLED` before `EXPIRED` in the form) |
-| `QuoteStatus` `:25-33` | 3 | `quoteStatus.ts:42-50` ✅ guarded; `badges.tsx:70-78` **not** guarded — a new status silently yields a grey pill, caught only by `badges.test.tsx` |
-| `DocumentCategory` `:44-55` | 2 | `DocumentsPanel.tsx:16-25` (**9 of 10 — omits `ACORD_FORM`**), `extract-lead/handler.ts:179-190` |
-| `LicenseClass`/`LicenseStatus` | 2 ea | `client.ts:37-43`, `:45-51` |
-| `ConstructionType`, `ReplacementCostType` `:87` | 2 | `CoverageForm.tsx:30-34` |
-| `AggregateAppliesTo` `:88` | 2 | `acord25.ts:218-223`; `:224` silently defaults unknown → `"POLICY"` |
-| `ExtractionStatus` `:57` | no table | 4 inline literal branches: `ExtractionPanel.tsx:172,295-298,306,314` |
-| `MarketingTaskStatus` `:60` | no table | inline at `renewal-tasks/handler.ts:207,221,226`, `MarketingTasks.tsx:335` |
-| `LicenseHolderType`, `LicenseResidency`, `MarketingTaskSource` | 1 ea | literal unions re-declared at `licensing/holder.ts:3`, `Onboarding.tsx:17`, `renewal-tasks/handler.ts:43` |
-
-**Live consequence:** generated ACORD forms are written with `category:"ACORD_FORM"`
-(`FormsTab.tsx:137`) and filtered on it (`:52`), but the category is **unselectable and
-unlabeled** in the Documents panel because `DocumentsPanel.tsx:16-25` omits it.
-
-**Certificate form identity:** `Certificate.formType` defaults to `"ACORD_25"`
-(`resource.ts:362`, written at `CertificatesTab.tsx:96`) while the registry spells the same
-form `"acord25"` (`acordRegistry.ts:19`). Two vocabularies, never reconciled.
-
-**License "needs attention" predicate** spelled 3× independently:
-`Licensing.tsx:70`, `:95`, `LicenseTable.tsx:151` — each
-`lvl === "expired" || lvl === "urgent" || lvl === "soon"`.
-
-### 4.2 Entity shapes typed more than once
-
-**`TeamUser` — the sharpest divergence.** Writer `team-admin/handler.ts:115-123` vs reader
-`Team.tsx:9-14`, bridged by an unchecked `as TeamUser[]` (`Team.tsx:53`):
-
-| field | handler | `TeamUser` |
-|---|---|---|
-| `userId`, `email` | `string \| undefined` | `string` |
-| `status` (`u.UserStatus`) | present | **absent** |
-| `enabled` | present | **absent** |
+| `userId` | `string \| undefined` | `string` — used as the React `key` (`:197`) |
+| `email` | `string \| undefined` | `string` — compared to `profile.email` (`:200`) |
 | `groups` | `(string \| undefined)[]` | `string[]` |
+| `status` (`u.UserStatus`) | present | **absent** |
+| `enabled` (`u.Enabled ?? true`) | present | **absent** |
 
-An invited-but-unconfirmed user renders identically to an active one because `status` was
-never typed in.
+An invited-but-unconfirmed user renders identically to an active one. Separately, `Team.tsx:119`
+and `:211` treat `u.groups[0]` (a Cognito group) and `p?.role` (schema `UserRole`) as the same
+value type; they coincide by convention, documented at `enums.ts:297-302` but not typed.
 
-Others:
-- **`Account`** — 3 form shapes hold every numeric column as `string`
-  (`OverviewTab.tsx:21-42` 22 fields, `DetailsCard.tsx` 17, `NewLead.tsx:17-33` 17) and coerce
-  with bare `Number()`; `Number("")` → 0, guarded only by inconsistent truthiness checks.
-  **Erase semantics differ:** `OverviewTab.tsx:54-76` and `DetailsCard.tsx:85-106` write
-  `|| null`; `NewLead.tsx:51-67` writes `|| undefined` for the same columns.
-- **`Building`** — `sqft` is `a.integer()` in the schema, `"string, digits only"` in the
-  extraction (`extract-lead/handler.ts:126`), `string | number | null` in the reader
-  (`ExtractionPanel.tsx:22`), `string` in the form (`BuildingsCard.tsx:20`). **Four
-  representations of one integer.** `BuildingInfo` (`acordApp.ts:26-31`) omits `accountId`/`id`;
-  the extraction's building object has only `{label, sqft}` — no `streetAddress`, no
-  `description`, the two fields ACORD 125 premises rows need (`acordApp.ts:331,371`).
-- **`Quote`/`Policy`** — `CoverageForm.tsx:59` `existing as Policy | null` is an unchecked
-  downcast on a union that may be a Quote. Bind (`QuotesPanel.tsx:295-320`) copies 18 fields
-  but **drops `quote.notes`** though `Policy.notes` exists (`resource.ts:245`), and converts
-  `null → undefined` 18× because Amplify create rejects `null` where update accepts it.
-- **`ExtractionResult`** — `ALL_FIELD_DEFS` (`ExtractionPanel.tsx:80-131`, 24 keys) mirrors
-  `EXTRACTION_SCHEMA.properties` (`extract-lead/handler.ts:75-135`) with no shared source; a key
-  added on one side is silently never reviewable on the other. `required` (`:136-163`) is a
-  **third** hand-written copy of the same key list within that one file.
+### 4.2 Extraction result — three hand-written copies of one key list
 
-### 4.3 `any` / casts / `!`
+Both sides describe `Account.aiExtraction` (`resource.ts:144`, `a.json()`).
 
-**`any` — 5 sites:** `extract-lead/handler.ts:322` `event: any` (papers over the
-resolver-vs-self-invoke dual shape, discriminated at `:324,330` with no type) ·
-`(window as any).gtag` ×4 (`AssociationLeadForm.tsx:87`, `QuoteApp.tsx:229`,
-`InstantAssessment.tsx:131`, `CoverageCalculator.tsx:262`) — no ambient gtag declaration,
-though `googlePlaces.tsx:14` shows the correct pattern.
+| | Consumer `ExtractionPanel.tsx:14-27` | Producer `extract-lead/handler.ts:41-65,116-128` |
+|---|---|---|
+| `value` | `string \| number \| boolean \| null` | `{type:"string"}` only; `""` means absent |
+| `evidence`/`source` | `string \| null` | `{type:"string"}`, never null |
+| `buildings[]` | `{label?, sqft?}` both optional | `{label: string; sqft: string}` both **required** |
+| `usage` | absent | written at `handler.ts:296-299` |
+| shape | `[key: string]: unknown` | 26 named keys, `additionalProperties: false` |
+
+`ALL_FIELD_DEFS` (`ExtractionPanel.tsx:72-123`, 25 keys) must simultaneously match
+`EXTRACTION_SCHEMA.properties` (`handler.ts:134-162`) **and** `Account` column names for
+`kind:"patch"` entries, with nothing checking either. `required` (`handler.ts:136-163`) is a
+third hand-written copy of the same key list inside one file. That is what
+`patch: Record<string, unknown>` (`ExtractionPanel.tsx:218`) hides, spread straight into
+`Account.update({id, ...patch})` at `:239-242`. Casts papering the gap:
+`ExtractionPanel.tsx:139,181,222,338`, plus `as never` at `:187,371`.
+
+### 4.3 `Quote` and `Policy` — 20 duplicated columns
+
+`resource.ts:206-229` and `:254-274` declare the same 20 columns verbatim (`lines`, `premium`,
+`commissionPct`, `gl*`×6, `glClaimsMade`, `glAggregateAppliesTo`, `perOccurrenceDeductible`,
+`perUnitDeductible`, `blanketLimit`, `coinsurancePct`, `replacementCostType`, `effectiveDate`,
+`expirationDate`, `notes`). Only `status` differs, plus `policyNumber`/`quoteId`. There is no
+shared fragment. `CoverageForm.tsx` serves both and pays for it:
+
+- `:50` `existing as Policy | null` — unguarded cast of a `Quote | Policy` union, purely to read
+  `policyNumber` at `:54`.
+- `:55` `status` widened to `string` in form state, re-narrowed three times by assertion
+  (`:144` `as Policy["status"]`, `:151`/`:158` `as Quote["status"]`). Nothing checks the string
+  belongs to the right union — a `PolicyStatus` value can be assigned to a Quote.
+- `:123`, `:131` — the same string→enum widening for `replacementCostType`,
+  `glAggregateAppliesTo`.
+
+Same `<select>`-value-asserted-into-a-schema-enum pattern, with no `isX()` guard, at
+`PoliciesTab.tsx:152`, `QuotesPanel.tsx:229`, `DocumentsPanel.tsx:187`, `DetailsCard.tsx:83`,
+`NewLead.tsx:55`, `Onboarding.tsx:179` — despite `enums.ts` already shipping `isUserRole`
+(`:303`) and `isAccountType` (`:354`) as the pattern.
+
+### 4.4 The web→CRM boundary
+
+`web/src/lib/crmLead.ts:17-35` `CrmLeadInput` is **field-for-field identical** to
+`submitWebLead`'s arguments (`resource.ts:520-535`), and `type?: AccountType` correctly imports
+from `shared/accountType.ts`. Three problems remain:
+
+1. **The GraphQL document (`crmLead.ts:37-50`) is a third hand-written copy** of the same 15
+   parameter names, restated twice within itself (declaration + argument) and checked by nothing.
+   A renamed schema argument compiles clean in both apps, fails at runtime, and is swallowed by
+   `submitCrmLead`'s fail-soft catch (`:66-69`) into a `console.warn`.
+2. **Fields typed as first-class inputs but stored as prose.** `contactPhone` (`:22`) is sent and
+   then discarded at `lead-intake/handler.ts:69` (`contactPhone: undefined`) and re-encoded into
+   `notes` at `:77`. `unitNumber` and `currentCarrier` (`:29-30`) have **no `Account` column at
+   all** and are folded into `notes` at `handler.ts:56-57`.
+3. **`FormData` is an untyped string bag.** `quote/schema.ts:216`
+   `Record<string, string | string[]>` is the wizard's entire state; field names are string
+   literals with no relation to `CrmLeadInput` keys, and `submission.ts:45,108` defend with
+   `typeof data[k] === "string" ? … : ""`. `session.ts:42-54` rehydrates it from `localStorage`
+   through three unchecked casts.
+
+**Live defect at this boundary — the state select.** `web/src/data/states.ts` serves six states
+(`MA:17`, `RI:34`, `NH:51`, `CT:68`, **`NY:85`, `OK:102`**) and `quote/session.ts:80-87`
+prefills all six from the URL slug — but the wizard's own select
+(`quote/schema.ts:75-82`) offers only `MA`, `RI`, `CT`, `NH`, `OTHER`. A visitor arriving from
+`/hoa-insurance-new-york` is prefilled `state: "NY"`, which the select cannot represent, and
+`submission.ts:152` then drops it as neither a listed option nor `"OTHER"`. Both states are
+marketed on `index.astro:55`.
+
+### 4.5 `auth.ts:13` `Role` — the one hand-written enum copy left
+
+```ts
+export type Role = "ADMIN" | "STAFF" | "PRODUCER";
+```
+
+`PATTERNS.md:49-50` records this as deliberate: these are Cognito *groups* declared in
+`amplify/auth/resource.ts:20`, a different source of truth from `UserRole` (`resource.ts:58`,
+derived at `enums.ts:44`). The members currently agree; **nothing enforces either the schema
+side or the Cognito side.** Consumed at `auth.ts:44` `roleFromGroups` and
+`Onboarding.tsx:4,42,86`, where the value is written into `UserProfile.role`. Adding a fourth
+role compiles clean and fails at runtime. Listed as unenforced, not as a rule violation.
+
+### 4.6 `any`, casts, `!`
+
+**`any` — 5 sites.** `extract-lead/handler.ts:318-319` `event: any` hides a genuine two-shape
+union — the AppSync resolver event (`event.arguments.accountId`, `:327`) and the self-invoke
+worker payload (`event.work.accountId`, `:321`, produced at `:337-343`) — and forfeits the
+schema's `startLeadExtraction` argument type. Every sibling handler is properly typed
+(`lead-intake/handler.ts:37` uses `Schema["submitWebLead"]["functionHandler"]`;
+`team-admin/handler.ts:131` uses `AppSyncResolverEvent<…>`).
+`(window as any).gtag` ×4 — `QuoteApp.tsx:229`, `AssociationLeadForm.tsx:87`,
+`InstantAssessment.tsx:131`, `CoverageCalculator.tsx:262` — hides the absence of a `Window`
+augmentation, though `googlePlaces.tsx:14` shows the correct pattern in-repo.
+
+**`list()` looseness asserted away.** `MarketingTasks.tsx:115` states it outright — "list()
+yields a structurally looser type than the model type" — then casts at `:116,121,343`; also
+`AppetiteGuides.tsx:24`. The looseness is real (lazy-loader properties that `listAllPages<T>`
+erases); the fix belongs in `listAllPages`' signature, not at each call site.
 
 **No `@ts-ignore`.** The 4 `@ts-expect-error` are intentional negative type-tests
-(`useFormState.test.ts:269-275`). The one `as unknown as` is a test double
-(`storage.test.ts:311`).
+(`useFormState.test.ts:269-275`); the one `as unknown as` is a test double
+(`storage.test.ts:311`). `as never` ×5 defeats checking rather than widening:
+`LicenseForm.tsx:83-85`, `ExtractionPanel.tsx:187,371`.
 
-**Enum-widening casts** (form state is `string`, schema wants an enum):
-`CoverageForm.tsx:132,140,153,160,167` · `QuotesPanel.tsx:229` · `PoliciesTab.tsx:151` ·
-`DetailsCard.tsx:92` · `NewLead.tsx:50` · `lead-intake/handler.ts:63`.
-`licensing/LicenseForm.tsx:83-85` uses **`as never` ×3**, which defeats all checking, not just
-widening. `ExtractionPanel.tsx:195,379` also use `as never`.
+**Non-null `!`** — `team-admin/handler.ts:27` `process.env.USER_POOL_ID!`, `:114` `u.Username!`.
+Minor: `Settings.tsx:32` and `AccountDetail.tsx:36` cast `searchParams.get("tab")` *before* the
+membership check on the next line (order backwards, harmless); `Licensing.tsx:235`
+`editing.holderType as HolderType` + `adding!`.
 
-**Response-shape casts** (`a.json()` ⇒ client type is `unknown`): `Team.tsx:43,53` ·
-`CertificatesTab.tsx:76-77` · `ExtractionPanel.tsx:147,189,230,346` ·
-`DocumentsPanel.tsx:377` and `extract-lead/handler.ts:203` (`as string[][][]`) ·
-`MarketingTasks.tsx:116,121,339` · `AppetiteGuides.tsx:26`.
-`FormsTab.tsx:101,113` `as string[]` after `.filter(Boolean)` — because `a.string().array()`
-yields `(string|null)[]` and `filter(Boolean)` isn't a type guard; the correct predicate form is
-already used at `QuotesPanel.tsx:301`, `CoverageForm.tsx:65`, `renewal-tasks/handler.ts:88`.
+### 4.7 Typecheck coverage
 
-**Non-null `!` on data** — all in Lambdas: `process-document/handler.ts:57` `start.JobId!`,
-`:100` `b.Id!`; `team-admin/handler.ts:23` `process.env.USER_POOL_ID!`, `:112` `u.Username!`.
-
-### 4.4 JSON blob fields — writer/reader agreement
-
-| Field / op | Writer | Reader | Agree? |
-|---|---|---|---|
-| `Account.aiExtraction` `:132` | `extract-lead/handler.ts:295-303` | `ExtractionPanel.tsx:139-148` | Partly — writer's `usage:{inputTokens,outputTokens}` is never declared or read; per-field shape asserted per-key, never validated. **The writer's contract lives only in the LLM prompt (`:254-260`) — a string, not a type** |
-| `Document.ocrTables` `:303` | `process-document/handler.ts:166` | 2 independent copies | Shape agrees; parser duplicated 3× and the >100 KB→`undefined` case is indistinguishable from "no tables" |
-| `submitWebLead` `:508` | `lead-intake/handler.ts:42,83,86` `{ok,…}` | `crmLead.ts:60-61` reads GraphQL `errors` only | **No** — `{ok:false,error:"name is required"}` returns HTTP 200 and is silently discarded |
-| `startLeadExtraction` `:533` | `extract-lead/handler.ts:326,331,348` | `ExtractionPanel.tsx:209-212` ignores payload | **No** — `{ok:false}` renders as success |
-| `listTeamUsers` `:525` | `team-admin/handler.ts:126` | `Team.tsx:35-53` | **No** — see §4.2 |
-| `reserveCertificateNumber` `:543` | `cert-number/handler.ts:27-31` — **typed** | `CertificatesTab.tsx:76` untyped `JSON.parse` | Type exists on the writer and is erased by `.returns(a.json())` |
-| `inviteUser` `:519` | `team-admin/handler.ts:96` | `Team.tsx:89-90` | Agrees by accident; both `unknown` |
-
-Magic-link token payload has **two independent readers with no shared type**:
-`magic-link/token.ts:50-58` (validates — the one disciplined parse) and
-`MagicLinkSignIn.tsx:32-34` (re-implements the decode client-side).
-
-### 4.5 The web→CRM boundary
-
-`crmLead.ts:15-31` (15 fields) → GraphQL string `:33-46` → `resource.ts:491-507` →
-`lead-intake/handler.ts:41-79`.
-
-| `CrmLeadInput` | mutation arg | handler | Account column |
-|---|---|---|---|
-| `type?` union of 3 | `a.string()` — **union collapsed** `:492` | re-validates via `Set` `:44` | cast back `:63` |
-| `contactEmail?` | `:496` | **dropped to notes if regex fails** `:50,54` | `a.email()` `:105` |
-| `contactPhone?` | `:497` | **writes `undefined`**, phone → notes `:76` | `:107` exists, unused |
-| `state?` | `:500` | **truncated to 2 chars** then uppercased `:71` | ✓ |
-| `unitNumber?`, `currentCarrier?` | `:502,503` | → notes `:55,56` | **no column**; `priorCarrierName` `:144` exists and is unused |
-
-`unitCount`, `yearBuilt`, `totalInsuredValue`, `currentPolicyExpiration` are Account columns
-**no web sender can reach**. `submission.ts:143-156` sends 10 of 15 fields while holding
-`unitCount`, `yearBuilt`, `propertyType`, `renewalDate`, `coverageNeeds`
-(`schema.ts:91-144`) — and serializes all of them into the `notes` string
-(`submission.ts:117-141`) instead.
-
-**`notes` is the de-facto untyped overflow schema — three writers, one free-text column
-(`resource.ts:154`), zero parsers:** web (`submission.ts:118-138` `Role:`, `Unit count:`,
-`Coverage needs:`), handler (`lead-intake/handler.ts:52-77` `Unit:`, `Current carrier:`,
-`Phone:`, `Email (unvalidated):`), ExtractionPanel (`:242` `[From documents] …`).
-
-**Marketing-site vocabularies with no schema counterpart:** role `board/manager/owner`
-(`schema.ts:58-60`) · property type `condo/townhouse/mixed/other` (`:103-106`) · coverage needs
-(`:122-128`) where `ordinance` and `not_sure` have no CRM line and `Earthquake`, `Flood`,
-`HO-6`, `Workers Comp` have no web option — and the web values **never reach `Quote.lines`**
-(`resource.ts:181`), only `notes`.
-State: 5 web values (`schema.ts:76-80`) vs 51 (`client.ts:98-103`).
-
-Failure is invisible in both directions: `crmLead.ts:62-65` swallows every error to
-`console.warn`, and the handler's `{ok:false}` is never read.
-
-### 4.6 Typecheck coverage
-
-No `strict:false` anywhere. The gap is **coverage**:
+No `strict:false` anywhere, and `crm/amplify/**` is now gated (`c464605`,
+`npm run typecheck:backend` in the `backend` phase of `amplify.yml`, ahead of
+`ampx pipeline-deploy`). The remaining gap is **`web`**:
 
 | File | Setting | Consequence |
 |---|---|---|
-| `crm/tsconfig.json:19` | `"include": ["src"]` | **`crm/amplify/**` is outside the build typecheck.** `crm/package.json` runs `tsc -b && vite build` against this config with no `references`. `data/resource.ts` is checked only incidentally because `client.ts:2` imports it — **the 7 Lambda handlers are never type-checked by any build or CI step** |
-| `crm/amplify/tsconfig.json` | `strict:true`, no `include` | **No npm script invokes it.** `amplify.yml:27` runs `ampx pipeline-deploy`, which esbuild-bundles without a typecheck |
-| `web/tsconfig.json:2` | `astro/tsconfigs/strict` (not `strictest`) | `noUncheckedIndexedAccess`, `noUnusedLocals`, `exactOptionalPropertyTypes` all **off** — which is what lets `submission.ts:45` `data[k]` and `schema.ts:63,221` index freely |
-| `web/package.json` | **no `typecheck`/`astro check` script** | `astro build` does not typecheck; the 4 `(window as any).gtag` sites and every `crmLead.ts` mismatch are unverified |
+| `web/package.json` | **no `typecheck`/`astro check` script** | `astro build` does not type-check. Nothing verifies `web/src` — including the 4 `(window as any).gtag` sites, the `CrmLeadInput` contract the CRM depends on, and the untyped `FormData` bag |
+| `web/tsconfig.json:2` | `astro/tsconfigs/strict`, not `strictest` | `noUncheckedIndexedAccess`, `noUnusedLocals`, `exactOptionalPropertyTypes` off — which is what lets `submission.ts:45` and `schema.ts:63,221` index freely |
 
-`noUncheckedIndexedAccess` is off everywhere, and `Record<string, …>` is the repo's default
-enum-table idiom (18 occurrences, §4.1) with every lookup assumed to hit.
+Adding it needs `@astrojs/check` + `typescript` as `web` devDependencies. `PATTERNS.md:133-136`
+already records this as the open half of the backend-typecheck work.
+
+### 4.8 All five custom operations return `a.json()`
+
+`resource.ts:537,548,554,562,571`. Every consumer re-invents the parse (§1.12), and the return
+type is erased at the boundary even where the writer has one —
+`cert-number/handler.ts:27-31` is typed, and `CertificatesTab.tsx:76` reads it through an
+untyped `JSON.parse`.
 
 ---
 
 ## 5. MISSING PATTERNS
 
-Ranked by the number of call sites currently improvising.
+Evidence threshold: 3+ independent hand-rolled sites. Ranked by call sites currently improvising.
 
-1. **A derive-from-schema convention for enums.** `quoteStatus.ts:50`'s
-   `satisfies Record<QuoteStatus, …>` is the pattern that closes every row of §4.1 and is
-   applied to exactly one of 21 enums. — *19 enums, ~40 hand-copied literal sites.*
-2. **A validation runner.** The pieces exist (`validateAccountFields`, `validateDateRange`,
-   `validateYear`, `validatePositiveInt`, `EMAIL_RE`) and 4 of 5 have zero callers. What's
-   missing is the thing that would make forms reach for them: a per-field rule map returning
-   `Record<keyof T, string>` so errors attach to fields. All 10 `save()` functions re-implement
-   the guard-clause cascade, and every form collapses its problems into one banner
-   (`problems.join(" ")` at `NewLead.tsx:43`, `DetailsCard.tsx:60`, `OverviewTab.tsx:48`).
-   **No form in either app has per-field touched state or per-field error rendering.**
-3. **A `<Field>` component.** The
-   `<div className="field"><label>X</label><input value={form.k} onChange={…} /></div>` block
-   appears **150+ times**. CRM has **zero `<form>` elements and zero `htmlFor`/`id` pairing** —
-   every `<label>` is a sibling of its control (`CoverageForm.tsx:194`, `LicenseForm.tsx:130`,
-   `DetailsCard.tsx:147`, `CarrierForm.tsx:88`), so no click-to-focus and nothing associated
-   for screen readers; only checkbox labels wrap correctly. No Enter-to-submit except two
-   ad-hoc `onKeyDown` handlers. `ContactForm.tsx:86-118` has **no `<label>` at all**.
-4. **A `<StateGrid>` / `<CheckboxChipList>`.** The 50-state checkbox grid is byte-identical at
-   `AppetiteGuides.tsx:270-289` ↔ `CarrierForm.tsx:229-243`, and the same `US_STATES.map` grid
-   appears at `DetailsCard.tsx:150`, `LicenseForm.tsx:133`, `Carriers.tsx:218`,
-   `Onboarding.tsx:162` — **6 copies.** The toggle-a-`string[]` idiom repeats at
-   `CoverageForm.tsx:96-100,361-376`, `LicenseForm.tsx:195-214`, `CarrierForm.tsx:38-42,229-244`.
-5. **A toast / transient notification system.** Acknowledged in-code at `SaveStatus.tsx:7`.
-   `SaveStatus` covers form-adjacent feedback; nothing covers "this happened elsewhere on the
-   page", which is why `Celebration` is bespoke and 9 mutations report nothing. **No
-   toast/snackbar/aria-live region exists in either app** — the only `role="status"`/`role="alert"`
-   in the codebase is `SaveStatus.tsx:97`, while `.error-text` is hand-rendered at ~30 sites.
-6. **A shared empty/loading state.** No skeleton and no empty-state component. 10 inline
-   loading implementations across 2 class conventions, 19 bespoke empty strings. Gate ordering
-   differs per page — `QuotesPanel.tsx:182-186` has no loading branch (renders "No quotes yet."
-   during the fetch); `QuotesList.tsx:70`, `PoliciesList.tsx:56`, `Carriers.tsx:108` have
-   **neither loading nor error**, so a failed fetch is indistinguishable from an empty table.
-7. **An `unwrap({data, errors})` helper.** `errors?.length` appears 33× across 22 files; 9
-   mutation sites forget it entirely.
-8. **A shared Lambda data-client module.** The 26-line `getDataClient()` prologue is verbatim in
-   4 handlers. `pagination.ts:13` already establishes the no-imports-shareable pattern.
-9. **A permission-guard primitive.** No `<RequireAdmin>`, no route-level guard in
-   `App.tsx:286-300`, and **no convention that a client gate must be paired with a model
-   rule** — which is exactly how `DeleteLeadZone` ended up client-only (§1.3).
-10. **A shared appetite-match module** (§1.8) and **a shared ACORD header block** (§1.12).
-11. **`web/src/lib/` submission + conversion helpers** (§1.7), and an ambient `gtag`
-    declaration to retire 4 `as any`.
-12. **A shared icon module.** `App.tsx:152-237` holds 9 inline SVGs + `iconProps`;
-    `FileButton.tsx:29-34` re-declares the attribute set by hand. In `web/`,
-    `CoverageCalculator.tsx:109-117` duplicates SVG paths byte-for-byte from its own sibling
-    `quote/icons.tsx:56-88`, and `quote/ui.tsx:176-207,472-492` inlines SVGs while already
-    importing from that module. The map-pin SVG repeats at `AssociationLeadForm.tsx:136`,
-    `InstantAssessment.tsx:207`, `ContactForm.tsx:67`.
-13. **A test-util module.** `deferred<T>()` ×3, `generateClient` stub ×2 (§1.9).
-14. **A path alias for `shared/`.** Imported as `../../../shared/agency`
+1. **`unwrap({data, errors})`** — §1.2. **36 sites / 24 files**, three spellings, 10 of them
+   non-throwing. Lives in `crm/src/lib/client.ts` beside `friendlyError`, or `pagination.ts` if
+   the 3 Lambda sites must share it.
+2. **A loading/error/empty ladder component.** The identical four-branch JSX —
+   `!loaded ? "Loading…" : error ? <p className="error-text"> : rows.length === 0 ? <p className="muted small"> : <table>`
+   — is written out **12 times**: `PoliciesList.tsx:76-81`, `QuotesList.tsx:88-93`,
+   `Carriers.tsx:125-130`, `AppetiteGuides.tsx:86-91`, `PoliciesTab.tsx:112-119`,
+   `CertificatesTab.tsx:308-313`, `FormsTab.tsx:248-253`, `MarketingTasks.tsx:402-410`,
+   `AccountsList.tsx:111-116`, `BuildingsCard.tsx:115-118`, `Dashboard.tsx:110-121`, and
+   **`Team.tsx:176-179` — which has only three branches, omitting the error case, so a failed
+   team read renders "No users found."** `PATTERNS.md:158-167` specifies the ladder in prose but
+   ships no component. A `<ResourceBody res={…} empty="…">` in `crm/src/lib/` closes the Team
+   bug by construction. — *12 files.*
+3. **A `web` submit pipeline** — §1.4. `submitToFormSubmit()` + `useSubmit()` in
+   `web/src/lib/`. — *5 forms.*
+4. **A reference-data cache** — §1.6. `useCarriers()` over `useAsyncResource`, plus a generic
+   `useLookup(items, key, label)`. — *9 fetch sites, 4 lookup sites.*
+5. **`listAll(model)`** — the unfiltered counterpart to `listAllPages`, in
+   `crm/src/lib/pagination.ts`. — *18 sites / 12 files.*
+6. **`trackConversion()` + `CONVERSION_ID`** — §1.5, in `web/src/constants.ts`. — *8 files.*
+7. **A tolerant `a.json()` unwrapper** — §1.12, in `crm/src/lib/pagination.ts`. — *3 sites,
+   one of which is already wrong.*
+8. **`joinList(values, { sep, empty })`** — §1.11, in `crm/src/lib/client.ts`. — *29 sites /
+   12 files.*
+9. **`isoToday()` / `isoNow()`, and `fmtDate` fixed to slice internally** — §1.10, in
+   `crm/src/lib/client.ts`. — *16 sites / 9 files.*
+10. **A shared ACORD header block and a shared `Quote`/`Policy` column fragment** — §1.14, §4.3.
+11. **A path alias for `shared/`.** Imported as `../../../shared/agency`
     (`crm/src/lib/agency.ts:8`) and `../../../../shared/agency`
-    (`web/src/pages/get-started/[...slug].astro:5`). `shared/` currently holds only
-    `agency.ts`; the cross-app duplicates in §1.7, §1.10 and §5.4 have nowhere to live.
-    A drift guard already exists (`crm/src/test/sharedAgency.test.ts:211`).
-15. **Splitting pure constants out of `client.ts`** so `US_STATES` doesn't drag in
-    `generateClient()` (§2).
+    (`web/src/pages/get-started/[...slug].astro:5`). `shared/` holds 2 files / 106 lines against
+    the cross-app duplicates in §1.4, §1.5, §1.7 and §1.9, which have nowhere to live.
+12. **A `web`-side icon module.** `CoverageCalculator.tsx:109-124` duplicates SVG paths
+    byte-for-byte from its own sibling `quote/icons.tsx`; `quote/ui.tsx` inlines SVGs while
+    already importing from that module; the map-pin repeats at `AssociationLeadForm.tsx:136`,
+    `InstantAssessment.tsx:207`, `ContactForm.tsx:67`. In `crm`, `App.tsx:152-237` holds 9
+    inline SVGs + `iconProps` and `FileButton.tsx:29-34` re-declares the attribute set.
+13. **A test-util module.** `deferred<T>()` ×3 (`SaveStatus.test.tsx`, `useAsyncResource.test.ts`,
+    `ConfirmButton.test.tsx`), `generateClient` stub ×2 (`client.test.ts:15`,
+    `storage.test.ts:13`).
+
+### 5.1 Adoption gaps, not missing modules
+
+The three dead modules (§1.1) and the four dead validators (§3.2) are the largest "missing
+pattern" by call-site count — **~100 sites** — but the pattern is not missing. It is written,
+tested, and unimported. Hand-rolled counterparts of the dead validators:
+
+| Canonical (0 sites) | Live copies |
+|---|---|
+| `client.ts:219` `EMAIL_RE` | `client.ts:131` (inline, `+` TLD — in the same file, 88 lines above), `lead-intake/handler.ts:51`, `team-admin/handler.ts:35`, `quote/schema.ts:25` |
+| `client.ts:252` `validateDateRange` | `CoverageForm.tsx:103-110`, `LicenseForm.tsx:64-71` — identical logic *and* identical message string; neither checks the dates parse |
+| `client.ts:277` `validateYear` | `client.ts:143-148` (`+5` window), `DetailsCard.tsx:42-46` (`+1` window, 4 fields) |
+| `client.ts:298` `validatePositiveInt` | `client.ts:138-142`, `BuildingsCard.tsx:45-49`, `AppetiteGuides.tsx:183-191` |
+
+`validateAccountFields` (`client.ts:122`, 3 call sites) re-implements `EMAIL_RE`, `validateYear`
+and `validatePositiveInt` from **the same file**.
+
+### 5.2 Checked and not found
+
+- **Error boundary** — no `componentDidCatch`/`ErrorBoundary` in `crm/src`. But
+  `useAsyncResource.error` + `useSaveStatus` cover every surfaced failure; there is no 3×
+  duplication to consolidate. A robustness gap, not a missing shared abstraction.
+- **Toast/notification service** — deliberately declined; `SaveStatus.tsx:6-7,176-196` argues the
+  persistent-until-dirty model is correct here.
+- **Permission-check helper** — `auth.ts` already provides `AdminContext`/`useIsAdmin`, 3
+  consumers, no hand-rolled variants.
+- **Shared `<Field>` component** — 100+ `<div className="field"><label>…` blocks, but they vary
+  across selects, chip lists, date inputs and autocomplete enough that this reads as CSS-class
+  convention rather than a suppressed component. (Accessibility note under §6.)
+- **Mutation counterpart to `useAsyncResource`** — exists: `useSaveStatus`, 16 sites.
+- **Money/date module** — exists: `client.ts:103-118,407` + `acordFormat.ts`. Not duplicated.
 
 ---
 
-## FLAGGED IN PASSING
+## 6. FLAGGED IN PASSING
 
 Outside the five requested categories; surfaced during the scan.
 
-1. **Committed live credentials.** `web/scripts/sync-buildium.ts:57-60` hardcodes
-   `BUILDIUM_CLIENT_ID` and `BUILDIUM_CLIENT_SECRET` as fallback defaults. Verified present in
-   the working tree and in git history on `staging`. `web/.env.example:24-26` documents both as
-   env vars, so the fallbacks appear unintended. Rotation is the only remediation that works —
-   removing the lines does not clear history.
-2. **STAFF users can delete any lead and its history through the API** — §1.3, item 1.
-3. **`signatures/*` is writable by any authenticated user at a predictable key**
-   (`crm/amplify/storage/resource.ts:~68`); those signatures are stamped onto issued ACORD
-   certificates. Marked a KNOWN GAP in-file.
-4. **Double-submit on the quote wizard's final step** — `QuoteApp.tsx:183` (§1.13).
-5. **Unsanitized S3 keys** — `NewLead.tsx:95` interpolates `file.name` directly; a `/` in the
-   filename breaks the OCR key parse at `process-document/handler.ts:143` (§1.6).
+1. **Committed live credentials — carried over from the previous audit, still present.**
+   `web/scripts/sync-buildium.ts:56-60` hardcodes `BUILDIUM_CLIENT_ID` and
+   `BUILDIUM_CLIENT_SECRET` as `||` fallback defaults. The file's own header (`:10-12`) documents
+   both as required env vars, so the fallbacks appear unintended. Present in the working tree and
+   in git history on `staging` — rotation is the only remediation that works; removing the lines
+   does not clear history.
+2. **Unsanitized S3 keys** — `NewLead.tsx:102` interpolates `file.name` into the S3 key; a `/` in
+   the filename breaks the OCR key parse at `process-document/handler.ts:143`. `safeSegment`
+   (`storage.ts:81`) exists and is unimported (§1.1a).
+3. **`signatures/*` writable by any authenticated user at a predictable key** —
+   `crm/amplify/storage/resource.ts:18`. Those signatures are stamped onto issued ACORD
+   certificates. Marked a KNOWN GAP in-file (`:42-67`) and in `PATTERNS.md:253-257`; unchanged.
+4. **CRM forms have zero `<form>` elements and zero `htmlFor`/`id` pairing** — every `<label>` is
+   a sibling of its control (`CoverageForm.tsx:194`, `LicenseForm.tsx:130`, `DetailsCard.tsx:147`,
+   `CarrierForm.tsx:88`), so there is no click-to-focus and nothing associated for screen readers;
+   only checkbox labels wrap correctly. `ContactForm.tsx:86-118` has no `<label>` at all. The only
+   `role="status"`/`role="alert"` in either app is `SaveStatus.tsx:97`, while `.error-text` is
+   hand-rendered at 51 sites.
+5. **`PhotosCard`'s thumbnail read still has no `.catch()`** — a genuine unhandled rejection,
+   recorded as open at `PATTERNS.md:201-202`.
