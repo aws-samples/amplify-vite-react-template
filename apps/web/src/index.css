@@ -1909,6 +1909,9 @@ h6 {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* A grid/flex child defaults to a min-content floor, so one long label or a
+     browser-default input width can push the field past the card. */
+  min-width: 0;
 }
 .bk-field.bk-full {
   grid-column: 1 / -1;
@@ -2021,7 +2024,10 @@ h6 {
 }
 .bk-form-step {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0, 1fr), not 1fr: an auto floor lets a wide child (segmented
+     control, address row) widen the track and shove the whole step out of
+     the card instead of shrinking to fit. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
   animation: bkFadeIn var(--dur-base) var(--ease-out);
 }
@@ -2299,11 +2305,11 @@ h6 {
 .bk-form-row {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
 }
 .bk-form-row--3 {
-  grid-template-columns: 2fr 1fr 1fr;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
 }
 
 /* Segmented control — full width variant */
@@ -2314,6 +2320,9 @@ h6 {
 .bk-segmented--full .bk-seg {
   flex: 1;
   text-align: center;
+  /* Without this the longest label ("Condo / HOA Community") sets a floor the
+     control can never shrink under, and it overflows the card on a phone. */
+  min-width: 0;
 }
 
 /* Inline error */
@@ -2418,10 +2427,28 @@ h6 {
   }
   .bk-form-step,
   .bk-form-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .bk-form-row--3 {
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* Phone: three uppercase labels can't share a row legibly, so the segmented
+   control becomes a stacked list, still one joined control (same treatment
+   the mode tabs get). City takes its own row so State and Zip stay tappable. */
+@media (max-width: 560px) {
+  .bk-segmented--full {
+    flex-direction: column;
+  }
+  .bk-segmented--full .bk-seg + .bk-seg {
+    border-top: 1px solid var(--border);
+  }
+  .bk-form-row--3 {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .bk-form-row--3 > :first-child {
+    grid-column: 1 / -1;
   }
 }
 
@@ -4661,7 +4688,10 @@ a:focus-visible {
 }
 .bk-pests-tabs {
   display: grid;
-  grid-template-columns: repeat(10, 1fr);
+  /* minmax(0, …): with an auto floor each column sizes to its own label, so
+     the icons (width: 100%, square) came out a different size per column and
+     the widest label pushed the last tab off screen. */
+  grid-template-columns: repeat(10, minmax(0, 1fr));
   gap: 12px;
 }
 .bk-pest-tab {
@@ -4709,7 +4739,8 @@ a:focus-visible {
   font-size: 0.72rem;
   font-weight: 700;
   text-align: center;
-  white-space: nowrap;
+  /* Not nowrap: the columns are equal-width, so a long label wraps inside its
+     own cell instead of running under its neighbour. */
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--bk-ink);
@@ -4736,12 +4767,21 @@ a:focus-visible {
 }
 @media (max-width: 860px) {
   .bk-pests-tabs {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 8px;
   }
   .bk-pest-label {
     font-size: 0.6rem;
     letter-spacing: 0.03em;
+  }
+}
+/* Phone: four across keeps the icons big enough to read the pest. */
+@media (max-width: 480px) {
+  .bk-pests-tabs {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .bk-pest-label {
+    font-size: 0.55rem;
   }
 }
 

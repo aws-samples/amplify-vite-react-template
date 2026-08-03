@@ -110,17 +110,59 @@ export const DEMAND_PRICING_MODEL = "claude-sonnet-5";
  * How a research call runs. DEEP is the staff-requested review pass: Opus,
  * the full four searches, and the 4-minute ceiling. DEMAND is the live
  * quote-miss pass — a lead is sitting on the quote page polling every few
- * seconds, so it runs on Sonnet with fewer searches and a 2-minute ceiling
- * (typically 20–60s). Both ceilings stay under the 5-minute coverage-row
- * lease, DEMAND with enough headroom for the worker's one in-run retry.
+ * seconds, so it runs on Sonnet with fewer searches and a 2-minute ceiling.
+ * Both ceilings stay under the 5-minute coverage-row lease, DEMAND with
+ * enough headroom for the worker's one in-run retry.
+ *
+ * `effort` and `maxTokens` are the LATENCY controls, and DEMAND's values are
+ * load-bearing. On claude-sonnet-5, omitting the `thinking` parameter runs
+ * ADAPTIVE THINKING at the default `high` effort — a silent behaviour change
+ * from the Sonnet generation this prompt was written against, where omitting
+ * it meant no thinking at all. High-effort thinking plus three web searches
+ * does not fit the 2-minute ceiling: every research failure logged in the
+ * three weeks to 3 Aug 2026 was "Request timed out", and the median
+ * pricing-refresh invocation sat at ~123s — one whole timeout. Each timeout
+ * costs the waiting lead the ceiling, then the in-run retry's ceiling, then
+ * a backoff the 5-minute recovery cron has to pick up: the 3-10 minute
+ * quotes.
+ *
+ *   - effort "low" keeps adaptive thinking (so the model still reaches for
+ *     the search tool) but scopes it to what this bounded lookup needs.
+ *     Raise it to "medium" if researched prices start looking careless;
+ *     that is the one knob to turn, and it trades latency for depth.
+ *   - maxTokens is a ceiling on thinking AND answer text together. At 3,000
+ *     with thinking on, reasoning can crowd out the trailing labeled lines
+ *     and the whole sheet is discarded as junk (every label must parse).
+ *     8,000 buys the answer room; it does not make the model write more.
+ *
+ * DEEP keeps the old shape on purpose: claude-opus-4-8 runs WITHOUT thinking
+ * when `thinking` is omitted, so the staff review pass never had this problem.
  */
 export type ResearchProfile = "DEEP" | "DEMAND";
 export const RESEARCH_PROFILES: Record<
   ResearchProfile,
-  { model: string; maxSearches: number; timeoutMs: number }
+  {
+    model: string;
+    maxSearches: number;
+    timeoutMs: number;
+    maxTokens: number;
+    /** Omitted = the model's default. Only set where latency is the point. */
+    effort?: "low" | "medium" | "high";
+  }
 > = {
-  DEEP: { model: PRICING_MODEL, maxSearches: 4, timeoutMs: 240_000 },
-  DEMAND: { model: DEMAND_PRICING_MODEL, maxSearches: 3, timeoutMs: 120_000 },
+  DEEP: {
+    model: PRICING_MODEL,
+    maxSearches: 4,
+    timeoutMs: 240_000,
+    maxTokens: 3000,
+  },
+  DEMAND: {
+    model: DEMAND_PRICING_MODEL,
+    maxSearches: 3,
+    timeoutMs: 120_000,
+    maxTokens: 8000,
+    effort: "low",
+  },
 };
 
 /**
@@ -1005,10 +1047,19 @@ async function research(
     timeout: cfg.timeoutMs,
     maxRetries: 0,
   });
+  // Every research call records how long it actually took. Without this the
+  // only latency signal was the Lambda's own REPORT duration, which is why a
+  // profile that timed out on EVERY attempt could run for weeks unnoticed.
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
   try {
     const researchMsg = await anthropic.messages.create({
       model: cfg.model,
-      max_tokens: 3000,
+      max_tokens: cfg.maxTokens,
+      // See RESEARCH_PROFILES: the DEMAND effort level is what keeps a live
+      // quote's research inside its ceiling. Omitted on DEEP = the model's
+      // own default.
+      ...(cfg.effort ? { output_config: { effort: cfg.effort } } : {}),
       tools: [
         {
           type: "web_search_20260209",
@@ -1022,13 +1073,38 @@ async function research(
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
       .map((b) => b.text)
       .join("\n");
-    // Every component or nothing: a partial answer is a junk answer.
+    // Every component or nothing: a partial answer is a junk answer. Name
+    // WHICH component was missing and why the answer stopped — a
+    // "max_tokens" stop reason here means thinking crowded out the labeled
+    // lines, which is a profile problem (maxTokens/effort), not a bad model.
     const cents: Record<string, number> = {};
     for (const label of spec.lines) {
       const parsed = parseUsdLine(text, label);
-      if (parsed == null) return null;
+      if (parsed == null) {
+        console.error(
+          "market-rate research answer unusable",
+          service,
+          areaKeyFor(city, state),
+          JSON.stringify({
+            profile,
+            missingLabel: label,
+            stopReason: researchMsg.stop_reason,
+            elapsedMs: elapsed(),
+          })
+        );
+        return null;
+      }
       cents[label] = spec.tidyLines === false ? parsed : tidy(parsed);
     }
+    console.log(
+      "market-rate research ok",
+      JSON.stringify({
+        service,
+        areaKey: areaKeyFor(city, state),
+        profile,
+        elapsedMs: elapsed(),
+      })
+    );
     const basisLine =
       text
         .split("\n")
@@ -1051,7 +1127,8 @@ async function research(
       "market-rate research request failed",
       service,
       areaKeyFor(city, state),
-      err instanceof Error ? err.message : String(err)
+      err instanceof Error ? err.message : String(err),
+      JSON.stringify({ profile, elapsedMs: elapsed() })
     );
     return null;
   }

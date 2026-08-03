@@ -934,10 +934,20 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
 
     const req = messagesCreate.mock.calls[0]?.[0] as {
       model: string;
+      max_tokens: number;
+      output_config?: { effort?: string };
       tools: { max_uses: number }[];
     };
     expect(req.model).toBe(DEMAND_PRICING_MODEL);
     expect(req.tools[0].max_uses).toBe(RESEARCH_PROFILES.DEMAND.maxSearches);
+    // The latency controls a waiting lead depends on. claude-sonnet-5 runs
+    // ADAPTIVE THINKING at `high` effort when neither is set, which does not
+    // fit the 2-minute ceiling — that is what made every attempt time out and
+    // turned cold quotes into 3-10 minute waits. An explicit effort scopes the
+    // thinking; the token ceiling covers thinking AND the labeled answer
+    // lines, so at 3,000 the sheet gets truncated into junk and discarded.
+    expect(req.output_config?.effort).toBe("low");
+    expect(req.max_tokens).toBe(8000);
     // The audit stays honest: the row names the model that actually ran.
     expect(created[0].model).toBe(DEMAND_PRICING_MODEL);
     expect(created[0].promptHash).toBe(pricingPromptHash());
