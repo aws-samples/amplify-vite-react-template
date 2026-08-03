@@ -925,7 +925,7 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
     expect(pricingPromptHash()).toBe(pricingPromptHash());
   });
 
-  it("the DEMAND profile researches on the fast model with fewer searches, and the row records it", async () => {
+  it("the DEMAND profile researches on the fast model with NO web search, and the row records it", async () => {
     await researchAndCacheRate({
       anthropicKey: "test-key",
       ...gpArgs,
@@ -936,21 +936,50 @@ describe("GL-16 — versioned prompt audit and the catalog rollback", () => {
       model: string;
       max_tokens: number;
       output_config?: { effort?: string };
-      tools: { max_uses: number }[];
+      tools?: { max_uses: number }[];
     };
     expect(req.model).toBe(DEMAND_PRICING_MODEL);
-    expect(req.tools[0].max_uses).toBe(RESEARCH_PROFILES.DEMAND.maxSearches);
+    // No web_search tool AT ALL on the live quote path — not max_uses 0, no
+    // tools key. The 72-call A/B on 3 Aug 2026 put every hard failure in the
+    // search arms (11 of 11, all ceiling timeouts) and cost ~30s a call for a
+    // GENERAL_PEST price that moved 2.7%. A tools array reappearing here is
+    // the regression that puts 3-10 minute quotes back.
+    expect(req.tools).toBeUndefined();
+    expect(RESEARCH_PROFILES.DEMAND.maxSearches).toBe(0);
     // The latency controls a waiting lead depends on. claude-sonnet-5 runs
-    // ADAPTIVE THINKING at `high` effort when neither is set, which does not
-    // fit the 2-minute ceiling — that is what made every attempt time out and
-    // turned cold quotes into 3-10 minute waits. An explicit effort scopes the
-    // thinking; the token ceiling covers thinking AND the labeled answer
-    // lines, so at 3,000 the sheet gets truncated into junk and discarded.
+    // ADAPTIVE THINKING at `high` effort when neither is set, which is what
+    // pushed every deployed attempt past the ceiling. An explicit effort
+    // scopes the thinking; the token ceiling covers thinking AND the labeled
+    // answer lines, so too low a value truncates the sheet into junk.
     expect(req.output_config?.effort).toBe("low");
     expect(req.max_tokens).toBe(8000);
     // The audit stays honest: the row names the model that actually ran.
     expect(created[0].model).toBe(DEMAND_PRICING_MODEL);
     expect(created[0].promptHash).toBe(pricingPromptHash());
+  });
+
+  it("the DEEP staff-review profile keeps web search — nobody is waiting on it", async () => {
+    await researchAndCacheRate({
+      anthropicKey: "test-key",
+      ...gpArgs,
+      profile: "DEEP",
+    });
+
+    const req = messagesCreate.mock.calls[0]?.[0] as {
+      model: string;
+      tools?: { type: string; max_uses: number }[];
+    };
+    expect(req.model).toBe(PRICING_MODEL);
+    expect(req.tools?.[0]?.max_uses).toBe(RESEARCH_PROFILES.DEEP.maxSearches);
+  });
+
+  it("the prompt hash distinguishes a searched sheet from an unsearched one", () => {
+    // GL-16: how a price was SOURCED is pricing policy, so the profile shapes
+    // feed the hash. Without this, dropping DEMAND's search would have shipped
+    // under an unchanged hash and no row could be told apart from a searched
+    // one after the fact.
+    expect(pricingPromptHash()).toBe(pricingPromptHash());
+    expect(JSON.stringify(RESEARCH_PROFILES)).toContain('"maxSearches":0');
   });
 
   it("pickServingRow under a version manifest serves EXACTLY the named row; pinned still wins", () => {

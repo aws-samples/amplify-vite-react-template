@@ -99,50 +99,74 @@ export const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * computed from the actual spec content so an ad-hoc edit can never ship
  * unversioned (the recorded hash changes even when the label forgot to).
  */
+// 2026-08-03.1: DEMAND stopped using web search (see RESEARCH_PROFILES for the
+// A/B). How a price was sourced — searched vs answered from the model alone —
+// is exactly the kind of thing an audit needs to distinguish two rows by, so
+// the profile shapes now feed the hash as well; every sheet cached from here
+// records a different hash than a searched one.
 // 2026-07-27.1: RODENT also prices an ongoing quarterly program, so its sheet
 // gained plans.QUARTERLY. Cached rodent sheets predate it and carry no plan —
 // those quotes fall to the honest contact-for-price path until they refresh.
-export const PRICING_PROMPT_VERSION = "2026-07-27.1";
+export const PRICING_PROMPT_VERSION = "2026-08-03.1";
 export const PRICING_MODEL = "claude-opus-4-8";
 export const DEMAND_PRICING_MODEL = "claude-sonnet-5";
 
 /**
  * How a research call runs. DEEP is the staff-requested review pass: Opus,
- * the full four searches, and the 4-minute ceiling. DEMAND is the live
- * quote-miss pass — a lead is sitting on the quote page polling every few
- * seconds, so it runs on Sonnet with fewer searches and a 2-minute ceiling.
- * Both ceilings stay under the 5-minute coverage-row lease, DEMAND with
- * enough headroom for the worker's one in-run retry.
+ * four web searches, and the 4-minute ceiling. DEMAND is the live quote-miss
+ * pass — a lead is sitting on the quote page polling every few seconds, so it
+ * runs on Sonnet with NO web search at all. Both ceilings stay under the
+ * 5-minute coverage-row lease, DEMAND with room for the in-run retry.
  *
- * `effort` and `maxTokens` are the LATENCY controls, and DEMAND's values are
- * load-bearing. On claude-sonnet-5, omitting the `thinking` parameter runs
- * ADAPTIVE THINKING at the default `high` effort — a silent behaviour change
- * from the Sonnet generation this prompt was written against, where omitting
- * it meant no thinking at all. High-effort thinking plus three web searches
- * does not fit the 2-minute ceiling: every research failure logged in the
- * three weeks to 3 Aug 2026 was "Request timed out", and the median
- * pricing-refresh invocation sat at ~123s — one whole timeout. Each timeout
- * costs the waiting lead the ceiling, then the in-run retry's ceiling, then
- * a backoff the 5-minute recovery cron has to pick up: the 3-10 minute
- * quotes.
+ * DEMAND does not search, and that is a measured decision (72-call A/B, 4 MA
+ * towns x GENERAL_PEST + HOA x 3 reps, 3 Aug 2026). Web search was the whole
+ * latency and failure story:
  *
- *   - effort "low" keeps adaptive thinking (so the model still reaches for
- *     the search tool) but scopes it to what this bounded lookup needs.
- *     Raise it to "medium" if researched prices start looking careless;
- *     that is the one knob to turn, and it trades latency for depth.
- *   - maxTokens is a ceiling on thinking AND answer text together. At 3,000
- *     with thinking on, reasoning can crowd out the trailing labeled lines
- *     and the whole sheet is discarded as junk (every label must parse).
- *     8,000 buys the answer room; it does not make the model write more.
+ *                       median    p90      120s ceiling   usable sheets
+ *   3 searches (old)     41.8s   120.0s     6 of 24          75.0%
+ *   1 search             44.0s   120.0s     5 of 24          79.2%
+ *   no search             9.2s    11.8s     0 of 24          95.8%
  *
- * DEEP keeps the old shape on purpose: claude-opus-4-8 runs WITHOUT thinking
- * when `thinking` is omitted, so the staff review pass never had this problem.
+ * Every one of the 11 hard failures was a ceiling timeout, all of them in the
+ * two search arms. Searching cost ~30s per call and bought no price accuracy
+ * worth having: on GENERAL_PEST the no-search sheet lands +2.7% signed / 7.7%
+ * mean absolute against the searched one — closer than one search arm is to
+ * the other — and no arm is repeatable (median run-to-run spread 25-37.5%
+ * whichever way you configure it). Search did not buy consistency either.
+ *
+ * The one place it moved the number systematically is HOA: no-search per-unit
+ * rates run ~25% under the searched ones across every band and cadence, and
+ * that flows into the derived one-time common-area price. Read against a
+ * searched baseline whose own reps ranged $2.25-$8.00 on identical input, so
+ * treat it as "HOA is where the model is least anchored", not as a known bias.
+ * Office-pinned HOA rates are the durable answer there.
+ *
+ * The other controls, and why they are what they are:
+ *
+ *   - effort "low". On claude-sonnet-5, omitting `thinking` runs ADAPTIVE
+ *     THINKING at the default `high` effort — a silent change from the Sonnet
+ *     generation this prompt was written against, where omitting it meant no
+ *     thinking at all. That default is what pushed every deployed attempt past
+ *     the ceiling before 3 Aug. Raise to "medium" if prices look careless.
+ *   - maxTokens caps thinking AND answer text together. A no-search answer
+ *     runs ~750 output tokens, so 8,000 is loose headroom, not a target: it
+ *     exists so reasoning can never crowd out the trailing labeled lines and
+ *     get the whole sheet discarded as junk.
+ *   - timeoutMs 45s. With no search the slowest of 24 calls was 12.1s, so 45s
+ *     is ~4x headroom and still cuts a pathological call loose fast. Two
+ *     attempts fit inside the 5-minute row lease with room to spare.
+ *
+ * DEEP keeps searching on purpose: it is the staff review pass, nobody is
+ * waiting on it, and the A/B tested the Sonnet/DEMAND shape only. Its Opus
+ * model also runs WITHOUT thinking when `thinking` is omitted, so it never had
+ * the adaptive-thinking problem in the first place.
  */
 export type ResearchProfile = "DEEP" | "DEMAND";
 export const RESEARCH_PROFILES: Record<
   ResearchProfile,
   {
     model: string;
+    /** 0 = no web_search tool on the request at all. */
     maxSearches: number;
     timeoutMs: number;
     maxTokens: number;
@@ -158,8 +182,8 @@ export const RESEARCH_PROFILES: Record<
   },
   DEMAND: {
     model: DEMAND_PRICING_MODEL,
-    maxSearches: 3,
-    timeoutMs: 120_000,
+    maxSearches: 0,
+    timeoutMs: 45_000,
     maxTokens: 8000,
     effort: "low",
   },
@@ -819,7 +843,10 @@ type ResearchSpec = {
 const LINE_INSTRUCTION =
   "Research current local/regional pricing (2025-2026). End your answer with EXACTLY these lines, each a single competitive number a quality local operator would quote (a number, not a range):";
 
-const RESEARCH_SPECS: Record<MarketRateService, ResearchSpec> = {
+// Exported so an offline pricing experiment can drive the EXACT production
+// prompt rather than a transcription of it. Read-only by contract: the
+// GL-16 prompt hash is computed from this object's content.
+export const RESEARCH_SPECS: Record<MarketRateService, ResearchSpec> = {
   GENERAL_PEST: {
     ask: (city, state, bucket) =>
       `What do pest-control companies near ${city}, ${state} charge for general pest control (ants, spiders, common crawling/stinging insects) on a ~${bucket ?? 2000} sqft single-family home? Price ALL of: (1) a one-time interior+exterior general pest treatment; (2) a recurring plan with monthly visits; (3) a recurring plan with visits every two months; (4) a recurring plan with quarterly visits. Recurring plans are billed as a flat monthly subscription price regardless of visit cadence, and each plan starts with a one-time initial/startup fee for the first intensive visit. ${LINE_INSTRUCTION}
@@ -997,9 +1024,15 @@ function parseUsdLine(text: string, label: string): number | null {
 
 /**
  * GL-16 — the content hash of the designed prompt policy: every spec's ask
- * template and required label set, plus the shared line instruction and
- * model. Recorded on every row; a prompt edit changes it even when the
- * version label was forgotten.
+ * template and required label set, the shared line instruction, the models,
+ * and the profile shapes. Recorded on every row; a prompt edit changes it
+ * even when the version label was forgotten.
+ *
+ * The profiles are in the material because the request shape IS pricing
+ * policy, not tuning: a sheet researched with three web searches and one
+ * answered with none are different products of different processes, and the
+ * audit has to be able to tell them apart from the row alone. Dropping
+ * DEMAND's search would otherwise have shipped under an unchanged hash.
  */
 let promptHashMemo: string | null = null;
 export function pricingPromptHash(): string {
@@ -1008,6 +1041,7 @@ export function pricingPromptHash(): string {
       PRICING_MODEL,
       DEMAND_PRICING_MODEL,
       LINE_INSTRUCTION,
+      RESEARCH_PROFILES,
       Object.entries(RESEARCH_SPECS).map(([kind, spec]) => [
         kind,
         spec.lines,
@@ -1060,13 +1094,20 @@ async function research(
       // quote's research inside its ceiling. Omitted on DEEP = the model's
       // own default.
       ...(cfg.effort ? { output_config: { effort: cfg.effort } } : {}),
-      tools: [
-        {
-          type: "web_search_20260209",
-          name: "web_search",
-          max_uses: cfg.maxSearches,
-        },
-      ],
+      // maxSearches 0 omits the tool entirely rather than passing max_uses: 0
+      // — the point is that no search loop exists, which is where DEMAND's
+      // ~30s and all of its timeouts came from.
+      ...(cfg.maxSearches > 0
+        ? {
+            tools: [
+              {
+                type: "web_search_20260209" as const,
+                name: "web_search",
+                max_uses: cfg.maxSearches,
+              },
+            ],
+          }
+        : {}),
       messages: [{ role: "user", content: spec.ask(city, state, bucket) }],
     });
     const text = researchMsg.content
@@ -1103,6 +1144,15 @@ async function research(
         areaKey: areaKeyFor(city, state),
         profile,
         elapsedMs: elapsed(),
+        // Which half of the call is the wall clock? Search rounds are the
+        // suspected variance (one 120s timeout and one 46s success on the
+        // SAME config, 3 Aug), but that was inference. These two numbers
+        // settle it: if slow calls carry more searches, cap maxSearches; if
+        // they carry more output tokens, the generation is the problem.
+        // Optional all the way down on purpose: a telemetry field must never
+        // be able to throw and take the research result with it.
+        searches: researchMsg.usage?.server_tool_use?.web_search_requests ?? null,
+        outputTokens: researchMsg.usage?.output_tokens ?? null,
       })
     );
     const basisLine =
