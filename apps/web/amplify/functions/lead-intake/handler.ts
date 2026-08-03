@@ -59,15 +59,17 @@ type LeadInput = {
 
 const SUPPORT_PHONE = "(508) 258-9294";
 
+/**
+ * No CORS headers here. The Function URL carries its own CORS config (see
+ * `backend.ts`), and Lambda appends those headers to whatever we return —
+ * so emitting our own produced two `Access-Control-Allow-Origin` values on
+ * every response. Browsers reject that, which surfaced as "couldn't reach
+ * the server" on a lead that had in fact been saved and emailed.
+ */
 function jsonResponse(statusCode: number, body: unknown) {
   return {
     statusCode,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "POST,OPTIONS",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   };
 }

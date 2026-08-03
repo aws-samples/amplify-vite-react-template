@@ -2,9 +2,8 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { submitLead } from "../lib/leadIntakeApi";
 import { trackFormSubmit, trackGenerateLead, trackAdsConversion, ADS_CONVERSIONS } from "../lib/analytics";
-
-const OFFICE_PHONE = "508-258-9294";
-const CONSENT_TEXT = "I agree BuzzKill may call or text me about my inquiry.";
+import FormContactFooter from "./FormContactFooter";
+import { CALL_CONSENT_TEXT } from "../../amplify/functions/shared/consentText";
 
 type Ctx = { open: () => void };
 const TalkToExpertContext = createContext<Ctx | null>(null);
@@ -24,7 +23,6 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
-  const [consent, setConsent] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstFieldRef = useRef<HTMLInputElement>(null);
 
@@ -35,7 +33,6 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
     setName("");
     setPhone("");
     setEmail("");
-    setConsent(false);
   };
 
   const open = () => {
@@ -69,11 +66,6 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
       setErrorMsg("Please enter your name and a phone number or email so we can reach you.");
       return;
     }
-    if (!consent) {
-      setErrorMsg("Please check the box so we know it's okay to contact you.");
-      return;
-    }
-
     setStatus("submitting");
     const [first, ...rest] = trimmedName.split(/\s+/);
     const result = await submitLead({
@@ -82,8 +74,10 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
       phone: phone.trim() || undefined,
       email: email.trim() || undefined,
       formId: "talk-to-expert",
+      // GL-03: the request itself is the basis for replying. consentText.ts
+      // records that, since the form shows no consent notice.
       consentToContact: true,
-      consentText: CONSENT_TEXT,
+      consentText: CALL_CONSENT_TEXT,
     });
 
     if (result.ok) {
@@ -123,9 +117,7 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
               <div className="bk-modal-success">
                 <h2 id="talk-to-expert-title" className="bk-modal-title">We've got it!</h2>
                 <p>A local pest control expert will reach out to you shortly.</p>
-                <p className="bk-modal-fallback">
-                  Need help right now? Call <a href={`tel:+1${OFFICE_PHONE.replace(/\D/g, "")}`}>{OFFICE_PHONE}</a>.
-                </p>
+                <FormContactFooter lead="Need help right now?" />
                 <button type="button" className="bk-btn bk-btn-primary" onClick={close}>
                   Close
                 </button>
@@ -172,15 +164,6 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
                   />
                 </div>
 
-                <label className="bk-modal-consent">
-                  <input
-                    type="checkbox"
-                    checked={consent}
-                    onChange={(e) => setConsent(e.target.checked)}
-                  />
-                  <span>{CONSENT_TEXT}</span>
-                </label>
-
                 {errorMsg && (
                   <div className="bk-field-error" role="alert">
                     {errorMsg}
@@ -191,9 +174,7 @@ export function TalkToExpertProvider({ children }: { children: ReactNode }) {
                   {status === "submitting" ? "Sending…" : "Request a Callback"}
                 </button>
 
-                <p className="bk-modal-fallback">
-                  Or call us now at <a href={`tel:+1${OFFICE_PHONE.replace(/\D/g, "")}`}>{OFFICE_PHONE}</a>
-                </p>
+                <FormContactFooter />
               </form>
             )}
           </div>

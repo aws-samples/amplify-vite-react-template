@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
-import { CALL_CONSENT_TEXT, CALL_CONSENT_TEXT_VERSION } from "../../../amplify/functions/shared/consentText";
+import { useEffect, useRef, useState } from "react";
+import { CALL_CONSENT_TEXT_VERSION } from "../../../amplify/functions/shared/consentText";
 import type { FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../../components/SEO";
 import BugZapper from "../../components/BugZapper";
+import ContactMeForm from "../../components/ContactMeForm";
+import FormContactFooter from "../../components/FormContactFooter";
 import { AddressAutocompleteInput } from "../../lib/addressAutocomplete";
 import { WILDLIFE_REMOVAL_KINDS } from "../../../amplify/functions/shared/serviceCatalog";
 import { trackFormSubmit, trackGenerateLead, trackAdsConversion, ADS_CONVERSIONS } from "../../lib/analytics";
@@ -81,11 +83,33 @@ function clearPendingQuote(storage: Storage): void {
   }
 }
 
+/**
+ * Which of the two doors the visitor is standing in. CONTACT is the default:
+ * most people arriving on a pest-control site want a human, and the instant
+ * quote asks for property details they may not have to hand. QUOTE is the
+ * opt-in for someone who would rather price and book it themselves.
+ */
+type Mode = "CONTACT" | "QUOTE";
+
+/** Each door has its own URL, so it can be linked, bookmarked, and measured. */
+const MODE_PATH: Record<Mode, string> = {
+  QUOTE: "/quote/instant",
+  CONTACT: "/quote/contact-me",
+};
+
+/**
+ * Bare `/quote` opens the contact door, the same default the tabs render.
+ * Anything under /quote/ that isn't the instant slug reads as contact too, so
+ * a typo lands on a working page instead of an empty one.
+ */
+function modeFromPath(pathname: string): Mode {
+  return pathname === MODE_PATH.QUOTE ? "QUOTE" : "CONTACT";
+}
+
 type Fields = {
   name: string;
   email: string;
   phone: string;
-  callConsent: boolean;
   service: string;
   propertyKind: PropertyKind;
   /** Condo/HOA only: one unit on its own — quoted like a residential visit. */
@@ -113,7 +137,6 @@ const EMPTY_FIELDS: Fields = {
   name: "",
   email: "",
   phone: "",
-  callConsent: false,
   service: "GENERAL_PEST",
   propertyKind: "RESIDENTIAL",
   inUnit: false,
@@ -141,6 +164,8 @@ const onlyDigits = (s: string) => s.replace(/\D+/g, "");
  */
 export default function QuotePage() {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const [mode, setMode] = useState<Mode>(() => modeFromPath(pathname));
   const [fields, setFields] = useState<Fields>(EMPTY_FIELDS);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState<string | null>(null);
@@ -168,6 +193,9 @@ export default function QuotePage() {
     const leadToken = search.get("lead");
     if (leadToken !== null) {
       if (leadToken && saveLeadToken(window.sessionStorage, leadToken)) {
+        // An office-sent link exists to price a known lead, so it opens on the
+        // pricing door rather than the contact one.
+        setMode("QUOTE");
         void getLeadPrefill(leadToken).then((result) => {
           if (!result.ok) return;
           const loaded = result.body;
@@ -183,9 +211,6 @@ export default function QuotePage() {
                 ? loaded.address.state || current.state
                 : current.state,
             zip: current.zip || loaded.address.zip,
-            // Consent is never inferred from a CRM record. The person using
-            // this form must make the checkbox decision in this interaction.
-            callConsent: current.callConsent,
           }));
           setLeadPrefilled(true);
         });
@@ -215,6 +240,7 @@ export default function QuotePage() {
       };
       savePendingQuote(window.sessionStorage, resumed);
       setPending(resumed);
+      setMode("QUOTE");
       // Capability tokens do not belong in browser history or referrers.
       window.history.replaceState(
         {},
@@ -227,12 +253,14 @@ export default function QuotePage() {
     const savedPending = loadPendingQuote(window.sessionStorage);
     if (savedPending) {
       setPending(savedPending);
+      setMode("QUOTE");
       setWaitedMs(Math.max(0, Date.now() - savedPending.startedAt));
       return;
     }
 
     const stored = loadFunnelState(window.sessionStorage);
     if (!stored) return;
+    setMode("QUOTE");
     if (isQuoteExpired(stored.quote.expiresAt)) {
       clearFunnelState(window.sessionStorage);
       setNotice(
@@ -337,6 +365,17 @@ export default function QuotePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending?.quote.bookingId, pending?.quote.statusToken]);
 
+  // The tabs are links, so the door follows the URL: a click, the back button,
+  // and a pasted /quote/instant all land the same way. Guarded against the
+  // first run, because the mount effect above may have opened the pricing door
+  // for a resumed quote or an office-sent link that bare /quote can't express.
+  const lastPath = useRef(pathname);
+  useEffect(() => {
+    if (lastPath.current === pathname) return;
+    lastPath.current = pathname;
+    setMode(modeFromPath(pathname));
+  }, [pathname]);
+
   const set = (k: keyof Fields) => (v: string) =>
     setFields((f) => ({ ...f, [k]: v }));
 
@@ -404,7 +443,10 @@ export default function QuotePage() {
       name: fields.name.trim(),
       email: fields.email.trim(),
       phone: fields.phone.trim() || undefined,
-      callConsent: fields.callConsent,
+      // GL-03: the request itself is the basis for replying, so a phone number
+      // typed into this form is callable. The form shows no consent notice;
+      // consentText.ts records that, and the version stamped here points at it.
+      callConsent: true,
       callConsentTextVersion: CALL_CONSENT_TEXT_VERSION,
       service: fields.service as ServiceCode,
       describe: describeMode ? fields.describe.trim() || undefined : undefined,
@@ -493,6 +535,9 @@ export default function QuotePage() {
   function startOver() {
     clearFunnelState(window.sessionStorage);
     clearPendingQuote(window.sessionStorage);
+    // They were mid-quote, so "start over" means another quote, not the
+    // contact form they never chose.
+    setMode("QUOTE");
     setPriced(null);
     setContact(null);
     setPending(null);
@@ -577,9 +622,7 @@ export default function QuotePage() {
             <div className="bk-eyebrow">Request received</div>
             <h1 className="bk-h2">We&rsquo;re on it.</h1>
             <p className="bk-body-lead">{contact.message}</p>
-            <p className="bk-p">
-              Prefer not to wait? Call us at <strong>{OFFICE_PHONE}</strong>.
-            </p>
+            <FormContactFooter lead="Prefer not to wait?" />
             <button type="button" className="bk-btn bk-btn-outline" onClick={startOver}>
               Start another quote
             </button>
@@ -796,6 +839,7 @@ export default function QuotePage() {
                   Continue to booking &rarr;
                 </button>
               </div>
+              <FormContactFooter className="bk-full" lead="Questions first?" />
             </div>
           </div>
         </section>
@@ -816,20 +860,51 @@ export default function QuotePage() {
       />
       <section className="bk-section bk-section-light">
         <div className="bk-container bk-narrow">
-          <div className="bk-eyebrow">Instant quote</div>
-          <h1 className="bk-h2">Price it now, book it online.</h1>
+          <div className="bk-eyebrow">
+            {mode === "CONTACT" ? "Get in touch" : "Instant quote"}
+          </div>
+          <h1 className="bk-h2">
+            {mode === "CONTACT"
+              ? "Tell us what you need."
+              : "Price it now, book it online."}
+          </h1>
           <p className="bk-body-lead">
-            Tell us what you&rsquo;re dealing with and where. Every service
-            gets an exact price and open days immediately, whether it&rsquo;s
-            your home, your community, or your business.
+            {mode === "CONTACT"
+              ? "Leave your details and a local BuzzKill expert follows up. Or price it yourself in a couple of minutes with an instant quote."
+              : "Tell us what you're dealing with and where. Every service gets an exact price and open days immediately, whether it's your home, your community, or your business."}
           </p>
 
+          <nav className="bk-mode-tabs" aria-label="How would you like to start?">
+            <Link
+              to={MODE_PATH.QUOTE}
+              className={`bk-mode-tab bk-mode-tab--magic ${mode === "QUOTE" ? "is-active" : ""}`}
+              // Named explicitly: the label sits in a span next to a decorative
+              // icon, so this keeps the name off the icon's rendering.
+              aria-label="Instant Quote"
+              aria-current={mode === "QUOTE" ? "page" : undefined}
+            >
+              <SparkleIcon />
+              <span>Instant Quote</span>
+            </Link>
+            <Link
+              to={MODE_PATH.CONTACT}
+              className={`bk-mode-tab ${mode === "CONTACT" ? "is-active" : ""}`}
+              aria-current={mode === "CONTACT" ? "page" : undefined}
+            >
+              Contact Me
+            </Link>
+          </nav>
+
+          {mode === "CONTACT" ? (
+            <div className="bk-form-card">
+              <ContactMeForm formId="quote-contact" />
+            </div>
+          ) : (
           <div className="bk-form-card">
             {leadPrefilled && (
               <div className="bk-notice" role="status">
                 Contact and address details were loaded from the CRM. Confirm
-                them, then choose the actual service and property details. Call
-                consent remains unchecked unless the customer gives it now.
+                them, then choose the actual service and property details.
               </div>
             )}
             <form className="bk-form-wizard" onSubmit={handleSubmit} noValidate>
@@ -886,23 +961,35 @@ export default function QuotePage() {
                     residential visit. */}
                 {fields.propertyKind === "COMMUNITY" ? (
                   <div className="bk-field bk-full">
-                    <label htmlFor="bq-in-unit" className="bk-consent">
-                      <input
-                        id="bq-in-unit"
-                        type="checkbox"
-                        checked={Boolean(fields.inUnit)}
-                        onChange={(e) =>
-                          setFields((f) => ({ ...f, inUnit: e.target.checked }))
-                        }
-                      />
-                      <span>
-                        This request is for In-Unit service
-                        <span className="bk-hint">
-                          Treating one unit, not the common areas. We price it
-                          like a single-home visit.
-                        </span>
-                      </span>
-                    </label>
+                    <label>What are we treating?</label>
+                    <div
+                      className="bk-segmented bk-segmented--full"
+                      role="radiogroup"
+                      aria-label="What are we treating?"
+                    >
+                      {(
+                        [
+                          [false, "Common areas"],
+                          [true, "One unit"],
+                        ] as [boolean, string][]
+                      ).map(([unit, label]) => (
+                        <button
+                          type="button"
+                          key={label}
+                          className={`bk-seg ${Boolean(fields.inUnit) === unit ? "is-active" : ""}`}
+                          aria-pressed={Boolean(fields.inUnit) === unit}
+                          onClick={() =>
+                            setFields((f) => ({ ...f, inUnit: unit }))
+                          }
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="bk-field-hint">
+                      One unit means we treat that apartment on its own, not the
+                      common areas, so we price it like a single-home visit.
+                    </p>
                   </div>
                 ) : null}
 
@@ -1150,17 +1237,6 @@ export default function QuotePage() {
                     {fieldError("phone")}
                   </div>
                 </div>
-                <label htmlFor="bq-call-consent" className="bk-consent">
-                  <input
-                    id="bq-call-consent"
-                    type="checkbox"
-                    checked={fields.callConsent}
-                    onChange={(e) =>
-                      setFields((f) => ({ ...f, callConsent: e.target.checked }))
-                    }
-                  />
-                  <span>{CALL_CONSENT_TEXT}</span>
-                </label>
 
                 <h3 className="bk-form-step__title">Where is the property?</h3>
 
@@ -1256,15 +1332,11 @@ export default function QuotePage() {
                     {submitting ? "Pricing…" : "Get my instant price"}
                   </button>
                 </div>
-                <p className="bk-form-fineprint">
-                  We only use these details to price and schedule your service.
-                  In the rare case we can&rsquo;t price your address on the
-                  spot, we&rsquo;ll follow up about this request, by phone if
-                  you asked us to call, otherwise by email.
-                </p>
+                <FormContactFooter className="bk-full" />
               </div>
             </form>
           </div>
+          )}
         </div>
       </section>
     </>
@@ -1365,6 +1437,30 @@ function QuoteLoadingScreen({
         </div>
       </section>
     </>
+  );
+}
+
+/**
+ * The instant-quote tab's mark. Two stars of different weights read as "this
+ * one does the work for you" without leaning on an emoji, which would inherit
+ * the platform's own colour and break the button's gradient.
+ */
+function SparkleIcon() {
+  return (
+    <svg
+      className="bk-mode-tab__sparkle"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M12 2.5l1.9 5.3a4 4 0 0 0 2.4 2.4l5.2 1.8-5.2 1.9a4 4 0 0 0-2.4 2.4L12 21.5l-1.9-5.2a4 4 0 0 0-2.4-2.4L2.5 12l5.2-1.8a4 4 0 0 0 2.4-2.4L12 2.5z" />
+      <path
+        d="M18.6 2.2l.7 1.9a1.6 1.6 0 0 0 .9.9l1.9.7-1.9.7a1.6 1.6 0 0 0-.9 1l-.7 1.8-.7-1.9a1.6 1.6 0 0 0-.9-.9l-1.9-.7 1.9-.7a1.6 1.6 0 0 0 .9-.9l.7-1.9z"
+        opacity="0.85"
+      />
+    </svg>
   );
 }
 

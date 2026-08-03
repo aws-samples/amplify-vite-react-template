@@ -204,7 +204,13 @@ export default function App() {
 
           {/* Booking funnel — /cancel is linked from confirmation emails,
               so this route must exist for every emailed URL to resolve. */}
+          {/* The quote page's two doors each have their own URL, so a link,
+              an ad, or a bookmark can land on the one it means. /quote itself
+              stays a live route: emailed resume links carry their token in
+              its hash, and a redirect would drop it. */}
           <Route path="/quote" element={<QuotePage />} />
+          <Route path="/quote/instant" element={<QuotePage />} />
+          <Route path="/quote/contact-me" element={<QuotePage />} />
           <Route path="/book" element={<BookPage />} />
           <Route path="/cancel" element={<CancelPage />} />
           {/* The redesign's quote page — the funnel is the one front door. */}

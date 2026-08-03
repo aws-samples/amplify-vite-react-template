@@ -56,9 +56,13 @@ export default function SEO({
   // component). Point the canonical at the /services/* version so Google
   // indexes one URL instead of treating them as duplicates. The /residential
   // landing page itself (exact) is a distinct page and is left untouched.
+  // The quote page's two doors (/quote/instant, /quote/contact-me) are the
+  // same page with a different tab open, so they canonicalize to /quote.
   const canonicalPath = pathname.startsWith("/residential/")
     ? pathname.replace("/residential/", "/services/")
-    : pathname;
+    : pathname.startsWith("/quote/")
+      ? "/quote"
+      : pathname;
   const canonicalUrl = `${SITE_URL}${canonicalPath === "/" ? "" : canonicalPath}`;
   const fullImage = image.startsWith("http") ? image : `${SITE_URL}${image}`;
 

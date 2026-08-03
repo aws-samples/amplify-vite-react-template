@@ -2,12 +2,10 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { Link } from "react-router-dom";
 import SEO, { buildBreadcrumbSchema } from "../components/SEO";
+import FormContactFooter from "../components/FormContactFooter";
+import { CALL_CONSENT_TEXT } from "../../amplify/functions/shared/consentText";
 import { submitLead } from "../lib/leadIntakeApi";
 import { trackFormSubmit, trackGenerateLead, trackAdsConversion, ADS_CONVERSIONS } from "../lib/analytics";
-
-const OFFICE_PHONE = "508-258-9294";
-const OFFICE_TEL = `tel:+1${OFFICE_PHONE.replace(/\D/g, "")}`;
-const CONSENT_TEXT = "I agree BuzzKill may contact me about my inquiry.";
 
 type Status = "idle" | "submitting" | "success" | "error";
 
@@ -18,7 +16,6 @@ export default function Contact() {
   const [propertyType, setPropertyType] = useState("Residential");
   const [reason, setReason] = useState("General question");
   const [message, setMessage] = useState("");
-  const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -32,11 +29,6 @@ export default function Contact() {
       setErrorMsg("Please enter your name and a phone number or email so we can reach you.");
       return;
     }
-    if (!consent) {
-      setErrorMsg("Please check the box so we know it's okay to contact you.");
-      return;
-    }
-
     setStatus("submitting");
     const [first, ...rest] = trimmedName.split(/\s+/);
     const result = await submitLead({
@@ -48,8 +40,10 @@ export default function Contact() {
       reason,
       message: message.trim() || undefined,
       formId: "contact",
+      // GL-03: the request itself is the basis for replying. consentText.ts
+      // records that, since the form shows no consent notice.
       consentToContact: true,
-      consentText: CONSENT_TEXT,
+      consentText: CALL_CONSENT_TEXT,
     });
 
     if (result.ok) {
@@ -98,9 +92,7 @@ export default function Contact() {
               <div className="bk-contact-success">
                 <h2>We&rsquo;ve got it!</h2>
                 <p>Someone from our team will reach out to you shortly.</p>
-                <p className="bk-modal-fallback">
-                  Need help right now? Call <a href={OFFICE_TEL}>{OFFICE_PHONE}</a>.
-                </p>
+                <FormContactFooter lead="Need help right now?" />
               </div>
             ) : (
               <form onSubmit={handleSubmit} noValidate className="bk-form-step bk-contact-form">
@@ -172,15 +164,6 @@ export default function Contact() {
                   />
                 </div>
 
-                <label className="bk-modal-consent bk-full">
-                  <input
-                    type="checkbox"
-                    checked={consent}
-                    onChange={(e) => setConsent(e.target.checked)}
-                  />
-                  <span>{CONSENT_TEXT}</span>
-                </label>
-
                 {errorMsg && (
                   <div className="bk-field-error bk-full" role="alert">
                     {errorMsg}
@@ -196,9 +179,7 @@ export default function Contact() {
                   {status === "submitting" ? "Sending…" : "Send Message"}
                 </button>
 
-                <p className="bk-modal-fallback bk-full">
-                  Or call us now at <a href={OFFICE_TEL}>{OFFICE_PHONE}</a>
-                </p>
+                <FormContactFooter className="bk-full" />
               </form>
             )}
           </div>

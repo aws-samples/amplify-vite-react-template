@@ -2114,6 +2114,187 @@ h6 {
   color: var(--fg2);
 }
 
+/* The reach-us-directly line that closes every public form. Sits below the
+   fine print, but reads louder than it: these are live links, not legal text. */
+.bk-form-contacts {
+  grid-column: 1 / -1;
+  margin: 14px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--divider);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--fg2);
+}
+.bk-form-contacts a {
+  color: var(--fg1);
+  font-weight: 700;
+  text-decoration: none;
+  border-bottom: 2px solid var(--bk-green);
+  white-space: nowrap;
+}
+.bk-form-contacts a:hover,
+.bk-form-contacts a:focus-visible {
+  color: var(--bk-green-deep);
+}
+.bk-form-contacts__sep {
+  padding: 0 8px;
+  color: var(--fg3);
+}
+
+/* =========================================================================
+   MODE TABS — "Contact Me" vs "Instant Quote"
+   -------------------------------------------------------------------------
+   Two doors into the same page, joined into one control: a single segmented
+   group whose halves share a border, each half its own URL. The plain tab
+   looks like the rest of the form furniture; the quote tab is deliberately
+   treated as a "magic" control (gradient, sparkle, a shine that sweeps across
+   it) because it is the one that does work for you instead of asking a person
+   to. The group is never clipped with overflow, or the active magic half
+   would lose its glow.
+   ========================================================================= */
+.bk-mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 28px;
+}
+.bk-mode-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 56px;
+  padding: 14px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: #fff;
+  text-decoration: none;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg2);
+  cursor: pointer;
+  transition:
+    color var(--dur-base, 0.2s) var(--ease-out, ease),
+    border-color var(--dur-base, 0.2s) var(--ease-out, ease),
+    background var(--dur-base, 0.2s) var(--ease-out, ease),
+    transform var(--dur-base, 0.2s) var(--ease-out, ease);
+}
+/* Joined: the halves share one border, and whichever is active sits on top so
+   its edge is the one you see. */
+.bk-mode-tab:first-child {
+  border-radius: var(--radius-lg, 10px) 0 0 var(--radius-lg, 10px);
+}
+.bk-mode-tab:last-child {
+  margin-left: -1px;
+  border-radius: 0 var(--radius-lg, 10px) var(--radius-lg, 10px) 0;
+}
+.bk-mode-tab.is-active,
+.bk-mode-tab:hover,
+.bk-mode-tab:focus-visible {
+  z-index: 1;
+}
+.bk-mode-tab:hover {
+  color: var(--fg1);
+  border-color: var(--bk-neutral-600);
+}
+.bk-mode-tab.is-active {
+  background: var(--bk-black);
+  border-color: var(--bk-black);
+  color: var(--bk-white);
+}
+
+/* The magic one. Inactive it is a quiet outline with a tinted wash, so the
+   default (Contact Me) still wins the page; active it lights up. */
+.bk-mode-tab--magic {
+  overflow: hidden;
+  isolation: isolate;
+  border-color: rgba(114, 224, 0, 0.55);
+  background:
+    linear-gradient(135deg, rgba(114, 224, 0, 0.1) 0%, rgba(45, 108, 223, 0.08) 100%);
+  color: var(--bk-green-deep);
+}
+/* No lift on hover: the halves are joined, and a moving edge would open a
+   seam between them. */
+.bk-mode-tab--magic:hover {
+  border-color: var(--bk-green);
+  color: var(--bk-green-deep);
+}
+.bk-mode-tab--magic.is-active {
+  border-color: transparent;
+  background:
+    linear-gradient(120deg, #0A0A0A 0%, #14261a 45%, #0A0A0A 100%);
+  color: var(--bk-green-yellow);
+  box-shadow:
+    0 0 0 1px rgba(114, 224, 0, 0.65),
+    0 10px 26px -12px rgba(114, 224, 0, 0.75);
+}
+/* The shine: a narrow highlight that crosses the button on a long loop.
+   Only while the magic tab is the chosen one, so an idle page is still. */
+.bk-mode-tab--magic.is-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    100deg,
+    transparent 35%,
+    rgba(172, 236, 90, 0.28) 50%,
+    transparent 65%
+  );
+  transform: translateX(-100%);
+  animation: bkMagicSweep 3.6s var(--ease-out, ease) infinite;
+}
+@keyframes bkMagicSweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  55%,
+  100% {
+    transform: translateX(100%);
+  }
+}
+.bk-mode-tab__sparkle {
+  flex: 0 0 auto;
+}
+.bk-mode-tab--magic.is-active .bk-mode-tab__sparkle {
+  animation: bkMagicTwinkle 2.4s ease-in-out infinite;
+}
+@keyframes bkMagicTwinkle {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.65;
+    transform: scale(0.88) rotate(-8deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bk-mode-tab--magic.is-active::after,
+  .bk-mode-tab--magic.is-active .bk-mode-tab__sparkle {
+    animation: none;
+  }
+}
+/* Stacked on a narrow screen, still one joined control: the seam turns
+   horizontal and the rounded corners follow it. */
+@media (max-width: 560px) {
+  .bk-mode-tabs {
+    grid-template-columns: 1fr;
+  }
+  .bk-mode-tab:first-child {
+    border-radius: var(--radius-lg, 10px) var(--radius-lg, 10px) 0 0;
+  }
+  .bk-mode-tab:last-child {
+    margin-left: 0;
+    margin-top: -1px;
+    border-radius: 0 0 var(--radius-lg, 10px) var(--radius-lg, 10px);
+  }
+}
+
 /* Multi-column rows inside steps */
 .bk-form-row {
   grid-column: 1 / -1;

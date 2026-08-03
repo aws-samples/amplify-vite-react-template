@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CALL_CONSENT_TEXT_VERSION } from "./consentText";
 
 type Row = Record<string, unknown> & { id: string };
 let customers: Map<string, Row>;
@@ -431,7 +432,9 @@ describe("recordWebsiteQuoteLead", () => {
       contactConsent: true,
       contactConsentChannels: ["EMAIL", "CALL"],
       contactConsentSource: "website-quote",
-      contactConsentPolicyVersion: "2026-07-20.1",
+      // The live wording's version, not a frozen string: bumping the copy
+      // must not fail this test, only changing which version gets stamped.
+      contactConsentPolicyVersion: CALL_CONSENT_TEXT_VERSION,
     });
   });
 
