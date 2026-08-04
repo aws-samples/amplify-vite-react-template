@@ -44,6 +44,12 @@ const baseModels = {
         nextToken: null,
       })
     ),
+    update: vi.fn(async ({ id, ...sets }: Row) => {
+      const row = jobs.get(String(id));
+      if (!row) return { data: null };
+      Object.assign(row, sets);
+      return { data: row };
+    }),
   },
   Customer: {
     get: vi.fn(async ({ id }: { id: string }) => ({
@@ -94,6 +100,8 @@ const {
   slotStates,
   stopsBySlotOn,
   DAY_MINUTES,
+  DAY_START_MINUTES,
+  formatEtaMinutes,
 } = await import("./capacity");
 
 // 2026-08-05 is a Wednesday; 2026-08-08 a Saturday.
@@ -841,6 +849,8 @@ describe("nightly rebuild — base → stops → base with real legs", () => {
       status: "SCHEDULED",
       technicianId: "t1",
       routeOrder: 1,
+      // Yesterday's rebuild left an arrival on this stop.
+      etaMinutes: DAY_START_MINUTES + 20,
     });
     driveMinutesBetween.mockImplementation(async () => null);
     const res = await reconcileCapacityDay(WED, "routes-key");
@@ -848,6 +858,9 @@ describe("nightly rebuild — base → stops → base with real legs", () => {
     const slot = capacityDays.get(slotId(WED, "t1"))!;
     expect(slot.verified).toBe(false);
     expect(slot.committedMinutes).toBe(DAY_MINUTES);
+    // A day we can no longer measure shows NO arrival rather than the stale one
+    // — the customer must never be given a time the route no longer supports.
+    expect(jobs.get("j1")!.etaMinutes).toBeNull();
   });
 
   it("stopsBySlotOn joins jobs and live claims into their tech-day slots", async () => {
@@ -928,7 +941,30 @@ describe("closedTourMinutes — travel is ONE tour, not a round trip per stop", 
       travel: 0,
       treatment: 0,
       verified: true,
+      arrivals: [],
     });
+  });
+
+  it("stamps an arrival per stop off the SAME walk: 7:30 + legs + prior on-site", async () => {
+    const stops = [clusterStop(1, 60), clusterStop(2, 60), clusterStop(3, 60)];
+    const { arrivals } = await closedTourMinutes(BASE, stops, leg);
+    // 7:30 + 85 drive = 8:55; + 60 on-site + 5 drive = 10:00; + 60 + 5 = 11:05.
+    expect(arrivals).toEqual([
+      DAY_START_MINUTES + 85,
+      DAY_START_MINUTES + 85 + 60 + 5,
+      DAY_START_MINUTES + 85 + 60 + 5 + 60 + 5,
+    ]);
+    expect(arrivals.map(formatEtaMinutes)).toEqual([
+      "8:55 AM",
+      "10:00 AM",
+      "11:05 AM",
+    ]);
+  });
+
+  it("hands out NO arrival on a tour it could not measure — never a stale guess", async () => {
+    const res = await closedTourMinutes(BASE, [clusterStop(1, 30)], async () => null);
+    expect(res.verified).toBe(false);
+    expect(res.arrivals).toEqual([]);
   });
 
   it("a missing base fails closed", async () => {
@@ -1127,6 +1163,14 @@ describe("recomputeSlotMinutes — a mutation rebuilds the day to its real tour"
     expect(slot!.travelMinutes).toBe(45);
     expect(slot!.treatmentMinutes).toBe(60);
     expect(slot!.committedMinutes).toBe(105);
+    // The same rebuild stamps each stop's arrival off that tour: leaves at 7:30,
+    // 15 min out ⇒ 7:45; +30 on-site +15 drive ⇒ 8:30. No extra Routes calls —
+    // these are the legs the ledger above was already measured from.
+    expect(jobs.get("j1")!.etaMinutes).toBe(DAY_START_MINUTES + 15);
+    expect(jobs.get("j2")!.etaMinutes).toBe(DAY_START_MINUTES + 60);
+    expect(formatEtaMinutes(jobs.get("j2")!.etaMinutes as number)).toBe(
+      "8:30 AM"
+    );
     expect(slot!.verified).toBe(true);
   });
 

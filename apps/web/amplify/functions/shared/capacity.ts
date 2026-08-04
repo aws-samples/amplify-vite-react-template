@@ -43,6 +43,25 @@ import { routingAddress } from "./serviceAddress";
  *  technician (travel + on-site). */
 export const DAY_MINUTES = 540;
 
+/** When a technician pulls out of their own driveway — minutes after local
+ *  midnight, America/New_York. The tour's first leg (base → first stop) starts
+ *  HERE, so it is the anchor every estimated arrival on the day is measured
+ *  from. Stored ETAs are minutes-after-local-midnight for the same reason
+ *  scheduledDate is a plain date: the business runs on one wall clock, and a
+ *  UTC instant would need DST reasoning at every read site. */
+export const DAY_START_MINUTES = 7 * 60 + 30; // 7:30 AM
+
+/** "7:30 AM" from minutes-after-local-midnight — the one place ETA minutes
+ *  become text, so the CRM, the tech app, and customer email all read alike. */
+export function formatEtaMinutes(minutes: number | null | undefined): string {
+  if (minutes == null || !Number.isFinite(minutes)) return "";
+  const total = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  const h24 = Math.floor(total / 60);
+  const mm = String(total % 60).padStart(2, "0");
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${mm} ${h24 < 12 ? "AM" : "PM"}`;
+}
+
 /** How long a card checkout may hold a claim before the sweep releases it. */
 export const CHECKOUT_CLAIM_MS = 45 * 60_000;
 
@@ -1160,6 +1179,12 @@ export type TourStop = {
  * with no address, or any unroutable leg fails CLOSED (verified:false) — a day
  * is never sold on travel we could not measure. Treatment is on-site time, so
  * it is always known and returned even when the travel legs cannot be verified.
+ *
+ * The same single walk also yields `arrivals`: the estimated arrival at each
+ * stop, in minutes after local midnight, anchored at DAY_START_MINUTES. It is
+ * the running clock this loop already keeps — no extra Routes calls — and it is
+ * returned ONLY on a verified tour, because a day we could not measure must not
+ * hand anyone a time we cannot stand behind.
  */
 export async function closedTourMinutes(
   base: string | null,
@@ -1169,16 +1194,25 @@ export async function closedTourMinutes(
   travel: number;
   treatment: number;
   verified: boolean;
+  /** Per-stop estimated arrival (minutes after local midnight), parallel to
+   *  `stops`. Empty on an unverified tour. */
+  arrivals: number[];
   /** When unverified: the stop that broke the tour, so the office is told WHICH
    *  address to fix instead of just "that day is now fully booked". Absent when
    *  the base itself is the missing fact. */
   blockedBy?: { address: string | null; label?: string | null };
 }> {
   const treatment = stops.reduce((sum, s) => sum + s.onsite, 0);
-  if (stops.length === 0) return { travel: 0, treatment, verified: true };
-  if (!base) return { travel: 0, treatment, verified: false };
+  if (stops.length === 0) {
+    return { travel: 0, treatment, verified: true, arrivals: [] };
+  }
+  if (!base) return { travel: 0, treatment, verified: false, arrivals: [] };
   let travel = 0;
   let prev = base;
+  // The technician's wall clock as the day plays out: it advances by each drive
+  // leg, stamps the arrival, then advances by that stop's on-site time.
+  let clock = DAY_START_MINUTES;
+  const arrivals: number[] = [];
   for (const stop of stops) {
     // A stop with no address, or one Routes cannot resolve, is the reason the
     // whole day becomes unsellable — name it.
@@ -1187,6 +1221,7 @@ export async function closedTourMinutes(
         travel: 0,
         treatment,
         verified: false,
+        arrivals: [],
         blockedBy: { address: null, label: stop.label ?? null },
       };
     }
@@ -1196,10 +1231,14 @@ export async function closedTourMinutes(
         travel: 0,
         treatment,
         verified: false,
+        arrivals: [],
         blockedBy: { address: stop.address, label: stop.label ?? null },
       };
     }
     travel += leg;
+    clock += leg;
+    arrivals.push(clock);
+    clock += stop.onsite;
     prev = stop.address;
   }
   const home = await legMinutes(prev, base);
@@ -1208,11 +1247,49 @@ export async function closedTourMinutes(
       travel: 0,
       treatment,
       verified: false,
+      arrivals: [],
       blockedBy: { address: prev, label: stops[stops.length - 1]?.label ?? null },
     };
   }
   travel += home;
-  return { travel, treatment, verified: true };
+  return { travel, treatment, verified: true, arrivals };
+}
+
+/**
+ * Persist per-stop estimated arrivals, writing ONLY the jobs whose time
+ * actually moved. Both the per-mutation rebuild and the nightly reconcile funnel
+ * through here so a stop can never carry one function's ETA and another's route
+ * order.
+ *
+ * Every write is swallowed: an ETA is a courtesy readout derived from the
+ * ledger, never the ledger itself, so a failed stamp must not take down the
+ * capacity rebuild it rides along with. `next: null` CLEARS the field — a day
+ * that stopped being measurable shows no time rather than yesterday's.
+ */
+async function writeStopEtas(
+  updates: { jobId: string; current: number | null; next: number | null }[]
+): Promise<void> {
+  try {
+    const changed = updates.filter(
+      (u) => (u.current ?? null) !== (u.next ?? null)
+    );
+    if (changed.length === 0) return;
+    const client = await dataClient();
+    // An API that predates the field (or a harness without the model) simply
+    // carries no ETAs — it must not throw into the rebuild.
+    const update = (client.models.Job as { update?: unknown } | undefined)
+      ?.update;
+    if (typeof update !== "function") return;
+    await Promise.all(
+      changed.map((u) =>
+        client.models.Job.update({ id: u.jobId, etaMinutes: u.next }).catch(
+          () => undefined
+        )
+      )
+    );
+  } catch (err) {
+    console.error("writeStopEtas failed (non-fatal)", err);
+  }
 }
 
 /**
@@ -1252,7 +1329,11 @@ export async function recomputeSlotMinutes(
     const legMinutes = makeLegResolver(key);
 
     // This tech's counted stops for the date, in route order.
-    const stops: (TourStop & { routeOrder: number })[] = [];
+    const stops: (TourStop & {
+      routeOrder: number;
+      jobId: string;
+      etaMinutes: number | null;
+    })[] = [];
     await forEachPage(
       (nextToken) =>
         client.models.Job.listJobByScheduledDate(
@@ -1272,6 +1353,9 @@ export async function recomputeSlotMinutes(
             address: address || null,
             onsite: onsiteMinutes(job.propertyClass),
             routeOrder: job.routeOrder ?? 999,
+            jobId: job.id,
+            etaMinutes:
+              (job as { etaMinutes?: number | null }).etaMinutes ?? null,
           });
         }
       },
@@ -1293,6 +1377,19 @@ export async function recomputeSlotMinutes(
     // "fully booked" on this one mutation — the nightly reconcile stays the
     // fail-closed authority that holds an unverifiable day.
     if (!tour.verified) return;
+
+    // The arrival times fall out of the tour we just measured — stamp them on
+    // the stops so the board, the technician, and the customer all read the
+    // same clock. Best-effort: an ETA write that fails costs a stale time, and
+    // must never fail the ledger rebuild that is the point of this function.
+    await writeStopEtas(
+      stops.map((s, i) => ({
+        jobId: s.jobId,
+        current: s.etaMinutes,
+        next: tour.arrivals[i] ?? null,
+      }))
+    );
+
     const id = slotId(date, technicianId);
     await ensureSlot(date, technicianId);
     const sets = {
@@ -1367,6 +1464,8 @@ export async function reconcileCapacityDay(
      *  the office has to act on. */
     label: string | null;
     customerId: string;
+    /** Current stamped arrival, so the rebuild only writes the ones that moved. */
+    etaMinutes: number | null;
   };
   const jobsBySlot = new Map<string, StopJob[]>();
   const assignedStopsByTech = new Map<string, number>();
@@ -1412,6 +1511,7 @@ export async function reconcileCapacityDay(
         onsite: onsiteMinutes(job.propertyClass),
         label: customer?.displayName ?? null,
         customerId: job.customerId,
+        etaMinutes: (job as { etaMinutes?: number | null }).etaMinutes ?? null,
       });
       jobsBySlot.set(key, list);
       // GL-07: ground truth for the assigned-stop day ledger — a stop is
@@ -1456,6 +1556,9 @@ export async function reconcileCapacityDay(
     let travelMinutes = 0;
     let treatmentMinutes = 0;
     let verified = true;
+    // Arrival per stop, parallel to `stops`. A pool day has no route and an
+    // unverified day has no measured tour, so both clear their stops' times.
+    let arrivals: (number | null)[] = stops.map(() => null);
     if (techId === POOL_TECH) {
       // Pool accounting: on-site only (no route exists yet, so no travel).
       treatmentMinutes = stops.reduce((sum, s) => sum + s.onsite, 0);
@@ -1469,6 +1572,7 @@ export async function reconcileCapacityDay(
       travelMinutes = tour.travel;
       treatmentMinutes = tour.treatment;
       verified = tour.verified;
+      if (tour.verified) arrivals = stops.map((_, i) => tour.arrivals[i] ?? null);
       // An unmeasurable day is pinned to the full window below, so from the
       // office's side it is indistinguishable from a full one — it just stops
       // taking bookings. Name the stop that broke it, or the silence costs a
@@ -1493,6 +1597,13 @@ export async function reconcileCapacityDay(
       }
     }
     const minutes = travelMinutes + treatmentMinutes + claimMinutes;
+    await writeStopEtas(
+      stops.map((s, i) => ({
+        jobId: s.id,
+        current: s.etaMinutes,
+        next: arrivals[i] ?? null,
+      }))
+    );
     await ensureSlot(date, techId);
     const sets = {
       committedMinutes: verified ? minutes : DAY_MINUTES,

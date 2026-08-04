@@ -342,6 +342,22 @@ export default function Schedule() {
     return parts.length >= 2 ? parts.join(", ") : "81 Greenwich Rd, Ware, MA 01082";
   };
 
+  // The estimated arrival the capacity rebuild stamped on a stop, as clock
+  // text. etaMinutes is minutes after LOCAL midnight (the backend's
+  // DAY_START_MINUTES anchor plus the day's measured drive legs and on-site
+  // time), so it needs no timezone conversion here — only formatting. Blank
+  // whenever the day's tour could not be measured; the board then shows the
+  // sequence alone rather than a time nobody can stand behind.
+  const etaLabel = (job: Job): string => {
+    const minutes = (job as { etaMinutes?: number | null }).etaMinutes;
+    if (minutes == null || !Number.isFinite(minutes)) return "";
+    const total = ((Math.round(minutes) % 1440) + 1440) % 1440;
+    const h24 = Math.floor(total / 60);
+    const mm = String(total % 60).padStart(2, "0");
+    const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+    return `${h12}:${mm} ${h24 < 12 ? "AM" : "PM"}`;
+  };
+
   // A Google Maps directions link for the day's route exactly as the optimizer
   // sequenced it: base → each stop in routeOrder → base. Maps preserves the
   // waypoint order we pass, so the office sees the real planned tour, not a
@@ -560,7 +576,16 @@ export default function Schedule() {
                         return (
                           <ListRow
                             key={j.id}
-                            title={<span>{i + 1}. {customerLink(j)}</span>}
+                            title={
+                              <span>
+                                {i + 1}. {customerLink(j)}
+                                {etaLabel(j) ? (
+                                  <span className="muted small" style={{ marginLeft: 8 }}>
+                                    ~{etaLabel(j)}
+                                  </span>
+                                ) : null}
+                              </span>
+                            }
                             subtitle={`${j.serviceType}${!j.paidAt && j.paymentPendingIntentId ? " · payment pending (bank)" : ""}`}
                             meta={
                               <>

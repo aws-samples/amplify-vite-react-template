@@ -1638,6 +1638,15 @@ export const schema = a.schema({
       routeId: a.id(),
       route: a.belongsTo("Route", "routeId"),
       routeOrder: a.integer(),
+      /** Estimated arrival, in MINUTES AFTER LOCAL MIDNIGHT (America/New_York),
+       *  derived from the day's optimized tour: the technician leaves their own
+       *  base at DAY_START_MINUTES and this stop's time is the running clock of
+       *  drive legs plus the on-site time of the stops before it. Written by the
+       *  capacity rebuild that already measures those legs, so it costs no extra
+       *  Routes calls. An ESTIMATE, never a promise — it is null whenever the
+       *  day's tour could not be verified, and it does not follow a technician
+       *  who is running late (the live "On My Way" GPS ETA owns that). */
+      etaMinutes: a.integer(),
       technicianId: a.id(),
       technician: a.belongsTo("Technician", "technicianId"),
       /** When the technician pressed Start. The application's start time on the
