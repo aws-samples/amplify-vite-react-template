@@ -674,6 +674,36 @@ describe("feasibility — REAL Routes legs, fail closed", () => {
     expect(noKey).toBeNull();
   });
 
+  it("the leg resolver dedupes CONCURRENT lookups of the same leg to one Routes call", async () => {
+    // The quote day board prices several days at once, and neighbouring days
+    // share legs (same technician bases, same recurring stops). The memo has
+    // to hold the in-flight promise: a value-memo only dedupes calls that
+    // START after an earlier one finished, so every concurrent day would miss
+    // and fire its own BILLED Routes request. That failure is invisible at
+    // runtime — the board is still correct, it just quietly costs more.
+    driveMinutesBetween.mockClear();
+    driveMinutesBetween.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      return 15;
+    });
+
+    const legMinutes = makeLegResolver("routes-key");
+    const answers = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        legMinutes("12 Beacon St, Ware, MA", "9 Main St, Ware, MA")
+      )
+    );
+
+    expect(answers).toEqual([15, 15, 15, 15, 15, 15]);
+    expect(driveMinutesBetween).toHaveBeenCalledTimes(1);
+
+    // And a later caller still reads the settled memo rather than re-calling.
+    expect(
+      await legMinutes("12 Beacon St, Ware, MA", "9 Main St, Ware, MA")
+    ).toBe(15);
+    expect(driveMinutesBetween).toHaveBeenCalledTimes(1);
+  });
+
   it("a leg Routes cannot produce makes the slot infeasible", async () => {
     driveMinutesBetween.mockImplementation(async () => null);
     const best = await bestSlotFor({

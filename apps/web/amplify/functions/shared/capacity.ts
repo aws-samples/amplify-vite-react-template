@@ -1026,18 +1026,30 @@ export async function bestSlotFor(opts: {
 }
 
 /** A memoizing Routes leg resolver. Null key ⇒ every leg is null (fail
- *  closed everywhere it is consulted). */
+ *  closed everywhere it is consulted).
+ *
+ *  The memo holds the in-flight PROMISE, not the resolved value. Callers run
+ *  concurrently (the quote day board prices several days at once), and a
+ *  value-memo only dedupes calls that start after an earlier one has already
+ *  finished — every concurrent caller would miss and fire its own billed
+ *  Routes request for the same leg. Caching the promise means the second
+ *  caller awaits the first one's call. Safe to cache without rejection
+ *  cleanup because driveMinutesBetween resolves null on every failure path
+ *  and never rejects; if that ever changes, a rejected entry must be evicted
+ *  or it poisons the key for the rest of the run. */
 export function makeLegResolver(
   routesKey: string | null
 ): (from: string, to: string) => Promise<number | null> {
-  const memo = new Map<string, number | null>();
-  return async (from: string, to: string) => {
-    if (!routesKey) return null;
+  const memo = new Map<string, Promise<number | null>>();
+  return (from: string, to: string) => {
+    if (!routesKey) return Promise.resolve(null);
     const key = `${from}→${to}`;
-    if (memo.has(key)) return memo.get(key)!;
-    const minutes = await driveMinutesBetween(routesKey, from, to);
-    memo.set(key, minutes);
-    return minutes;
+    let inFlight = memo.get(key);
+    if (!inFlight) {
+      inFlight = driveMinutesBetween(routesKey, from, to);
+      memo.set(key, inFlight);
+    }
+    return inFlight;
   };
 }
 
@@ -1061,21 +1073,50 @@ export async function stopsBySlotOn(
         { limit: 200, nextToken }
       ),
     async (jobs) => {
-        for (const job of jobs) {
-          if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") continue;
-          const stopTechId =
-            job.technicianId ??
+      // The stops that actually route: scheduled/in-progress work with a
+      // technician on it.
+      const routable = jobs.filter((job) => {
+        if (job.status !== "SCHEDULED" && job.status !== "IN_PROGRESS") {
+          return false;
+        }
+        return (
+          (job.technicianId ??
             (job as { capacityTechnicianId?: string | null })
               .capacityTechnicianId ??
-            null;
-          if (!stopTechId) continue;
-          const { data: customer } = await client.models.Customer.get({
-            id: job.customerId,
-          });
-          // ROUTING address — the unit is deliberately excluded (serviceAddress.ts).
-          const address = customer ? routingAddress(customer) || null : null;
-          push(slotId(date, stopTechId), address, job.routeOrder ?? 999);
+            null) != null
+        );
+      });
+      // One Customer read per stop, fanned out instead of awaited in series.
+      // This runs inside the quote funnel's day board, which walks ~22 days —
+      // serially this was one round trip per stop per day (a day can carry a
+      // stop per tech-hour), and it is the bulk of the 21-32s a customer waits
+      // for the board. Same reads, same results: the caller sorts by
+      // routeOrder below, so completion order is irrelevant.
+      const CONCURRENCY = 20;
+      for (let i = 0; i < routable.length; i += CONCURRENCY) {
+        const batch = routable.slice(i, i + CONCURRENCY);
+        const resolved = await Promise.all(
+          batch.map(async (job) => {
+            const stopTechId =
+              job.technicianId ??
+              (job as { capacityTechnicianId?: string | null })
+                .capacityTechnicianId!;
+            const { data: customer } = await client.models.Customer.get({
+              id: job.customerId,
+            });
+            // ROUTING address — the unit is deliberately excluded
+            // (serviceAddress.ts).
+            return {
+              stopTechId,
+              address: customer ? routingAddress(customer) || null : null,
+              routeOrder: job.routeOrder ?? 999,
+            };
+          })
+        );
+        for (const stop of resolved) {
+          push(slotId(date, stop.stopTechId), stop.address, stop.routeOrder);
         }
+      }
     },
     { pageErrors: "throw" }
   );

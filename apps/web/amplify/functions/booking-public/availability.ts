@@ -125,16 +125,31 @@ export async function buildDayMatrix(opts: {
   // (fail closed — capacity is never sold on guessed travel).
   const legMinutes = makeLegResolver(routesKey);
 
-  const out: DayQuote[] = [];
-  for (const date of days) {
+  // One day's price depends only on that day's own capacity and stops — days
+  // never read each other. Built serially, a ~22-day board was 22 round-trip
+  // chains end to end and took 21-32s, the single largest component of a
+  // quote once AI research was fixed. Waves of DAY_CONCURRENCY keep the read
+  // burst bounded while collapsing the wall clock to roughly the slowest day
+  // per wave. Order is preserved: waves run in sequence and Promise.all
+  // resolves in input order, so the board still reads soonest-first.
+  //
+  // This is only safe because legMinutes memoizes the in-flight promise
+  // rather than the resolved value (see makeLegResolver). With a value-memo,
+  // concurrent days all miss on the same leg and each pay for its own billed
+  // Routes call — the latency win would come straight out of the Routes bill.
+  const DAY_CONCURRENCY = 6;
+
+  const quoteForDay = async (date: string): Promise<DayQuote | null> => {
     const eligibility = eligibilityByDate.get(date) ?? {
       techs: [],
       reasons: ["Unknown date."],
     };
-    if (eligibility.techs.length === 0) continue;
+    if (eligibility.techs.length === 0) return null;
 
-    const slots = await slotStates(date);
-    const stops = await stopsBySlotOn(date);
+    const [slots, stops] = await Promise.all([
+      slotStates(date),
+      stopsBySlotOn(date),
+    ]);
 
     // Day feasibility: the day offers only if some technician's slot can
     // absorb this stop's on-site + real marginal Routes legs.
@@ -147,7 +162,7 @@ export async function buildDayMatrix(opts: {
       legMinutes,
       candidateAddress,
     });
-    if (!slot) continue;
+    if (!slot) return null;
 
     // Pricing modifiers, from the day's real load and proximity.
     let stopCount = 0;
@@ -204,12 +219,22 @@ export async function buildDayMatrix(opts: {
       factors.push("floored at variable cost");
     }
     const priceCents = tidyDollars(floored);
-    out.push({
+    return {
       date,
       slot,
       priceCents,
       factors,
-    });
+    };
+  };
+
+  const out: DayQuote[] = [];
+  for (let i = 0; i < days.length; i += DAY_CONCURRENCY) {
+    const wave = await Promise.all(
+      days.slice(i, i + DAY_CONCURRENCY).map(quoteForDay)
+    );
+    for (const day of wave) {
+      if (day) out.push(day);
+    }
   }
   return out;
 }
