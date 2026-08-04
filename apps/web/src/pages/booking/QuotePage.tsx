@@ -18,6 +18,7 @@ import {
   type PendingQuote,
   type PricedQuote,
   type PropertyKind,
+  type QuoteDay,
   type QuoteRequest,
   type RecurringFrequency,
   type ServiceCode,
@@ -637,9 +638,36 @@ export default function QuotePage() {
     const selectedDay = priced.days.find((d) => d.date === selDate) ?? null;
     const offer = priced.recurringOffer;
     // Community/HOA: a plan-only quote — the day board picks the first
-    // visit, the plan price itself does not vary by day.
+    // visit, and the plan's MONTHLY rate does not vary by day.
     const planOnly = Boolean(priced.planOnly && offer);
     const requestedPlan = hasRequestedPlan(priced);
+    /**
+     * What a tile shows: the amount due TODAY on the offer being sold.
+     *
+     * On a plan quote that is the first visit's fee, which the server prices
+     * per day off route density — so a day where a technician is already
+     * working nearby reads as real money saved, and the customer's choice
+     * seeds the cluster every later visit in the plan inherits.
+     *
+     * On a one-time quote it is the day's price. A plan-only quote with no
+     * per-day fee (an older stored quote) shows nothing rather than repeating
+     * the flat plan total the card above already states.
+     */
+    const tilePrice = (
+      d: QuoteDay
+    ): { cents: number; note?: string } | null => {
+      const planFee = d.planInitialFeeCents;
+      if (planOnly || requestedPlan) {
+        return planFee != null ? { cents: planFee, note: "first visit" } : null;
+      }
+      return { cents: d.priceCents };
+    };
+    /** The best first-visit fee anywhere on the board, for the "as low as"
+     *  line shown before a day is chosen. Null when no day carries one. */
+    const planFees = priced.days
+      .map((d) => d.planInitialFeeCents)
+      .filter((c): c is number => typeof c === "number");
+    const lowestPlanFee = planFees.length > 0 ? Math.min(...planFees) : null;
     const serviceChoices: ("ONE_TIME" | "PLAN")[] = requestedPlan
       ? ["PLAN", "ONE_TIME"]
       : ["ONE_TIME", "PLAN"];
@@ -732,8 +760,24 @@ export default function QuotePage() {
                       <span className="bk-booking-price-card__per">/mo</span>
                     </div>
                     <div className="bk-booking-price-card__meta">
-                      {money(offer.initialFeeCents)} is due for your first visit;
-                      the subscription starts after that visit is completed.
+                      {/* No day is chosen yet, so this states the list fee —
+                          and, when some day beats it, says so rather than
+                          being silently undercut by the tiles below. */}
+                      {lowestPlanFee != null &&
+                      lowestPlanFee < offer.initialFeeCents ? (
+                        <>
+                          Your first visit is {money(offer.initialFeeCents)}, and
+                          as low as {money(lowestPlanFee)} on days we&rsquo;re
+                          already working nearby. The subscription starts after
+                          that visit is completed.
+                        </>
+                      ) : (
+                        <>
+                          {money(offer.initialFeeCents)} is due for your first
+                          visit; the subscription starts after that visit is
+                          completed.
+                        </>
+                      )}
                     </div>
                   </div>
                 </>
@@ -742,7 +786,9 @@ export default function QuotePage() {
                 {planOnly ? "1. Pick your first visit day" : "1. Pick your day"}
               </h3>
               <div className="bk-day-grid">
-                {priced.days.map((d) => (
+                {priced.days.map((d) => {
+                  const tile = tilePrice(d);
+                  return (
                   <button
                     key={d.date}
                     type="button"
@@ -751,11 +797,21 @@ export default function QuotePage() {
                     onClick={() => setSelDate(d.date)}
                   >
                     <div className="bk-day-card__date">{formatDay(d.date)}</div>
-                    {!requestedPlan && (!planOnly || d.priceCents > 0) && (
-                      <div className="bk-day-card__price">{money(d.priceCents)}</div>
+                    {tile && (
+                      <div className="bk-day-card__price">
+                        {money(tile.cents)}
+                        {/* The qualifier keeps a plan tile from reading as the
+                            monthly rate — it is what is due at booking. */}
+                        {tile.note && (
+                          <span className="bk-day-card__price-note">
+                            {tile.note}
+                          </span>
+                        )}
+                      </div>
                     )}
                   </button>
-                ))}
+                  );
+                })}
               </div>
 
               {selectedDay && offer && planOnly && (
@@ -770,8 +826,8 @@ export default function QuotePage() {
                       <span className="bk-booking-price-card__per">/mo</span>
                     </div>
                     <div className="bk-booking-price-card__meta">
-                      {hoaMoneyLine(offer)} The subscription starts after your
-                      first completed visit.
+                      {hoaMoneyLine(offer, selectedDay.planInitialFeeCents)} The
+                      subscription starts after your first completed visit.
                     </div>
                   </div>
                 </>
@@ -795,8 +851,14 @@ export default function QuotePage() {
                           onClick={() => setPlan("PLAN")}
                         >
                           <div className="bk-choice-card__title">
-                            {money(offer.initialFeeCents)} today, then{" "}
-                            {money(offer.monthlyCents)}/mo
+                            {/* The chosen day's fee — what /book will actually
+                                charge. Showing the flat list fee here would
+                                contradict the tile the customer just clicked. */}
+                            {money(
+                              selectedDay.planInitialFeeCents ??
+                                offer.initialFeeCents
+                            )}{" "}
+                            today, then {money(offer.monthlyCents)}/mo
                           </div>
                           <div className="bk-choice-card__meta">
                             {FREQUENCY_LABELS[offer.frequency]} plan — the monthly

@@ -110,6 +110,10 @@ export type QuoteRequest = {
 export type QuoteDay = {
   date: string; // YYYY-MM-DD
   priceCents: number;
+  /** The plan's first-visit fee for THIS day — the route-density factor applies
+   *  to the first visit (the monthly rate never varies by day). Absent when no
+   *  plan was offered, and on quotes taken before per-day plan fees. */
+  planInitialFeeCents?: number;
 };
 
 export type RecurringOffer = {

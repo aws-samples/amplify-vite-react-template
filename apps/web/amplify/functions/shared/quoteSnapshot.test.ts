@@ -90,6 +90,26 @@ describe("parseQuoteSnapshot", () => {
     it("does not let a malformed price survive via the spread", () => {
       expect(parseQuoteSnapshot({ days: [{ ...DAY, priceCents: "24900" }] }).days).toBeNull();
     });
+
+    describe("planInitialFeeCents is CHARGED, so it is validated not carried", () => {
+      it("keeps a well-formed per-day plan fee", () => {
+        const day = { ...DAY, planInitialFeeCents: 12700 };
+        expect(parseQuoteSnapshot({ days: [day] }).days).toEqual([day]);
+      });
+
+      it.each([["24900"], [NaN], [Infinity], [149.5], [null], [0], [-100]])(
+        "drops %p rather than letting it reach a charge amount",
+        (bad) => {
+          const parsed = parseQuoteSnapshot({
+            days: [{ ...DAY, planInitialFeeCents: bad }],
+          });
+          // The day itself survives on its priceCents; only the bad fee is
+          // dropped, so /book falls back to the offer's flat initialFeeCents.
+          expect(parsed.days).toEqual([DAY]);
+          expect(parsed.days![0].planInitialFeeCents).toBeUndefined();
+        }
+      );
+    });
   });
 
   describe("flags and labels", () => {

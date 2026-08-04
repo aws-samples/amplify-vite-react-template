@@ -35,6 +35,21 @@ export type DayQuote = {
    *  Checkout claims exactly this. */
   slot?: SlotFeasibility;
   priceCents: number;
+  /**
+   * The PLAN's first-visit fee for this day, when a recurring offer was made.
+   * The monthly rate never moves — a durable discount off a transient route
+   * snapshot would outlive the density that justified it — but the first visit
+   * is one dated piece of work, so the day's route factor applies to it exactly
+   * as it does to a one-time price.
+   *
+   * This is the highest-leverage place to put the discount: `pickTechDayNear`
+   * schedules every LATER visit onto the same technician's least-marginal-travel
+   * day near the address, so steering the first visit onto a dense day seeds the
+   * cluster the whole plan inherits.
+   *
+   * Discount-only — never above the plan's list fee (see below).
+   */
+  planInitialFeeCents?: number;
   factors: string[]; // audit trail persisted with the quote
 };
 
@@ -81,6 +96,9 @@ export async function buildDayMatrix(opts: {
   baseCents: number;
   /** Drive-time zone; enables the variable-cost discount floor (R62). */
   zone?: Zone;
+  /** The recurring offer's list first-visit fee, when a plan was offered. Given
+   *  it, each day also carries its own discounted `planInitialFeeCents`. */
+  planInitialFeeCents?: number;
   onsiteMinutes?: number;
   /** Restrict to a single day — the /book live re-check (R29). */
   onlyDate?: string;
@@ -219,10 +237,42 @@ export async function buildDayMatrix(opts: {
       factors.push("floored at variable cost");
     }
     const priceCents = tidyDollars(floored);
+
+    // The plan's first visit, priced on the same day factor.
+    //
+    // DISCOUNT-ONLY, deliberately: the plan card states one list fee ("$149 is
+    // due for your first visit"), so a nearly-full day that RAISES a one-time
+    // price must not make a tile contradict the offer above it. The factor can
+    // only ever pull this number down.
+    //
+    // Floors, in order: never under 60% of the list fee, and never under the
+    // visit's variable cost — borrowed from the one-time cost model because the
+    // first plan visit is the same physical work (same on-site minutes, same
+    // drive). The cost floor is itself capped at the list fee: a plan whose fee
+    // is DELIBERATELY under cost (a loss-leader first visit) must not be
+    // marked UP by a floor meant to stop discounts going too deep.
+    //
+    // Services with no cost model — community/HOA above all — get the 60%
+    // policy floor ALONE. That is the same R62 gap the one-time path documents;
+    // it bounds the give, but it does not prove margin.
+    let planInitialFeeCents: number | undefined;
+    const listFee = opts.planInitialFeeCents;
+    if (listFee != null && listFee > 0) {
+      let fee = Math.max(listFee * 0.6, Math.min(listFee, listFee * factor));
+      if (costCents != null && costCents > fee) fee = Math.min(costCents, listFee);
+      planInitialFeeCents = Math.min(tidyDollars(fee), listFee);
+      if (planInitialFeeCents < listFee) {
+        factors.push(
+          `plan first visit ${Math.round((1 - planInitialFeeCents / listFee) * 100)}% off list`
+        );
+      }
+    }
+
     return {
       date,
       slot,
       priceCents,
+      ...(planInitialFeeCents != null ? { planInitialFeeCents } : {}),
       factors,
     };
   };

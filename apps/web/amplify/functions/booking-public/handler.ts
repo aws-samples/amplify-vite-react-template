@@ -585,9 +585,10 @@ function pricedResponse(booking: StoredQuoteBooking) {
     // never invented here.
     offSeason: stored.offSeason || undefined,
     offSeasonMessage: stored.offSeason ? OFF_SEASON_MESSAGE : undefined,
-    days: (stored.days ?? []).map(({ date, priceCents }) => ({
+    days: (stored.days ?? []).map(({ date, priceCents, planInitialFeeCents }) => ({
       date,
       priceCents,
+      planInitialFeeCents,
     })),
     expiresAt: booking.expiresAt,
     terms: { version: BOOKING_TERMS_VERSION, text: BOOKING_TERMS_TEXT },
@@ -1929,6 +1930,10 @@ async function quote(
     service,
     baseCents: baseCents!,
     zone: priceZone,
+    // Every plan quote gets a per-day first-visit fee, so the board shows real
+    // savings and steers the first visit onto a day we are already working
+    // nearby. The monthly rate stays flat.
+    planInitialFeeCents: recurringOffer?.initialFeeCents,
     onsiteMinutes:
       pricingKind === "COMMERCIAL" || pricingKind === "COMMUNITY" ? 60 : 30,
   });
@@ -1973,15 +1978,19 @@ async function quote(
     );
   }
   if (planOnly) {
-    // The day board only picks the first visit: availability and
-    // feasibility per day are real, but the plan price never varies by day.
+    // The day board only picks the first visit. There is no one-time option to
+    // price, so `priceCents` is pinned to the plan total — but the FIRST
+    // month/visit is still dated work, so `planInitialFeeCents` keeps whatever
+    // the day's route factor earned it, and the audit line that explains the
+    // discount is preserved alongside the fixed-price note.
     days = days.map((d) => ({
       ...d,
       priceCents: baseCents!,
       factors: [
         SEASONAL_SERVICES.has(service)
-          ? "seasonal plan (Apr–Oct treatments, billed monthly year-round), first month charged at booking, price fixed per day"
-          : "community plan, first month charged at booking, price fixed per day",
+          ? "seasonal plan (Apr–Oct treatments, billed monthly year-round), first month charged at booking, plan rate fixed per day"
+          : "community plan, first month charged at booking, plan rate fixed per day",
+        ...d.factors.filter((f) => f.startsWith("plan first visit")),
       ],
     }));
   }
@@ -2052,9 +2061,10 @@ async function quote(
     // truthful explanation — checkout is the plan itself, date-less.
     offSeason: offSeason || undefined,
     offSeasonMessage: offSeason ? OFF_SEASON_MESSAGE : undefined,
-    days: days.map(({ date, priceCents }) => ({
+    days: days.map(({ date, priceCents, planInitialFeeCents }) => ({
       date,
       priceCents,
+      planInitialFeeCents,
     })),
     expiresAt,
     // R17: the checkout must render exactly what /book will hold them to.
@@ -2473,7 +2483,12 @@ async function promoPreview(body: Record<string, unknown>) {
   const day = offSeason ? null : stored.days?.find((d) => d.date === date);
   const baseCents =
     recurring || offSeason
-      ? stored.recurringOffer?.initialFeeCents ?? 0
+      ? // Same per-day first-visit fee /book will charge — previewing a code
+        // against the flat list fee would quote a discount off an amount the
+        // customer is never billed.
+        day?.planInitialFeeCents ??
+        stored.recurringOffer?.initialFeeCents ??
+        0
       : day?.priceCents ?? 0;
   if (baseCents <= 0) {
     throw new HttpError(409, {
@@ -2636,8 +2651,16 @@ async function book(
     }
     return provenOffer;
   };
-  /** The first-month fee, for the branches the guards above proved reach it. */
-  const recurringFeeCents = (): number => requireRecurringOffer().initialFeeCents;
+  /** The first-month fee, for the branches the guards above proved reach it.
+   *  Quoted PER DAY (the route factor discounts the first visit), so charge the
+   *  fee for the day the customer actually chose. Falls back to the offer's
+   *  flat fee for a day-less enrollment (off-season) and for quotes taken
+   *  before per-day plan fees existed. */
+  const recurringFeeCents = (): number => {
+    const offer = requireRecurringOffer();
+    const dayFee = provenDay?.planInitialFeeCents;
+    return typeof dayFee === "number" ? dayFee : offer.initialFeeCents;
+  };
   /** The chosen day's price, for the dated branches. */
   const datedPriceCents = (): number => {
     if (!provenDay) {

@@ -26,6 +26,12 @@
 export type QuoteSnapshotDay = {
   date: string;
   priceCents: number;
+  /** The plan's first-visit fee quoted for THIS day (route density applies to
+   *  the first visit; the monthly rate never varies). /book charges it, so it
+   *  is validated like any other cents field rather than ridden along. Absent
+   *  on quotes taken before per-day plan fees, and on quotes with no plan —
+   *  callers fall back to the offer's flat `initialFeeCents`. */
+  planInitialFeeCents?: number;
   slot?: unknown;
   factors?: string[];
 };
@@ -74,7 +80,16 @@ function parseDay(raw: unknown): QuoteSnapshotDay | null {
   if (date === null || priceCents === null) return null;
   // Spread first so a malformed `date`/`priceCents` cannot survive, but every
   // other stamped field (slot, factors) rides along untouched.
-  return { ...row, date, priceCents } as QuoteSnapshotDay;
+  const day = { ...row, date, priceCents } as QuoteSnapshotDay;
+  // `planInitialFeeCents` is CHARGED, so it gets the same structural treatment
+  // as every other cents field: a malformed value is dropped, not passed
+  // through. Dropping it is safe — /book then falls back to the offer's flat
+  // fee, which is the pre-per-day behavior and never NaN. A spread alone would
+  // have carried a string or a NaN straight to Stripe.
+  const planFee = centsOrNull(row.planInitialFeeCents);
+  if (planFee !== null && planFee > 0) day.planInitialFeeCents = planFee;
+  else delete day.planInitialFeeCents;
+  return day;
 }
 
 /** All-or-nothing: a partial offer is worse than no offer, because callers

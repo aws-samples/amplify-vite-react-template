@@ -3330,6 +3330,18 @@ a:focus-visible {
   font-size: 18px;
   font-weight: 800;
 }
+/* Qualifier on a plan-requested quote, where the day price is the ONE-TIME
+   option rather than the plan headline. Deliberately quiet: it labels the
+   number without competing with it. */
+.bk-day-card__price-note {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg2);
+  margin-top: 2px;
+}
 
 /* Window / plan choice chips + cards */
 .bk-choice-row {

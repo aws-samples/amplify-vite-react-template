@@ -353,6 +353,30 @@ describe("hoaMoneyLine", () => {
       "Your first month ($160.00) is charged today to lock in your first visit, then $160.00/mo."
     );
   });
+
+  it("quotes the CHOSEN day's first-visit fee, not the flat list fee", () => {
+    // The tile the customer clicked said $128; the checkout line must not
+    // turn around and say $160.
+    expect(
+      hoaMoneyLine(
+        { frequency: "QUARTERLY", monthlyCents: 16000, initialFeeCents: 16000 },
+        12800
+      )
+    ).toBe(
+      // Only the FIRST month moves — the recurring rate stays at list, which is
+      // the whole point of discounting the first visit instead of the plan.
+      "Your first month ($128.00) is charged today to lock in your first visit, then $160.00/mo."
+    );
+  });
+
+  it("falls back to the list fee when the day carries none (older quote)", () => {
+    expect(
+      hoaMoneyLine(
+        { frequency: "QUARTERLY", monthlyCents: 16000, initialFeeCents: 16000 },
+        undefined
+      )
+    ).toContain("$160.00");
+  });
 });
 
 // ── Expiry ──────────────────────────────────────────────────────────

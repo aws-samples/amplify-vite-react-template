@@ -175,8 +175,16 @@ export function humanizeServiceEnum(service: string): string {
  * today's charge is the plan's initial fee and the subscription starts
  * after the first completed visit.
  */
-export function hoaMoneyLine(offer: RecurringOffer): string {
-  return `Your first month (${money(offer.initialFeeCents)}) is charged today to lock in your first visit, then ${money(offer.monthlyCents)}/mo.`;
+/** `firstFeeCents` is the CHOSEN day's first-visit fee when one is known — the
+ *  route factor discounts the first visit, so quoting the flat list fee here
+ *  would contradict the day tile the customer picked. Falls back to the offer's
+ *  list fee for a day-less enrollment or an older quote. */
+export function hoaMoneyLine(
+  offer: RecurringOffer,
+  firstFeeCents?: number | null
+): string {
+  const first = firstFeeCents ?? offer.initialFeeCents;
+  return `Your first month (${money(first)}) is charged today to lock in your first visit, then ${money(offer.monthlyCents)}/mo.`;
 }
 
 /** True only when this quote carries the plan cadence the visitor explicitly

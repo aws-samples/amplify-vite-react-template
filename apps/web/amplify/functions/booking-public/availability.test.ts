@@ -179,3 +179,89 @@ describe("single-day re-check (R29 support)", () => {
     expect(days).toEqual([]);
   });
 });
+
+describe("per-day plan first-visit fee", () => {
+  /** A day with NO nearby stop and no quiet/planner modifier — factor 1.0. */
+  const PLAIN_DAY = "2026-07-27";
+
+  it("discounts the first visit by the day's route factor, monthly untouched", async () => {
+    const days = await buildDayMatrix({
+      routesKey: "test-routes-key",
+      candidateAddress: "12 Beacon St, Ware, MA",
+      service: "GENERAL_PEST",
+      baseCents: 36000,
+      planInitialFeeCents: 14900,
+    });
+
+    // factor 0.85 (route-density −10% + quiet-day −5%) on the nearby day.
+    const near = days.find((d) => d.date === QUIET_NEARBY_DAY)!;
+    expect(near.planInitialFeeCents).toBe(12700); // tidy(0.85 × $149)
+    expect(near.factors.some((f) => f.startsWith("plan first visit"))).toBe(true);
+
+    // A day with no nearby stop pays list — the discount is the exception.
+    const plain = days.find((d) => d.date === PLAIN_DAY)!;
+    expect(plain.planInitialFeeCents).toBeLessThanOrEqual(14900);
+  });
+
+  it("NEVER charges above the plan's list fee, even on a busy day", async () => {
+    // Pin the day near capacity so the nearly-full +10% modifier fires.
+    capacityFixture.maps.capacityDays.set(`${PLAIN_DAY}#t1`, {
+      id: `${PLAIN_DAY}#t1`,
+      date: PLAIN_DAY,
+      technicianId: "t1",
+      // ≥85% of the 540-minute window (the +10% tier) but with room left for
+      // a 30-minute stop plus its legs — a day too full to FIT the stop drops
+      // off the board entirely and would make this test vacuous.
+      committedMinutes: 465,
+      verified: true,
+    });
+
+    const days = await buildDayMatrix({
+      routesKey: "test-routes-key",
+      candidateAddress: "12 Beacon St, Ware, MA",
+      service: "GENERAL_PEST",
+      baseCents: 36000,
+      planInitialFeeCents: 14900,
+    });
+
+    // Prove the +10% modifier actually fired, or this test is vacuous.
+    const busy = days.find((d) => d.date === PLAIN_DAY)!;
+    expect(busy).toBeDefined();
+    expect(busy.factors).toContain("nearly-full +10%");
+    expect(busy.priceCents).toBeGreaterThan(36000); // one-time DOES rise
+    // The plan card states ONE list fee; a tile must never contradict it by
+    // asking for more than the offer above it promised.
+    for (const d of days) {
+      expect(d.planInitialFeeCents!).toBeLessThanOrEqual(14900);
+    }
+  });
+
+  it("a loss-leader fee under variable cost is NOT marked up by the cost floor", async () => {
+    // Zone B rodent: variable cost is $177, well ABOVE this $99 plan fee. The
+    // floor exists to stop discounts going too deep, not to reprice a first
+    // visit the plan deliberately sells below cost.
+    const days = await buildDayMatrix({
+      routesKey: "test-routes-key",
+      candidateAddress: "12 Beacon St, Ware, MA",
+      service: "RODENT",
+      baseCents: 19900,
+      zone: "B",
+      planInitialFeeCents: 9900,
+    });
+
+    const near = days.find((d) => d.date === QUIET_NEARBY_DAY)!;
+    expect(near.planInitialFeeCents).toBe(9900); // held at list, never $177
+  });
+
+  it("omits the field entirely when no plan was offered", async () => {
+    const days = await buildDayMatrix({
+      routesKey: "test-routes-key",
+      candidateAddress: "12 Beacon St, Ware, MA",
+      service: "RODENT",
+      baseCents: 19900,
+      zone: "B",
+    });
+
+    expect(days.every((d) => d.planInitialFeeCents === undefined)).toBe(true);
+  });
+});
