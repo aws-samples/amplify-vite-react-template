@@ -90,7 +90,12 @@ vi.mock("./dataClient", () => ({
   }),
 }));
 
-const { notifyLeads, notifyOffice, sendEmail } = await import("./email");
+const {
+  notifyLeads,
+  notifyOffice,
+  routeAwayFromProductionInboxes,
+  sendEmail,
+} = await import("./email");
 
 /** The most recent SES command input (RawMessage + any ConfigurationSetName). */
 const lastCommandInput = (): Record<string, unknown> | undefined => {
@@ -128,6 +133,11 @@ beforeEach(() => {
   delete process.env.SES_LEADS_EMAIL;
   delete process.env.SES_NOTIFY_EMAIL;
   delete process.env.SES_CONFIGURATION_SET;
+  // Most of this file asserts PRODUCTION routing (R80's ops/sales partition),
+  // so declare production. Without the flag every send to info@ / sales@ is
+  // rewritten to the owner's staging aliases — which is the point of the
+  // "staging can never reach a production inbox" block at the bottom.
+  process.env.PRODUCTION_EMAIL = "1";
 });
 
 afterEach(() => {
@@ -426,5 +436,98 @@ describe("GL-03 — the outbox: provider acceptance can never become untracked",
     });
     expect(outcome).toBe("UNRESENDABLE");
     expect(sesSend).not.toHaveBeenCalled();
+  });
+});
+
+describe("staging can never reach a production inbox", () => {
+  beforeEach(() => {
+    // Not production: the flag is the explicit opt-in, and its absence is
+    // what every non-main branch looks like.
+    delete process.env.PRODUCTION_EMAIL;
+  });
+
+  it("rewrites the ops and sales inboxes to the owner's staging aliases", () => {
+    expect(routeAwayFromProductionInboxes("info@pestbuzzkill.com")).toBe(
+      "jake+staginginfo@pestbuzzkill.com"
+    );
+    expect(routeAwayFromProductionInboxes("sales@pestbuzzkill.com")).toBe(
+      "jake+stagingsales@pestbuzzkill.com"
+    );
+    // Case and surrounding whitespace must not smuggle an address past the
+    // guard, and neither may a "Name <addr>" header form.
+    expect(routeAwayFromProductionInboxes("  Sales@PestBuzzKill.com ")).toBe(
+      "jake+stagingsales@pestbuzzkill.com"
+    );
+    expect(
+      routeAwayFromProductionInboxes("BuzzKill Office <info@pestbuzzkill.com>")
+    ).toBe("jake+staginginfo@pestbuzzkill.com");
+  });
+
+  it("leaves customers and the staging aliases themselves alone", () => {
+    expect(routeAwayFromProductionInboxes("dana@example.com")).toBe(
+      "dana@example.com"
+    );
+    // No second hop, and no match on a lookalike that merely contains "info".
+    expect(
+      routeAwayFromProductionInboxes("jake+staginginfo@pestbuzzkill.com")
+    ).toBe("jake+staginginfo@pestbuzzkill.com");
+    expect(routeAwayFromProductionInboxes("info@example.com")).toBe(
+      "info@example.com"
+    );
+  });
+
+  it("keeps production addressing untouched when the flag is set", () => {
+    process.env.PRODUCTION_EMAIL = "1";
+    expect(routeAwayFromProductionInboxes("info@pestbuzzkill.com")).toBe(
+      "info@pestbuzzkill.com"
+    );
+    expect(routeAwayFromProductionInboxes("sales@pestbuzzkill.com")).toBe(
+      "sales@pestbuzzkill.com"
+    );
+  });
+
+  it("redirects an ops alarm end to end, and logs where it ACTUALLY went", async () => {
+    // The env still names the production inbox — this is the case where a
+    // deploy, a fallback in ownedWork, or a direct caller supplies info@ and
+    // only the send boundary stands between staging and the real office.
+    process.env.SES_NOTIFY_EMAIL = "info@pestbuzzkill.com";
+
+    const ok = await notifyOffice({
+      subject: "Card declined",
+      heading: "Card declined",
+      bodyHtml: "<p>x</p>",
+      template: "ops-payment-failed",
+    });
+
+    expect(ok).toBe(true);
+    expect(lastTo()).toBe("jake+staginginfo@pestbuzzkill.com");
+    // An EmailLog that says info@ while SES was handed something else would
+    // make the audit trail lie about who was contacted.
+    expect(emailLogs[0]).toMatchObject({
+      toEmail: "jake+staginginfo@pestbuzzkill.com",
+    });
+  });
+
+  it("redirects a sales alert end to end", async () => {
+    process.env.SES_LEADS_EMAIL = "sales@pestbuzzkill.com";
+
+    const ok = await notifyLeads(alert);
+
+    expect(ok).toBe(true);
+    expect(lastTo()).toBe("jake+stagingsales@pestbuzzkill.com");
+  });
+
+  it("still sends customer mail to the customer", async () => {
+    // The rule is about the two internal inboxes only — a staging test
+    // booking must still be able to email the address that made it.
+    const ok = await sendEmail({
+      to: "dana@example.com",
+      subject: "Your booking",
+      html: "<p>Confirmed</p>",
+      template: "booking-confirmation",
+    });
+
+    expect(ok).toBe(true);
+    expect(lastTo()).toBe("dana@example.com");
   });
 });

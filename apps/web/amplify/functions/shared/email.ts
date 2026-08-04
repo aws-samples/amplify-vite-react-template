@@ -127,11 +127,41 @@ function buildMime(opts: {
 }
 
 /**
+ * Owner rule: outside production, an email must never be ABLE to reach the
+ * real office or sales inbox — staging test data pages them constantly, and
+ * the office cannot tell a staging alarm from a real one. Non-production
+ * sends to those two mailboxes are rewritten to the owner's staging aliases.
+ *
+ * This lives at the send boundary rather than in the deploy config on
+ * purpose. The recipient reaches sendEmail from several directions — the
+ * SES_NOTIFY_EMAIL / SES_LEADS_EMAIL env vars, ownedWork's defaultWorkOwner
+ * fallbacks, and any caller that passes an address directly — so guarding
+ * the config alone leaves the hardcoded fallbacks live. One choke point that
+ * cannot be bypassed is the only version of this that stays true.
+ *
+ * Fail-safe direction: production is the case that must be OPTED INTO, via
+ * PRODUCTION_EMAIL (backend.ts sets it only on the main branch). A new
+ * environment that forgets the flag redirects to the owner, which is noisy;
+ * the reverse default would silently page the real office from staging.
+ */
+const STAGING_INBOX_REDIRECTS: Record<string, string> = {
+  "info@pestbuzzkill.com": "jake+staginginfo@pestbuzzkill.com",
+  "sales@pestbuzzkill.com": "jake+stagingsales@pestbuzzkill.com",
+};
+
+export function routeAwayFromProductionInboxes(to: string): string {
+  if (process.env.PRODUCTION_EMAIL) return to;
+  // Accept both a bare address and a "Name <addr>" header form.
+  const bare = (to.match(/<([^>]+)>/)?.[1] ?? to).trim().toLowerCase();
+  return STAGING_INBOX_REDIRECTS[bare] ?? to;
+}
+
+/**
  * Send an email via SES and record it in EmailLog. Returns whether the
  * send succeeded — callers decide if a failed email should fail the
  * operation (usually it should not).
  */
-export async function sendEmail(opts: {
+export async function sendEmail(input: {
   to: string;
   subject: string;
   html: string;
@@ -141,6 +171,16 @@ export async function sendEmail(opts: {
   attachments?: EmailAttachment[];
   ownerTeam?: WorkOwnerTeam;
 }): Promise<boolean> {
+  // Redirect FIRST, so suppression checks, the EmailLog row and any failure
+  // work item all name the address the message actually went to. A log that
+  // says info@ while SES was handed something else is worse than no log.
+  const opts = { ...input, to: routeAwayFromProductionInboxes(input.to) };
+  if (opts.to !== input.to) {
+    console.log(
+      "email redirected away from a production inbox",
+      JSON.stringify({ template: input.template, from: input.to, to: opts.to })
+    );
+  }
   const from = process.env.SES_FROM_EMAIL ?? "info@pestbuzzkill.com";
   const toKey = opts.to.trim().toLowerCase();
 
@@ -468,13 +508,17 @@ async function openEmailFailureWork(
  * go to the sales inbox (SES_LEADS_EMAIL, sales@). Keep money/ops alarms here.
  */
 /**
- * Owner decision (2026-07-23): staging must never page the real office/sales
- * inboxes — its test data generates a constant stream of ops noise into the
- * same info@ the production alerts land in. backend.ts sets OPS_EMAIL_MUTED on
- * every mail-sending function for non-main branches. Returning true (not
+ * A manual kill switch for the internal pager helpers. Returning true (not
  * false) is deliberate: a muted alert is handled, not failed, so callers never
  * open EMAIL_FAILURE work for it. Customer-facing sends are unaffected — this
- * gate covers only the internal pager helpers.
+ * gate covers only notifyOffice / notifyLeads.
+ *
+ * Nothing sets this any more. It replaced the real office inbox on staging
+ * from 2026-07-23 by DROPPING those alerts; the owner's later rule is that
+ * staging alerts must still be readable, so backend.ts now aims them at the
+ * staging aliases and routeAwayFromProductionInboxes guarantees they cannot
+ * land anywhere else. Kept as the switch to reach for if an environment ever
+ * needs to go quiet outright.
  */
 function opsEmailsMuted(): boolean {
   return Boolean(process.env.OPS_EMAIL_MUTED);

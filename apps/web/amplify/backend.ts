@@ -291,6 +291,26 @@ const crmUrlEnv =
     ? "https://app.pestbuzzkill.com"
     : "https://staging.d5ln2hbbp9s2j.amplifyapp.com");
 
+/**
+ * Owner rule (supersedes the 2026-07-23 mute): staging must never reach the
+ * real office or sales inbox, but its alerts must still be READABLE — they
+ * now land in the owner's staging aliases instead of being dropped. Only the
+ * main branch addresses info@ / sales@.
+ *
+ * PRODUCTION_EMAIL is the runtime opt-in for shared/email.ts, which rewrites
+ * any send addressed to those two mailboxes when the flag is absent. Two
+ * layers on purpose: this config decides where alerts are AIMED, the send
+ * boundary guarantees where they can LAND — including for the hardcoded
+ * fallbacks in ownedWork's defaultWorkOwner, which no env var controls.
+ */
+const IS_PRODUCTION_EMAIL = process.env.AWS_BRANCH === "main";
+const OPS_INBOX = IS_PRODUCTION_EMAIL
+  ? "info@pestbuzzkill.com"
+  : "jake+staginginfo@pestbuzzkill.com";
+const LEADS_INBOX = IS_PRODUCTION_EMAIL
+  ? "sales@pestbuzzkill.com"
+  : "jake+stagingsales@pestbuzzkill.com";
+
 for (const fn of [
   backend.crmDocs,
   backend.dailyReminders,
@@ -316,18 +336,17 @@ for (const fn of [
   backend.thumbtackWebhook,
 ]) {
   fn.resources.lambda.addToRolePolicy(sesPolicy);
+  // The From stays info@ on every branch: it is the verified SES sender
+  // identity, and the rule is about where mail LANDS, not who it is from.
   fn.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
-  fn.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com");
+  fn.addEnvironment("SES_NOTIFY_EMAIL", OPS_INBOX);
   fn.addEnvironment("CRM_APP_URL", crmUrlEnv);
   fn.addEnvironment(
     "GOOGLE_REVIEW_URL",
     "https://g.page/r/CYyHi3DH59WEEAI/review"
   );
-  // Owner decision (2026-07-23): only production pages the office/sales
-  // inboxes. shared/email.ts notifyOffice/notifyLeads no-op when this is set;
-  // customer-facing sends are untouched.
-  if (process.env.AWS_BRANCH !== "main") {
-    fn.addEnvironment("OPS_EMAIL_MUTED", "1");
+  if (IS_PRODUCTION_EMAIL) {
+    fn.addEnvironment("PRODUCTION_EMAIL", "1");
   }
 }
 docsBucket.grantReadWrite(backend.crmDocs.resources.lambda);
@@ -341,9 +360,9 @@ docsBucket.grantWrite(backend.stripeWebhook.resources.lambda);
 backend.stripeWebhook.addEnvironment("DOCS_BUCKET", docsBucket.bucketName);
 backend.stripeWebhook.resources.lambda.addToRolePolicy(sesPolicy);
 backend.stripeWebhook.addEnvironment("SES_FROM_EMAIL", "info@pestbuzzkill.com");
-backend.stripeWebhook.addEnvironment("SES_NOTIFY_EMAIL", "info@pestbuzzkill.com");
-if (process.env.AWS_BRANCH !== "main") {
-  backend.stripeWebhook.addEnvironment("OPS_EMAIL_MUTED", "1");
+backend.stripeWebhook.addEnvironment("SES_NOTIFY_EMAIL", OPS_INBOX);
+if (IS_PRODUCTION_EMAIL) {
+  backend.stripeWebhook.addEnvironment("PRODUCTION_EMAIL", "1");
 }
 // The dunning "your payment failed" email links the customer to the portal
 // billing page (CRM_APP_URL + /billing) to update their card and pay.
@@ -361,7 +380,7 @@ for (const fn of [
   backend.crmPricing,
   backend.stripeWebhook,
 ]) {
-  fn.addEnvironment("SES_LEADS_EMAIL", "sales@pestbuzzkill.com");
+  fn.addEnvironment("SES_LEADS_EMAIL", LEADS_INBOX);
 }
 
 // The pricing engine reads its API keys from SSM at runtime so the deploy
