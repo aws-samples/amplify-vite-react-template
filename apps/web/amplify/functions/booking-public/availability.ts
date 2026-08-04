@@ -245,12 +245,12 @@ export async function buildDayMatrix(opts: {
     // price must not make a tile contradict the offer above it. The factor can
     // only ever pull this number down.
     //
-    // Floors, in order: never under 60% of the list fee, and never under the
-    // visit's variable cost — borrowed from the one-time cost model because the
-    // first plan visit is the same physical work (same on-site minutes, same
-    // drive). The cost floor is itself capped at the list fee: a plan whose fee
-    // is DELIBERATELY under cost (a loss-leader first visit) must not be
-    // marked UP by a floor meant to stop discounts going too deep.
+    // Floors: never under 60% of the list fee, and never under the visit's
+    // variable cost — borrowed from the one-time cost model because the first
+    // plan visit is the same physical work (same on-site minutes, same drive).
+    // The discount-only cap runs LAST, so a plan whose fee is DELIBERATELY
+    // under cost (a loss-leader first visit) is held at list rather than marked
+    // up by a floor that exists to stop discounts going too deep.
     //
     // Services with no cost model — community/HOA above all — get the 60%
     // policy floor ALONE. That is the same R62 gap the one-time path documents;
@@ -258,8 +258,13 @@ export async function buildDayMatrix(opts: {
     let planInitialFeeCents: number | undefined;
     const listFee = opts.planInitialFeeCents;
     if (listFee != null && listFee > 0) {
-      let fee = Math.max(listFee * 0.6, Math.min(listFee, listFee * factor));
-      if (costCents != null && costCents > fee) fee = Math.min(costCents, listFee);
+      // Each rule applies EXACTLY once, in order, so no two of them can quietly
+      // enforce the same bound and mask a regression in the other.
+      let fee = listFee * factor; // 1. the day's own factor
+      fee = Math.max(fee, listFee * 0.6); // 2. policy floor
+      if (costCents != null) fee = Math.max(fee, costCents); // 3. cost floor
+      // 4. Discount-only, and the LAST word — which is also what stops the cost
+      //    floor above from marking up a deliberate loss-leader first visit.
       planInitialFeeCents = Math.min(tidyDollars(fee), listFee);
       if (planInitialFeeCents < listFee) {
         factors.push(

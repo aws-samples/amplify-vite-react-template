@@ -58,10 +58,13 @@ const fakeDataClient = {
 Object.assign(fakeDataClient.models, capacityFixture.models);
 vi.mock("../shared/dataClient", () => ({ dataClient: async () => fakeDataClient }));
 
-/** One existing stop 10 minutes away → route-density discount applies. */
+/** Every leg is `legMins` minutes. Default 20 puts an existing stop in the
+ *  ≤25-minute route-density tier (−10%); a test can lower it to reach the
+ *  deeper ≤15 / ≤5 tiers. */
+let legMins = 20;
 vi.mock("../shared/driveTime", () => ({
   HQ_ADDRESS: "81 Greenwich Rd, Ware, MA 01082",
-  driveMinutesBetween: async () => 20,
+  driveMinutesBetween: async () => legMins,
   driveMatrixFrom: async (_k: string, _o: string, dests: string[]) =>
     dests.map(() => 10),
 }));
@@ -88,6 +91,7 @@ beforeEach(() => {
       CapacityClaim: capacityFixture.maps.capacityClaims,
     })
   );
+  legMins = 20;
   vi.useFakeTimers();
   freezeEastern("2026-07-16");
   listJobByScheduledDate.mockClear();
@@ -263,5 +267,43 @@ describe("per-day plan first-visit fee", () => {
     });
 
     expect(days.every((d) => d.planInitialFeeCents === undefined)).toBe(true);
+  });
+});
+
+describe("plan first-visit fee — the 60% policy floor", () => {
+  /** 25 days out from the frozen today, so the planner −5% stacks on top of
+   *  the route and quiet discounts and drives the raw factor BELOW 0.6. A day
+   *  at exactly 0.6 would make this test pass with the floor deleted. */
+  const FAR_NEARBY_DAY = "2026-08-10";
+
+  it("stops the deepest stacked discount from going past 60% of list", async () => {
+    // Adjacent-parcel stop (≤5 min) = −35%, quiet day = −5%, planner = −5%.
+    // Raw factor 0.55 would take a $149 first visit to $82.
+    legMins = 3;
+    stopsByDate[FAR_NEARBY_DAY] = [
+      {
+        customerId: "c8",
+        serviceType: "GENERAL_PEST",
+        status: "SCHEDULED",
+        technicianId: "t1",
+        timeWindow: "MORNING",
+      },
+    ];
+
+    const days = await buildDayMatrix({
+      routesKey: "test-routes-key",
+      candidateAddress: "12 Beacon St, Ware, MA",
+      service: "GENERAL_PEST",
+      baseCents: 36000,
+      planInitialFeeCents: 14900,
+    });
+
+    const deep = days.find((d) => d.date === FAR_NEARBY_DAY)!;
+    // Prove the discounts really stacked past the floor, or this is vacuous.
+    expect(deep.factors).toContain("route-density −35% (stop 3 min away)");
+    expect(deep.factors).toContain("quiet-day −5%");
+    expect(deep.factors).toContain("planner −5%");
+    // 0.60 × $149 = $89.40 → tidied to $89. Never the un-floored $82.
+    expect(deep.planInitialFeeCents).toBe(8900);
   });
 });

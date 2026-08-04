@@ -27,6 +27,8 @@ const bookingRows = new Map<string, Record<string, unknown>>();
 let failCheckoutPersistWrites = false;
 let stopsOnDay: Stop[];
 let jobRow: Record<string, unknown> | null = null;
+/** Staff discount codes visible to /promo and /book. */
+let promoRows: Record<string, unknown>[] = [];
 const bookingUpdates: Record<string, unknown>[] = [];
 
 const capacityFixture = capacityFixtureModels();
@@ -40,6 +42,12 @@ const fakeDataClient = {
         booking = { ...booking, ...patch };
         return { data: booking };
       },
+    },
+    PromoCode: {
+      listPromoCodeByCode: async ({ code }: { code: string }) => ({
+        data: promoRows.filter((r) => r.code === code),
+      }),
+      update: async () => ({ data: null }),
     },
     Technician: {
       list: async () => ({
@@ -1214,5 +1222,144 @@ describe("portal add-service — charge the saved card off-session (trusted inte
     // The saved card was never read, and finalize did not run inline.
     expect(customerRetrieve).not.toHaveBeenCalled();
     expect(finalizeBookingMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("per-day plan first-visit fee is what actually gets CHARGED", () => {
+  // The tile the customer clicked is the promise. These prove the money path
+  // honours it rather than falling back to the plan's flat list fee.
+  const withPlanFee = (planInitialFeeCents: number | string | undefined) => {
+    booking.service = "GENERAL_PEST";
+    booking.quoteJson = JSON.stringify({
+      days: [
+        {
+          ...QUOTED_DAY,
+          priceCents: 36000,
+          ...(planInitialFeeCents !== undefined ? { planInitialFeeCents } : {}),
+        },
+      ],
+      baseCents: 36000,
+      serviceLabel: "General pest control",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 5900,
+        initialFeeCents: 14900,
+      },
+    });
+  };
+
+  it("charges the DAY's discounted fee, not the offer's list fee", async () => {
+    withPlanFee(9700);
+
+    const res = await bookIt({ recurring: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.amountCents).toBe(9700);
+    expect(intentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 9700 }),
+      expect.anything()
+    );
+  });
+
+  it("falls back to the list fee when the stored day carries none", async () => {
+    // An older quote, taken before per-day plan fees existed, must still book.
+    withPlanFee(undefined);
+
+    const res = await bookIt({ recurring: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.amountCents).toBe(14900);
+  });
+
+  it("a MALFORMED stored fee falls back to list — never NaN to Stripe", async () => {
+    withPlanFee("9700");
+
+    const res = await bookIt({ recurring: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.amountCents).toBe(14900);
+    expect(Number.isFinite(res.body.amountCents)).toBe(true);
+    expect(intentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 14900 }),
+      expect.anything()
+    );
+  });
+
+  it("a ONE-TIME booking off the same quote is unaffected by the plan fee", async () => {
+    withPlanFee(9700);
+
+    const res = await bookIt({ recurring: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body.amountCents).toBe(36000); // the day's one-time price
+  });
+});
+
+describe("/promo previews against the SAME base /book will charge", () => {
+  // The handler's own comment promises this mirror. If /promo discounts off the
+  // flat list fee while /book charges the discounted day fee, the customer is
+  // shown a saving that never materialises at checkout.
+  const postPromo = async (body: unknown) => {
+    const res = (await handler({
+      headers: { "user-agent": "vitest-agent/1.0" },
+      requestContext: {
+        http: { method: "POST", path: "/promo", sourceIp: "1.2.3.4" },
+      },
+      body: JSON.stringify(body),
+      isBase64Encoded: false,
+    } as never)) as { statusCode: number; body: string };
+    return { status: res.statusCode, body: JSON.parse(res.body) };
+  };
+
+  beforeEach(() => {
+    promoRows = [
+      {
+        id: "p1",
+        code: "STAFF10",
+        active: true,
+        kind: "PERCENT",
+        percentOff: 10,
+        timesRedeemed: 0,
+      },
+    ];
+    booking.service = "GENERAL_PEST";
+    booking.quoteJson = JSON.stringify({
+      days: [{ ...QUOTED_DAY, priceCents: 36000, planInitialFeeCents: 9700 }],
+      baseCents: 36000,
+      serviceLabel: "General pest control",
+      recurringOffer: {
+        frequency: "MONTHLY",
+        monthlyCents: 5900,
+        initialFeeCents: 14900,
+      },
+    });
+  });
+
+  it("discounts the DAY's plan fee, not the list fee", async () => {
+    const res = await postPromo({
+      bookingId: "b1",
+      date: QUOTED_DAY.date,
+      code: "STAFF10",
+      recurring: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(true);
+    // 10% of the $97 day fee — NOT 10% of the $149 list fee ($14.90).
+    expect(res.body.discountCents).toBe(970);
+    expect(res.body.amountCents).toBe(8730);
+  });
+
+  it("the previewed amount is exactly what /book then charges", async () => {
+    const preview = await postPromo({
+      bookingId: "b1",
+      date: QUOTED_DAY.date,
+      code: "STAFF10",
+      recurring: true,
+    });
+    const booked = await bookIt({ recurring: true, promoCode: "STAFF10" });
+
+    expect(booked.status).toBe(200);
+    expect(booked.body.amountCents).toBe(preview.body.amountCents);
   });
 });
