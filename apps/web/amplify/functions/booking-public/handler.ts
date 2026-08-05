@@ -9,6 +9,12 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import Stripe from "stripe";
 import { dataClient } from "../shared/dataClient";
 import { BOOKING_LINK_TOKEN_RE } from "../shared/bookingLink";
+import {
+  quoteDisplayService,
+  quoteFrequency,
+  requestedQuoteFrequency,
+  type QuoteFrequency as SharedQuoteFrequency,
+} from "../shared/quoteDisplay";
 import { emailShell, notifyLeads, notifyOffice, sendEmail } from "../shared/email";
 import { openOwnedWork, workItemId } from "../shared/ownedWork";
 import { nextContactPhrase } from "../shared/businessHours";
@@ -513,45 +519,10 @@ export function invoiceEligibleFor(
   return kind === "COMMUNITY" || kind === "COMMERCIAL";
 }
 
-type QuoteFrequency = "MONTHLY" | "BIMONTHLY" | "QUARTERLY";
-
-function quoteFrequency(value: string | null | undefined): QuoteFrequency | undefined {
-  return value === "MONTHLY" || value === "BIMONTHLY" || value === "QUARTERLY"
-    ? value
-    : undefined;
-}
-
-/** The plan cadence the customer actually requested. Plan-only offers use
- *  their one available/selected cadence even if an older caller omitted the
- *  preference field. A normal quote with no recurring request stays one-time. */
-function requestedQuoteFrequency(
-  requested: string | null | undefined,
-  offer: { frequency: string } | null | undefined,
-  planOnly = false
-): QuoteFrequency | undefined {
-  const normalized = quoteFrequency(requested);
-  if (normalized && offer?.frequency === normalized) return normalized;
-  return planOnly ? quoteFrequency(offer?.frequency) : undefined;
-}
-
-/** `serviceLabel` remains the canonical sold-service label used if the
- *  customer changes to one-time. The public response gets a truthful display
- *  label for the option they requested instead of calling a monthly lead a
- *  "one-time treatment" before showing their plan price. */
-function quoteDisplayService(
-  serviceLabel: string,
-  requestedFrequency: QuoteFrequency | undefined
-): string {
-  if (!requestedFrequency || /\bplan\b/i.test(serviceLabel)) return serviceLabel;
-  const base = serviceLabel.replace(/\s+—\s+one-time treatment$/i, "");
-  const cadence =
-    requestedFrequency === "MONTHLY"
-      ? "Monthly"
-      : requestedFrequency === "BIMONTHLY"
-        ? "Every-2-months"
-        : "Quarterly";
-  return `${base} — ${cadence} plan`;
-}
+/** Re-exported so this module's many call sites keep their bare names. The
+ *  implementations live in shared/quoteDisplay.ts because the CRM shows the
+ *  same quotes and must describe them the same way. */
+type QuoteFrequency = SharedQuoteFrequency;
 
 /** Rehydrate the exact stored day board without recalculating its price. */
 function pricedResponse(booking: StoredQuoteBooking) {

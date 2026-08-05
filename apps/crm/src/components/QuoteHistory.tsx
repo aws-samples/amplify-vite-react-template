@@ -9,57 +9,11 @@ import {
   type Customer,
 } from "../lib/api";
 import { bookingFunnelUrl } from "../lib/bookingLink";
-import { fmtDateTime, money } from "../lib/format";
+import { fmtDateTime } from "../lib/format";
 import { useAction } from "../lib/useAsync";
-import { parseQuoteSnapshot } from "../../../web/amplify/functions/shared/quoteSnapshot";
+import { summarizeQuote } from "../lib/quotePresentation";
 import DocButton from "./DocButton";
 import { Badge, Button, ErrorNote } from "../ui/kit";
-
-/** The bits of a lead's last quote the panel shows: what, how much, and the
- *  bookable link. Reads the stored quoteJson; falls back to the row fields. */
-function summarizeQuote(q: BookingRequest): {
-  service: string;
-  price: string | null;
-  statusLabel: string;
-  tone: "ok" | "info" | "warn" | "muted";
-  bookLink: string | null;
-} | null {
-  const priced = ["QUOTED", "PROCESSING", "BOOKED"].includes(q.status ?? "");
-  if (!priced) return null; // a CONTACT/callback carries no price to show
-  // One shape, one parser — malformed JSON and a half-written offer both come
-  // back absent, and the row fields below are the fallback either way.
-  const parsed = parseQuoteSnapshot(q.quoteJson);
-  const monthly = parsed.recurringOffer?.monthlyCents ?? q.monthlyCents ?? null;
-  const price =
-    monthly != null
-      ? `${money(monthly)}/mo`
-      : parsed.baseCents != null
-        ? `${money(parsed.baseCents)}`
-        : null;
-  const statusLabel =
-    q.status === "BOOKED"
-      ? "booked & paid"
-      : q.status === "PROCESSING"
-        ? "payment processing"
-        : "quoted — not booked yet";
-  const tone =
-    q.status === "BOOKED" ? "ok" : q.status === "PROCESSING" ? "info" : "warn";
-  // Only a QUOTED request is still bookable via the resume link; the fragment
-  // (#request=…&token=…) is what the funnel reads to reopen the priced quote.
-  const bookLink =
-    q.status === "QUOTED" && q.cancelToken
-      ? `${bookingFunnelUrl()}#request=${encodeURIComponent(
-          q.id
-        )}&token=${encodeURIComponent(q.cancelToken)}`
-      : null;
-  return {
-    service: parsed.serviceLabel || String(q.service ?? "Service"),
-    price,
-    statusLabel,
-    tone,
-    bookLink,
-  };
-}
 
 /**
  * Every quote this customer was given — what, how much, when, and its PDF.
@@ -136,8 +90,11 @@ export default function QuoteHistory({
     }
   };
 
+  // Resolved once per render, not per row: the funnel host is a property of
+  // this deployment, and passing it in is what keeps summarizeQuote pure.
+  const funnelUrl = bookingFunnelUrl();
   const rows = quotes
-    .map((row) => ({ row, q: summarizeQuote(row) }))
+    .map((row) => ({ row, q: summarizeQuote(row, funnelUrl) }))
     .filter(
       (r): r is {
         row: BookingRequest;
@@ -185,6 +142,12 @@ export default function QuoteHistory({
               {" — "}
               <strong>{q.price}</strong>
             </>
+          ) : null}
+          {q.priceNote ? (
+            <span className="muted">
+              {q.price ? " · " : " — "}
+              {q.priceNote}
+            </span>
           ) : null}
         </p>
         <div className="inline-actions" style={{ marginTop: 6 }}>
