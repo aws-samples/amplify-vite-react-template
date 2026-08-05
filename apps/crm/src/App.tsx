@@ -4,6 +4,7 @@ import {
   NavLink,
   Route,
   Routes,
+  useLocation,
 } from "react-router-dom";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react";
 import "@aws-amplify/ui-react/styles.css";
@@ -13,6 +14,7 @@ import { useAction } from "./lib/useAsync";
 import { Button, EmptyState, Spinner } from "./ui/kit";
 import { Icon, type IconName } from "./ui/icons";
 import InstallBanner from "./components/InstallBanner";
+import ScreenErrorBoundary from "./components/ScreenErrorBoundary";
 import { confirmSignIn, signIn, signOut } from "aws-amplify/auth";
 import { clearAllDrafts } from "./lib/reportDraft";
 
@@ -175,6 +177,9 @@ function Require({ when, children }: { when: boolean; children: ReactNode }) {
 
 function Shell() {
   const roles = useRoles();
+  // Read before any early return — it resets the screen error boundary below,
+  // so a failure on one route does not follow you to the next.
+  const { pathname } = useLocation();
   if (roles.loading) return <Spinner label="Loading your account…" />;
 
   if (!roles.office && !roles.finance && !roles.tech && !roles.customer) {
@@ -207,49 +212,53 @@ function Shell() {
 
   return (
     <div className="app-frame">
-      <Routes>
-        <Route path="/" element={<HomeRedirect />} />
+      {/* Inside the frame and around the routes only, so a screen that throws
+          costs you that screen and not the tab bar you need to leave it. */}
+      <ScreenErrorBoundary resetKey={pathname}>
+        <Routes>
+          <Route path="/" element={<HomeRedirect />} />
 
-        {/* Office */}
-        <Route path="/dashboard" element={<Require when={staff}><Dashboard /></Require>} />
-        <Route path="/work" element={<Require when={workStaff}><WorkQueue /></Require>} />
-        <Route path="/visit-changes" element={<Require when={workStaff}><VisitChangeHistory /></Require>} />
-        <Route path="/leads" element={<Require when={staff}><Leads /></Require>} />
-        <Route path="/customers" element={<Require when={staff}><Customers /></Require>} />
-        {/* GL-13: the office customer view exposes plans, invoices, agreements
-            and every job across the customer — not a technician surface. The
-            field app never links here; a tech's customer context comes scoped
-            through /tech/job/:jobId. Staff only. */}
-        <Route path="/customers/:id" element={<Require when={staff}><CustomerDetail /></Require>} />
-        <Route path="/groups/:id" element={<Require when={staff}><GroupDetail /></Require>} />
-        <Route path="/schedule" element={<Require when={staff}><Schedule /></Require>} />
-        <Route path="/pricing" element={<Require when={staff}><PricingLog /></Require>} />
-        <Route path="/products" element={<Require when={staff}><ProductLog /></Require>} />
-        <Route path="/inventory" element={<Require when={roles.owner}><Inventory /></Require>} />
-        <Route path="/product-usage" element={<Require when={roles.owner}><ProductUsage /></Require>} />
-        <Route path="/market-rates" element={<Require when={staff}><MarketRates /></Require>} />
-        <Route path="/catalog" element={<Require when={staff}><Catalog /></Require>} />
-        <Route path="/staff" element={<Require when={roles.owner}><Staff /></Require>} />
-        <Route path="/promo-codes" element={<Require when={roles.owner}><PromoCodes /></Require>} />
-        {/* Staging-only database reset. OWNER-gated here; the screen itself
-            hides on production hosts and the backend refuses on the main
-            branch. */}
+          {/* Office */}
+          <Route path="/dashboard" element={<Require when={staff}><Dashboard /></Require>} />
+          <Route path="/work" element={<Require when={workStaff}><WorkQueue /></Require>} />
+          <Route path="/visit-changes" element={<Require when={workStaff}><VisitChangeHistory /></Require>} />
+          <Route path="/leads" element={<Require when={staff}><Leads /></Require>} />
+          <Route path="/customers" element={<Require when={staff}><Customers /></Require>} />
+          {/* GL-13: the office customer view exposes plans, invoices, agreements
+              and every job across the customer — not a technician surface. The
+              field app never links here; a tech's customer context comes scoped
+              through /tech/job/:jobId. Staff only. */}
+          <Route path="/customers/:id" element={<Require when={staff}><CustomerDetail /></Require>} />
+          <Route path="/groups/:id" element={<Require when={staff}><GroupDetail /></Require>} />
+          <Route path="/schedule" element={<Require when={staff}><Schedule /></Require>} />
+          <Route path="/pricing" element={<Require when={staff}><PricingLog /></Require>} />
+          <Route path="/products" element={<Require when={staff}><ProductLog /></Require>} />
+          <Route path="/inventory" element={<Require when={roles.owner}><Inventory /></Require>} />
+          <Route path="/product-usage" element={<Require when={roles.owner}><ProductUsage /></Require>} />
+          <Route path="/market-rates" element={<Require when={staff}><MarketRates /></Require>} />
+          <Route path="/catalog" element={<Require when={staff}><Catalog /></Require>} />
+          <Route path="/staff" element={<Require when={roles.owner}><Staff /></Require>} />
+          <Route path="/promo-codes" element={<Require when={roles.owner}><PromoCodes /></Require>} />
+          {/* Staging-only database reset. OWNER-gated here; the screen itself
+              hides on production hosts and the backend refuses on the main
+              branch. */}
 
-        {/* Technician */}
-        <Route path="/tech" element={<Require when={roles.tech || staff}><TechToday /></Require>} />
-        <Route path="/tech/job/:jobId" element={<Require when={roles.tech || staff}><TechJob /></Require>} />
+          {/* Technician */}
+          <Route path="/tech" element={<Require when={roles.tech || staff}><TechToday /></Require>} />
+          <Route path="/tech/job/:jobId" element={<Require when={roles.tech || staff}><TechJob /></Require>} />
 
-        {/* Customer portal */}
-        <Route path="/portal" element={<Require when={roles.customer}><PortalHome /></Require>} />
-        <Route path="/portal/docs" element={<Require when={roles.customer}><PortalDocs /></Require>} />
-        <Route path="/portal/billing" element={<Require when={roles.customer}><PortalBilling /></Require>} />
-        <Route path="/portal/requests" element={<Require when={roles.customer}><PortalRequests /></Require>} />
-        <Route path="/portal/add-service" element={<Require when={roles.customer}><PortalAddService /></Require>} />
-        <Route path="/portal/group" element={<Require when={roles.customer}><PortalGroup /></Require>} />
+          {/* Customer portal */}
+          <Route path="/portal" element={<Require when={roles.customer}><PortalHome /></Require>} />
+          <Route path="/portal/docs" element={<Require when={roles.customer}><PortalDocs /></Require>} />
+          <Route path="/portal/billing" element={<Require when={roles.customer}><PortalBilling /></Require>} />
+          <Route path="/portal/requests" element={<Require when={roles.customer}><PortalRequests /></Require>} />
+          <Route path="/portal/add-service" element={<Require when={roles.customer}><PortalAddService /></Require>} />
+          <Route path="/portal/group" element={<Require when={roles.customer}><PortalGroup /></Require>} />
 
-        <Route path="/more" element={<More />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+          <Route path="/more" element={<More />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </ScreenErrorBoundary>
 
       {workStaff || roles.tech ? <InstallBanner /> : null}
 
