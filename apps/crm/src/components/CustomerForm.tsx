@@ -144,7 +144,10 @@ export default function CustomerForm({
       </div>
       <Field
         label="Property type"
-        hint="Sets on-site time, capacity, and pricing. New visits inherit this."
+        hint={
+          "Sets on-site time, capacity, and pricing. New visits inherit this — " +
+          "a visit already on the books keeps its own, changed in that visit's Packet."
+        }
       >
         <select
           value={values.propertyClass}

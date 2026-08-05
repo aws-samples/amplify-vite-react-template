@@ -192,6 +192,20 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
         return;
       }
     }
+    // GL-04/GL-12: the class the NEXT visit is dispatched at. The completed
+    // visit is the best source — the property did not change class between
+    // visits — but it is not always a source at all: a job imported from
+    // FieldRoutes, or created before the class was recorded, carries none, and
+    // carrying that `null` forward minted a visit that could NEVER be
+    // dispatched (the readiness guard refuses a job with no class, and the
+    // only editor for it is the visit's own dispatch packet). So fall back to
+    // the customer's own class, exactly as job creation in crm-docs already
+    // coalesces it. Still undefined only when nobody has ever classified this
+    // property — which is the case the guard is genuinely FOR.
+    const nextPropertyClass =
+      job.propertyClass ??
+      (customer as { propertyClass?: string | null } | null)?.propertyClass ??
+      undefined;
     const { data: createdNext } = await client.models.Job.create({
       // GL-15: deterministic id derived from the completed job, so the create
       // is CONDITIONAL — two concurrent finalizes (or a resumed retry) collapse
@@ -216,13 +230,16 @@ export async function scheduleNextRecurringVisit(job: JobLike): Promise<void> {
       priceCents: null,
       status: "UNSCHEDULED",
       scheduledDate: dueDate, // target date — office confirms the slot
-      // The property did not change class between visits — carry it forward
-      // so capacity reserves the real on-site time (commercial/community is
-      // 60 min, not the residential 30) and dispatch doesn't re-ask.
-      propertyClass: job.propertyClass ?? undefined,
+      // Carried forward so capacity reserves the real on-site time
+      // (commercial/community is 60 min, not the residential 30) and dispatch
+      // doesn't re-ask. See nextPropertyClass above for why it is not read
+      // straight off the completed job.
+      propertyClass: nextPropertyClass,
       // GL-04: pool facts stamped at birth — the canonical release path
-      // gives exactly these minutes back exactly once on cancel/sweep.
-      capacityMinutes: onsiteMinutes(job.propertyClass),
+      // gives exactly these minutes back exactly once on cancel/sweep. Sized
+      // from the SAME class the visit carries, so an inherited community class
+      // reserves its 60 minutes instead of silently defaulting to 30.
+      capacityMinutes: onsiteMinutes(nextPropertyClass),
       notes: `Auto-queued ${plan.serviceFrequency.toLowerCase()} visit after job ${job.id}.`,
       accessGroups: customerAccessGroups(
         job.customerId,

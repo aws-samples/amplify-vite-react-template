@@ -77,37 +77,59 @@ export function assertDispatchFacts(
   assertDeliverableAddress(customer);
 
   const who = customer.displayName?.trim() || "this customer";
-  const problems: string[] = [];
+  // Two buckets, because they are fixed on two different SCREENS. Lumping the
+  // property class in with the address problems and calling the lot
+  // "<customer>'s record" sent the office to the customer editor — where the
+  // property-type field is the customer's DEFAULT and only seeds new visits, so
+  // changing it left this refusal saying exactly the same thing. The class the
+  // guard reads lives on the visit, and the only editor for it is that visit's
+  // dispatch packet. A refusal that names the wrong screen is worse than a
+  // vague one: it is confidently wrong.
+  const customerProblems: string[] = [];
+  const visitProblems: string[] = [];
   const street = customer.serviceStreet?.trim() ?? "";
   const city = customer.serviceCity?.trim() ?? "";
   const state = customer.serviceState?.trim() ?? "";
   const zip = customer.serviceZip?.trim() ?? "";
 
   if (isPlaceholder(street) || /^\d+$/.test(street)) {
-    problems.push(`the street ("${street}") isn't a real street address`);
+    customerProblems.push(`the street ("${street}") isn't a real street address`);
   }
   if (isPlaceholder(city)) {
-    problems.push(`the city ("${city}") isn't a real city`);
+    customerProblems.push(`the city ("${city}") isn't a real city`);
   }
   if (!MA_RI_STATE_RE.test(state)) {
-    problems.push(
+    customerProblems.push(
       `the state ("${state}") must be MA or RI — BuzzKill's launch territory is Massachusetts and Rhode Island`
     );
   }
   if (!MA_RI_ZIP_RE.test(zip)) {
-    problems.push(
+    customerProblems.push(
       `the ZIP ("${zip}") isn't a Massachusetts/Rhode Island ZIP (starts 01–02)`
     );
   }
   if (!normalizePropertyClass(job.propertyClass)) {
-    problems.push(
-      "the visit needs its property classification — residential (30 minutes on site) or commercial/community (60) — because duration and pricing depend on it"
+    visitProblems.push(
+      "it needs its property classification — residential (30 minutes on site) or commercial/community (60) — because duration and pricing depend on it"
     );
   }
-  if (problems.length) {
+  if (customerProblems.length || visitProblems.length) {
+    const parts: string[] = [];
+    if (customerProblems.length) {
+      parts.push(`${who}'s record needs fixing: ${customerProblems.join("; ")}`);
+    }
+    if (visitProblems.length) {
+      // Names the button, not just the concept — "the office fixes this" is
+      // only actionable if the office knows where.
+      parts.push(
+        `this visit's dispatch packet needs fixing (open the visit and press "Packet"): ${visitProblems.join(
+          "; "
+        )}`
+      );
+    }
     throw new Error(
-      `This job can't be dispatched yet — ${who}'s record needs fixing: ${problems.join(
-        "; "
+      `This job can't be dispatched yet — ${parts.join(
+        ", and "
       )}. The office fixes this before assigning a technician.`
     );
   }

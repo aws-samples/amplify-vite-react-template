@@ -19,7 +19,12 @@ type Plan = {
   seasonal?: boolean;
   serviceMonths?: number[];
 };
-type Customer = { id: string; status: string; groupId?: string | null };
+type Customer = {
+  id: string;
+  status: string;
+  groupId?: string | null;
+  propertyClass?: string | null;
+};
 
 const plans = new Map<string, Plan>();
 const customers = new Map<string, Customer>();
@@ -120,6 +125,56 @@ describe("scheduleNextRecurringVisit — INACTIVE customer guard", () => {
     const next = created[0] as { scheduledDate: string };
     // 2026-07-10 + 182 days = 2027-01-08.
     expect(next.scheduledDate).toBe("2027-01-08");
+  });
+});
+
+/**
+ * The next visit must be born DISPATCHABLE. assertDispatchFacts refuses a job
+ * with no property classification, and the only editor for a job's class is
+ * that visit's own dispatch packet — so a visit minted without one is stuck
+ * until someone finds an obscure button. Carrying the completed job's class
+ * forward is right when it has one, but an imported or pre-classification job
+ * has none, and `null` was being carried forward faithfully.
+ */
+describe("scheduleNextRecurringVisit — the next visit's property class", () => {
+  it("carries the completed visit's class forward, and sizes capacity from it", async () => {
+    customers.set("c1", { id: "c1", status: "ACTIVE", propertyClass: "RESIDENTIAL" });
+
+    await scheduleNextRecurringVisit({
+      ...completedJob,
+      propertyClass: "COMMUNITY",
+    });
+
+    const next = created[0] as { propertyClass: string; capacityMinutes: number };
+    // The visit's own class wins over the customer default...
+    expect(next.propertyClass).toBe("COMMUNITY");
+    // ...and the reserved minutes agree with it (community is 60, not 30).
+    expect(next.capacityMinutes).toBe(60);
+  });
+
+  it("falls back to the customer's class when the completed visit carries none", async () => {
+    customers.set("c1", { id: "c1", status: "ACTIVE", propertyClass: "COMMUNITY" });
+
+    // A job imported from FieldRoutes, or created before the class was
+    // recorded: no propertyClass at all.
+    await scheduleNextRecurringVisit(completedJob);
+
+    const next = created[0] as { propertyClass?: string; capacityMinutes: number };
+    expect(next.propertyClass).toBe("COMMUNITY");
+    // The old code sized this off the completed job's absent class and quietly
+    // reserved the residential 30 for a 60-minute common-area visit.
+    expect(next.capacityMinutes).toBe(60);
+  });
+
+  it("leaves the class unset when nobody has ever classified the property", async () => {
+    customers.set("c1", { id: "c1", status: "ACTIVE" });
+
+    await scheduleNextRecurringVisit(completedJob);
+
+    // Not invented. This is the case the dispatch guard genuinely exists for,
+    // and the office is asked once, in the visit's packet.
+    const next = created[0] as { propertyClass?: string };
+    expect(next.propertyClass).toBeUndefined();
   });
 });
 

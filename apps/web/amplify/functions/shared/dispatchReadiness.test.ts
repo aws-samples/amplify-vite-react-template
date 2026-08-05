@@ -60,6 +60,41 @@ describe("the dispatch gate (GL-12)", () => {
     ).toThrow(/property classification/i);
   });
 
+  /**
+   * A refusal has to name the screen that fixes it. The class this guard reads
+   * lives on the JOB, but the message used to file it under "<customer>'s
+   * record needs fixing" — so the office edited the customer's property type,
+   * which only seeds NEW visits, and got the identical refusal back.
+   */
+  it("sends a missing classification to the visit's packet, not the customer record", () => {
+    let message = "";
+    try {
+      assertDispatchFacts(GOOD, { propertyClass: null, serviceType: "x" });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/property classification/i);
+    expect(message).toMatch(/packet/i);
+    // The customer's address is fine here, so nothing may claim otherwise.
+    expect(message).not.toMatch(/record needs fixing/i);
+  });
+
+  it("names BOTH screens when the address and the classification are both wrong", () => {
+    let message = "";
+    try {
+      assertDispatchFacts(
+        { ...GOOD, serviceState: "CT", serviceZip: "06010" },
+        { propertyClass: null, serviceType: "x" }
+      );
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/Dana Whitlock's record needs fixing/i);
+    expect(message).toMatch(/must be MA or RI/i);
+    expect(message).toMatch(/packet/i);
+    expect(message).toMatch(/property classification/i);
+  });
+
   it("carries the locked durations: residential 30, commercial/community 60", () => {
     expect(onsiteMinutesFor("RESIDENTIAL")).toBe(30);
     expect(onsiteMinutesFor("COMMERCIAL")).toBe(60);
