@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, listAll, unwrap, type Customer, type CustomerGroup } from "../lib/api";
+import { api, listAll, unwrap } from "../lib/api";
 import { useAction, useAsync } from "../lib/useAsync";
+import {
+  rowsForTab,
+  type CustomersLoaded,
+  type CustomersTab,
+} from "../lib/customerTabs";
 import {
   Badge,
   Button,
@@ -17,7 +22,7 @@ import {
   StatusBadge,
 } from "../ui/kit";
 
-type Tab = "ACTIVE" | "INACTIVE" | "GROUPS";
+type Tab = CustomersTab;
 
 export default function Customers() {
   const navigate = useNavigate();
@@ -28,23 +33,36 @@ export default function Customers() {
   // The stale-response guard this screen used to hand-roll now lives in
   // useAsync, so every list in the app has it.
   const {
-    data: rows,
+    data: loaded,
     error,
     reload,
-  } = useAsync<Customer[] | CustomerGroup[]>(
-    () =>
-      tab === "GROUPS"
-        ? listAll((t) => api().models.CustomerGroup.list({ limit: 500, nextToken: t }))
-        : listAll((t) =>
-            api().models.Customer.listCustomerByStatusAndDisplayName(
-              { status: tab },
-              { limit: 500, nextToken: t }
-            )
-          ),
-    [tab]
-  );
-  const customers = tab === "GROUPS" ? null : (rows as Customer[] | null);
-  const groups = tab === "GROUPS" ? (rows as CustomerGroup[] | null) : null;
+  } = useAsync<CustomersLoaded>(async () => {
+    // Captured per run, so the tag records the tab this data was actually
+    // fetched for rather than whatever the tab happens to be when it lands.
+    const forTab = tab;
+    if (forTab === "GROUPS") {
+      return {
+        tab: forTab,
+        groups: await listAll((t) =>
+          api().models.CustomerGroup.list({ limit: 500, nextToken: t })
+        ),
+      };
+    }
+    return {
+      tab: forTab,
+      customers: await listAll((t) =>
+        api().models.Customer.listCustomerByStatusAndDisplayName(
+          { status: forTab },
+          { limit: 500, nextToken: t }
+        )
+      ),
+    };
+  }, [tab]);
+
+  // Held rows belonging to a different tab are "not loaded yet" for this one,
+  // which the existing `!customers` / `!groups` branches already render as a
+  // Spinner. No cast anywhere: the tag does the narrowing.
+  const { customers, groups } = rowsForTab(loaded, tab);
 
   const q = query.trim().toLowerCase();
   const filtered = (customers ?? []).filter(
@@ -132,10 +150,14 @@ export default function Customers() {
         <Card>
           {[...groups]
             .sort((a, b) => {
-              // Active groups first; then alphabetical.
+              // Active groups first; then alphabetical. `name` is required by
+              // the schema, so the guards are belt-and-braces — but a list
+              // screen sorting itself into a blank page is exactly the failure
+              // worth being paranoid about, and every other sort here already
+              // coalesces.
               const ai = a.status === "INACTIVE" ? 1 : 0;
               const bi = b.status === "INACTIVE" ? 1 : 0;
-              return ai - bi || a.name.localeCompare(b.name);
+              return ai - bi || (a.name ?? "").localeCompare(b.name ?? "");
             })
             .map((g) => (
               <ListRow
