@@ -1,6 +1,6 @@
 import { Link, NavLink } from "react-router-dom";
 import { useState } from "react";
-import { PORTAL_URL } from "../lib/portal";
+import { portalUrl } from "../lib/portal";
 
 type SubItem   = { label: string; to: string };
 type NavGroup  = { label: string; to: string; subItems?: SubItem[] };
@@ -154,7 +154,7 @@ export default function Header() {
           </a>
 
           <a
-            href={PORTAL_URL}
+            href={portalUrl()}
             className="bk-topbar-login"
             target="_blank"
             rel="noopener noreferrer"

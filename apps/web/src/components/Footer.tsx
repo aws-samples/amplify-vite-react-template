@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { PORTAL_URL } from "../lib/portal";
+import { portalUrl } from "../lib/portal";
 
 const Instagram = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -103,7 +103,7 @@ export default function Footer() {
             <div className="bk-eyebrow bk-on-dark-soft">Account</div>
             <a
               className="bk-footer-link"
-              href={PORTAL_URL}
+              href={portalUrl()}
               target="_blank"
               rel="noopener noreferrer"
             >
