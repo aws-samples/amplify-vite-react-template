@@ -1,4 +1,4 @@
-import { useEffect, lazy, Suspense } from "react";
+import { useEffect, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Outlet, Navigate } from "react-router-dom";
 import { captureAttribution } from "./lib/leadIntake";
 import Header from "./components/Header";
@@ -9,56 +9,62 @@ import ClickTracker from "./components/ClickTracker";
 import ScrollDepthTracker from "./components/ScrollDepthTracker";
 import ScrollProgress from "./components/ScrollProgress";
 import { TalkToExpertProvider } from "./components/TalkToExpertModal";
+import PageErrorBoundary from "./components/PageErrorBoundary";
+import lazyPage from "./lib/lazyPage";
 
-// Pages are code-split (lazy) so each route loads only its own JS chunk
+// Pages are code-split (lazyPage) so each route loads only its own JS chunk
 // instead of one big bundle — faster first paint, better Core Web Vitals.
 // Header/Footer and the trackers stay eager (they're on every page).
-const Home             = lazy(() => import("./pages/Home"));
-const Residential      = lazy(() => import("./pages/residential/Residential"));
-const Communities      = lazy(() => import("./pages/Communities"));
-const PropertyManagers = lazy(() => import("./pages/PropertyManagers"));
-const AboutPage        = lazy(() => import("./pages/AboutPage"));
-const ServiceAreas     = lazy(() => import("./pages/ServiceAreas"));
-const Reviews          = lazy(() => import("./pages/Reviews"));
-const Careers          = lazy(() => import("./pages/Careers"));
-const Contact          = lazy(() => import("./pages/Contact"));
+// lazyPage rather than React's lazy: a deploy replaces every hashed chunk, so
+// a session already open asks for files that no longer exist. It reloads once
+// to pick up the new index.html, and PageErrorBoundary catches what it can't
+// recover — the alternative, seen on staging at /book, is a blank white page.
+const Home             = lazyPage(() => import("./pages/Home"));
+const Residential      = lazyPage(() => import("./pages/residential/Residential"));
+const Communities      = lazyPage(() => import("./pages/Communities"));
+const PropertyManagers = lazyPage(() => import("./pages/PropertyManagers"));
+const AboutPage        = lazyPage(() => import("./pages/AboutPage"));
+const ServiceAreas     = lazyPage(() => import("./pages/ServiceAreas"));
+const Reviews          = lazyPage(() => import("./pages/Reviews"));
+const Careers          = lazyPage(() => import("./pages/Careers"));
+const Contact          = lazyPage(() => import("./pages/Contact"));
 
-const CommonAreaProtection = lazy(() => import("./pages/communities/CommonAreaProtection"));
-const InUnitService        = lazy(() => import("./pages/communities/InUnitService"));
-const HOAResources         = lazy(() => import("./pages/communities/HOAResources"));
-const ForUnitOwners        = lazy(() => import("./pages/communities/ForUnitOwners"));
+const CommonAreaProtection = lazyPage(() => import("./pages/communities/CommonAreaProtection"));
+const InUnitService        = lazyPage(() => import("./pages/communities/InUnitService"));
+const HOAResources         = lazyPage(() => import("./pages/communities/HOAResources"));
+const ForUnitOwners        = lazyPage(() => import("./pages/communities/ForUnitOwners"));
 
-const AntsSpiders             = lazy(() => import("./pages/services/AntsSpiders"));
-const RodentControl           = lazy(() => import("./pages/services/RodentControl"));
-const MosquitoTick            = lazy(() => import("./pages/services/MosquitoTick"));
-const Termite                 = lazy(() => import("./pages/services/Termite"));
-const Wildlife                = lazy(() => import("./pages/services/Wildlife"));
-const Cockroach               = lazy(() => import("./pages/services/Cockroach"));
-const FleaSilverfish          = lazy(() => import("./pages/services/FleaSilverfish"));
-const WaspHornetBee           = lazy(() => import("./pages/services/WaspHornetBee"));
-const RodentEntrySealing      = lazy(() => import("./pages/services/RodentEntrySealing"));
-const RodentAttic             = lazy(() => import("./pages/services/RodentAttic"));
-const AtticRestoration        = lazy(() => import("./pages/services/AtticRestoration"));
-const TickProgram             = lazy(() => import("./pages/services/TickProgram"));
-const TermiteTreatment        = lazy(() => import("./pages/services/TermiteTreatment"));
-const WoodBoring              = lazy(() => import("./pages/services/WoodBoring"));
-const HumaneRemoval           = lazy(() => import("./pages/services/HumaneRemoval"));
+const AntsSpiders             = lazyPage(() => import("./pages/services/AntsSpiders"));
+const RodentControl           = lazyPage(() => import("./pages/services/RodentControl"));
+const MosquitoTick            = lazyPage(() => import("./pages/services/MosquitoTick"));
+const Termite                 = lazyPage(() => import("./pages/services/Termite"));
+const Wildlife                = lazyPage(() => import("./pages/services/Wildlife"));
+const Cockroach               = lazyPage(() => import("./pages/services/Cockroach"));
+const FleaSilverfish          = lazyPage(() => import("./pages/services/FleaSilverfish"));
+const WaspHornetBee           = lazyPage(() => import("./pages/services/WaspHornetBee"));
+const RodentEntrySealing      = lazyPage(() => import("./pages/services/RodentEntrySealing"));
+const RodentAttic             = lazyPage(() => import("./pages/services/RodentAttic"));
+const AtticRestoration        = lazyPage(() => import("./pages/services/AtticRestoration"));
+const TickProgram             = lazyPage(() => import("./pages/services/TickProgram"));
+const TermiteTreatment        = lazyPage(() => import("./pages/services/TermiteTreatment"));
+const WoodBoring              = lazyPage(() => import("./pages/services/WoodBoring"));
+const HumaneRemoval           = lazyPage(() => import("./pages/services/HumaneRemoval"));
 
-const CondoServices    = lazy(() => import("./pages/CondoServices"));
-const InUnitServices   = lazy(() => import("./pages/InUnitServices"));
-const PrivacyPolicy    = lazy(() => import("./pages/PrivacyPolicy"));
-const TermsOfService   = lazy(() => import("./pages/TermsOfService"));
-const CityPage         = lazy(() => import("./pages/CityPage"));
-const LicensedInsured  = lazy(() => import("./pages/LicensedInsured"));
-const LPQuote          = lazy(() => import("./pages/lp/LPQuote"));
-const LPProtect        = lazy(() => import("./pages/lp/LPProtect"));
-const LPCall           = lazy(() => import("./pages/lp/LPCall"));
-const MAServiceArea    = lazy(() => import("./pages/MAServiceArea"));
-const RIServiceArea    = lazy(() => import("./pages/RIServiceArea"));
-const QuotePage        = lazy(() => import("./pages/booking/QuotePage"));
-const BookPage         = lazy(() => import("./pages/booking/BookPage"));
-const CancelPage       = lazy(() => import("./pages/booking/CancelPage"));
-const TrackPage        = lazy(() => import("./pages/booking/TrackPage"));
+const CondoServices    = lazyPage(() => import("./pages/CondoServices"));
+const InUnitServices   = lazyPage(() => import("./pages/InUnitServices"));
+const PrivacyPolicy    = lazyPage(() => import("./pages/PrivacyPolicy"));
+const TermsOfService   = lazyPage(() => import("./pages/TermsOfService"));
+const CityPage         = lazyPage(() => import("./pages/CityPage"));
+const LicensedInsured  = lazyPage(() => import("./pages/LicensedInsured"));
+const LPQuote          = lazyPage(() => import("./pages/lp/LPQuote"));
+const LPProtect        = lazyPage(() => import("./pages/lp/LPProtect"));
+const LPCall           = lazyPage(() => import("./pages/lp/LPCall"));
+const MAServiceArea    = lazyPage(() => import("./pages/MAServiceArea"));
+const RIServiceArea    = lazyPage(() => import("./pages/RIServiceArea"));
+const QuotePage        = lazyPage(() => import("./pages/booking/QuotePage"));
+const BookPage         = lazyPage(() => import("./pages/booking/BookPage"));
+const CancelPage       = lazyPage(() => import("./pages/booking/CancelPage"));
+const TrackPage        = lazyPage(() => import("./pages/booking/TrackPage"));
 
 /** Brief, on-brand loader shown while a page's chunk loads (self-contained, no CSS needed). */
 function PageFallback() {
@@ -86,10 +92,14 @@ function SiteLayout() {
       <a href="#main-content" className="bk-skip-link">Skip to main content</a>
       <Header />
       <main id="main-content">
-        {/* Suspense inside the layout so Header/Footer stay visible while a page chunk loads */}
-        <Suspense fallback={<PageFallback />}>
-          <Outlet />
-        </Suspense>
+        {/* Suspense inside the layout so Header/Footer stay visible while a page
+            chunk loads — and the boundary inside the layout for the same reason,
+            so a page that fails to load costs the page, not the whole site. */}
+        <PageErrorBoundary>
+          <Suspense fallback={<PageFallback />}>
+            <Outlet />
+          </Suspense>
+        </PageErrorBoundary>
       </main>
       <Footer />
     </>
@@ -99,9 +109,11 @@ function SiteLayout() {
 /** Standalone (no header/footer) wrapper that still provides a Suspense boundary for LP chunks. */
 function BareLayout() {
   return (
-    <Suspense fallback={<PageFallback />}>
-      <Outlet />
-    </Suspense>
+    <PageErrorBoundary>
+      <Suspense fallback={<PageFallback />}>
+        <Outlet />
+      </Suspense>
+    </PageErrorBoundary>
   );
 }
 
