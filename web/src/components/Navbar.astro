@@ -6,6 +6,18 @@ interface Props {
 }
 
 const { currentPath } = Astro.props;
+
+/* Trailing slashes are not significant, so "/contact/" and "/contact" are the
+   same page. "/" normalises to itself rather than to "". */
+const norm = (p: string) => p.replace(/\/+$/, "") || "/";
+const current = norm(currentPath);
+
+/* Only the first matching link is highlighted. About Us points at the homepage,
+   so comparing each link independently would mark both Home and About Us active
+   on "/" — two highlighted items reads as a bug. Hash links never match. */
+const activeIndex = NAV_LINKS.findIndex(
+  (l) => !l.path.includes("#") && norm(l.path) === current
+);
 ---
 
 <nav class="navbar" id="navbar">
@@ -15,13 +27,13 @@ const { currentPath } = Astro.props;
     </a>
 
     <div class="navbar-links" id="navbar-links">
-      {NAV_LINKS.map((l) => {
-        const isHash = l.path.includes("#");
-        const isActive = !isHash && currentPath.replace(/\/$/, "") === l.path.replace(/\/$/, "");
+      {NAV_LINKS.map((l, i) => {
+        const isActive = i === activeIndex;
         return (
           <a
             href={l.path}
             class={"navbar-link" + (isActive ? " navbar-link--active" : "")}
+            aria-current={isActive ? "page" : undefined}
           >
             {l.label}
           </a>
