@@ -24,25 +24,34 @@
   --qf-headline-to: #c8d3e3;
   --qf-back-hover: rgba(255, 255, 255, 0.04);
   --qf-error: #f85149;
+  --qf-border-strong: #4da6ff;
+  --qf-bar-bg: rgba(11, 18, 32, 0.9);
+  --qf-field-bg: rgba(255, 255, 255, 0.04);
 }
 
+/* Brand light theme: white ground, near-black type, gold borders. Gold is an
+   edge and focus colour only — it cannot carry white text at an accessible
+   contrast, so navy takes the buttons and the progress fill. */
 :root[data-theme="light"] {
-  --qf-bg: #f6f8fc;
+  --qf-bg: #ffffff;
   --qf-bg-grad-from: #ffffff;
-  --qf-bg-grad-to: #e7eef9;
-  --qf-text: #0f172a;
-  --qf-text-strong: #0f172a;
-  --qf-text-muted: #5b6776;
-  --qf-text-faint: #94a0b3;
-  --qf-border: #dfe5ef;
-  --qf-track: rgba(15, 23, 42, 0.06);
-  --qf-accent: #1f7ae0;
-  --qf-accent-2: #3b94f0;
-  --qf-accent-glow: rgba(31, 122, 224, 0.5);
-  --qf-headline-from: #0f172a;
-  --qf-headline-to: #2e3b52;
-  --qf-back-hover: rgba(15, 23, 42, 0.05);
-  --qf-error: #d92d20;
+  --qf-bg-grad-to: #fffdf7;
+  --qf-text: #0b0d10;
+  --qf-text-strong: #000000;
+  --qf-text-muted: #5c6470;
+  --qf-text-faint: #98a0ab;
+  --qf-border: #e8d5a8;
+  --qf-border-strong: #d4a940;
+  --qf-track: rgba(11, 13, 16, 0.08);
+  --qf-accent: #1a365d;
+  --qf-accent-2: #2b6cb0;
+  --qf-accent-glow: rgba(26, 54, 93, 0.35);
+  --qf-headline-from: #0b0d10;
+  --qf-headline-to: #23303f;
+  --qf-back-hover: rgba(229, 193, 106, 0.2);
+  --qf-error: #c0392b;
+  --qf-bar-bg: rgba(255, 255, 255, 0.93);
+  --qf-field-bg: #ffffff;
 }
 
 * {
@@ -83,6 +92,8 @@ a {
 }
 
 /* ── Root layout ── */
+/* Top padding clears the fixed bar (~58px) plus the step indicator beneath it,
+   and the bottom clears the support chip. */
 .qf-root {
   min-height: 100vh;
   min-height: 100dvh;
@@ -90,7 +101,7 @@ a {
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  padding: clamp(72px, 12vh, 160px) 20px 32px;
+  padding: clamp(112px, 15vh, 176px) 20px 80px;
   position: relative;
 }
 
@@ -118,35 +129,163 @@ a {
   border-radius: 0 4px 4px 0;
 }
 
-/* ── Back button ── */
-.qf-back-btn {
+/* ── Fixed top bar: back · wordmark · controls ──
+   Back and the controls used to be independently position:fixed. They now live
+   in this bar so they cannot drift apart or overlap the stage on short screens. */
+.qf-bar {
   position: fixed;
-  top: 22px;
-  left: 20px;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 101;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  background: var(--qf-bar-bg, rgba(255, 255, 255, 0.92));
+  border-bottom: 1px solid var(--qf-track);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.qf-bar-left { justify-self: start; }
+
+.qf-bar-right {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Holds the column open so the wordmark stays centred when back is absent. */
+.qf-bar-spacer {
+  display: block;
+  width: 36px;
+  height: 36px;
+}
+
+/* ── Wordmark ── */
+.qf-brand {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 6px;
+  transition: opacity 0.2s ease;
+}
+
+.qf-brand:hover { opacity: 0.75; }
+
+.qf-brand img {
+  display: block;
+  height: 30px;
+  width: auto;
+}
+
+.qf-brand--small img { height: 26px; }
+
+/* ── Segmented step indicator ── */
+.qf-steps {
+  position: fixed;
+  top: 60px;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 0 16px;
+  pointer-events: none;
+}
+
+.qf-steps-track {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.qf-step-seg {
+  flex: 1 1 0;
+  height: 4px;
+  border-radius: 999px;
+  transition: background 0.35s ease, opacity 0.35s ease, transform 0.35s ease;
+}
+
+/* The current segment is scaled up so the eye lands on where you are, not only
+   on how much is filled. */
+.qf-step-seg--active {
+  transform: scaleY(1.6);
+}
+
+.qf-steps-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Back button (now a bar child, not fixed) ── */
+.qf-back-btn {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   padding: 8px 12px;
   border-radius: 8px;
   transition: all 0.2s ease;
-  z-index: 101;
 }
 
 .qf-back-btn:hover {
   background: var(--qf-back-hover);
 }
 
-/* ── Top-right cluster (restart + theme toggle) ── */
-.qf-top-right {
+/* ── Support line, bottom corner ── */
+.qf-support {
   position: fixed;
-  top: 18px;
   right: 16px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  bottom: 16px;
   z-index: 101;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px -8px rgba(11, 13, 16, 0.28);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.qf-support:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 26px -10px rgba(11, 13, 16, 0.35);
+}
+
+.qf-support-label {
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  opacity: 0.6;
+}
+
+.qf-support-num { font-variant-numeric: tabular-nums; }
+
+@media (max-width: 560px) {
+  .qf-support { padding: 8px 12px; font-size: 12px; }
+  .qf-support-label { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qf-step-seg,
+  .qf-support,
+  .qf-brand {
+    transition: none;
+  }
+  .qf-support:hover { transform: none; }
 }
 
 .qf-theme-toggle,
@@ -375,6 +514,93 @@ a {
   100% {
     opacity: 1;
     transform: scale(1) rotate(0);
+  }
+}
+
+/* ── Group step: several related fields on one screen ── */
+.qf-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.qf-group-field {
+  flex: 1 1 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/* Two half fields share a row; the gap is subtracted so they never overflow. */
+.qf-group-field--half {
+  flex: 1 1 calc(50% - 9px);
+}
+
+.qf-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--qf-text-muted, #8a93a5);
+}
+
+/* Inside a group the field is a proper box with a gold edge, not the 24px
+   underline the single-question steps use. Five underlined 24px inputs on one
+   screen would not fit, and the box is what makes a multi-field screen scannable
+   — the eye finds the next empty box without re-reading the labels. */
+.qf-group .qf-input {
+  padding: 13px 15px;
+  font-size: 16px;
+  font-weight: 500;
+  background: var(--qf-field-bg);
+  border: 1.5px solid var(--qf-border);
+  border-bottom: 1.5px solid var(--qf-border);
+  border-radius: 10px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.qf-group .qf-input:hover {
+  border-color: var(--qf-border-strong);
+}
+
+.qf-group .qf-input:focus {
+  border-color: var(--qf-border-strong);
+  border-bottom-color: var(--qf-border-strong);
+  box-shadow: 0 0 0 3px var(--qf-back-hover);
+}
+
+.qf-optional {
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+/* Native picker: reset the platform chrome, then draw our own caret. */
+.qf-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238a93a5' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 16px center;
+  padding-right: 42px;
+  cursor: pointer;
+}
+
+/* Inside a group the option list is a grid, not a stack — eight coverage lines
+   as full-width rows would push the Continue button off the screen. */
+.qf-options--compact {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 520px) {
+  .qf-group-field--half {
+    flex: 1 1 100%;
+  }
+
+  .qf-options--compact {
+    grid-template-columns: 1fr;
   }
 }
 

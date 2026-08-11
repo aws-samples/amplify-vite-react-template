@@ -1,0 +1,62 @@
+---
+/**
+ * Every analytics tag on the site, in one place.
+ *
+ * Previously this block was copy-pasted into four <head>s — Layout.astro,
+ * quote.astro, get-started/[...slug].astro and associations/[slug].astro — so a
+ * tag change meant four edits and any missed one silently stopped reporting.
+ * Adding GA4 was the point at which that became worth fixing.
+ *
+ * ── gtag.js is loaded ONCE ────────────────────────────────────────────────
+ * GA4 and Google Ads share the same library. The correct pattern is one
+ * gtag/js request followed by a `config` call per measurement ID, NOT two
+ * script tags. Two requests would download the same library twice and race to
+ * initialise the same dataLayer.
+ *
+ * ── is:inline matters ─────────────────────────────────────────────────────
+ * Without it Astro compiles the snippet to `type="module"`, which keeps the
+ * `gtag` function inside module scope. Pageviews still worked, because `config`
+ * pushes to the global `window.dataLayer` — but `window.gtag` was never defined,
+ * so every later call from application code silently did nothing. That is the
+ * bug documented in constants.ts `fireConversion`. `is:inline` emits a classic
+ * script, so `gtag` is global and event calls work.
+ *
+ * Gated by ANALYTICS_DISABLED, which is ON by default: production needs no
+ * configuration, and staging sets PUBLIC_ANALYTICS_DISABLED=true so test traffic
+ * cannot pollute the property or fire a conversion against the live campaign.
+ */
+import { ANALYTICS_DISABLED, GA4_ID, ADS_ID, CLARITY_ID } from "../constants";
+---
+
+{!ANALYTICS_DISABLED && (
+  <Fragment>
+    {/* Google tag — one library, configured for GA4 and Google Ads */}
+    <script async is:inline src={`https://www.googletagmanager.com/gtag/js?id=${GA4_ID}`}></script>
+    <script is:inline define:vars={{ GA4_ID, ADS_ID }}>
+      window.dataLayer = window.dataLayer || [];
+      function gtag() {
+        dataLayer.push(arguments);
+      }
+      window.gtag = gtag;
+      gtag("js", new Date());
+      gtag("config", GA4_ID);
+      gtag("config", ADS_ID);
+    </script>
+
+    {/* Microsoft Clarity */}
+    <script is:inline define:vars={{ CLARITY_ID }}>
+      (function (c, l, a, r, i, t, y) {
+        c[a] =
+          c[a] ||
+          function () {
+            (c[a].q = c[a].q || []).push(arguments);
+          };
+        t = l.createElement(r);
+        t.async = 1;
+        t.src = "https://www.clarity.ms/tag/" + i;
+        y = l.getElementsByTagName(r)[0];
+        y.parentNode.insertBefore(t, y);
+      })(window, document, "clarity", "script", CLARITY_ID);
+    </script>
+  </Fragment>
+)}

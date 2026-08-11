@@ -13,9 +13,21 @@ interface Props {
 }
 
 const { title, subtitle, backgroundImage, backgroundVideo, ctaText, ctaHref, compact, eyebrow } = Astro.props;
+
+/**
+ * An `action` slot replaces the plain CTA link with a richer control (the
+ * homepage's address-lookup form). A hero carrying one is laid out shorter —
+ * the form needs to sit above the fold with the headline, not below a full
+ * viewport of image — hence `hero--action`. Pages that pass no slot are
+ * unaffected; this component renders 34 of the 43 indexable pages.
+ */
+const hasAction = Astro.slots.has("action");
 ---
 
-<section class={"hero" + (compact ? " hero--compact" : "")} style={`background-image: url(${backgroundImage})`}>
+<section
+  class={"hero" + (compact ? " hero--compact" : "") + (hasAction ? " hero--action" : "")}
+  style={`background-image: url(${backgroundImage})`}
+>
   {backgroundVideo && (
     <video
       class="hero-video"
@@ -34,8 +46,12 @@ const { title, subtitle, backgroundImage, backgroundVideo, ctaText, ctaHref, com
     {eyebrow && <span class="hero-eyebrow">{eyebrow}</span>}
     <h1 class="hero-title">{title}</h1>
     {subtitle && <p class="hero-subtitle">{subtitle}</p>}
-    {ctaText && ctaHref && (
-      <a href={ctaHref} class="btn btn-gold hero-cta">{ctaText}</a>
+    {hasAction ? (
+      <slot name="action" />
+    ) : (
+      ctaText && ctaHref && (
+        <a href={ctaHref} class="btn btn-gold hero-cta">{ctaText}</a>
+      )
     )}
   </div>
 </section>

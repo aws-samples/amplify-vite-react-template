@@ -1,0 +1,374 @@
+---
+/**
+ * US coverage map — homepage section 11. True state geometry, not a grid.
+ *
+ * Geometry: `us-atlas` (ISC), pre-built TopoJSON from the U.S. Census Bureau,
+ * already projected to Albers USA in a 975 × 610 space — which is why no
+ * projection library is needed and why Alaska and Hawaii are correctly inset.
+ * Both packages are devDependencies: the topology is read at BUILD time and only
+ * the resulting SVG path strings ship. Nothing is added to the client bundle.
+ *
+ * Paths are simplified with Douglas–Peucker at 0.8 units, which is sub-pixel at
+ * the rendered width and takes the geometry from 108 KB to ~26 KB while keeping
+ * all 51 features.
+ *
+ * viewBox starts at x = -64 because the Albers Alaska inset reaches x = -58; at
+ * x = 0 Alaska was clipped down its western edge.
+ *
+ * Every state is a link now, labelled with its postal abbreviation. Leader lines
+ * and the right-hand name gutter are gone by request. The small northeastern
+ * states cannot hold a label inside their own outline at this scale — RI's
+ * mainland is 11 units wide — so those carry a hand-tuned offset in NUDGE that
+ * places the abbreviation just clear of the coast. Without leader lines that
+ * relies on proximity to read correctly, which is the trade the brief asked for.
+ */
+import { feature } from "topojson-client";
+import topo from "us-atlas/states-albers-10m.json";
+import { states as guideStates } from "../data/states";
+
+interface Props {
+  ctaHref: string;
+  ctaLabel?: string;
+}
+const { ctaHref, ctaLabel = "Request a review in your state" } = Astro.props;
+
+/* ── geometry → svg paths ─────────────────────────────────────────────── */
+type Ring = [number, number][];
+
+const collection = feature(topo as any, (topo as any).objects.states) as any;
+
+function perpDist(p: number[], a: number[], b: number[]) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len = dx * dx + dy * dy;
+  if (!len) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+/** Douglas–Peucker. Iterative stack to avoid deep recursion on long coastlines. */
+function simplify(points: Ring, tol: number): Ring {
+  if (points.length < 3) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+  const stack: [number, number][] = [[0, points.length - 1]];
+  while (stack.length) {
+    const [lo, hi] = stack.pop()!;
+    let maxD = 0;
+    let idx = -1;
+    for (let i = lo + 1; i < hi; i++) {
+      const d = perpDist(points[i], points[lo], points[hi]);
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (idx !== -1 && maxD > tol) {
+      keep[idx] = 1;
+      stack.push([lo, idx], [idx, hi]);
+    }
+  }
+  return points.filter((_, i) => keep[i]);
+}
+
+function toPath(geom: any, tol = 0.8) {
+  const polys = geom.type === "Polygon" ? [geom.coordinates] : geom.coordinates;
+  let d = "";
+  for (const poly of polys) {
+    for (const raw of poly) {
+      const ring = raw.length > 3 ? simplify(raw as Ring, tol) : (raw as Ring);
+      const pts: string[] = [];
+      let last = "";
+      for (const [x, y] of ring) {
+        const p = `${Math.round(x)},${Math.round(y)}`;
+        if (p !== last) {
+          pts.push(p);
+          last = p;
+        }
+      }
+      if (pts.length < 4) continue;
+      d += `M${pts.join("L")}Z`;
+    }
+  }
+  return d;
+}
+
+/** Largest ring of a geometry — the mainland body, ignoring offshore islands. */
+function largestRing(geom: any): Ring {
+  const polys = geom.type === "Polygon" ? [geom.coordinates] : geom.coordinates;
+  let best: Ring = polys[0][0];
+  let bestArea = -1;
+  for (const poly of polys) {
+    const r = poly[0] as Ring;
+    let a = 0;
+    for (let i = 0, n = r.length, j = n - 1; i < n; j = i++) {
+      a += r[j][0] * r[i][1] - r[i][0] * r[j][1];
+    }
+    a = Math.abs(a / 2);
+    if (a > bestArea) {
+      bestArea = a;
+      best = r;
+    }
+  }
+  return best;
+}
+
+function pointInRing(pt: number[], ring: Ring) {
+  let hit = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > pt[1] !== yj > pt[1] && pt[0] < ((xj - xi) * (pt[1] - yi)) / (yj - yi) + xi) {
+      hit = !hit;
+    }
+  }
+  return hit;
+}
+
+function distToRing(pt: number[], ring: Ring) {
+  let min = Infinity;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const d = perpDist(pt, ring[j], ring[i]);
+    if (d < min) min = d;
+  }
+  return min;
+}
+
+/**
+ * Pole of inaccessibility: the interior point furthest from any edge.
+ *
+ * This replaces a vertex-average centroid, which is what made the labels look
+ * misaligned. Averaging vertices biases the point toward whichever side carries
+ * more coastline detail, so Idaho, Nebraska, West Virginia and Kentucky all
+ * pulled off-centre. The pole is guaranteed to be inside the shape and sits in
+ * its visually open part, which is what a label wants.
+ *
+ * `r` doubles as the room available, so whether a label fits is measured rather
+ * than guessed.
+ */
+function labelPoint(geom: any): { pt: [number, number]; r: number } {
+  const ring = largestRing(geom);
+  const xs = ring.map((p) => p[0]);
+  const ys = ring.map((p) => p[1]);
+  let x0 = Math.min(...xs);
+  let x1 = Math.max(...xs);
+  let y0 = Math.min(...ys);
+  let y1 = Math.max(...ys);
+  let step = Math.max((x1 - x0) / 24, (y1 - y0) / 24, 1);
+  let best: [number, number] = [(x0 + x1) / 2, (y0 + y1) / 2];
+  let bestR = -1;
+  for (let pass = 0; pass < 3; pass++) {
+    for (let x = x0; x <= x1; x += step) {
+      for (let y = y0; y <= y1; y += step) {
+        if (!pointInRing([x, y], ring)) continue;
+        const r = distToRing([x, y], ring);
+        if (r > bestR) {
+          bestR = r;
+          best = [x, y];
+        }
+      }
+    }
+    x0 = best[0] - step;
+    x1 = best[0] + step;
+    y0 = best[1] - step;
+    y1 = best[1] + step;
+    step /= 5;
+  }
+  return { pt: best, r: bestR };
+}
+
+/**
+ * Ten states have no room for a label inside their own outline — measured, not
+ * assumed: their inscribed radius runs from 1 unit (DC) to 12 (NH), against the
+ * ~13 a two-letter label needs. Those get an explicit position just off their
+ * own coast, chosen so no two are closer than ~23 units. They sit adjacent to
+ * their state rather than in a gutter, because leader lines are out by request
+ * and a distant column would be unreadable without them.
+ *
+ * Everything else is placed automatically at its pole of inaccessibility.
+ */
+const OUTSIDE: Record<string, [number, number]> = {
+  Vermont:                [862, 108],
+  "New Hampshire":        [908, 133],
+  Massachusetts:          [929, 167],
+  "Rhode Island":         [925, 190],
+  Connecticut:            [876, 208],
+  "New Jersey":           [884, 250],
+  Delaware:               [876, 275],
+  "District of Columbia": [846, 285],
+  Maryland:               [806, 268],
+  Hawaii:                 [352, 590],
+};
+
+/** Below this much room, a two-letter label cannot sit inside the outline. */
+const MIN_ROOM = 13;
+
+const slugByName = new Map(guideStates.map((s) => [s.name, s.slug]));
+
+type Tile = {
+  name: string;
+  slug: string | undefined;
+  d: string;
+  label: [number, number];
+  outside: boolean;
+};
+
+const tiles: Tile[] = [];
+
+for (const f of collection.features) {
+  const name = f.properties.name as string;
+  const d = toPath(f.geometry);
+  if (!d) continue;
+  const { pt, r } = labelPoint(f.geometry);
+  const override = OUTSIDE[name];
+  const outside = Boolean(override) || r < MIN_ROOM;
+  const [lx, ly] = override ?? pt;
+  tiles.push({
+    name,
+    slug: slugByName.get(name),
+    d,
+    // Rounded: the search returns full float precision, and 17 decimals × 51
+    // labels is pure payload for sub-pixel positioning nobody can see.
+    label: [Math.round(lx * 10) / 10, Math.round(ly * 10) / 10],
+    outside,
+  });
+}
+
+/* Abbreviation per state, keyed off the same data file that owns the routes. */
+const abbrByName = new Map(guideStates.map((s) => [s.name, s.abbr]));
+---
+
+<div class="cmap">
+  <div class="cmap__head">
+    <h3 class="cmap__title">Where we place coverage</h3>
+    <p class="cmap__hint">Licensed in all 50 states and DC. Select a state to open its page.</p>
+  </div>
+
+  <svg
+    class="cmap__svg"
+    viewBox="-64 0 1184 620"
+    role="group"
+    aria-label={`Map of the United States. Licensed in all 50 states and the District of Columbia. Select a state to open its coverage page.`}
+  >
+    <g class="cmap__states">
+      {tiles.map((s) => (
+        <a href={`/hoa-insurance-${s.slug}`} aria-label={`HOA insurance in ${s.name}`}>
+          <path class="cmap__state" d={s.d} />
+          <text
+            class={"cmap__abbr" + (s.outside ? " cmap__abbr--out" : "")}
+            x={s.label[0]}
+            y={s.label[1]}
+            text-anchor="middle">{abbrByName.get(s.name) ?? ""}</text>
+        </a>
+      ))}
+    </g>
+  </svg>
+
+  <div class="cmap__cta">
+    <a href={ctaHref} class="btn btn-navy">{ctaLabel}</a>
+  </div>
+</div>
+
+<style>
+  .cmap {
+    background: var(--color-gold);
+    border-radius: 20px;
+    padding: 30px 26px 28px;
+    text-align: left;
+  }
+
+  .cmap__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px 24px;
+    margin-bottom: 12px;
+  }
+
+  .cmap__title {
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--color-navy-dark);
+    margin: 0;
+    opacity: 0.8;
+  }
+
+  .cmap__hint {
+    font-size: 12.5px;
+    color: rgba(19, 42, 74, 0.8);
+    margin: 0;
+  }
+
+  /* No overflow:visible — the viewBox now contains every feature, so anything
+     spilling out would be a bug worth seeing rather than hiding. */
+  .cmap__svg {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .cmap__states a { cursor: pointer; }
+
+  /* Blue by default, darker on hover. non-scaling-stroke keeps the border a
+     hairline at every viewport width instead of thickening with the viewBox. */
+  .cmap__state {
+    fill: var(--color-navy);
+    stroke: var(--color-gold-light);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    transition: fill 0.16s ease;
+  }
+
+  .cmap__states a:hover .cmap__state,
+  .cmap__states a:focus-visible .cmap__state {
+    fill: var(--color-accent);
+  }
+
+  .cmap__abbr {
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    fill: var(--color-white);
+    dominant-baseline: middle;
+    letter-spacing: 0.02em;
+    pointer-events: none; /* the path underneath owns the click */
+  }
+
+  /* The ten that sit off their own coast: dark fill with a white halo so they
+     read against the gold ground rather than the navy landmass. */
+  .cmap__abbr--out {
+    font-size: 13px;
+    fill: var(--color-navy-dark);
+    paint-order: stroke;
+    stroke: rgba(255, 255, 255, 0.9);
+    stroke-width: 3;
+  }
+
+  .cmap__states a:focus-visible {
+    outline: 2px solid var(--color-navy-dark);
+    outline-offset: 2px;
+  }
+
+  .cmap__cta {
+    margin-top: 20px;
+    text-align: center;
+  }
+
+  /* On a phone-width map the small-state abbreviations collide, so only those
+     are dropped. The states stay blue and tappable, and every link keeps its
+     aria-label, so nothing is lost to assistive tech. */
+  @media (max-width: 700px) {
+    .cmap { padding: 24px 14px 22px; }
+    .cmap__abbr--out { display: none; }
+    .cmap__abbr { font-size: 17px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cmap__state { transition: none; }
+  }
+</style>

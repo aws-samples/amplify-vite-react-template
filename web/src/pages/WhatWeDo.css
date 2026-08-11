@@ -1,148 +1,432 @@
-.wwd-intro {
+/* ═══════════════════════════════════════════════════════════════════════
+   /what-we-do — HOA insurance product page
+
+   Uses the same section furniture as the homepage (.eyebrow, .sec-head,
+   .section-cta-wrap from global.css) so the two pages read as one brand. Only
+   the layouts unique to this page live here.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Shared two-column split (sections 01 and 05) ── */
+.wwd-split {
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  gap: 56px;
+  align-items: center;
+}
+
+/* Media first in source order on the HO-6 section so the image leads on desktop;
+   the media re-orders above the text on mobile either way. */
+.wwd-split--reverse {
+  grid-template-columns: 1fr 1.05fr;
+}
+
+.wwd-split__media img,
+.wwd-split__media > * {
+  width: 100%;
+}
+
+.wwd-lead {
   font-size: 17px;
-  color: var(--color-gray-600);
   line-height: 1.7;
-  max-width: 720px;
-  margin: 16px 0 24px;
+  color: var(--color-gray-700);
+  margin-bottom: 16px;
+  max-width: 56ch;
 }
 
 .wwd-body {
   font-size: 16px;
+  line-height: 1.75;
   color: var(--color-gray-600);
-  line-height: 1.7;
-  margin: 12px 0 24px;
-  max-width: 640px;
+  margin-bottom: 20px;
+  max-width: 56ch;
 }
 
-.wwd-sub-heading {
-  font-size: 20px;
-  font-weight: 600;
-  margin-top: 36px;
-  margin-bottom: 8px;
-  color: var(--color-gray-900);
-}
-
-.wwd-bullets {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 16px 0 24px;
-}
-
-.wwd-bullets li {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  font-size: 15px;
-  color: var(--color-gray-700);
-  line-height: 1.5;
-}
-
-.wwd-bullets li::before {
-  content: "";
-  display: inline-block;
-  width: 20px;
-  height: 20px;
-  min-width: 20px;
-  margin-top: 2px;
-  border-radius: 50%;
-  background: var(--color-sky);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%232b6cb0' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5 9-11'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: center;
-}
-
-/* Coverage blocks */
-.coverage-list {
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-  margin-top: 36px;
-}
-
-.coverage-block {
-  background: var(--color-white);
-  border: 1px solid var(--color-gray-200);
-  border-radius: 12px;
-  padding: 28px 32px;
-}
-
-.coverage-block h3 {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--color-gray-900);
-  margin-bottom: 14px;
-}
-
-.coverage-block ul {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 24px;
-}
-
-.coverage-block li {
-  font-size: 14px;
-  color: var(--color-gray-600);
-  padding: 4px 0;
-  position: relative;
+/* The line each section lands on. Gold rule so the eye stops here. */
+.wwd-closer {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-navy);
+  border-left: 3px solid var(--color-gold);
   padding-left: 16px;
+  margin-bottom: 26px;
+  max-width: 52ch;
 }
 
-.coverage-block li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 11px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-blue);
-}
+/* On the navy band the standard title/subtitle colours are unreadable. */
+.wwd-invert { color: var(--color-white); }
+.wwd-invert-sub { color: rgba(255, 255, 255, 0.78); }
 
-/* Issues */
-.issues-grid {
+/* ── 01 · The four things it responds to, inline in the definition ──
+   Two columns, hairline separators, no card chrome. It is supporting detail for
+   the paragraph above it, so it should not compete with the coverage cards. */
+.responds-inline {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 16px;
-  margin-top: 32px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 26px;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 24px;
 }
 
-.issue-card {
+.responds-inline li {
+  padding-top: 14px;
+  border-top: 2px solid var(--color-gold);
+}
+
+.responds-inline h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
+.responds-inline p {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--color-gray-600);
+}
+
+/* ── 02 · Coverage panel ──
+   One bordered plane with 1px gaps forming hairlines, three across. Same joined
+   pattern the homepage uses for The Board Record, so the two pages share a
+   visual language. Three and two both divide six exactly, so no breakpoint
+   leaves an empty cell. */
+.cov-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--color-gray-200);
+  border: 1px solid var(--color-gray-200);
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.cov-card {
+  background: var(--color-white);
+  padding: 22px 22px 24px;
+  display: flex;
+  gap: 14px;
+  transition: background 0.2s ease;
+}
+
+.cov-card:hover {
+  background: var(--color-gray-50);
+}
+
+/* Inline with the title, and smaller than the stacked version it replaces. */
+.cov-card__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--color-gold-dim);
+  color: var(--color-gold);
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.cov-card:hover .cov-card__mark {
+  background: var(--color-gold);
+  color: var(--color-navy-dark);
+}
+
+.cov-card__body { min-width: 0; }
+
+.cov-card h3 {
+  font-size: 15.5px;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin-bottom: 5px;
+  line-height: 1.3;
+}
+
+.cov-card p {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--color-gray-600);
+}
+
+.cov-note {
+  margin: 22px auto 0;
+  max-width: 64ch;
+  text-align: center;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--color-gray-500);
+}
+
+/* ── 03 · Common issues — accordion on the navy band ──
+   Two columns of native <details>. Collapsed the section is roughly half the
+   height of six open rows, and the titles alone still carry the point. */
+.issues-acc {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.issue-acc {
+  background: var(--color-navy);
+  transition: background 0.2s ease;
+}
+
+.issue-acc:hover,
+.issue-acc[open] {
+  background: #1e3f6d;
+}
+
+.issue-acc summary {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 20px 24px;
-  background: var(--color-gray-50);
+  padding: 17px 22px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.issue-acc summary::-webkit-details-marker { display: none; }
+
+.issue-acc summary:focus-visible {
+  outline: 2px solid var(--color-gold);
+  outline-offset: -3px;
+}
+
+.issue-acc__num {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--color-gold);
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-acc__title {
+  flex: 1 1 auto;
+  font-size: 15.5px;
+  font-weight: 700;
+  color: var(--color-white);
+  line-height: 1.35;
+}
+
+.issue-acc__chev {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: rgba(255, 255, 255, 0.5);
+  transition: transform 0.22s ease, color 0.22s ease;
+}
+
+.issue-acc[open] .issue-acc__chev {
+  transform: rotate(180deg);
+  color: var(--color-gold);
+}
+
+.issue-acc > p {
+  padding: 0 22px 18px 50px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.74);
+}
+
+/* Footer line and CTA share a row instead of stacking. */
+.issues-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+  margin-top: 26px;
+}
+
+.issues-foot__text {
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+  max-width: 56ch;
+}
+
+.issues-foot__cta { white-space: nowrap; }
+
+/* ── 04 · Policy types — comparison table ── */
+.types-table-wrap {
+  overflow-x: auto;
   border: 1px solid var(--color-gray-200);
-  border-radius: 10px;
-  font-size: 15px;
-  color: var(--color-gray-700);
+  border-radius: 14px;
+  background: var(--color-white);
+  margin-bottom: 26px;
 }
 
-.issue-card svg {
-  flex-shrink: 0;
+.types-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 620px;
 }
 
-/* HO-6 split */
-.ho6-split {
+.types-table th,
+.types-table td {
+  text-align: left;
+  padding: 15px 18px;
+  vertical-align: top;
+}
+
+.types-table thead th {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-gray-500);
+  background: var(--color-gray-50);
+  border-bottom: 1px solid var(--color-gray-200);
+  white-space: nowrap;
+}
+
+.types-table tbody tr + tr th,
+.types-table tbody tr + tr td {
+  border-top: 1px solid var(--color-gray-200);
+}
+
+/* The row header is the policy type — the thing being compared. */
+.types-table tbody th {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--color-navy);
+  white-space: nowrap;
+  border-left: 3px solid var(--color-gold);
+}
+
+.types-table tbody td {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-gray-600);
+}
+
+.types-table tbody tr:hover td,
+.types-table tbody tr:hover th {
+  background: var(--color-gray-50);
+}
+
+.types-table__owner-col { text-align: center !important; }
+
+.owner-pill {
+  display: inline-block;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: var(--color-gold-dim);
+  color: var(--color-navy);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Deductible + loss assessment, side by side. */
+.stops-pair {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 64px;
-  align-items: start;
+  gap: 20px;
+  align-items: stretch;
 }
 
-.ho6-image-wrap img {
-  width: 100%;
-  border-radius: 16px;
-  object-fit: cover;
-  aspect-ratio: 4/3;
-  margin-top: 20px;
+.stops-item {
+  background: var(--color-gray-50);
+  border: 1px solid var(--color-gray-200);
+  border-left: 3px solid var(--color-gold);
+  border-radius: 12px;
+  padding: 18px 20px;
 }
 
-/* FAQ */
+.stops-item h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin-bottom: 6px;
+}
+
+.stops-item p {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--color-gray-600);
+}
+
+/* Closing line and CTA share a row, matching the issues section's footer so the
+   two "agitate then resolve" sections resolve the same way. */
+.stops-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+  margin-top: 24px;
+}
+
+.stops-foot__text {
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--color-gray-600);
+  margin: 0;
+  max-width: 62ch;
+}
+
+.stops-foot__cta { white-space: nowrap; }
+
+/* ── 05 · HO-6 ── */
+/* Pull quote, not a paragraph: this is the section's strongest claim and the
+   reason an owner acts, so it is set larger with a gold rule and its own space. */
+.ho6-pull {
+  margin: 0 0 24px;
+  padding: 16px 0 16px 20px;
+  border-left: 4px solid var(--color-gold);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.45;
+  color: var(--color-navy);
+  max-width: 50ch;
+}
+
+.ho6-closer {
+  margin: 0 0 6px;
+  font-size: 15.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--color-navy);
+  max-width: 54ch;
+}
+
+.ho6-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 28px;
+}
+
+.ho6-list li {
+  padding-left: 18px;
+  border-left: 2px solid var(--color-gold);
+}
+
+.ho6-list h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin-bottom: 5px;
+}
+
+.ho6-list p {
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: var(--color-gray-600);
+}
+
+/* ── FAQ accordion ── */
 .faq-list {
-  max-width: 720px;
-  margin-top: 32px;
+  max-width: 800px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -152,6 +436,7 @@
   border: 1px solid var(--color-gray-200);
   border-radius: 10px;
   overflow: hidden;
+  background: var(--color-white);
 }
 
 .faq-item summary {
@@ -164,23 +449,20 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
 }
 
-.faq-item summary::-webkit-details-marker {
-  display: none;
-}
+.faq-item summary::-webkit-details-marker { display: none; }
 
 .faq-item summary::after {
   content: "+";
   font-size: 20px;
   font-weight: 400;
   color: var(--color-gray-400);
-  transition: transform 0.2s ease;
+  flex: 0 0 auto;
 }
 
-.faq-item[open] summary::after {
-  content: "−";
-}
+.faq-item[open] summary::after { content: "−"; }
 
 .faq-item p {
   padding: 0 24px 20px;
@@ -189,18 +471,83 @@
   line-height: 1.7;
 }
 
-@media (max-width: 768px) {
-  .ho6-split {
+/* ── Responsive ── */
+/* ── CTA pattern ──
+   One recognisable primary label (Request Insurance Review) repeated down the
+   page, with a friction-reducing note on the SAME row rather than beneath it —
+   so the reassurance costs no extra height. The note answers the objection the
+   button raises: what it costs, what happens next, what it is written against. */
+.wwd-cta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-top: 26px;
+}
+
+.wwd-cta--center {
+  justify-content: center;
+  margin-top: 26px;
+}
+
+.wwd-cta__note {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--color-gray-500);
+  max-width: 34ch;
+}
+
+/* ── Page density ──
+   Sections on this page run tighter than the global 80px. Eight sections at the
+   default padding spent over 1,200px on whitespace alone, which is most of what
+   made the page feel long. Scoped to .wwd so no other page is affected. */
+.wwd .section {
+  padding: 54px 0;
+}
+
+.wwd .sec-head {
+  margin-bottom: 30px;
+}
+
+@media (max-width: 900px) {
+  .wwd-split,
+  .wwd-split--reverse {
     grid-template-columns: 1fr;
-    gap: 32px;
+    gap: 36px;
   }
 
-  .ho6-image-wrap {
-    order: -1;
+  /* Image above the copy on both splits, so the section still opens visually. */
+  .wwd-split__media { order: -1; }
+
+  .issues-acc,
+  .stops-pair {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .coverage-block ul {
-    flex-direction: column;
-    gap: 6px;
+  /* Two across, not one: six single-file rows would undo the height saving. */
+  .cov-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stops-foot__cta,
+  .issues-foot__cta {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 620px) {
+  .cov-grid,
+  .responds-inline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cov-card,
+  .cov-card__mark,
+  .issue-acc,
+  .issue-acc__chev {
+    transition: none;
   }
 }

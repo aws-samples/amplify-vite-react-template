@@ -1,9 +1,36 @@
 import type { IconKey } from "./icons";
+import { states as ALL_STATES } from "../../data/states";
 
 /* ──────────────────────────────────────────────────────────
    STEP DEFINITIONS
+
+   Five questions, both paths. The count is stated on the splash, so the flows
+   must stay at five — naming the length is the main lever on completion, and a
+   promise of five followed by seven is worse than never promising.
+
+   Detail that used to occupy its own screen is grouped onto the screen it
+   belongs with:
+     · unit count sits with the association it describes  (Q2)
+     · property address sits with state and city          (Q3)
+     · carriers and expiry sit with the lines to review   (Q4)
+     · name, email and phone are one screen               (Q5)
+   That is what `group` exists for.
    ────────────────────────────────────────────────────────── */
 type Option = { value: string; label: string; icon?: IconKey; sub?: string };
+
+/** One input inside a `group` step. */
+export type GroupField = {
+  kind: "text" | "select" | "multi";
+  field: string;
+  label: string;
+  placeholder?: string;
+  options?: Option[];
+  optional?: boolean;
+  inputType?: string;
+  validation?: "email" | "phone";
+  /** Render at half width so two can share a row. */
+  half?: boolean;
+};
 
 type Step =
   | { type: "splash"; headline: string; sub: string }
@@ -19,6 +46,7 @@ type Step =
       validation?: "email" | "phone";
     }
   | { type: "multi"; question: string; sub?: string; field: string; options: Option[] }
+  | { type: "group"; question: string; sub?: string; fields: GroupField[] }
   | { type: "submitted" };
 
 /* ── Validators ── */
@@ -43,192 +71,198 @@ export function validateText(
   return null;
 }
 
+/**
+ * Every state we are licensed in, derived from states.ts rather than hand-listed.
+ *
+ * This used to carry only six states. Once states.ts grew to all fifty plus DC,
+ * a visitor arriving from (say) the Texas page had no Texas to choose, was forced
+ * onto "OTHER", and `buildCrmLead` drops "OTHER" — so the lead reached the CRM
+ * with no state at all. Reading the list from the data file means the two cannot
+ * drift apart again.
+ */
+const STATE_OPTIONS: Option[] = [...ALL_STATES]
+  .sort((a, b) => a.name.localeCompare(b.name))
+  .map((s) => ({ value: s.abbr, label: s.name }));
+
 export const STEPS: Record<string, Step> = {
   welcome: {
     type: "splash",
     // headline is rendered dynamically in JSX so it can include the agent's name
     headline: "",
-    sub: "Free, fast, and never any spam.",
+    sub: "Five questions. No cost, no obligation.",
   },
+
+  /* ── Q1 · Who's asking ── */
   role: {
     type: "select",
-    question: "First — which best describes you?",
+    question: "Who are we speaking with?",
     field: "role",
     options: [
       { value: "board", label: "Board member or trustee", icon: "Board", sub: "I serve on the HOA board" },
       { value: "manager", label: "Property manager", icon: "Manager", sub: "I manage the property" },
-      { value: "owner", label: "Unit owner (HO‑6)", icon: "Owner", sub: "I own a unit in the HOA" },
+      { value: "owner", label: "Unit owner", icon: "Owner", sub: "I own a unit in the association" },
     ],
   },
 
-  /* shared */
-  assocName: {
+  /* ── Q2 · Which association ── */
+  assocBoard: {
+    type: "group",
+    question: "What's the association called?",
+    sub: "Full legal name if you have it — the name on the policy.",
+    fields: [
+      {
+        kind: "text",
+        field: "associationName",
+        label: "Association name",
+        placeholder: "e.g. Maple Ridge Condominium Trust",
+      },
+      {
+        kind: "text",
+        field: "unitCount",
+        label: "How many units?",
+        placeholder: "e.g. 48",
+        inputType: "number",
+        half: true,
+      },
+    ],
+  },
+  assocOwner: {
     type: "text",
-    question: "What's the name of your association?",
+    question: "What's the association called?",
     placeholder: "e.g. Maple Ridge Condominium Trust",
     field: "associationName",
-  },
-  state: {
-    type: "select",
-    question: "Which state is the property in?",
-    field: "state",
-    // Must cover every state in `src/data/states.ts` — those states have landing
-    // pages, and `session.ts` prefills their abbr from the referrer slug. A state
-    // missing here cannot be represented: the visitor is forced onto "OTHER",
-    // which overwrites the prefill and is dropped by `buildCrmLead`.
-    options: [
-      { value: "MA", label: "Massachusetts" },
-      { value: "RI", label: "Rhode Island" },
-      { value: "CT", label: "Connecticut" },
-      { value: "NH", label: "New Hampshire" },
-      { value: "NY", label: "New York" },
-      { value: "OK", label: "Oklahoma" },
-      { value: "OTHER", label: "Other" },
-    ],
-  },
-  city: {
-    type: "text",
-    question: "City or town?",
-    placeholder: "e.g. Marlborough",
-    field: "city",
+    sub: "Full legal name if you have it — the name on the policy.",
   },
 
-  /* board / manager */
-  unitCount: {
-    type: "text",
-    question: "How many units in the association?",
-    placeholder: "e.g. 48",
-    field: "unitCount",
-    inputType: "number",
-  },
-  propertyType: {
-    type: "select",
-    question: "What type of property?",
-    field: "propertyType",
-    options: [
-      { value: "condo", label: "Condominium", icon: "Condo" },
-      { value: "townhouse", label: "Townhouse", icon: "Townhouse" },
-      { value: "mixed", label: "Mixed use", icon: "Mixed" },
-      { value: "other", label: "Other", icon: "Building" },
+  /* ── Q3 · Where ── */
+  where: {
+    type: "group",
+    question: "Where is the property?",
+    fields: [
+      {
+        kind: "select",
+        field: "state",
+        label: "State",
+        placeholder: "Select a state",
+        options: STATE_OPTIONS,
+        half: true,
+      },
+      { kind: "text", field: "city", label: "City or town", placeholder: "e.g. Marlborough", half: true },
+      {
+        kind: "text",
+        field: "propertyAddress",
+        label: "Primary property address",
+        placeholder: "Street address",
+        optional: true,
+      },
     ],
-  },
-  yearBuilt: {
-    type: "text",
-    question: "Approximate year built?",
-    placeholder: "e.g. 1985",
-    field: "yearBuilt",
-    inputType: "number",
-  },
-  coverageNeeds: {
-    type: "multi",
-    question: "What coverage are you looking for?",
-    sub: "Select all that apply.",
-    field: "coverageNeeds",
-    options: [
-      { value: "master_property", label: "Master Property", icon: "Building" },
-      { value: "general_liability", label: "General Liability", icon: "Shield" },
-      { value: "dno", label: "Directors & Officers (D&O)", icon: "Briefcase" },
-      { value: "umbrella", label: "Umbrella / Excess", icon: "Umbrella" },
-      { value: "crime", label: "Crime / Fidelity", icon: "Lock" },
-      { value: "ordinance", label: "Ordinance or Law", icon: "Scale" },
-      { value: "not_sure", label: "Not sure — review everything", icon: "Sparkle" },
-    ],
-  },
-  currentCarrier: {
-    type: "text",
-    question: "Who's your current carrier?",
-    placeholder: "e.g. Amica, or 'not sure'",
-    field: "currentCarrier",
-    optional: true,
-  },
-  renewalDate: {
-    type: "text",
-    question: "When does your policy renew?",
-    placeholder: "e.g. September 2026",
-    field: "renewalDate",
-    optional: true,
   },
 
-  /* owner */
-  masterDeductible: {
-    type: "select",
-    question: "Do you know your association's master policy deductible?",
-    field: "masterDeductible",
-    options: [
-      { value: "yes_know", label: "Yes, I know it", icon: "Yes" },
-      { value: "no", label: "No", icon: "No" },
-      { value: "not_sure", label: "Not sure", icon: "Question" },
+  /* ── Q4 · What to review (board / manager) ── */
+  reviewBoard: {
+    type: "group",
+    question: "What should we review?",
+    sub: "Select the lines that apply. The rest is optional and speeds things up.",
+    fields: [
+      {
+        kind: "multi",
+        field: "coverageNeeds",
+        label: "Lines of coverage",
+        options: [
+          { value: "master_property", label: "Commercial Property", icon: "Building" },
+          { value: "general_liability", label: "General Liability", icon: "Shield" },
+          { value: "umbrella", label: "Umbrella / Excess Liability", icon: "Umbrella" },
+          { value: "dno", label: "Directors & Officers Liability", icon: "Briefcase" },
+          { value: "crime", label: "Crime / Fidelity", icon: "Lock" },
+          { value: "ordinance", label: "Ordinance or Law", icon: "Scale" },
+          { value: "other", label: "Other", icon: "Question" },
+          { value: "not_sure", label: "Not sure — review everything", icon: "Sparkle" },
+        ],
+      },
+      {
+        kind: "text",
+        field: "currentCarrier",
+        label: "Current carriers",
+        placeholder: "Carrier per line, if you know them",
+        optional: true,
+      },
+      {
+        kind: "text",
+        field: "renewalDate",
+        label: "Program expiry date",
+        placeholder: "e.g. 1 September 2026",
+        optional: true,
+        half: true,
+      },
     ],
   },
-  deductibleAmount: {
-    type: "text",
-    question: "What's the deductible amount?",
-    placeholder: "e.g. $10,000",
-    field: "deductibleAmount",
-  },
-  ho6Need: {
+
+  /* ── Q4 · What you need (unit owner) ── */
+  needOwner: {
     type: "select",
-    question: "What are you looking for?",
+    question: "What do you need?",
     field: "ho6Need",
     options: [
-      { value: "new", label: "New HO‑6 policy", icon: "Document" },
-      { value: "review", label: "Review my existing policy", icon: "Shield" },
+      { value: "new", label: "A new HO-6 policy", icon: "Document" },
+      { value: "review", label: "A review of the one I have", icon: "Shield" },
       { value: "loss_assessment", label: "Loss assessment coverage", icon: "Scale" },
-      { value: "not_sure", label: "Not sure — help me figure it out", icon: "Question" },
+      { value: "not_sure", label: "Not sure — help me work it out", icon: "Question" },
     ],
   },
 
-  /* contact */
-  contactName: {
-    type: "text",
-    question: "What's your name?",
-    placeholder: "Full name",
-    field: "contactName",
-  },
-  contactEmail: {
-    type: "text",
-    question: "Best email to reach you?",
-    placeholder: "you@example.com",
-    field: "contactEmail",
-    inputType: "email",
-    validation: "email",
-  },
-  contactPhone: {
-    type: "text",
-    question: "Phone number?",
-    placeholder: "(508) 555-1234",
-    field: "contactPhone",
-    inputType: "tel",
-    optional: true,
-    validation: "phone",
+  /* ── Q5 · Where to send it ── */
+  contact: {
+    type: "group",
+    question: "Where should we send the review?",
+    fields: [
+      { kind: "text", field: "contactName", label: "Name", placeholder: "Full name" },
+      {
+        kind: "text",
+        field: "contactEmail",
+        label: "Email",
+        placeholder: "you@example.com",
+        inputType: "email",
+        validation: "email",
+        half: true,
+      },
+      {
+        kind: "text",
+        field: "contactPhone",
+        label: "Phone",
+        placeholder: "(508) 555-1234",
+        inputType: "tel",
+        optional: true,
+        validation: "phone",
+        half: true,
+      },
+    ],
   },
 
   submitted: { type: "submitted" },
 };
 
 const FLOW_BOARD = [
-  "welcome", "role", "assocName", "state", "city",
-  "unitCount", "propertyType", "yearBuilt", "coverageNeeds",
-  "currentCarrier", "renewalDate",
-  "contactName", "contactEmail", "contactPhone", "submitted",
+  "welcome",
+  "role", // Q1
+  "assocBoard", // Q2
+  "where", // Q3
+  "reviewBoard", // Q4
+  "contact", // Q5
+  "submitted",
 ];
 
 const FLOW_OWNER = [
-  "welcome", "role", "assocName", "state", "city",
-  "masterDeductible", "ho6Need",
-  "contactName", "contactEmail", "contactPhone", "submitted",
+  "welcome",
+  "role", // Q1
+  "assocOwner", // Q2
+  "where", // Q3
+  "needOwner", // Q4
+  "contact", // Q5
+  "submitted",
 ];
 
 export type FormData = Record<string, string | string[]>;
 
-export function getFlow(role: string | null, data: FormData): string[] {
-  if (role === "owner") {
-    const flow = [...FLOW_OWNER];
-    if (data.masterDeductible === "yes_know") {
-      const idx = flow.indexOf("masterDeductible");
-      flow.splice(idx + 1, 0, "deductibleAmount");
-    }
-    return flow;
-  }
-  return FLOW_BOARD;
+export function getFlow(role: string | null): string[] {
+  return role === "owner" ? FLOW_OWNER : FLOW_BOARD;
 }

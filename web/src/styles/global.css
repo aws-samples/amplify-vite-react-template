@@ -6,9 +6,9 @@
   --color-blue: #2b6cb0;
   --color-blue-light: #4da6ff;
   --color-sky: #ebf4ff;
-  --color-gold: #d1b378;
-  --color-gold-light: #e8d5a8;
-  --color-gold-dim: rgba(209, 179, 120, 0.12);
+  --color-gold: #e5c16a;
+  --color-gold-light: #f2d78f;
+  --color-gold-dim: rgba(229, 193, 106, 0.12);
   --color-gray-50: #f8fafc;
   --color-gray-100: #f1f5f9;
   --color-gray-200: #e2e8f0;
@@ -121,7 +121,24 @@ ul {
 .btn-gold:hover {
   background: var(--color-gold-light);
   transform: translateY(-1px);
-  box-shadow: 0 8px 24px rgba(209, 179, 120, 0.35);
+  box-shadow: 0 8px 24px rgba(229, 193, 106, 0.35);
+}
+
+/* Brand Standards: gold is an accent only — never a button fill. Navy with
+   white text is the correct primary treatment on a navy-overlaid hero. The
+   hairline border keeps the button legible against that overlay, which a
+   flat navy-on-navy fill would not be. */
+.btn-navy {
+  background: var(--color-navy);
+  color: var(--color-white);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.btn-navy:hover {
+  background: var(--color-navy-dark);
+  border-color: rgba(255, 255, 255, 0.38);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(9, 22, 42, 0.4);
 }
 
 .btn-outline {
@@ -144,6 +161,49 @@ ul {
   background: var(--color-gray-100);
   transform: translateY(-1px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   SHARED SECTION FURNITURE
+   An eyebrow + title + standfirst on every section, so a page reads as one
+   managed system rather than a stack of unrelated blocks.
+
+   Lives here, not in Home.css: /contact uses the same pattern, and Home.css is
+   only bundled onto the homepage — so these were silently unstyled anywhere
+   else. Any new page that wants the section rhythm gets it from Layout.
+   ══════════════════════════════════════════════════════════════════════ */
+.eyebrow {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+  margin-bottom: 12px;
+}
+
+.eyebrow--gold {
+  color: var(--color-gold);
+}
+
+.sec-head {
+  margin-bottom: 40px;
+}
+
+.sec-head--center {
+  text-align: center;
+  max-width: 720px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.sec-head--center .section-subtitle {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.section-cta-wrap {
+  margin-top: 40px;
+  text-align: center;
 }
 
 /* ── Section spacing ── */
@@ -229,9 +289,227 @@ ul {
   line-height: 1.6;
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   AUDIENCE CARDS — "Who we work with"
+   Shared by the homepage and /what-we-do, so it lives here rather than in
+   Home.css. Mark, title, CTA and no body copy: the CTA is pushed down with
+   margin-top:auto so every card ends on the same baseline even when a title
+   wraps to two lines.
+   ══════════════════════════════════════════════════════════════════════ */
+.aud-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+}
+
+.aud-card {
+  background: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  border-radius: 14px;
+  padding: 26px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+}
+
+.aud-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--color-gold);
+  box-shadow: 0 14px 34px -14px rgba(15, 23, 42, 0.18);
+}
+
+.aud-card__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  background: var(--color-gold-dim);
+  color: var(--color-gold);
+  transition: background 0.22s ease, color 0.22s ease;
+}
+
+.aud-card:hover .aud-card__mark {
+  background: var(--color-gold);
+  color: var(--color-navy-dark);
+}
+
+.aud-card h3 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-navy);
+  line-height: 1.3;
+}
+
+.aud-card__cta {
+  margin-top: auto;
+}
+
+/* Inline forward link. Used by audience cards on two pages. */
+.text-link {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-accent);
+  display: inline-block;
+  margin-top: 8px;
+  transition: color 0.2s ease;
+}
+
+.text-link:hover {
+  color: var(--color-accent-hover);
+}
+
 /* ── Gold accent ── */
 .gold-accent {
   color: var(--color-gold);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   SHARED SECTION COMPONENTS — process stages + carrier marquee
+   Used by the homepage and /why-choose-us, so they live here rather than in
+   Home.css. Home.css is only bundled onto the homepage, so anything relying on
+   it elsewhere renders unstyled.
+   ══════════════════════════════════════════════════════════════════════ */
+/* ══ 06 · Stages ═════════════════════════════════════════════════════ */
+.stage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  counter-reset: none;
+}
+
+.stage-card {
+  padding: 30px 26px;
+  border-radius: 12px;
+  background: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  border-top: 3px solid var(--color-gold);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.stage-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+}
+
+.stage-num {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-gold);
+  letter-spacing: 0.08em;
+  margin-bottom: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-card h3 {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin-bottom: 10px;
+}
+
+.stage-card p {
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: var(--color-gray-600);
+}
+
+/* ══ 06 · Carrier marquee ════════════════════════════════════════════ */
+/* Edge fades rather than hard cuts, so logos enter and leave the strip instead
+   of being sliced off at the container edge. */
+.carrier-marquee {
+  overflow: hidden;
+  position: relative;
+  padding: 8px 0;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+}
+
+/* max-content stops the flex row wrapping, which is what keeps all twelve on a
+   single line regardless of viewport width. */
+.carrier-track {
+  display: flex;
+  align-items: center;
+  width: max-content;
+  gap: 18px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  animation: carrier-scroll 46s linear infinite;
+}
+
+/* -50% is exactly one full set, because the markup renders the list twice. Any
+   other value would visibly jump on loop. */
+@keyframes carrier-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.carrier-marquee:hover .carrier-track,
+.carrier-marquee:focus-within .carrier-track {
+  animation-play-state: paused;
+}
+
+/* Every slide is the same box — that is what makes the marks uniform in size.
+   The logo is contained inside it, so nothing is stretched to fit. */
+.carrier {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 200px;
+  height: 92px;
+  padding: 16px 20px;
+  background: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  border-radius: 12px;
+}
+
+.carrier__logo {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  /* No filter, tint or greyscale: a carrier's mark appears in its own colours. */
+}
+
+.carrier-note {
+  margin-top: 28px;
+  text-align: center;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--color-gray-500);
+  max-width: 62ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Motion off: fall back to a static wrapped set. The duplicate half is hidden so
+   the same logo is not shown twice sitting still. */
+@media (prefers-reduced-motion: reduce) {
+  .carrier-marquee {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .carrier-track {
+    animation: none;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .carrier[aria-hidden="true"] {
+    display: none;
+  }
 }
 
 /* ── Scroll-reveal animations ── */
@@ -272,6 +550,27 @@ ul {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .aud-card,
+  .aud-card__mark,
+  .text-link {
+    transition: none;
+  }
+
+  .aud-card:hover {
+    transform: none;
+  }
+}
+
+/* Safety net: .reveal starts at opacity 0 and only paints once the observer in
+   Layout.astro adds .revealed. With scripting unavailable that never happens and
+   the content stays invisible forever, so it is forced visible here instead. */
+@media (scripting: none) {
   .reveal {
     opacity: 1;
     transform: none;

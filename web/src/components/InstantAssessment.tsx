@@ -141,8 +141,8 @@ export function InstantAssessment({
       <div className="ia-success">
         <div className="ia-success-icon">
           <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
-            <circle cx="32" cy="32" r="32" fill="#d1b37820" />
-            <circle cx="32" cy="32" r="24" fill="#d1b378" />
+            <circle cx="32" cy="32" r="32" fill="#e5c16a20" />
+            <circle cx="32" cy="32" r="24" fill="#e5c16a" />
             <path d="M20 32l8 8 16-18" stroke="#fff" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </div>

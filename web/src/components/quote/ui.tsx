@@ -16,6 +16,77 @@ export function ProgressBar({ current, total }: { current: number; total: number
   );
 }
 
+/**
+ * Segmented step indicator: one segment per question, plus a "Step N of 5" count.
+ *
+ * A single sliding bar tells you how far along you are but not how much is left.
+ * Discrete segments plus the count answer both, which is what makes a form feel
+ * finishable — the same reason the splash names the number up front.
+ */
+export function StepIndicator({ current, total }: { current: number; total: number }) {
+  const c = useTheme();
+  if (total < 1) return null;
+  const clamped = Math.max(0, Math.min(current, total));
+  return (
+    <div className="qf-steps" role="group" aria-label={`Step ${clamped} of ${total}`}>
+      <div className="qf-steps-track">
+        {Array.from({ length: total }, (_, i) => {
+          const done = i < clamped - 1;
+          const active = i === clamped - 1;
+          return (
+            <span
+              key={i}
+              className={
+                "qf-step-seg" +
+                (done ? " qf-step-seg--done" : "") +
+                (active ? " qf-step-seg--active" : "")
+              }
+              style={{
+                background: done || active ? c.borderActive : c.border,
+                opacity: done ? 1 : active ? 1 : 0.45,
+              }}
+            />
+          );
+        })}
+      </div>
+      <span className="qf-steps-label" style={{ color: c.textMuted }}>
+        Step {clamped} of {total}
+      </span>
+    </div>
+  );
+}
+
+/** Wordmark shown on every screen, so the form never looks detached from the site. */
+export function BrandMark({ small = false }: { small?: boolean }) {
+  return (
+    <a
+      href="/"
+      className={"qf-brand" + (small ? " qf-brand--small" : "")}
+      aria-label="HOA Insurance Agency home"
+    >
+      <img src="/logo.png" alt="HOA Insurance Agency" draggable={false} />
+    </a>
+  );
+}
+
+/** Persistent support line. A form that can be abandoned should offer a human. */
+export function SupportChip({ phone, href }: { phone: string; href: string }) {
+  const c = useTheme();
+  return (
+    <a
+      className="qf-support"
+      href={href}
+      style={{ borderColor: c.border, color: c.text, background: c.card }}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 012.1 4.2 2 2 0 014.1 2h3a2 2 0 012 1.7c.1.9.3 1.8.6 2.6a2 2 0 01-.5 2.1L8.1 9.6a16 16 0 006 6l1.2-1.1a2 2 0 012.1-.5c.8.3 1.7.5 2.6.6a2 2 0 011.7 2z" />
+      </svg>
+      <span className="qf-support-label">Support</span>
+      <span className="qf-support-num">{phone}</span>
+    </a>
+  );
+}
+
 /* ── Typing animation ── */
 function TypeWriter({ text, speed = 32, onDone }: { text: string; speed?: number; onDone?: () => void }) {
   const [displayed, setDisplayed] = useState("");
@@ -46,48 +117,6 @@ function TypeWriter({ text, speed = 32, onDone }: { text: string; speed?: number
   );
 }
 
-/* ── Progress ring around avatar ── */
-function ProgressRing({ progress, size = 92, stroke = 3 }: { progress: number; size?: number; stroke?: number }) {
-  const c = useTheme();
-  const radius = (size - stroke) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference * (1 - Math.min(1, Math.max(0, progress)));
-
-  return (
-    <svg
-      className="qf-progress-ring"
-      width={size}
-      height={size}
-      viewBox={`0 0 ${size} ${size}`}
-      style={{ position: "absolute", top: -4, left: -4 }}
-    >
-      {/* Track */}
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={radius}
-        fill="none"
-        stroke={c.border}
-        strokeWidth={stroke}
-        opacity={0.4}
-      />
-      {/* Progress */}
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={radius}
-        fill="none"
-        stroke={c.accent}
-        strokeWidth={stroke}
-        strokeLinecap="round"
-        strokeDasharray={circumference}
-        strokeDashoffset={dashOffset}
-        transform={`rotate(-90 ${size / 2} ${size / 2})`}
-        style={{ transition: "stroke-dashoffset 0.6s cubic-bezier(0.2,0.7,0.3,1)" }}
-      />
-    </svg>
-  );
-}
 
 /* ── Confetti burst ── */
 export function Confetti({ active }: { active: boolean }) {
@@ -102,7 +131,7 @@ export function Confetti({ active }: { active: boolean }) {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    const colors = ["#4da6ff", "#d1b378", "#3fb950", "#f85149", "#79bbff", "#e8d5a8", "#ff6eb4", "#ffd700"];
+    const colors = ["#4da6ff", "#e5c16a", "#3fb950", "#f85149", "#79bbff", "#f2d78f", "#ff6eb4", "#ffd700"];
     const particles: {
       x: number; y: number; vx: number; vy: number;
       w: number; h: number; color: string; rotation: number; spin: number;
@@ -343,6 +372,48 @@ export function TextField({
   );
 }
 
+/**
+ * Native <select>. Deliberately not the CardOption grid the other choice steps
+ * use: fifty-one states as tappable cards would be a screen of scrolling, and a
+ * native picker is also what mobile keyboards handle best.
+ */
+export function SelectField({
+  value,
+  onChange,
+  options,
+  placeholder = "Select…",
+  autoFocus = false,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  placeholder?: string;
+  autoFocus?: boolean;
+}) {
+  const ref = useRef<HTMLSelectElement>(null);
+  useEffect(() => {
+    if (autoFocus && ref.current) {
+      const t = setTimeout(() => ref.current?.focus(), 250);
+      return () => clearTimeout(t);
+    }
+  }, [autoFocus]);
+  return (
+    <select
+      ref={ref}
+      className="qf-input qf-select"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value="">{placeholder}</option>
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function PrimaryButton({
   onClick,
   label = "Continue",
@@ -380,7 +451,13 @@ export function PrimaryButton({
   );
 }
 
-export function BackButton({ onClick }: { onClick: () => void }) {
+export function BackButton({
+  onClick,
+  label = "Back",
+}: {
+  onClick: () => void;
+  label?: string;
+}) {
   const c = useTheme();
   const [hov, setHov] = useState(false);
   return (
@@ -393,7 +470,7 @@ export function BackButton({ onClick }: { onClick: () => void }) {
       style={{ color: hov ? c.text : c.textMuted }}
     >
       <Icon.ArrowLeft size={16} />
-      <span>Back</span>
+      <span>{label}</span>
     </button>
   );
 }
@@ -426,13 +503,11 @@ export function AgentHeader({
   agent,
   greeting,
   compact,
-  progress,
   typeGreeting,
 }: {
   agent: Agent;
   greeting?: string;
   compact?: boolean;
-  progress?: number;
   typeGreeting?: boolean;
 }) {
   const c = useTheme();
@@ -448,7 +523,6 @@ export function AgentHeader({
           position: "relative",
         }}
       >
-        {progress !== undefined && <ProgressRing progress={progress} />}
         {!imgFailed ? (
           <img
             src={agent.photo}

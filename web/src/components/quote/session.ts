@@ -1,4 +1,5 @@
 import type { FormData } from "./schema";
+import { states } from "../../data/states";
 
 /* ──────────────────────────────────────────────────────────
    AGENT ROSTER — rotates per session
@@ -76,15 +77,13 @@ export function clearState() {
   }
 }
 
-/* ── Smart prefill from URL params ── */
-const STATE_SLUGS: Record<string, string> = {
-  massachusetts: "MA",
-  "rhode-island": "RI",
-  connecticut: "CT",
-  "new-hampshire": "NH",
-  "new-york": "NY",
-  oklahoma: "OK",
-};
+/* ── Smart prefill from URL params ──
+   Built from states.ts, not hand-listed. The hardcoded six-state map here meant
+   that once the site gained a page per state, arriving from any of the other 45
+   prefilled nothing and the visitor had to pick their state manually. */
+const STATE_SLUGS: Record<string, string> = Object.fromEntries(
+  states.map((s) => [s.slug, s.abbr])
+);
 
 export function getPrefillFromUrl(): Partial<{ state: string }> {
   try {

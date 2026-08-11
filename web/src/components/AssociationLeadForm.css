@@ -21,7 +21,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  color: #d1b378;
+  color: #e5c16a;
   margin: 0 0 12px;
 }
 
@@ -47,8 +47,8 @@
   gap: 14px;
   align-items: flex-start;
   padding: 16px 18px;
-  background: rgba(209, 179, 120, 0.08);
-  border: 1.5px solid rgba(209, 179, 120, 0.3);
+  background: rgba(229, 193, 106, 0.08);
+  border: 1.5px solid rgba(229, 193, 106, 0.3);
   border-radius: 12px;
   margin-bottom: 28px;
 }
@@ -58,7 +58,7 @@
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: rgba(209, 179, 120, 0.18);
+  background: rgba(229, 193, 106, 0.18);
   color: #9a7d3f;
   display: flex;
   align-items: center;
@@ -180,7 +180,7 @@
   font-family: inherit;
   border: none;
   border-radius: 12px;
-  background: #d1b378;
+  background: #e5c16a;
   color: #132a4a;
   cursor: pointer;
   transition: all 0.25s ease;
@@ -188,9 +188,9 @@
 }
 
 .alf-submit:hover:not(:disabled) {
-  background: #e8d5a8;
+  background: #f2d78f;
   transform: translateY(-1px);
-  box-shadow: 0 10px 28px rgba(209, 179, 120, 0.35);
+  box-shadow: 0 10px 28px rgba(229, 193, 106, 0.35);
 }
 
 .alf-submit:active {
@@ -256,7 +256,7 @@
 .alf-what-you-get svg {
   flex-shrink: 0;
   margin-top: 2px;
-  color: #d1b378;
+  color: #e5c16a;
 }
 
 .alf-signals {
@@ -277,7 +277,7 @@
 .alf-signal svg {
   flex-shrink: 0;
   margin-top: 2px;
-  color: #d1b378;
+  color: #e5c16a;
 }
 
 .alf-contact-alt {
@@ -355,8 +355,8 @@
   gap: 8px;
   padding: 14px 28px;
   border-radius: 10px;
-  background: rgba(209, 179, 120, 0.1);
-  border: 1.5px solid rgba(209, 179, 120, 0.3);
+  background: rgba(229, 193, 106, 0.1);
+  border: 1.5px solid rgba(229, 193, 106, 0.3);
   color: #0f172a;
   font-size: 15px;
   font-weight: 600;
@@ -366,8 +366,8 @@
 }
 
 .alf-phone-link:hover {
-  background: rgba(209, 179, 120, 0.18);
-  border-color: #d1b378;
+  background: rgba(229, 193, 106, 0.18);
+  border-color: #e5c16a;
 }
 
 .alf-back-link {

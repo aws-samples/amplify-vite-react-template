@@ -27,7 +27,7 @@ const { property } = Astro.props;
 const fullAddress = [property.address, property.city, property.state, property.zip]
   .filter(Boolean)
   .join(", ");
-import { ANALYTICS_DISABLED } from "../../constants";
+import Analytics from "../../components/Analytics.astro";
 ---
 
 <html lang="en">
@@ -49,28 +49,7 @@ import { ANALYTICS_DISABLED } from "../../constants";
     <title>HO-6 Condo Insurance for {property.name} — ProtectMyHOA</title>
     <meta name="description" content={`Get an HO-6 condo insurance quote for your unit at ${property.name}${fullAddress ? ` (${fullAddress})` : ""}. Coordinated with your association's master policy. Free quote — no obligation.`} />
 
-    {/* Analytics — on unless PUBLIC_ANALYTICS_DISABLED=true (staging). */}
-    {!ANALYTICS_DISABLED && (
-      <Fragment>
-    <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18085022517"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', 'AW-18085022517');
-    </script>
-
-    <!-- Microsoft Clarity -->
-    <script type="text/javascript">
-      (function(c,l,a,r,i,t,y){
-        c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
-        t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
-        y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
-      })(window, document, "clarity", "script", "wamnker55b");
-    </script>
-      </Fragment>
-    )}
+    <Analytics />
   </head>
   <body style="margin:0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased;">
     <AssociationLeadForm client:load property={property} />

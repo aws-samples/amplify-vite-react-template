@@ -1,0 +1,158 @@
+---
+/**
+ * Homepage hero action: a single joined control — address field and submit
+ * button share one bordered group, reading as one input rather than two.
+ *
+ * A plain GET form, so it works with no JavaScript: the address arrives at
+ * /quote as `?address=…`.
+ *
+ * NOTE: the quote wizard does not consume that param yet. `getPrefillFromUrl()`
+ * (components/quote/session.ts:89) reads only `state`, and the wizard schema
+ * has no address field — so today the address is carried in the URL but the
+ * board still types it once inside the wizard. Wiring it through is a change to
+ * the wizard, not to this hero.
+ */
+import { QUOTE_URL } from "../constants";
+
+interface Props {
+  placeholder?: string;
+  buttonText?: string;
+  /** Fee-disclosure microcopy, 24px below the control. */
+  microcopy?: string;
+}
+
+const {
+  placeholder = "Property address",
+  buttonText = "Request Insurance Review",
+  microcopy = "We charge no broker fee.",
+} = Astro.props;
+---
+
+<form class="hero-lookup" action={QUOTE_URL} method="get">
+  {/* No visible field label by request, so the accessible name is carried by a
+      screen-reader-only label — which also keeps click-to-focus working. */}
+  <label class="sr-only" for="hero-address">{placeholder}</label>
+  <div class="hero-lookup__group">
+    <input
+      class="hero-lookup__input"
+      id="hero-address"
+      type="text"
+      name="address"
+      placeholder={placeholder}
+      autocomplete="street-address"
+      required
+    />
+    <button class="hero-lookup__btn" type="submit">{buttonText}</button>
+  </div>
+  <p class="hero-lookup__note">{microcopy}</p>
+</form>
+
+<style>
+  .hero-lookup {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 620px;
+    margin-top: 36px;
+  }
+
+  /* One seamless bar: solid white field, gold button flush against it, no outer
+     border or translucency — the field reads as a single opaque control sitting
+     on the image, not a glass panel. */
+  .hero-lookup__group {
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+    background: var(--color-white);
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow: 0 12px 32px -10px rgba(9, 22, 42, 0.5);
+  }
+
+  /* Focus ring outside the bar, so the seam between field and button stays
+     unbroken while the focused state is still obvious. */
+  .hero-lookup__group:focus-within {
+    box-shadow: 0 0 0 3px rgba(229, 193, 106, 0.55),
+                0 12px 32px -10px rgba(9, 22, 42, 0.5);
+  }
+
+  .hero-lookup__input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 18px 20px;
+    background: transparent;
+    border: none;
+    color: var(--color-gray-900);
+    font-family: inherit;
+    font-size: 16px; /* 16px keeps iOS Safari from zooming on focus */
+    line-height: 1.4;
+  }
+
+  .hero-lookup__input::placeholder {
+    color: var(--color-gray-500);
+  }
+
+  .hero-lookup__input:focus {
+    outline: none; /* the group carries the ring */
+  }
+
+  /* Gold fill, flush to the bar's right edge. Not `.btn` — that class brings a
+     radius and a hover translate, both of which would break the seam. Navy text
+     rather than white: on this gold, white does not clear contrast. */
+  .hero-lookup__btn {
+    flex: 0 0 auto;
+    padding: 18px 32px;
+    border: none;
+    border-radius: 0;
+    background: var(--color-gold);
+    color: var(--color-navy-dark);
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.005em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.18s ease;
+  }
+
+  .hero-lookup__btn:hover {
+    background: var(--color-gold-light);
+  }
+
+  .hero-lookup__btn:active {
+    background: #cfa84f;
+  }
+
+  .hero-lookup__btn:focus-visible {
+    outline: 2px solid var(--color-navy-dark);
+    outline-offset: -5px;
+  }
+
+  /* The 24px gap between the control and the fee disclosure. */
+  .hero-lookup__note {
+    margin-top: 24px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: rgba(255, 255, 255, 0.68);
+    max-width: 540px;
+  }
+
+  /* Below this the two cannot share a line without cramping both; stacking is
+     the lesser evil, and they stay visually joined as one block. */
+  @media (max-width: 520px) {
+    .hero-lookup__group {
+      flex-direction: column;
+    }
+
+    .hero-lookup__btn {
+      padding: 16px 24px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero-lookup__btn {
+      transition: none;
+    }
+  }
+</style>

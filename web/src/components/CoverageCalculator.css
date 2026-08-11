@@ -1,26 +1,33 @@
-/* ── Calculator section ── */
+/* ── Calculator section ──
+   Matched to the homepage's section rhythm so the tool reads as part of the page
+   rather than an embedded widget: same alternating grey ground as .section--alt,
+   no boxing rules, and a header that uses the same eyebrow → title → standfirst
+   treatment as every other section.
+   Bottom padding is cut from the global 80px because this is the page's tallest
+   section — the step-based tool pushes whatever follows well below the fold, and
+   the section after it needs to be reachable from inside the tool. */
 .calc-section {
   background: var(--color-gray-50);
-  border-top: 1px solid var(--color-gray-200);
-  border-bottom: 1px solid var(--color-gray-200);
+  padding-bottom: 48px;
 }
 
 .calc-header {
   text-align: center;
   margin-bottom: 40px;
+  max-width: 720px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
+/* Was a gold pill; now identical to the .eyebrow used by the other sections. */
 .calc-badge {
-  display: inline-block;
-  font-size: 12px;
+  display: block;
+  font-size: 11.5px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--color-gold);
-  background: var(--color-gold-dim);
-  padding: 6px 14px;
-  border-radius: 20px;
-  margin-bottom: 16px;
+  letter-spacing: 0.16em;
+  color: var(--color-accent);
+  margin-bottom: 12px;
 }
 
 .calc-header .section-subtitle {
@@ -250,7 +257,7 @@
 
 .calc-email-input:focus {
   border-color: var(--color-gold);
-  box-shadow: 0 0 0 4px rgba(209, 179, 120, 0.12);
+  box-shadow: 0 0 0 4px rgba(229, 193, 106, 0.12);
   background: var(--color-white);
 }
 
@@ -323,7 +330,7 @@
 
 .calc-card--essential {
   border-color: var(--color-gold);
-  background: linear-gradient(180deg, rgba(209, 179, 120, 0.04) 0%, var(--color-white) 100%);
+  background: linear-gradient(180deg, rgba(229, 193, 106, 0.04) 0%, var(--color-white) 100%);
 }
 
 .calc-card--recommended {
@@ -419,8 +426,8 @@
   align-items: flex-start;
   gap: 12px;
   padding: 16px 20px;
-  background: rgba(209, 179, 120, 0.06);
-  border: 1px solid rgba(209, 179, 120, 0.2);
+  background: rgba(229, 193, 106, 0.06);
+  border: 1px solid rgba(229, 193, 106, 0.2);
   border-radius: 10px;
 }
 

@@ -25,6 +25,20 @@ export const FORMSUBMIT_URL = AGENCY_FMT.formsubmitUrl;
 export const ANALYTICS_DISABLED =
   import.meta.env.PUBLIC_ANALYTICS_DISABLED === "true";
 
+/* ── Measurement IDs ──
+   Named here and consumed only by components/Analytics.astro. They used to be
+   written out longhand in four separate <head>s, which is how a site ends up
+   reporting to a property it no longer owns. */
+
+/** GA4 property. Added 2026-08-11 — the site had no GA4 before this. */
+export const GA4_ID = "G-VWMS4RWTRX";
+
+/** Google Ads account. Conversion label lives in ADS_CONVERSION_ID below. */
+export const ADS_ID = "AW-18085022517";
+
+/** Microsoft Clarity project. */
+export const CLARITY_ID = "wamnker55b";
+
 /**
  * Google Ads conversion `send_to` — account id and label.
  *
@@ -70,8 +84,12 @@ export const SOCIAL = {
 
 export const NAV_LINKS = [
   { label: "Home", path: "/" },
-  { label: "About Us", path: "/about-us" },
   { label: "HOA Insurance", path: "/what-we-do" },
   { label: "Why Choose Us", path: "/why-choose-us" },
-  { label: "Contact", path: "/#contact" },
+  // Moved after Why Choose Us: the order now runs product → proof → who we are,
+  // rather than putting the company before what it sells.
+  { label: "About Us", path: "/about-us" },
+  // A real route now, not an in-page anchor. Navbar.astro treats non-hash paths
+  // as highlightable, so Contact gains an active state on /contact.
+  { label: "Contact", path: "/contact" },
 ];

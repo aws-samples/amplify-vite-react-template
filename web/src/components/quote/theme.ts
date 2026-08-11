@@ -38,21 +38,30 @@ export const DARK: Palette = {
   success: "#3fb950",
 };
 
+/**
+ * Brand light theme: white ground, near-black type, gold field borders.
+ *
+ * Gold is the border and the focus colour so the form matches the logo, while
+ * navy carries the buttons and the progress fill — gold-on-white cannot hold
+ * white button text at an accessible contrast, so it stays an edge colour rather
+ * than a fill. Resting borders use a softened gold; the full brand gold appears
+ * on hover, focus and selection, which gives the form somewhere to go.
+ */
 export const LIGHT: Palette = {
-  bg: "#f6f8fc",
+  bg: "#ffffff",
   card: "#ffffff",
-  cardHover: "#f0f4fb",
-  border: "#dfe5ef",
-  borderActive: "#1f7ae0",
-  accent: "#1f7ae0",
-  accentHover: "#1668c4",
-  accentDim: "rgba(31,122,224,0.08)",
-  accentGlow: "rgba(31,122,224,0.22)",
-  text: "#0f172a",
-  textMuted: "#5b6776",
+  cardHover: "#fffaf0",
+  border: "#e8d5a8",
+  borderActive: "#d4a940",
+  accent: "#1a365d",
+  accentHover: "#132a4a",
+  accentDim: "rgba(229,193,106,0.14)",
+  accentGlow: "rgba(26,54,93,0.20)",
+  text: "#0b0d10",
+  textMuted: "#5c6470",
   white: "#ffffff",
-  error: "#d92d20",
-  success: "#16a34a",
+  error: "#c0392b",
+  success: "#1f8b4c",
 };
 
 /* Day = 6:00 → 17:59 local time. Night otherwise. */

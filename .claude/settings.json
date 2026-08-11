@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(npm --prefix web run build 2>&1)",
+      "PowerShell(.\\\\web\\\\seo-fingerprint.ps1)"
+    ]
+  }
+}

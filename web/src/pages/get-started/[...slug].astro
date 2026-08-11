@@ -37,7 +37,7 @@ export function getStaticPaths() {
 }
 
 const { page } = Astro.props;
-import { ANALYTICS_DISABLED } from "../../constants";
+import Analytics from "../../components/Analytics.astro";
 ---
 
 <html lang="en">
@@ -60,28 +60,7 @@ import { ANALYTICS_DISABLED } from "../../constants";
     <meta property="og:description" content={page.metaDescription} />
     <meta property="og:url" content={`https://www.protectmyhoa.com/get-started${page.slug ? `/${page.slug}` : ""}`} />
 
-    {/* Analytics — on unless PUBLIC_ANALYTICS_DISABLED=true (staging). */}
-    {!ANALYTICS_DISABLED && (
-      <Fragment>
-    <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18085022517"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', 'AW-18085022517');
-    </script>
-
-    <!-- Microsoft Clarity -->
-    <script type="text/javascript">
-      (function(c,l,a,r,i,t,y){
-        c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
-        t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
-        y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
-      })(window, document, "clarity", "script", "wamnker55b");
-    </script>
-      </Fragment>
-    )}
+    <Analytics />
 
     <script type="application/ld+json" set:html={JSON.stringify({
       "@context": "https://schema.org",

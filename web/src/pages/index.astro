@@ -1,42 +1,124 @@
 ---
 import Layout from "../layouts/Layout.astro";
 import Hero from "../components/Hero.astro";
-import { ContactForm } from "../components/ContactForm";
+import HeroLookup from "../components/HeroLookup.astro";
+import CoverageMap from "../components/CoverageMap.astro";
 import { CoverageCalculator } from "../components/CoverageCalculator";
+import { states } from "../data/states";
+import { STAGES } from "../data/process";
+import { MARKETS } from "../data/markets";
 import { QUOTE_URL } from "../constants";
 import "../pages/Home.css";
 
-const COVERAGES = [
-  { title: "HOA Master Property Insurance", desc: "Protects buildings, common areas, and shared assets at replacement cost — the foundation of every HOA insurance program.", icon: "building" },
-  { title: "General Liability", desc: "Covers slip and fall claims, premises liability, operations exposure, medical payments, and legal defense costs.", icon: "shield" },
-  { title: "Umbrella / Excess Liability", desc: "Extends limits above underlying liability policies for catastrophic claim protection.", icon: "umbrella" },
-  { title: "Directors & Officers (D&O)", desc: "Shields board members and trustees from governance allegations, decision disputes, and wrongful acts claims.", icon: "briefcase" },
-  { title: "Crime / Fidelity Bond", desc: "Covers employee theft, forgery, computer fraud, and funds transfer fraud — essential for associations handling member dues.", icon: "lock" },
-  { title: "Ordinance or Law", desc: "Pays the increased cost when rebuilding must meet current building codes after a covered loss.", icon: "scale" },
+/* ───────────────────────────────────────────────────────────────────────────
+   PLACEHOLDER CONTENT — 2026-08-06
+   Every figure below is written as a bracketed token ("[00]", "[metric]") on
+   purpose. They are meant to be obviously unfinished so that no unverified
+   number can reach production: an insurance brokerage publishing an invented
+   statistic is a compliance problem, not a copy problem. Search "[" in this
+   file to find everything still awaiting real data.
+
+   Copy is original throughout: no competitor wording or structure reproduced.
+   Carriers ARE now named in section 06 from a supplied list — see MARKETS.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* 02 — What a master policy covers.
+   LICENSURE CLAIM — now consistent across the page. This figure and section 11
+   both state all 50 states plus DC. Note this supersedes the earlier 48-item
+   footprint, which deliberately excluded CA, FL and IA; those three are now
+   included by implication. Misstating licensure is a state-DOI matter, so the
+   50-state claim should be confirmed against the agency's actual licences. */
+/* Brand marks from crm/CREATIVE/HOME, resized 1536×192 → 288×192 (3.5 MB → 60 KB
+   for the set) and copied into public/images/figures. They are transparent PNGs
+   with white artwork, so they sit directly on the navy band with no blend mode.
+   Decorative: each repeats its own label, so alt is empty. */
+const ASSOC_FIGURES: { img: string; value: string; label?: string }[] = [
+  { img: "states", value: "Licensed in 50 states" },
+  { img: "coverage", value: "12 markets", label: "one programme" },
+  { img: "written", value: "Written rationale", label: "on every placement" },
 ];
 
-const STEPS = [
-  { num: "01", title: "Review", desc: "We review current policies, loss history, key exposures, and governing documents (when available)." },
-  { num: "02", title: "Identify gaps", desc: "We flag common HOA issues: deductible structure, ordinance/law, building valuation, water losses, and liability limits." },
-  { num: "03", title: "Market & negotiate", desc: "We shop the account across appropriate carriers and specialty markets." },
-  { num: "04", title: "Present options clearly", desc: "Boards get a clean summary — coverage, deductibles, limits, and tradeoffs." },
-  { num: "05", title: "Support through renewal", desc: "We stay involved before, during, and after the renewal date." },
+/* 03 — The practice.
+   Bodies rewritten to earn trust through what we DO rather than through claims
+   about ourselves. Constraints applied:
+     · no compensation mechanics (how the insurer pays us is not mentioned)
+     · no carrier-ownership statement
+     · no "volunteer trustees"
+     · no superlatives, no best-of / most-complete claim, nothing promissory
+   What is left is verifiable process: what the board receives, and when. Every
+   sentence describes something a client could hold us to.
+
+   Card 2 also drops the "three markets each across four lines" breakdown, which
+   read as twelve relationships rather than six and contradicted section 06. */
+const PRACTICE_CARDS = [
+  {
+    icon: "compass",
+    title: "Independent, not captive",
+    desc: "Your association's risk decides where the coverage goes. You see what each market returned, including the ones that declined and the reason they gave.",
+  },
+  {
+    icon: "layers",
+    title: "Twelve appointed markets",
+    desc: "Your risk is presented to each market appointed for it. The responses come back to you set side by side on coverage, deductibles and limits.",
+  },
+  {
+    icon: "clipboard",
+    title: "Board-facing by design",
+    desc: "Boards have to explain insurance decisions to owners. Our documents are written to be read aloud in a meeting and filed with the minutes.",
+  },
+  {
+    icon: "nofee",
+    title: "No broker fee",
+    desc: "Reviewing the coverage your association already has costs nothing, and so does the market comparison that follows it. Nothing is placed until the board has seen the options and chosen one.",
+  },
 ];
 
-const CLIENT_TYPES = [
-  "HOA boards and trustees",
-  "Condominium associations and condo trusts",
-  "Property managers",
-  "Unit owners seeking aligned HO-6 coverage",
+/* 04 — The Board Record.
+   Numbered because these are the document's own contents in order, not a
+   decorative sequence. */
+const BOARD_RECORD = [
+  { num: "01", title: "What we reviewed", desc: "The current policy, the loss history and the governing documents." },
+  { num: "02", title: "Which insurers we approached", desc: "Named, with what each one returned." },
+  { num: "03", title: "What each option cost", desc: "Premium, deductible and limits, side by side." },
+  { num: "04", title: "Why we recommended this one", desc: "Our reasoning, stated in plain language." },
+  { num: "05", title: "What is still not covered", desc: "Every gap has a name. We put it in writing rather than leaving it out of the proposal." },
+  { num: "06", title: "What to look at again next year", desc: "The items that will need attention before the next renewal." },
 ];
 
+/* 11 — Footprint now lives in components/CoverageMap.astro, which owns the tile
+   grid for all 50 states plus DC. Only the guide count is needed here, and it is
+   read from states.ts so the copy cannot drift from the routes that exist.
+
+   VERB TO CONFIRM WITH COMPLIANCE: "licensed in" is the standard reading of an
+   agency state list, but "licensed", "appointed" and "actively writing" are
+   three different claims, and the wrong one on an insurance site is a
+   regulatory exposure rather than a copy nit. */
+const withGuides = states;
+
+/* 09 — Who we work with.
+   Descriptions removed by request: each card is now a mark, a title and its CTA.
+   No audience artwork was supplied, so the marks are the same stroked SVG set
+   used by the section 03 cards — consistent with the rest of the page and
+   identical on every platform, which emoji would not be. */
+const AUDIENCES = [
+  { icon: "board",     title: "Boards & trustees",     cta: "Request a board review",      href: QUOTE_URL },
+  { icon: "manager",   title: "Property managers",     cta: "Talk to us about a portfolio", href: "/contact" },
+  { icon: "developer", title: "Developers & sponsors", cta: "Discuss a new project",        href: "/contact" },
+  { icon: "owner",     title: "Unit owners",           cta: "Get HO-6 coverage",            href: "/what-we-do" },
+];
+
+/* ⚠ This array is the source for BOTH the visible FAQ and the FAQPage JSON-LD.
+   Editing it edits the rich-result payload Google may already be showing.
+   Replaced wholesale on request, 2026-08-11: six questions out, four in.
+   Em-dashes removed per the standing no-dash rule.
+   The retired "What states does HOA Insurance Agency serve?" answer named only
+   six states, which had been contradicting the 50-state map — that conflict goes
+   away with it. See docs/WEBSITE-STRUCTURE.md §6. */
 const FAQS = [
-  { q: "What is HOA master insurance?", a: "An HOA master insurance policy protects the association's shared property, common areas, and liability exposure. It typically includes property coverage, general liability, and can extend to D&O, crime/fidelity, umbrella, and ordinance or law coverage. The master policy is purchased by the association — not individual unit owners." },
-  { q: "What is the difference between HOA master insurance and HO-6?", a: "The master policy covers association-owned buildings, common areas, and shared liability. HO-6 insurance is purchased by individual condo unit owners and covers personal property, interior improvements, personal liability, and loss assessment exposure. Both policies should be coordinated to avoid gaps." },
-  { q: "Do condo unit owners need HO-6 insurance?", a: "In most cases, yes. The HOA master policy typically does not cover your personal belongings, interior upgrades, or your share of association deductibles and special assessments. HO-6 insurance fills these gaps and is especially important if your association has large per-unit deductibles." },
-  { q: "What states does HOA Insurance Agency serve?", a: "We currently serve HOA and condominium associations in Massachusetts, Rhode Island, New Hampshire, Connecticut, New York, and Oklahoma. Our home office is in Marlborough, MA." },
-  { q: "How much does HOA insurance cost?", a: "HOA insurance costs vary based on the number of units, building age and construction type, location, claims history, and coverage limits. We provide free, no-obligation coverage assessments to help boards understand their options and make informed decisions." },
-  { q: "What should HOA boards review at insurance renewal?", a: "At renewal, boards should review building valuation and replacement cost, deductible structure (especially per-unit water deductibles), ordinance or law limits, general liability and umbrella adequacy, D&O and crime/fidelity coverage, and any changes in loss history or property conditions." },
+  { q: "What does an HOA master policy cover?", a: "The master policy is the association's own insurance, funded through member assessments. It responds to the shared buildings and common elements, the association's liability, the funds it holds, and the decisions its board makes. It does not cover the inside of an individual unit. That is what an owner's HO-6 is for." },
+  { q: "What type of master policy does our association have?", a: "There are three. Bare walls covers the structure and common elements only. Single entity adds the original fixtures and finishes inside each unit. All-in adds improvements an owner has made since. Your governing documents determine which one applies, and it is the single most consequential detail in the policy: it decides who pays for what after a loss." },
+  { q: "A pipe leaked into my unit. Does the association pay, or do I?", a: "It depends on your master policy type and where the water came from. Bare walls generally leaves the interior to the owner. Single entity and all-in cover more. The association's deductible also matters. If the loss falls below it, the association pays nothing and the cost lands on the owner through loss assessment." },
+  { q: "If the association has a master policy, does an owner still need an HO-6?", a: "Yes. The master policy stops at the unit. An HO-6 covers interior finishes, belongings, personal liability and an owner's share of an association deductible. Since 2026, lenders require one where the master policy carries a per-unit deductible. Without it, the unit may not qualify for a mortgage." },
 ];
 
 const faqJsonLd = {
@@ -56,133 +138,386 @@ const faqJsonLd = {
   canonicalPath=""
   jsonLd={[faqJsonLd]}
 >
+  {/* ═══ 01 · Hero ═══════════════════════════════════════════════════ */}
   <Hero
     eyebrow="ProtectMyHOA&trade;"
     title="HOA Insurance, Built for Associations"
-    subtitle="Independent brokerage specializing in HOA master policies and HO-6 condo unit owner coverage. Boards and trustees make high-stakes decisions. Our job is to make those decisions clear, defendable, and properly insured."
+    subtitle="The HOA-specialist independent brokerage for community associations: twelve markets compared side by side on coverage, deductibles and limits."
     backgroundImage="/images/hero-people.jpg"
     backgroundVideo="/images/hero-video.mp4"
-    ctaText="Request Insurance Review"
-    ctaHref={QUOTE_URL}
-  />
+  >
+    <HeroLookup slot="action" />
+  </Hero>
 
-  <!-- Intro value prop -->
-  <section class="section">
-    <div class="container intro-grid reveal">
-      <div class="intro-content">
-        <h2 class="section-title">Insurance Built for Associations isn't just a slogan — it's how we operate.</h2>
-        <p>HOA Insurance Agency is an independent insurance brokerage focused on insurance programs for HOAs and condo associations, plus <a href="/what-we-do">HO-6 condo unit owner coverage</a> aligned with the master policy.</p>
-        <p class="intro-callout">Boards and trustees make high-stakes decisions. Our job is to make those decisions clear, defendable, and properly insured.</p>
-        <a href="/about-us" class="text-link">About Our Agency &gt;</a>
+  {/* ═══ 02 · Association insurance ══════════════════════════════════ */}
+  <section class="section band-assoc" aria-labelledby="assoc-h">
+    <div class="container band-assoc__grid">
+      <div class="band-assoc__lead">
+        <p class="eyebrow eyebrow--gold">Association insurance</p>
+        <h2 class="section-title band-assoc__title" id="assoc-h">
+          What an HOA or condo association master policy covers.
+        </h2>
+        <div class="band-assoc__body">
+          <p>
+            The master policy is the association's own insurance, funded through member
+            assessments. It responds to the shared buildings and common elements, the
+            association's liability, the funds it holds, and the decisions its board makes.
+          </p>
+          <p>
+            Where the master policy ends and a unit owner's HO-6 begins is determined by the
+            governing documents. It is the question boards, managers and owners raise with us
+            most often.
+          </p>
+        </div>
+        <a href="/what-we-do" class="btn btn-gold">See what a master policy covers</a>
       </div>
-      <div class="intro-image">
-        <img src="/images/about-hero.jpg" alt="HOA board members reviewing condominium association insurance policy" loading="lazy" width="800" height="600" />
-      </div>
+      <ul class="assoc-figs">
+        {ASSOC_FIGURES.map((f) => (
+          <li class="assoc-fig">
+            <img
+              class="assoc-fig__img"
+              src={`/images/figures/${f.img}.png`}
+              alt=""
+              width="288"
+              height="192"
+              loading="lazy"
+              decoding="async"
+            />
+            <span class="assoc-fig__text">
+              <span class="assoc-fig__v">{f.value}</span>
+              {f.label && <span class="assoc-fig__l">{f.label}</span>}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   </section>
 
-  <!-- Coverages -->
-  <section class="section section--alt">
+  {/* ═══ 03 · What we are ════════════════════════════════════════════ */}
+  <section class="section" aria-labelledby="what-h">
     <div class="container">
-      <h2 class="section-title">HOA Master Insurance Coverages We Place</h2>
-      <p class="section-subtitle">We help associations place and manage the core coverages that protect shared assets, board members, and community governance.</p>
-      <div class="card-grid">
-        {COVERAGES.map((c) => (
-          <div class="card reveal">
-            <div class="card-icon">
-              {c.icon === "building" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M8 7h.01M12 7h.01M16 7h.01M8 11h.01M12 11h.01M16 11h.01M8 15h.01M12 15h.01M16 15h.01"/><path d="M10 21v-3h4v3"/></svg>}
-              {c.icon === "shield" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v6c0 5-3.5 9.5-8 10-4.5-.5-8-5-8-10V6l8-4z"/></svg>}
-              {c.icon === "umbrella" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v2"/><path d="M2 12a10 10 0 0120 0H2z"/><path d="M12 12v7a3 3 0 01-6 0"/></svg>}
-              {c.icon === "briefcase" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/><path d="M3 13h18"/></svg>}
-              {c.icon === "lock" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>}
-              {c.icon === "scale" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M5 7h14"/><path d="M5 7l-2 6a4 4 0 008 0L9 7"/><path d="M19 7l-2 6a4 4 0 008 0l-2-6"/></svg>}
-            </div>
+      <div class="what-grid">
+        <div class="what-lead">
+          <p class="eyebrow">The practice</p>
+          <h2 class="section-title" id="what-h">A brokerage built around community associations.</h2>
+          <p class="section-subtitle">
+            Community association insurance is not a line item in a general agency here. It is
+            the entire book, which is why the coverage questions a board asks are the ones we
+            answer every day.
+          </p>
+          {/* CTA sits with the lead copy, not only after the four cards. A visitor
+               reaching this section can act on it without scrolling past the grid. */}
+          <div class="what-actions">
+            <a href={QUOTE_URL} class="btn btn-gold">Request Insurance Review</a>
+            <a href="/about-us" class="text-link">About our brokerage &gt;</a>
+          </div>
+        </div>
+        <div class="what-media">
+          <img
+            src="/images/practice-team.jpg"
+            alt="Insurance brokers and an association board reviewing master policy documents across a boardroom table"
+            width="1200"
+            height="800"
+            loading="lazy"
+            decoding="async"
+          />
+        </div>
+      </div>
+
+      <div class="practice-grid">
+        {PRACTICE_CARDS.map((c) => (
+          <div class="practice-card">
+            <span class="practice-card__mark" aria-hidden="true">
+              {c.icon === "compass" && <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.6 8.4l-2.2 5-5 2.2 2.2-5z"/></svg>}
+              {c.icon === "layers" && <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>}
+              {c.icon === "clipboard" && <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>}
+              {c.icon === "nofee" && <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M6.2 17.8L17.8 6.2"/></svg>}
+            </span>
             <h3>{c.title}</h3>
             <p>{c.desc}</p>
           </div>
         ))}
       </div>
-      <p class="coverages-note">Our focus is not "cheap insurance." It's appropriate insurance that holds up when a claim happens.</p>
+
       <div class="section-cta-wrap">
-        <a href="/what-we-do" class="btn btn-primary">Explore All HOA Coverages</a>
+        <a href={QUOTE_URL} class="btn btn-primary">Request Insurance Review</a>
       </div>
     </div>
   </section>
 
-  <!-- HO-6 -->
-  <section class="section">
-    <div class="container ho6-grid reveal">
-      <div class="ho6-content">
-        <h2 class="section-title">HO-6 Condo Insurance for Unit Owners</h2>
-        <p>Many coverage problems happen because the <a href="/what-we-do">master policy</a> and unit owner coverage aren't coordinated. We make it easy to align:</p>
-        <ul class="check-list">
-          <li>What the association covers (master policy)</li>
-          <li>What unit owners must cover (HO-6)</li>
-          <li>Loss assessment exposure</li>
-        </ul>
-        <p class="ho6-callout">If your association's master policy has large deductibles, HO-6 coverage is not optional — it's essential.</p>
-        <a href="/what-we-do" class="btn btn-primary">Learn About HO-6 Coverage</a>
-      </div>
-      <div class="ho6-image">
-        <img src="/images/modern-building.jpg" alt="Modern condominium building with HOA master insurance coverage" loading="lazy" width="800" height="600" />
-      </div>
-    </div>
-  </section>
-
-  <!-- Process -->
-  <section class="section section--alt">
+  {/* ═══ 04 · The Board Record ═══════════════════════════════════════ */}
+  <section class="section section--navy" aria-labelledby="record-h">
     <div class="container">
-      <h2 class="section-title">A Board-Friendly Insurance Review Process</h2>
-      <div class="steps-grid">
-        {STEPS.map((s) => (
-          <div class="step-card reveal">
-            <span class="step-num">{s.num}</span>
+      <div class="record-grid">
+        <div class="record-lead">
+          <p class="eyebrow eyebrow--gold">The Board Record</p>
+          <h2 class="section-title record-h2" id="record-h">
+            We place the coverage. Then we write down why.
+          </h2>
+          <div class="record-body">
+            <p>
+              Most brokers hand a board a quote and go quiet until renewal. Every policy we
+              arrange comes with a short written summary, meant to be filed with your meeting
+              minutes.
+            </p>
+            <p>
+              Board members are unpaid volunteers who can be held personally responsible for
+              their decisions. This is the written proof that the decision was made properly.
+            </p>
+          </div>
+          {/* Lead-capture CTA sits with the copy as well as at the close, so a
+               visitor can act before scrolling the six items. */}
+          <a href={QUOTE_URL} class="btn btn-gold record-lead__cta">Request your insurance review</a>
+        </div>
+        <div class="record-media">
+          <img
+            src="/images/board-record-desk.jpg"
+            alt="Broker annotating an association's insurance documents at a desk while preparing the written record"
+            width="1200"
+            height="800"
+            loading="lazy"
+            decoding="async"
+          />
+        </div>
+      </div>
+
+      <ol class="record-items">
+        {BOARD_RECORD.map((r) => (
+          <li class="record-item">
+            <span class="record-item__num" aria-hidden="true">{r.num}</span>
+            <h3>{r.title}</h3>
+            <p>{r.desc}</p>
+          </li>
+        ))}
+      </ol>
+
+      <div class="record-close">
+        <p class="record-close__line">Insurance your board can defend.</p>
+        <div class="record-close__actions">
+          <a href={QUOTE_URL} class="btn btn-gold">Request your insurance review</a>
+          <a href="/contact" class="btn btn-outline">Speak to a broker</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══ 05 · Review. Compare. Place. Record. ════════════════════════ */}
+  <section class="section" aria-labelledby="stages-h">
+    <div class="container">
+      <div class="sec-head sec-head--center">
+        <p class="eyebrow">The process</p>
+        <h2 class="section-title" id="stages-h">Review. Compare. Place. Record.</h2>
+        <p class="section-subtitle">
+          Four stages, in order, on a schedule the board can hold us to. Most reviews run
+          [00] weeks from first document to bound placement.
+        </p>
+      </div>
+      <ol class="stage-grid">
+        {STAGES.map((s) => (
+          <li class="stage-card reveal">
+            <span class="stage-num">{s.num}</span>
             <h3>{s.title}</h3>
             <p>{s.desc}</p>
+          </li>
+        ))}
+      </ol>
+      <div class="section-cta-wrap">
+        <a href={QUOTE_URL} class="btn btn-primary">Start stage one</a>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══ 06 · Our markets ════════════════════════════════════════════ */}
+  <section class="section section--alt" aria-labelledby="markets-h">
+    <div class="container">
+      <div class="sec-head sec-head--center">
+        <p class="eyebrow">Our markets</p>
+        <h2 class="section-title" id="markets-h">Markets a board will recognise</h2>
+        <p class="section-subtitle">National insurers alongside the specialists.</p>
+      </div>
+
+      {/* Single-line logo marquee, scrolling right to left.
+           The set is rendered TWICE and the track animates to -50%, so the
+           second copy is exactly where the first started when the loop resets —
+           that is what makes it seamless rather than snapping back. The duplicate
+           is aria-hidden so assistive tech reads twelve carriers, not
+           twenty-four. Pauses on hover and on focus-within, and collapses to a
+           static wrapped grid under prefers-reduced-motion. */}
+      <div class="carrier-marquee">
+        <ul class="carrier-track">
+          {MARKETS.map((m) => (
+            <li class="carrier">
+              <img
+                class="carrier__logo"
+                src={`/images/carriers/${m.slug}.png`}
+                alt={m.name}
+                width="240"
+                height="120"
+                loading="lazy"
+                decoding="async"
+              />
+            </li>
+          ))}
+          {MARKETS.map((m) => (
+            <li class="carrier" aria-hidden="true">
+              <img
+                class="carrier__logo"
+                src={`/images/carriers/${m.slug}.png`}
+                alt=""
+                width="240"
+                height="120"
+                loading="lazy"
+                decoding="async"
+              />
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <p class="carrier-note">
+        Carrier availability varies by state, association type and risk profile. Not every
+        market is approached on every placement.
+      </p>
+
+      <div class="section-cta-wrap">
+        <a href={QUOTE_URL} class="btn btn-primary">Request your market comparison</a>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══ 07 · Compensation ═══════════════════════════════════════════ */}
+  {/* Laid out as a paid-style panel: the yard-sign artwork carries the claim
+       and the copy substantiates it. Navy ground and gold accent are the site's
+       own, so it reads as a house ad rather than bolted-on advertising. */}
+  <section class="section band-fee" aria-labelledby="fee-h">
+    <div class="container band-fee__panel">
+      <div class="band-fee__media">
+        <img
+          src="/images/no-broker-fee.jpg"
+          alt="Yard sign outside a condominium community reading zero dollar broker fee, HOA insurance with transparency you can trust"
+          width="1200"
+          height="800"
+          loading="lazy"
+          decoding="async"
+        />
+      </div>
+      <div class="band-fee__lead">
+        <p class="eyebrow eyebrow--gold">Compensation</p>
+        <h2 class="section-title band-fee__title" id="fee-h">
+          No broker fee. Not now, not at renewal.
+        </h2>
+        <ul class="fee-points">
+          <li>No broker fee, no consulting fee, no fee to review what you already have</li>
+          <li>Compensation disclosed in The Board Record on every placement</li>
+          <li>Identical to us whichever of the twelve markets the board chooses</li>
+        </ul>
+        <div class="band-fee__actions">
+          <a href={QUOTE_URL} class="btn btn-gold">Request your insurance review</a>
+          <a href="#states" class="btn btn-outline">See the states we cover</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ═══ 08 · Coverage tool ══════════════════════════════════════════ */}
+  {/* CoverageCalculator supplies its own badge, H2 and standfirst, so this
+       section adds no heading of its own — a second one would just compete.
+       NOTE: its own CTAs only render once the tool is completed, so this is the
+       one section with no CTA visible on arrival. The trailing strip that used to
+       cover that was removed by request. */}
+  <CoverageCalculator client:visible />
+
+  {/* ═══ 09 · Who we work with ═══════════════════════════════════════ */}
+  {/* NOT section--alt: that is the same grey as .calc-section above it, so the
+       two ran together as one continuous band with no visible boundary. White
+       plus a hairline rule makes the change of section read while the tool is
+       still on screen. */}
+  <section class="section aud-band" aria-labelledby="aud-h">
+    <div class="container">
+      <div class="sec-head sec-head--center">
+        <p class="eyebrow">Who we serve</p>
+        <h2 class="section-title" id="aud-h">Who we work with</h2>
+        <p class="section-subtitle">
+          Four groups, each needing something different from the same placement.
+        </p>
+      </div>
+      <div class="aud-grid">
+        {AUDIENCES.map((a) => (
+          <div class="aud-card">
+            <span class="aud-card__mark" aria-hidden="true">
+              {a.icon === "board" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 19v-1.4a3.4 3.4 0 00-3.4-3.4H7.4A3.4 3.4 0 004 17.6V19"/><circle cx="9.75" cy="7.6" r="3.4"/><path d="M16.6 11.1a3.2 3.2 0 000-6.3"/><path d="M20 19v-1.4a3.3 3.3 0 00-2.3-3.1"/></svg>}
+              {a.icon === "manager" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M8 7h.01M12 7h.01M16 7h.01M8 11h.01M12 11h.01M16 11h.01"/><path d="M10 21v-3h4v3"/></svg>}
+              {a.icon === "developer" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M3 10h6M15 9h6M15 14h6"/></svg>}
+              {a.icon === "owner" && <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.6L12 3l9 7.6"/><path d="M5.4 9.6V20h13.2V9.6"/><path d="M10 20v-5.2h4V20"/></svg>}
+            </span>
+            <h3>{a.title}</h3>
+            <a href={a.href} class="text-link aud-card__cta">{a.cta} &gt;</a>
           </div>
         ))}
       </div>
       <div class="section-cta-wrap">
-        <a href="/about-us" class="btn btn-primary">About Our Approach</a>
+        <a href="/contact" class="btn btn-primary">Contact HOA Insurance Agency</a>
       </div>
     </div>
   </section>
 
-  <!-- Coverage Calculator -->
-  <CoverageCalculator client:visible />
-
-  <!-- Who We Work With -->
-  <section class="section section--navy">
-    <div class="container" style="text-align: center">
-      <h2 class="section-title">Who We Work With</h2>
-      <ul class="client-list">
-        {CLIENT_TYPES.map((c) => <li>{c}</li>)}
-      </ul>
-      <p class="section-subtitle" style="margin: 24px auto 36px">If your HOA renewal is approaching — or you want a second opinion — start with a quick review.</p>
-      <a href="#contact" class="btn btn-white">Contact HOA Insurance Agency</a>
-    </div>
-  </section>
-
-  <!-- Service Areas -->
-  <section class="section">
-    <div class="container" style="text-align: center">
-      <h2 class="section-title">HOA Insurance by State</h2>
-      <p class="section-subtitle" style="margin: 0 auto 32px">We serve condominium associations and HOA boards across six states.</p>
-      <div class="state-links">
-        <a href="/hoa-insurance-massachusetts" class="state-link">Massachusetts</a>
-        <a href="/hoa-insurance-rhode-island" class="state-link">Rhode Island</a>
-        <a href="/hoa-insurance-new-hampshire" class="state-link">New Hampshire</a>
-        <a href="/hoa-insurance-connecticut" class="state-link">Connecticut</a>
-        <a href="/hoa-insurance-new-york" class="state-link">New York</a>
-        <a href="/hoa-insurance-oklahoma" class="state-link">Oklahoma</a>
-      </div>
-    </div>
-  </section>
-
-  <!-- FAQ -->
-  <section class="section section--alt" id="faq">
+  {/* ═══ 10 · HO-6 — deliberately demoted ═══════════════════════════ */}
+  {/* Per brand direction HO-6 does not lead. It keeps a single compact card
+       here rather than the half-page treatment it had, and the /what-we-do link
+       is retained so the internal path to that page survives. */}
+  <section class="section" aria-labelledby="ho6-h">
     <div class="container">
-      <h2 class="section-title">Frequently Asked Questions About HOA Insurance</h2>
+      <aside class="ho6-card">
+        <div class="ho6-card__body">
+          <p class="eyebrow">Unit owners</p>
+          <h2 class="ho6-card__title" id="ho6-h">Own a unit in an association?</h2>
+          <p class="ho6-card__sub">For unit owners, not just boards</p>
+          <p class="ho6-card__lead">
+            Where the master policy carries a per-unit deductible, your lender now requires
+            an HO-6.
+          </p>
+          <p>
+            HO-6 covers what the master policy does not: your interior finishes, your
+            belongings, your personal liability and your share of an association deductible.
+            It should be written against your association's actual master policy, not a
+            generic template.
+          </p>
+        </div>
+        <a href="/what-we-do" class="btn btn-primary ho6-card__cta">HO-6 condo coverage</a>
+      </aside>
+    </div>
+  </section>
+
+  {/* ═══ 11 · HOA insurance by state ════════════════════════════════ */}
+  {/* The map's guide tiles are the ONLY crawl path from this page to the state
+       landing pages. They are real <a href> elements inside CoverageMap — keep
+       them. The former split layout (a pin row plus a separate "also licensed in"
+       chip list) is merged into the one map, which carries every jurisdiction and
+       the CTA. */}
+  <section class="section section--alt" id="states" aria-labelledby="states-h">
+    <div class="container" style="text-align: center">
+      <div class="sec-head sec-head--center">
+        <p class="eyebrow">Coverage area</p>
+        <h2 class="section-title" id="states-h">HOA Insurance by State</h2>
+        <p class="section-subtitle">
+          Licensed in all 50 states and the District of Columbia, with dedicated guides
+          for the {withGuides.length} where we place the most association business.
+        </p>
+      </div>
+
+      <CoverageMap ctaHref={QUOTE_URL} ctaLabel="Request a review in your state" />
+    </div>
+  </section>
+
+  {/* ═══ 12 · FAQ — feeds the FAQPage schema above ══════════════════ */}
+  {/* The FAQS array is the source for both this markup and faqJsonLd. Editing
+       an answer here edits the rich-result payload. See docs/WEBSITE-STRUCTURE.md §6. */}
+  <section class="section" id="faq" aria-labelledby="faq-h">
+    <div class="container">
+      <div class="sec-head sec-head--center">
+        <p class="eyebrow">Questions</p>
+        <h2 class="section-title" id="faq-h">Frequently Asked Questions About HOA Insurance</h2>
+      </div>
       <div class="faq-list">
         {FAQS.map((f) => (
           <details class="faq-item">
@@ -191,8 +526,9 @@ const faqJsonLd = {
           </details>
         ))}
       </div>
+      <div class="section-cta-wrap">
+        <a href={QUOTE_URL} class="btn btn-primary">Ask us your question</a>
+      </div>
     </div>
   </section>
-
-  <ContactForm client:visible />
 </Layout>

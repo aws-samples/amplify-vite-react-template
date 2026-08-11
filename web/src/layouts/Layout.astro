@@ -2,8 +2,8 @@
 import Navbar from "../components/Navbar.astro";
 import Footer from "../components/Footer.astro";
 import "../styles/global.css";
+import Analytics from "../components/Analytics.astro";
 import { AGENCY, AGENCY_FMT } from "../../../shared/agency";
-import { ANALYTICS_DISABLED } from "../constants";
 
 interface Props {
   title: string;
@@ -11,6 +11,12 @@ interface Props {
   ogImage?: string;
   canonicalPath?: string;
   jsonLd?: Record<string, unknown>[];
+  /**
+   * Keep this page out of the index. Opt-in and defaults to false, so the 34
+   * pages that already use this layout are unaffected. Used by state pages whose
+   * content is still generic — see data/states.ts `reviewed`.
+   */
+  noindex?: boolean;
 }
 
 const {
@@ -19,6 +25,7 @@ const {
   ogImage = "/logo.png",
   canonicalPath = "",
   jsonLd = [],
+  noindex = false,
 } = Astro.props;
 
 const siteUrl = "https://www.protectmyhoa.com";
@@ -71,32 +78,17 @@ const allSchemas = [baseSchema, ...jsonLd];
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
-    {/* Analytics — on unless PUBLIC_ANALYTICS_DISABLED=true (staging). */}
-    {!ANALYTICS_DISABLED && (
-      <Fragment>
-        <!-- Google tag (gtag.js) -->
-        <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18085022517"></script>
-        <script>
-          window.dataLayer = window.dataLayer || [];
-          function gtag(){dataLayer.push(arguments);}
-          gtag('js', new Date());
-          gtag('config', 'AW-18085022517');
-        </script>
-
-        <!-- Microsoft Clarity -->
-        <script type="text/javascript">
-          (function(c,l,a,r,i,t,y){
-            c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
-            t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
-            y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
-          })(window, document, "clarity", "script", "wamnker55b");
-        </script>
-      </Fragment>
-    )}
+    <Analytics />
 
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonicalUrl} />
+    {noindex && (
+      <Fragment>
+        <meta name="robots" content="noindex, follow" />
+        <meta name="googlebot" content="noindex, follow" />
+      </Fragment>
+    )}
 
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
@@ -122,6 +114,17 @@ const allSchemas = [baseSchema, ...jsonLd];
     <Footer />
 
     <script>
+      /*
+       * Reveal-on-scroll.
+       *
+       * The margin below the viewport is POSITIVE and the threshold is 0, so an
+       * element starts revealing while it is still under the fold. That matters:
+       * with the previous `-40px` bottom margin and a 0.12 threshold, a section
+       * had to be 12% inside a viewport shrunk by 40px before it animated, so
+       * the top of the next section scrolled into view still at opacity 0 and
+       * read as an empty band. Revealing early means whatever is peeking above
+       * the fold is already painted.
+       */
       const observer = new IntersectionObserver(
         (entries) => {
           for (const entry of entries) {
@@ -131,7 +134,7 @@ const allSchemas = [baseSchema, ...jsonLd];
             }
           }
         },
-        { threshold: 0.12, rootMargin: "0px 0px -40px 0px" }
+        { threshold: 0, rootMargin: "0px 0px 25% 0px" }
       );
       document.querySelectorAll(".reveal").forEach((el) => observer.observe(el));
     </script>

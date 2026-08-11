@@ -14,30 +14,20 @@ const ROLE_LABELS: Record<string, string> = {
   owner: "Unit Owner (HO-6)",
 };
 const COVERAGE_LABELS: Record<string, string> = {
-  master_property: "Master Property",
+  master_property: "Commercial Property",
   general_liability: "General Liability",
-  dno: "Directors & Officers (D&O)",
-  umbrella: "Umbrella / Excess",
+  umbrella: "Umbrella / Excess Liability",
+  dno: "Directors & Officers Liability",
   crime: "Crime / Fidelity",
   ordinance: "Ordinance or Law",
-  not_sure: "Not sure — review everything",
-};
-const PROPERTY_LABELS: Record<string, string> = {
-  condo: "Condominium",
-  townhouse: "Townhouse",
-  mixed: "Mixed use",
   other: "Other",
+  not_sure: "Not sure — review everything",
 };
 const HO6_LABELS: Record<string, string> = {
   new: "New HO-6 policy",
   review: "Review existing policy",
   loss_assessment: "Loss assessment coverage",
   not_sure: "Not sure — needs guidance",
-};
-const DEDUCTIBLE_LABELS: Record<string, string> = {
-  yes_know: "Yes, knows the amount",
-  no: "No",
-  not_sure: "Not sure",
 };
 
 /** Build a flat, label-friendly payload for FormSubmit. */
@@ -69,34 +59,28 @@ function buildSubmission(data: FormData, agentName: string) {
 
     /* ── Association ── */
     "Association": association,
+    "Property Address": get("propertyAddress") || "—",
     "City": get("city") || "—",
     "State": get("state") || "—",
   };
 
   if (role === "board" || role === "manager") {
     payload["Unit Count"] = get("unitCount") || "—";
-    payload["Property Type"] = PROPERTY_LABELS[get("propertyType")] || get("propertyType") || "—";
-    payload["Year Built"] = get("yearBuilt") || "—";
 
     const coverage = data.coverageNeeds;
     if (Array.isArray(coverage) && coverage.length) {
-      payload["Coverage Needs"] = coverage
+      payload["Lines to Review"] = coverage
         .map((v) => COVERAGE_LABELS[v] || v)
         .join(", ");
     } else {
-      payload["Coverage Needs"] = "—";
+      payload["Lines to Review"] = "—";
     }
 
-    payload["Current Carrier"] = get("currentCarrier") || "—";
-    payload["Renewal Date"] = get("renewalDate") || "—";
+    payload["Current Carriers"] = get("currentCarrier") || "—";
+    payload["Program Expiry"] = get("renewalDate") || "—";
   }
 
   if (role === "owner") {
-    payload["Knows Master Deductible"] =
-      DEDUCTIBLE_LABELS[get("masterDeductible")] || get("masterDeductible") || "—";
-    if (get("deductibleAmount")) {
-      payload["Deductible Amount"] = get("deductibleAmount");
-    }
     payload["What They Need"] = HO6_LABELS[get("ho6Need")] || get("ho6Need") || "—";
   }
 
@@ -119,20 +103,10 @@ export function buildCrmLead(data: FormData, agentName: string): CrmLeadInput {
     `Assigned agent: ${agentName}`,
     isOwner && association ? `Association: ${association}` : undefined,
     !isOwner && get("unitCount") ? `Unit count: ${get("unitCount")}` : undefined,
-    !isOwner && get("propertyType")
-      ? `Property type: ${PROPERTY_LABELS[get("propertyType")] || get("propertyType")}`
-      : undefined,
-    !isOwner && get("yearBuilt") ? `Year built: ${get("yearBuilt")}` : undefined,
     !isOwner && Array.isArray(coverage) && coverage.length
-      ? `Coverage needs: ${coverage.map((v) => COVERAGE_LABELS[v] || v).join(", ")}`
+      ? `Lines to review: ${coverage.map((v) => COVERAGE_LABELS[v] || v).join(", ")}`
       : undefined,
-    !isOwner && get("renewalDate") ? `Renewal date: ${get("renewalDate")}` : undefined,
-    isOwner && get("masterDeductible")
-      ? `Knows master deductible: ${DEDUCTIBLE_LABELS[get("masterDeductible")] || get("masterDeductible")}`
-      : undefined,
-    isOwner && get("deductibleAmount")
-      ? `Master policy deductible: ${get("deductibleAmount")}`
-      : undefined,
+    !isOwner && get("renewalDate") ? `Program expiry: ${get("renewalDate")}` : undefined,
     isOwner && get("ho6Need")
       ? `What they need: ${HO6_LABELS[get("ho6Need")] || get("ho6Need")}`
       : undefined,
@@ -147,8 +121,10 @@ export function buildCrmLead(data: FormData, agentName: string): CrmLeadInput {
     contactLastName: nameParts.slice(1).join(" ") || undefined,
     contactEmail: get("contactEmail") || undefined,
     contactPhone: get("contactPhone") || undefined,
+    address: get("propertyAddress") || undefined,
     city: get("city") || undefined,
-    // "OTHER" is a flow branch, not a state — don't write it to the CRM.
+    // Every licensed state is now selectable, so "OTHER" no longer exists in the
+    // options. The guard stays for leads persisted under the old schema.
     state: state && state !== "OTHER" ? state : undefined,
     currentCarrier: (!isOwner && get("currentCarrier")) || undefined,
     source: "website-quote",

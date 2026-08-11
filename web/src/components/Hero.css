@@ -15,6 +15,36 @@
   min-height: 50vh;
 }
 
+/* Hero carrying an action form (homepage). Fixed px rather than a viewport
+   unit so the form lands in the same place on every screen height. */
+.hero--action {
+  min-height: 560px;
+}
+
+/* The navbar is position:fixed at var(--nav-height), so the hero must pad past
+   it or the eyebrow sits under the logo row. */
+.hero--action .hero-content {
+  padding: calc(var(--nav-height) + 48px) 24px 64px;
+}
+
+/* One line on desktop. The base hero caps at 60px, which pushes this 36-char
+   headline onto a second line inside the 1200px container — 52px is the
+   largest size that still holds it on one line. Wraps naturally on narrow
+   screens, where one line is not possible. */
+.hero--action .hero-title {
+  font-size: clamp(29px, 4.6vw, 52px);
+  max-width: 1120px;
+  margin-bottom: 20px;
+  text-wrap: balance;
+}
+
+/* The form supplies its own leading gap, so the subtitle gives back the
+   36px it reserves for a plain CTA link. */
+.hero--action .hero-subtitle {
+  margin-bottom: 0;
+  max-width: 620px;
+}
+
 .hero-video {
   position: absolute;
   inset: 0;
@@ -49,9 +79,9 @@
   align-items: center;
   padding: 8px 20px;
   margin-bottom: 22px;
-  border: 1px solid rgba(209, 179, 120, 0.5);
+  border: 1px solid rgba(229, 193, 106, 0.5);
   border-radius: 999px;
-  background: rgba(209, 179, 120, 0.14);
+  background: rgba(229, 193, 106, 0.14);
   color: var(--color-gold-light);
   font-size: 13px;
   font-weight: 700;
@@ -97,5 +127,13 @@
 
   .hero-content {
     padding: 80px 20px;
+  }
+
+  .hero--action {
+    min-height: 520px;
+  }
+
+  .hero--action .hero-content {
+    padding: calc(var(--nav-height) + 32px) 20px 48px;
   }
 }

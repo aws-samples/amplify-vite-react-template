@@ -1,0 +1,113 @@
+---
+/**
+ * Stand-in for artwork that has not been supplied yet.
+ *
+ * Deliberately reads as unfinished — dashed rule, hatched ground, an explicit
+ * "PLACEHOLDER" label and the intended dimensions. Real photography and video
+ * drop in later by replacing the whole component with an <img>/<video>. Nothing
+ * here should survive to production, and it is styled so nobody could mistake
+ * it for finished work.
+ */
+interface Props {
+  /** What belongs here, in the author's words. */
+  label: string;
+  /** "image" changes only the glyph; "video" adds a play mark. */
+  kind?: "image" | "video";
+  /** CSS aspect-ratio value, e.g. "4/3", "16/9". */
+  ratio?: string;
+  /** Optional guidance shown under the label, e.g. "1600×900, landscape". */
+  spec?: string;
+}
+
+const { label, kind = "image", ratio = "4/3", spec } = Astro.props;
+---
+
+<div class="media-ph" style={`aspect-ratio: ${ratio}`} role="img" aria-label={`Placeholder: ${label}`}>
+  <div class="media-ph__inner">
+    {kind === "video" ? (
+      <svg class="media-ph__glyph" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+        <path d="M10 9l5 3-5 3V9z"></path>
+      </svg>
+    ) : (
+      <svg class="media-ph__glyph" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+        <circle cx="8.5" cy="8.5" r="1.6"></circle>
+        <path d="M21 15l-5-5L5 21"></path>
+      </svg>
+    )}
+    <p class="media-ph__kind">{kind} placeholder</p>
+    <p class="media-ph__label">{label}</p>
+    {spec && <p class="media-ph__spec">{spec}</p>}
+  </div>
+</div>
+
+<style>
+  .media-ph {
+    width: 100%;
+    border-radius: 14px;
+    border: 1.5px dashed var(--color-gray-400);
+    background-color: var(--color-gray-50);
+    background-image: repeating-linear-gradient(
+      45deg,
+      rgba(43, 108, 176, 0.045) 0 10px,
+      transparent 10px 20px
+    );
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    overflow: hidden;
+  }
+
+  .media-ph__inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 4px;
+    max-width: 320px;
+  }
+
+  .media-ph__glyph {
+    color: var(--color-gray-400);
+    margin-bottom: 6px;
+  }
+
+  .media-ph__kind {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+  }
+
+  .media-ph__label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-gray-700);
+    line-height: 1.45;
+  }
+
+  .media-ph__spec {
+    font-size: 12px;
+    color: var(--color-gray-500);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* On navy sections the light ground would punch a hole in the band. */
+  :global(.section--navy) .media-ph {
+    border-color: rgba(255, 255, 255, 0.3);
+    background-color: rgba(255, 255, 255, 0.05);
+    background-image: repeating-linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.05) 0 10px,
+      transparent 10px 20px
+    );
+  }
+
+  :global(.section--navy) .media-ph__glyph { color: rgba(255, 255, 255, 0.45); }
+  :global(.section--navy) .media-ph__kind { color: var(--color-gold); }
+  :global(.section--navy) .media-ph__label { color: rgba(255, 255, 255, 0.9); }
+  :global(.section--navy) .media-ph__spec { color: rgba(255, 255, 255, 0.6); }
+</style>

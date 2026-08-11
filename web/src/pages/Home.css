@@ -1,6 +1,502 @@
-.section-cta-wrap {
-  margin-top: 40px;
+/* ══ 02 · Association insurance band ═════════════════════════════════ */
+.band-assoc {
+  background: var(--color-navy);
+  color: var(--color-white);
+}
+
+/* Even split rather than 1.25fr — the enlarged marks and 26px figure text need
+   the width, and "Licensed in 50 states" has to stay on one line. */
+.band-assoc__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 56px;
+  align-items: center;
+}
+
+.band-assoc__title {
+  color: var(--color-white);
+  max-width: 24ch;
+}
+
+.band-assoc__body {
+  margin: 0 0 28px;
+  max-width: 56ch;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.band-assoc__body p {
+  font-size: 16px;
+  line-height: 1.75;
+  color: rgba(255, 255, 255, 0.78);
+  margin: 0;
+}
+
+.assoc-figs {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  overflow: hidden;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+/* Mark and text sit on one row; align-items centres a single-line figure
+   (no label) against its two-line neighbours. */
+.assoc-fig {
+  background: var(--color-navy);
+  padding: 26px 30px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 24px;
+  min-height: 132px;
+}
+
+/* Brand mark. The source art is 3:2 with the glow baked into the padding, so
+   the visible glyph is smaller than the box — hence 96px rather than the ~46px
+   an icon chip would take. Still under the 288px intrinsic width, so it stays
+   sharp on retina. width/height attributes are on the element to reserve the
+   space and avoid layout shift. */
+.assoc-fig__img {
+  width: 96px;
+  height: auto;
+  flex: 0 0 auto;
+}
+
+.assoc-fig__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* Two of the three figures are phrases rather than numbers, so this is sized to
+   hold "Written rationale" on one line instead of scaled for digits. */
+/* Clamped rather than fixed: between 900px and ~1250px the two-column band is
+   tight, and a hard 26px would wrap "Licensed in 50 states" onto a second line. */
+.assoc-fig__v {
+  font-size: clamp(21px, 1.9vw, 26px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--color-gold);
+  letter-spacing: -0.02em;
+}
+
+.assoc-fig__l {
+  font-size: 16px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* ══ 03 · The practice ═══════════════════════════════════════════════ */
+.what-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 56px;
+  align-items: center;
+  margin-bottom: 48px;
+}
+
+.what-lead .section-subtitle {
+  max-width: 54ch;
+}
+
+.what-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px 24px;
+  margin-top: 26px;
+}
+
+/* Native 3:2, so no aspect-ratio override — cropping to the old placeholder's
+   4:3 would cut the people at the edges of the table. */
+.what-media img,
+.record-media img {
+  width: 100%;
+  height: auto;
+  border-radius: 16px;
+  display: block;
+}
+
+/* Four cards. auto-fit lands 4-across on wide screens and 2×2 in the middle
+   band, so no card is ever orphaned on its own row. */
+.practice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+}
+
+/* Modern treatment: the accent is carried by a marked icon chip rather than a
+   coloured edge, the card sits on a soft raised plane, and a hairline gold rule
+   slides in under the title on hover. */
+.practice-card {
+  position: relative;
+  padding: 28px 26px 30px;
+  border-radius: 16px;
+  background: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+
+.practice-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--color-gold);
+  box-shadow: 0 16px 40px -12px rgba(15, 23, 42, 0.18);
+}
+
+/* The mark. Each card is labelled with its own glyph so the four read as a
+   deliberate set rather than four paragraphs in boxes. */
+.practice-card__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  background: var(--color-gold-dim);
+  color: var(--color-gold);
+  margin-bottom: 18px;
+  transition: background 0.25s ease, color 0.25s ease;
+}
+
+.practice-card:hover .practice-card__mark {
+  background: var(--color-gold);
+  color: var(--color-navy-dark);
+}
+
+.practice-card h3 {
+  font-size: 17.5px;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  line-height: 1.3;
+  border-bottom: 1px solid var(--color-gray-200);
+  transition: border-color 0.25s ease;
+}
+
+.practice-card:hover h3 {
+  border-bottom-color: var(--color-gold);
+}
+
+.practice-card p {
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--color-gray-600);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .practice-card,
+  .practice-card__mark {
+    transition: none;
+  }
+
+  .practice-card:hover {
+    transform: none;
+  }
+}
+
+/* ══ 04 · The Board Record ═══════════════════════════════════════════ */
+.record-grid {
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  gap: 56px;
+  align-items: center;
+  margin-bottom: 52px;
+}
+
+.record-h2 {
+  color: var(--color-white);
+  max-width: 22ch;
+  margin-bottom: 22px;
+}
+
+.record-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 54ch;
+}
+
+.record-body p {
+  font-size: 16px;
+  line-height: 1.75;
+  color: rgba(255, 255, 255, 0.78);
+  margin: 0;
+}
+
+.record-lead__cta {
+  margin-top: 28px;
+}
+
+/* Six items on a translucent plane. Panels rather than plain text so the set
+   reads as the contents of one document.
+   Fixed column counts, NOT auto-fit: auto-fit resolved to 4 columns at this
+   width, so six items filled 4 + 2 and the two empty cells showed the plane's
+   own background as an odd dark block after item 6. Three, two and one all
+   divide six exactly, so no breakpoint can leave a hole. */
+.record-items {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  overflow: hidden;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .record-items {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .record-items {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.record-item {
+  background: var(--color-navy);
+  padding: 26px 28px 28px;
+  transition: background 0.25s ease;
+}
+
+.record-item:hover {
+  background: #1e3f6d;
+}
+
+.record-item__num {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--color-gold);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 14px;
+}
+
+.record-item h3 {
+  font-size: 16.5px;
+  font-weight: 700;
+  color: var(--color-white);
+  margin-bottom: 8px;
+  line-height: 1.35;
+}
+
+.record-item p {
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* Closing statement + the section's primary lead-capture pair. */
+.record-close {
+  margin-top: 48px;
+  padding-top: 40px;
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 26px;
   text-align: center;
+}
+
+.record-close__line {
+  font-size: clamp(22px, 3vw, 32px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--color-gold);
+  margin: 0;
+}
+
+.record-close__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .record-item {
+    transition: none;
+  }
+}
+
+/* ══ 07 · Compensation band ══════════════════════════════════════════ */
+.band-fee {
+  background: var(--color-navy-dark);
+  color: var(--color-white);
+}
+
+/* Image and claim side by side, artwork first in the reading order on desktop. */
+.band-fee__panel {
+  display: grid;
+  grid-template-columns: 1fr 1.05fr;
+  gap: 56px;
+  align-items: center;
+}
+
+.band-fee__media img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 16px;
+  box-shadow: 0 18px 44px -18px rgba(0, 0, 0, 0.6);
+}
+
+.band-fee__lead {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.band-fee__title {
+  color: var(--color-gold);
+}
+
+.band-fee__body {
+  font-size: 16.5px;
+  line-height: 1.75;
+  color: rgba(255, 255, 255, 0.8);
+  margin: 0 0 24px;
+}
+
+.fee-points {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 30px;
+  text-align: left;
+}
+
+.band-fee__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.fee-points li {
+  position: relative;
+  padding-left: 26px;
+  font-size: 15px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.fee-points li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 12px;
+  height: 7px;
+  border-left: 2px solid var(--color-gold);
+  border-bottom: 2px solid var(--color-gold);
+  transform: rotate(-45deg);
+}
+
+/* ══ 09 · Who we work with ═══════════════════════════════════════════ */
+/* White against the calculator's grey, with a hairline rule on the seam, so the
+   section boundary is visible from inside the tool above it. Top padding is
+   tighter than the global 80px to bring the heading into view sooner — the
+   calculator is a tall interactive block and every pixel of gap pushes this
+   section further below the fold. */
+.aud-band {
+  background: var(--color-white);
+  border-top: 1px solid var(--color-gray-200);
+  padding-top: 52px;
+}
+
+/* ══ 11 · HO-6 demoted card ══════════════════════════════════════════ */
+.ho6-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 40px;
+  padding: 32px 36px;
+  border: 1px solid var(--color-gray-200);
+  border-left: 4px solid var(--color-gray-400);
+  border-radius: 12px;
+  background: var(--color-gray-50);
+}
+
+.ho6-card__body {
+  max-width: 68ch;
+}
+
+.ho6-card__title {
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+
+.ho6-card__body p {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--color-gray-600);
+}
+
+/* Subtitle: sits under the title as a positioning line, so it is lighter than
+   the title but heavier than body copy. */
+.ho6-card__sub {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-gray-500) !important;
+  margin-bottom: 12px;
+}
+
+/* The lender line. Bold and navy with a gold rule, so it reads as the reason to
+   act rather than as another sentence of body copy. */
+.ho6-card__lead {
+  font-weight: 700;
+  color: var(--color-navy) !important;
+  border-left: 3px solid var(--color-gold);
+  padding-left: 14px;
+  margin-bottom: 14px;
+}
+
+.ho6-card__cta {
+  flex: 0 0 auto;
+}
+
+/* ══ Responsive ══════════════════════════════════════════════════════ */
+@media (max-width: 900px) {
+  .band-assoc__grid,
+  .what-grid,
+  .record-grid,
+  .band-fee__panel {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+
+  .band-assoc__title {
+    max-width: none;
+  }
+
+  .record-media {
+    order: -1;
+  }
+
+  .ho6-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 24px;
+  }
 }
 
 /* Intro */
@@ -32,28 +528,7 @@
   aspect-ratio: 4/3;
 }
 
-.text-link {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-accent);
-  display: inline-block;
-  margin-top: 8px;
-  transition: color 0.2s ease;
-}
 
-.text-link:hover {
-  color: var(--color-accent-hover);
-}
-
-/* Coverages note */
-.coverages-note {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-navy);
-  margin-top: 32px;
-  text-align: center;
-  font-style: italic;
-}
 
 /* HO-6 */
 .ho6-grid {
@@ -164,32 +639,6 @@
 .client-list li {
   font-size: 16px;
   color: rgba(255, 255, 255, 0.85);
-}
-
-/* State links */
-.state-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  justify-content: center;
-}
-
-.state-link {
-  display: inline-flex;
-  padding: 12px 24px;
-  border-radius: 10px;
-  background: var(--color-gray-50);
-  border: 1px solid var(--color-gray-200);
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-accent);
-  transition: all 0.2s ease;
-}
-
-.state-link:hover {
-  background: var(--color-sky);
-  border-color: var(--color-accent);
-  transform: translateY(-2px);
 }
 
 /* FAQ */

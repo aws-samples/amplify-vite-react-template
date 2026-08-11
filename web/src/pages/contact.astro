@@ -1,0 +1,57 @@
+---
+/**
+ * Contact page.
+ *
+ * Order matches the homepage's rhythm so the two read as one site:
+ *   hero → contact form (with claims block) → coverage map (gold) → footer
+ *
+ * The section furniture (.eyebrow, .sec-head, .section-cta-wrap) comes from
+ * global.css via Layout, not from Home.css — Home.css is only bundled onto the
+ * homepage, so anything relying on it here would render unstyled.
+ */
+import Layout from "../layouts/Layout.astro";
+import Hero from "../components/Hero.astro";
+import CoverageMap from "../components/CoverageMap.astro";
+import { ContactForm } from "../components/ContactForm";
+import { QUOTE_URL } from "../constants";
+
+---
+
+<Layout
+  title="Contact HOA Insurance Agency — HOA & Condo Insurance Specialists"
+  description="Contact HOA Insurance Agency about HOA master insurance or HO-6 condo coverage. Call 508-233-2261, report a claim, or send your association's details for a free review. No broker fee."
+  canonicalPath="/contact"
+>
+  {/* ═══ 01 · Hero ═══════════════════════════════════════════════════ */}
+  <Hero
+    eyebrow="Contact"
+    title="Talk to an HOA insurance specialist"
+    subtitle="Whether you are renewing, reviewing, or starting from scratch, tell us about your association and we will put our recommendation in writing. No broker fee, now or at renewal."
+    backgroundImage="/images/hero-people.jpg"
+    backgroundVideo="/images/hero-video.mp4"
+    compact
+  />
+
+  {/* ═══ 02 · Contact form ══════════════════════════════════════════ */}
+  {/* ContactForm brings its own <section> and the id="contact" anchor.
+       showClaims renders the claims + urgent block beneath the address, inside
+       the contact-info column, replacing the standalone navy band this page
+       used to carry. */}
+  <ContactForm showClaims client:visible />
+
+  {/* ═══ 03 · Where we cover ════════════════════════════════════════ */}
+  <section class="section section--alt" id="states" aria-labelledby="states-h">
+    <div class="container" style="text-align: center">
+      <div class="sec-head sec-head--center">
+        <p class="eyebrow">Coverage area</p>
+        <h2 class="section-title" id="states-h">The states we serve</h2>
+        <p class="section-subtitle">
+          Licensed in all 50 states and the District of Columbia. Select a state to open its
+          coverage page.
+        </p>
+      </div>
+
+      <CoverageMap ctaHref={QUOTE_URL} ctaLabel="Request a review in your state" />
+    </div>
+  </section>
+</Layout>

@@ -39,6 +39,79 @@
   color: var(--color-accent);
 }
 
+/* ── Claims + urgent, under the address ──
+   Sits inside the contact-info column, separated by a rule so it reads as a
+   different kind of request from the general enquiry form beside it. */
+.contact-claims {
+  margin-top: 32px;
+  padding-top: 26px;
+  border-top: 1px solid var(--color-gray-200);
+}
+
+.contact-claims__title {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-gray-500);
+  margin-bottom: 16px;
+}
+
+/* Email is the action, the number sits beside it as a peer — large enough to
+   read and dial by hand rather than hidden inside a second button. */
+.contact-claims__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+}
+
+.contact-claims__btn {
+  font-size: 15px;
+  padding: 14px 22px;
+}
+
+.contact-claims__phone {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.contact-claims__phone-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-gold);
+}
+
+.contact-claims__phone-num {
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--color-navy);
+  font-variant-numeric: tabular-nums;
+  transition: color 0.2s ease;
+}
+
+.contact-claims__phone:hover .contact-claims__phone-num {
+  color: var(--color-accent);
+}
+
+.contact-claims__note {
+  margin-top: 16px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-gray-500);
+  max-width: 46ch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .contact-claims__phone-num {
+    transition: none;
+  }
+}
+
 .contact-heading {
   font-size: clamp(24px, 4vw, 32px);
   font-weight: 700;

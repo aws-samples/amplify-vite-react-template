@@ -39,14 +39,14 @@
   font-size: 13px;
   font-weight: 600;
   color: #9a7d3f;
-  background: rgba(209, 179, 120, 0.1);
+  background: rgba(229, 193, 106, 0.1);
   padding: 8px 16px;
   border-radius: 8px;
   margin-bottom: 28px;
 }
 
 .ia-urgency svg {
-  color: #d1b378;
+  color: #e5c16a;
 }
 
 /* ── Form ── */
@@ -125,7 +125,7 @@
   font-family: inherit;
   border: none;
   border-radius: 12px;
-  background: #d1b378;
+  background: #e5c16a;
   color: #132a4a;
   cursor: pointer;
   transition: all 0.25s ease;
@@ -133,9 +133,9 @@
 }
 
 .ia-submit:hover:not(:disabled) {
-  background: #e8d5a8;
+  background: #f2d78f;
   transform: translateY(-1px);
-  box-shadow: 0 10px 28px rgba(209, 179, 120, 0.35);
+  box-shadow: 0 10px 28px rgba(229, 193, 106, 0.35);
 }
 
 .ia-submit:active {
@@ -205,7 +205,7 @@
 .ia-what-you-get svg {
   flex-shrink: 0;
   margin-top: 2px;
-  color: #d1b378;
+  color: #e5c16a;
 }
 
 .ia-signals {
@@ -226,7 +226,7 @@
 .ia-signal svg {
   flex-shrink: 0;
   margin-top: 2px;
-  color: #d1b378;
+  color: #e5c16a;
 }
 
 .ia-contact-alt {
@@ -299,8 +299,8 @@
   gap: 8px;
   padding: 14px 28px;
   border-radius: 10px;
-  background: rgba(209, 179, 120, 0.1);
-  border: 1.5px solid rgba(209, 179, 120, 0.3);
+  background: rgba(229, 193, 106, 0.1);
+  border: 1.5px solid rgba(229, 193, 106, 0.3);
   color: #0f172a;
   font-size: 15px;
   font-weight: 600;
@@ -310,8 +310,8 @@
 }
 
 .ia-phone-link:hover {
-  background: rgba(209, 179, 120, 0.18);
-  border-color: #d1b378;
+  background: rgba(229, 193, 106, 0.18);
+  border-color: #e5c16a;
 }
 
 .ia-back-link {

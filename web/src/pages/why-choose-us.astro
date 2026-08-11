@@ -1,30 +1,70 @@
 ---
+/**
+ * Why choose us.
+ *
+ * Aligned to the homepage and /what-we-do: same hero treatment with the address
+ * lookup, same section furniture from global.css, and sections 04 and 05 reuse
+ * the homepage's own process stages and carrier wall from shared data files, so
+ * the three pages state those once and state them identically.
+ *
+ *   01 hero            02 the practice + four reasons
+ *   03 the offer       04 Review. Compare. Place. Record.
+ *   05 Our markets     06 contact (matching /contact)
+ */
 import Layout from "../layouts/Layout.astro";
 import Hero from "../components/Hero.astro";
+import HeroLookup from "../components/HeroLookup.astro";
 import { ContactForm } from "../components/ContactForm";
+import { STAGES } from "../data/process";
+import { MARKETS } from "../data/markets";
 import { QUOTE_URL } from "../constants";
 import "./WhyChooseUs.css";
 
+/* 02 — Four reasons. Each carries a claim, a short argument, and the specifics
+   that make the claim checkable rather than assertive. */
 const DIFFERENTIATORS = [
   {
-    title: "HOA-Only Focus",
-    desc: "Our niche is community associations. Specialization leads to better underwriting submissions, clearer renewal discussions, and fewer coverage gaps.",
-    bullets: ["Condominiums and condo trusts", "HOA boards and trustees", "Property managers supporting multiple associations", "Unit owners seeking HO-6 aligned to master policy"],
+    num: "01",
+    title: "Community associations only",
+    desc: "Not homes, not cars, not one line among twenty. Depth in a single class means better submissions to underwriters, sharper renewal conversations and fewer gaps left open.",
+    bullets: [
+      "Condominium associations and condominium trusts",
+      "Homeowners associations",
+      "Property managers running multiple associations",
+      "Unit owners whose HO-6 has to match the master policy",
+    ],
   },
   {
-    title: "We Think in Systems, Not Policies",
-    desc: "HOA insurance is a coordinated program. We help build programs that hold together in a real claim — not just on paper.",
-    bullets: ["Property + liability + umbrella", "D&O + crime + (sometimes) cyber", "HO-6 coverage for unit owners", "Clear communication around deductibles and assessments"],
+    num: "02",
+    title: "One programme, not six purchases",
+    desc: "Property, liability, umbrella, D&O, crime and ordinance or law are placed as one system, so the limits and deductibles agree with each other.",
+    bullets: [
+      "Property, general liability and umbrella as one tower",
+      "D&O and crime and fidelity written together",
+      "HO-6 aligned to the master policy structure",
+      "Deductibles and assessments explained to owners in advance",
+    ],
   },
   {
-    title: "Renewal Strategy That Boards Can Defend",
-    desc: "Our goal is for board decisions to be informed, reasonable, and defensible.",
-    bullets: ["Clear coverage summaries", "Deductible and limit rationale", "Market options explained plainly", "Document-ready recommendations"],
+    num: "03",
+    title: "A renewal a board can defend",
+    desc: "Every recommendation comes with the reasoning behind it, in writing, ready to be read at a meeting and filed with the minutes.",
+    bullets: [
+      "What the current policy does and does not cover",
+      "Why each limit and deductible was set where it was",
+      "What the market returned, option by option",
+      "A written recommendation, not a verbal one",
+    ],
   },
   {
-    title: "Unit Owner HO-6 Programs",
-    desc: "Uncoordinated HO-6 coverage causes confusion after losses. We help reduce that friction.",
-    bullets: ["Master policy clarification", "Unit owner education", "Streamlined HO-6 quoting"],
+    num: "04",
+    title: "HO-6 coordinated to the master policy",
+    desc: "Uncoordinated owner policies are where post-loss disputes begin. We place both sides, so the gap between them does not land on a resident.",
+    bullets: [
+      "The master policy structure identified and explained",
+      "Owners told what they are responsible for",
+      "HO-6 written against the actual policy, not a template",
+    ],
   },
 ];
 ---
@@ -34,43 +74,160 @@ const DIFFERENTIATORS = [
   description="HOA-only focus, coordinated coverage systems, defensible renewal strategies, and HO-6 programs that reduce board headaches. See why associations choose ProtectMyHOA. Free review — 508-233-2261."
   canonicalPath="/why-choose-us"
 >
+  {/* ═══ 01 · Hero — same treatment as the homepage ═════════════════ */}
   <Hero
+    eyebrow="ProtectMyHOA&trade;"
     title="Why Choose HOA Insurance Agency"
-    subtitle="HOA boards need more than a generic insurance quote. Associations face shared ownership, shared liability, shared governance — plus increasingly complex underwriting requirements."
+    subtitle="HOA boards need more than a generic insurance quote. Associations face shared ownership, shared liability and shared governance, alongside increasingly complex underwriting requirements."
     backgroundImage="/images/hero-people.jpg"
     backgroundVideo="/images/hero-video.mp4"
-    compact
-  />
+  >
+    <HeroLookup slot="action" />
+  </Hero>
 
-  <section class="section">
-    <div class="container">
-      <p class="wcu-intro">We specialize in <a href="/what-we-do">HOA master insurance</a> and HO-6 condo insurance so decisions are clear, practical, and aligned with how associations actually operate.</p>
-      <div style="margin-bottom: 48px">
-        <a href="/what-we-do" class="btn btn-primary">Explore Our HOA Coverages</a>
-      </div>
-      <div class="wcu-grid">
-        {DIFFERENTIATORS.map((d) => (
-          <div class="wcu-card reveal">
-            <h2 class="wcu-card-title">{d.title}</h2>
-            <p>{d.desc}</p>
-            <ul>
-              {d.bullets.map((b) => <li>{b}</li>)}
-            </ul>
+  <div class="wcu">
+    {/* ═══ 02 · The practice + four reasons ═════════════════════════ */}
+    <section class="section" aria-labelledby="practice-h">
+      <div class="container">
+        <div class="sec-head sec-head--center">
+          <p class="eyebrow">The practice</p>
+          <h2 class="section-title" id="practice-h">
+            Community associations are the whole of the practice
+          </h2>
+          <p class="section-subtitle">
+            Master policies and HO-6, placed together, so a board can see how the decisions fit
+            and explain them afterwards.
+          </p>
+          <div class="wwd-cta wwd-cta--center">
+            <a href={QUOTE_URL} class="btn btn-primary">Request Insurance Review</a>
+            <span class="wwd-cta__note">Free review. No broker fee, now or at renewal.</span>
           </div>
-        ))}
-      </div>
-    </div>
-  </section>
+        </div>
 
-  <section class="section section--navy" style="text-align: center">
-    <div class="container">
-      <h2 class="section-title">If you want an HOA insurance partner built for association renewals and HO-6 coordination, let's talk.</h2>
-      <div style="margin-top: 32px; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap">
-        <a href={QUOTE_URL} class="btn btn-white">Request Insurance Review</a>
-        <a href="/what-we-do" class="btn btn-outline">See Our HOA Coverages</a>
+        {/* Numbered because the four build on each other: focus produces the
+            programme, the programme produces the defensible renewal, and the
+            renewal is what makes HO-6 coordination possible. */}
+        <ol class="wcu-grid">
+          {DIFFERENTIATORS.map((d) => (
+            <li class="wcu-card">
+              <span class="wcu-card__num" aria-hidden="true">{d.num}</span>
+              <h3 class="wcu-card__title">{d.title}</h3>
+              <p class="wcu-card__desc">{d.desc}</p>
+              <ul class="wcu-card__list">
+                {d.bullets.map((b) => <li>{b}</li>)}
+              </ul>
+            </li>
+          ))}
+        </ol>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <ContactForm client:visible />
+    {/* ═══ 03 · The offer ══════════════════════════════════════════ */}
+    <section class="section section--navy" aria-labelledby="offer-h">
+      <div class="container">
+        <div class="wcu-offer">
+          <div class="wcu-offer__lead">
+            <p class="eyebrow eyebrow--gold">The offer</p>
+            <h2 class="section-title wcu-offer__title" id="offer-h">
+              An insurance partner built for association renewals and HO-6 coordination
+            </h2>
+            <p class="wcu-offer__body">
+              Send us the current policy and the renewal date. We come back with the markets
+              approached, what each returned, and a written recommendation your board can file
+              with its minutes.
+            </p>
+          </div>
+          <div class="wcu-offer__actions">
+            <a href={QUOTE_URL} class="btn btn-gold">Request Insurance Review</a>
+            <a href="/what-we-do" class="btn btn-outline">See our HOA coverages</a>
+            <p class="wcu-offer__note">No broker fee. No obligation.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    {/* ═══ 04 · Process — shared with the homepage ═════════════════ */}
+    <section class="section" aria-labelledby="stages-h">
+      <div class="container">
+        <div class="sec-head sec-head--center">
+          <p class="eyebrow">The process</p>
+          <h2 class="section-title" id="stages-h">Review. Compare. Place. Record.</h2>
+          <p class="section-subtitle">
+            Four stages, in order, on a schedule the board can hold us to.
+          </p>
+        </div>
+        <ol class="stage-grid">
+          {STAGES.map((s) => (
+            <li class="stage-card reveal">
+              <span class="stage-num">{s.num}</span>
+              <h3>{s.title}</h3>
+              <p>{s.desc}</p>
+            </li>
+          ))}
+        </ol>
+        <div class="wwd-cta wwd-cta--center">
+          <a href={QUOTE_URL} class="btn btn-primary">Request Insurance Review</a>
+          <span class="wwd-cta__note">Most reviews start the same week.</span>
+        </div>
+      </div>
+    </section>
+
+    {/* ═══ 05 · Our markets — shared with the homepage ═════════════ */}
+    <section class="section section--alt" aria-labelledby="markets-h">
+      <div class="container">
+        <div class="sec-head sec-head--center">
+          <p class="eyebrow">Our markets</p>
+          <h2 class="section-title" id="markets-h">Markets a board will recognise</h2>
+          <p class="section-subtitle">National insurers alongside the specialists.</p>
+        </div>
+
+        {/* The list renders twice and the track animates to -50%, so the second
+            copy is where the first began when the loop resets. The duplicate is
+            aria-hidden so assistive tech reads twelve carriers, not twenty-four. */}
+        <div class="carrier-marquee">
+          <ul class="carrier-track">
+            {MARKETS.map((m) => (
+              <li class="carrier">
+                <img
+                  class="carrier__logo"
+                  src={`/images/carriers/${m.slug}.png`}
+                  alt={m.name}
+                  width="240"
+                  height="120"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </li>
+            ))}
+            {MARKETS.map((m) => (
+              <li class="carrier" aria-hidden="true">
+                <img
+                  class="carrier__logo"
+                  src={`/images/carriers/${m.slug}.png`}
+                  alt=""
+                  width="240"
+                  height="120"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <p class="carrier-note">
+          Carrier availability varies by state, association type and risk profile. Not every
+          market is approached on every placement.
+        </p>
+
+        <div class="wwd-cta wwd-cta--center">
+          <a href={QUOTE_URL} class="btn btn-primary">Request Insurance Review</a>
+          <span class="wwd-cta__note">See what each market returned, side by side.</span>
+        </div>
+      </div>
+    </section>
+
+    {/* ═══ 06 · Contact — same treatment as /contact ═══════════════ */}
+    <ContactForm showClaims client:visible />
+  </div>
 </Layout>

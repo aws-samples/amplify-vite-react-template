@@ -3,7 +3,33 @@ import { FORMSUBMIT_URL, PHONE, PHONE_HREF, EMAIL, EMAIL_HREF, ADDRESS_LINE1, AD
 import { submitCrmLead } from "../lib/crmLead";
 import "./ContactForm.css";
 
-export function ContactForm() {
+/* Pre-filled claim notice. The body prompts for the four things always asked
+   first, so the reply is not a request for basics. Encoded so newlines survive. */
+const CLAIM_HREF =
+  `mailto:${EMAIL}` +
+  `?subject=${encodeURIComponent("Claim notification")}` +
+  `&body=${encodeURIComponent(
+    [
+      "Association name:",
+      "Property address:",
+      "Date of loss:",
+      "What happened:",
+      "",
+      "Best number to reach you:",
+    ].join("\n")
+  )}`;
+
+export function ContactForm({
+  /**
+   * Show the claims + urgent block under the address. Opt-in: this component
+   * also renders on about-us, what-we-do, why-choose-us and every state and city
+   * page, and a claim notice belongs on the contact page rather than on all of
+   * them. Pass it anywhere else that should offer the same route.
+   */
+  showClaims = false,
+}: {
+  showClaims?: boolean;
+} = {}) {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
@@ -68,6 +94,29 @@ export function ContactForm() {
               <span>{ADDRESS_LINE1}<br />{ADDRESS_LINE2}</span>
             </div>
           </div>
+
+          {showClaims && (
+            <div className="contact-claims">
+              <h4 className="contact-claims__title">Claims and urgent matters</h4>
+              <div className="contact-claims__actions">
+                <a href={CLAIM_HREF} className="btn btn-gold contact-claims__btn">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="2.5" y="4.5" width="19" height="15" rx="2" />
+                    <path d="M3 6.5l9 6.5 9-6.5" />
+                  </svg>
+                  Report a claim by email
+                </a>
+                <a href={PHONE_HREF} className="contact-claims__phone">
+                  <span className="contact-claims__phone-label">Urgent</span>
+                  <span className="contact-claims__phone-num">{PHONE}</span>
+                </a>
+              </div>
+              <p className="contact-claims__note">
+                Notifying us does not replace any notice your policy requires you to give the
+                carrier. If a deadline is close, call rather than email.
+              </p>
+            </div>
+          )}
         </div>
 
         <form className="contact-form" onSubmit={handleSubmit}>
