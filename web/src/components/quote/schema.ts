@@ -263,6 +263,19 @@ const FLOW_OWNER = [
 
 export type FormData = Record<string, string | string[]>;
 
+/**
+ * Identity of the flow shape, used to expire saved sessions that belong to an
+ * earlier one — see `loadState()` in session.ts.
+ *
+ * Derived from the flows rather than being a version number somebody has to
+ * remember to bump. Editing, reordering, adding or removing any step changes
+ * this string automatically, which is the whole point: a saved `stepIndex` only
+ * means anything relative to the exact list it was recorded against. When this
+ * shrank from fifteen steps to seven, an index of 6 silently became the
+ * `submitted` screen and anything past it became a blank stage.
+ */
+export const FLOW_SIGNATURE = [FLOW_BOARD.join(","), FLOW_OWNER.join(",")].join("|");
+
 export function getFlow(role: string | null): string[] {
   return role === "owner" ? FLOW_OWNER : FLOW_BOARD;
 }

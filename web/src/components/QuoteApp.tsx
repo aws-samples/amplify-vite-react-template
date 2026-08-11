@@ -98,7 +98,23 @@ function QuoteFlow({ isDay, onToggleTheme }: { isDay: boolean; onToggleTheme: ()
   // Hydrate from localStorage on first render
   const persisted = useMemo(() => loadState(), []);
   const prefill = useMemo(() => getPrefillFromUrl(), []);
-  const [stepIndex, setStepIndex] = useState<number>(persisted?.stepIndex ?? 0);
+  /**
+   * A restored index has to be a real question in *this* flow.
+   *
+   * `loadState()` already rejects a session saved against a different flow, so
+   * this is the second line of defence — for a hand-edited or truncated blob,
+   * or a persisted `role` whose flow is shorter than the one that was saved.
+   * The upper bound is exclusive of the last entry on purpose: that entry is
+   * `submitted`, and resuming onto it would show a confirmation for a request
+   * that was never sent, then clear the session that proved otherwise.
+   */
+  const [stepIndex, setStepIndex] = useState<number>(() => {
+    const saved = persisted?.stepIndex ?? 0;
+    const restoredFlow = getFlow(persisted?.role ?? null);
+    const usable =
+      Number.isInteger(saved) && saved > 0 && saved < restoredFlow.length - 1;
+    return usable ? saved : 0;
+  });
   const [data, setData] = useState<FormData>(() => {
     const base = persisted?.data ?? {};
     // Apply URL prefill if no persisted data

@@ -3,14 +3,25 @@
  * Homepage hero action: a single joined control — address field and submit
  * button share one bordered group, reading as one input rather than two.
  *
- * A plain GET form, so it works with no JavaScript: the address arrives at
- * /quote as `?address=…`.
+ * A plain GET form, so it works with no JavaScript: submitting lands on /quote.
  *
- * NOTE: the quote wizard does not consume that param yet. `getPrefillFromUrl()`
- * (components/quote/session.ts:89) reads only `state`, and the wizard schema
- * has no address field — so today the address is carried in the URL but the
- * board still types it once inside the wizard. Wiring it through is a change to
- * the wizard, not to this hero.
+ * THE ADDRESS FIELD IS DELIBERATELY UNNAMED — do not add a `name`.
+ *
+ * A named field would put the property address into `/quote?address=…`, and
+ * that URL is not private: it goes into browser history, into the `Referer` of
+ * anything /quote requests, into server logs, and — because quote.astro mounts
+ * <Analytics /> in <head> — into the `page_location` that GA4, Google Ads and
+ * Microsoft Clarity all report. A street address is personal data, and sending
+ * it to Google Analytics also breaches its terms of use.
+ *
+ * Nothing is lost by dropping the name, because nothing consumed it: the wizard
+ * collects `propertyAddress` itself on the `where` step (quote/schema.ts), and
+ * `getPrefillFromUrl()` (quote/session.ts) reads only `state`.
+ *
+ * To actually save the visitor from retyping it, hand the value over in
+ * sessionStorage from a submit handler and prefill `propertyAddress` from there
+ * — same saving, no PII in a URL. That is a change to the wizard, not to this
+ * hero, and it is not done yet.
  */
 import { QUOTE_URL } from "../constants";
 
@@ -37,7 +48,6 @@ const {
       class="hero-lookup__input"
       id="hero-address"
       type="text"
-      name="address"
       placeholder={placeholder}
       autocomplete="street-address"
       required
