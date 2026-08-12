@@ -505,15 +505,19 @@ export default function QuotePage() {
         clearPendingQuote(window.sessionStorage);
         clearFunnelState(window.sessionStorage);
         window.scrollTo({ top: 0, behavior: "smooth" });
-        trackFormSubmit("quote", "success", { decision: "PRICED", booking_id: result.body.bookingId });
+        trackFormSubmit("quote", "success", { decision: result.body.decision, booking_id: result.body.bookingId });
+        // A CONTACT decision IS the lead — there's no price to pay, the office
+        // follows up. This is the funnel's generate_lead.
+        trackGenerateLead("quote_contact", result.body.bookingId);
       } else {
         // GL-06: a fresh submission can't reach a payment state, but a
         // replayed one can — show the durable truth.
         setBanner(result.body.message);
         clearPendingQuote(window.sessionStorage);
         window.scrollTo({ top: 0, behavior: "smooth" });
-        trackFormSubmit("quote", "success", { decision: "CONTACT", booking_id: result.body.bookingId });
-        trackGenerateLead("quote_contact", result.body.bookingId);
+        // PROCESSING / BOOKED / PAYMENT_FAILED / ERROR — a replay, not a new
+        // lead, so no generate_lead here. Report the real decision.
+        trackFormSubmit("quote", "success", { decision: result.body.decision, booking_id: result.body.bookingId });
       }
       return;
     }
