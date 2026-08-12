@@ -120,6 +120,11 @@ function BareLayout() {
 export default function App() {
   // First touch wins, so this has to run on the landing page rather than at
   // submit time — by then the ad's utm/gclid params are long gone.
+  //
+  // main.tsx already calls this before render, because the address-bar cleanup
+  // there erases the utm params this reads. Kept as a no-op safety net: the
+  // function returns early once the session has attribution, so a second call
+  // costs nothing — but main.tsx is where the ordering guarantee lives.
   useEffect(() => {
     captureAttribution();
   }, []);

@@ -56,6 +56,97 @@ Collected automatically by gtag.js:
 > (in `App.tsx`) and stored in `sessionStorage`, then sent with each lead to the
 > CRM — separate from GA4, so sales can see a lead's original source.
 
+### 3.1 Lead ID stitching
+
+Once any form reports a lead, `setLeadId()` (in `src/lib/analytics.ts`) persists
+it to `sessionStorage` under `bk_lead_id` and it is attached **two ways**:
+
+| Scope | Mechanism | What it buys you |
+| --- | --- | --- |
+| Event | `trackEvent` stamps `lead_id` on **every subsequent event** | Any single event — `cta_click`, `purchase`, `scroll_depth` — traces to the CRM record |
+| User | `gtag('set','user_properties',{lead_id})` | GA4 attributes the lead to the whole user, **including the page views before the form was submitted**, so Explore can replay the full path that produced the lead |
+
+`lead_id` survives route changes and reloads for the whole session, which is
+what lets a `purchase` on `/book` join back to a lead created earlier on
+`/contact`. Last write wins (newest lead is the one the session is working on) —
+the opposite of attribution, where first touch wins.
+
+The id is also pushed to Clarity as a custom tag (`clarity('set','lead_id',…)`),
+so a lead's **session recording** is filterable by the same key GA4 reports on.
+
+### 3.2 Tagging emailed links
+
+An emailed link should carry three things. Sample:
+
+```
+https://www.pestbuzzkill.com/quote
+  ?lead=W8xK2mQ7vR...           ← capability. NEVER reaches analytics.
+  &bk_lid=c7f3a9e2-4b1d-...     ← CRM lead id. This is what GA4 tracks.
+  &utm_source=buzzkill
+  &utm_medium=email
+  &utm_campaign=quote_followup
+  &utm_content=cta_button
+```
+
+| Param | Purpose | Read by |
+| --- | --- | --- |
+| `lead` | Existing capability token — prefills the lead's details, decides whose booking a payment converts | `QuotePage`, resolved server-side |
+| `bk_lid` | The CRM lead id. `captureLandingParams()` (called in `main.tsx` before render) adopts it, so **the very first `page_view` of the visit already names the lead** | `src/lib/analytics.ts` |
+| `utm_*` | Standard campaign attribution, parsed by GA4 automatically | GA4, plus `captureAttribution()` |
+
+`bk_lid` is safe in a URL — an opaque CRM id, not a capability, and the same id
+already reported as `lead_id`. `lead` is **not**: see §3.3.
+
+**Address bar:** `captureLandingParams()` (called in `main.tsx` before render)
+reads everything the landing URL carries, hands it to the tags, then erases
+`utm_*`, `utm_id`, and `bk_lid` via `replaceState`. The visitor ends up on a bare
+`https://www.pestbuzzkill.com/quote/instant` with full tracking intact.
+
+Campaign attribution normally works by gtag parsing `utm_*` out of the page URL,
+so erasing them would report the session as **direct / none** — and because
+gtag.js loads async it may parse the URL *after* the cleanup, making the naive
+version fail intermittently rather than cleanly. Two deliberately redundant
+defences, because the failure mode is silent:
+
+1. **`gtag('set','campaign',…)`** — values pushed to GA4 explicitly, so
+   attribution no longer depends on the URL surviving at all.
+2. **`landingHref`** — the original URL is retained and reported as the *first*
+   `page_view`'s `page_location`, so GA4's own parsing sees what it always saw.
+   Consumed once; later page views report their own URL.
+
+Three things are **not** erased, with tests pinning each:
+
+| Kept | Why removing it breaks things |
+| --- | --- |
+| `gclid` | gtag turns it into the `_gcl_aw` cookie carrying Google Ads click attribution. gtag.js loads async and may still be reading the URL; the explicit campaign push covers GA4 but *not* that cookie. Never appears on an email link anyway. |
+| `lead` | `QuotePage` reads it from the address bar in its own effect. Removing it breaks form prefill and which lead a payment converts. |
+| hash | Carries the saved-quote resume tokens (`#request=…&token=…`). |
+
+> `main.tsx` calls `captureAttribution()` **before** `captureLandingParams()`.
+> That order is load-bearing: the CRM's first-touch lead source reads the same
+> `utm_*` params, and the cleanup erases them. `App.tsx` still calls
+> `captureAttribution()` in an effect as an idempotent safety net.
+
+### 3.3 Capability redaction (security)
+
+`?lead=<token>` is a 7-day capability that prefills a lead's contact and address
+details and decides whose booking a payment converts. `/track/<token>` is a
+private live-tracking link. `#request=…&token=…` resumes a saved quote.
+
+None of these may reach GA4 or Clarity: an analytics property is read by more
+people than the funnel is, retains data for months, and surfaces raw URLs inside
+session replays. `sanitizeAnalyticsPath()` / `sanitizeAnalyticsUrl()` strip them
+from every event's `page_path` and `page_location`, and mask the `/track/`
+segment to `/track/(token)`.
+
+> The funnel does `history.replaceState` to clear `?lead=` from the address bar,
+> but that runs inside a lazily-loaded page's effect and is **not** guaranteed to
+> beat the first `page_view`. Redaction at the analytics layer is the guarantee;
+> do not rely on the address-bar strip alone.
+
+`bk_lid` is redacted from `page_path` too — not for secrecy, but because leaving
+it there would fragment the Pages report into one row per lead.
+
 ---
 
 ## 4. Event taxonomy (custom events)
@@ -143,8 +234,10 @@ Fired from all 5 forms. Base params always present, plus form-specific extras.
 | --- | --- |
 | `page_path` | Page where purchase completed |
 | `transaction_id` | Booking / payment id (dedupes) |
+| `booking_id` | Same id, under the dimension the funnel's `form_submit` already uses |
 | `value` | Revenue in dollars (`amountCents / 100`) |
 | `currency` | `USD` |
+| `lead_id` | Auto-attached when the session produced a lead — ties revenue to the CRM lead |
 
 ---
 
@@ -177,8 +270,8 @@ retroactive — register soon.
 | Scroll Percent | `percent` | scroll_depth |
 | Form ID | `form_id` | form_submit, generate_lead |
 | Form Status | `status` | form_submit |
-| Lead ID | `lead_id` | generate_lead, form_submit |
-| Booking ID | `booking_id` | form_submit |
+| Lead ID | `lead_id` | **all events** (auto-attached once known) |
+| Booking ID | `booking_id` | form_submit, purchase |
 | Quote Decision | `decision` | form_submit |
 | Error | `error` | form_submit |
 | Error Fields | `errors` | form_submit |
@@ -186,6 +279,16 @@ retroactive — register soon.
 
 Do **not** register (already built-in): `page_path`, `page_location`,
 `page_title`, `transaction_id`, `value`, `currency`.
+
+**Also register one USER-scoped dimension** (Admin → Custom definitions → Custom
+user properties, *not* the event-scoped tab):
+
+| Dimension name | User property | Why separate |
+| --- | --- | --- |
+| Lead ID (User) | `lead_id` | Event scope only shows events after the lead existed; user scope covers the whole session, including the page views that led up to it |
+
+So `lead_id` is registered **twice** — once event-scoped, once user-scoped. They
+are different dimensions in GA4 and both are needed.
 
 ---
 
@@ -237,7 +340,8 @@ See `docs/` page-title reference for the exact `page_path` → `page_title` map.
 
 **Dashboard / infra (to do):**
 - [ ] Set `VITE_GA_ID` on the staging Amplify branch → separate GA4 property
-- [ ] Register the 12 custom dimensions (§6)
+- [ ] Register the 12 event-scoped custom dimensions (§6)
+- [ ] Register the `lead_id` **user-scoped** dimension (§6)
 - [ ] Mark `generate_lead` + `purchase` as Key events (§7)
 - [ ] Submit `sitemap.xml` in Google Search Console
 - [ ] Link GA4 ↔ Google Ads + enable auto-tagging (gclid)
